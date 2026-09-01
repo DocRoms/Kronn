@@ -1,4 +1,6 @@
 import type {
+  DiscussionWeightConfig,
+  DiscussionWeightsResponse,
   DiscussionImportProvenance,
   SetupStatus,
   SetScanPathsRequest,
@@ -37,11 +39,17 @@ import type {
   DiscussionDetail,
   DiscussionNativeAgentMode,
   DiscussionAgentHandoffMode,
+  DiscussionExecutionVariableRetention,
+  DiscussionAction,
+  LaunchDiscussionActionRequest,
+  LaunchLivePageActionRequest,
+  LivePageAction,
   DiscussionMeta,
   DiscussionSession,
   DiscussionWorkspace,
   ParticipantView,
   CreateDiscussionRequest,
+  PromptVariable,
   SendMessageRequest,
   ReviseMessageRequest,
   MessageRevisionReceipt,
@@ -203,6 +211,15 @@ import type {
   TaskExecutionObservability,
   ValidationSpec,
   ExternalApiConnectionPreset,
+  SharedRun,
+} from '../types/generated';
+import type {
+  CatalogModelEntry,
+  DeleteManualModelRequest,
+  ModelCatalogSnapshot,
+  ModelCatalogView,
+  RefreshModelCatalogRequest,
+  UpsertManualModelRequest,
 } from '../types/generated';
 import type { DiscoverKeysResponse, TestModeEnterResult, TestModeExitResponse } from '../types/extensions';
 
@@ -277,6 +294,13 @@ async function parseSSEStream(
   const decoder = new TextDecoder();
   let buffer = '';
   let eventType = '';
+  let terminalEventSeen = false;
+  const dispatchEvent = (type: string, data: unknown) => {
+    handlers.onEvent(type, data);
+    if (['done', 'complete', 'run_done', 'success', 'error'].includes(type)) {
+      terminalEventSeen = true;
+    }
+  };
 
   try {
     while (true) {
@@ -294,7 +318,7 @@ async function parseSSEStream(
           const data = line.slice(5).trim();
           try {
             const parsed = JSON.parse(data);
-            handlers.onEvent(eventType, parsed);
+            dispatchEvent(eventType, parsed);
           } catch { /* ignore non-JSON */ }
         } else if (line.trim() === '') {
           eventType = '';
@@ -311,7 +335,7 @@ async function parseSSEStream(
           const data = line.slice(5).trim();
           try {
             const parsed = JSON.parse(data);
-            handlers.onEvent(eventType, parsed);
+            dispatchEvent(eventType, parsed);
           } catch { /* ignore non-JSON */ }
         } else if (line.trim() === '') {
           eventType = '';
@@ -323,7 +347,13 @@ async function parseSSEStream(
     throw e;
   }
 
-  handlers.onDone();
+  if (terminalEventSeen) {
+    handlers.onDone();
+  } else {
+    handlers.onError(
+      'SSE stream closed before a terminal event; the operation closed before completion.',
+    );
+  }
 }
 
 /**
@@ -713,7 +743,15 @@ export const config = {
   restoreRecovery: (passphrase: string, recoveryCode?: string) =>
     api<void>('POST', '/config/recovery/restore', { passphrase, recovery_code: recoveryCode || null }),
   getServerConfig: () => api<ServerConfigPublic>('GET', '/config/server'),
-  setServerConfig: (req: { domain?: string; max_concurrent_agents?: number; agent_stall_timeout_min?: number; agent_global_timeout_min?: number; local_agent_global_timeout_min?: number; pseudo?: string; avatar_email?: string; bio?: string; debug_mode?: boolean; discussion_notes_enabled?: boolean; default_model_tier?: 'economy' | 'default' | 'reasoning'; default_summary_strategy?: 'Auto' | 'OnDemand' | 'Off'; agent_handoffs_enabled?: boolean; agent_handoff_paid_limit?: number; agent_handoff_paid_unlimited?: boolean; agent_handoff_blocked_agents?: AgentType[] }) => api<void>('POST', '/config/server', req),
+  /** Batch storage weight for the discussions currently on screen. Sparse:
+   * an id that holds nothing is absent from `weights`. Never call this to
+   * "get everything" — the endpoint refuses an unbounded request. */
+  discussionWeights: (discussionIds: string[]) =>
+    api<DiscussionWeightsResponse>(
+      'GET',
+      `/discussion-weights?discussion_ids=${encodeURIComponent(discussionIds.join(','))}`,
+    ),
+  setServerConfig: (req: { domain?: string; max_concurrent_agents?: number; agent_stall_timeout_min?: number; agent_global_timeout_min?: number; local_agent_global_timeout_min?: number; pseudo?: string; avatar_email?: string; bio?: string; debug_mode?: boolean; discussion_notes_enabled?: boolean; default_model_tier?: 'economy' | 'default' | 'reasoning'; default_summary_strategy?: 'Auto' | 'OnDemand' | 'Off'; agent_handoffs_enabled?: boolean; agent_handoff_paid_limit?: number; agent_handoff_paid_unlimited?: boolean; agent_handoff_blocked_agents?: AgentType[]; discussion_weight?: DiscussionWeightConfig; execution_variable_retention_days?: number }) => api<void>('POST', '/config/server', req),
   regenerateAuthToken: () => api<string>('POST', '/config/auth-token/regenerate'),
 };
 
@@ -1410,17 +1448,19 @@ export const discussions = {
    *  (incl. background/batch children). Polled so a run still working after you
    *  navigate away keeps showing as running, instead of looking dead. */
   getRunning: () => api<string[]>('GET', '/discussions/running'),
-  get: (id: string) => api<Discussion & Partial<Pick<DiscussionDetail, 'active_agent_dispatches' | 'message_targets'>>>(
+  get: (id: string) => api<Discussion & Partial<Pick<DiscussionDetail, 'active_agent_dispatches' | 'message_targets' | 'partial_response'>>>(
     'GET',
     `/discussions/${id}`,
   ),
   create: (req: CreateDiscussionRequest) => api<Discussion>('POST', '/discussions', req),
   delete: (id: string) => api<void>('DELETE', `/discussions/${id}`),
-  update: (id: string, body: { title?: string; archived?: boolean; pinned?: boolean; skill_ids?: string[]; profile_ids?: string[]; directive_ids?: string[]; project_id?: string | null; tier?: ModelTier; agent?: AgentType; summary_strategy?: 'Auto' | 'OnDemand' | 'Off'; no_agent?: boolean; agent_handoffs_disabled?: boolean; agent_handoffs_unlimited?: boolean }) => api<void>('PATCH', `/discussions/${id}`, body),
+  update: (id: string, body: { title?: string; archived?: boolean; pinned?: boolean; skill_ids?: string[]; profile_ids?: string[]; directive_ids?: string[]; project_id?: string | null; tier?: ModelTier; agent?: AgentType; summary_strategy?: 'Auto' | 'OnDemand' | 'Off'; no_agent?: boolean; agent_handoffs_disabled?: boolean; agent_handoffs_unlimited?: boolean; execution_variable_retention_days?: number | null }) => api<void>('PATCH', `/discussions/${id}`, body),
   nativeAgentMode: (id: string) =>
     api<DiscussionNativeAgentMode>('GET', `/discussions/${id}/native-agent`),
   agentHandoffMode: (id: string) =>
     api<DiscussionAgentHandoffMode>('GET', `/discussions/${id}/agent-handoffs`),
+  executionVariableRetention: (id: string) =>
+    api<DiscussionExecutionVariableRetention>('GET', `/discussions/${id}/execution-variable-retention`),
   share: (id: string, contactIds: string[]) => api<string>('POST', `/discussions/${id}/share`, { contact_ids: contactIds }),
   /** Unified "join by code": paste any `kr-join-…` token and the backend
    *  resolves it LOCAL or cross-instance. If it isn't a local room, the backend
@@ -1857,6 +1897,20 @@ export const discussions = {
   },
 };
 
+/** Durable, human-gated actions proposed by an agent inside a discussion.
+ * The backend validates and persists the typed action when the source message
+ * is inserted; the frontend only reads this registry and launches by id. */
+export const discussionActions = {
+  list: (discussionId: string) =>
+    api<DiscussionAction[]>('GET', `/discussions/${encodeURIComponent(discussionId)}/actions`),
+  get: (actionId: string) =>
+    api<DiscussionAction>('GET', `/discussion-actions/${encodeURIComponent(actionId)}`),
+  cancel: (actionId: string) =>
+    api<DiscussionAction>('POST', `/discussion-actions/${encodeURIComponent(actionId)}/cancel`, {}),
+  launch: (actionId: string, request: LaunchDiscussionActionRequest) =>
+    api<DiscussionAction>('POST', `/discussion-actions/${encodeURIComponent(actionId)}/launch`, request),
+};
+
 export interface PlanningTaskListFilters {
   search?: string;
   status?: PlanningTaskStatus;
@@ -2206,6 +2260,40 @@ export const workflows = {
   },
 };
 
+export interface ExecutionVariableMetadata {
+  id: string;
+  resolved_at: string;
+  expires_at: string | null;
+  purged: boolean;
+  provenance: Array<{
+    name: string;
+    source: 'user_input' | 'kronn_context' | 'project_env';
+    source_ref: string | null;
+    effective_source_ref: string;
+    overridden: boolean;
+  }>;
+}
+
+export interface ExecutionVariablePreviewResponse {
+  run_kind: 'preview';
+  run_id: string;
+  metadata: ExecutionVariableMetadata;
+}
+
+export const executionVariables = {
+  preview: (projectId: string | null | undefined, variables: PromptVariable[]) =>
+    api<ExecutionVariablePreviewResponse>('POST', '/execution-context/preview', {
+      project_id: projectId ?? null,
+      variables,
+    }),
+  metadata: (runKind: string, runId: string) =>
+    api<ExecutionVariableMetadata>('GET', `/execution-context/${encodeURIComponent(runKind)}/${encodeURIComponent(runId)}`),
+  reveal: (runKind: string, runId: string, variable: string) =>
+    api<string>('POST', `/execution-context/${encodeURIComponent(runKind)}/${encodeURIComponent(runId)}/reveal`, { variable }),
+  extend: (runKind: string, runId: string, days: number) =>
+    api<void>('POST', `/execution-context/${encodeURIComponent(runKind)}/${encodeURIComponent(runId)}/extend`, { days }),
+};
+
 // ─── Pages vivantes (0.10.0) ──────────────────────────────────────────────
 
 export const pages = {
@@ -2228,6 +2316,14 @@ export const pages = {
     api<LivePageRevision>('PUT', `/pages/${encodeURIComponent(id)}/html`, request),
   publish: (id: string, request: PublishLivePageRequest) =>
     api<PublishLivePageResult>('POST', `/pages/${encodeURIComponent(id)}/publish`, request),
+  actions: (id: string) =>
+    api<LivePageAction[]>('GET', `/pages/${encodeURIComponent(id)}/actions`),
+  getAction: (actionId: string) =>
+    api<LivePageAction>('GET', `/live-page-actions/${encodeURIComponent(actionId)}`),
+  cancelAction: (actionId: string) =>
+    api<LivePageAction>('POST', `/live-page-actions/${encodeURIComponent(actionId)}/cancel`, {}),
+  launchAction: (actionId: string, request: LaunchLivePageActionRequest) =>
+    api<LivePageAction>('POST', `/live-page-actions/${encodeURIComponent(actionId)}/launch`, request),
 };
 
 // ─── Quick Prompts ─────────────────────────────────────────────────────────
@@ -2235,6 +2331,7 @@ export const pages = {
 export interface BatchItem {
   title: string;
   prompt: string;
+  variables?: Record<string, string>;
 }
 
 export interface BatchPreview {
@@ -2272,6 +2369,9 @@ export interface BatchRunResponse {
   run_id: string;
   discussion_ids: string[];
   batch_total: number;
+  /** Non-fatal SharedRun projection failures — the batch itself succeeded,
+   *  but the corresponding RunStatusCard may fail to rehydrate for these. */
+  shared_run_warnings?: string[];
 }
 
 export const quickPrompts = {
@@ -2300,6 +2400,7 @@ export const quickPrompts = {
     qpId: string,
     req: {
       prompt: string;
+      variables?: Record<string, string>;
       batch_name: string;
       targets: Array<{ agent: AgentType; tier: ModelTier; connection_id?: string }>;
       project_id?: string;
@@ -2592,6 +2693,16 @@ export interface ExternalApiConnectionView {
   economy_model: string | null;
   default_model: string | null;
   reasoning_model: string | null;
+  /** Media generation slots. Modalities, not quality tiers.
+   *
+   * Optional so a frontend can read a backend that predates these columns —
+   * during a rolling deploy the two sides are not necessarily in step, and a
+   * missing field must render as "not configured" rather than crash. */
+  image_model?: string | null;
+  video_model?: string | null;
+  /** Override for a provider serving media from another host; absent or null
+   * derives it from `endpoint`. */
+  media_endpoint?: string | null;
   created_at: string;
   updated_at: string;
   /** Whether a credential is currently stored; the value never crosses the wire. */
@@ -2606,6 +2717,10 @@ export interface UpsertExternalApiConnection {
   economy_model: string | null;
   default_model: string | null;
   reasoning_model: string | null;
+  /** Media generation slots; null when the provider has none. */
+  image_model?: string | null;
+  video_model?: string | null;
+  media_endpoint?: string | null;
   /** Tri-state: omitted/null keeps the stored key, '' clears it, a value replaces it. */
   api_key?: string | null;
 }
@@ -2614,8 +2729,103 @@ export interface ExternalApiConnectionTestResult {
   ok: boolean;
   status: 'success' | 'invalid_url' | 'credential_required' | 'auth_error' | 'http_error' | 'timeout' | 'transport_error' | 'invalid_catalogue';
   models: string[];
+  /** Capability-bearing union from provider-specific catalogue routes. Older
+   * backends omit it; callers keep `models` as the chat-only fallback. */
+  catalog?: Array<{
+    id: string;
+    display_name: string;
+    capabilities: string[];
+  }>;
   hint: string | null;
 }
+
+/** Media generation (KT-540). Modalities, not tiers: the model comes from the
+ *  connection's image/video slot, never from the caller, so a UI cannot bill a
+ *  model the operator did not configure. */
+export type MediaModality = 'image' | 'video';
+
+export interface GenerateMediaBody {
+  idempotency_key: string;
+  connection_id: string;
+  modality: MediaModality;
+  prompt: string;
+  discussion_id?: string;
+  message_id?: string;
+  duration_secs?: number;
+  resolution?: string;
+  aspect_ratio?: string;
+  generate_audio?: boolean;
+}
+
+export interface GeneratedMediaJob {
+  job_id: string;
+  status: string;
+  /** Model the connection resolved, echoed so the caller sees what is billed. */
+  model: string;
+  /** Discussion the asset will land in — including one this call created. */
+  discussion_id: string;
+  /** The message this job is anchored to — freshly created for this launch
+   *  unless an existing one was named. The inline placeholder, and later the
+   *  asset, render at this exact transcript position. */
+  message_id: string;
+}
+
+export interface MediaJobView {
+  id: string;
+  modality: MediaModality;
+  status: string;
+  model: string;
+  discussion_id: string | null;
+  /** Message the finished asset hangs from. */
+  message_id: string | null;
+  context_file_id: string | null;
+  width: number | null;
+  height: number | null;
+  duration_ms: number | null;
+  /** Absent while the job is still running — never shown as a zero cost. */
+  cost_usd: number | null;
+  is_byok: boolean | null;
+  last_error: string | null;
+  attempts: number;
+}
+
+export interface MediaEstimate {
+  model: string;
+  /** Absent when nothing comparable was billed yet — an unknown price is shown
+   *  as unknown rather than as zero. */
+  estimated_usd?: number | null;
+  samples: number;
+}
+
+export interface MediaSpendEntry {
+  id: string;
+  modality: MediaModality;
+  model: string;
+  cost_usd: number;
+  is_byok: boolean;
+  completed_at: string | null;
+  discussion_id: string | null;
+}
+
+export interface MediaSpend {
+  entries: MediaSpendEntry[];
+  image_total_usd: number;
+  video_total_usd: number;
+  total_usd: number;
+}
+
+export const media = {
+  generate: (body: GenerateMediaBody) =>
+    api<GeneratedMediaJob>('POST', '/media/generate', body),
+  job: (id: string) => api<MediaJobView>('GET', `/media/jobs/${id}`),
+  cancel: (id: string) => api<null>('POST', `/media/jobs/${id}/cancel`),
+  costs: () => api<MediaSpend>('GET', '/media/costs'),
+  estimate: (connectionId: string, modality: MediaModality, durationSecs?: number) => {
+    const params = new URLSearchParams({ connection_id: connectionId, modality });
+    if (durationSecs !== undefined) params.set('duration_secs', String(durationSecs));
+    return api<MediaEstimate>('GET', `/media/estimate?${params.toString()}`);
+  },
+};
 
 export const externalApi = {
   list: () => api<ExternalApiConnectionView[]>('GET', '/external-api/connections'),
@@ -2955,6 +3165,33 @@ export const userContext = {
     api<UserContextFile>('PUT', `/user-context/${encodeURIComponent(name)}`, { content }),
   delete: (name: string) =>
     api<void>('DELETE', `/user-context/${encodeURIComponent(name)}`),
+};
+
+export const runsApi = {
+  get: (id: string) => api<SharedRun>('GET', `/runs/${encodeURIComponent(id)}`),
+  list: (filters: { kind?: string; sourceId?: string; projectId?: string; discussionId?: string; limit?: number; offset?: number } = {}) => {
+    const query = new URLSearchParams();
+    if (filters.kind) query.set('kind', filters.kind);
+    if (filters.sourceId) query.set('source_id', filters.sourceId);
+    if (filters.projectId) query.set('project_id', filters.projectId);
+    if (filters.discussionId) query.set('discussion_id', filters.discussionId);
+    if (filters.limit) query.set('limit', String(filters.limit));
+    if (filters.offset) query.set('offset', String(filters.offset));
+    return api<SharedRun[]>('GET', `/runs${query.size ? `?${query}` : ''}`);
+  },
+};
+
+/** Shared catalog consumed by discussion, QP/compare and workflow pickers. */
+export const modelCatalogApi = {
+  list: () => api<ModelCatalogSnapshot>('GET', '/model-catalogs'),
+  refresh: (request: RefreshModelCatalogRequest) =>
+    api<ModelCatalogView>('POST', '/model-catalogs/refresh', request),
+  createManual: (request: UpsertManualModelRequest) =>
+    api<CatalogModelEntry>('POST', '/model-catalogs/manual', request),
+  updateManual: (request: UpsertManualModelRequest) =>
+    api<CatalogModelEntry>('PUT', '/model-catalogs/manual', request),
+  deleteManual: (request: DeleteManualModelRequest) =>
+    api<void>('POST', '/model-catalogs/manual/delete', request),
 };
 
 // ─── Continual Learning (0.10.0) ───────────────────────────────────────────────

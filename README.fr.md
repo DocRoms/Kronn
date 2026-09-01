@@ -19,7 +19,7 @@
   <a href="https://github.com/DocRoms/Kronn/commits/main"><img src="https://img.shields.io/github/last-commit/DocRoms/Kronn?label=dernier%20commit" alt="Dernier commit" /></a>
 </p>
 
-**Pilote Claude Code, Codex, Gemini, Ollama (100 % local), LiteLLM et 3 autres agents IA depuis un seul dashboard self-hosted, avec des MCP partagés, des secrets chiffrés et des workflows répétables.**
+**Pilote Claude Code, Codex, OpenCode, Gemini, Ollama (100 % local), LiteLLM et 3 autres agents IA depuis un seul dashboard self-hosted, avec des MCP partagés, des secrets chiffrés et des workflows répétables.**
 
 **Prompts plus petits, code déterministe quand c'est possible : moins d'hallucinations, facture tokens divisée, écoconception par conception.**
 
@@ -75,7 +75,7 @@ Si tu as déjà :
 - **Regardé un mega-prompt de 500 lignes halluciner à moitié 12 tâches différentes**. Kronn te laisse décomposer : du code déterministe quand c'est mécanique (API, exec, webhook, zéro token), des petits prompts IA focused uniquement là où le raisonnement est indispensable, chacun validé via compare-agents avant d'être shippé.
 - **Voulu de l'IA sur ton code mais PAS ton code chez Anthropic**. Branche [Ollama](https://ollama.com), lance Llama / Gemma / Qwen localement. **0 € de tokens, 0 fuite de données**, même UI.
 
-Kronn est un **control plane self-hosted pour agents IA de code** : Claude Code, Codex, Vibe, Gemini CLI, Kiro, GitHub Copilot CLI, Ollama et LiteLLM. Backend en Rust, frontend en React, secrets dans un vault chiffré sur ta machine.
+Kronn est un **control plane self-hosted pour agents IA de code** : Claude Code, Codex, OpenCode, Vibe, Gemini CLI, Kiro, GitHub Copilot CLI, Ollama et LiteLLM. Backend en Rust, frontend en React, secrets dans un vault chiffré sur ta machine.
 
 L’interface est disponible en français, anglais, espagnol et chinois simplifié. Sa langue reste indépendante de la langue de sortie attribuée aux nouvelles discussions avec les agents.
 

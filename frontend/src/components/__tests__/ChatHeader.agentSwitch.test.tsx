@@ -236,6 +236,7 @@ describe('ChatHeader — shared agent switcher', () => {
       modelTiers: {
         claude_code: { ...blank },
         codex: { ...blank, reasoning: 'gpt-company-review' },
+        open_code: { ...blank },
         gemini_cli: { ...blank },
         kiro: { ...blank },
         vibe: { ...blank },

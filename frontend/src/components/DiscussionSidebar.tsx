@@ -1,6 +1,8 @@
 import { Fragment, useState, useMemo, useRef, useEffect, useCallback } from 'react';
 import '../pages/DiscussionsPage.css';
 import { SwipeableDiscItem } from './SwipeableDiscItem';
+import { DiscussionWeightBadge } from './DiscussionWeightBadge';
+import { boundedWeightIds, useDiscussionWeights } from '../lib/useDiscussionWeights';
 import { unseenBasis } from '../lib/discussionUiUtils';
 import { GlobalSearchPanel } from './GlobalSearchPanel';
 import { CollectionFavoritesHeader } from './CollectionFavoritesHeader';
@@ -555,6 +557,20 @@ export function DiscussionSidebar({
 
   // ─── Render ───────────────────────────────────────────────────────────
   const discussionById = new Map(discussions.map(discussion => [discussion.id, discussion]));
+
+  // Storage-weight indicator. Disabled in config → the hook issues no request
+  // and this returns undefined, leaving each card's DOM exactly as before.
+  // Bounded on purpose: a workspace can hold hundreds of discussions and only
+  // a screenful is ever read. Asking for the whole set would turn an indicator
+  // into a table-wide aggregate on every render.
+  const weightIds = useMemo(() => boundedWeightIds(discussions), [discussions]);
+  const { enabled: weightEnabled, weights, stateFor: weightStateFor } = useDiscussionWeights(weightIds);
+  // Per-row state: a discussion outside the bounded batch reports
+  // `unmeasured`, so it never renders a zero it was never measured for.
+  const weightBadgeFor = (id: string) =>
+    weightEnabled
+      ? <DiscussionWeightBadge weight={weights[id]} state={weightStateFor(id)} t={t} />
+      : undefined;
   const executionChildrenByParent = new Map<string, ExecutionDiscussionLink[]>();
   const nestedExecutionChildIds = new Set<string>();
   for (const link of executionLinks) {
@@ -629,6 +645,7 @@ export function DiscussionSidebar({
     <SwipeableDiscItem
       key={`${keyPrefix}-${disc.id}`}
       disc={disc}
+      weightBadge={weightBadgeFor(disc.id)}
       agentLabel={agentLabels[disc.id]}
       isActive={disc.id === activeId}
       lastSeenCount={lastSeenMsgCount[disc.id] ?? 0}
@@ -671,6 +688,7 @@ export function DiscussionSidebar({
       <Fragment key={disc.id}>
         <SwipeableDiscItem
           disc={disc}
+          weightBadge={weightBadgeFor(disc.id)}
           agentLabel={agentLabels[disc.id]}
           isActive={disc.id === activeId}
           lastSeenCount={lastSeenMsgCount[disc.id] ?? 0}
@@ -714,6 +732,7 @@ export function DiscussionSidebar({
                   </div>
                   <SwipeableDiscItem
                     disc={child}
+                    weightBadge={weightBadgeFor(child.id)}
                     agentLabel={agentLabels[child.id]}
                     isActive={child.id === activeId}
                     lastSeenCount={lastSeenMsgCount[child.id] ?? 0}
@@ -1728,6 +1747,7 @@ export function DiscussionSidebar({
                                         <SwipeableDiscItem
                                           key={disc.id}
                                           disc={disc}
+                                          weightBadge={weightBadgeFor(disc.id)}
                                           agentLabel={agentLabels[disc.id]}
                                           isActive={disc.id === activeId}
                                           lastSeenCount={lastSeenMsgCount[disc.id] ?? 0}
@@ -1902,6 +1922,7 @@ export function DiscussionSidebar({
                     <SwipeableDiscItem
                       key={disc.id}
                       disc={disc}
+                      weightBadge={weightBadgeFor(disc.id)}
                       agentLabel={agentLabels[disc.id]}
                       isActive={disc.id === activeId}
                       lastSeenCount={lastSeenMsgCount[disc.id] ?? 0}

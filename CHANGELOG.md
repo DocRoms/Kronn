@@ -11,6 +11,66 @@ Release notes for 0.9.3 and earlier are available in the
 
 ## [Unreleased]
 
+### Added
+
+- Image and video generation on HTTP connections (LiteLLM, NVIDIA, OpenRouter).
+  Media models are configured as their own slots on a connection — modalities,
+  not quality tiers — so a text step can never select "tier Image". A
+  generation is launched from a discussion's Assets tab or by an agent through
+  MCP (`media_generate`, `media_job_status`); each launch gets its own bubble at
+  its chronological place in the transcript, which turns on the spot from
+  pending into the finished media — or into a stated failure — and comes back
+  the same way after a reload. The launcher is free again the moment the job is
+  accepted, so a video and two images can progress in parallel without mixing
+  up their states. Videos play inline with native
+  Picture-in-Picture, and opening any asset browses every image and clip of the
+  discussion in one carousel. Media spend is its OWN counter, reported per
+  generation from the provider's billed figure, never recomputed from a
+  published rate. The estimate shown before sending comes from past billed
+  generations, and reads as unknown — never as free — when there is none.
+
+- Discussions now report their storage weight, split by what a cleanup could
+  actually reclaim: attachment bytes held on disk, extracted document text, and
+  message content. The sidebar shows a green / amber / red indicator whose
+  detail panel breaks the three masses down and states how much is reclaimable
+  without losing any conversation. The indicator is configurable from Settings
+  (`[server.discussion_weight]`: `enabled`, `amber_bytes`, `red_bytes`) and
+  disabling it removes the queries entirely, not just the badge. Weights are
+  served by a bounded batch endpoint — it never scans every discussion.
+
+- Codex and Claude Code can now run through the same create/resume/stream/
+  cancel/close ACP contract as the native ACP agents, via an explicit,
+  off-by-default, per-agent opt-in (`KRONN_ACP_ADAPTER_CODEX` /
+  `KRONN_ACP_ADAPTER_CLAUDE`). Direct CLI migration remains the production
+  default for both; task workers always stay on it regardless of the toggle.
+  A shared, scoped, audited permission broker denies filesystem/terminal
+  requests, unbound sessions, out-of-project paths, and unauthorized MCP
+  server/tools by default. Project MCP servers are never inlined with
+  credentials, prompts travel on stdin, and normal discussions persist the
+  native Claude/Codex conversation id so a backend restart resumes the same
+  CLI session without reusing it across projects. See
+  `docs/operations/acp-adapters.md`.
+
+### Fixed
+
+- A Page's inline Kronn action CTAs (`data-kronn-action`) now work from the
+  standalone tab and every mosaic tile, not only the embedded viewer: clicking
+  one opened only a same-origin link relay with no action handler, so the
+  click was silently intercepted and lost. The three surfaces now share one
+  `useLivePageActions` hook and the native `LivePageActionCard`, loading and
+  validating each Page's own action list, failing closed on a removed
+  `action_ref`, and keeping every mosaic tile's action state fully isolated
+  from its siblings. A terminal action's "open discussion" jump opens a fresh
+  same-origin tab since these surfaces have no Dashboard shell to navigate
+  within.
+
+- OpenCode no longer gets locked out of a discussion just because
+  `~/.local/share/opencode/auth.json` is missing, empty, or unreadable.
+  OpenCode also accepts environment credentials, its own provider config, and
+  local or no-auth providers Kronn cannot see from that one file, so the
+  absence of a confirmed auth signal now reports "unknown, assume runnable"
+  instead of a hard "not ready" that blocked dispatch outright.
+
 ## [0.12.0] - 2026-08-30
 
 ### Added

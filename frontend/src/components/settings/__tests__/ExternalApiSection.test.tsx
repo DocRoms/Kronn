@@ -90,7 +90,18 @@ beforeEach(() => {
   updateMock.mockResolvedValue(conn({}));
   revealMock.mockResolvedValue('sk-stored-secret');
   removeMock.mockResolvedValue(null);
-  testMock.mockResolvedValue({ ok: true, status: 'success', models: ['model-a', 'model-b'], hint: null });
+  testMock.mockResolvedValue({
+    ok: true,
+    status: 'success',
+    models: ['model-a', 'model-b'],
+    catalog: [
+      { id: 'model-a', display_name: 'Model A', capabilities: ['chat'] },
+      { id: 'model-b', display_name: 'Model B', capabilities: ['chat'] },
+      { id: 'image-a', display_name: 'Image A', capabilities: ['image'] },
+      { id: 'video-a', display_name: 'Video A', capabilities: ['video'] },
+    ],
+    hint: null,
+  });
 });
 
 afterEach(() => {
@@ -295,6 +306,10 @@ describe('ExternalApiSection', () => {
       economy_model: null,
       default_model: 'model-a',
       reasoning_model: null,
+      // Media slots travel with every save, empty or not. `media_endpoint` is
+      // an advanced override the form does not expose, so it is not sent.
+      image_model: null,
+      video_model: null,
       api_key: 'sk-together',
     });
     // The list is reloaded after a successful create.
@@ -601,4 +616,65 @@ describe('ExternalApiSection', () => {
     fireEvent.click(screen.getByTestId('ext-api-cancel'));
     expect(screen.queryByTestId('ext-api-saved-test-result-saved-1')).toBeNull();
   });
+
+  it('uses the tested searchable catalogue for image and video models', async () => {
+    renderSection();
+    fireEvent.click(await screen.findByTestId('ext-api-add-connection'));
+    await waitFor(() => expect(screen.getByTestId('ext-api-media-panel')).toBeTruthy());
+
+    const video = screen.getByTestId('ext-api-media-video') as HTMLInputElement;
+    const image = screen.getByTestId('ext-api-media-image') as HTMLInputElement;
+    // Exactly like the text tiers: no unverified catalogue can be selected.
+    expect(video.value).toBe('');
+    expect(image.value).toBe('');
+    expect(video).toBeDisabled();
+    expect(image).toBeDisabled();
+
+    fireEvent.click(screen.getByTestId('ext-api-test'));
+    await waitFor(() => expect(video).not.toBeDisabled());
+    expectTierOption('ext-api-media-image', 'Image A');
+    const videoPicker = screen.getByTestId('ext-api-media-video');
+    fireEvent.focus(videoPicker);
+    fireEvent.change(videoPicker, { target: { value: 'Video A' } });
+    fireEvent.click(screen.getByRole('option', { name: 'Video A' }));
+
+    expect((screen.getByTestId('ext-api-media-video') as HTMLInputElement).value).toBe('Video A');
+    fireEvent.focus(screen.getByTestId('ext-api-media-image'));
+    expect(screen.queryByRole('option', { name: 'model-a' })).toBeNull();
+  });
+
+  it('keeps a saved but undetected media model visible as unavailable', async () => {
+    listMock.mockResolvedValue([conn({
+      id: 'saved-media',
+      endpoint: 'https://openrouter.ai/api',
+      origin_preset: 'open_router',
+      has_credential: true,
+      video_model: 'retired/video-model',
+    })]);
+    renderSection();
+    fireEvent.click(await screen.findByTestId('ext-api-edit-saved-media'));
+    const video = screen.getByTestId('ext-api-media-video');
+    expect(video).toHaveValue('retired/video-model');
+
+    fireEvent.click(screen.getByTestId('ext-api-test'));
+    await waitFor(() => expect(video).not.toBeDisabled());
+    fireEvent.focus(video);
+    expect(screen.getByRole('option', { name: 'retired/video-model' })).toHaveAttribute('aria-disabled', 'true');
+    expect(screen.getByRole('option', { name: 'Video A' })).toBeInTheDocument();
+    expect(screen.queryByRole('option', { name: 'Image A' })).toBeNull();
+  });
+
+  it('keeps the media block separate from the three text tiers', async () => {
+    // Modalities are not quality levels: mixing them into the tier list would
+    // suggest a text step could pick "tier Image".
+    renderSection();
+    fireEvent.click(await screen.findByTestId('ext-api-add-connection'));
+    await waitFor(() => expect(screen.getByTestId('ext-api-media-panel')).toBeTruthy());
+
+    const mediaPanel = screen.getByTestId('ext-api-media-panel');
+    expect(mediaPanel.querySelector('[data-testid="ext-api-tier-economy"]')).toBeNull();
+    expect(mediaPanel.querySelector('[data-testid="ext-api-tier-reasoning"]')).toBeNull();
+    expect(mediaPanel.querySelector('[data-testid="ext-api-media-video"]')).toBeTruthy();
+  });
+
 });

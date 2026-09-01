@@ -1,6 +1,7 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   livePageMosaicLayouts,
+  openStandaloneDiscussion,
   standaloneLivePageId,
   standaloneLivePageMosaic,
   standaloneLivePageMosaicUrl,
@@ -8,6 +9,10 @@ import {
 } from '../live-page-navigation';
 
 describe('standalone Live Page navigation', () => {
+  afterEach(() => {
+    sessionStorage.clear();
+  });
+
   it('builds a stable same-origin URL and decodes its Page id', () => {
     const url = standaloneLivePageUrl('page/équipe', {
       origin: 'http://localhost:5173',
@@ -47,5 +52,15 @@ describe('standalone Live Page navigation', () => {
     expect(standaloneLivePageMosaic('#pages/mosaic?page=one&page=two&page=three&layout=two-columns'))
       .toEqual({ pageIds: ['one', 'two', 'three'], layout: 'auto' });
     expect(standaloneLivePageMosaic('#pages/mosaic?page=one&layout=auto')).toBeNull();
+  });
+
+  it('seeds the Dashboard reload checkpoint and opens it in a fresh same-origin tab', () => {
+    const open = vi.fn();
+
+    openStandaloneDiscussion('disc-42', { origin: 'http://localhost:5173', pathname: '/index.html' } as Location, open);
+
+    expect(sessionStorage.getItem('kronn:navigation:page')).toBe('discussions');
+    expect(sessionStorage.getItem('kronn:navigation:discussion')).toBe('disc-42');
+    expect(open).toHaveBeenCalledWith('http://localhost:5173/index.html', '_blank');
   });
 });

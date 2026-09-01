@@ -1,16 +1,25 @@
-import { useEffect, useMemo, useState } from 'react';
-import { FileText, Images, Search, X } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Clapperboard, FileText, Images, Search, Sparkles, X } from 'lucide-react';
 import type { ContextFile } from '../types/generated';
+import type { ExternalApiConnectionView } from '../lib/api';
 import { MessageAttachments } from './MessageAttachments';
+import { MediaGenerateForm } from './MediaGenerateForm';
+import { mediaKind } from '../lib/mediaKind';
 
 type T = (key: string, ...args: (string | number)[]) => string;
-type AssetFilter = 'all' | 'images' | 'files' | 'pending';
+type AssetFilter = 'all' | 'images' | 'videos' | 'files' | 'pending';
 
 const PAGE_SIZE = 40;
-const IMAGE_FILENAME = /\.(?:png|jpe?g|gif|webp|svg|bmp|tiff?|ico)$/i;
 
+// Kind detection is shared with the carousel, so the inventory and the viewer
+// never disagree about what a file is. A generated clip used to land under
+// "Fichiers" next to a CSV.
 function isImage(file: ContextFile): boolean {
-  return file.mime_type.startsWith('image/') || IMAGE_FILENAME.test(file.filename);
+  return mediaKind(file) === 'image';
+}
+
+function isVideo(file: ContextFile): boolean {
+  return mediaKind(file) === 'video';
 }
 
 export function DiscussionAssetsPanel({
@@ -19,29 +28,59 @@ export function DiscussionAssetsPanel({
   onClose,
   onNavigateMessage,
   t,
+  connections = [],
+  onMediaLaunched,
+  openAssetRequest,
 }: {
   discussionId: string;
   files: ContextFile[];
   onClose: () => void;
   onNavigateMessage: (messageId: string) => void;
   t: T;
+  /// External API connections, so a generation can be launched from the tab
+  /// that will hold its result. Empty hides the launcher entirely.
+  connections?: ExternalApiConnectionView[];
+  /// Fired once the backend accepted a job, so the discussion can reveal the
+  /// fresh anchor message the inline placeholder renders at.
+  onMediaLaunched?: (jobId: string, messageId: string) => void;
+  /** One-shot request from a transcript media bubble. The nonce lets the same
+   * asset be deliberately opened again after the viewer was closed. */
+  openAssetRequest?: { assetId: string; nonce: number } | null;
 }) {
   const [query, setQuery] = useState('');
   const [filter, setFilter] = useState<AssetFilter>('all');
   const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
+  // Floor imposed by a targeted open request, so the grid behind the viewer has
+  // really scrolled to the asset. Kept apart from `visibleCount`: the same
+  // request clears the query and filter, and their own reset would undo it.
+  const [pinnedCount, setPinnedCount] = useState(0);
+  const [showGenerate, setShowGenerate] = useState(false);
+  const clearPagination = useCallback(() => setPinnedCount(0), []);
 
   useEffect(() => {
     setQuery('');
     setFilter('all');
     setVisibleCount(PAGE_SIZE);
+    setPinnedCount(0);
+    setShowGenerate(false);
   }, [discussionId]);
 
   useEffect(() => setVisibleCount(PAGE_SIZE), [query, filter]);
 
+  useEffect(() => {
+    if (!openAssetRequest) return;
+    setQuery('');
+    setFilter('all');
+    const ordered = [...files].sort((left, right) => right.created_at.localeCompare(left.created_at));
+    const index = ordered.findIndex(file => file.id === openAssetRequest.assetId);
+    setPinnedCount(index >= 0 ? index + 1 : 0);
+  }, [files, openAssetRequest]);
+
   const counts = useMemo(() => ({
     all: files.length,
     images: files.filter(isImage).length,
-    files: files.filter(file => !isImage(file)).length,
+    videos: files.filter(isVideo).length,
+    files: files.filter(file => !isImage(file) && !isVideo(file)).length,
     pending: files.filter(file => !file.message_id).length,
   }), [files]);
 
@@ -51,16 +90,37 @@ export function DiscussionAssetsPanel({
       .sort((left, right) => right.created_at.localeCompare(left.created_at))
       .filter(file => {
         if (filter === 'images' && !isImage(file)) return false;
-        if (filter === 'files' && isImage(file)) return false;
+        if (filter === 'videos' && !isVideo(file)) return false;
+        if (filter === 'files' && (isImage(file) || isVideo(file))) return false;
         if (filter === 'pending' && file.message_id) return false;
         return !needle || file.filename.toLocaleLowerCase().includes(needle);
       });
   }, [files, filter, query]);
 
-  const visibleFiles = filteredFiles.slice(0, visibleCount);
+  // The floor only ever widens the page, never narrows it.
+  const shownCount = Math.max(visibleCount, pinnedCount);
+  const visibleFiles = filteredFiles.slice(0, shownCount);
+  // The carousel walks the whole discussion, not the current page or filter:
+  // opening one asset must reach every image and clip that was generated,
+  // which is the point of the tab. Same order as the grid above (newest
+  // first), so the counter matches what the eye just clicked.
+  const carouselScope = useMemo(
+    () => [...files].sort((left, right) => right.created_at.localeCompare(left.created_at)),
+    [files],
+  );
+  // Whether any connection can actually serve a modality. It gates the FORM,
+  // not the entry point: hiding the whole block made the feature invisible and
+  // left no clue that a media slot has to be configured first — the same
+  // mistake as a disabled selector that explains nothing.
+  const canGenerate = connections.some(
+    connection =>
+      (connection.image_model && connection.image_model.trim())
+      || (connection.video_model && connection.video_model.trim()),
+  );
   const filters: Array<{ id: AssetFilter; label: string; icon?: typeof Images }> = [
     { id: 'all', label: t('disc.assets.filterAll') },
     { id: 'images', label: t('disc.assets.filterImages'), icon: Images },
+    { id: 'videos', label: t('disc.assets.filterVideos'), icon: Clapperboard },
     { id: 'files', label: t('disc.assets.filterFiles'), icon: FileText },
     { id: 'pending', label: t('disc.assets.filterPending') },
   ];
@@ -83,13 +143,41 @@ export function DiscussionAssetsPanel({
         </button>
       </header>
 
+      <div className="disc-assets-generate">
+        <button
+          type="button"
+          className="btn btn-sm"
+          onClick={() => setShowGenerate(open => !open)}
+          aria-expanded={showGenerate}
+          data-testid="assets-generate-toggle"
+        >
+          <Sparkles size={13} aria-hidden="true" />
+          <span>{showGenerate ? t('disc.media.closeForm') : t('disc.media.newAsset')}</span>
+        </button>
+        {!canGenerate && (
+          // Stated without a click: the reason it cannot run yet, and where to
+          // fix it. Discovering that through an empty form would be worse.
+          <p className="disc-assets-generate-hint" data-testid="assets-generate-hint">
+            {t('disc.media.noSlot')}
+          </p>
+        )}
+        {showGenerate && (
+          <MediaGenerateForm
+            discussionId={discussionId}
+            connections={connections}
+            t={t}
+            onLaunched={onMediaLaunched}
+          />
+        )}
+      </div>
+
       <div className="disc-assets-panel-tools">
         <label className="disc-assets-search">
           <Search size={14} aria-hidden="true" />
           <input
             type="search"
             value={query}
-            onChange={event => setQuery(event.target.value)}
+            onChange={event => { clearPagination(); setQuery(event.target.value); }}
             placeholder={t('disc.assets.search')}
             aria-label={t('disc.assets.search')}
           />
@@ -102,7 +190,7 @@ export function DiscussionAssetsPanel({
                 key={item.id}
                 type="button"
                 data-active={filter === item.id}
-                onClick={() => setFilter(item.id)}
+                onClick={() => { clearPagination(); setFilter(item.id); }}
               >
                 {Icon && <Icon size={12} aria-hidden="true" />}
                 <span>{item.label}</span>
@@ -122,14 +210,16 @@ export function DiscussionAssetsPanel({
               t={t}
               variant="library"
               onNavigateMessage={onNavigateMessage}
+              carouselScope={carouselScope}
+              openRequest={openAssetRequest}
             />
-            {visibleCount < filteredFiles.length && (
+            {shownCount < filteredFiles.length && (
               <button
                 type="button"
                 className="btn btn-sm disc-assets-load-more"
-                onClick={() => setVisibleCount(count => count + PAGE_SIZE)}
+                onClick={() => setVisibleCount(shownCount + PAGE_SIZE)}
               >
-                {t('disc.assets.loadMore', filteredFiles.length - visibleCount)}
+                {t('disc.assets.loadMore', filteredFiles.length - shownCount)}
               </button>
             )}
           </>

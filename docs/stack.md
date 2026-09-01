@@ -22,7 +22,7 @@ Content verbatim.
 | Database | SQLite (`kronn.db`, WAL mode, foreign keys) |
 | Streaming | SSE (Server-Sent Events) for agent responses and workflow run updates |
 | Container | Docker Compose (backend + frontend + nginx gateway) |
-| Agents | Claude Code CLI, OpenAI Codex CLI, Vibe (Mistral), Gemini CLI (Google), Kiro (Amazon), **Ollama (local, v0.4.0)** — HTTP API streaming `/api/chat` with system/user role separation, zero cost. Planned: OpenCode, DeepSeek |
+| Agents | Claude Code CLI, OpenAI Codex CLI, **OpenCode CLI (SST, native ACP transport — `opencode acp`)**, Vibe (Mistral), Gemini CLI (Google), Kiro (Amazon), GitHub Copilot CLI, **Ollama (local, v0.4.0)** — HTTP API streaming `/api/chat` with system/user role separation, zero cost. Planned: DeepSeek |
 | MCP sync | 7 formats: `.mcp.json` (Claude), `.kiro/settings/mcp.json` (Kiro), `.docs/mcp/mcp.json` (Kiro new), `.gemini/settings.json` (Gemini CLI), `.vibe/config.toml` (Vibe), `~/.codex/config.toml` (Codex), `~/.copilot/mcp-config.json` (Copilot CLI). Also syncs Claude Code's `.claude/settings.local.json` `enabledMcpjsonServers` whitelist |
 | Skills sync | Native SKILL.md files written to `.claude/skills/`, `.agents/skills/` (Codex), `.gemini/skills/` for progressive agent discovery. Profiles synced as agent files (`.claude/agents/`, `.gemini/agents/`, `.codex/agents/`, `.copilot/agents/`). Vibe/Kiro: prompt injection fallback |
 | API keys | Multi-key per provider (named keys, active selection), stored in `config.toml` as `[[tokens.keys]]` array. Agent auth files synced (e.g. `~/.codex/auth.json`). Override toggle per provider without deleting keys. |

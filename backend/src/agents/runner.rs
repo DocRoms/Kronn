@@ -1394,6 +1394,10 @@ pub struct AgentProcess {
     agent_type: AgentType,
     rx: mpsc::Receiver<String>,
     pub stderr_capture: Arc<Mutex<Vec<String>>>,
+    /// Usage emitted by structured transports such as ACP. This is process
+    /// telemetry, not a log scrape, so callers can attribute a completed run
+    /// even when the transport has no stderr token marker.
+    usage: Arc<Mutex<AgentUsage>>,
     stderr_task: Option<tokio::task::JoinHandle<()>>,
     /// HTTP agents run their provider/tool loop in a Tokio task rather than in
     /// `child`. Killing the lifeline process alone therefore does not stop the
@@ -1403,6 +1407,12 @@ pub struct AgentProcess {
     /// On Unix, the process group ID of the spawned agent, used to terminate
     /// the entire process tree on cancellation. None on Windows.
     pgid: Option<i32>,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct AgentUsage {
+    input_tokens: u64,
+    output_tokens: u64,
 }
 
 impl AgentProcess {
@@ -1444,6 +1454,12 @@ impl AgentProcess {
     /// Note: may be incomplete if called before process exit. Prefer `captured_stderr_flushed`.
     pub fn captured_stderr(&self) -> Vec<String> {
         self.stderr_capture.lock().unwrap().clone()
+    }
+
+    pub fn reported_token_usage(&self) -> Option<u64> {
+        let usage = *self.usage.lock().unwrap();
+        let total = usage.input_tokens.saturating_add(usage.output_tokens);
+        (total > 0).then_some(total)
     }
 
     /// Fix file ownership after agent execution.
@@ -1551,6 +1567,11 @@ pub trait AgentIo: Send {
     fn raw_token_stream(&self) -> bool {
         false
     }
+    /// Provider-reported token totals, when a structured transport supplies
+    /// them. `None` preserves the stderr/output parsing fallback for CLIs.
+    fn reported_token_usage(&self) -> Option<u64> {
+        None
+    }
     /// Best-effort kill of the underlying process.
     async fn kill(&mut self);
     /// Await process exit. `None` when nothing real backs it (scripted).
@@ -1577,6 +1598,9 @@ impl AgentIo for AgentProcess {
     }
     fn raw_token_stream(&self) -> bool {
         AgentProcess::raw_token_stream(self)
+    }
+    fn reported_token_usage(&self) -> Option<u64> {
+        AgentProcess::reported_token_usage(self)
     }
     async fn kill(&mut self) {
         self.rx.close();
@@ -1981,12 +2005,86 @@ pub(crate) const KRONN_INTERNAL_CODEX_ENV_VARS: &[&str] = &[
     "KRONN_WAIT_TOTAL_SECS",
 ];
 
-fn codex_kronn_internal_env_override() -> String {
+pub(crate) fn codex_kronn_internal_env_override() -> String {
     format!(
         "mcp_servers.kronn-internal.env_vars={}",
         serde_json::to_string(KRONN_INTERNAL_CODEX_ENV_VARS)
             .expect("static Codex MCP env allowlist must serialize")
     )
+}
+
+#[derive(Clone)]
+pub struct AcpSessionStore {
+    db: Arc<crate::db::Database>,
+    discussion_id: String,
+}
+
+impl AcpSessionStore {
+    pub fn new(db: Arc<crate::db::Database>, discussion_id: impl Into<String>) -> Self {
+        Self {
+            db,
+            discussion_id: discussion_id.into(),
+        }
+    }
+
+    fn runtime(agent_type: &AgentType) -> Option<&'static str> {
+        match agent_type {
+            AgentType::Codex => Some("codex_cli_adapter_v1"),
+            AgentType::ClaudeCode => Some("claude_cli_adapter_v1"),
+            _ => None,
+        }
+    }
+
+    async fn load(
+        &self,
+        agent_type: &AgentType,
+        project_scope: &Path,
+    ) -> Result<Option<String>, String> {
+        let runtime = Self::runtime(agent_type)
+            .ok_or_else(|| format!("{agent_type:?} has no durable ACP adapter session"))?;
+        let discussion_id = self.discussion_id.clone();
+        let agent_type = format!("{agent_type:?}");
+        let project_scope = project_scope.to_string_lossy().into_owned();
+        self.db
+            .with_conn(move |conn| {
+                crate::db::acp_runtime_sessions::get(
+                    conn,
+                    &discussion_id,
+                    &agent_type,
+                    runtime,
+                    &project_scope,
+                )
+            })
+            .await
+            .map_err(|error| format!("load ACP conversation id: {error}"))
+    }
+
+    async fn persist(
+        &self,
+        agent_type: &AgentType,
+        project_scope: &Path,
+        conversation_id: &str,
+    ) -> Result<(), String> {
+        let runtime = Self::runtime(agent_type)
+            .ok_or_else(|| format!("{agent_type:?} has no durable ACP adapter session"))?;
+        let discussion_id = self.discussion_id.clone();
+        let agent_type = format!("{agent_type:?}");
+        let project_scope = project_scope.to_string_lossy().into_owned();
+        let conversation_id = conversation_id.to_owned();
+        self.db
+            .with_conn(move |conn| {
+                crate::db::acp_runtime_sessions::upsert(
+                    conn,
+                    &discussion_id,
+                    &agent_type,
+                    runtime,
+                    &project_scope,
+                    &conversation_id,
+                )
+            })
+            .await
+            .map_err(|error| format!("persist ACP conversation id: {error}"))
+    }
 }
 
 /// Build the complete MCP table for an isolated Codex task worker.
@@ -2053,6 +2151,11 @@ pub struct AgentStartConfig<'a> {
     /// belong to a persistent discussion thread, or the auto-summary
     /// path itself).
     pub discussion_id: Option<&'a str>,
+    /// Durable adapter-session storage owned by a real discussion run. It is
+    /// deliberately separate from `discussion_sessions`: those rows represent
+    /// externally joined CLI participants and affect presence/routing, whereas
+    /// this state belongs to Kronn's own provider invocation.
+    pub acp_session_store: Option<AcpSessionStore>,
     /// CLI-only task-worker capability assembled by the discussion dispatcher.
     /// The MCP bridge receives this out-of-band through the child process
     /// environment; it is never rendered into the model prompt or accepted as
@@ -2131,6 +2234,7 @@ impl<'a> AgentStartConfig<'a> {
             external_http: None,
             context_files_prompt: "",
             discussion_id: None,
+            acp_session_store: None,
             task_worker_context: None,
             ollama_format: None,
             model_override: None,
@@ -2239,6 +2343,7 @@ pub(crate) fn is_local_agent(agent: &AgentType) -> bool {
         agent,
         AgentType::ClaudeCode
             | AgentType::Codex
+            | AgentType::OpenCode
             | AgentType::GeminiCli
             | AgentType::Kiro
             | AgentType::Vibe
@@ -2251,9 +2356,10 @@ pub(crate) fn agent_concurrency_limits(
     cfg: &crate::models::setup::AgentsConfig,
     local_global_limit: usize,
 ) -> String {
-    const LOCAL: [AgentType; 7] = [
+    const LOCAL: [AgentType; 8] = [
         AgentType::ClaudeCode,
         AgentType::Codex,
+        AgentType::OpenCode,
         AgentType::GeminiCli,
         AgentType::Kiro,
         AgentType::Vibe,
@@ -2265,6 +2371,7 @@ pub(crate) fn agent_concurrency_limits(
     let per_agent = |agent: &AgentType| match agent {
         AgentType::ClaudeCode => &cfg.claude_code,
         AgentType::Codex => &cfg.codex,
+        AgentType::OpenCode => &cfg.open_code,
         AgentType::GeminiCli => &cfg.gemini_cli,
         AgentType::Kiro => &cfg.kiro,
         AgentType::Vibe => &cfg.vibe,
@@ -2351,6 +2458,7 @@ pub(crate) fn resolve_model_flag(
         let agent_cfg = match agent_type {
             AgentType::ClaudeCode => &cfg.claude_code,
             AgentType::Codex => &cfg.codex,
+            AgentType::OpenCode => &cfg.open_code,
             AgentType::GeminiCli => &cfg.gemini_cli,
             AgentType::Kiro => &cfg.kiro,
             AgentType::Vibe => &cfg.vibe,
@@ -2393,47 +2501,27 @@ pub(crate) fn resolve_model_flag(
         }
     }
 
-    // Built-in defaults — explicit model for each tier so tiers are always distinct.
-    // Default maps to the "standard" model, not "no flag" (which depends on user subscription).
-    match (agent_type, tier) {
-        (AgentType::ClaudeCode, ModelTier::Economy) => Some("haiku".into()),
-        (AgentType::ClaudeCode, ModelTier::Default) => Some("sonnet".into()),
-        (AgentType::ClaudeCode, ModelTier::Reasoning) => Some("opus".into()),
-        // 2026-07: gpt-5.6 generation (sol=frontier, terra=balanced, luna=fast).
-        (AgentType::Codex, ModelTier::Economy) => Some("gpt-5.6-luna".into()),
-        (AgentType::Codex, ModelTier::Default) => None, // Codex default is fine
-        (AgentType::Codex, ModelTier::Reasoning) => Some("gpt-5.6-sol".into()),
-        (AgentType::GeminiCli, ModelTier::Economy) => Some("gemini-2.5-flash".into()),
-        (AgentType::GeminiCli, ModelTier::Default) => None, // Gemini default is fine
-        (AgentType::GeminiCli, ModelTier::Reasoning) => Some("gemini-3.1-pro-preview".into()),
-        // Copilot's available model set is account/policy-dependent. The old
-        // hard-coded `gpt-4o-mini` / `o4-mini` values are no longer accepted
-        // by Copilot CLI 1.0.x and made an otherwise valid prompt fail before
-        // execution. Let the CLI select its current account-compatible model
-        // unless the user explicitly configured a tier override.
-        (AgentType::CopilotCli, _) => None,
-        // Ollama: the user normally picks a model per tier via the OllamaCard
-        // (override above). These are the pulled-tag fallbacks when none is set,
-        // deliberately portability-first (NOT tuned for a beefy machine):
-        // qwen3:8b (~5 GB) fits almost any box, is fast, multilingual, and — key
-        // — reliably honors `/no_think` so its output stays clean+parseable.
-        // Economy is ALSO qwen3:8b, not qwen3:4b: benchmarking (2026-07-02)
-        // showed qwen3:4b ignores `/no_think`, leaking reasoning + `\boxed{}`
-        // wrappers into `content` → unusable for a step that parses the output,
-        // and it wasn't even faster (the thinking made it SLOWER). 8b is the
-        // reliable small-model floor; users who want lighter can still pick
-        // qwen3:4b explicitly in the OllamaCard economy slot. Reasoning is the
-        // only heavy fallback (qwen3:30b-a3b MoE) — an explicit opt-in tier;
-        // small machines should override it. Never bare tags like `qwen3` (not
-        // pullable) or `llama3.2` (not pulled) → opaque Ollama 404.
-        (AgentType::Ollama, ModelTier::Default) => Some("qwen3:8b".into()),
-        (AgentType::Ollama, ModelTier::Economy) => Some("qwen3:8b".into()),
-        (AgentType::Ollama, ModelTier::Reasoning) => Some("qwen3:30b-a3b".into()),
-        // LiteLLM deliberately has no built-in: the model names come from the
-        // operator's `config.yaml`, so any guess here would 404. The user sets
-        // one in the LiteLLM card and it covers every tier (see above).
-        // Kiro, Vibe: no --model flag support
-        _ => None,
+    // The durable catalog is the runtime source. Former built-ins are seeded
+    // once by `migrate_hardcoded_catalog_once`; keeping literals here would
+    // silently revive them after an operator removes or replaces a model.
+    let catalog_model = crate::core::model_catalog::assigned_model_for_agent(agent_type, tier)
+        .or_else(|| {
+            is_http_chat_agent(agent_type)
+                .then(|| {
+                    crate::core::model_catalog::assigned_model_for_agent(
+                        agent_type,
+                        ModelTier::Default,
+                    )
+                })
+                .flatten()
+        });
+    #[cfg(test)]
+    {
+        catalog_model.or_else(|| crate::core::model_catalog::migrated_default(agent_type, tier))
+    }
+    #[cfg(not(test))]
+    {
+        catalog_model
     }
 }
 
@@ -2874,6 +2962,74 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
             p
         }
     };
+    // OpenCode is an ACP-native CLI. It must never enter the generic text
+    // runner: `opencode acp` speaks bidirectional JSON-RPC, not line-oriented
+    // model output. The ACP host owns initialize/session/prompt/cancel and
+    // forwards only normalized text updates to the existing stream consumer.
+    let acp_route = crate::acp::resolve_acp_route(config.agent_type);
+    let acp_resume_id = if acp_route == crate::acp::AcpProductionRoute::AdaptedAcp && !task_worker {
+        match config.acp_session_store.as_ref() {
+            Some(store) => store.load(config.agent_type, &work_dir).await?,
+            None => None,
+        }
+    } else {
+        None
+    };
+    match acp_route {
+        crate::acp::AcpProductionRoute::NativeAcp => {
+            // Kiro ships as a host binary; the Linux container needs its own
+            // copy before the ACP subprocess can start.
+            if matches!(config.agent_type, AgentType::Kiro) {
+                ensure_kiro_cli_available().await?;
+            }
+            return start_native_acp(
+                AcpSessionRequest {
+                    agent_type: config.agent_type,
+                    work_dir: &work_dir,
+                    prompt: config.prompt,
+                    system_context: &extra_context,
+                    project_path: config.project_path,
+                    model_flag: model_flag.as_deref(),
+                    parent_cancel: config.cancel_token.as_ref(),
+                    discussion_id: config.discussion_id,
+                    resume_id: None,
+                    session_store: None,
+                },
+                config.full_access,
+            )
+            .await;
+        }
+        // Task workers keep the narrow, isolated worktree policy the direct
+        // CLI builder already applies below (`--setting-sources ""`,
+        // `--ignore-user-config`, the 3-tool allowlist, …); the adapters are
+        // out of scope for that path, so an operator's opt-in toggle never
+        // reaches a task worker. Direct CLI migration remains the explicit,
+        // observable fallback either way.
+        crate::acp::AcpProductionRoute::AdaptedAcp if !task_worker => {
+            tracing::info!(
+                agent = ?config.agent_type,
+                "KRONN_ACP_ADAPTER_* opt-in active: starting an isolated ACP adapter session \
+                 (unset the variable to fall back to direct CLI migration)"
+            );
+            return start_adapted_acp(
+                AcpSessionRequest {
+                    agent_type: config.agent_type,
+                    work_dir: &work_dir,
+                    prompt: config.prompt,
+                    system_context: &extra_context,
+                    project_path: config.project_path,
+                    model_flag: model_flag.as_deref(),
+                    parent_cancel: config.cancel_token.as_ref(),
+                    discussion_id: config.discussion_id,
+                    resume_id: acp_resume_id.as_deref(),
+                    session_store: config.acp_session_store.clone(),
+                },
+                config.full_access,
+            )
+            .await;
+        }
+        _ => {}
+    }
     let (binary, npx_pkg, mut args, env_key, stderr_mode, output_mode) =
         agent_command_with_task_worker_policy(
             config.agent_type,
@@ -2913,12 +3069,6 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
 
     // API key is optional — agents use their own local auth by default
     let api_key = get_api_key(env_key, config.tokens);
-
-    // On macOS hosts, host-mounted kiro-cli is not runnable in Linux containers.
-    // Ensure a Linux kiro-cli exists locally before spawning Kiro.
-    if matches!(config.agent_type, AgentType::Kiro) {
-        ensure_kiro_cli_available().await?;
-    }
 
     // Claude Code accepts the positional prompt argument OR reads it from
     // stdin when absent. Writing large prompts to stdin side-steps the
@@ -3084,10 +3234,351 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
         agent_type: config.agent_type.clone(),
         rx,
         stderr_capture,
+        usage: Arc::new(Mutex::new(AgentUsage::default())),
         stderr_task: stderr_handle,
         http_cancel: None,
         pgid,
     })
+}
+
+/// Common inputs to every ACP session-start path (native and adapted alike).
+/// Bundled into one struct so `start_native_acp`/`start_adapted_acp`/
+/// `run_acp_session` stay under clippy's argument-count lint instead of
+/// growing an ever-longer positional parameter list.
+struct AcpSessionRequest<'a> {
+    agent_type: &'a AgentType,
+    work_dir: &'a Path,
+    prompt: &'a str,
+    system_context: &'a str,
+    project_path: &'a str,
+    model_flag: Option<&'a str>,
+    parent_cancel: Option<&'a tokio_util::sync::CancellationToken>,
+    discussion_id: Option<&'a str>,
+    resume_id: Option<&'a str>,
+    session_store: Option<AcpSessionStore>,
+}
+
+async fn start_native_acp(
+    request: AcpSessionRequest<'_>,
+    full_access: bool,
+) -> Result<AgentProcess, String> {
+    use crate::acp::{acp_agent, AcpJsonRpcTransport, AcpSessionScope, AcpTransport};
+
+    let agent_type = request.agent_type;
+    let acp_agent_kind =
+        acp_agent(agent_type).ok_or_else(|| format!("{agent_type:?} is not an ACP agent"))?;
+    let project_root = (!request.project_path.is_empty()).then(|| request.work_dir.to_path_buf());
+    let scope = AcpSessionScope::new(
+        project_root,
+        request.discussion_id.unwrap_or("unbound-discussion"),
+    );
+    let transport: Arc<dyn AcpTransport> = Arc::new(
+        AcpJsonRpcTransport::spawn_native(
+            acp_agent_kind,
+            &request.work_dir.to_string_lossy(),
+            full_access,
+            request.discussion_id,
+            scope,
+        )
+        .await
+        .map_err(|error| format!("{agent_type:?} ACP spawn failed: {error}"))?,
+    );
+    run_acp_session(request, transport).await
+}
+
+/// Codex/Claude via the isolated ACP adapters (`ClaudeAcpAdapter`,
+/// `CodexAcpAdapter`), only reachable when an operator has explicitly
+/// enabled `KRONN_ACP_ADAPTER_CODEX`/`KRONN_ACP_ADAPTER_CLAUDE`
+/// (`crate::acp::resolve_acp_route`). Direct CLI migration remains the
+/// default and the observable fallback (see the caller in
+/// `start_agent_with_config`).
+///
+/// Unlike native ACP agents, neither CLI has a session-config-options
+/// catalogue or a live permission callback: the model is resolved once here
+/// and baked into the adapter's CLI invocation directly, and permission
+/// policy is the broker's static `session_policy()` rather than a per-request
+/// negotiation. `run_acp_session` therefore receives `model_flag: None` so
+/// its (native-agent-oriented) `select_model` step stays a correctly-skipped
+/// no-op instead of logging a misleading "no matching option" message.
+async fn start_adapted_acp(
+    request: AcpSessionRequest<'_>,
+    full_access: bool,
+) -> Result<AgentProcess, String> {
+    use crate::acp::{AcpSessionScope, AcpTransport, ClaudeAcpAdapter, CodexAcpAdapter};
+
+    let agent_type = request.agent_type;
+    let model = request.model_flag.map(str::to_owned);
+    if let Some(model) = &model {
+        tracing::debug!(agent = ?agent_type, model, "ACP adapter model applied via direct CLI flag");
+    }
+    let project_root = (!request.project_path.is_empty()).then(|| request.work_dir.to_path_buf());
+    let scope = AcpSessionScope::new(
+        project_root,
+        request.discussion_id.unwrap_or("unbound-discussion"),
+    );
+    let discussion_id = request.discussion_id.map(str::to_owned);
+    let transport: Arc<dyn AcpTransport> = match agent_type {
+        AgentType::ClaudeCode => Arc::new(ClaudeAcpAdapter::new(
+            model,
+            full_access,
+            discussion_id,
+            scope,
+        )),
+        AgentType::Codex => Arc::new(CodexAcpAdapter::new(
+            model,
+            full_access,
+            request.resume_id.map(str::to_owned),
+            discussion_id,
+            scope,
+        )),
+        other => return Err(format!("{other:?} has no ACP adapter")),
+    };
+    run_acp_session(
+        AcpSessionRequest {
+            model_flag: None,
+            ..request
+        },
+        transport,
+    )
+    .await
+}
+
+/// Shared session-run core behind `AcpHost`, common to every ACP transport
+/// (native JSON-RPC and the Codex/Claude adapters alike): negotiate, scope
+/// the project MCP registry, create the session, apply a resolved model when
+/// the transport actually offers a matching config option, then stream one
+/// prompt turn into the existing text-based `AgentProcess` lifecycle.
+async fn run_acp_session(
+    request: AcpSessionRequest<'_>,
+    transport: Arc<dyn crate::acp::AcpTransport>,
+) -> Result<AgentProcess, String> {
+    let AcpSessionRequest {
+        agent_type,
+        work_dir,
+        prompt,
+        system_context,
+        project_path,
+        model_flag,
+        parent_cancel,
+        discussion_id: _,
+        resume_id,
+        session_store,
+    } = request;
+    use crate::acp::{
+        acp_agent, AcpCapability, AcpHost, AcpInitialize, AcpSessionEvent, AcpSessionTarget,
+    };
+    use tokio::io::AsyncWriteExt;
+
+    let mut host = AcpHost::new(1, transport);
+    let mcp_servers = acp_project_mcp_servers(project_path);
+    host.negotiate(AcpInitialize {
+        protocol_version: 1,
+        cwd: work_dir.to_string_lossy().into_owned(),
+        mcp_servers: mcp_servers.clone(),
+    })
+    .await
+    .map_err(|error| format!("{agent_type:?} ACP initialize failed: {error}"))?;
+    if !mcp_servers.is_empty() {
+        host.require_capability(AcpCapability::McpInjection)
+            .map_err(|error| {
+                format!("{agent_type:?} ACP cannot start with the project MCP registry: {error}")
+            })?;
+    }
+    let session = if let Some(conversation_id) = resume_id {
+        let agent = acp_agent(agent_type)
+            .ok_or_else(|| format!("{agent_type:?} has no ACP session identity"))?;
+        let target = AcpSessionTarget::new(agent, conversation_id.to_owned())
+            .map_err(|error| format!("{agent_type:?} ACP resume target is invalid: {error}"))?;
+        host.resume_session(&target)
+            .await
+            .map_err(|error| format!("{agent_type:?} ACP session resume failed: {error}"))?;
+        target
+    } else {
+        host.create_session()
+            .await
+            .map_err(|error| format!("{agent_type:?} ACP session creation failed: {error}"))?
+    };
+    if *agent_type == AgentType::ClaudeCode {
+        if let Some(store) = session_store.as_ref() {
+            store
+                .persist(agent_type, work_dir, &session.session_id)
+                .await?;
+        }
+    }
+    // Apply the resolved tier/model against the options the session actually
+    // returned (ACP session-config-options). The host applies it via
+    // `session/set_config_option` only when a matching option value exists;
+    // otherwise the choice is a deliberate no-op so a catalogue-less agent keeps
+    // its own default instead of receiving a bad flag.
+    if let Some(model) = model_flag {
+        match host.select_model(&session, model).await {
+            Ok(true) => tracing::debug!(agent = ?agent_type, model, "ACP model selection applied"),
+            Ok(false) => tracing::debug!(
+                agent = ?agent_type,
+                model,
+                "ACP session exposes no matching model option; keeping its default"
+            ),
+            Err(error) => {
+                return Err(format!(
+                    "{agent_type:?} ACP model selection failed: {error}"
+                ))
+            }
+        }
+    }
+
+    let full_prompt = if system_context.is_empty() {
+        prompt.to_owned()
+    } else {
+        format!("{system_context}\n\n{prompt}")
+    };
+    let (tx, rx) = mpsc::channel::<String>(256);
+    let stderr_capture = Arc::new(Mutex::new(Vec::new()));
+    let usage = Arc::new(Mutex::new(AgentUsage::default()));
+    let cancel = parent_cancel
+        .map(tokio_util::sync::CancellationToken::child_token)
+        .unwrap_or_default();
+    let task_cancel = cancel.clone();
+    let task_usage = usage.clone();
+    let process_agent_type = agent_type.clone();
+    let event_agent_label = format!("{agent_type:?}");
+    let event_agent_type = agent_type.clone();
+    let event_work_dir = work_dir.to_path_buf();
+
+    // Match the async agent task to the AgentProcess lifecycle without treating
+    // the ACP child itself as a line-producing text process.
+    let mut lifeline = async_cmd("sh")
+        .args(["-c", r#"read -r s; exit "${s:-1}""#])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| format!("OpenCode ACP lifeline spawn failed: {error}"))?;
+    let lifeline_stdin = lifeline.stdin.take();
+
+    tokio::spawn(async move {
+        let mut lifeline_stdin = lifeline_stdin;
+        // Forward normalized ACP events to the existing text stream as they
+        // arrive, so the UI streams live during the prompt turn instead of
+        // receiving one batch after the response.
+        let (event_tx, mut event_rx) = mpsc::channel::<AcpSessionEvent>(256);
+        let forward_label = event_agent_label.clone();
+        let persistence_error = Arc::new(Mutex::new(None::<String>));
+        let forwarder_error = persistence_error.clone();
+        let event_store = session_store.clone();
+        let forwarder = tokio::spawn(async move {
+            while let Some(event) = event_rx.recv().await {
+                match event {
+                    AcpSessionEvent::TextDelta(text) => {
+                        if tx.send(text).await.is_err() {
+                            break;
+                        }
+                    }
+                    AcpSessionEvent::ToolCall { name } => {
+                        if tx
+                            .send(format!("[{forward_label} tool: {name}]"))
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    AcpSessionEvent::Usage {
+                        input_tokens,
+                        output_tokens,
+                    } => {
+                        *task_usage.lock().unwrap() = AgentUsage {
+                            input_tokens,
+                            output_tokens,
+                        };
+                    }
+                    AcpSessionEvent::NativeSessionId(conversation_id) => {
+                        if let Some(store) = event_store.as_ref() {
+                            if let Err(error) = store
+                                .persist(&event_agent_type, &event_work_dir, &conversation_id)
+                                .await
+                            {
+                                *forwarder_error.lock().unwrap() = Some(error);
+                            }
+                        }
+                    }
+                    AcpSessionEvent::Completed => {}
+                }
+            }
+        });
+
+        // On cancellation the prompt future is dropped, which drops its event
+        // sender and lets the forwarder finish draining before we report.
+        let (result, cancelled) = tokio::select! {
+            _ = task_cancel.cancelled() => (host.cancel(&session).await, true),
+            result = host.prompt(&session, &full_prompt, event_tx) => (result, false),
+        };
+        let _ = forwarder.await;
+        let persistence_error = persistence_error.lock().unwrap().take();
+        let ok = match (&result, persistence_error.as_ref()) {
+            (_, Some(error)) => {
+                tracing::error!(agent = %event_agent_label, "ACP session persistence failed: {error}");
+                false
+            }
+            (Ok(()), None) if !cancelled => true,
+            (Ok(()), None) => false,
+            (Err(error), None) => {
+                tracing::warn!(agent = %event_agent_label, "ACP session failed: {error}");
+                false
+            }
+        };
+        let _ = host.shutdown().await;
+        if let Some(mut stdin) = lifeline_stdin.take() {
+            let _ = stdin.write_all(if ok { b"0\n" } else { b"1\n" }).await;
+            let _ = stdin.shutdown().await;
+        }
+    });
+
+    Ok(AgentProcess {
+        child: lifeline,
+        output_mode: OutputMode::Text,
+        work_dir: work_dir.to_path_buf(),
+        agent_type: process_agent_type,
+        rx,
+        stderr_capture,
+        usage,
+        stderr_task: None,
+        http_cancel: Some(cancel),
+        pgid: None,
+    })
+}
+
+/// ACP receives only command-only MCP declarations from Kronn's canonical
+/// project registry. Values from an MCP `env` map can be credentials; keeping
+/// those entries out of the ACP payload preserves the server-side secret
+/// boundary until the broker can inject scoped credentials directly.
+fn acp_project_mcp_servers(project_path: &str) -> Vec<crate::acp::AcpMcpServer> {
+    if project_path.is_empty() {
+        return Vec::new();
+    }
+    let Some(file) = crate::core::mcp_scanner::read_mcp_json(project_path) else {
+        return Vec::new();
+    };
+    let mut servers: Vec<_> = file
+        .mcp_servers
+        .into_iter()
+        .filter_map(|(id, entry)| {
+            let command = entry.command.clone()?;
+            // Fail closed: a credential in `env` OR embedded directly in
+            // `args` (`["--token", "secret"]`) drops the whole server rather
+            // than partially redacting it — the ACP no-secret promise covers
+            // both shapes (KT-542 review).
+            (!command.trim().is_empty()
+                && !crate::core::mcp_scanner::mcp_entry_leaks_secret(&entry))
+            .then_some(crate::acp::AcpMcpServer {
+                id,
+                command,
+                args: entry.args.unwrap_or_default(),
+                allowed_tools: Vec::new(),
+            })
+        })
+        .collect();
+    servers.sort_by(|left, right| left.id.cmp(&right.id));
+    servers
 }
 
 /// Ensure kiro-cli is available inside the container.
@@ -7046,6 +7537,7 @@ async fn start_ollama_http(
         agent_type: agent_type.clone(),
         rx,
         stderr_capture,
+        usage: Arc::new(Mutex::new(AgentUsage::default())),
         stderr_task: None,
         http_cancel: Some(http_cancel),
         pgid: None,
@@ -7690,6 +8182,28 @@ fn agent_command_with_task_worker_policy(
                 Some("@openai/codex"),
                 args,
                 "OPENAI_API_KEY",
+                StderrMode::StdoutOnly,
+                OutputMode::Text,
+            )
+        }
+        AgentType::OpenCode => {
+            // Production ACP sessions are created by `AcpJsonRpcTransport`.
+            // This command builder is retained only for the explicit direct
+            // CLI migration path and deliberately does not parse ACP as a
+            // Claude stream.
+            let _ = (
+                prompt,
+                full_access,
+                mcp_context,
+                model_flag,
+                task_worker,
+                task_work_dir,
+            );
+            (
+                "opencode",
+                Some("opencode-ai"),
+                vec!["acp".into()],
+                "NONE",
                 StderrMode::StdoutOnly,
                 OutputMode::Text,
             )

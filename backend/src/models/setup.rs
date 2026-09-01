@@ -109,6 +109,10 @@ pub struct ServerConfig {
     /// still referenced by a retained child are always preserved.
     #[serde(default)]
     pub run_retention_days: u32,
+    /// Encrypted execution-variable snapshot retention. `0` keeps metadata
+    /// but disables value retention. Product default: 30 days.
+    #[serde(default = "default_execution_variable_retention_days")]
+    pub execution_variable_retention_days: u32,
     /// KT-373 — refuse to provision a worktree below this much free disk, in
     /// GiB. On 2026-08-21 the dev volume hit 100% with seven worktrees each
     /// holding its own Rust `target/`; provisioning kept going until nothing
@@ -247,6 +251,10 @@ pub struct ServerConfig {
     /// generated reply. Empty keeps the historical allow-all behaviour.
     #[serde(default)]
     pub agent_handoff_blocked_agents: Vec<AgentType>,
+    /// Sidebar storage-weight indicator. Validation and fallback live in
+    /// `models::discussion_weight`; this is only the persisted field.
+    #[serde(default)]
+    pub discussion_weight: crate::models::DiscussionWeightConfig,
 }
 
 /// Serde default for [`ServerConfig::default_summary_strategy`].
@@ -272,6 +280,10 @@ pub(crate) const DEFAULT_DISK_CRITICAL_GIB: u64 = 5;
 pub(crate) const DEFAULT_DISK_WARNING_GIB: u64 = 20;
 fn default_disk_critical_gib() -> u64 {
     DEFAULT_DISK_CRITICAL_GIB
+}
+
+fn default_execution_variable_retention_days() -> u32 {
+    30
 }
 fn default_disk_warning_gib() -> u64 {
     DEFAULT_DISK_WARNING_GIB
@@ -426,6 +438,8 @@ pub struct AgentsConfig {
     pub claude_code: AgentConfig,
     pub codex: AgentConfig,
     #[serde(default)]
+    pub open_code: AgentConfig,
+    #[serde(default)]
     pub gemini_cli: AgentConfig,
     #[serde(default)]
     pub kiro: AgentConfig,
@@ -484,6 +498,7 @@ impl HttpEndpoints {
             AgentType::Ollama
             | AgentType::ClaudeCode
             | AgentType::Codex
+            | AgentType::OpenCode
             | AgentType::Vibe
             | AgentType::GeminiCli
             | AgentType::Kiro
@@ -499,6 +514,7 @@ impl AgentsConfig {
         match agent {
             AgentType::ClaudeCode => self.claude_code.full_access,
             AgentType::Codex => self.codex.full_access,
+            AgentType::OpenCode => self.open_code.full_access,
             AgentType::GeminiCli => self.gemini_cli.full_access,
             AgentType::Kiro => self.kiro.full_access,
             AgentType::Vibe => self.vibe.full_access,
@@ -513,6 +529,7 @@ impl AgentsConfig {
     pub fn any_full_access(&self) -> bool {
         self.claude_code.full_access
             || self.codex.full_access
+            || self.open_code.full_access
             || self.gemini_cli.full_access
             || self.kiro.full_access
             || self.vibe.full_access
@@ -526,6 +543,7 @@ impl AgentsConfig {
     pub fn any_installed(&self) -> bool {
         self.claude_code.installed
             || self.codex.installed
+            || self.open_code.installed
             || self.gemini_cli.installed
             || self.kiro.installed
             || self.vibe.installed
@@ -606,6 +624,8 @@ pub struct ModelTiersConfig {
     pub claude_code: ModelTierConfig,
     #[serde(default)]
     pub codex: ModelTierConfig,
+    #[serde(default)]
+    pub open_code: ModelTierConfig,
     #[serde(default)]
     pub gemini_cli: ModelTierConfig,
     #[serde(default)]
@@ -719,6 +739,9 @@ pub enum AgentType {
     #[default]
     ClaudeCode,
     Codex,
+    /// OpenCode uses the ACP transport; it is a CLI identity, never the
+    /// generic `Custom` HTTP connection bucket.
+    OpenCode,
     Vibe,
     GeminiCli,
     Kiro,
@@ -805,6 +828,12 @@ pub struct ServerConfigPublic {
     pub agent_handoff_paid_limit: u32,
     pub agent_handoff_paid_unlimited: bool,
     pub agent_handoff_blocked_agents: Vec<AgentType>,
+    /// Sidebar storage-weight indicator: lets the frontend skip the batch
+    /// call entirely when disabled, and grade colours without a round-trip.
+    pub discussion_weight: crate::models::DiscussionWeightConfig,
+    /// Default retention for encrypted execution-variable snapshots.
+    /// Zero purges values as soon as the run reaches a terminal state.
+    pub execution_variable_retention_days: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -837,4 +866,11 @@ pub struct UpdateServerConfigRequest {
     pub agent_handoff_paid_unlimited: Option<bool>,
     #[serde(default)]
     pub agent_handoff_blocked_agents: Option<Vec<AgentType>>,
+    /// Whole section at once: the toggle and the pair are persisted together
+    /// so a rejected pair can never leave a half-applied state.
+    pub discussion_weight: Option<crate::models::DiscussionWeightConfig>,
+    /// Default encrypted execution-variable retention. Zero means that values
+    /// exist only for the lifetime of the active execution.
+    #[serde(default)]
+    pub execution_variable_retention_days: Option<u32>,
 }

@@ -13,6 +13,9 @@ vi.mock('../../lib/api', () => ({
   // mount. Tests don't care about the value (the form still passes its
   // 'default' fallback if the API throws), but the import must resolve.
   config: { getServerConfig: vi.fn().mockResolvedValue({ default_model_tier: 'default' }) },
+  // KT-531 — AgentSwitchPicker reads the dynamic model catalog when its
+  // popover opens.
+  modelCatalogApi: { list: vi.fn().mockResolvedValue({ targets: [] }) },
 }));
 
 vi.mock('../../lib/I18nContext', () => ({
@@ -578,6 +581,23 @@ describe('NewDiscussionForm — creation flow layout', () => {
     expect(fireEvent.paste(prompt, {
       clipboardData: { getData: () => 'one line' },
     })).toBe(true);
+  });
+
+  it('turns a pasted image into a pending attachment before creation', () => {
+    mount([]);
+    const prompt = screen.getByRole('textbox', { name: 'disc.prompt' });
+    const image = new File(['image-bytes'], 'clipboard-image.png', { type: 'image/png' });
+
+    const dispatched = fireEvent.paste(prompt, {
+      clipboardData: {
+        items: [{ kind: 'file', getAsFile: () => image }],
+        getData: () => '',
+      },
+    });
+
+    expect(dispatched).toBe(false);
+    expect(screen.getByText('clipboard-image.png')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /1 disc\.attachFile/ })).toBeInTheDocument();
   });
 });
 

@@ -80,6 +80,7 @@ Full spec: [`docs/conventions/agents-md-format-v1.md`](conventions/agents-md-for
 | Secret themes / unlock features | `docs/operations/secret-themes.md` |
 | **Désagentification / `ApiCall` step** (workflow engine calls APIs directly, zero tokens) — incl. AI helper bubble | `docs/operations/deagent-apicall.md` |
 | **Ollama local models** (deterministic offload: model resolution, num_ctx / `/no_think` gotchas, TypedSchema `format`, quality escalation) | `docs/operations/ollama-local-models.md` |
+| **ACP adapters / agent transport toggles** (Codex/Claude via `AcpTransport`, `KRONN_ACP_ADAPTER_*`, permission broker) | `docs/operations/acp-adapters.md`, `docs/design/adr-003-acp-control-plane.md` |
 | Token cost | `docs/operations/token-economy-0.9.6.md` |
 | Fix known issue | `docs/inconsistencies-tech-debt.md` |
 
@@ -203,6 +204,14 @@ After completing a task: if you discovered something non-obvious (a gotcha, a mi
 ## 9. UI structure
 
 → [`architecture/ui-structure.md`](architecture/ui-structure.md)
+
+## 9bis. Media generation (image / video)
+
+→ [`architecture/media-generation.md`](architecture/media-generation.md)
+
+Read it before touching a media path: submission is billable and the rules
+around resubmission, provider URLs and cost persistence exist to keep a crash
+from paying twice.
 
 ---
 

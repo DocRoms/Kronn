@@ -4,43 +4,93 @@
 // unmount). Non-image files (no disk_path on the backend) render as a filename
 // chip. Lives in its own file so the blob lifecycle is unit-testable in
 // isolation from the heavy MessageBubble.
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { ChevronLeft, ChevronRight, Download, ExternalLink, FileText, Image as ImageIcon, Loader2, MessageSquare, X } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Download, ExternalLink, FileText, Image as ImageIcon, Loader2, MessageSquare, Sparkles, X } from 'lucide-react';
 import type { ContextFile } from '../types/generated';
 import { discussions as discussionsApi } from '../lib/api';
 import { triggerDownload } from '../lib/downloadBlob';
+import { isImageFile, isVideoFile, isViewableMedia } from '../lib/mediaKind';
+import { MediaPlayer } from './MediaPlayer';
 
 type T = (key: string, ...args: (string | number)[]) => string;
-
-const IMAGE_FILENAME = /\.(?:png|jpe?g|gif|webp|svg|bmp|tiff?|ico)$/i;
 
 function formatKb(bytes: number): string {
   return `${Math.max(1, Math.round(bytes / 1024))} KB`;
 }
 
-function isImageFile(file: ContextFile): boolean {
-  // Raw text and arbitrary files are disk-backed too, so disk_path alone does
-  // not mean the browser can render a thumbnail. Keep the extension fallback
-  // for legacy image rows that were stored with mime_type=text/plain.
-  return !!file.disk_path
-    && (file.mime_type.startsWith('image/') || IMAGE_FILENAME.test(file.filename));
+function AiGeneratedBadge({ t }: { t: T }) {
+  return (
+    <span className="disc-ai-generated-badge" data-testid="ai-generated-badge">
+      <Sparkles size={10} aria-hidden="true" />
+      {t('disc.assets.aiGenerated')}
+    </span>
+  );
 }
 
-function AttachmentThumb({ file, url, failed, t, onOpen, variant, onNavigateMessage }: {
+function AiGenerationDetails({ file, t }: { file: ContextFile; t: T }) {
+  if (!file.ai_generation) return null;
+  return (
+    <div
+      className="disc-ai-generation-details"
+      role="note"
+      aria-label={t('disc.assets.aiGenerated')}
+      data-testid="ai-generation-details"
+    >
+      <div className="disc-ai-generation-heading">
+        <span className="disc-ai-generation-label">
+          <Sparkles size={13} aria-hidden="true" />
+          {t('disc.assets.aiGenerated')}
+        </span>
+        <span className="disc-ai-generation-model">
+          <span>{t('disc.assets.aiModel')}</span>
+          <code>{file.ai_generation.model}</code>
+        </span>
+      </div>
+      <p className="disc-ai-generation-prompt">
+        <strong>{t('disc.assets.aiPrompt')}</strong>
+        <span>{file.ai_generation.prompt}</span>
+      </p>
+    </div>
+  );
+}
+
+function AttachmentThumb({ file, url, failed, t, onOpen, onPrepareVideo, variant, onNavigateMessage }: {
   file: ContextFile;
   url?: string;
   failed: boolean;
   t: T;
   onOpen: () => void;
+  onPrepareVideo?: () => void;
   variant: 'message' | 'library';
   onNavigateMessage?: (messageId: string) => void;
 }) {
   const isImage = isImageFile(file);
+  const isVideo = isVideoFile(file);
   const meta = `${file.filename} (${formatKb(file.original_size)})`;
   const messageId = file.message_id;
+  const videoThumbRef = useRef<HTMLButtonElement | null>(null);
   const [downloading, setDownloading] = useState(false);
   const [downloadFailed, setDownloadFailed] = useState(false);
+
+  // A real video thumbnail needs the authenticated blob. Load it only when a
+  // library card enters the viewport; message rows keep the cheap badge and
+  // fetch only after the user opens the clip.
+  useEffect(() => {
+    if (!isVideo || variant !== 'library' || url || failed || !onPrepareVideo) return;
+    const node = videoThumbRef.current;
+    if (!node || typeof IntersectionObserver === 'undefined') {
+      onPrepareVideo();
+      return;
+    }
+    const observer = new IntersectionObserver(entries => {
+      if (!entries.some(entry => entry.isIntersecting)) return;
+      observer.disconnect();
+      onPrepareVideo();
+    }, { rootMargin: '160px' });
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [failed, isVideo, onPrepareVideo, url, variant]);
 
   const downloadFile = async () => {
     if (downloading || !file.disk_path) return;
@@ -56,7 +106,7 @@ function AttachmentThumb({ file, url, failed, t, onOpen, variant, onNavigateMess
     }
   };
 
-  const preview = isImage && !failed ? (
+  const previewContent = isImage && !failed ? (
       <button
         type="button"
         className="disc-attach-thumb"
@@ -69,13 +119,52 @@ function AttachmentThumb({ file, url, failed, t, onOpen, variant, onNavigateMess
           ? <img src={url} alt={file.filename} loading="lazy" />
           : <span className="disc-attach-thumb-loading" aria-hidden="true"><ImageIcon size={14} /></span>}
       </button>
+  ) : isVideo && !failed ? (
+    // A video gets a real, openable thumbnail — no <video> here, so a row that
+    // is merely on screen pulls nothing. The bytes are fetched when the
+    // carousel opens on it.
+    <button
+      ref={videoThumbRef}
+      type="button"
+      className="disc-attach-thumb disc-attach-thumb--video"
+      onClick={onOpen}
+      title={meta}
+      aria-label={t('disc.media.playerLabel', file.filename)}
+      data-testid="attach-video-thumb"
+    >
+      {url && (
+        <video
+          className="disc-attach-video-poster"
+          src={url}
+          preload="metadata"
+          muted
+          playsInline
+          aria-hidden="true"
+          data-testid="attach-video-poster"
+          onLoadedMetadata={event => {
+            const video = event.currentTarget;
+            if (Number.isFinite(video.duration) && video.duration > 0) {
+              video.currentTime = Math.min(0.1, video.duration / 10);
+            }
+          }}
+        />
+      )}
+      <span className="disc-attach-video-badge" aria-hidden="true">▶</span>
+      <span className="disc-attach-video-kind">{t('disc.media.videoBadge')}</span>
+    </button>
   ) : (
-    // Non-image, or an image whose bytes failed to load → filename chip.
+    // Anything else, or a media whose bytes failed to load → filename chip.
     <span className="disc-attach-chip" title={meta} data-testid="attach-chip">
       <FileText size={11} />
       <span className="disc-attach-chip-name">{file.filename}</span>
     </span>
   );
+  const preview = file.ai_generation && (isImage || isVideo) ? (
+    <span className="disc-attach-generated">
+      {previewContent}
+      <AiGeneratedBadge t={t} />
+    </span>
+  ) : previewContent;
 
   if (variant === 'message') return preview;
 
@@ -129,59 +218,143 @@ export function MessageAttachments({
   t,
   variant = 'message',
   onNavigateMessage,
+  carouselScope,
+  openRequest,
 }: {
   files: ContextFile[];
   discussionId: string;
   t: T;
   variant?: 'message' | 'library';
   onNavigateMessage?: (messageId: string) => void;
+  /// Full sequence to browse once one thumbnail is opened. The grid still
+  /// shows `files`; this is what the arrows walk through, so opening an image
+  /// under one message reaches every image AND clip of the discussion instead
+  /// of stopping at that message's own attachments.
+  carouselScope?: ContextFile[];
+  /** Controlled one-shot open request from outside the attachment grid. */
+  openRequest?: { assetId: string; nonce: number } | null;
 }) {
   const imageFiles = useMemo(() => files.filter(isImageFile), [files]);
+  // Membership is decided on METADATA, not on a loaded blob: filtering on
+  // `urls` excluded a video nobody had downloaded yet, and an image still in
+  // flight, so the carousel silently skipped entries.
+  const carouselFiles = useMemo(() => {
+    const sequence = (carouselScope ?? files).filter(isViewableMedia);
+    // A thumbnail must always be reachable from the sequence it opens: a scope
+    // that filtered or paginated the grid away would otherwise open on nothing.
+    const known = new Set(sequence.map(file => file.id));
+    const orphans = files.filter(file => isViewableMedia(file) && !known.has(file.id));
+    return [...sequence, ...orphans];
+  }, [carouselScope, files]);
   const [urls, setUrls] = useState<Record<string, string>>({});
   const [failedIds, setFailedIds] = useState<Set<string>>(() => new Set());
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const objectUrlsRef = useRef<Map<string, string>>(new Map());
+  const inFlightRef = useRef<Set<string>>(new Set());
+  const generationRef = useRef(0);
+  const mountedRef = useRef(false);
+  const discussionRef = useRef(discussionId);
+  const cleanupSequenceRef = useRef(0);
+  const handledOpenNonceRef = useRef<number | null>(null);
+
+  const releaseMediaUrls = useCallback(() => {
+    generationRef.current += 1;
+    for (const objectUrl of objectUrlsRef.current.values()) {
+      URL.revokeObjectURL(objectUrl);
+    }
+    objectUrlsRef.current.clear();
+    inFlightRef.current.clear();
+  }, []);
+
+  const finalizeUnmount = useCallback((cleanupSequence: number) => {
+    if (mountedRef.current || cleanupSequenceRef.current !== cleanupSequence) return;
+    releaseMediaUrls();
+  }, [releaseMediaUrls]);
+
+  // Object URLs belong to the discussion, not to a transient selection. The
+  // former video effect revoked its URL as soon as setUrls triggered a rerun,
+  // then kept that revoked string in state: reopening the clip produced an
+  // endless native loader. Cleanup is deferred by one microtask so React
+  // StrictMode's synthetic unmount/remount does not download a large clip
+  // twice. A real discussion change still clears its URLs synchronously.
+  useLayoutEffect(() => {
+    if (discussionRef.current !== discussionId) {
+      releaseMediaUrls();
+      discussionRef.current = discussionId;
+      setUrls({});
+      setFailedIds(new Set());
+      setSelectedId(null);
+      handledOpenNonceRef.current = null;
+    }
+    mountedRef.current = true;
+    cleanupSequenceRef.current += 1;
+    return () => {
+      mountedRef.current = false;
+      const cleanupSequence = ++cleanupSequenceRef.current;
+      queueMicrotask(() => finalizeUnmount(cleanupSequence));
+    };
+  }, [discussionId, finalizeUnmount, releaseMediaUrls]);
+
+  const loadMediaUrl = useCallback((file: ContextFile) => {
+    if (objectUrlsRef.current.has(file.id) || inFlightRef.current.has(file.id)) return;
+    const generation = generationRef.current;
+    inFlightRef.current.add(file.id);
+    discussionsApi.contextFileBlob(discussionId, file.id)
+      .then((blob: Blob) => {
+        if (!mountedRef.current || generation !== generationRef.current) return;
+        const objectUrl = URL.createObjectURL(blob);
+        objectUrlsRef.current.set(file.id, objectUrl);
+        setUrls(prev => ({ ...prev, [file.id]: objectUrl }));
+        setFailedIds(prev => {
+          if (!prev.has(file.id)) return prev;
+          const next = new Set(prev);
+          next.delete(file.id);
+          return next;
+        });
+      })
+      .catch(() => {
+        if (mountedRef.current && generation === generationRef.current) {
+          setFailedIds(prev => new Set(prev).add(file.id));
+        }
+      })
+      .finally(() => {
+        if (generation === generationRef.current) inFlightRef.current.delete(file.id);
+      });
+  }, [discussionId]);
 
   useEffect(() => {
-    let cancelled = false;
-    const objectUrls: string[] = [];
     for (const file of imageFiles) {
-      discussionsApi.contextFileBlob(discussionId, file.id)
-        .then((blob: Blob) => {
-          if (cancelled) return;
-          const objectUrl = URL.createObjectURL(blob);
-          objectUrls.push(objectUrl);
-          setUrls(prev => ({ ...prev, [file.id]: objectUrl }));
-          setFailedIds(prev => {
-            if (!prev.has(file.id)) return prev;
-            const next = new Set(prev);
-            next.delete(file.id);
-            return next;
-          });
-        })
-        .catch(() => {
-          if (!cancelled) setFailedIds(prev => new Set(prev).add(file.id));
-        });
+      loadMediaUrl(file);
     }
-    return () => {
-      cancelled = true;
-      for (const objectUrl of objectUrls) URL.revokeObjectURL(objectUrl);
-    };
-  }, [discussionId, imageFiles]);
+  }, [imageFiles, loadMediaUrl]);
 
-  const viewableImages = imageFiles.filter(file => !!urls[file.id]);
   const selectedIndex = selectedId
-    ? viewableImages.findIndex(file => file.id === selectedId)
+    ? carouselFiles.findIndex(file => file.id === selectedId)
     : -1;
-  const selectedFile = selectedIndex >= 0 ? viewableImages[selectedIndex] : null;
+  const selectedFile = selectedIndex >= 0 ? carouselFiles[selectedIndex] : null;
+
+  useEffect(() => {
+    if (!openRequest || handledOpenNonceRef.current === openRequest.nonce) return;
+    if (!carouselFiles.some(file => file.id === openRequest.assetId)) return;
+    handledOpenNonceRef.current = openRequest.nonce;
+    setSelectedId(openRequest.assetId);
+  }, [carouselFiles, openRequest]);
+
+  // A clip weighs megabytes, so its bytes are fetched only once it is the one
+  // being looked at — never for the whole carousel.
+  useEffect(() => {
+    if (!selectedFile || !isVideoFile(selectedFile)) return;
+    loadMediaUrl(selectedFile);
+  }, [loadMediaUrl, selectedFile]);
 
   const moveSelection = useCallback((delta: number) => {
-    if (viewableImages.length < 2) return;
+    if (carouselFiles.length < 2) return;
     const current = selectedId
-      ? viewableImages.findIndex(file => file.id === selectedId)
+      ? carouselFiles.findIndex(file => file.id === selectedId)
       : 0;
-    const next = (Math.max(0, current) + delta + viewableImages.length) % viewableImages.length;
-    setSelectedId(viewableImages[next].id);
-  }, [selectedId, viewableImages]);
+    const next = (Math.max(0, current) + delta + carouselFiles.length) % carouselFiles.length;
+    setSelectedId(carouselFiles[next].id);
+  }, [selectedId, carouselFiles]);
 
   useEffect(() => {
     if (!selectedFile) return;
@@ -214,6 +387,7 @@ export function MessageAttachments({
             failed={failedIds.has(file.id)}
             t={t}
             onOpen={() => setSelectedId(file.id)}
+            onPrepareVideo={() => loadMediaUrl(file)}
             variant={variant}
             onNavigateMessage={onNavigateMessage}
           />
@@ -224,6 +398,7 @@ export function MessageAttachments({
           className="disc-image-lightbox"
           role="dialog"
           aria-modal="true"
+          data-asset-id={selectedFile.id}
           aria-label={t('disc.attachmentGallery')}
           onClick={() => setSelectedId(null)}
         >
@@ -233,7 +408,7 @@ export function MessageAttachments({
                 {selectedFile.filename}
               </span>
               <span className="disc-image-lightbox-count">
-                {selectedIndex + 1} / {viewableImages.length}
+                {selectedIndex + 1} / {carouselFiles.length}
               </span>
               <a
                 className="disc-image-lightbox-action"
@@ -256,23 +431,42 @@ export function MessageAttachments({
               </button>
             </div>
             <div className="disc-image-lightbox-content">
-              {viewableImages.length > 1 && (
+              {carouselFiles.length > 1 && (
                 <button
                   type="button"
                   className="disc-image-lightbox-nav previous"
                   onClick={() => moveSelection(-1)}
-                  aria-label={t('disc.attachmentPrevious')}
+                  aria-label={t('disc.media.carouselPrevious')}
                 >
                   <ChevronLeft size={28} />
                 </button>
               )}
-              <img src={urls[selectedFile.id]} alt={selectedFile.filename} />
-              {viewableImages.length > 1 && (
+              <div className="disc-image-lightbox-asset">
+                <div className="disc-image-lightbox-media-frame">
+                  {isVideoFile(selectedFile)
+                    ? urls[selectedFile.id]
+                      ? <MediaPlayer
+                          src={urls[selectedFile.id]}
+                          filename={selectedFile.filename}
+                          t={t}
+                        />
+                      : failedIds.has(selectedFile.id)
+                        ? <span className="disc-image-lightbox-empty">{t('disc.attachmentImage', selectedFile.filename)}</span>
+                        // Fetched on selection, so a brief placeholder is expected
+                        // rather than an empty frame.
+                        : <span className="disc-image-lightbox-empty" data-testid="lightbox-loading">
+                            <Loader2 size={20} />
+                          </span>
+                    : <img src={urls[selectedFile.id]} alt={selectedFile.filename} />}
+                </div>
+                <AiGenerationDetails file={selectedFile} t={t} />
+              </div>
+              {carouselFiles.length > 1 && (
                 <button
                   type="button"
                   className="disc-image-lightbox-nav next"
                   onClick={() => moveSelection(1)}
-                  aria-label={t('disc.attachmentNext')}
+                  aria-label={t('disc.media.carouselNext')}
                 >
                   <ChevronRight size={28} />
                 </button>

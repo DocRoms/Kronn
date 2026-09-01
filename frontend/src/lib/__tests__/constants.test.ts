@@ -48,6 +48,7 @@ describe('constants', () => {
       const modelTiers = {
         claude_code: {},
         codex: { reasoning: 'gpt-company-review' },
+        open_code: {},
         gemini_cli: {},
         kiro: {},
         vibe: {},
@@ -127,15 +128,16 @@ describe('constants', () => {
   });
 
   describe('ALL_AGENT_TYPES', () => {
-    it('contains the 9 real agent types — Custom is intentionally excluded', () => {
+    it('contains the 10 real agent types — Custom is intentionally excluded', () => {
       // ALL_AGENT_TYPES lists only the concrete, selectable agent types —
       // installable CLIs plus the remote HTTP providers (Nvidia has no binary to
       // install but is fully selectable, KT-337). AgentType (from generated.ts)
       // also includes "Custom", a generic escape hatch that is never offered in
       // the UI, so it stays excluded on purpose.
-      expect(ALL_AGENT_TYPES).toHaveLength(9);
+      expect(ALL_AGENT_TYPES).toHaveLength(10);
       expect(ALL_AGENT_TYPES).toContain('ClaudeCode');
       expect(ALL_AGENT_TYPES).toContain('Codex');
+      expect(ALL_AGENT_TYPES).toContain('OpenCode');
       expect(ALL_AGENT_TYPES).toContain('Vibe');
       expect(ALL_AGENT_TYPES).toContain('GeminiCli');
       expect(ALL_AGENT_TYPES).toContain('Kiro');
@@ -222,6 +224,16 @@ describe('constants', () => {
     it('keeps the restricted warning for agents that expose the toggle', () => {
       expect(isAgentRestricted(access, 'ClaudeCode')).toBe(true);
       expect(hasAgentFullAccess(access, 'ClaudeCode')).toBe(false);
+    });
+
+    it('reads OpenCode full_access from open_code, not a missing key (regression, KT-543)', () => {
+      const withOpenCode = { open_code: { full_access: true } } as never;
+      expect(hasAgentFullAccess(withOpenCode, 'OpenCode')).toBe(true);
+      expect(isAgentRestricted(withOpenCode, 'OpenCode')).toBe(false);
+
+      const restricted = { open_code: { full_access: false } } as never;
+      expect(hasAgentFullAccess(restricted, 'OpenCode')).toBe(false);
+      expect(isAgentRestricted(restricted, 'OpenCode')).toBe(true);
     });
 
     it.each(['Ollama', 'LiteLlm', 'Nvidia'] as const)(
@@ -366,7 +378,7 @@ describe('constants', () => {
       // If a new agent is added to the Rust enum but not to ALL_AGENT_TYPES
       // in constants.ts, this test fails. The generated.ts union is the
       // source of truth from the backend.
-      const knownFromGenerated: string[] = ['ClaudeCode', 'Codex', 'Vibe', 'GeminiCli', 'Kiro', 'CopilotCli', 'Ollama', 'LiteLlm', 'Nvidia'];
+      const knownFromGenerated: string[] = ['ClaudeCode', 'Codex', 'OpenCode', 'Vibe', 'GeminiCli', 'Kiro', 'CopilotCli', 'Ollama', 'LiteLlm', 'Nvidia'];
       expect(ALL_AGENT_TYPES.sort()).toEqual(knownFromGenerated.sort());
     });
 

@@ -224,6 +224,7 @@ pub(crate) fn agent_type_to_db(a: &AgentType) -> String {
     match a {
         AgentType::ClaudeCode => "ClaudeCode",
         AgentType::Codex => "Codex",
+        AgentType::OpenCode => "OpenCode",
         AgentType::Vibe => "Vibe",
         AgentType::GeminiCli => "GeminiCli",
         AgentType::Kiro => "Kiro",

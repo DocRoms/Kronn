@@ -39,6 +39,7 @@ Kronn/
 │       │   ├── quick_prompts.rs # Quick Prompts CRUD + render + launch (0.3.4)
 │       │   ├── ollama.rs      # Ollama local LLM (0.4.0) — health check (contextual hints per env) + model listing via HTTP API. ollama_base_url_pub() reused by runner
 │       │   ├── agents.rs       # Agent detection + install + uninstall + toggle (enable/disable)
+│       │   ├── model_catalog.rs # Dynamic catalog snapshot, refresh and manual model CRUD
 │       │   ├── stats.rs        # Token usage & cost stats (by provider, project, daily history, top discussions/workflows)
 │       │   ├── skills.rs       # Skills API: list, create, update, delete
 │       │   ├── profiles.rs     # Profiles API: list, create, update, delete, persona-name override
@@ -55,6 +56,7 @@ Kronn/
 │       │   ├── discussions.rs  # Discussion + message CRUD (+ archive/rename via update_discussion)
 │       │   ├── discussion_workspaces.rs # Managed/external worktrees declared by joined CLI sessions
 │       │   ├── discussions_test.rs # 21 tests (CRUD, archive, title, messages, AgentType round-trip for all 6 agents + Custom, DB string stability)
+│       │   ├── model_catalog.rs # runtime_target_id persistence, reconciliation and tier projection
 │       │   ├── mcps.rs         # MCP servers/configs/linkages CRUD, encryption, hashing
 │       │   ├── workflows.rs    # Workflow + WorkflowRun CRUD, run deletion (individual + bulk)
 │       │   └── sql/
@@ -98,6 +100,7 @@ Kronn/
 │       │   ├── scanner.rs      # Git repo scanner + AI audit detection (detect_audit_status, count_ai_todos). WSL UNC paths (\\wsl.localhost\...) run git via wsl.exe
 │       │   ├── registry.rs     # Plugin registry — 53 MCPs + 3 API plugins (api-chartbeat, api-adobe-analytics, api-google-search). Each McpDefinition carries optional api_spec with base_url (supports {ENV_KEY} templating), auth (inc. OAuth2ClientCredentials with extra_headers), endpoints, docs_url, config_keys.
 │       │   ├── mcp_scanner.rs  # Multi-agent MCP sync + MCP/API prompt injection. read_all_mcp_contexts() reads .mcp.json + context files. build_api_context_block() renders `## REST APIs available` from API plugins. collect_active_api_plugins() decrypts + returns active configs. interpolate_env_template() substitutes {ENV_KEY} in base_url + header templates. Disk sync: .mcp.json (Claude), .vibe/config.toml (Vibe), ~/.codex/config.toml (Codex). ApiOnly transport is a silent skip. **0.6.0: outbound host sync** — sync_claude_global_config (scope-aware: top-level vs projects[<host-path>].mcpServers based on is_global+project_ids), sync_gemini_global_config, sync_codex_global_config, sync_copilot_global_config. All filter `host_sync ≠ None`. `_kronn` marker on managed entries + tree-wide orphan cleanup. Atomic write + chmod 0600 on Unix. Defensive backup `.kronn-backup` on parse failure.
+│       │   ├── model_catalog/  # ACP/Codex discovery, HTTP reconciliation, preflight and one-time seed migration
 │       │   ├── host_mcp_discovery.rs # 0.6.0: read-only scan of ~/.claude.json, ~/.gemini/settings.json, ~/.codex/config.toml, ~/.copilot/mcp-config.json. Returns DiscoveredHostMcp with HostScope (ClaudeUser, ClaudeLocal{path}, Gemini, Codex, Copilot) + KronnOwnership (NotManaged | ManagedByMarker(uuid) | ManagedByHash(uuid)). Phase 1 of inbound/outbound feature. Never writes disk.
 │       │   ├── oauth2_cache.rs # OAuth2 client-credentials token cache + exchanger (0.5.0). In-memory HashMap<config_id, CachedToken> behind a tokio::sync::Mutex. resolve_token() checks cache → exchanges on miss/expiry → returns bearer. 30s safety margin before provider expiry. Error-transparent: token-exchange failures are bubbled up as human-readable strings for prompt injection.
 │       │   ├── native_files.rs # Native SKILL.md + agent file sync. Writes skills to .claude/skills/, .agents/skills/, .gemini/skills/. Profiles to .claude/agents/, .gemini/agents/, .codex/agents/. Additive sync for discussions, full cleanup at startup.

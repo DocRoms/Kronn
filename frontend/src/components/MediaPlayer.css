@@ -1,0 +1,140 @@
+/* Video player. Own sheet so the shared component styles stay untouched. */
+
+.media-player {
+  position: relative;
+  display: flex;
+  width: 100%;
+}
+
+.media-player-video {
+  width: 100%;
+  max-height: 70vh;
+  border-radius: 6px;
+  background: #000;
+  /* Letterboxing inside the element rather than cropping: a generated clip is
+     often not exactly the ratio that was asked for. */
+  object-fit: contain;
+}
+
+.media-player-pip {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  padding: 2px 6px;
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  font-size: 12px;
+  line-height: 1.2;
+  cursor: pointer;
+}
+
+.media-player-pip:hover,
+.media-player-pip:focus-visible {
+  background: rgba(0, 0, 0, 0.8);
+}
+
+.media-player-pip:focus-visible {
+  outline: 2px solid var(--kr-accent, #fff);
+  outline-offset: 1px;
+}
+
+/* Video thumbnail in a message row or the asset library. Library cards load
+   their authenticated blob lazily when close to the viewport, then expose a
+   real first-frame preview; compact message rows retain the cheap badge. */
+.disc-attach-thumb--video {
+  position: relative;
+  overflow: hidden;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 6px;
+  min-height: 22px;
+  border: 1px solid var(--kr-border, rgba(128, 128, 128, 0.3));
+  border-radius: 4px;
+  background: var(--kr-surface-2, rgba(0, 0, 0, 0.06));
+  color: var(--kr-text, inherit);
+  cursor: pointer;
+  font-size: 10px;
+}
+
+.disc-attach-generated {
+  position: relative;
+  display: inline-flex;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.disc-ai-generated-badge {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  max-width: calc(100% - 12px);
+  padding: 3px 6px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  border-radius: var(--kr-r-pill, 999px);
+  color: #fff;
+  background: rgba(7, 12, 21, 0.76);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+  font-size: 8px;
+  font-weight: 700;
+  line-height: 1;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
+  pointer-events: none;
+  backdrop-filter: blur(5px);
+}
+
+.disc-attach-video-poster {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  background: #000;
+  object-fit: cover;
+  pointer-events: none;
+}
+
+.disc-attach-thumb--video:hover,
+.disc-attach-thumb--video:focus-visible {
+  border-color: var(--kr-accent, currentColor);
+}
+
+.disc-attach-video-badge {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.62);
+  color: #fff;
+  font-size: 9px;
+  line-height: 1;
+}
+
+.disc-attach-video-kind {
+  position: relative;
+  z-index: 1;
+  padding: 2px 5px;
+  border-radius: var(--kr-r-pill, 999px);
+  background: rgba(0, 0, 0, 0.62);
+  color: #fff;
+}
+
+.disc-image-lightbox-empty {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 120px;
+  min-height: 80px;
+  color: var(--kr-text-muted, inherit);
+}

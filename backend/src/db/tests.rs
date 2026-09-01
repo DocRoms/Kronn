@@ -3305,6 +3305,10 @@ fn sample_qp_for_batch(id: &str) -> QuickPrompt {
             description: None,
             required: true,
             pattern: None,
+            source: Default::default(),
+            source_ref: None,
+            allow_manual_override: false,
+            control: None,
         }],
         agent: crate::models::AgentType::ClaudeCode,
         connection_id: None,
@@ -3410,6 +3414,49 @@ fn create_batch_run_pure_fn_roundtrip_toplevel() {
         );
         assert!(disc.awaiting_agent);
     }
+}
+
+#[test]
+fn assigned_batch_identity_persists_template_without_resolved_secret() {
+    let conn = test_db();
+    let qp = sample_qp_for_batch("qp-secret-template");
+    crate::db::quick_prompts::insert_quick_prompt(&conn, &qp).unwrap();
+    let discussion_id = "disc-secret-template".to_string();
+    let outcome = crate::db::workflows::create_batch_run_with_identities(
+        &conn,
+        crate::db::workflows::CreateBatchRunInput {
+            quick_prompt: &qp,
+            items: vec![crate::db::workflows::BatchItemInput {
+                title: "secret-safe".into(),
+                prompt: "Analyse {{ticket}} en profondeur".into(),
+                agent_override: None,
+            }],
+            batch_name: Some("secret-safe".into()),
+            project_id: None,
+            parent_run_id: None,
+            author_pseudo: None,
+            author_avatar_email: None,
+            language: "fr".into(),
+            workspace_mode: "Direct".into(),
+            chain_prompt_ids: vec![],
+            chain_batch_items: vec![],
+            group_concurrency_limit: None,
+        },
+        Some("run-secret-template".into()),
+        std::slice::from_ref(&discussion_id),
+    )
+    .unwrap();
+    assert_eq!(outcome.run_id, "run-secret-template");
+    assert_eq!(outcome.discussion_ids, vec![discussion_id.clone()]);
+    let stored: String = conn
+        .query_row(
+            "SELECT content FROM messages WHERE discussion_id=?1 AND role='User'",
+            [&discussion_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(stored, "Analyse {{ticket}} en profondeur");
+    assert!(!stored.contains("small-secret"));
 }
 
 #[test]
@@ -3893,6 +3940,76 @@ fn partial_response_recovery_idempotent_when_nothing_to_recover() {
     // Run again — still empty
     let n2 = crate::db::discussions::recover_partial_responses(&conn).unwrap();
     assert!(n2.is_empty());
+}
+
+#[test]
+fn partial_response_dispatch_owner_blocks_stale_writes_and_clears() {
+    let conn = test_db();
+    crate::db::discussions::insert_discussion(
+        &conn,
+        &sample_discussion("disc-owned-checkpoint", None),
+    )
+    .unwrap();
+
+    let first = crate::db::discussions::set_partial_response_for_dispatch(
+        &conn,
+        "disc-owned-checkpoint",
+        "premier fragment",
+        (&AgentType::Custom, Some("openrouter/model-a")),
+        "job-a",
+        "user-a",
+        Some("openrouter-connection"),
+    )
+    .unwrap();
+    assert!(first);
+    let competing = crate::db::discussions::set_partial_response_for_dispatch(
+        &conn,
+        "disc-owned-checkpoint",
+        "mauvais fragment plus récent",
+        (&AgentType::ClaudeCode, Some("sonnet")),
+        "job-b",
+        "user-b",
+        None,
+    )
+    .unwrap();
+    assert!(
+        !competing,
+        "a queued follow-up must not steal the checkpoint slot"
+    );
+    assert!(
+        !crate::db::discussions::clear_partial_response_for_dispatch(
+            &conn,
+            "disc-owned-checkpoint",
+            "job-b",
+        )
+        .unwrap()
+    );
+
+    let snapshot = crate::db::discussions::get_in_flight_agent_response(
+        &conn,
+        "disc-owned-checkpoint",
+        &AgentType::ClaudeCode,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(snapshot.content, "premier fragment");
+    assert_eq!(snapshot.trigger_message_id.as_deref(), Some("user-a"));
+    assert_eq!(
+        snapshot.connection_id.as_deref(),
+        Some("openrouter-connection")
+    );
+    assert!(
+        snapshot.dispatch.is_none(),
+        "missing job rows degrade honestly"
+    );
+
+    assert!(crate::db::discussions::clear_partial_response_for_dispatch(
+        &conn,
+        "disc-owned-checkpoint",
+        "job-a",
+    )
+    .unwrap());
+    assert!(!crate::db::discussions::has_pending_partial(&conn, "disc-owned-checkpoint").unwrap());
 }
 
 #[test]
@@ -5019,6 +5136,10 @@ fn quick_prompt_crud() {
                 description: Some("Identifiant Jira du ticket à analyser".into()),
                 required: true,
                 pattern: None,
+                source: Default::default(),
+                source_ref: None,
+                allow_manual_override: false,
+                control: None,
             },
             crate::models::PromptVariable {
                 name: "project".into(),
@@ -5027,6 +5148,10 @@ fn quick_prompt_crud() {
                 description: None,
                 required: true,
                 pattern: None,
+                source: Default::default(),
+                source_ref: None,
+                allow_manual_override: false,
+                control: None,
             },
         ],
         agent: crate::models::AgentType::ClaudeCode,
@@ -5647,6 +5772,10 @@ fn quick_prompt_variables_roundtrip() {
                 description: None,
                 required: false,
                 pattern: None,
+                source: Default::default(),
+                source_ref: None,
+                allow_manual_override: false,
+                control: None,
             },
             crate::models::PromptVariable {
                 name: "pr".into(),
@@ -5655,6 +5784,10 @@ fn quick_prompt_variables_roundtrip() {
                 description: None,
                 required: false,
                 pattern: None,
+                source: Default::default(),
+                source_ref: None,
+                allow_manual_override: false,
+                control: None,
             },
         ],
         agent: crate::models::AgentType::ClaudeCode,

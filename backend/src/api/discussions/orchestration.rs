@@ -545,6 +545,10 @@ pub async fn orchestrate(
                     http_endpoints: Some(&http_endpoints),
                     context_files_prompt: &companion_context,
                     discussion_id: Some(&id),
+                    acp_session_store: Some(runner::AcpSessionStore::new(
+                        state.db.clone(),
+                        id.clone(),
+                    )),
                     tools: spawn_uses_native_tools(SpawnToolPolicy::AgentWork, agent_type).then(
                         || {
                             if is_worker_room {
@@ -729,6 +733,7 @@ pub async fn orchestrate(
                 http_endpoints: Some(&http_endpoints),
                 context_files_prompt: &companion_context,
                 discussion_id: Some(&id),
+                acp_session_store: Some(runner::AcpSessionStore::new(state.db.clone(), id.clone())),
                 tools: spawn_uses_native_tools(SpawnToolPolicy::AgentWork, &primary_agent_type)
                     .then(|| {
                         if is_worker_room {
@@ -1382,6 +1387,8 @@ pub async fn generate_summary_on_demand(
     let (_cleaned, parsed_tokens) = runner::parse_token_usage(&disc.agent, &out, &stderr_lines);
     let tokens_used = if stream_json_tokens > 0 {
         stream_json_tokens
+    } else if let Some(reported) = process.reported_token_usage() {
+        reported
     } else {
         parsed_tokens
     };

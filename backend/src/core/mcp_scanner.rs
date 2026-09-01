@@ -159,6 +159,55 @@ pub struct McpServerEntry {
     pub env: HashMap<String, String>,
 }
 
+/// Credential-flag markers checked against each `--flag` in an MCP server's
+/// `args`, split on `-`/`_`/`=` and matched as a WHOLE part (never a
+/// substring) so `--keyboard-shortcut` never false-positives on `key` while
+/// `--api-key`, `--token`, `--auth-token` all do. Mirrors the wholesale-drop
+/// policy already applied to a non-empty `env` map (KT-542 review): a project
+/// can embed a credential directly in `args` (`["--token", "sk-…"]`) instead
+/// of `env`, and the ACP no-secret promise must cover that shape too — fail
+/// closed by dropping the WHOLE server rather than guessing which arg is the
+/// secret value.
+const MCP_ARG_SECRET_MARKERS: &[&str] = &[
+    "token",
+    "secret",
+    "password",
+    "passwd",
+    "pwd",
+    "apikey",
+    "api-key",
+    "api_key",
+    "key",
+    "credential",
+    "credentials",
+    "auth",
+    "bearer",
+];
+
+/// True when any `--flag`-shaped entry in `args` names a credential by a
+/// known marker. Deliberately over-inclusive (a flag name alone, not its
+/// value, is enough to trip it) — fail-closed means a false positive costs
+/// Kronn an MCP server it could have safely included, while a false negative
+/// costs a leaked secret.
+pub(crate) fn mcp_args_carry_secret(args: &[String]) -> bool {
+    args.iter().any(|arg| {
+        let Some(flag) = arg.strip_prefix('-') else {
+            return false;
+        };
+        flag.split(['-', '_', '='])
+            .map(str::to_ascii_lowercase)
+            .any(|part| MCP_ARG_SECRET_MARKERS.contains(&part.as_str()))
+    })
+}
+
+/// A server is credential-bearing — and must never enter an ACP payload,
+/// adapter argv, or client event — when it has a non-empty `env` map OR any
+/// `args` entry names a credential flag (KT-542 review: the no-secret
+/// promise covers `args`, not only `env`).
+pub(crate) fn mcp_entry_leaks_secret(entry: &McpServerEntry) -> bool {
+    !entry.env.is_empty() || entry.args.as_deref().is_some_and(mcp_args_carry_secret)
+}
+
 /// Custom Debug impl that masks env values (may contain secrets like API keys).
 impl std::fmt::Debug for McpServerEntry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

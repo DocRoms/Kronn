@@ -70,12 +70,15 @@ pub async fn get(
                 &id,
                 &discussion.agent,
             )?;
+            let partial_response =
+                crate::db::discussions::get_in_flight_agent_response(conn, &id, &discussion.agent)?;
             let message_targets =
                 crate::db::discussions::list_discussion_message_targets(conn, &id)?;
             Ok(Some(crate::models::DiscussionDetail {
                 discussion,
                 active_agent_dispatches,
                 message_targets,
+                partial_response,
             }))
         })
         .await
@@ -140,11 +143,104 @@ pub async fn agent_handoff_mode(
     }
 }
 
+/// GET /api/discussions/{id}/execution-variable-retention
+pub async fn execution_variable_retention(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Json<ApiResponse<DiscussionExecutionVariableRetention>> {
+    let global_days = state
+        .config
+        .read()
+        .await
+        .server
+        .execution_variable_retention_days;
+    match state
+        .db
+        .with_read_conn(move |conn| {
+            crate::db::discussions::get_execution_variable_retention_days(conn, &id)
+        })
+        .await
+    {
+        Ok(Some(override_days)) => Json(ApiResponse::ok(DiscussionExecutionVariableRetention {
+            effective_days: override_days.unwrap_or(global_days),
+            global_days,
+            override_days,
+        })),
+        Ok(None) => Json(ApiResponse::err("Discussion not found")),
+        Err(error) => Json(ApiResponse::err(format!("DB error: {error}"))),
+    }
+}
+
 /// POST /api/discussions
 pub async fn create(
     State(state): State<AppState>,
-    Json(req): Json<CreateDiscussionRequest>,
+    Json(mut req): Json<CreateDiscussionRequest>,
 ) -> Json<ApiResponse<Discussion>> {
+    let discussion_id = Uuid::new_v4().to_string();
+    if let Some(qp_id) = req.originating_qp_id.clone() {
+        let lookup = qp_id.clone();
+        let qp = match state
+            .db
+            .with_conn(move |conn| crate::db::quick_prompts::get_quick_prompt(conn, &lookup))
+            .await
+        {
+            Ok(Some(qp)) => qp,
+            Ok(None) => return Json(ApiResponse::err("Quick prompt not found")),
+            Err(error) => return Json(ApiResponse::err(format!("DB error: {error}"))),
+        };
+        let (secret, retention_days) = {
+            let config = state.config.read().await;
+            let Some(secret) = config.encryption_secret.clone() else {
+                return Json(ApiResponse::err(
+                    "Variable preflight unavailable: encryption key missing",
+                ));
+            };
+            (secret, config.server.execution_variable_retention_days)
+        };
+        let declarations = qp.variables.clone();
+        let supplied = req.launch_variables.clone();
+        let project_id = req.project_id.clone().or(qp.project_id.clone());
+        let run_id = discussion_id.clone();
+        let prepared = state
+            .db
+            .with_conn(move |conn| {
+                crate::core::execution_variables::prepare(
+                    conn,
+                    crate::core::execution_variables::PrepareRequest {
+                        declarations: &declarations,
+                        supplied: &supplied,
+                        context: &std::collections::HashMap::new(),
+                        project_id: project_id.as_deref(),
+                        discussion_id: None,
+                        environment_ref: "project_mcp_configs",
+                        run_kind: "quick_prompt",
+                        run_id: &run_id,
+                        encryption_secret: &secret,
+                        retention_days,
+                    },
+                )
+            })
+            .await;
+        match prepared {
+            Ok(Ok(_)) => {}
+            Ok(Err(failures)) => {
+                return Json(ApiResponse::err(format!(
+                    "preflight_failed:{}",
+                    serde_json::to_string(&failures).unwrap_or_default()
+                )))
+            }
+            Err(error) => {
+                return Json(ApiResponse::err(format!(
+                    "Variable preflight failed: {error}"
+                )))
+            }
+        }
+        // Persist only the canonical template. The encrypted snapshot is
+        // hydrated into a temporary discussion copy immediately before agent
+        // dispatch; API responses and message storage never receive values.
+        req.initial_prompt = qp.prompt_template;
+        req.project_id = req.project_id.or(qp.project_id);
+    }
     // Input validation
     if req.title.len() > MAX_TITLE_LEN {
         return Json(ApiResponse::err(format!(
@@ -258,7 +354,10 @@ pub async fn create(
     let discussion = Discussion {
         awaiting_agent: false,
         agent_running: false,
-        id: Uuid::new_v4().to_string(),
+        // The preflight snapshot is allocated against this durable execution
+        // identity before any discussion side effect. Reuse it as the actual
+        // discussion id so inspection/reveal cannot become orphaned.
+        id: discussion_id.clone(),
         project_id: req.project_id,
         title: req.title,
         agent: req.agent.clone(),
@@ -316,6 +415,17 @@ pub async fn create(
             }
             crate::db::discussions::insert_discussion(conn, &disc)?;
             crate::db::discussions::insert_message(conn, &disc.id, &msg)?;
+            // The card has a foreign key to the discussion through the messages
+            // table. Insert the durable owner first, then add the immutable,
+            // value-free context record in the same transaction.
+            if originating_qp_id.is_some() {
+                crate::db::execution_variable_snapshots::insert_execution_context_message(
+                    conn,
+                    &disc.id,
+                    "quick_prompt",
+                    &disc.id,
+                )?;
+            }
             if !initial_targets.is_empty() {
                 crate::db::discussions::replace_message_targets(conn, &msg.id, &initial_targets)?;
             }
@@ -424,6 +534,7 @@ pub async fn update(
     let no_agent = req.no_agent;
     let agent_handoffs_disabled = req.agent_handoffs_disabled;
     let agent_handoffs_unlimited = req.agent_handoffs_unlimited;
+    let execution_variable_retention_days = req.execution_variable_retention_days;
 
     // Reject conflicting directives on update
     if let Some(ref ids) = directive_ids {
@@ -498,6 +609,11 @@ pub async fn update(
                     &id,
                     agent_handoffs_disabled,
                     agent_handoffs_unlimited,
+                )? || updated;
+            }
+            if let Some(days) = execution_variable_retention_days {
+                updated = crate::db::discussions::update_execution_variable_retention_days(
+                    conn, &id, days,
                 )? || updated;
             }
             Ok(updated)
@@ -751,6 +867,14 @@ pub async fn delete_message(
             )),
         )
             .into_response(),
+        Ok(Err(crate::db::discussions::TombstoneMessageError::Immutable)) => (
+            StatusCode::CONFLICT,
+            Json(ApiResponse::<()>::err_coded(
+                ApiErrorCode::Conflict,
+                "Execution context cards are immutable and cannot be deleted",
+            )),
+        )
+            .into_response(),
         Ok(Err(error)) => {
             tracing::error!("Failed to tombstone discussion message: {error}");
             (
@@ -937,7 +1061,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn get_discussion_exposes_each_active_dispatch_with_its_trigger_turn() {
+    async fn get_discussion_exposes_restart_checkpoint_and_each_active_dispatch() {
         let state = state_with_disc("d-overlap").await;
         state
             .db
@@ -973,6 +1097,21 @@ mod tests {
                         group_concurrency_limit: None,
                     },
                 )?;
+                conn.execute(
+                    "UPDATE agent_dispatch_jobs
+                        SET attempts = 2, last_error = 'backend_restarted'
+                      WHERE id = 'job-overlap'",
+                    [],
+                )?;
+                crate::db::discussions::set_partial_response_for_dispatch(
+                    conn,
+                    "d-overlap",
+                    "Analyse déjà produite avant le redémarrage.",
+                    (&crate::models::AgentType::Ollama, Some("qwen:test")),
+                    "job-overlap",
+                    "u-overlap",
+                    None,
+                )?;
                 Ok(())
             })
             .await
@@ -988,6 +1127,29 @@ mod tests {
         assert_eq!(
             detail.active_agent_dispatches[0].agent_type,
             crate::models::AgentType::Ollama
+        );
+        assert_eq!(detail.active_agent_dispatches[0].attempts, Some(2));
+        assert_eq!(
+            detail.active_agent_dispatches[0].last_error.as_deref(),
+            Some("backend_restarted")
+        );
+        let partial = detail
+            .partial_response
+            .expect("checkpointed response must be exposed while the dispatch resumes");
+        assert_eq!(
+            partial.content,
+            "Analyse déjà produite avant le redémarrage."
+        );
+        assert_eq!(partial.agent_type, Some(crate::models::AgentType::Ollama));
+        assert_eq!(partial.model.as_deref(), Some("qwen:test"));
+        assert!(!partial.message_id.is_empty());
+        let partial_dispatch = partial.dispatch.expect("active dispatch projection");
+        assert_eq!(partial_dispatch.id, "job-overlap");
+        assert_eq!(partial_dispatch.trigger_message_id, "u-overlap");
+        assert_eq!(partial_dispatch.attempts, Some(2));
+        assert_eq!(
+            partial_dispatch.last_error.as_deref(),
+            Some("backend_restarted")
         );
         assert_eq!(
             detail.message_targets.get("u-overlap"),

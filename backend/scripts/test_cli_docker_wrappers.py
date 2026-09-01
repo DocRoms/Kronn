@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 import pathlib
+import re
 import subprocess
 import tempfile
 import unittest
@@ -69,6 +70,137 @@ class AzureDockerWrapperTests(unittest.TestCase):
 
 
 class E2eContainerWorkflowTests(unittest.TestCase):
+    def test_ci_jobs_have_hard_bounded_timeouts(self):
+        workflow = CI_WORKFLOW.read_text()
+        jobs = (
+            "require-ci-label", "test-backend", "test-backend-coverage",
+            "test-backend-quality", "test-desktop-compile", "duplication-check", "test-python",
+            "test-docs-sidecar-windows", "test-frontend", "test-e2e", "test-shell",
+            "security-scan", "test-backend-portability", "ci-quality-gates",
+            "backend-ci-performance",
+        )
+        for job in jobs:
+            match = re.search(
+                rf"^  {re.escape(job)}:\n(?P<section>.*?)(?=^  [A-Za-z0-9_-]+:\n|\Z)",
+                workflow,
+                re.MULTILINE | re.DOTALL,
+            )
+            self.assertIsNotNone(match, job)
+            section = match.group("section")
+            expected_timeout = 35 if job == "test-backend" else 30
+            self.assertIn(f"timeout-minutes: {expected_timeout}", section, job)
+
+    def test_backend_slo_observer_is_non_blocking_and_uses_hot_cold_measurements(self):
+        workflow = CI_WORKFLOW.read_text()
+        self.assertIn("workflow_dispatch:", workflow)
+        self.assertIn("options: [hot, cold]", workflow)
+        self.assertIn("unlabeled", workflow)
+        self.assertIn("backend-ci-performance:", workflow)
+        self.assertIn("ci-quality-gates:", workflow)
+        for gate in (
+            "test-backend", "test-backend-coverage", "test-backend-quality",
+            "test-desktop-compile", "duplication-check", "test-python",
+            "test-docs-sidecar-windows", "test-frontend", "test-e2e",
+            "test-shell", "security-scan", "test-backend-portability",
+        ):
+            self.assertIn(f"      - {gate}", workflow)
+        aggregate = re.search(
+            r"^  ci-quality-gates:\n(?P<section>.*?)(?=^  [A-Za-z0-9_-]+:\n|\Z)",
+            workflow,
+            re.MULTILINE | re.DOTALL,
+        ).group("section")
+        self.assertIn("if: always()", aggregate)
+        self.assertIn("      - require-ci-label", aggregate)
+        self.assertIn("node scripts/ci/backend_ci_slo.mjs", workflow)
+        backend = re.search(
+            r"^  test-backend:\n(?P<section>.*?)(?=^  [A-Za-z0-9_-]+:\n|\Z)",
+            workflow,
+            re.MULTILINE | re.DOTALL,
+        ).group("section")
+        self.assertIn("timeout-minutes: 35", backend)
+        self.assertIn("target/debug/.fingerprint", backend)
+        self.assertIn("target/debug/build", backend)
+        self.assertIn("target/debug/deps", backend)
+        self.assertIn("Record compiled cache hit", backend)
+        self.assertIn("Record compiled cache warmup miss", backend)
+        self.assertIn("Verify bounded compiled backend cache", backend)
+        self.assertIn("Reject invalid compiled cache hit", backend)
+        self.assertIn("Mark bounded compiled backend cache ready", backend)
+        self.assertIn("../target/debug/$directory", backend)
+        self.assertIn(".kronn-backend-cache-v2", backend)
+        cargo_config = (ROOT / ".cargo" / "config.toml").read_text()
+        self.assertIn('target-dir = "target"', cargo_config)
+        self.assertLess(
+            backend.index("cargo test — measured backend critical path"),
+            backend.index("Mark bounded compiled backend cache ready"),
+        )
+        self.assertNotIn("cargo llvm-cov", backend)
+        self.assertNotIn("cargo check — desktop crate", backend)
+        # KT-533 — clippy moved off the measured critical path: a warm
+        # `test-backend` run still exceeded the 15-minute SLO (17m41 on
+        # https://github.com/DocRoms/Kronn/actions/runs/33368662050) with
+        # clippy inline. It now runs in the parallel, still-required
+        # `test-backend-quality` gate instead of being removed.
+        self.assertNotIn("cargo clippy", backend)
+        # KT-533 — the measured backend job never spends several minutes
+        # deleting unrelated runner toolchains. The bounded compiled cache is
+        # restored and saved in place, so neither a hit nor a warmup copies the
+        # whole debug tree a second time.
+        self.assertNotIn("Free disk space", backend)
+        verify_index = backend.index("Verify bounded compiled backend cache")
+        mark_index = backend.index("Mark bounded compiled backend cache ready")
+        mark_section = re.search(
+            r"Mark bounded compiled backend cache ready(?P<section>.*?)(?=^      - |\Z)",
+            backend,
+            re.DOTALL,
+        ).group("section")
+        self.assertIn("steps.verify-backend-cache.outputs.state == 'miss'", mark_section)
+        self.assertNotIn("cp -a", backend)
+        self.assertLess(verify_index, mark_index)
+        coverage = re.search(
+            r"^  test-backend-coverage:\n(?P<section>.*?)(?=^  [A-Za-z0-9_-]+:\n|\Z)",
+            workflow,
+            re.MULTILINE | re.DOTALL,
+        ).group("section")
+        self.assertIn("cargo llvm-cov — enforce coverage floor", coverage)
+        quality = re.search(
+            r"^  test-backend-quality:\n(?P<section>.*?)(?=^  [A-Za-z0-9_-]+:\n|\Z)",
+            workflow,
+            re.MULTILINE | re.DOTALL,
+        ).group("section")
+        self.assertIn("components: clippy", quality)
+        self.assertIn("cargo clippy --all-targets -- -D warnings", quality)
+        desktop = re.search(
+            r"^  test-desktop-compile:\n(?P<section>.*?)(?=^  [A-Za-z0-9_-]+:\n|\Z)",
+            workflow,
+            re.MULTILINE | re.DOTALL,
+        ).group("section")
+        self.assertIn("cargo check — desktop crate", desktop)
+        self.assertIn("CI_COMPILED_CACHE_HIT: ${{ needs.test-backend.outputs.compiled_cache_hit }}", workflow)
+        self.assertIn("CI_COMPILED_CACHE_STATE: ${{ needs.test-backend.outputs.compiled_cache_state }}", workflow)
+        hot_cache = re.search(
+            r"Cache cargo registry and bounded backend build \(hot\)(?P<section>.*?)(?=^      - |\Z)",
+            backend,
+            re.DOTALL,
+        ).group("section")
+        self.assertNotIn("backend/target", hot_cache)
+        self.assertNotIn("llvm-cov-target", hot_cache)
+        self.assertIn("target/debug/.fingerprint", hot_cache)
+        self.assertIn("cargo-hot-v2-", hot_cache)
+        cold_cache = re.search(
+            r"Cache cargo registry \(cold, isolated\)(?P<section>.*?)(?=^      - |\Z)",
+            backend,
+            re.DOTALL,
+        ).group("section")
+        self.assertIn("github.run_attempt", cold_cache)
+        self.assertNotIn("restore-keys", cold_cache)
+        python_job = re.search(
+            r"^  test-python:\n(?P<section>.*?)(?=^  [A-Za-z0-9_-]+:\n|\Z)",
+            workflow,
+            re.MULTILINE | re.DOTALL,
+        ).group("section")
+        self.assertIn("node scripts/ci/test_backend_ci_slo.mjs", python_job)
+
     def test_backend_readiness_wait_is_posix_and_latched(self):
         workflow = CI_WORKFLOW.read_text()
         self.assertNotIn(

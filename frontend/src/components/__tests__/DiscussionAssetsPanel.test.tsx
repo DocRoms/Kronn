@@ -25,6 +25,7 @@ function file(index: number, overrides: Partial<ContextFile> = {}): ContextFile 
     extracted_size: 512,
     disk_path: null,
     message_id: `message-${index}`,
+    ai_generation: null,
     created_at: `2026-08-${String((index % 28) + 1).padStart(2, '0')}T10:00:00Z`,
     ...overrides,
   };
@@ -150,8 +151,178 @@ describe('DiscussionAssetsPanel', () => {
     const dialog = screen.getByRole('dialog', { name: 'disc.attachmentGallery' });
     expect(dialog).toHaveTextContent('2 / 2');
     expect(within(dialog).getByRole('img', { name: 'one.png' })).toBeInTheDocument();
-    fireEvent.click(within(dialog).getByRole('button', { name: 'disc.attachmentNext' }));
+    fireEvent.click(within(dialog).getByRole('button', { name: 'disc.media.carouselNext' }));
     expect(dialog).toHaveTextContent('1 / 2');
     expect(within(dialog).getByRole('img', { name: 'two.png' })).toBeInTheDocument();
+  });
+  it('opens the exact requested asset once and allows an explicit reopen', async () => {
+    discussionsApi.contextFileBlob.mockResolvedValue(new Blob(['video'], { type: 'video/mp4' }));
+    const files = [
+      file(1, { filename: 'other.png', mime_type: 'image/png', disk_path: '/tmp/other.png' }),
+      file(2, { filename: 'target.mp4', mime_type: 'video/mp4', disk_path: '/tmp/target.mp4' }),
+    ];
+    const baseProps = {
+      discussionId: 'disc-1',
+      files,
+      onClose: vi.fn(),
+      onNavigateMessage: vi.fn(),
+      t,
+    };
+    const { rerender } = render(
+      <DiscussionAssetsPanel
+        {...baseProps}
+        openAssetRequest={{ assetId: 'file-2', nonce: 1 }}
+      />,
+    );
+
+    const video = await screen.findByTestId('media-player-video');
+    expect(video).toHaveAttribute('aria-label', 'disc.media.playerLabel:target.mp4');
+    expect((video as HTMLVideoElement).autoplay).toBe(true);
+
+    fireEvent.click(screen.getByRole('button', { name: 'disc.attachmentClose' }));
+    expect(screen.queryByRole('dialog', { name: 'disc.attachmentGallery' })).toBeNull();
+
+    // An ordinary rerender must not reopen a viewer the human just closed.
+    rerender(
+      <DiscussionAssetsPanel
+        {...baseProps}
+        openAssetRequest={{ assetId: 'file-2', nonce: 1 }}
+      />,
+    );
+    expect(screen.queryByRole('dialog', { name: 'disc.attachmentGallery' })).toBeNull();
+
+    // A fresh click on the same bubble carries a new nonce and deliberately
+    // opens that same asset again.
+    rerender(
+      <DiscussionAssetsPanel
+        {...baseProps}
+        openAssetRequest={{ assetId: 'file-2', nonce: 2 }}
+      />,
+    );
+    expect(await screen.findByTestId('media-player-video')).toHaveAttribute(
+      'aria-label',
+      'disc.media.playerLabel:target.mp4',
+    );
+  });
+  it('scrolls the grid to a requested asset that sits past the first page', async () => {
+    // 45 assets, so the target is on the second page. The open request clears
+    // the search, and that reset used to snap the grid back to page one — the
+    // viewer opened on the right asset but the grid behind it never reached it.
+    const files = Array.from({ length: 45 }, (_, index) => file(index + 1, {
+      filename: `shot-${index + 1}.png`,
+      mime_type: 'image/png',
+      disk_path: `/tmp/shot-${index + 1}.png`,
+      created_at: `2026-08-01T10:${String(59 - index).padStart(2, '0')}:00Z`,
+    }));
+    const baseProps = {
+      discussionId: 'disc-1',
+      files,
+      onClose: vi.fn(),
+      onNavigateMessage: vi.fn(),
+      t,
+    };
+    const { rerender } = render(<DiscussionAssetsPanel {...baseProps} />);
+    expect(screen.getAllByTestId('discussion-asset-card')).toHaveLength(40);
+
+    fireEvent.change(screen.getByLabelText('disc.assets.search'), { target: { value: 'shot-4' } });
+    rerender(
+      <DiscussionAssetsPanel
+        {...baseProps}
+        openAssetRequest={{ assetId: 'file-45', nonce: 1 }}
+      />,
+    );
+
+    await waitFor(() => expect(screen.getAllByTestId('discussion-asset-card')).toHaveLength(45));
+    expect(screen.getAllByTitle('shot-45.png')[0]).toBeInTheDocument();
+  });
+
+  it('reaches images and clips filtered out of the grid', async () => {
+    // The "images" filter hides the clip from the inventory, but the carousel
+    // is a viewer for everything the discussion generated: one sequence,
+    // images and videos together.
+    render(
+      <DiscussionAssetsPanel
+        discussionId="disc-1"
+        files={[
+          file(3, { filename: 'clip.mp4', mime_type: 'video/mp4', disk_path: '/tmp/clip.mp4' }),
+          file(2, { filename: 'shot.png', mime_type: 'image/png', disk_path: '/tmp/shot.png' }),
+          file(1, { filename: 'notes.csv', mime_type: 'text/csv' }),
+        ]}
+        onClose={vi.fn()}
+        onNavigateMessage={vi.fn()}
+        t={t}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: /disc\.assets\.filterImages/ }));
+    expect(screen.queryByRole('button', { name: 'disc.media.playerLabel:clip.mp4' })).toBeNull();
+
+    const thumb = await screen.findByRole('button', { name: 'disc.attachmentImage:shot.png' });
+    await waitFor(() => expect(thumb).not.toBeDisabled());
+    fireEvent.click(thumb);
+
+    const dialog = screen.getByRole('dialog', { name: 'disc.attachmentGallery' });
+    // Two media in the discussion, the clip included, even under the filter.
+    expect(dialog).toHaveTextContent('2 / 2');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'disc.media.carouselNext' }));
+    await waitFor(() =>
+      expect(within(dialog).getByTestId('media-player-video')).toHaveAttribute(
+        'aria-label',
+        'disc.media.playerLabel:clip.mp4',
+      ),
+    );
+  });
+  it('counts a generated clip as a video, not as a plain file', async () => {
+    // Before the media work, "Fichiers" held the clip next to a CSV: the
+    // filters only knew about images, so a generated video read as a document.
+    render(
+      <DiscussionAssetsPanel
+        discussionId="disc-1"
+        files={[
+          file(3, { filename: 'clip.mp4', mime_type: 'video/mp4', disk_path: '/tmp/clip.mp4' }),
+          file(2, { filename: 'shot.png', mime_type: 'image/png', disk_path: '/tmp/shot.png' }),
+          file(1, { filename: 'notes.csv', mime_type: 'text/csv' }),
+        ]}
+        onClose={vi.fn()}
+        onNavigateMessage={vi.fn()}
+        t={t}
+      />,
+    );
+
+    const countFor = (label: RegExp) =>
+      screen.getByRole('button', { name: label }).querySelector('.disc-assets-filter-count')
+        ?.textContent;
+    expect(countFor(/disc\.assets\.filterVideos/)).toBe('1');
+    expect(countFor(/disc\.assets\.filterImages/)).toBe('1');
+    // The CSV, and only the CSV.
+    expect(countFor(/disc\.assets\.filterFiles/)).toBe('1');
+
+    fireEvent.click(screen.getByRole('button', { name: /disc\.assets\.filterVideos/ }));
+    await waitFor(() => expect(screen.getAllByTestId('discussion-asset-card')).toHaveLength(1));
+    expect(screen.getByText('clip.mp4')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /disc\.assets\.filterFiles/ }));
+    await waitFor(() => expect(screen.getAllByTestId('discussion-asset-card')).toHaveLength(1));
+    // Neither media is left in the documents bucket.
+    expect(screen.queryByText('clip.mp4')).toBeNull();
+    expect(screen.queryByText('shot.png')).toBeNull();
+  });
+  it('offers the generation entry even before any media model is configured', async () => {
+    // Hiding the entry made the feature undiscoverable: nothing told the
+    // operator a media slot has to be filled first, so nobody looked.
+    render(
+      <DiscussionAssetsPanel
+        discussionId="disc-1"
+        files={[file(1)]}
+        connections={[]}
+        onClose={vi.fn()}
+        onNavigateMessage={vi.fn()}
+        t={t}
+      />,
+    );
+
+    expect(screen.getByTestId('assets-generate-toggle')).toBeInTheDocument();
+    // And the reason is on screen without a click.
+    expect(screen.getByTestId('assets-generate-hint')).toHaveTextContent('disc.media.noSlot');
   });
 });

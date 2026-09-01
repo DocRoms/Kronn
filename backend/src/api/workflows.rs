@@ -88,6 +88,19 @@ fn is_safe_trigger_var_name(name: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.')
 }
 
+fn build_secure_execution_trigger_obj(
+    snapshot_id: String,
+    resolved_at: chrono::DateTime<chrono::Utc>,
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut object = build_manual_trigger_obj(&std::collections::HashMap::new(), resolved_at);
+    object.insert("execution_snapshot_id".into(), snapshot_id.into());
+    object.insert(
+        "variables_resolved_at".into(),
+        resolved_at.to_rfc3339().into(),
+    );
+    object
+}
+
 fn validate_artifact_specs(
     specs: &::std::collections::HashMap<String, ArtifactSpec>,
 ) -> Result<(), String> {
@@ -252,17 +265,30 @@ fn validate_json_data_steps(steps: &[WorkflowStep]) -> Result<(), String> {
 /// "no constraint" (logged, never blocks a launch). This is the net that
 /// stops a typo like `7152` (vs `EW-7152`) from reaching the API as a
 /// literal path param and 404ing.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn validate_launch_variables(
     declared: &[crate::models::PromptVariable],
     provided: &std::collections::HashMap<String, String>,
 ) -> Result<(), String> {
+    crate::models::validate_prompt_variables(declared)?;
     for d in declared {
+        if !d.requires_user_input() {
+            continue;
+        }
         let label = if d.label.is_empty() {
             &d.name
         } else {
             &d.label
         };
-        let val = provided.get(&d.name).map(|s| s.trim()).unwrap_or("");
+        let raw = provided.get(&d.name).map(|s| s.trim());
+        let val = raw
+            .filter(|value| !value.is_empty())
+            .or_else(|| {
+                (raw.is_none() || d.required)
+                    .then(|| d.default_input_value())
+                    .flatten()
+            })
+            .unwrap_or("");
         if d.required && val.is_empty() {
             return Err(format!(
                 "Variable « {label} » est obligatoire pour lancer ce workflow."
@@ -270,6 +296,11 @@ pub(crate) fn validate_launch_variables(
         }
         if val.is_empty() {
             continue; // optional + empty → nothing to shape-check
+        }
+        if !d.accepts_value(val) {
+            return Err(format!(
+                "Variable « {label} » utilise une option inactive ou inconnue."
+            ));
         }
         if let Some(pat) = d.pattern.as_deref().filter(|p| !p.trim().is_empty()) {
             match regex_lite::Regex::new(&format!("^(?:{pat})$")) {
@@ -1130,6 +1161,9 @@ pub async fn create(
     if req.name.len() > 200 {
         return Json(ApiResponse::err("Workflow name too long (max 200 chars)"));
     }
+    if let Err(e) = crate::models::validate_prompt_variables(&req.variables) {
+        return Json(ApiResponse::err(e));
+    }
     if let Err(errors) = crate::workflows::template::validate_step_references(&req.steps) {
         return Json(ApiResponse::err(format!(
             "Références d'étapes invalides :\n- {}",
@@ -1392,6 +1426,11 @@ pub async fn update(
     if let Some(ref name) = req.name {
         if name.len() > 200 {
             return Json(ApiResponse::err("Workflow name too long (max 200 chars)"));
+        }
+    }
+    if let Some(ref variables) = req.variables {
+        if let Err(e) = crate::models::validate_prompt_variables(variables) {
+            return Json(ApiResponse::err(e));
         }
     }
 
@@ -2270,44 +2309,76 @@ pub async fn import_workflow(
 /// (the existing `inject_trigger_context` already handles that path).
 /// Legacy callers that send no body still work — `Option<Json<...>>` ➜
 /// `None` → no variables → exactly the previous behaviour.
-pub async fn trigger(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-    body: Option<Json<TriggerWorkflowRequest>>,
-) -> Sse<SseStream> {
-    let wf_id = id.clone();
-    let wf = match state
+pub(crate) async fn start_manual_run(
+    state: &AppState,
+    workflow_id: &str,
+    provided_vars: std::collections::HashMap<String, String>,
+    event_sender: Option<tokio::sync::mpsc::Sender<crate::workflows::runner::RunEvent>>,
+    launch: crate::core::launch_context::LaunchContext,
+) -> Result<WorkflowRun, String> {
+    let lookup_id = workflow_id.to_string();
+    let mut wf = state
         .db
-        .with_conn(move |conn| crate::db::workflows::get_workflow(conn, &wf_id))
+        .with_conn(move |conn| crate::db::workflows::get_workflow(conn, &lookup_id))
         .await
-    {
-        Ok(Some(wf)) => wf,
-        Ok(None) => {
-            return sse_error("Workflow not found");
-        }
-        Err(e) => {
-            return sse_error(format!("DB error: {}", e));
-        }
-    };
-
+        .map_err(|error| format!("DB error: {error}"))?
+        .ok_or_else(|| "Workflow not found".to_string())?;
     if !wf.enabled {
-        return sse_error("Workflow is disabled");
+        return Err("Workflow is disabled".into());
     }
-
-    // 0.6.0 UX pass — validate and merge user-entered variables.
-    // - Required variable missing/empty → reject with explicit message.
-    // - Unknown variables (sent but not declared) → silently dropped
-    //   (defensive: don't let a stale form smuggle data in).
-    let provided_vars = body.map(|Json(b)| b.variables).unwrap_or_default();
-    if let Err(msg) = validate_launch_variables(&wf.variables, &provided_vars) {
-        return sse_error(msg);
+    // A GLOBAL workflow launched from a project-scoped discussion resolves
+    // that project's environment/worktree exactly like one declared on the
+    // project directly (KT-476 LaunchContext). A workflow's own declared
+    // project always wins.
+    if wf.project_id.is_none() {
+        wf.project_id = launch.project_id.clone();
     }
-    let trigger_obj = build_manual_trigger_obj(&provided_vars, Utc::now());
-
-    // Atomic concurrency check + insert in a single transaction (avoids TOCTOU race)
+    let (secret, retention_days) = {
+        let config = state.config.read().await;
+        let secret = config
+            .encryption_secret
+            .clone()
+            .ok_or_else(|| "Variable preflight unavailable: encryption key missing".to_string())?;
+        (secret, config.server.execution_variable_retention_days)
+    };
+    let run_id = Uuid::new_v4().to_string();
+    let declarations = wf.variables.clone();
+    let project_id = wf.project_id.clone();
+    let launch_context = launch.context.clone();
+    let launch_discussion_id = launch.discussion_id.clone();
+    let snapshot_run_id = run_id.clone();
+    let prepared = state
+        .db
+        .with_conn(move |conn| {
+            crate::core::execution_variables::prepare(
+                conn,
+                crate::core::execution_variables::PrepareRequest {
+                    declarations: &declarations,
+                    supplied: &provided_vars,
+                    context: &launch_context,
+                    project_id: project_id.as_deref(),
+                    discussion_id: launch_discussion_id.as_deref(),
+                    environment_ref: "project_mcp_configs",
+                    run_kind: "workflow",
+                    run_id: &snapshot_run_id,
+                    encryption_secret: &secret,
+                    retention_days,
+                },
+            )
+        })
+        .await
+        .map_err(|error| format!("Variable preflight failed: {error}"))?
+        .map_err(|failures| {
+            format!(
+                "preflight_failed:{}",
+                serde_json::to_string(&failures).unwrap_or_default()
+            )
+        })?;
+    let trigger_obj =
+        build_secure_execution_trigger_obj(prepared.snapshot_id, prepared.resolved.resolved_at);
     let now = Utc::now();
     let run = WorkflowRun {
-        id: Uuid::new_v4().to_string(),
+        id: run_id,
         workflow_id: wf.id.clone(),
         status: RunStatus::Pending,
         trigger_context: Some(serde_json::Value::Object(trigger_obj)),
@@ -2316,7 +2387,6 @@ pub async fn trigger(
         workspace_path: None,
         started_at: now,
         finished_at: None,
-        // Legacy linear runs — batch fields stay at their defaults.
         run_type: "linear".into(),
         batch_total: 0,
         batch_completed: 0,
@@ -2330,65 +2400,69 @@ pub async fn trigger(
         parent_workflow_name: None,
         parent_run_started_at: None,
     };
-
-    let r = run.clone();
+    let persisted = run.clone();
     let limit = wf.concurrency_limit;
-    let wf_id_check = wf.id.clone();
-    match state
+    let workflow_id = wf.id.clone();
+    state
         .db
         .with_conn(move |conn| {
-            // Single transaction: check + insert atomically
             if let Some(max) = limit {
-                let active = crate::db::workflows::count_active_runs(conn, &wf_id_check)?;
+                let active = crate::db::workflows::count_active_runs(conn, &workflow_id)?;
                 if active >= max {
-                    anyhow::bail!("CONCURRENCY_LIMIT:{}/{}", active, max);
+                    anyhow::bail!("Concurrency limit reached ({active}/{max})");
                 }
             }
-            crate::db::workflows::insert_run(conn, &r)?;
-            Ok(())
+            crate::db::workflows::insert_run(conn, &persisted)
         })
         .await
-    {
-        Ok(()) => {}
-        Err(e) => {
-            let msg = e.to_string();
-            if let Some(rest) = msg.strip_prefix("CONCURRENCY_LIMIT:") {
-                return sse_error(format!("Concurrency limit reached ({})", rest));
-            }
-            return sse_error(format!("DB error: {}", msg));
-        }
-    }
+        .map_err(|error| format!("DB error: {error}"))?;
 
-    tracing::info!("Workflow run created: {} for workflow {}", run.id, wf.name);
-
-    // Create event channel for real-time streaming
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::workflows::runner::RunEvent>(32);
-
-    // Dispatch execution in background with the sender
     let state_for_run = state.clone();
-    let config = state.config.clone();
     let mut run_exec = run.clone();
     tokio::spawn(async move {
-        let cfg = config.read().await;
-        let tokens = cfg.tokens.clone();
-        let agents = cfg.agents.clone();
-        drop(cfg);
-
-        if let Err(e) = crate::workflows::runner::execute_run(
+        let config = state_for_run.config.read().await;
+        let tokens = config.tokens.clone();
+        let agents = config.agents.clone();
+        drop(config);
+        if let Err(error) = crate::workflows::runner::execute_run(
             state_for_run,
             &wf,
             &mut run_exec,
             &tokens,
             &agents,
-            Some(tx),
+            event_sender,
             None,
             None,
         )
         .await
         {
-            tracing::error!("Workflow run {} failed: {}", run_exec.id, e);
+            tracing::error!(run_id = %run_exec.id, error = %error, "workflow action run failed");
         }
     });
+    Ok(run)
+}
+
+pub async fn trigger(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    body: Option<Json<TriggerWorkflowRequest>>,
+) -> Sse<SseStream> {
+    let provided_vars = body.map(|Json(b)| b.variables).unwrap_or_default();
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::workflows::runner::RunEvent>(32);
+    let run = match start_manual_run(
+        &state,
+        &id,
+        provided_vars,
+        Some(tx),
+        crate::core::launch_context::LaunchContext::default(),
+    )
+    .await
+    {
+        Ok(run) => run,
+        Err(error) => return sse_error(error),
+    };
+
+    tracing::info!("Workflow run created: {} for workflow {}", run.id, id);
 
     // Stream events as SSE
     let run_id = run.id.clone();
@@ -2774,6 +2848,7 @@ pub async fn test_step(
     let full_access = match req.step.agent {
         AgentType::ClaudeCode => agents.claude_code.full_access,
         AgentType::Codex => agents.codex.full_access,
+        AgentType::OpenCode => agents.open_code.full_access,
         AgentType::GeminiCli => agents.gemini_cli.full_access,
         AgentType::Kiro => agents.kiro.full_access,
         AgentType::Vibe => agents.vibe.full_access,
@@ -2847,6 +2922,7 @@ pub async fn test_step(
             Some(&http_endpoints),
             Some(&ollama_context_overrides),
             native_tools,
+            Some(&state.db),
         )
         .await;
 
@@ -4797,6 +4873,10 @@ mod tests {
             description: None,
             required,
             pattern: pattern.map(str::to_string),
+            source: Default::default(),
+            source_ref: None,
+            allow_manual_override: false,
+            control: None,
         }
     }
 
@@ -4837,6 +4917,37 @@ mod tests {
         let mut provided = std::collections::HashMap::new();
         provided.insert("k".to_string(), "anything".to_string());
         assert!(validate_launch_variables(&declared, &provided).is_ok());
+    }
+
+    #[test]
+    fn launch_vars_select_uses_default_and_rejects_inactive_or_unknown_values() {
+        use crate::models::{PromptVariableControl, PromptVariableOption};
+
+        let mut choice = var("target", true, None);
+        choice.control = Some(PromptVariableControl::Select {
+            options: vec![
+                PromptVariableOption {
+                    value: "stable".into(),
+                    label: "Stable".into(),
+                    enabled: true,
+                },
+                PromptVariableOption {
+                    value: "retired".into(),
+                    label: "Retired".into(),
+                    enabled: false,
+                },
+            ],
+            default_value: Some("stable".into()),
+        });
+
+        assert!(validate_launch_variables(&[choice.clone()], &Default::default()).is_ok());
+
+        for rejected in ["retired", "unknown"] {
+            let provided =
+                std::collections::HashMap::from([("target".to_string(), rejected.to_string())]);
+            let error = validate_launch_variables(&[choice.clone()], &provided).unwrap_err();
+            assert!(error.contains("inactive ou inconnue"), "got: {error}");
+        }
     }
 
     #[test]
@@ -5697,6 +5808,10 @@ mod tests {
                 description: None,
                 required: true,
                 pattern: None,
+                source: Default::default(),
+                source_ref: None,
+                allow_manual_override: false,
+                control: None,
             }],
             agent: AgentType::ClaudeCode,
             connection_id: None,
@@ -6010,6 +6125,28 @@ mod tests {
         let obj = build_manual_trigger_obj(&HashMap::new(), Utc::now());
         assert_eq!(obj.get("type").and_then(|v| v.as_str()), Some("manual"));
         assert!(obj.get("triggered_at").and_then(|v| v.as_str()).is_some());
+    }
+
+    #[test]
+    fn secure_execution_trigger_context_never_contains_resolved_values() {
+        let now = Utc::now();
+        let object = build_secure_execution_trigger_obj("snapshot-1".into(), now);
+        let persisted = serde_json::to_string(&object).unwrap();
+        let expected_resolved_at = now.to_rfc3339();
+        assert_eq!(
+            object.get("execution_snapshot_id").and_then(|v| v.as_str()),
+            Some("snapshot-1")
+        );
+        assert_eq!(
+            object.get("variables_resolved_at").and_then(|v| v.as_str()),
+            Some(expected_resolved_at.as_str())
+        );
+        assert!(!persisted.contains("small-secret"));
+        assert_eq!(
+            object.len(),
+            4,
+            "only trigger and snapshot metadata may persist"
+        );
     }
 
     #[test]

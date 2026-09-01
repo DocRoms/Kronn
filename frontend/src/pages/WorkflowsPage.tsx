@@ -26,6 +26,11 @@ import { WorkflowWizard } from '../components/workflows/WorkflowWizard';
 import { QuickPromptForm } from '../components/workflows/QuickPromptForm';
 import { QuickApiForm } from '../components/workflows/QuickApiForm';
 import { QuickExecForm } from '../components/workflows/QuickExecForm';
+import { ProvidedVariablesPreview } from '../components/workflows/ProvidedVariablesPreview';
+import { PromptVariableInput } from '../components/workflows/PromptVariableInput';
+import { promptVariableEffectiveValue } from '../lib/promptVariableControl';
+import { RunStatusCard } from '../components/RunStatusCard';
+import type { RunStatusCardModel } from '../lib/runStatusCardModel';
 import QPHistoryDrawer from '../components/QPHistoryDrawer';
 import QPCardMetricsChip from '../components/QPCardMetricsChip';
 import { parseBatchQAItems } from '../components/workflows/parseBatchQAItems';
@@ -434,7 +439,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
   const [launchVarsQA, setLaunchVarsQA] = useState<Record<string, string>>({});
   const [launchingQARun, setLaunchingQARun] = useState(false);
   const launchingQARunRef = useRef(false); // Race-free guard, cf launchingRef.
-  const [launchQAResult, setLaunchQAResult] = useState<{ ok: boolean; payload: unknown; error: string | null } | null>(null);
+  const [launchQAResult, setLaunchQAResult] = useState<{ runId: string; ok: boolean; payload: unknown; error: string | null; durationMs: number | null } | null>(null);
   // Batch state — same pattern as `batchingQP` but for QAs. Items is a
   // newline/comma/semicolon-separated string the user pastes; we parse
   // it into a JSON array (strings if one var on the QA, otherwise prompt
@@ -458,7 +463,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
   }, [showAutomationActions]);
   const [runningQE, setRunningQE] = useState<QuickExec | null>(null);
   const [runVarsQE, setRunVarsQE] = useState<Record<string, string>>({});
-  const [runQEState, setRunQEState] = useState<{ busy: boolean; data: unknown | null; error: string | null }>({ busy: false, data: null, error: null });
+  const [runQEState, setRunQEState] = useState<{ runId: string | null; busy: boolean; data: unknown | null; error: string | null; durationMs: number | null }>({ runId: null, busy: false, data: null, error: null, durationMs: null });
   // Lignes du tableau de résultats batch dépliées (Set d'index). On garde
   // un Set plutôt qu'un single index pour permettre la comparaison de
   // plusieurs réponses côte-à-côte. Reset à chaque nouveau batch.
@@ -1232,16 +1237,18 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
 
   const handleRunQE = async (quickExec: QuickExec) => {
     if (runQEState.busy) return;
-    setRunQEState({ busy: true, data: null, error: null });
+    setRunQEState({ runId: null, busy: true, data: null, error: null, durationMs: null });
     try {
       const response = await quickExecsApi.run(quickExec.id, { variables: runVarsQE });
-      setRunQEState({
+        setRunQEState({
+          runId: response.run_id,
         busy: false,
         data: response.data ?? null,
         error: response.success ? null : response.error ?? t('qe.runFailed'),
+        durationMs: response.duration_ms,
       });
     } catch (error) {
-      setRunQEState({ busy: false, data: null, error: userError(error) });
+      setRunQEState({ runId: null, busy: false, data: null, error: userError(error), durationMs: null });
     }
   };
 
@@ -1257,13 +1264,15 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     try {
       const res = await quickApisApi.runQa(qa.id, { variables: launchVarsQA });
       const env = res.envelope as { data?: unknown } | null;
-      setLaunchQAResult({
+        setLaunchQAResult({
+          runId: res.run_id,
         ok: res.success,
         payload: env?.data ?? res.envelope ?? null,
         error: res.error ?? null,
+        durationMs: res.duration_ms,
       });
     } catch (e) {
-      setLaunchQAResult({ ok: false, payload: null, error: String(e) });
+        setLaunchQAResult({ runId: qa.id, ok: false, payload: null, error: String(e), durationMs: null });
     } finally {
       launchingQARunRef.current = false;
       setLaunchingQARun(false);
@@ -1325,19 +1334,6 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showAutomationActions, tab]);
 
-  const renderTemplate = (template: string, vars: Record<string, string>): string => {
-    let rendered = template;
-    // 1. Process conditional sections: {{#var}}content{{/var}} — removed if var is empty
-    rendered = rendered.replace(/\{\{#(\w+)\}\}([\s\S]*?)\{\{\/\1\}\}/g, (_, name, content) => {
-      return vars[name]?.trim() ? content : '';
-    });
-    // 2. Replace remaining {{var}} placeholders
-    rendered = rendered.replace(/\{\{(\w+)\}\}/g, (_, name) => vars[name] ?? '');
-    // 3. Clean up double spaces/commas from removed sections
-    rendered = rendered.replace(/  +/g, ' ').replace(/, ,/g, ',').trim();
-    return rendered;
-  };
-
   /**
    * 0.8.5 follow-up — validate that every variable flagged as required
    * has a non-empty value before firing a launch / compare-agents.
@@ -1349,7 +1345,8 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
   const collectMissingRequiredVars = (qp: QuickPrompt, vars: Record<string, string>): string[] => {
     return qp.variables
       // `required` defaults to true (legacy QPs); only explicitly false skips validation.
-      .filter(v => v.required !== false && !(vars[v.name] ?? '').trim())
+      .filter(v => (v.source ?? 'user_input') === 'user_input' && v.required !== false
+        && !promptVariableEffectiveValue(v, vars[v.name])?.trim())
       .map(v => v.label || v.name);
   };
 
@@ -1367,7 +1364,6 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     launchingRef.current = true;
     setLaunching(true);
     try {
-      const rendered = renderTemplate(qp.prompt_template, launchVars);
       // Build dynamic title with first non-empty variable value
       const firstVal = qp.variables.map(v => launchVars[v.name]).find(v => v?.trim());
       const title = firstVal ? `${qp.name} — ${firstVal}` : qp.name;
@@ -1376,7 +1372,10 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
         title,
         agent: qp.agent,
         language: configLanguage || 'fr',
-        initial_prompt: rendered,
+        // The backend performs canonical rendering after JIT resolution so
+        // project-provided values never cross this launch payload.
+        initial_prompt: qp.prompt_template,
+        launch_variables: launchVars,
         initial_targets: qp.connection_id ? [{
           kind: 'agent',
           agent_type: qp.agent,
@@ -1529,14 +1528,14 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     launchingRef.current = true;
     setLaunching(true);
     try {
-      const rendered = renderTemplate(qp.prompt_template, launchVars);
       const firstVal = qp.variables.map(v => launchVars[v.name]).find(v => v?.trim());
       const stamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
       const batchName = firstVal
         ? `🤝 ${qp.name} — ${firstVal} — ${stamp}`
         : `🤝 ${qp.name} — ${stamp}`;
       const result = await quickPromptsApi.compareAgents(qp.id, {
-        prompt: rendered,
+        prompt: qp.prompt_template,
+        variables: launchVars,
         batch_name: batchName,
         targets,
         project_id: qp.project_id ?? undefined,
@@ -1564,6 +1563,13 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
       // sibling spinners light up in the sidebar AND we don't re-fire
       // a second `/run` on top of the fan-out we just dispatched.
       onBatchLaunched?.(result.discussion_ids, result.run_id, 'compare');
+      // The discussions/agent runs themselves launched fine; a warning here
+      // only means the durable SharedRun projection for one or more child
+      // discussions failed to persist — surface it so the user knows run
+      // tracking may be incomplete, instead of silently swallowing it.
+      if (result.shared_run_warnings?.length) {
+        toastProp?.(t('run.persistWarning', result.shared_run_warnings.length), 'error');
+      }
     } catch (e) {
       console.warn('Compare-agents launch failed:', e);
     } finally {
@@ -1627,8 +1633,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     try {
       const items = lines.map(line => {
         const vars: Record<string, string> = { [keyVar.name]: line };
-        const prompt = renderTemplate(qp.prompt_template, vars);
-        return { title: `${qp.name} — ${line}`, prompt };
+        return { title: `${qp.name} — ${line}`, prompt: qp.prompt_template, variables: vars };
       });
       const now = new Date();
       const batchName = `${qp.name} — ${now.toLocaleString(configLanguage || 'fr', {
@@ -1681,6 +1686,12 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
       // `onBatchLaunched` in Dashboard uses `setOpenDiscussionId`
       // which opens without auto-running.
       onBatchLaunched?.(res.discussion_ids, res.run_id);
+      // See the matching comment in the compare-agents handler above: this
+      // only flags a partial SharedRun-tracking persistence failure, not a
+      // failure of the batch launch itself.
+      if (res.shared_run_warnings?.length) {
+        notify(t('run.persistWarning', res.shared_run_warnings.length), 'error');
+      }
       setBatchingQP(null);
       setBatchInputLines('');
     } catch (e) {
@@ -2973,23 +2984,35 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                           subset before firing). */}
                       {launchingQP?.id === qp.id && (
                         <div className="qp-launch-form">
-                          {qp.variables.map(v => (
+                          <h3 className="text-xs font-medium">{t('wf.launchInputTitle')}</h3>
+                          {qp.variables.filter(v => (v.source ?? 'user_input') === 'user_input').map(v => (
                             <div key={v.name} className="qp-launch-field">
                               <label className="qp-launch-label">{v.label || v.name}</label>
-                              <input
-                                className="wf-input flex-1"
-                                value={launchVars[v.name] ?? ''}
-                                onChange={e => setLaunchVars(prev => ({ ...prev, [v.name]: e.target.value }))}
-                                placeholder={v.placeholder}
+                              <PromptVariableInput
+                                variable={v}
+                                value={launchVars[v.name]}
+                                onChange={value => setLaunchVars(prev => ({ ...prev, [v.name]: value }))}
                                 autoFocus={qp.variables.indexOf(v) === 0}
-                                onKeyDown={e => {
-                                  if (e.key !== 'Enter') return;
+                                onEnter={() => {
                                   if (qpLaunchMode === 'compare') handleCompareAgents(qp);
                                   else handleLaunchQP(qp);
                                 }}
                               />
                             </div>
                           ))}
+                          {qp.variables.some(v => (v.source ?? 'user_input') !== 'user_input') && (
+                            <ProvidedVariablesPreview
+                              variables={qp.variables.filter(v => (v.source ?? 'user_input') !== 'user_input')}
+                              projectId={qp.project_id}
+                              values={launchVars}
+                              onValueChange={(name, value) => setLaunchVars(previous => {
+                                const next = { ...previous };
+                                if (value === undefined) delete next[name];
+                                else next[name] = value;
+                                return next;
+                              })}
+                            />
+                          )}
                           {/* Compare targets use the shared agent+tier picker,
                               so this launch surface speaks the same model
                               language as discussions, QPs and workflow steps. */}
@@ -3584,46 +3607,55 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                           clicks Launch again or another QA's button. */}
                       {launchingQA?.id === qa.id && qa.variables.length > 0 && (
                         <div className="qp-launch-form">
-                          {qa.variables.map(v => (
+                          <h3 className="text-xs font-medium">{t('wf.launchInputTitle')}</h3>
+                          {qa.variables.filter(v => (v.source ?? 'user_input') === 'user_input').map(v => (
                             <div key={v.name} className="qp-launch-field">
                               <label className="qp-launch-label">
                                 {v.label || v.name}
                                 {(v.required ?? true) && <span className="wf-required"> *</span>}
                               </label>
-                              <input
-                                className="wf-input flex-1"
-                                value={launchVarsQA[v.name] ?? ''}
-                                onChange={e => setLaunchVarsQA(prev => ({ ...prev, [v.name]: e.target.value }))}
-                                placeholder={v.placeholder}
+                              <PromptVariableInput
+                                variable={v}
+                                value={launchVarsQA[v.name]}
+                                onChange={value => setLaunchVarsQA(prev => ({ ...prev, [v.name]: value }))}
                                 autoFocus={qa.variables.indexOf(v) === 0}
-                                onKeyDown={e => { if (e.key === 'Enter') handleLaunchQA(qa); }}
+                                onEnter={() => handleLaunchQA(qa)}
                               />
                             </div>
                           ))}
+                          {qa.variables.some(v => (v.source ?? 'user_input') !== 'user_input') && (
+                            <ProvidedVariablesPreview
+                              variables={qa.variables.filter(v => (v.source ?? 'user_input') !== 'user_input')}
+                              projectId={qa.project_id}
+                              values={launchVarsQA}
+                              onValueChange={(name, value) => setLaunchVarsQA(previous => {
+                                const next = { ...previous };
+                                if (value === undefined) delete next[name];
+                                else next[name] = value;
+                                return next;
+                              })}
+                            />
+                          )}
                           <button
                             className="qp-launch-go-btn"
                             onClick={() => handleLaunchQA(qa)}
-                            disabled={launchingQARun || qa.variables.some(v => (v.required ?? true) && !(launchVarsQA[v.name] ?? '').trim())}
+                            disabled={launchingQARun || qa.variables.some(v => (v.source ?? 'user_input') === 'user_input' && (v.required ?? true) && !promptVariableEffectiveValue(v, launchVarsQA[v.name]).trim())}
                           >
                             {launchingQARun ? <Loader2 size={14} className="spin" /> : <Play size={14} />}
                             {launchingQARun ? '...' : t('qa.runGo')}
                           </button>
                         </div>
                       )}
-                      {/* Result panel — appears under the form once Run fires */}
-                      {launchingQA?.id === qa.id && launchQAResult && (
-                        <div
-                          className={launchQAResult.ok ? 'wf-apicall-success' : 'wf-apicall-error'}
-                          style={{ marginTop: 8, padding: 10, borderRadius: 6, maxHeight: 320, overflow: 'auto' }}
-                        >
-                          {launchQAResult.ok ? (
-                            <pre style={{ margin: 0, fontSize: 11, whiteSpace: 'pre-wrap' }}>
-                              {JSON.stringify(launchQAResult.payload, null, 2)}
-                            </pre>
-                          ) : (
-                            <span>{launchQAResult.error ?? t('qa.runFailed')}</span>
-                          )}
-                        </div>
+                      {launchingQA?.id === qa.id && (launchingQARun || launchQAResult) && (
+                        <RunStatusCard
+                          runId={launchQAResult?.runId}
+                          model={!launchQAResult ? {
+                            id: qa.id,
+                            kind: 'quick_api',
+                            status: 'queued',
+                            freshness: 'unavailable',
+                          } satisfies RunStatusCardModel : undefined}
+                        />
                       )}
                     </div>
                     {selectedQuickApiId === qa.id && (
@@ -3752,11 +3784,11 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                           onClick={() => {
                             if (isOpen) {
                               setRunningQE(null);
-                              setRunQEState({ busy: false, data: null, error: null });
+                              setRunQEState({ runId: null, busy: false, data: null, error: null, durationMs: null });
                             } else {
                               setRunningQE(quickExec);
                               setRunVarsQE({});
-                              setRunQEState({ busy: false, data: null, error: null });
+                              setRunQEState({ runId: null, busy: false, data: null, error: null, durationMs: null });
                               if (quickExec.variables.length === 0) void handleRunQE(quickExec);
                             }
                           }}
@@ -3766,35 +3798,55 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                       </div>
                       {isOpen && (
                         <div className="qp-launch-form qe-run-form">
-                          {quickExec.variables.map(variable => (
+                          <h3 className="text-xs font-medium">{t('wf.launchInputTitle')}</h3>
+                          {quickExec.variables.filter(variable => (variable.source ?? 'user_input') === 'user_input').map(variable => (
                             <div className="qp-launch-field" key={variable.name}>
                               <label className="qp-launch-label">
                                 {variable.label || variable.name}{variable.required && ' *'}
                               </label>
-                              <input
-                                className="wf-input flex-1"
-                                value={runVarsQE[variable.name] ?? ''}
-                                placeholder={variable.placeholder}
-                                onChange={event => setRunVarsQE(current => ({ ...current, [variable.name]: event.target.value }))}
+                              <PromptVariableInput
+                                variable={variable}
+                                value={runVarsQE[variable.name]}
+                                onChange={value => setRunVarsQE(current => ({ ...current, [variable.name]: value }))}
                               />
                             </div>
                           ))}
+                          {quickExec.variables.some(variable => (variable.source ?? 'user_input') !== 'user_input') && (
+                            <ProvidedVariablesPreview
+                              variables={quickExec.variables.filter(variable => (variable.source ?? 'user_input') !== 'user_input')}
+                              projectId={quickExec.project_id}
+                              values={runVarsQE}
+                              onValueChange={(name, value) => setRunVarsQE(previous => {
+                                const next = { ...previous };
+                                if (value === undefined) delete next[name];
+                                else next[name] = value;
+                                return next;
+                              })}
+                            />
+                          )}
                           {quickExec.variables.length > 0 && (
                             <button
                               className="qp-launch-go-btn"
-                              disabled={runQEState.busy || quickExec.variables.some(variable => variable.required && !(runVarsQE[variable.name] ?? '').trim())}
+                              disabled={runQEState.busy || quickExec.variables.some(variable => (variable.source ?? 'user_input') === 'user_input' && variable.required && !promptVariableEffectiveValue(variable, runVarsQE[variable.name]).trim())}
                               onClick={() => void handleRunQE(quickExec)}
                             >
                               {runQEState.busy ? <Loader2 size={14} className="spin" /> : <Play size={14} />}
                               {t('qe.run')}
                             </button>
                           )}
-                          {runQEState.error && <div className="wf-apicall-error">{runQEState.error}</div>}
-                          {runQEState.data !== null && (
-                            <div className="wf-apicall-success qe-run-result">
-                              <strong>{t('qe.result')}</strong>
-                              <pre>{JSON.stringify(runQEState.data, null, 2)}</pre>
-                            </div>
+                          {(runQEState.busy || runQEState.error || runQEState.data !== null) && (
+                            <RunStatusCard
+                              runId={runQEState.runId ?? undefined}
+                              model={!runQEState.runId ? {
+                                id: runQEState.runId ?? quickExec.id,
+                                kind: 'quick_exec',
+                                status: runQEState.busy ? 'running' : runQEState.error ? 'failed' : 'success',
+                                durationMs: runQEState.durationMs,
+                                result: runQEState.data,
+                                diagnostic: runQEState.error,
+                                freshness: 'unavailable',
+                              } satisfies RunStatusCardModel : undefined}
+                            />
                           )}
                         </div>
                       )}
@@ -3842,7 +3894,13 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
               ><X size={12} /></button>
             </div>
             <p className="text-xs text-muted mb-4">{t('wf.launchModalHint')}</p>
-            {(launchingWorkflow.workflow.variables ?? []).map((v, idx) => {
+            {(() => {
+              const declared = launchingWorkflow.workflow.variables ?? [];
+              const manual = declared.filter(v => (v.source ?? 'user_input') === 'user_input');
+              const provided = declared.filter(v => (v.source ?? 'user_input') !== 'user_input');
+              return <>
+              {manual.length > 0 && <h3 className="text-xs font-medium mb-2">{t('wf.launchInputsTitle')}</h3>}
+              {manual.map((v, idx) => {
               const required = v.required ?? true;
               return (
                 <div key={v.name} className="qp-launch-field mb-3">
@@ -3850,21 +3908,19 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                     {v.label || v.name}
                     {required && <span className="text-error" style={{ marginLeft: 4 }}>*</span>}
                   </label>
-                  <input
-                    className="wf-input flex-1"
-                    value={launchingWorkflow.values[v.name] ?? ''}
-                    onChange={e => setLaunchingWorkflow(prev => prev ? {
+                  <PromptVariableInput
+                    variable={v}
+                    value={launchingWorkflow.values[v.name]}
+                    onChange={value => setLaunchingWorkflow(prev => prev ? {
                       ...prev,
-                      values: { ...prev.values, [v.name]: e.target.value },
+                      values: { ...prev.values, [v.name]: value },
                       error: null,
                     } : prev)}
-                    placeholder={v.placeholder}
                     autoFocus={idx === 0}
                     disabled={launchingWorkflow.submitting}
-                    onKeyDown={e => {
-                      if (e.key === 'Enter' && !e.shiftKey && !launchingWorkflow.submitting) {
-                        e.preventDefault();
-                        const submitBtn = (e.currentTarget.closest('.wf-import-modal') as HTMLElement | null)?.querySelector('.wf-launch-submit-btn') as HTMLButtonElement | null;
+                    onEnter={() => {
+                      if (!launchingWorkflow.submitting) {
+                        const submitBtn = document.querySelector<HTMLButtonElement>('.wf-import-modal .wf-launch-submit-btn');
                         submitBtn?.click();
                       }
                     }}
@@ -3874,7 +3930,24 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                   )}
                 </div>
               );
-            })}
+              })}
+              {provided.length > 0 && (
+                <ProvidedVariablesPreview
+                  variables={provided}
+                  projectId={launchingWorkflow.workflow.project_id}
+                  values={launchingWorkflow.values}
+                  disabled={launchingWorkflow.submitting}
+                  onValueChange={(name, value) => setLaunchingWorkflow(previous => {
+                    if (!previous) return previous;
+                    const values = { ...previous.values };
+                    if (value === undefined) delete values[name];
+                    else values[name] = value;
+                    return { ...previous, values, error: null };
+                  })}
+                />
+              )}
+              </>;
+            })()}
             {launchingWorkflow.error && (
               <div className="text-xs text-error mb-3">{launchingWorkflow.error}</div>
             )}
@@ -3892,7 +3965,8 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                   // Validate required vars are filled.
                   const vars = launchingWorkflow.workflow.variables ?? [];
                   const missing = vars
-                    .filter(v => (v.required ?? true) && !(launchingWorkflow.values[v.name] ?? '').trim())
+                    .filter(v => (v.source ?? 'user_input') === 'user_input'
+                      && (v.required ?? true) && !promptVariableEffectiveValue(v, launchingWorkflow.values[v.name]).trim())
                     .map(v => v.label || v.name);
                   if (missing.length > 0) {
                     setLaunchingWorkflow(prev => prev ? {
@@ -3908,7 +3982,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                   // or a huge value could freeze the UI — past these sizes we
                   // skip the local check and let the backend be the authority.
                   const badPattern = vars.find(v => {
-                    const val = (launchingWorkflow.values[v.name] ?? '').trim();
+                    const val = promptVariableEffectiveValue(v, launchingWorkflow.values[v.name]).trim();
                     if (!v.pattern || !val) return false;
                     if (v.pattern.length > 200 || val.length > 512) return false;
                     try { return !new RegExp(`^(?:${v.pattern})$`).test(val); }

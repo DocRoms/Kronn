@@ -9,9 +9,10 @@
 
 use crate::models::{AgentType, TokensConfig};
 
-const AGENT_ALIASES: [(&str, AgentType); 9] = [
+const AGENT_ALIASES: [(&str, AgentType); 10] = [
     ("@claude", AgentType::ClaudeCode),
     ("@codex", AgentType::Codex),
+    ("@opencode", AgentType::OpenCode),
     ("@vibe", AgentType::Vibe),
     ("@gemini", AgentType::GeminiCli),
     ("@kiro", AgentType::Kiro),
@@ -83,6 +84,7 @@ pub fn agent_prompt_budget(agent_type: &AgentType) -> usize {
         AgentType::ClaudeCode => 400_000, // ~100K tokens, 200K+ window
         AgentType::GeminiCli => 800_000,  // ~200K tokens, 1M window
         AgentType::Codex => 200_000,      // ~50K tokens, GPT-5 128K+ window
+        AgentType::OpenCode => 200_000,   // the ACP catalogue supplies the concrete model
         AgentType::Kiro => 400_000,       // ~100K tokens, Claude via AWS Bedrock (200K window)
         AgentType::CopilotCli => 200_000, // ~50K tokens, GPT-4o 128K window
         AgentType::Vibe => 60_000,        // ~15K tokens, Mistral 128K window (API mode)
@@ -101,6 +103,7 @@ pub fn auth_mode_for(agent_type: &AgentType, tokens: &TokensConfig) -> String {
     let provider = match agent_type {
         AgentType::ClaudeCode => "anthropic",
         AgentType::Codex => "openai",
+        AgentType::OpenCode => "",
         AgentType::GeminiCli => "google",
         AgentType::Vibe => "mistral",
         AgentType::Kiro => "aws",
@@ -127,6 +130,7 @@ pub fn agent_display_name(agent_type: &AgentType) -> String {
     match agent_type {
         AgentType::ClaudeCode => "Claude Code".into(),
         AgentType::Codex => "Codex".into(),
+        AgentType::OpenCode => "OpenCode".into(),
         AgentType::Vibe => "Vibe".into(),
         AgentType::GeminiCli => "Gemini CLI".into(),
         AgentType::Kiro => "Kiro".into(),
@@ -392,6 +396,22 @@ mod tests {
         assert_eq!(agent_display_name(&AgentType::ClaudeCode), "Claude Code");
         assert_eq!(agent_display_name(&AgentType::GeminiCli), "Gemini CLI");
         assert_eq!(agent_display_name(&AgentType::CopilotCli), "GitHub Copilot");
+    }
+
+    #[test]
+    fn opencode_has_a_canonical_alias_like_every_other_agent() {
+        // Regression (KT-543): @opencode was missing from AGENT_ALIASES,
+        // silently excluding OpenCode from mention parsing and from every
+        // handoff target that filters on `agent_alias(...).is_some()`.
+        assert_eq!(agent_alias(&AgentType::OpenCode), Some("@opencode"));
+        assert_eq!(
+            agent_mentions_in_prose("@opencode, prends le relais."),
+            vec![AgentType::OpenCode]
+        );
+        let (cleaned, agents) =
+            extract_agent_handoff_markers("Fait.\n<!-- kronn:handoff @opencode -->");
+        assert_eq!(agents, vec![AgentType::OpenCode]);
+        assert_eq!(cleaned.trim(), "Fait.");
     }
 
     #[test]

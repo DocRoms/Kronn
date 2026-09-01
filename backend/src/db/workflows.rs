@@ -480,8 +480,20 @@ pub fn create_batch_run(
     conn: &Connection,
     input: CreateBatchRunInput,
 ) -> Result<CreateBatchRunOutput> {
+    create_batch_run_with_identities(conn, input, None, &[])
+}
+
+/// Variant used by secret-bearing launches: identities are allocated before
+/// the transaction so encrypted snapshots can be durably bound before agent
+/// dispatch rows become visible.
+pub fn create_batch_run_with_identities(
+    conn: &Connection,
+    input: CreateBatchRunInput,
+    assigned_run_id: Option<String>,
+    assigned_discussion_ids: &[String],
+) -> Result<CreateBatchRunOutput> {
     let batch_total = input.items.len() as u32;
-    let run_id = Uuid::new_v4().to_string();
+    let run_id = assigned_run_id.unwrap_or_else(|| Uuid::new_v4().to_string());
     let now = Utc::now();
     let qp = input.quick_prompt;
     // A comparison score is only meaningful for the exact prompt revision it
@@ -543,7 +555,10 @@ pub fn create_batch_run(
         .iter()
         .enumerate()
         .map(|(index, item)| {
-            let disc_id = Uuid::new_v4().to_string();
+            let disc_id = assigned_discussion_ids
+                .get(index)
+                .cloned()
+                .unwrap_or_else(|| Uuid::new_v4().to_string());
             let initial_message = DiscussionMessage {
                 recovered_partial: false,
                 session_tokens_at_message: None,
@@ -653,6 +668,25 @@ pub fn create_batch_run(
         for (index, (disc, msg, batch_item)) in discussions.iter().enumerate() {
             crate::db::discussions::insert_discussion(conn, disc)?;
             let trigger_sort_order = crate::db::discussions::insert_message(conn, &disc.id, msg)?;
+            let context_link = if let Some(parent_id) = input.parent_run_id.as_deref() {
+                ("workflow", parent_id)
+            } else if crate::db::execution_variable_snapshots::snapshot_id_for_run(
+                conn,
+                "quick_prompt_batch_item",
+                &disc.id,
+            )?
+            .is_some()
+            {
+                ("quick_prompt_batch_item", disc.id.as_str())
+            } else {
+                ("quick_prompt_compare", run_id.as_str())
+            };
+            crate::db::execution_variable_snapshots::insert_execution_context_message(
+                conn,
+                &disc.id,
+                context_link.0,
+                context_link.1,
+            )?;
             if let Some(target) = input.items[index].agent_override.as_ref() {
                 let mut message_target = crate::models::MessageTarget::agent(target.agent.clone())
                     .with_tier(target.tier);
@@ -1412,6 +1446,7 @@ pub fn insert_run(conn: &Connection, run: &WorkflowRun) -> Result<()> {
             run.batch_no_response as i64,
         ],
     )?;
+    crate::db::shared_runs::sync_workflow(conn, run)?;
     Ok(())
 }
 
@@ -1689,7 +1724,8 @@ pub fn claim_waiting_run(conn: &Connection, run_id: &str, new_status: &RunStatus
 pub fn update_run(conn: &Connection, run: &WorkflowRun) -> Result<()> {
     // Same Cancelled-stickiness semantics; callers of this convenience
     // wrapper don't act on the raced-cancel signal.
-    update_run_progress(conn, RunProgressSnapshot::from_run(run)).map(|_| ())
+    update_run_progress(conn, RunProgressSnapshot::from_run(run))?;
+    crate::db::shared_runs::sync_workflow(conn, run)
 }
 
 /// Lightweight snapshot of a WorkflowRun for progress updates.
@@ -1784,6 +1820,8 @@ pub fn update_run_progress(conn: &Connection, snap: RunProgressSnapshot) -> Resu
                 "run progress write targets a missing run row"
             ),
         }
+    } else if let Some(run) = get_run(conn, &snap.id)? {
+        crate::db::shared_runs::sync_workflow(conn, &run)?;
     }
     Ok(affected > 0)
 }

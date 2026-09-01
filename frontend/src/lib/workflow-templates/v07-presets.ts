@@ -462,6 +462,9 @@ export function buildV07Presets(t: Translator): WorkflowPreset[] {
         placeholder: 'https://your.atlassian.net/browse/EW-7247  ·  github.com/org/repo/issues/123  ·  linear.app/...',
         description: 'Source URL of the epic / feature / issue to break down. The agent picks the right MCP from the host.',
         required: true,
+        source: 'user_input',
+        source_ref: null,
+        allow_manual_override: false,
       },
     ],
     steps: [

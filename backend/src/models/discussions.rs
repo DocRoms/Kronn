@@ -17,6 +17,45 @@ pub struct ActiveAgentDispatch {
     pub trigger_message_id: String,
     pub agent_type: AgentType,
     pub status: String,
+    /// Number of times this durable dispatch has been claimed. A value above
+    /// one makes a post-restart retry distinguishable from a first launch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub attempts: Option<u32>,
+    /// Durable transition reason, notably `backend_restarted` while a crashed
+    /// invocation is waiting to resume.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub last_error: Option<String>,
+    /// Exact external HTTP connection used by a `Custom` dispatch (for
+    /// example OpenRouter). The generic agent type alone is not enough to
+    /// render or resume that provider honestly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub connection_id: Option<String>,
+}
+
+/// Durable snapshot of the text already emitted by an in-flight agent.
+///
+/// It lives on `DiscussionDetail` rather than in `messages`: until completion
+/// (or boot recovery) this is a checkpoint, not a second transcript row.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct InFlightAgentResponse {
+    pub message_id: String,
+    pub content: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_type: Option<AgentType>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger_message_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dispatch: Option<ActiveAgentDispatch>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -30,6 +69,12 @@ pub struct DiscussionDetail {
     /// concrete model that eventually answered differs.
     #[serde(default)]
     pub message_targets: HashMap<String, Vec<MessageTarget>>,
+    /// Latest DB checkpoint for a response that has not reached a terminal
+    /// message yet. Lets a reconnect render saved text instead of an empty
+    /// loader while boot recovery/re-dispatch is settling.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub partial_response: Option<InFlightAgentResponse>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -378,6 +423,10 @@ pub struct CreateDiscussionRequest {
     /// `None` = not a QP launch (briefing / manual / etc.).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub originating_qp_id: Option<String>,
+    /// Raw launch inputs for an originating Quick Prompt. The server resolves
+    /// project/context sources and renders the canonical stored template.
+    #[serde(default)]
+    pub launch_variables: std::collections::HashMap<String, String>,
     /// F9 — create a "human-only" disc: the agent runner never spawns on
     /// `send_message`. Used by the contact-click → 1:1 human↔human chat flow.
     #[serde(default)]
@@ -417,6 +466,14 @@ pub struct UpdateDiscussionRequest {
     /// switch, per-agent blocks and structural loop guards still apply.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_handoffs_unlimited: Option<bool>,
+    /// Per-discussion encrypted execution-variable retention override.
+    /// Zero keeps values only for the lifetime of the active run.
+    #[serde(
+        default,
+        deserialize_with = "super::deserialize_optional_field",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub execution_variable_retention_days: Option<Option<u32>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -434,6 +491,17 @@ pub struct DiscussionAgentHandoffMode {
     pub effective_enabled: bool,
     /// `None` means no financial quota; structural loop guards still apply.
     pub paid_limit: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct DiscussionExecutionVariableRetention {
+    /// Global default from server configuration.
+    pub global_days: u32,
+    /// Discussion-specific override. `None` means inherit the global default.
+    pub override_days: Option<u32>,
+    /// Value used for the next execution in this discussion.
+    pub effective_days: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]

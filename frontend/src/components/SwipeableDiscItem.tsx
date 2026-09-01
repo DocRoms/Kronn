@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect, memo } from 'react';
+import type { ReactNode } from 'react';
 import {
   ShieldCheck, Zap, Rocket, GitBranch, Loader2, Users, Users2, Square,
   Link2, Download, AlertTriangle, Check, MoreHorizontal, Copy, Archive, Trash2,
@@ -41,6 +42,11 @@ export interface SwipeableDiscItemProps {
   onTogglePin?: (discId: string, pinned: boolean) => void;
   /** Project / workspace label used by cross-project shortcut sections. */
   contextLabel?: string;
+  /** Rendered as-is in the actions row, OUTSIDE the card's own `<button>`:
+   * an interactive node nested inside a button is invalid HTML and breaks
+   * React hydration. The card holds no weight logic — the owning component
+   * supplies the whole badge, and omitting it leaves the DOM unchanged. */
+  weightBadge?: ReactNode;
   t: (key: string, ...args: (string | number)[]) => string;
   archiveLabel?: string;
   /** The shared collection shell contributes only its roving-focus class.
@@ -69,7 +75,7 @@ export interface SwipeableDiscItemProps {
 export const SwipeableDiscItem = memo(function SwipeableDiscItem({
   disc, agentLabel, isActive, lastSeenCount, isSending, isQueued = false, onSelect, onArchive, onDelete, onStop, t, archiveLabel,
   sourceAgents, importedBy, selectionMode = false, isSelected = false, onToggleSelection, onTogglePin,
-  contextLabel, collectionRowClassName,
+  contextLabel, collectionRowClassName, weightBadge,
 }: SwipeableDiscItemProps) {
   const [offsetX, setOffsetX] = useState(0);
   const [swiping, setSwiping] = useState(false);
@@ -357,6 +363,7 @@ export const SwipeableDiscItem = memo(function SwipeableDiscItem({
         </button>
         {!selectionMode && (
           <div className="disc-item-actions" ref={actionMenuRef}>
+            {weightBadge}
             {isSending && onStop && (
               <button
                 type="button"

@@ -33,6 +33,7 @@ import {
 } from 'lucide-react';
 import { scanUndeclaredVars } from '../../lib/scanUndeclaredVars';
 import { userError } from '../../lib/userError';
+import { PromptVariableControlEditor } from './PromptVariableControlEditor';
 import '../../pages/WorkflowsPage.css';
 
 const checkAgentRestricted = isAgentRestricted;
@@ -3885,6 +3886,9 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                                           placeholder: '',
                                           description: null,
                                           required: true,
+                                          source: 'user_input',
+                                          source_ref: null,
+                                          allow_manual_override: false,
                                         }]);
                                       }}
                                       title={t('wiz.undeclaredAddVarHint').replace('{name}', uv.name)}
@@ -4770,6 +4774,10 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                   style={{ opacity: 0.85 }}
                   aria-label={t('qp.varDescriptionPlaceholder')}
                 />
+                <PromptVariableControlEditor
+                  variable={v}
+                  onChange={variable => setWfVariables(previous => previous.map((item, index) => index === idx ? variable : item))}
+                />
               </div>
             ))}
             <button
@@ -4780,6 +4788,9 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                 placeholder: '',
                 description: null,
                 required: true,
+                source: 'user_input',
+                source_ref: null,
+                allow_manual_override: false,
               }])}
             >
               <Plus size={10} /> {t('wiz.addVariable')}
