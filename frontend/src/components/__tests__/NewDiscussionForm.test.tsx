@@ -579,6 +579,23 @@ describe('NewDiscussionForm — creation flow layout', () => {
       clipboardData: { getData: () => 'one line' },
     })).toBe(true);
   });
+
+  it('turns a pasted image into a pending attachment before creation', () => {
+    mount([]);
+    const prompt = screen.getByRole('textbox', { name: 'disc.prompt' });
+    const image = new File(['image-bytes'], 'clipboard-image.png', { type: 'image/png' });
+
+    const dispatched = fireEvent.paste(prompt, {
+      clipboardData: {
+        items: [{ kind: 'file', getAsFile: () => image }],
+        getData: () => '',
+      },
+    });
+
+    expect(dispatched).toBe(false);
+    expect(screen.getByText('clipboard-image.png')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /1 disc\.attachFile/ })).toBeInTheDocument();
+  });
 });
 
 describe('NewDiscussionForm — no-RTK cost warning', () => {

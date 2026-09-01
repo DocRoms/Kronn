@@ -819,6 +819,19 @@ export function NewDiscussionForm({
                     }
                   }}
                   onPaste={e => {
+                    // Match the in-disc composer: clipboard files must become
+                    // pending attachments before the discussion exists. The
+                    // parent uploads and pins them to the initial message once
+                    // creation succeeds.
+                    const files = Array.from(e.clipboardData.items)
+                      .filter(item => item.kind === 'file')
+                      .map(item => item.getAsFile())
+                      .filter((file): file is File => file !== null);
+                    if (files.length > 0) {
+                      e.preventDefault();
+                      setPendingFiles(previous => [...previous, ...files]);
+                      return;
+                    }
                     const textarea = e.currentTarget;
                     const start = textarea.selectionStart ?? 0;
                     const lineStart = textarea.value.lastIndexOf('\n', start - 1) + 1;
