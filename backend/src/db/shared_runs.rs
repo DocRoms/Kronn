@@ -422,7 +422,7 @@ mod tests {
         upsert(&conn, &run("run-a", Some("proj-a"), Some("disc-a"))).unwrap();
         upsert(&conn, &run("run-b", Some("proj-b"), Some("disc-b"))).unwrap();
 
-        let by_project_a = list(&conn, None, None, Some("proj-a"), None, 50).unwrap();
+        let by_project_a = list(&conn, None, None, Some("proj-a"), None, 50, 0).unwrap();
         assert_eq!(
             by_project_a
                 .iter()
@@ -431,7 +431,7 @@ mod tests {
             vec!["run-a"]
         );
 
-        let by_discussion_b = list(&conn, None, None, None, Some("disc-b"), 50).unwrap();
+        let by_discussion_b = list(&conn, None, None, None, Some("disc-b"), 50, 0).unwrap();
         assert_eq!(
             by_discussion_b
                 .iter()
@@ -440,7 +440,7 @@ mod tests {
             vec!["run-b"]
         );
 
-        let cross_scope = list(&conn, None, None, Some("proj-a"), Some("disc-b"), 50).unwrap();
+        let cross_scope = list(&conn, None, None, Some("proj-a"), Some("disc-b"), 50, 0).unwrap();
         assert!(
             cross_scope.is_empty(),
             "a project A / discussion B combination that never co-occurred must return nothing"

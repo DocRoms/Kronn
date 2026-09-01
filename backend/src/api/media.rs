@@ -208,11 +208,12 @@ pub async fn generate(
         connection_id: connection.id.clone(),
         model: model.clone(),
         prompt: prompt.clone(),
-        params,
+        params: params.clone(),
         source_message_id: req.message_id.clone(),
         scheduled_at: now,
         deadline_at: deadline,
     };
+    let requested_discussion_id = req.discussion_id.clone();
     let (discussion_id, anchor) = match state
         .db
         .with_conn(move |conn| write_media_launch(conn, req.discussion_id, launch))
@@ -238,7 +239,7 @@ pub async fn generate(
                         &model,
                         &prompt,
                         &params,
-                        req.discussion_id.as_deref(),
+                        requested_discussion_id.as_deref(),
                     ));
                 }
                 _ => return Json(ApiResponse::err(format!("failed to queue job: {e}"))),
@@ -272,7 +273,14 @@ fn idempotent_job_id(connection_id: &str, key: &str) -> String {
     digest.update(connection_id.as_bytes());
     digest.update(b"\0");
     digest.update(key.as_bytes());
-    format!("media-{:x}", digest.finalize())
+    // sha2 0.11 returns `hybrid_array::Array` (no `LowerHex`) — manual hex, as
+    // in `core::checksums`.
+    let hex: String = digest
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    format!("media-{hex}")
 }
 
 fn idempotent_response(
@@ -844,7 +852,7 @@ mod tests {
                         rusqlite::params![id],
                     )?;
                 }
-                let (source_id, source) = build_prompt_message("source intacte", now, None);
+                let (source_id, source) = build_prompt_message("source intacte", now, None, "job-source");
                 crate::db::discussions::insert_message(conn, "disc-source", &source)?;
                 Ok(source_id)
             })
