@@ -13,13 +13,29 @@
  *
  * Zero $. No generation is launched here; the assets already exist.
  */
-import { test, expect } from '@playwright/test';
+import { test, expect, type Locator } from '@playwright/test';
 import { mkdirSync } from 'node:fs';
 import { DashboardPage } from '../pages/DashboardPage';
 
 const DISC = process.env.MEDIA_DISC_ID ?? '';
 const OUT = process.env.MEDIA_SHOT_DIR ?? 'test-results/media';
 const CONNECTION = process.env.MEDIA_CONNECTION_ID ?? '';
+
+async function expectDecodedVideo(video: Locator, label: string) {
+  await expect
+    .poll(
+      () => video.evaluate((node: HTMLVideoElement) => node.readyState),
+      { message: `${label} must decode media bytes`, timeout: 60_000 },
+    )
+    .toBeGreaterThan(0);
+  expect(
+    await video.evaluate((node: HTMLVideoElement) => node.error?.code ?? null),
+    `${label} must not expose a media decoding error`,
+  ).toBeNull();
+  await expect
+    .poll(() => video.evaluate((node: HTMLVideoElement) => node.videoWidth))
+    .toBeGreaterThan(0);
+}
 
 test.beforeAll(() => {
   expect(DISC, 'MEDIA_DISC_ID must name a discussion holding generated assets').not.toBe('');
@@ -56,7 +72,9 @@ test('captures the generated assets, the carousel and the launcher', async ({ pa
   await expect(panel.getByTestId('discussion-asset-card').first()).toBeVisible({ timeout: 15_000 });
   // A visible clip card must expose an actual first-frame preview rather than
   // only the generic play badge.
-  await expect(panel.getByTestId('attach-video-poster').first()).toBeVisible({ timeout: 30_000 });
+  const poster = panel.getByTestId('attach-video-poster').first();
+  await expect(poster).toBeVisible({ timeout: 30_000 });
+  await expectDecodedVideo(poster, 'the asset thumbnail');
   await page.screenshot({ path: `${OUT}/02-assets-tab.png` });
 
   // The launcher — modality, connection, prompt, video shape, estimated price.
@@ -90,6 +108,7 @@ test('captures the generated assets, the carousel and the launcher', async ({ pa
       .catch(() => false);
   }
   expect(sawVideo, 'the clip must be reachable from the same carousel as the image').toBe(true);
+  await expectDecodedVideo(dialog.getByTestId('media-player-video'), 'the first viewer opening');
   await page.waitForTimeout(1200); // let the first frame paint
   await page.screenshot({ path: `${OUT}/06-carousel-video.png` });
 
@@ -100,7 +119,9 @@ test('captures the generated assets, the carousel and the launcher', async ({ pa
   await dialog.getByRole('button', { name: 'Fermer la visionneuse' }).click();
   await expect(dialog).toBeHidden();
   await panel.getByTestId('attach-video-thumb').first().click();
-  await expect(dialog.getByTestId('media-player-video')).toBeVisible({ timeout: 10_000 });
+  const reopenedPlayer = dialog.getByTestId('media-player-video');
+  await expect(reopenedPlayer).toBeVisible({ timeout: 10_000 });
+  await expectDecodedVideo(reopenedPlayer, 'the reopened viewer');
 });
 
 test('captures the media slots on the connection card', async ({ page }) => {
