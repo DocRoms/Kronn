@@ -149,6 +149,7 @@ pub async fn run(
     Path(id): Path<String>,
     Json(request): Json<RunQuickExecRequest>,
 ) -> Json<ApiResponse<RunQuickExecResponse>> {
+    let launch = request.launch.clone().unwrap_or_default();
     let run_id = uuid::Uuid::new_v4().to_string();
     let created_at = Utc::now();
     let queued = crate::models::SharedRun {
@@ -156,7 +157,7 @@ pub async fn run(
         kind: crate::models::SharedRunKind::QuickExec,
         source_id: id.clone(),
         project_id: None,
-        discussion_id: None,
+        discussion_id: launch.discussion_id.clone(),
         status: crate::models::SharedRunStatus::Queued,
         started_at: None,
         finished_at: None,
@@ -191,6 +192,7 @@ pub async fn run(
                 &state,
                 &id,
                 None,
+                launch.discussion_id.clone(),
                 created_at,
                 &response,
                 crate::models::SharedRunStatus::PreflightFailed,
@@ -203,6 +205,12 @@ pub async fn run(
         }
         Err(error) => return Json(ApiResponse::err(format!("DB error: {error}"))),
     };
+    // A GLOBAL Quick Exec launched from a project-scoped discussion resolves
+    // that project's environment/worktree exactly like one declared on the
+    // project directly (KT-476 LaunchContext).
+    let project_id = launch
+        .effective_project_id(item.project_id.as_deref())
+        .map(str::to_owned);
     let (secret, retention_days) = {
         let config = state.config.read().await;
         let Some(secret) = config.encryption_secret.clone() else {
@@ -218,7 +226,8 @@ pub async fn run(
             let _ = persist_quick_exec_terminal(
                 &state,
                 &id,
-                item.project_id.clone(),
+                project_id.clone(),
+                launch.discussion_id.clone(),
                 created_at,
                 &response,
                 crate::models::SharedRunStatus::PreflightFailed,
@@ -230,7 +239,9 @@ pub async fn run(
     };
     let declarations = item.variables.clone();
     let supplied = request.variables.clone();
-    let selected_project = item.project_id.clone();
+    let selected_project = project_id.clone();
+    let launch_context = launch.context.clone();
+    let launch_discussion_id = launch.discussion_id.clone();
     let snapshot_run_id = run_id.clone();
     let prepared = state
         .db
@@ -240,9 +251,9 @@ pub async fn run(
                 crate::core::execution_variables::PrepareRequest {
                     declarations: &declarations,
                     supplied: &supplied,
-                    context: &std::collections::HashMap::new(),
+                    context: &launch_context,
                     project_id: selected_project.as_deref(),
-                    discussion_id: None,
+                    discussion_id: launch_discussion_id.as_deref(),
                     environment_ref: "project_mcp_configs",
                     run_kind: "quick_exec",
                     run_id: &snapshot_run_id,
@@ -270,7 +281,8 @@ pub async fn run(
             if let Err(error) = persist_quick_exec_terminal(
                 &state,
                 &id,
-                item.project_id.clone(),
+                project_id.clone(),
+                launch.discussion_id.clone(),
                 created_at,
                 &response,
                 crate::models::SharedRunStatus::PreflightFailed,
@@ -287,7 +299,6 @@ pub async fn run(
             )))
         }
     };
-    let project_id = item.project_id.clone();
     let work_dir = if let Some(pid) = project_id.clone() {
         match state
             .db
@@ -309,6 +320,7 @@ pub async fn run(
                     &state,
                     &id,
                     project_id.clone(),
+                    launch.discussion_id.clone(),
                     created_at,
                     &response,
                     crate::models::SharedRunStatus::PreflightFailed,
@@ -343,7 +355,7 @@ pub async fn run(
         kind: crate::models::SharedRunKind::QuickExec,
         source_id: id.clone(),
         project_id: project_id.clone(),
-        discussion_id: None,
+        discussion_id: launch.discussion_id.clone(),
         status: crate::models::SharedRunStatus::Running,
         started_at: Some(running_at),
         finished_at: None,
@@ -395,6 +407,7 @@ pub async fn run(
             &state,
             &id,
             project_id.clone(),
+            launch.discussion_id.clone(),
             created_at,
             &response,
             status,
@@ -419,6 +432,7 @@ pub async fn run(
             &state,
             &id,
             project_id.clone(),
+            launch.discussion_id.clone(),
             created_at,
             &response,
             crate::models::SharedRunStatus::Failed,
@@ -445,6 +459,7 @@ pub async fn run(
                 &state,
                 &id,
                 project_id.clone(),
+                launch.discussion_id.clone(),
                 created_at,
                 &response,
                 crate::models::SharedRunStatus::Failed,
@@ -491,8 +506,16 @@ pub async fn run(
                 crate::models::SharedRunStatus::Failed,
             ),
         };
-    if let Err(error) =
-        persist_quick_exec_terminal(&state, &id, project_id, created_at, &response, status).await
+    if let Err(error) = persist_quick_exec_terminal(
+        &state,
+        &id,
+        project_id,
+        launch.discussion_id.clone(),
+        created_at,
+        &response,
+        status,
+    )
+    .await
     {
         return Json(ApiResponse::err(format!("DB error: {error}")));
     }
@@ -503,6 +526,7 @@ async fn persist_quick_exec_terminal(
     state: &AppState,
     source_id: &str,
     project_id: Option<String>,
+    discussion_id: Option<String>,
     created_at: chrono::DateTime<Utc>,
     response: &RunQuickExecResponse,
     status: crate::models::SharedRunStatus,
@@ -513,7 +537,7 @@ async fn persist_quick_exec_terminal(
         kind: crate::models::SharedRunKind::QuickExec,
         source_id: source_id.to_owned(),
         project_id,
-        discussion_id: None,
+        discussion_id,
         status,
         started_at: (response.duration_ms > 0)
             .then_some(now - chrono::Duration::milliseconds(response.duration_ms as i64)),

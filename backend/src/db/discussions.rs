@@ -2400,7 +2400,7 @@ pub fn insert_message(
     // path skips it entirely (zero overhead on bulk inserts).
     if matches!(msg.channel, crate::models::MessageChannel::Main)
         && matches!(msg.role, crate::models::MessageRole::Agent)
-        && msg.content.contains("kronn-plan-action")
+        && (msg.content.contains("kronn-plan-action") || msg.content.contains("kronn-action"))
     {
         conn.execute_batch("SAVEPOINT insert_message_h")?;
         return match insert_message_inner(conn, discussion_id, msg) {
@@ -2484,6 +2484,12 @@ fn insert_message_inner(
         && matches!(msg.role, crate::models::MessageRole::Agent)
     {
         super::planning_proposals::ingest_message_proposals(
+            conn,
+            discussion_id,
+            &msg.id,
+            &msg.content,
+        )?;
+        super::discussion_actions::ingest_message_actions(
             conn,
             discussion_id,
             &msg.id,

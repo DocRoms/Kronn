@@ -1,6 +1,6 @@
 import { ArrowDown, ArrowUp, Plus, Trash2 } from 'lucide-react';
 import { useT } from '../../lib/I18nContext';
-import type { PromptVariable, PromptVariableControl, PromptVariableOption } from '../../types/generated';
+import type { PromptVariable, PromptVariableControl, PromptVariableOption, PromptVariableSource } from '../../types/generated';
 
 interface Props {
   variable: PromptVariable;
@@ -14,6 +14,23 @@ export function PromptVariableControlEditor({ variable, onChange }: Props) {
   const type = controlType(variable);
   const select = variable.control?.type === 'select' ? variable.control : null;
   const options = select?.options ?? [];
+  const source = variable.source ?? 'user_input';
+
+  const setSource = (next: PromptVariableSource) => {
+    if (next === 'user_input') {
+      onChange({ ...variable, source: next, source_ref: null, allow_manual_override: false });
+      return;
+    }
+    const expectedPrefix = next === 'project_env' ? '<env.' : '<context.';
+    onChange({
+      ...variable,
+      source: next,
+      source_ref: variable.source_ref?.startsWith(expectedPrefix)
+        ? variable.source_ref
+        : `${expectedPrefix}>`,
+      allow_manual_override: variable.allow_manual_override ?? false,
+    });
+  };
 
   const setOptions = (next: PromptVariableOption[], defaultValue = select?.default_value) => {
     onChange({
@@ -67,6 +84,50 @@ export function PromptVariableControlEditor({ variable, onChange }: Props) {
 
   return (
     <div className="prompt-variable-control-editor">
+      <div className="prompt-variable-source-row">
+        <label className="prompt-variable-control-label">
+          <span>{t('variables.sourceType')}</span>
+          <select
+            className="wf-select text-xs"
+            value={source}
+            onChange={event => setSource(event.target.value as PromptVariableSource)}
+            aria-label={t('variables.sourceTypeFor', variable.label || variable.name)}
+          >
+            <option value="user_input">{t('variables.sourceUserInput')}</option>
+            <option value="project_env">{t('variables.sourceProjectEnv')}</option>
+            <option value="kronn_context">{t('variables.sourceKronnContext')}</option>
+          </select>
+        </label>
+        {source !== 'user_input' && (
+          <>
+            <label className="prompt-variable-source-reference">
+              <span>{t('variables.sourceReference')}</span>
+              <input
+                className="wf-input font-mono"
+                value={variable.source_ref ?? ''}
+                placeholder={source === 'project_env' ? '<env.API_TOKEN>' : '<context.issue_key>'}
+                onChange={event => onChange({ ...variable, source, source_ref: event.target.value })}
+                aria-label={t('variables.sourceReferenceFor', variable.label || variable.name)}
+              />
+            </label>
+            <label className="prompt-variable-source-override">
+              <input
+                type="checkbox"
+                checked={variable.allow_manual_override}
+                onChange={event => onChange({ ...variable, source, allow_manual_override: event.target.checked })}
+              />
+              {t('variables.allowManualOverride')}
+            </label>
+          </>
+        )}
+      </div>
+      <p className="prompt-variable-source-hint">
+        {source === 'project_env'
+          ? t('variables.sourceProjectEnvHint', variable.name)
+          : source === 'kronn_context'
+            ? t('variables.sourceKronnContextHint', variable.name)
+            : t('variables.sourceUserInputHint', variable.name)}
+      </p>
       <label className="prompt-variable-control-label">
         <span>{t('variables.controlType')}</span>
         <select

@@ -464,6 +464,13 @@ pub struct RunQuickExecRequest {
     #[serde(default)]
     #[ts(type = "Record<string, string>")]
     pub variables: ::std::collections::HashMap<String, String>,
+    /// Deterministic source-discussion context for a launch proposed inline
+    /// from a discussion (KT-476). Server-owned: never accepted from the
+    /// wire, so an HTTP caller cannot spoof another project's environment or
+    /// worktree.
+    #[serde(skip)]
+    #[ts(skip)]
+    pub launch: Option<crate::core::launch_context::LaunchContext>,
 }
 
 #[derive(Debug, Serialize, TS)]
@@ -630,6 +637,12 @@ pub struct RunQuickApiRequest {
     #[serde(skip)]
     #[ts(skip)]
     pub agent: Option<String>,
+    /// Deterministic source-discussion context for a launch proposed inline
+    /// from a discussion (KT-476). Server-owned: never accepted from the
+    /// wire, so an HTTP caller cannot spoof another project's environment.
+    #[serde(skip)]
+    #[ts(skip)]
+    pub launch: Option<crate::core::launch_context::LaunchContext>,
 }
 
 /// Response from `POST /api/quick-apis/:id/run`. Mirrors the

@@ -1442,7 +1442,7 @@ TOOLS = [
         "name": "qp_list",
         "description": (
             "List every Quick Prompt in the user's library — compact "
-            "view (id, name, agent, description, variable_names, "
+            "view (id, name, agent, description, variable_names, variables, "
             "skill_ids, project_id, tier). Use this to (a) reuse a "
             "matching QP via `quick_prompt_id` / "
             "`batch_quick_prompt_id` in a workflow step instead of "
@@ -1457,8 +1457,9 @@ TOOLS = [
             "List every Quick API in the user's library — compact view "
             "(id, name, api_plugin_slug, api_endpoint_path, api_method, "
             "description, project_id, variables[]). The `variables[]` "
-            "entries are `{name, label, required, description}` — pass "
-            "values matching those names to `qa_run`. Use this to (a) "
+            "entries include `{name, label, required, description, source, "
+            "source_ref, allow_manual_override, control}`. Pass only user-input "
+            "values to `qa_run`; project/context values resolve at dispatch. Use this to (a) "
             "discover the right QA for an action via `qa_run`, (b) "
             "reuse a matching QA via `quick_api_id` in a workflow "
             "`ApiCall` / `BatchApiCall` step, or as a source in "
@@ -1660,7 +1661,7 @@ TOOLS = [
                     "description": "1-20 top-level typed steps. Call workflow_step_schema for fields and examples.",
                 },
                 "project_id": {"type": "string", "description": "Optional Kronn project id to bind the workflow to."},
-                "variables": {"type": "array", "description": "Manual-launch variable definitions."},
+                "variables": {"type": "array", "description": "PromptVariable declarations: `{name,label?,placeholder?,description?,required?,pattern?,source?,source_ref?,allow_manual_override?,control?}`. `source` is `user_input` (default), `project_env` (`source_ref:'<env.NAME>'`, project required), or `kronn_context` (`source_ref:'<context.key>'`). Store references only; values resolve at each launch."},
                 "guards": {"type": "object", "description": "Execution limits."},
                 "on_failure": {"type": "array", "description": "Rollback steps."},
                 "exec_allowlist": {"type": "array", "items": {"type": "string"}, "description": "Allowed Exec binaries."},
@@ -1687,7 +1688,7 @@ TOOLS = [
                 "name": {"type": "string", "description": "QP name (1-200 chars, displayed on the QP card)."},
                 "prompt_template": {"type": "string", "description": "The template body. Use `{{var}}` for required variables."},
                 "agent": {"type": "string", "description": "Default agent: `ClaudeCode` / `Codex` / `Vibe` / `GeminiCli` / `Kiro` / `CopilotCli` / `Ollama` / `Custom`."},
-                "variables": {"type": "array", "description": "Variable definitions (each `{ name, label?, placeholder?, required?, description? }`)."},
+                "variables": {"type": "array", "description": "PromptVariable declarations: `{name,label?,placeholder?,description?,required?,pattern?,source?,source_ref?,allow_manual_override?,control?}`. Use `project_env` + `<env.NAME>` or `kronn_context` + `<context.key>` as references only; never include resolved values."},
                 "description": {"type": "string", "description": "Optional one-line description (~120 chars max) shown on the QP card."},
                 "icon": {"type": "string", "description": "Optional single-emoji prefix shown on the QP card (e.g. `⚡` / `🔍` / `📝`)."},
                 "tier": {"type": "string", "description": "Default model tier: `default` / `economy` / `reasoning`."},
@@ -1758,7 +1759,7 @@ TOOLS = [
                 "name": {"type": "string"},
                 "trigger": {"type": "object", "description": "e.g. `{ \"type\": \"Manual\" }`."},
                 "steps": {"type": "array", "description": "Full replacement steps array (1-20). Fetch + edit via `workflow_get` first."},
-                "variables": {"type": "array", "description": "Launch-time variables. `label`/`placeholder` auto-default to the name/empty if omitted."},
+                "variables": {"type": "array", "description": "Launch-time PromptVariable declarations. Sources: user_input, project_env with `<env.NAME>`, or kronn_context with `<context.key>`; references resolve anew at run start. `label`/`placeholder` auto-default."},
                 "guards": {"type": "object"},
                 "on_failure": {"type": "array"},
                 "exec_allowlist": {"type": "array", "items": {"type": "string"}},
@@ -1810,7 +1811,7 @@ TOOLS = [
                 "name": {"type": "string"},
                 "prompt_template": {"type": "string"},
                 "agent": {"type": "string"},
-                "variables": {"type": "array", "description": "`label`/`placeholder` auto-default to the name/empty if omitted."},
+                "variables": {"type": "array", "description": "PromptVariable declarations including source/source_ref/allow_manual_override/control; project_env stores `<env.NAME>` only. `label`/`placeholder` auto-default."},
                 "description": {"type": "string"},
                 "icon": {"type": "string"},
                 "tier": {"type": "string"},
@@ -2130,7 +2131,7 @@ TOOLS = [
                 "api_max_retries": {"type": "integer", "description": "Optional retry count on transient HTTP errors."},
                 "variables": {
                     "type": "array",
-                    "description": "Variable definitions; exact shape documented in tool_manual.",
+                    "description": "PromptVariable declarations; tool_manual documents user_input/project_env/kronn_context sources. Store references, never values.",
                 },
                 "description": {"type": "string", "description": "Optional one-line description shown on the QA card."},
                 "icon": {"type": "string", "description": "Optional single-emoji prefix (e.g. `🎫` / `📧` / `🔍`)."},
@@ -2156,7 +2157,7 @@ TOOLS = [
                 "args": {"type": "array", "items": {"type": "string"}, "description": "Literal argv values; {{variables}} are allowed."},
                 "output_format": {"type": "string", "enum": ["json", "csv", "text", "lines"]},
                 "timeout_secs": {"type": "integer", "minimum": 1, "maximum": 1800},
-                "variables": {"type": "array", "description": "Definitions {name,label?,placeholder?,required?,description?}."},
+                "variables": {"type": "array", "description": "PromptVariable declarations including source/source_ref/allow_manual_override/control. `project_env` stores `<env.NAME>` only and resolves for the selected project at run start."},
                 "description": {"type": "string"},
                 "icon": {"type": "string"},
                 "project_id": {"type": "string"},
@@ -2174,7 +2175,7 @@ TOOLS = [
                 "name": {"type": "string"}, "command": {"type": "string"},
                 "args": {"type": "array", "items": {"type": "string"}},
                 "output_format": {"type": "string", "enum": ["json", "csv", "text", "lines"]},
-                "timeout_secs": {"type": "integer"}, "variables": {"type": "array"},
+                "timeout_secs": {"type": "integer"}, "variables": {"type": "array", "description": "PromptVariable declarations including source/source_ref; project_env values resolve at each run."},
                 "description": {"type": "string"}, "icon": {"type": "string"},
                 "project_id": {
                     "type": "string",
@@ -2212,7 +2213,7 @@ TOOLS = [
                 "api_pagination": {"type": "object"},
                 "api_timeout_ms": {"type": "integer"},
                 "api_max_retries": {"type": "integer"},
-                "variables": {"type": "array"},
+                "variables": {"type": "array", "description": "PromptVariable declarations including source/source_ref; project_env stores `<env.NAME>` only."},
                 "profile_ids": {"type": "array", "items": {"type": "string"}},
                 "directive_ids": {"type": "array", "items": {"type": "string"}},
                 "project_id": {"type": "string", "description": "Re-bind to a different project."},
@@ -7021,6 +7022,24 @@ def call_workflow_active_runs(_args):
     return out
 
 
+def _compact_variable_contract(variable):
+    """Display-safe PromptVariable metadata shared by QP/QA/QE catalogues.
+
+    Source references are declarations, never resolved values. Returning them
+    lets an agent reuse or propose the contract without asking for a secret.
+    """
+    return {
+        "name": variable.get("name"),
+        "label": variable.get("label"),
+        "required": bool(variable.get("required", True)),
+        "description": variable.get("description") or None,
+        "source": variable.get("source") or "user_input",
+        "source_ref": variable.get("source_ref") or None,
+        "allow_manual_override": bool(variable.get("allow_manual_override", False)),
+        "control": variable.get("control") or {"type": "text"},
+    }
+
+
 def call_qp_list(_args):
     # 0.8.5 — compact list. Keeps variable names so the agent can decide
     # if an existing QP fits the user's use case before drafting a new
@@ -7029,13 +7048,15 @@ def call_qp_list(_args):
     data = _unwrap(_http("GET", "/api/quick-prompts")) or []
     out = []
     for q in data:
-        var_names = [v.get("name") for v in (q.get("variables") or [])]
+        variables = [_compact_variable_contract(v) for v in (q.get("variables") or [])]
+        var_names = [v.get("name") for v in variables]
         out.append({
             "id": q.get("id"),
             "name": q.get("name"),
             "agent": q.get("agent"),
             "description": q.get("description"),
             "variable_names": var_names,
+            "variables": variables,
             "skill_ids": q.get("skill_ids") or [],
             "project_id": q.get("project_id"),
             "tier": q.get("tier"),
@@ -7055,15 +7076,7 @@ def call_qa_list(_args):
     data = _unwrap(_http("GET", "/api/quick-apis")) or []
     out = []
     for q in data:
-        variables = [
-            {
-                "name": v.get("name"),
-                "label": v.get("label"),
-                "required": bool(v.get("required", True)),
-                "description": v.get("description") or None,
-            }
-            for v in (q.get("variables") or [])
-        ]
+        variables = [_compact_variable_contract(v) for v in (q.get("variables") or [])]
         out.append({
             "id": q.get("id"),
             "name": q.get("name"),
@@ -7090,15 +7103,7 @@ def call_qe_list(_args):
             "output_format": item.get("output_format"),
             "timeout_secs": item.get("timeout_secs"),
             "project_id": item.get("project_id"),
-            "variables": [
-                {
-                    "name": variable.get("name"),
-                    "label": variable.get("label"),
-                    "required": bool(variable.get("required", True)),
-                    "description": variable.get("description") or None,
-                }
-                for variable in (item.get("variables") or [])
-            ],
+            "variables": [_compact_variable_contract(variable) for variable in (item.get("variables") or [])],
         }
         for item in data
     ]
@@ -7226,6 +7231,11 @@ def call_mcp_list(_args):
             "is_global": c.get("is_global"),
             "project_ids": c.get("project_ids") or [],
             "label": c.get("label"),
+            # Names are safe authoring metadata. Values remain encrypted and
+            # are deliberately absent; `<env.NAME>` is resolved server-side
+            # only when a QP/QA/QE/Workflow run starts.
+            "env_keys": c.get("env_keys") or [],
+            "secrets_broken": bool(c.get("secrets_broken", False)),
         })
     # Server registry (which slugs are KNOWN and have an api_spec) —
     # lets the agent answer "what API plugins are available to wire?".
@@ -7387,6 +7397,14 @@ def call_mcp_list(_args):
             "configuration. Presence is necessary but not sufficient; absence "
             "at captured_at means ApiCall cannot use that server in this "
             "snapshot. Re-run mcp_list before diagnosing a later observation."
+        ),
+        "execution_variable_contract": (
+            "configs[].env_keys exposes names only, never values. A project-bound "
+            "QP/QA/QE/Workflow may declare source:'project_env' with "
+            "source_ref:'<env.NAME>'; Kronn resolves the current encrypted value "
+            "again at each launch. The key must belong to exactly one configuration "
+            "active for that project, and secrets_broken must be false. Never copy a "
+            "masked or resolved value into a template."
         ),
     }
 
@@ -8858,7 +8876,7 @@ def call_workflow_step_schema(_args):
                 "artifacts.<name>": "content a step emitted via a `---ARTIFACT:<name>---` block.",
                 "issue.{title,body,number,url,labels}": "tracker-trigger fields (Cron/Tracker workflows).",
                 "time.now / now": "one timestamp captured at run start and reused by all steps and parallel CollectApiData sources, including after resume. `now` is shorthand unless a static/launch variable named `now` exists.",
-                "<launch_var>": "any manual-launch `variables[].name` is referenced bare as `{{name}}`.",
+                "<launch_var>": "any `variables[].name` is referenced bare as `{{name}}`. Its source is user_input (default), project_env with source_ref `<env.NAME>`, or kronn_context with `<context.key>`. References resolve at run start; never store the resolved value.",
             },
             "time_expressions": {
                 "canonical": "{{time.now|shift:-24h|tz:Europe/Paris|floor:hour|fmt:local_iso_ms}}",
@@ -9458,6 +9476,13 @@ TOOL_MANUALS = {
         "converged. The payload mirrors CreateWorkflowRequest: required name, tagged trigger "
         "and 1-20 steps; optional project, variables, guards, failure chain, allowlist, "
         "artifacts, concurrency, safety, actions and workspace config.\n\n"
+        "Each PromptVariable is `{name,label?,placeholder?,description?,required?,pattern?,"
+        "source?,source_ref?,allow_manual_override?,control?}`. Omitted source means "
+        "`user_input`. Use `project_env` with a declarative `<env.NAME>` reference only "
+        "when the workflow is project-bound and `mcp_list.configs` proves that exactly one "
+        "active project config exposes NAME. Use `kronn_context` with `<context.key>` for "
+        "allowlisted runtime metadata. Kronn resolves current values at every launch, then "
+        "keeps one encrypted snapshot for that run; never copy a masked/resolved value.\n\n"
         "Type-specific step fields live at the top level. `step_type`, trigger and output "
         "format use tagged objects. `workflow_step_schema` is the canonical on-demand source "
         "for every field, example, output-piping rule and template namespace. In particular, "
@@ -9490,7 +9515,10 @@ TOOL_MANUALS = {
     "qp_create_draft": (
         "Quick Prompts are reusable manual-launch templates and have no enabled flag. Create "
         "one only after the conversation has converged on a prompt worth keeping. Variables "
-        "use `{{name}}`; declare each name and whether it is required. Return the created id "
+        "use `{{name}}`; declare each name and whether it is required. A variable may use "
+        "`source:'project_env'` + `source_ref:'<env.NAME>'` when the QP is project-bound, "
+        "or `source:'kronn_context'` + `<context.key>`; those references resolve anew per "
+        "run and never carry the real value. Return the created id "
         "to the user so the QP can be opened or compared.\n\n"
         "Bindings are durable ids, not labels. Read the current QP/binding catalog first and "
         "use only real agent, skill, profile and directive ids. If a requested binding cannot "
@@ -9541,9 +9569,13 @@ TOOL_MANUALS = {
         "Persisting without `api_extract` is fine for small-payload vendors "
         "(Resend, Mailjet, simple webhooks) — but measure first. Adding it later "
         "with `qa_update` is friction the user never had to pay.\n\n"
-        "**Variables**: each entry is `{name, label?, placeholder?, required?, "
-        "description?}`; `required` defaults to true. `name` must be a snake_case "
-        "or UPPER_SNAKE_CASE identifier matching the `{{var_name}}` placeholders.\n\n"
+        "**Variables**: each entry is `{name,label?,placeholder?,description?,required?,"
+        "pattern?,source?,source_ref?,allow_manual_override?,control?}`; `required` defaults "
+        "to true and `source` to `user_input`. A project-bound QA may use "
+        "`source:'project_env'` + `source_ref:'<env.NAME>'`; runtime metadata uses "
+        "`kronn_context` + `<context.key>`. Resolve available key names through `mcp_list`, "
+        "never copy masked/resolved values, and let Kronn read the current value per run. "
+        "`name` must match the `{{var_name}}` placeholders.\n\n"
         "**Pagination**: `api_pagination` is internally tagged `{\"type\": ...}`; "
         "Auto | Offset | Cursor | Page | LinkHeader (LinkHeader = GitHub-style bare "
         "array + `Link: rel=next` header; fields page_size_param/page_size/max_pages).\n\n"
@@ -9597,7 +9629,11 @@ TOOL_MANUALS = {
         "and every `args[]` entry is one literal argv value. Never use `sh -c`, pipes, "
         "redirections, globs or command substitution. Shells and executable paths are "
         "rejected server-side.\n\n"
-        "Declare every `{{variable}}` used in argv. `output_format` is `json`, `csv`, "
+        "Declare every `{{variable}}` used in argv. PromptVariable supports `user_input` "
+        "(default), or `project_env` with `source_ref:'<env.NAME>'` for a project-bound "
+        "collector; `kronn_context` uses `<context.key>`. Discover safe key names through "
+        "`mcp_list.configs[].env_keys`; never copy a masked/resolved value. Kronn resolves "
+        "the current value at each run. `output_format` is `json`, `csv`, "
         "`text` or `lines`; CSV is normalized into an array of objects using its header "
         "row so TransformData and Pages receive ordinary JSON. Test the saved resource "
         "with `qe_run`. In a workflow, use `CollectApiData.sources[].quick_exec_id` and "
@@ -10672,6 +10708,7 @@ def _handle(req):
                     "• **Working in a room:** a room is not a mailbox you empty at the end. After each real step — a commit, a green test run, a background task that finished, a milestone — call `disc_wait_for_peer` BEFORE starting the next one. Its cursor is durable, so re-checking never re-delivers what you already read, and a quiet return costs nothing. A peer's message routinely changes what you are about to build: a design review of the choice you just made, a file boundary, a decision the human already took. Long silent stretches of work are how two agents duplicate each other, or how one keeps building on a choice the other has already overturned. Messages flagged `awareness: true` are context to read, never turns to answer. Any tool result may also carry a `kronn_room` block: turns that arrived while you were working, attached to an answer you asked for. `attention_required` holds turns addressed to YOU — read them before continuing, because a peer announcing a scope is how duplicate work gets prevented; `context` is background you read without answering turn by turn. Seeing it does not replace calling `disc_wait_for_peer`: it appears only when you happen to call something else.\n"
                     "• Rich room output: messages are Markdown. A `mermaid` fence renders a diagram; `kronn-doc-preview` renders sandboxed HTML with PDF/DOCX actions (a plain `html` fence is only code); `kronn-doc-data` exposes CSV/XLSX/PPTX export. Use visual output only when it materially helps.\n"
                     "• Planning: a discussion may have a shared plan made of prioritized, editable tasks. The user may refer to it naturally as “the plan”, “the tasks”, “what remains”, “the priority”, and similar wording. Use `plan_get` (compact current objective/plan) · `task_list` (compact filtered backlog) · `task_get` (FULL task) · `task_changes` (deltas) · `proposal_list`/`proposal_get` (durable proposals, read-only) · narrow writes `task_create`/`task_update`/`task_update_dod`/`task_link_discussion`/`task_add_blocker`/`task_remove_blocker`. Read the relevant plan first. Immediately before any direct `task_create`, call `plan_get` again so a peer's recent write is visible. Apply unambiguous intent directly; otherwise propose a human-gated `kronn-plan-action` fence (`create`, `create_many`, `status`, `complete`, `unblock`, `open`). You may read and propose, but only a human accepts, rejects or decides a durable proposal. Never replace a requested plan update with a prose-only summary. Whenever tracked work starts or materially changes, keep its status, DoD and priority honest in the plan. Write only on a real change: never reload or rewrite an unchanged task merely to report progress. If the announced Planning tools are missing from your MCP surface, use the read-only `plan_snapshot` from `disc_join`, ask @user to reconnect the Kronn MCP, and never fabricate an update.\n"
+                    "• Human-gated Automation proposals: after resolving a real QP/QA/QE/Workflow id and its declared variables through the catalogue/get tools, an agent may emit one `kronn-action` fence with `{\"kind\":\"quick_prompt|quick_api|quick_exec|workflow\",\"target_id\":\"<real id>\",\"project_id\":\"<optional id>\",\"values\":[{\"name\":\"<declared variable>\",\"value\":\"<editable suggestion>\",\"provenance\":\"agent_suggestion\",\"suggested_by\":\"<your alias>\"}]}`. This proposes only: Kronn validates and persists the card, and the human click launches it. Never invent ids/variables or include secret/resolved values.\n"
                     "• Workflows (multi-step pipelines): `workflow_list` (compact) · `workflow_get` (FULL, every step) · `workflow_step_schema` (CANONICAL step schema as an untruncatable result — the closed 12 `step_type`s, per-type fields, runtime contracts; call before authoring) · `workflow_create_draft` · `workflow_clone`/`workflow_update`/`workflow_set_enabled` · `workflow_trigger`/`workflow_run_status` · run history `workflow_runs`/`workflow_run_get` · `workflow_active_runs`/`workflow_cancel_run`. Agent-step bindings (full CRUD): `skills_list`/`profiles_list`/`directives_list` enumerate valid ids; `skill_get`/`profile_get`/`directive_get` read FULL bodies; `skill_create`/`skill_update`/`skill_delete` (+ `profile_*`/`directive_*`) author & edit custom ones.\n"
                     "• Quick Prompts (reusable prompt templates): `qp_list` (no body) · `qp_get` (FULL incl `prompt_template` — read this to know what a QP does, or to run it yourself) · `qp_create_draft`/`qp_update`/`qp_delete` · `qp_run`/`qp_batch_run`.\n"
                     "• Quick APIs + API broker: `qa_list`/`qa_run`/`qa_create_draft`/`qa_update` · `mcp_list` → `api_call` (configured plugins, auth injected). Quick Execs: `qe_list`/`qe_run`/`qe_create_draft`/`qe_update` for saved shell-free CLI collectors.\n"

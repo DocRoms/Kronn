@@ -155,6 +155,13 @@ vi.mock('../../lib/api', () => ({
     list: vi.fn().mockResolvedValue([]),
     get: vi.fn(),
   },
+  // KT-476 — the message list fetches proposed inline actions per discussion.
+  discussionActions: {
+    list: vi.fn().mockResolvedValue([]),
+    get: vi.fn(),
+    cancel: vi.fn(),
+    launch: vi.fn(),
+  },
   config: {
     getUiLanguage: vi.fn().mockResolvedValue('fr'),
     saveUiLanguage: vi.fn().mockResolvedValue(undefined),

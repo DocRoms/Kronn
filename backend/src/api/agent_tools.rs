@@ -914,6 +914,7 @@ impl ToolExecutor for KronnToolExecutor {
                         variables,
                         workflow_run_id: self.workflow_run_id.clone(),
                         agent: Some(self.actor_id.clone()),
+                        launch: None,
                     }),
                 )
                 .await;

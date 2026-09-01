@@ -597,6 +597,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "158_external_api_media_models",
         include_str!("sql/158_external_api_media_models.sql"),
     ),
+    (
+        "159_discussion_actions",
+        include_str!("sql/159_discussion_actions.sql"),
+    ),
 ];
 
 /// Apply one migration inside the caller-owned transaction.

@@ -8,6 +8,7 @@ pub mod compare;
 pub mod contacts;
 pub mod context_audits;
 pub mod disc_source;
+pub mod discussion_actions;
 pub mod discussion_sessions;
 pub mod discussion_weight;
 pub mod discussion_workspaces;

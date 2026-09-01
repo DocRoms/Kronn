@@ -477,6 +477,11 @@ pub struct McpQpRunRequest {
     /// " — MCP run".
     #[serde(default)]
     pub title: Option<String>,
+    /// Deterministic source-discussion context for a launch proposed inline
+    /// from a discussion (KT-476). Server-owned: never accepted from the
+    /// wire, so an MCP caller cannot spoof another project's environment.
+    #[serde(skip)]
+    pub launch: Option<crate::core::launch_context::LaunchContext>,
 }
 
 #[derive(Debug, Serialize)]
@@ -537,7 +542,11 @@ pub async fn qp_run(
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
     };
 
-    let project_id = req.project_id.clone().or_else(|| qp.project_id.clone());
+    let launch = req.launch.clone().unwrap_or_default();
+    let target_project_id = req.project_id.clone().or_else(|| qp.project_id.clone());
+    let project_id = launch
+        .effective_project_id(target_project_id.as_deref())
+        .map(str::to_owned);
     let (secret, retention_days) = {
         let config = state.config.read().await;
         let Some(secret) = config.encryption_secret.clone() else {
@@ -550,6 +559,8 @@ pub async fn qp_run(
     let declarations = qp.variables.clone();
     let supplied = req.vars.clone();
     let selected_project = project_id.clone();
+    let launch_context = launch.context.clone();
+    let launch_discussion_id = launch.discussion_id.clone();
     let execution_id = Uuid::new_v4().to_string();
     let snapshot_run_id = execution_id.clone();
     let prepared = state
@@ -560,9 +571,9 @@ pub async fn qp_run(
                 crate::core::execution_variables::PrepareRequest {
                     declarations: &declarations,
                     supplied: &supplied,
-                    context: &HashMap::new(),
+                    context: &launch_context,
                     project_id: selected_project.as_deref(),
-                    discussion_id: None,
+                    discussion_id: launch_discussion_id.as_deref(),
                     environment_ref: "project_mcp_configs",
                     run_kind: "quick_prompt",
                     run_id: &snapshot_run_id,
