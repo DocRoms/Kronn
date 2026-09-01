@@ -1797,6 +1797,20 @@ test_mode_restore_branch?: string | null,
  */
 test_mode_stash_ref?: string | null, created_at: string, updated_at: string, };
 
+export type DiscussionExecutionVariableRetention = {
+/**
+ * Global default from server configuration.
+ */
+global_days: number,
+/**
+ * Discussion-specific override. `None` means inherit the global default.
+ */
+override_days: number | null,
+/**
+ * Value used for the next execution in this discussion.
+ */
+effective_days: number, };
+
 export type DiscussionExportEnvelope = { kind: string, version: number, exported_at: string, secret_policy: string, source_discussion_id: string, discussion: Discussion, messages: Array<DiscussionMessage>, attachments: Array<PortableDiscussionAttachment>, revision_events: Array<PortableDiscussionRevisionEvent>, plan: Array<PortableDiscussionPlanItem>,
 /**
  * Absent from every bundle exported before KT-74, hence `default` on the
@@ -4911,7 +4925,12 @@ default_summary_strategy: SummaryStrategy, agent_handoffs_enabled: boolean, agen
  * Sidebar storage-weight indicator: lets the frontend skip the batch
  * call entirely when disabled, and grade colours without a round-trip.
  */
-discussion_weight: DiscussionWeightConfig, };
+discussion_weight: DiscussionWeightConfig,
+/**
+ * Default retention for encrypted execution-variable snapshots.
+ * Zero purges values as soon as the run reaches a terminal state.
+ */
+execution_variable_retention_days: number, };
 
 /**
  * Configurable ceilings for one CLI session.
@@ -5792,7 +5811,7 @@ agent_handoffs_unlimited?: boolean | null,
  * Per-discussion encrypted execution-variable retention override.
  * Zero keeps values only for the lifetime of the active run.
  */
-execution_variable_retention_days?: number | null, };
+execution_variable_retention_days?: number | null | null, };
 
 export type UpdateLivePageHtmlRequest = { html: string, created_by_agent?: string | null, };
 

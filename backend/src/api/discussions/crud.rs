@@ -140,6 +140,34 @@ pub async fn agent_handoff_mode(
     }
 }
 
+/// GET /api/discussions/{id}/execution-variable-retention
+pub async fn execution_variable_retention(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Json<ApiResponse<DiscussionExecutionVariableRetention>> {
+    let global_days = state
+        .config
+        .read()
+        .await
+        .server
+        .execution_variable_retention_days;
+    match state
+        .db
+        .with_read_conn(move |conn| {
+            crate::db::discussions::get_execution_variable_retention_days(conn, &id)
+        })
+        .await
+    {
+        Ok(Some(override_days)) => Json(ApiResponse::ok(DiscussionExecutionVariableRetention {
+            effective_days: override_days.unwrap_or(global_days),
+            global_days,
+            override_days,
+        })),
+        Ok(None) => Json(ApiResponse::err("Discussion not found")),
+        Err(error) => Json(ApiResponse::err(format!("DB error: {error}"))),
+    }
+}
+
 /// POST /api/discussions
 pub async fn create(
     State(state): State<AppState>,

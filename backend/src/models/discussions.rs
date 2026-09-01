@@ -423,8 +423,12 @@ pub struct UpdateDiscussionRequest {
     pub agent_handoffs_unlimited: Option<bool>,
     /// Per-discussion encrypted execution-variable retention override.
     /// Zero keeps values only for the lifetime of the active run.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub execution_variable_retention_days: Option<u32>,
+    #[serde(
+        default,
+        deserialize_with = "super::deserialize_optional_field",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub execution_variable_retention_days: Option<Option<u32>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -442,6 +446,17 @@ pub struct DiscussionAgentHandoffMode {
     pub effective_enabled: bool,
     /// `None` means no financial quota; structural loop guards still apply.
     pub paid_limit: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct DiscussionExecutionVariableRetention {
+    /// Global default from server configuration.
+    pub global_days: u32,
+    /// Discussion-specific override. `None` means inherit the global default.
+    pub override_days: Option<u32>,
+    /// Value used for the next execution in this discussion.
+    pub effective_days: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]

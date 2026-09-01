@@ -8,7 +8,7 @@
 // own toggle, mirroring NewDiscussionForm. Only ONE expanded at a time.
 
 import { beforeEach, describe, it, expect, vi } from 'vitest';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { act, render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { buildApiMock } from '../../test/apiMock';
 
 vi.mock('../../lib/api', () => buildApiMock());
@@ -26,6 +26,12 @@ beforeEach(() => {
   vi.mocked(discussionsApi.agentHandoffMode).mockReset();
   vi.mocked(discussionsApi.agentHandoffMode).mockImplementation(() => new Promise(() => {}));
   vi.mocked(discussionsApi.update).mockClear();
+  vi.mocked(discussionsApi.executionVariableRetention).mockReset();
+  vi.mocked(discussionsApi.executionVariableRetention).mockResolvedValue({
+    global_days: 30,
+    override_days: null,
+    effective_days: 30,
+  });
 });
 
 function makeDiscussion(over: Partial<Discussion> = {}): Discussion {
@@ -228,5 +234,23 @@ describe('DiscussionSettingsPanel — collapsed context sections', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('disc.agentHandoffUnlimitedWarning');
     expect(screen.getByText('disc.agentHandoffChainUnlimited')).toBeInTheDocument();
     expect(screen.getByText('disc.agentHandoffCliUnaffected')).toBeInTheDocument();
+  });
+
+  it('can override execution-value retention and restore the global policy', async () => {
+    vi.mocked(discussionsApi.update).mockResolvedValue(undefined);
+    renderPanel();
+
+    const select = await screen.findByLabelText('disc.executionVariableRetention') as HTMLSelectElement;
+    expect(select.value).toBe('inherit');
+
+    await act(async () => { fireEvent.change(select, { target: { value: '7' } }); });
+    await waitFor(() => expect(discussionsApi.update).toHaveBeenLastCalledWith('d-1', {
+      execution_variable_retention_days: 7,
+    }));
+
+    await act(async () => { fireEvent.change(select, { target: { value: 'inherit' } }); });
+    await waitFor(() => expect(discussionsApi.update).toHaveBeenLastCalledWith('d-1', {
+      execution_variable_retention_days: null,
+    }));
   });
 });
