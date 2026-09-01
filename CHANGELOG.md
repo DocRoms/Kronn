@@ -35,6 +35,16 @@ Release notes for 0.9.3 and earlier are available in the
   disabling it removes the queries entirely, not just the badge. Weights are
   served by a bounded batch endpoint — it never scans every discussion.
 
+- Codex and Claude Code can now run through the same create/resume/stream/
+  cancel/close ACP contract as the native ACP agents, via an explicit,
+  off-by-default, per-agent opt-in (`KRONN_ACP_ADAPTER_CODEX` /
+  `KRONN_ACP_ADAPTER_CLAUDE`). Direct CLI migration remains the production
+  default for both; task workers always stay on it regardless of the toggle.
+  A shared, scoped, audited permission broker denies filesystem/terminal
+  requests and unsafe tool calls by default, and project MCP servers are
+  never inlined with credentials into an ACP payload. See
+  `docs/operations/acp-adapters.md`.
+
 ## [0.12.0] - 2026-08-30
 
 ### Added

@@ -2005,7 +2005,7 @@ pub(crate) const KRONN_INTERNAL_CODEX_ENV_VARS: &[&str] = &[
     "KRONN_WAIT_TOTAL_SECS",
 ];
 
-fn codex_kronn_internal_env_override() -> String {
+pub(crate) fn codex_kronn_internal_env_override() -> String {
     format!(
         "mcp_servers.kronn-internal.env_vars={}",
         serde_json::to_string(KRONN_INTERNAL_CODEX_ENV_VARS)
@@ -2909,23 +2909,54 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
     // runner: `opencode acp` speaks bidirectional JSON-RPC, not line-oriented
     // model output. The ACP host owns initialize/session/prompt/cancel and
     // forwards only normalized text updates to the existing stream consumer.
-    if crate::acp::production_route(config.agent_type) == crate::acp::AcpProductionRoute::NativeAcp
-    {
-        // Kiro ships as a host binary; the Linux container needs its own copy
-        // before the ACP subprocess can start.
-        if matches!(config.agent_type, AgentType::Kiro) {
-            ensure_kiro_cli_available().await?;
+    match crate::acp::resolve_acp_route(config.agent_type) {
+        crate::acp::AcpProductionRoute::NativeAcp => {
+            // Kiro ships as a host binary; the Linux container needs its own
+            // copy before the ACP subprocess can start.
+            if matches!(config.agent_type, AgentType::Kiro) {
+                ensure_kiro_cli_available().await?;
+            }
+            return start_native_acp(
+                AcpSessionRequest {
+                    agent_type: config.agent_type,
+                    work_dir: &work_dir,
+                    prompt: config.prompt,
+                    system_context: &extra_context,
+                    project_path: config.project_path,
+                    model_flag: model_flag.as_deref(),
+                    parent_cancel: config.cancel_token.as_ref(),
+                },
+                config.full_access,
+            )
+            .await;
         }
-        return start_native_acp(
-            config.agent_type,
-            &work_dir,
-            config.prompt,
-            &extra_context,
-            config.project_path,
-            model_flag.as_deref(),
-            config.cancel_token.as_ref(),
-        )
-        .await;
+        // Task workers keep the narrow, isolated worktree policy the direct
+        // CLI builder already applies below (`--setting-sources ""`,
+        // `--ignore-user-config`, the 3-tool allowlist, …); the adapters are
+        // out of scope for that path, so an operator's opt-in toggle never
+        // reaches a task worker. Direct CLI migration remains the explicit,
+        // observable fallback either way.
+        crate::acp::AcpProductionRoute::AdaptedAcp if !task_worker => {
+            tracing::info!(
+                agent = ?config.agent_type,
+                "KRONN_ACP_ADAPTER_* opt-in active: starting an isolated ACP adapter session \
+                 (unset the variable to fall back to direct CLI migration)"
+            );
+            return start_adapted_acp(
+                AcpSessionRequest {
+                    agent_type: config.agent_type,
+                    work_dir: &work_dir,
+                    prompt: config.prompt,
+                    system_context: &extra_context,
+                    project_path: config.project_path,
+                    model_flag: model_flag.as_deref(),
+                    parent_cancel: config.cancel_token.as_ref(),
+                },
+                config.full_access,
+            )
+            .await;
+        }
+        _ => {}
     }
     let (binary, npx_pkg, mut args, env_key, stderr_mode, output_mode) =
         agent_command_with_task_worker_policy(
@@ -3138,27 +3169,107 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
     })
 }
 
+/// Common inputs to every ACP session-start path (native and adapted alike).
+/// Bundled into one struct so `start_native_acp`/`start_adapted_acp`/
+/// `run_acp_session` stay under clippy's argument-count lint instead of
+/// growing an ever-longer positional parameter list.
+struct AcpSessionRequest<'a> {
+    agent_type: &'a AgentType,
+    work_dir: &'a Path,
+    prompt: &'a str,
+    system_context: &'a str,
+    project_path: &'a str,
+    model_flag: Option<&'a str>,
+    parent_cancel: Option<&'a tokio_util::sync::CancellationToken>,
+}
+
 async fn start_native_acp(
-    agent_type: &AgentType,
-    work_dir: &Path,
-    prompt: &str,
-    system_context: &str,
-    project_path: &str,
-    model_flag: Option<&str>,
-    parent_cancel: Option<&tokio_util::sync::CancellationToken>,
+    request: AcpSessionRequest<'_>,
+    full_access: bool,
 ) -> Result<AgentProcess, String> {
-    use crate::acp::{
-        acp_agent, AcpCapability, AcpHost, AcpInitialize, AcpJsonRpcTransport, AcpSessionEvent,
+    use crate::acp::{acp_agent, AcpJsonRpcTransport, AcpTransport};
+
+    let agent_type = request.agent_type;
+    let acp_agent_kind =
+        acp_agent(agent_type).ok_or_else(|| format!("{agent_type:?} is not an ACP agent"))?;
+    let transport: Arc<dyn AcpTransport> = Arc::new(
+        AcpJsonRpcTransport::spawn_native(
+            acp_agent_kind,
+            &request.work_dir.to_string_lossy(),
+            full_access,
+        )
+        .await
+        .map_err(|error| format!("{agent_type:?} ACP spawn failed: {error}"))?,
+    );
+    run_acp_session(request, transport).await
+}
+
+/// Codex/Claude via the isolated ACP adapters (`ClaudeAcpAdapter`,
+/// `CodexAcpAdapter`), only reachable when an operator has explicitly
+/// enabled `KRONN_ACP_ADAPTER_CODEX`/`KRONN_ACP_ADAPTER_CLAUDE`
+/// (`crate::acp::resolve_acp_route`). Direct CLI migration remains the
+/// default and the observable fallback (see the caller in
+/// `start_agent_with_config`).
+///
+/// Unlike native ACP agents, neither CLI has a session-config-options
+/// catalogue or a live permission callback: the model is resolved once here
+/// and baked into the adapter's CLI invocation directly, and permission
+/// policy is the broker's static `session_policy()` rather than a per-request
+/// negotiation. `run_acp_session` therefore receives `model_flag: None` so
+/// its (native-agent-oriented) `select_model` step stays a correctly-skipped
+/// no-op instead of logging a misleading "no matching option" message.
+async fn start_adapted_acp(
+    request: AcpSessionRequest<'_>,
+    full_access: bool,
+) -> Result<AgentProcess, String> {
+    use crate::acp::{AcpTransport, ClaudeAcpAdapter, CodexAcpAdapter};
+
+    let agent_type = request.agent_type;
+    let model = request.model_flag.map(str::to_owned);
+    if let Some(model) = &model {
+        tracing::debug!(agent = ?agent_type, model, "ACP adapter model applied via direct CLI flag");
+    }
+    let transport: Arc<dyn AcpTransport> = match agent_type {
+        AgentType::ClaudeCode => Arc::new(ClaudeAcpAdapter::new(model, full_access)),
+        // No durable cross-restart seed is threaded through from
+        // `AgentStartConfig` yet (it carries no DB handle to read a
+        // previously persisted native thread id) — a fresh session is
+        // started every time. Documented limitation: see KT-542 delivery
+        // notes / docs/operations/acp-adapters.md.
+        AgentType::Codex => Arc::new(CodexAcpAdapter::new(model, full_access, None)),
+        other => return Err(format!("{other:?} has no ACP adapter")),
     };
+    run_acp_session(
+        AcpSessionRequest {
+            model_flag: None,
+            ..request
+        },
+        transport,
+    )
+    .await
+}
+
+/// Shared session-run core behind `AcpHost`, common to every ACP transport
+/// (native JSON-RPC and the Codex/Claude adapters alike): negotiate, scope
+/// the project MCP registry, create the session, apply a resolved model when
+/// the transport actually offers a matching config option, then stream one
+/// prompt turn into the existing text-based `AgentProcess` lifecycle.
+async fn run_acp_session(
+    request: AcpSessionRequest<'_>,
+    transport: Arc<dyn crate::acp::AcpTransport>,
+) -> Result<AgentProcess, String> {
+    let AcpSessionRequest {
+        agent_type,
+        work_dir,
+        prompt,
+        system_context,
+        project_path,
+        model_flag,
+        parent_cancel,
+    } = request;
+    use crate::acp::{AcpCapability, AcpHost, AcpInitialize, AcpSessionEvent};
     use tokio::io::AsyncWriteExt;
 
-    let acp_agent =
-        acp_agent(agent_type).ok_or_else(|| format!("{agent_type:?} is not an ACP agent"))?;
-    let transport = Arc::new(
-        AcpJsonRpcTransport::spawn_native(acp_agent, &work_dir.to_string_lossy())
-            .await
-            .map_err(|error| format!("{agent_type:?} ACP spawn failed: {error}"))?,
-    );
     let mut host = AcpHost::new(1, transport);
     let mcp_servers = acp_project_mcp_servers(project_path);
     host.negotiate(AcpInitialize {

@@ -17,6 +17,40 @@ use tokio::time::{timeout, Duration};
 
 use crate::models::AgentType;
 
+mod claude_adapter;
+mod codex_adapter;
+mod permission_broker;
+
+pub use claude_adapter::ClaudeAcpAdapter;
+pub use codex_adapter::CodexAcpAdapter;
+pub use permission_broker::{
+    AcpAuditEntry, AcpPermissionBroker, AcpPermissionVerdict, AcpSessionPolicy,
+};
+
+/// Shared by the Claude/Codex adapter test modules.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::{Path, PathBuf};
+
+    /// Write an executable shell fixture and return its path. The adapters
+    /// always append their own CLI-specific flags (`--print`,
+    /// `--output-format`, `--session-id`, `--resume`, …); a fixture script
+    /// ignores whatever it does not recognize and reacts only to the
+    /// substrings it cares about, exactly like a real shell script would.
+    pub(crate) fn write_fixture_script(dir: &Path, body: &str) -> PathBuf {
+        let path = dir.join("fixture-cli");
+        fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("write fixture script");
+        let mut perms = fs::metadata(&path)
+            .expect("stat fixture script")
+            .permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&path, perms).expect("chmod fixture script");
+        path
+    }
+}
+
 type PendingRequests = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, AcpError>>>>>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -43,10 +77,20 @@ pub enum AcpRuntime {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AcpProductionRoute {
     NativeAcp,
+    /// Codex/Claude via `ClaudeAcpAdapter`/`CodexAcpAdapter` — the same
+    /// `AcpHost` as native agents, but the wire is each CLI's own
+    /// non-interactive protocol rather than ACP JSON-RPC. Only reachable
+    /// through [`resolve_acp_route`]; [`production_route`] never returns it.
+    AdaptedAcp,
     DirectCliMigration,
     HttpModelProvider,
 }
 
+/// The default/candidate route for an agent, assuming no adapter opt-in.
+/// Deliberately pure and unaware of any runtime toggle: Codex/Claude keep
+/// returning `DirectCliMigration` here even after the adapters exist, so the
+/// conservative default never silently changes. Use [`resolve_acp_route`] at
+/// actual dispatch time to honor the explicit, observable opt-in toggle.
 pub fn production_route(agent: &AgentType) -> AcpProductionRoute {
     match agent {
         AgentType::OpenCode
@@ -58,6 +102,33 @@ pub fn production_route(agent: &AgentType) -> AcpProductionRoute {
         AgentType::Ollama | AgentType::LiteLlm | AgentType::Nvidia | AgentType::Custom => {
             AcpProductionRoute::HttpModelProvider
         }
+    }
+}
+
+/// Per-agent, explicit, environment-driven opt-in for the Codex/Claude ACP
+/// adapters. Off by default: direct-CLI migration stays the production
+/// default for both agents until an operator turns the adapter on for that
+/// specific agent. Reading the toggle at call time (rather than baking it
+/// into a `once_cell`) keeps it test-friendly and trivially observable —
+/// `kronn doctor`/logs can report the exact variable an operator would set.
+pub fn acp_adapter_enabled(agent: &AgentType) -> bool {
+    match agent {
+        AgentType::Codex => std::env::var("KRONN_ACP_ADAPTER_CODEX").is_ok(),
+        AgentType::ClaudeCode => std::env::var("KRONN_ACP_ADAPTER_CLAUDE").is_ok(),
+        _ => false,
+    }
+}
+
+/// The route actually taken for one dispatch, honoring the explicit opt-in
+/// toggle on top of the conservative default from [`production_route`].
+/// Never widens any OTHER agent's route: only a `DirectCliMigration` default
+/// can become `AdaptedAcp`, and only when that agent's toggle is set.
+pub fn resolve_acp_route(agent: &AgentType) -> AcpProductionRoute {
+    let default_route = production_route(agent);
+    if default_route == AcpProductionRoute::DirectCliMigration && acp_adapter_enabled(agent) {
+        AcpProductionRoute::AdaptedAcp
+    } else {
+        default_route
     }
 }
 
@@ -307,6 +378,16 @@ pub trait AcpTransport: Send + Sync {
     ) -> Result<(), AcpError>;
     async fn cancel(&self, target: &AcpSessionTarget) -> Result<(), AcpError>;
     async fn shutdown(&self) -> Result<(), AcpError>;
+    /// The runtime's own native session/thread identifier, when it differs
+    /// from Kronn's opaque `AcpSessionTarget.session_id`. Native ACP agents
+    /// and the Claude adapter let Kronn choose the id up front, so it is
+    /// always `None` there. The Codex adapter cannot: Codex only assigns a
+    /// `thread_id` after the first turn, so this exposes it once known so the
+    /// caller can persist it for a cross-restart resume. Default `None` keeps
+    /// every other implementor unchanged.
+    async fn native_session_id(&self, _target: &AcpSessionTarget) -> Option<String> {
+        None
+    }
 }
 
 /// A sequential ND-JSON ACP client for native ACP CLIs. The wire is kept here
@@ -321,6 +402,7 @@ pub struct AcpJsonRpcTransport {
     notifications: broadcast::Sender<Value>,
     session_setup: Mutex<Option<AcpSessionSetup>>,
     config_options: Mutex<Vec<AcpConfigOption>>,
+    broker: Arc<AcpPermissionBroker>,
 }
 
 /// `session/new` inputs captured at `initialize` time. Retained so that
@@ -336,18 +418,23 @@ impl AcpJsonRpcTransport {
     /// Start a runtime whose ACP subprocess command is documented by its
     /// vendor. Agents without a verified command remain on the observable
     /// direct-CLI migration route instead of guessing a flag.
-    pub async fn spawn_native(agent: AcpAgent, cwd: &str) -> Result<Self, AcpError> {
+    pub async fn spawn_native(
+        agent: AcpAgent,
+        cwd: &str,
+        full_access: bool,
+    ) -> Result<Self, AcpError> {
         let (program, args) = native_acp_command(agent).ok_or_else(|| {
             AcpError::Transport(format!("no verified production ACP command for {agent:?}"))
         })?;
         let mut command = crate::core::cmd::async_cmd(program);
         command.args(args).current_dir(cwd);
-        Self::spawn(agent, command).await
+        Self::spawn(agent, command, full_access).await
     }
 
     pub async fn spawn(
         agent: AcpAgent,
         mut command: tokio::process::Command,
+        full_access: bool,
     ) -> Result<Self, AcpError> {
         command
             .stdin(std::process::Stdio::piped())
@@ -370,11 +457,13 @@ impl AcpJsonRpcTransport {
             oneshot::Sender<Result<Value, AcpError>>,
         >::new()));
         let (notifications, _) = broadcast::channel(256);
+        let broker = Arc::new(AcpPermissionBroker::new(full_access));
         Self::start_dispatcher(
             BufReader::new(stdout),
             stdin.clone(),
             pending.clone(),
             notifications.clone(),
+            broker.clone(),
         );
         Ok(Self {
             agent,
@@ -385,7 +474,14 @@ impl AcpJsonRpcTransport {
             notifications,
             session_setup: Mutex::new(None),
             config_options: Mutex::new(Vec::new()),
+            broker,
         })
+    }
+
+    /// Audit trail of every permission/fs/terminal decision the dispatcher
+    /// made for incoming agent->client requests during this session.
+    pub fn permission_audit_log(&self) -> Vec<AcpAuditEntry> {
+        self.broker.audit_log()
     }
 
     fn start_dispatcher(
@@ -393,6 +489,7 @@ impl AcpJsonRpcTransport {
         stdin: Arc<Mutex<ChildStdin>>,
         pending: PendingRequests,
         notifications: broadcast::Sender<Value>,
+        broker: Arc<AcpPermissionBroker>,
     ) {
         tokio::spawn(async move {
             loop {
@@ -426,11 +523,16 @@ impl AcpJsonRpcTransport {
                 if let Some(id) = message.get("id").and_then(Value::as_u64) {
                     if let Some(method) = message.get("method").and_then(Value::as_str) {
                         // Agent -> client requests cannot wait behind a prompt response.
-                        // Kronn has not granted an ACP capability-specific executor here, so
-                        // deny safely and deterministically instead of silently hanging.
-                        let response =
-                            json!({"jsonrpc":"2.0", "id":id, "result": permission_denied(method)});
-                        let _ = write_frame(&stdin, response).await;
+                        // Every one is routed through the scoped, audited broker instead
+                        // of hanging or being silently granted.
+                        let params = message.get("params").cloned().unwrap_or(Value::Null);
+                        let envelope = match handle_client_request(&broker, method, &params) {
+                            Ok(result) => json!({"jsonrpc":"2.0", "id":id, "result": result}),
+                            Err((code, error_message)) => {
+                                json!({"jsonrpc":"2.0", "id":id, "error": {"code": code, "message": error_message}})
+                            }
+                        };
+                        let _ = write_frame(&stdin, envelope).await;
                     } else if let Some(sender) = pending.lock().await.remove(&id) {
                         let result = if let Some(error) = message.get("error") {
                             Err(AcpError::Transport(format!("ACP response error: {error}")))
@@ -498,15 +600,23 @@ async fn fail_pending(pending: &PendingRequests, error: AcpError) {
     }
 }
 
-fn permission_denied(method: &str) -> Value {
-    tracing::warn!(
-        method,
-        "ACP agent requested an unbound client capability; denying"
-    );
-    // ACP permission and file/terminal requests use result objects. Keeping the
-    // outcome explicit lets compatible agents terminate the tool call instead of
-    // retrying a request whose Kronn scope has not been injected.
-    json!({"outcome": "denied", "reason": "Kronn permission scope does not allow this request"})
+/// Route one incoming agent->client JSON-RPC request through the broker.
+/// `session/request_permission` always gets a "result" (a spec-shaped
+/// selected/cancelled outcome, allow or deny); `fs/*`, `terminal/*` and any
+/// other method Kronn does not implement get a spec-correct JSON-RPC error
+/// instead of a fabricated result object.
+fn handle_client_request(
+    broker: &AcpPermissionBroker,
+    method: &str,
+    params: &Value,
+) -> Result<Value, (i64, String)> {
+    match method {
+        "session/request_permission" => Ok(broker.decide_tool_call_permission(method, params)),
+        method if method.starts_with("fs/") || method.starts_with("terminal/") => {
+            Err(broker.deny_unbound_capability(method))
+        }
+        other => Err(broker.deny_unknown_method(other)),
+    }
 }
 
 /// Map an ACP v1 `initialize` result into Kronn's capability set.
@@ -1251,6 +1361,56 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(acp_adapter_env_toggle)]
+    fn the_adapted_route_is_off_by_default_and_never_widens_other_agents() {
+        std::env::remove_var("KRONN_ACP_ADAPTER_CODEX");
+        std::env::remove_var("KRONN_ACP_ADAPTER_CLAUDE");
+        assert_eq!(
+            resolve_acp_route(&AgentType::Codex),
+            AcpProductionRoute::DirectCliMigration
+        );
+        assert_eq!(
+            resolve_acp_route(&AgentType::ClaudeCode),
+            AcpProductionRoute::DirectCliMigration
+        );
+        // A route that was never DirectCliMigration to begin with must never
+        // become AdaptedAcp, no matter what the toggle says.
+        for agent in [AgentType::OpenCode, AgentType::Ollama] {
+            assert_eq!(resolve_acp_route(&agent), production_route(&agent));
+        }
+    }
+
+    #[test]
+    #[serial_test::serial(acp_adapter_env_toggle)]
+    fn each_agent_s_toggle_only_widens_that_agent_s_own_route() {
+        std::env::remove_var("KRONN_ACP_ADAPTER_CODEX");
+        std::env::remove_var("KRONN_ACP_ADAPTER_CLAUDE");
+        std::env::set_var("KRONN_ACP_ADAPTER_CODEX", "1");
+        assert_eq!(
+            resolve_acp_route(&AgentType::Codex),
+            AcpProductionRoute::AdaptedAcp
+        );
+        assert_eq!(
+            resolve_acp_route(&AgentType::ClaudeCode),
+            AcpProductionRoute::DirectCliMigration,
+            "Claude's route must stay unaffected by Codex's toggle"
+        );
+        std::env::remove_var("KRONN_ACP_ADAPTER_CODEX");
+
+        std::env::set_var("KRONN_ACP_ADAPTER_CLAUDE", "1");
+        assert_eq!(
+            resolve_acp_route(&AgentType::ClaudeCode),
+            AcpProductionRoute::AdaptedAcp
+        );
+        assert_eq!(
+            resolve_acp_route(&AgentType::Codex),
+            AcpProductionRoute::DirectCliMigration,
+            "Codex's route must stay unaffected by Claude's toggle"
+        );
+        std::env::remove_var("KRONN_ACP_ADAPTER_CLAUDE");
+    }
+
+    #[test]
     fn native_acp_commands_match_the_verified_vendor_syntax() {
         assert_eq!(
             native_acp_command(AcpAgent::OpenCode),
@@ -1334,10 +1494,39 @@ mod tests {
     }
 
     #[test]
-    fn acp_v1_permission_requests_are_denied_with_a_typed_result() {
+    fn fs_and_terminal_requests_get_a_json_rpc_error_never_a_fabricated_result() {
+        let broker = AcpPermissionBroker::new(true);
+        for method in ["fs/read_text_file", "fs/write_text_file", "terminal/create"] {
+            let outcome = handle_client_request(&broker, method, &Value::Null);
+            let (code, message) = outcome.expect_err("fs/terminal must never be granted a result");
+            assert_eq!(code, permission_broker::ACP_CAPABILITY_NOT_GRANTED);
+            assert!(message.contains(method));
+        }
+    }
+
+    #[test]
+    fn an_unimplemented_method_is_a_standard_json_rpc_method_not_found() {
+        let broker = AcpPermissionBroker::new(true);
+        let (code, message) =
+            handle_client_request(&broker, "session/some_future_method", &Value::Null)
+                .expect_err("unknown methods must be refused");
+        assert_eq!(code, permission_broker::ACP_METHOD_NOT_FOUND);
+        assert!(message.contains("session/some_future_method"));
+    }
+
+    #[test]
+    fn a_permission_request_is_routed_to_the_broker_and_returns_a_result_not_an_error() {
+        let broker = AcpPermissionBroker::new(false);
+        let params = json!({
+            "sessionId": "s1",
+            "toolCall": {"toolCallId": "call-1", "kind": "read"},
+            "options": [{"optionId": "allow-once", "name": "Allow once", "kind": "allow_once"}]
+        });
+        let result = handle_client_request(&broker, "session/request_permission", &params)
+            .expect("a read-kind tool call must be granted a result, not an error");
         assert_eq!(
-            permission_denied("fs/write_text_file"),
-            json!({"outcome":"denied", "reason":"Kronn permission scope does not allow this request"})
+            result,
+            json!({"outcome": {"outcome": "selected", "optionId": "allow-once"}})
         );
     }
 
@@ -1345,7 +1534,7 @@ mod tests {
     async fn json_rpc_transport_keeps_updates_emitted_before_prompt_response() {
         let mut command = crate::core::cmd::async_cmd("sh");
         command.args(["-c", "while IFS= read -r line; do case \"$line\" in *'\"method\":\"initialize\"'*) printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":1,\"agentCapabilities\":{\"sessionCapabilities\":{},\"promptCapabilities\":{},\"sessionCancellation\":{}}}}' ;; *'\"method\":\"session/new\"'*) printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"sessionId\":\"fixture-session\"}}' ;; *'\"method\":\"session/prompt\"'*) printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"update\":{\"content\":[{\"type\":\"text\",\"text\":\"before response\"}],\"usage\":{\"inputTokens\":3,\"outputTokens\":5}}}}'; printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{}}' ;; esac; done"]);
-        let transport = AcpJsonRpcTransport::spawn(AcpAgent::OpenCode, command)
+        let transport = AcpJsonRpcTransport::spawn(AcpAgent::OpenCode, command, false)
             .await
             .unwrap();
         transport.initialize(request()).await.unwrap();
@@ -1372,6 +1561,49 @@ mod tests {
             ]
         );
         transport.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn dispatcher_denies_a_live_fs_request_with_a_spec_correct_json_rpc_error() {
+        // End-to-end coverage that the running dispatcher — not just the pure
+        // `handle_client_request` helper — actually routes an inbound
+        // agent->client request through the broker. The fixture agent sends
+        // an `fs/read_text_file` request mid-turn, captures Kronn's reply to
+        // a file, then completes the turn normally.
+        let response_file = tempfile::NamedTempFile::new().unwrap();
+        let response_path = response_file.path().to_path_buf();
+        let mut command = crate::core::cmd::async_cmd("sh");
+        command
+            .env("RESPONSE_FILE", &response_path)
+            .args(["-c", "while IFS= read -r line; do case \"$line\" in *'\"method\":\"initialize\"'*) printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":1}}' ;; *'\"method\":\"session/new\"'*) printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"sessionId\":\"fixture-session\"}}' ;; *'\"method\":\"session/prompt\"'*) printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":99,\"method\":\"fs/read_text_file\",\"params\":{\"sessionId\":\"fixture-session\",\"path\":\"/tmp/x\"}}'; IFS= read -r reply; printf '%s' \"$reply\" > \"$RESPONSE_FILE\"; printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{}}' ;; esac; done"]);
+        let transport = AcpJsonRpcTransport::spawn(AcpAgent::OpenCode, command, false)
+            .await
+            .unwrap();
+        transport.initialize(request()).await.unwrap();
+        let target = transport.create_session().await.unwrap();
+        let (tx, mut rx) = mpsc::channel(16);
+        transport
+            .prompt(&target, "fixture prompt", tx)
+            .await
+            .unwrap();
+        while rx.recv().await.is_some() {}
+        transport.shutdown().await.unwrap();
+
+        let raw = std::fs::read_to_string(&response_path).unwrap();
+        let reply: Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(reply["id"], json!(99));
+        assert_eq!(
+            reply["error"]["code"],
+            json!(permission_broker::ACP_CAPABILITY_NOT_GRANTED)
+        );
+        assert!(reply.get("result").is_none());
+
+        let audited = transport
+            .permission_audit_log()
+            .into_iter()
+            .find(|entry| entry.method == "fs/read_text_file")
+            .expect("the fs/read_text_file decision must be audited");
+        assert_eq!(audited.verdict, AcpPermissionVerdict::Deny);
     }
 
     #[test]
