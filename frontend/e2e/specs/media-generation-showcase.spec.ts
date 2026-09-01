@@ -54,6 +54,9 @@ test('captures the generated assets, the carousel and the launcher', async ({ pa
   const panel = page.getByRole('complementary', { name: 'Assets' });
   await expect(panel).toBeVisible();
   await expect(panel.getByTestId('discussion-asset-card').first()).toBeVisible({ timeout: 15_000 });
+  // A visible clip card must expose an actual first-frame preview rather than
+  // only the generic play badge.
+  await expect(panel.getByTestId('attach-video-poster').first()).toBeVisible({ timeout: 30_000 });
   await page.screenshot({ path: `${OUT}/02-assets-tab.png` });
 
   // The launcher — modality, connection, prompt, video shape, estimated price.
@@ -89,6 +92,15 @@ test('captures the generated assets, the carousel and the launcher', async ({ pa
   expect(sawVideo, 'the clip must be reachable from the same carousel as the image').toBe(true);
   await page.waitForTimeout(1200); // let the first frame paint
   await page.screenshot({ path: `${OUT}/06-carousel-video.png` });
+
+  // Regression: closing used to revoke the blob URL while keeping the dead
+  // string cached, so reopening the exact same clip displayed an endless
+  // native loader. The library thumbnail reopens it without a second page
+  // reload and the player must become visible again.
+  await dialog.getByRole('button', { name: 'Fermer la visionneuse' }).click();
+  await expect(dialog).toBeHidden();
+  await panel.getByTestId('attach-video-thumb').first().click();
+  await expect(dialog.getByTestId('media-player-video')).toBeVisible({ timeout: 10_000 });
 });
 
 test('captures the media slots on the connection card', async ({ page }) => {
