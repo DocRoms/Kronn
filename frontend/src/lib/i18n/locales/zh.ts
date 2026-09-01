@@ -2394,7 +2394,7 @@ const zh: TranslationDict = {
   "config.extApi.media.video": "视频",
   "config.extApi.mediaPlaceholder.image": "例如 meta/muse-image",
   "config.extApi.mediaPlaceholder.video": "例如 bytedance/seedance-2.0-mini",
-  "config.extApi.mediaHint": "若该提供方没有图片或视频模型，请留空。请输入准确的模型 id；媒体目录可用后，此输入框将替换为选择器。",
+  "config.extApi.mediaHint": "请先测试连接，然后搜索并选择准确的图片或视频模型。如果提供方不再列出已保存的模型，该模型仍会显示。",
   "config.extApi.modelsLoaded": "已加载 {0} 个模型。",
   "config.extApi.noModels": "连接正常，但未返回模型。",
   "config.nvidiaLoadCatalogue": "加载 NVIDIA 模型目录",

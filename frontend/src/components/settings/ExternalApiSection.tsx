@@ -380,10 +380,6 @@ function ConnectionForm({
             <span>{t('config.extApi.mediaTitle')}</span>
             <small>{t('config.extApi.mediaOptional')}</small>
           </div>
-          {/* Free text rather than a picker: the media catalogues live on
-              separate provider routes and belong to another ticket. Typing a
-              model works today and becomes a picker later without changing
-              what is stored. */}
           <div className="set-ext-api-tiers">
             {(['image', 'video'] as const).map(modality => {
               const value = modality === 'image' ? form.image_model : form.video_model;
@@ -393,19 +389,35 @@ function ConnectionForm({
                     ? { ...prev, image_model: next }
                     : { ...prev, video_model: next },
                 );
+              // Keep an already-saved value visible even when a provider no
+              // longer returns it. This is the same explicit, non-destructive
+              // behaviour as the text tiers; the user can see and replace it
+              // after a successful connection test.
+              const models = [...new Set([
+                value,
+                ...(testResult?.models ?? []),
+              ].filter(Boolean))];
               return (
                 <div className="set-ext-api-tier" key={modality} data-tier={modality}>
                   <span className="set-ext-api-tier-label">
                     <span aria-hidden="true">{modality === 'image' ? '🖼' : '🎬'}</span>{' '}
                     {t(`config.extApi.media.${modality}`)}
                   </span>
-                  <input
-                    type="text"
-                    className="input input-compact"
+                  <SearchableSelect
+                    className="searchable-select--compact"
                     value={value}
+                    options={models.map(model => ({
+                      value: model,
+                      label: model,
+                      keywords: model.replaceAll('/', ' '),
+                    }))}
+                    onChange={setValue}
+                    label={t(`config.extApi.media.${modality}`)}
                     placeholder={t(`config.extApi.mediaPlaceholder.${modality}`)}
-                    data-testid={`ext-api-media-${modality}`}
-                    onChange={event => setValue(event.target.value)}
+                    emptyLabel={t('config.searchModelEmpty')}
+                    clearLabel={t('config.defaultModel')}
+                    disabled={!modelsUnlocked}
+                    testId={`ext-api-media-${modality}`}
                   />
                   {value && modelCostSuffix ? (
                     <span className="text-2xs text-muted">{modelCostSuffix(value)}</span>

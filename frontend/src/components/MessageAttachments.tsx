@@ -4,7 +4,7 @@
 // unmount). Non-image files (no disk_path on the backend) render as a filename
 // chip. Lives in its own file so the blob lifecycle is unit-testable in
 // isolation from the heavy MessageBubble.
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { ChevronLeft, ChevronRight, Download, ExternalLink, FileText, Image as ImageIcon, Loader2, MessageSquare, X } from 'lucide-react';
 import type { ContextFile } from '../types/generated';
@@ -19,12 +19,13 @@ function formatKb(bytes: number): string {
   return `${Math.max(1, Math.round(bytes / 1024))} KB`;
 }
 
-function AttachmentThumb({ file, url, failed, t, onOpen, variant, onNavigateMessage }: {
+function AttachmentThumb({ file, url, failed, t, onOpen, onPrepareVideo, variant, onNavigateMessage }: {
   file: ContextFile;
   url?: string;
   failed: boolean;
   t: T;
   onOpen: () => void;
+  onPrepareVideo?: () => void;
   variant: 'message' | 'library';
   onNavigateMessage?: (messageId: string) => void;
 }) {
@@ -32,8 +33,28 @@ function AttachmentThumb({ file, url, failed, t, onOpen, variant, onNavigateMess
   const isVideo = isVideoFile(file);
   const meta = `${file.filename} (${formatKb(file.original_size)})`;
   const messageId = file.message_id;
+  const videoThumbRef = useRef<HTMLButtonElement | null>(null);
   const [downloading, setDownloading] = useState(false);
   const [downloadFailed, setDownloadFailed] = useState(false);
+
+  // A real video thumbnail needs the authenticated blob. Load it only when a
+  // library card enters the viewport; message rows keep the cheap badge and
+  // fetch only after the user opens the clip.
+  useEffect(() => {
+    if (!isVideo || variant !== 'library' || url || failed || !onPrepareVideo) return;
+    const node = videoThumbRef.current;
+    if (!node || typeof IntersectionObserver === 'undefined') {
+      onPrepareVideo();
+      return;
+    }
+    const observer = new IntersectionObserver(entries => {
+      if (!entries.some(entry => entry.isIntersecting)) return;
+      observer.disconnect();
+      onPrepareVideo();
+    }, { rootMargin: '160px' });
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [failed, isVideo, onPrepareVideo, url, variant]);
 
   const downloadFile = async () => {
     if (downloading || !file.disk_path) return;
@@ -67,6 +88,7 @@ function AttachmentThumb({ file, url, failed, t, onOpen, variant, onNavigateMess
     // is merely on screen pulls nothing. The bytes are fetched when the
     // carousel opens on it.
     <button
+      ref={videoThumbRef}
       type="button"
       className="disc-attach-thumb disc-attach-thumb--video"
       onClick={onOpen}
@@ -74,6 +96,23 @@ function AttachmentThumb({ file, url, failed, t, onOpen, variant, onNavigateMess
       aria-label={t('disc.media.playerLabel', file.filename)}
       data-testid="attach-video-thumb"
     >
+      {url && (
+        <video
+          className="disc-attach-video-poster"
+          src={url}
+          preload="metadata"
+          muted
+          playsInline
+          aria-hidden="true"
+          data-testid="attach-video-poster"
+          onLoadedMetadata={event => {
+            const video = event.currentTarget;
+            if (Number.isFinite(video.duration) && video.duration > 0) {
+              video.currentTime = Math.min(0.1, video.duration / 10);
+            }
+          }}
+        />
+      )}
       <span className="disc-attach-video-badge" aria-hidden="true">▶</span>
       <span className="disc-attach-video-kind">{t('disc.media.videoBadge')}</span>
     </button>
@@ -165,33 +204,82 @@ export function MessageAttachments({
   const [urls, setUrls] = useState<Record<string, string>>({});
   const [failedIds, setFailedIds] = useState<Set<string>>(() => new Set());
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const objectUrlsRef = useRef<Map<string, string>>(new Map());
+  const inFlightRef = useRef<Set<string>>(new Set());
+  const generationRef = useRef(0);
+  const mountedRef = useRef(false);
+  const discussionRef = useRef(discussionId);
+  const cleanupSequenceRef = useRef(0);
+
+  const releaseMediaUrls = useCallback(() => {
+    generationRef.current += 1;
+    for (const objectUrl of objectUrlsRef.current.values()) {
+      URL.revokeObjectURL(objectUrl);
+    }
+    objectUrlsRef.current.clear();
+    inFlightRef.current.clear();
+  }, []);
+
+  const finalizeUnmount = useCallback((cleanupSequence: number) => {
+    if (mountedRef.current || cleanupSequenceRef.current !== cleanupSequence) return;
+    releaseMediaUrls();
+  }, [releaseMediaUrls]);
+
+  // Object URLs belong to the discussion, not to a transient selection. The
+  // former video effect revoked its URL as soon as setUrls triggered a rerun,
+  // then kept that revoked string in state: reopening the clip produced an
+  // endless native loader. Cleanup is deferred by one microtask so React
+  // StrictMode's synthetic unmount/remount does not download a large clip
+  // twice. A real discussion change still clears its URLs synchronously.
+  useLayoutEffect(() => {
+    if (discussionRef.current !== discussionId) {
+      releaseMediaUrls();
+      discussionRef.current = discussionId;
+      setUrls({});
+      setFailedIds(new Set());
+      setSelectedId(null);
+    }
+    mountedRef.current = true;
+    cleanupSequenceRef.current += 1;
+    return () => {
+      mountedRef.current = false;
+      const cleanupSequence = ++cleanupSequenceRef.current;
+      queueMicrotask(() => finalizeUnmount(cleanupSequence));
+    };
+  }, [discussionId, finalizeUnmount, releaseMediaUrls]);
+
+  const loadMediaUrl = useCallback((file: ContextFile) => {
+    if (objectUrlsRef.current.has(file.id) || inFlightRef.current.has(file.id)) return;
+    const generation = generationRef.current;
+    inFlightRef.current.add(file.id);
+    discussionsApi.contextFileBlob(discussionId, file.id)
+      .then((blob: Blob) => {
+        if (!mountedRef.current || generation !== generationRef.current) return;
+        const objectUrl = URL.createObjectURL(blob);
+        objectUrlsRef.current.set(file.id, objectUrl);
+        setUrls(prev => ({ ...prev, [file.id]: objectUrl }));
+        setFailedIds(prev => {
+          if (!prev.has(file.id)) return prev;
+          const next = new Set(prev);
+          next.delete(file.id);
+          return next;
+        });
+      })
+      .catch(() => {
+        if (mountedRef.current && generation === generationRef.current) {
+          setFailedIds(prev => new Set(prev).add(file.id));
+        }
+      })
+      .finally(() => {
+        if (generation === generationRef.current) inFlightRef.current.delete(file.id);
+      });
+  }, [discussionId]);
 
   useEffect(() => {
-    let cancelled = false;
-    const objectUrls: string[] = [];
     for (const file of imageFiles) {
-      discussionsApi.contextFileBlob(discussionId, file.id)
-        .then((blob: Blob) => {
-          if (cancelled) return;
-          const objectUrl = URL.createObjectURL(blob);
-          objectUrls.push(objectUrl);
-          setUrls(prev => ({ ...prev, [file.id]: objectUrl }));
-          setFailedIds(prev => {
-            if (!prev.has(file.id)) return prev;
-            const next = new Set(prev);
-            next.delete(file.id);
-            return next;
-          });
-        })
-        .catch(() => {
-          if (!cancelled) setFailedIds(prev => new Set(prev).add(file.id));
-        });
+      loadMediaUrl(file);
     }
-    return () => {
-      cancelled = true;
-      for (const objectUrl of objectUrls) URL.revokeObjectURL(objectUrl);
-    };
-  }, [discussionId, imageFiles]);
+  }, [imageFiles, loadMediaUrl]);
 
   const selectedIndex = selectedId
     ? carouselFiles.findIndex(file => file.id === selectedId)
@@ -202,23 +290,8 @@ export function MessageAttachments({
   // being looked at — never for the whole carousel.
   useEffect(() => {
     if (!selectedFile || !isVideoFile(selectedFile)) return;
-    if (urls[selectedFile.id] || failedIds.has(selectedFile.id)) return;
-    let cancelled = false;
-    let objectUrl: string | null = null;
-    discussionsApi.contextFileBlob(discussionId, selectedFile.id)
-      .then((blob: Blob) => {
-        if (cancelled) return;
-        objectUrl = URL.createObjectURL(blob);
-        setUrls(prev => ({ ...prev, [selectedFile.id]: objectUrl as string }));
-      })
-      .catch(() => {
-        if (!cancelled) setFailedIds(prev => new Set(prev).add(selectedFile.id));
-      });
-    return () => {
-      cancelled = true;
-      if (objectUrl) URL.revokeObjectURL(objectUrl);
-    };
-  }, [discussionId, selectedFile, urls, failedIds]);
+    loadMediaUrl(selectedFile);
+  }, [loadMediaUrl, selectedFile]);
 
   const moveSelection = useCallback((delta: number) => {
     if (carouselFiles.length < 2) return;
@@ -260,6 +333,7 @@ export function MessageAttachments({
             failed={failedIds.has(file.id)}
             t={t}
             onOpen={() => setSelectedId(file.id)}
+            onPrepareVideo={() => loadMediaUrl(file)}
             variant={variant}
             onNavigateMessage={onNavigateMessage}
           />
