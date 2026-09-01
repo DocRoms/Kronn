@@ -193,6 +193,15 @@ function ConnectionForm({
     openRouterKeyValid &&
     !submitting;
   const modelsUnlocked = testResult?.ok === true && testResult.models.length > 0;
+  const catalogModels = (capability: 'chat' | 'image' | 'video') => {
+    if (!testResult?.catalog) {
+      return capability === 'chat'
+        ? (testResult?.models ?? []).map(id => ({ id, display_name: id, capabilities: ['chat'] }))
+        : [];
+    }
+    return testResult.catalog
+      .filter(model => model.capabilities.includes(capability));
+  };
 
   return (
     <div className="set-ext-api-form" data-testid="ext-api-form">
@@ -343,7 +352,7 @@ function ConnectionForm({
                 );
               const models = [...new Set([
                 value,
-                ...(testResult?.models ?? []),
+                ...catalogModels('chat').map(model => model.id),
               ].filter(Boolean))];
               return (
                 <div className="set-ext-api-tier" key={tier} data-tier={tier}>
@@ -393,10 +402,9 @@ function ConnectionForm({
               // longer returns it. This is the same explicit, non-destructive
               // behaviour as the text tiers; the user can see and replace it
               // after a successful connection test.
-              const models = [...new Set([
-                value,
-                ...(testResult?.models ?? []),
-              ].filter(Boolean))];
+              const discovered = catalogModels(modality);
+              const discoveredIds = discovered.map(model => model.id);
+              const models = [...new Set([value, ...discoveredIds].filter(Boolean))];
               return (
                 <div className="set-ext-api-tier" key={modality} data-tier={modality}>
                   <span className="set-ext-api-tier-label">
@@ -408,15 +416,19 @@ function ConnectionForm({
                     value={value}
                     options={models.map(model => ({
                       value: model,
-                      label: model,
+                      label: discovered.find(item => item.id === model)?.display_name ?? model,
                       keywords: model.replaceAll('/', ' '),
+                      disabled: model === value && !discoveredIds.includes(model),
+                      description: model === value && !discoveredIds.includes(model)
+                        ? t('modelCatalog.unavailable')
+                        : model,
                     }))}
                     onChange={setValue}
                     label={t(`config.extApi.media.${modality}`)}
                     placeholder={t(`config.extApi.mediaPlaceholder.${modality}`)}
                     emptyLabel={t('config.searchModelEmpty')}
                     clearLabel={t('config.defaultModel')}
-                    disabled={!modelsUnlocked}
+                    disabled={!testResult?.ok || (discovered.length === 0 && !value)}
                     testId={`ext-api-media-${modality}`}
                   />
                   {value && modelCostSuffix ? (

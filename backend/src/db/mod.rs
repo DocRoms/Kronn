@@ -25,6 +25,7 @@ pub mod live_pages;
 pub mod mcps;
 pub mod media_jobs;
 pub mod migrations;
+pub mod model_catalog;
 pub mod orchestration;
 pub mod planning;
 pub mod planning_proposals;

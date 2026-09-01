@@ -90,7 +90,18 @@ beforeEach(() => {
   updateMock.mockResolvedValue(conn({}));
   revealMock.mockResolvedValue('sk-stored-secret');
   removeMock.mockResolvedValue(null);
-  testMock.mockResolvedValue({ ok: true, status: 'success', models: ['model-a', 'model-b'], hint: null });
+  testMock.mockResolvedValue({
+    ok: true,
+    status: 'success',
+    models: ['model-a', 'model-b'],
+    catalog: [
+      { id: 'model-a', display_name: 'Model A', capabilities: ['chat'] },
+      { id: 'model-b', display_name: 'Model B', capabilities: ['chat'] },
+      { id: 'image-a', display_name: 'Image A', capabilities: ['image'] },
+      { id: 'video-a', display_name: 'Video A', capabilities: ['video'] },
+    ],
+    hint: null,
+  });
 });
 
 afterEach(() => {
@@ -621,10 +632,36 @@ describe('ExternalApiSection', () => {
 
     fireEvent.click(screen.getByTestId('ext-api-test'));
     await waitFor(() => expect(video).not.toBeDisabled());
-    expectTierOption('ext-api-media-image', 'model-a');
-    chooseTier('ext-api-media-video', 'model-b');
+    expectTierOption('ext-api-media-image', 'Image A');
+    const videoPicker = screen.getByTestId('ext-api-media-video');
+    fireEvent.focus(videoPicker);
+    fireEvent.change(videoPicker, { target: { value: 'Video A' } });
+    fireEvent.click(screen.getByRole('option', { name: 'Video A' }));
 
-    expect((screen.getByTestId('ext-api-media-video') as HTMLInputElement).value).toBe('model-b');
+    expect((screen.getByTestId('ext-api-media-video') as HTMLInputElement).value).toBe('Video A');
+    fireEvent.focus(screen.getByTestId('ext-api-media-image'));
+    expect(screen.queryByRole('option', { name: 'model-a' })).toBeNull();
+  });
+
+  it('keeps a saved but undetected media model visible as unavailable', async () => {
+    listMock.mockResolvedValue([conn({
+      id: 'saved-media',
+      endpoint: 'https://openrouter.ai/api',
+      origin_preset: 'open_router',
+      has_credential: true,
+      video_model: 'retired/video-model',
+    })]);
+    renderSection();
+    fireEvent.click(await screen.findByTestId('ext-api-edit-saved-media'));
+    const video = screen.getByTestId('ext-api-media-video');
+    expect(video).toHaveValue('retired/video-model');
+
+    fireEvent.click(screen.getByTestId('ext-api-test'));
+    await waitFor(() => expect(video).not.toBeDisabled());
+    fireEvent.focus(video);
+    expect(screen.getByRole('option', { name: 'retired/video-model' })).toHaveAttribute('aria-disabled', 'true');
+    expect(screen.getByRole('option', { name: 'Video A' })).toBeInTheDocument();
+    expect(screen.queryByRole('option', { name: 'Image A' })).toBeNull();
   });
 
   it('keeps the media block separate from the three text tiers', async () => {

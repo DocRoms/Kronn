@@ -806,6 +806,69 @@ async fn execute_run_with_notify_policy(
                 emit(RunEvent::RunError { error: msg });
                 return Ok(());
             }
+
+            // Resolve every statically reachable Agent step before the first
+            // one starts. Dynamic branches are checked again immediately
+            // before dispatch by `execute_step`.
+            let mut catalog_failures = Vec::new();
+            for step in workflow
+                .steps
+                .iter()
+                .filter(|step| matches!(step.step_type, StepType::Agent))
+            {
+                let tier = step
+                    .agent_settings
+                    .as_ref()
+                    .and_then(|settings| settings.tier)
+                    .unwrap_or_default();
+                let model = step
+                    .agent_settings
+                    .as_ref()
+                    .and_then(|settings| settings.model.as_deref());
+                if let Some(failure) = crate::core::model_catalog::preflight_check(
+                    &state.db,
+                    None,
+                    step.agent.clone(),
+                    tier,
+                    model,
+                    Some(&agents_config.model_tiers),
+                )
+                .await
+                {
+                    catalog_failures.push((step.name.clone(), failure));
+                }
+            }
+            if !catalog_failures.is_empty() {
+                let msg = format!(
+                    "preflight_failed:{}",
+                    serde_json::to_string(&catalog_failures).unwrap_or_default()
+                );
+                run.status = RunStatus::Failed;
+                run.step_results.push(StepResult {
+                    step_name: "__preflight__".to_string(),
+                    status: RunStatus::Failed,
+                    output: msg.clone(),
+                    tokens_used: 0,
+                    duration_ms: 0,
+                    started_at: None,
+                    condition_result: None,
+                    envelope_detected: None,
+                    step_kind: Some("preflight_failed".into()),
+                    step_api_plugin_slug: None,
+                    step_api_endpoint_path: None,
+                    is_rollback: false,
+                    child_run_id: None,
+                    native_tool_calls: Box::default(),
+                    step_agent: None,
+                    step_model: None,
+                });
+                let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
+                let db_p = db.clone();
+                db_p.with_conn(move |conn| crate::db::workflows::update_run_progress(conn, snap))
+                    .await?;
+                emit(RunEvent::RunError { error: msg });
+                return Ok(());
+            }
         }
     }
 
@@ -1303,6 +1366,7 @@ async fn execute_run_with_notify_policy(
                             )),
                             Some(&ollama_context_overrides),
                             native_tools,
+                            Some(&state.db),
                         )
                         .await;
                         // execute_step took ownership of progress_tx and dropped
@@ -2307,6 +2371,7 @@ async fn execute_run_with_notify_policy(
                         )),
                         Some(&ollama_context_overrides),
                         native_tools,
+                        Some(&state.db),
                     )
                     .await
                 }

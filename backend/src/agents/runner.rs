@@ -2501,50 +2501,27 @@ pub(crate) fn resolve_model_flag(
         }
     }
 
-    // Built-in defaults — explicit model for each tier so tiers are always distinct.
-    // Default maps to the "standard" model, not "no flag" (which depends on user subscription).
-    match (agent_type, tier) {
-        (AgentType::ClaudeCode, ModelTier::Economy) => Some("haiku".into()),
-        (AgentType::ClaudeCode, ModelTier::Default) => Some("sonnet".into()),
-        (AgentType::ClaudeCode, ModelTier::Reasoning) => Some("opus".into()),
-        // 2026-07: gpt-5.6 generation (sol=frontier, terra=balanced, luna=fast).
-        (AgentType::Codex, ModelTier::Economy) => Some("gpt-5.6-luna".into()),
-        (AgentType::Codex, ModelTier::Default) => None, // Codex default is fine
-        (AgentType::Codex, ModelTier::Reasoning) => Some("gpt-5.6-sol".into()),
-        // OpenCode provides its selected model and modes from ACP during
-        // initialization; no static model name is authoritative here.
-        (AgentType::OpenCode, _) => None,
-        (AgentType::GeminiCli, ModelTier::Economy) => Some("gemini-2.5-flash".into()),
-        (AgentType::GeminiCli, ModelTier::Default) => None, // Gemini default is fine
-        (AgentType::GeminiCli, ModelTier::Reasoning) => Some("gemini-3.1-pro-preview".into()),
-        // Copilot's available model set is account/policy-dependent. The old
-        // hard-coded `gpt-4o-mini` / `o4-mini` values are no longer accepted
-        // by Copilot CLI 1.0.x and made an otherwise valid prompt fail before
-        // execution. Let the CLI select its current account-compatible model
-        // unless the user explicitly configured a tier override.
-        (AgentType::CopilotCli, _) => None,
-        // Ollama: the user normally picks a model per tier via the OllamaCard
-        // (override above). These are the pulled-tag fallbacks when none is set,
-        // deliberately portability-first (NOT tuned for a beefy machine):
-        // qwen3:8b (~5 GB) fits almost any box, is fast, multilingual, and — key
-        // — reliably honors `/no_think` so its output stays clean+parseable.
-        // Economy is ALSO qwen3:8b, not qwen3:4b: benchmarking (2026-07-02)
-        // showed qwen3:4b ignores `/no_think`, leaking reasoning + `\boxed{}`
-        // wrappers into `content` → unusable for a step that parses the output,
-        // and it wasn't even faster (the thinking made it SLOWER). 8b is the
-        // reliable small-model floor; users who want lighter can still pick
-        // qwen3:4b explicitly in the OllamaCard economy slot. Reasoning is the
-        // only heavy fallback (qwen3:30b-a3b MoE) — an explicit opt-in tier;
-        // small machines should override it. Never bare tags like `qwen3` (not
-        // pullable) or `llama3.2` (not pulled) → opaque Ollama 404.
-        (AgentType::Ollama, ModelTier::Default) => Some("qwen3:8b".into()),
-        (AgentType::Ollama, ModelTier::Economy) => Some("qwen3:8b".into()),
-        (AgentType::Ollama, ModelTier::Reasoning) => Some("qwen3:30b-a3b".into()),
-        // LiteLLM deliberately has no built-in: the model names come from the
-        // operator's `config.yaml`, so any guess here would 404. The user sets
-        // one in the LiteLLM card and it covers every tier (see above).
-        // Kiro, Vibe: no --model flag support
-        _ => None,
+    // The durable catalog is the runtime source. Former built-ins are seeded
+    // once by `migrate_hardcoded_catalog_once`; keeping literals here would
+    // silently revive them after an operator removes or replaces a model.
+    let catalog_model = crate::core::model_catalog::assigned_model_for_agent(agent_type, tier)
+        .or_else(|| {
+            is_http_chat_agent(agent_type)
+                .then(|| {
+                    crate::core::model_catalog::assigned_model_for_agent(
+                        agent_type,
+                        ModelTier::Default,
+                    )
+                })
+                .flatten()
+        });
+    #[cfg(test)]
+    {
+        catalog_model.or_else(|| crate::core::model_catalog::migrated_default(agent_type, tier))
+    }
+    #[cfg(not(test))]
+    {
+        catalog_model
     }
 }
 

@@ -1127,6 +1127,20 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route("/api/agents/install", post(api::agents::install))
         .route("/api/agents/uninstall", post(api::agents::uninstall))
         .route("/api/agents/toggle", post(api::agents::toggle))
+        // ── Dynamic model catalogs (KT-531) ──
+        .route("/api/model-catalogs", get(api::model_catalog::list))
+        .route(
+            "/api/model-catalogs/refresh",
+            post(api::model_catalog::refresh),
+        )
+        .route(
+            "/api/model-catalogs/manual",
+            post(api::model_catalog::create_manual).put(api::model_catalog::update_manual),
+        )
+        .route(
+            "/api/model-catalogs/manual/delete",
+            post(api::model_catalog::delete_manual),
+        )
         // ── RTK (Rust Token Killer) — host-side compression proxy ──
         .route("/api/rtk/activate", post(api::rtk::activate))
         .route("/api/rtk/deactivate", post(api::rtk::deactivate))

@@ -1,6 +1,25 @@
 import type { TranslationDict } from '../../i18n';
 
 const es: TranslationDict = {
+  'modelCatalog.title': 'Catálogos de modelos',
+  'modelCatalog.description': 'Modelos detectados, almacenados en caché o configurados manualmente por destino.',
+  'modelCatalog.add': 'Añadir un modelo',
+  'modelCatalog.target': 'Agente o conexión',
+  'modelCatalog.modelId': 'Identificador exacto del modelo',
+  'modelCatalog.displayName': 'Nombre mostrado',
+  'modelCatalog.tier': 'Nivel predeterminado',
+  'modelCatalog.noTier': 'Sin nivel',
+  'modelCatalog.reasoningModes': 'Modos de razonamiento',
+  'modelCatalog.stale': 'Catálogo por comprobar',
+  'modelCatalog.current': 'Catálogo verificado',
+  'modelCatalog.recheck': 'Volver a comprobar el catálogo',
+  'modelCatalog.empty': 'No hay modelos conocidos. Compruébalo o añade uno manualmente.',
+  'modelCatalog.count': '{0} modelos conocidos',
+  'modelCatalog.provenance.live': 'Detectado',
+  'modelCatalog.provenance.cached': 'Caché — volver a comprobar',
+  'modelCatalog.provenance.manual': 'Manual',
+  'modelCatalog.provenance.migrated': 'Configuración migrada',
+  'modelCatalog.unavailable': 'No disponible',
   // ── Nav & Tabs ──
   'nav.projects': 'Proyectos',
   'nav.discussions': 'Discusiones',

@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Check, ChevronDown, Loader2, RefreshCw } from 'lucide-react';
+import { modelCatalogApi } from '../lib/api';
+import { useT } from '../lib/I18nContext';
 import {
   AGENT_COLORS,
   AGENT_LABELS,
@@ -8,7 +10,14 @@ import {
   agentTextColor,
   modelForAgentTier,
 } from '../lib/constants';
-import type { AgentType, ModelTier, ModelTierConfig, ModelTiersConfig } from '../types/generated';
+import type {
+  AgentType,
+  CatalogModelEntry,
+  ModelCatalogSnapshot,
+  ModelTier,
+  ModelTierConfig,
+  ModelTiersConfig,
+} from '../types/generated';
 import './AgentSwitchPicker.css';
 
 export interface AgentSwitchTarget {
@@ -66,8 +75,10 @@ export function AgentSwitchPicker({
   suffix,
   displayName,
 }: AgentSwitchPickerProps) {
+  const { t } = useT();
   const [open, setOpen] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [catalog, setCatalog] = useState<ModelCatalogSnapshot | null>(null);
   const [popoverPosition, setPopoverPosition] = useState<{ top: number; left: number } | null>(null);
   const savingRef = useRef(false);
   const rootRef = useRef<HTMLSpanElement>(null);
@@ -97,9 +108,37 @@ export function AgentSwitchPicker({
 
   const targetLabel = (target: AgentSwitchTarget) =>
     target.label ?? AGENT_LABELS[target.agent] ?? target.agent;
-  const targetModel = (target: AgentSwitchTarget, tier: ModelTier) =>
-    target.modelTiers?.[tier]
-    ?? modelForAgentTier(target.agent, tier, modelTiers, defaultModelLabel);
+  const runtimeTargetId = (target: AgentSwitchTarget) => target.connectionId
+    ? `http:${target.connectionId}`
+    : ({
+      ClaudeCode: 'agent:claude-code',
+      Codex: 'agent:codex',
+      OpenCode: 'agent:opencode',
+      Vibe: 'agent:vibe',
+      GeminiCli: 'agent:gemini-cli',
+      Kiro: 'agent:kiro',
+      CopilotCli: 'agent:copilot-cli',
+      Ollama: 'agent:ollama',
+      LiteLlm: 'agent:litellm',
+      Nvidia: 'agent:nvidia',
+      Custom: 'agent:custom',
+    } satisfies Record<AgentType, string>)[target.agent];
+  const catalogEntry = (target: AgentSwitchTarget, tier: ModelTier): CatalogModelEntry | undefined => {
+    const models = catalog?.targets
+      .find(view => view.runtime_target_id === runtimeTargetId(target))
+      ?.models;
+    const assigned = models?.find(model => model.tier_assignment === tier);
+    if (assigned) return assigned;
+    const configuredModel = target.modelTiers?.[tier]
+      ?? modelForAgentTier(target.agent, tier, modelTiers, defaultModelLabel);
+    return models?.find(model => model.model_id === configuredModel);
+  };
+  const targetModel = (target: AgentSwitchTarget, tier: ModelTier) => {
+    const entry = catalogEntry(target, tier);
+    return entry?.display_alias ?? entry?.display_name ?? entry?.model_id
+      ?? target.modelTiers?.[tier]
+      ?? modelForAgentTier(target.agent, tier, modelTiers, defaultModelLabel);
+  };
   const tierTitle = (target: AgentSwitchTarget, tier: ModelTier) =>
     `${tierLabels?.[tier] ?? tier} · ${targetModel(target, tier)}`;
   const effectiveSuffix = suffix
@@ -156,6 +195,15 @@ export function AgentSwitchPicker({
 
   useEffect(() => {
     if (!open) return;
+    let active = true;
+    void modelCatalogApi.list()
+      .then(snapshot => {
+        if (active) setCatalog(snapshot);
+      })
+      .catch(() => {
+        // The existing configured tiers remain a safe fallback. A picker
+        // never becomes unusable just because the catalog read failed.
+      });
     updatePopoverPosition();
     const closeOutside = (event: MouseEvent) => {
       const target = event.target as Node;
@@ -174,6 +222,7 @@ export function AgentSwitchPicker({
     window.addEventListener('resize', updatePopoverPosition);
     window.addEventListener('scroll', updatePopoverPosition, true);
     return () => {
+      active = false;
       document.removeEventListener('mousedown', closeOutside);
       document.removeEventListener('keydown', closeOnEscape);
       window.removeEventListener('resize', updatePopoverPosition);
@@ -257,6 +306,11 @@ export function AgentSwitchPicker({
                     && tier === currentTier;
                   const icon = MODEL_TIER_ICONS[tier];
                   const label = tierLabels?.[tier] ?? tier;
+                  const entry = catalogEntry(target, tier);
+                  const unavailable = entry?.availability === 'unavailable';
+                  const provenance = entry
+                    ? t(`modelCatalog.provenance.${entry.provenance}`)
+                    : null;
                   return (
                     <button
                       key={tier}
@@ -267,11 +321,18 @@ export function AgentSwitchPicker({
                       data-current={selected}
                       aria-label={`${targetLabel(target)} · ${label}`}
                       title={tierTitle(target, tier)}
-                      disabled={saving || selected}
+                      disabled={saving || selected || unavailable}
                       onClick={() => void select(target, tier)}
                     >
                       <span aria-hidden="true">{icon}</span>
                       <span>{label}</span>
+                      {entry && (
+                        <span className="kr-agent-switch-catalog-meta">
+                          {unavailable
+                            ? t('modelCatalog.unavailable')
+                            : provenance}
+                        </span>
+                      )}
                       {selected && <Check size={8} aria-hidden="true" />}
                     </button>
                   );

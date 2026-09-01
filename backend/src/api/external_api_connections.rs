@@ -85,8 +85,20 @@ pub struct TestConnectionRequest {
 pub struct TestConnectionResponse {
     pub ok: bool,
     pub status: String,
+    /// Backward-compatible chat model ids consumed by tier selectors.
     pub models: Vec<String>,
+    /// Capability-bearing union of every catalogue endpoint reached during
+    /// the probe. Media selectors filter this list instead of treating chat
+    /// models (or a previously saved free-text value) as media-capable.
+    pub catalog: Vec<TestConnectionModel>,
     pub hint: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TestConnectionModel {
+    pub id: String,
+    pub display_name: String,
+    pub capabilities: Vec<String>,
 }
 
 fn clean(value: Option<String>) -> Option<String> {
@@ -180,6 +192,7 @@ async fn probe_models(
                 ok: false,
                 status: "credential_required".into(),
                 models: vec![],
+                catalog: vec![],
                 hint: Some("Enter the OpenRouter API key before testing this connection.".into()),
             };
         };
@@ -189,6 +202,14 @@ async fn probe_models(
     }
 
     let mut catalogue = fetch_catalogue(endpoint, api_key).await;
+    if catalogue.ok && is_open_router {
+        let (images, videos) = tokio::join!(
+            fetch_capability_catalogue(endpoint, api_key, "/v1/images/models", "image"),
+            fetch_capability_catalogue(endpoint, api_key, "/v1/videos/models", "video"),
+        );
+        merge_catalog(&mut catalogue.catalog, images);
+        merge_catalog(&mut catalogue.catalog, videos);
+    }
     if catalogue.ok {
         let is_nvidia = origin_preset == Some(ExternalApiConnectionPreset::Nvidia);
         if (is_nvidia || is_open_router) && api_key.filter(|key| !key.trim().is_empty()).is_none() {
@@ -269,6 +290,7 @@ async fn probe_openrouter_credential(
                 ok: false,
                 status: "auth_error".into(),
                 models: vec![],
+                catalog: vec![],
                 hint: Some(hint.into()),
             })
         }
@@ -276,6 +298,7 @@ async fn probe_openrouter_credential(
             ok: false,
             status: "http_error".into(),
             models: vec![],
+            catalog: vec![],
             hint: Some(format!(
                 "OpenRouter returned HTTP {} while validating the API key.",
                 response.status().as_u16()
@@ -285,12 +308,14 @@ async fn probe_openrouter_credential(
             ok: false,
             status: "timeout".into(),
             models: vec![],
+            catalog: vec![],
             hint: Some("OpenRouter did not answer the API key validation in time.".into()),
         }),
         Err(_) => Some(TestConnectionResponse {
             ok: false,
             status: "transport_error".into(),
             models: vec![],
+            catalog: vec![],
             hint: Some("Kronn could not reach OpenRouter to validate the API key.".into()),
         }),
     }
@@ -335,6 +360,7 @@ async fn probe_auth(
                 ok: false,
                 status: "auth_error".into(),
                 models: vec![],
+                catalog: vec![],
                 hint: Some(format!(
                     "The endpoint refused '{model}'. Either the API key is rejected, or the key is valid but this model is not available to this account on this endpoint — image and video models are often served elsewhere. Check both before replacing the key."
                 )),
@@ -361,6 +387,7 @@ async fn probe_auth(
                 ok: false,
                 status: "http_error".into(),
                 models,
+                catalog: vec![],
                 hint: Some(hint),
             })
         }
@@ -370,6 +397,7 @@ async fn probe_auth(
             models: retained_models
                 .map(|items| items.to_vec())
                 .unwrap_or_default(),
+            catalog: vec![],
             hint: Some(if retained_models.is_some() {
                 format!(
                     "The NVIDIA model {model} did not answer in time. Try it again or choose another model."
@@ -384,6 +412,7 @@ async fn probe_auth(
             models: retained_models
                 .map(|items| items.to_vec())
                 .unwrap_or_default(),
+            catalog: vec![],
             hint: Some(if retained_models.is_some() {
                 format!(
                     "Kronn could not reach the NVIDIA model {model}. Try another model or check NVIDIA availability."
@@ -405,17 +434,20 @@ async fn fetch_catalogue(endpoint: &str, api_key: Option<&str>) -> TestConnectio
             match response.json::<serde_json::Value>().await {
                 Ok(body) if model_ids_from_body(&body).is_some() => {
                     let models = model_ids_from_body(&body).expect("checked above");
+                    let catalog = catalog_models_from_body(&body, "chat").unwrap_or_default();
                     TestConnectionResponse {
                     ok: true,
                     status: "success".into(),
                     hint: models.is_empty().then(|| "The endpoint responded but returned no usable models. Check this account or endpoint.".into()),
                     models,
+                    catalog,
                     }
                 }
                 _ => TestConnectionResponse {
                     ok: false,
                     status: "invalid_catalogue".into(),
                     models: vec![],
+                    catalog: vec![],
                     hint: Some(
                         "The endpoint responded, but its model catalogue is not OpenAI-compatible. Check the endpoint and provider settings."
                             .into(),
@@ -427,6 +459,7 @@ async fn fetch_catalogue(endpoint: &str, api_key: Option<&str>) -> TestConnectio
             ok: false,
             status: "auth_error".into(),
             models: vec![],
+            catalog: vec![],
             hint: Some(
                 "The endpoint rejected the credentials. Check the API key and its permissions."
                     .into(),
@@ -436,6 +469,7 @@ async fn fetch_catalogue(endpoint: &str, api_key: Option<&str>) -> TestConnectio
             ok: false,
             status: "http_error".into(),
             models: vec![],
+            catalog: vec![],
             hint: Some(format!(
                 "The endpoint returned HTTP {} while loading models.",
                 response.status().as_u16()
@@ -445,6 +479,7 @@ async fn fetch_catalogue(endpoint: &str, api_key: Option<&str>) -> TestConnectio
             ok: false,
             status: "timeout".into(),
             models: vec![],
+            catalog: vec![],
             hint: Some(
                 "The endpoint did not respond in time. Check its URL and availability.".into(),
             ),
@@ -453,10 +488,103 @@ async fn fetch_catalogue(endpoint: &str, api_key: Option<&str>) -> TestConnectio
             ok: false,
             status: "transport_error".into(),
             models: vec![],
+            catalog: vec![],
             hint: Some(
                 "Kronn could not reach this endpoint. Check the URL and network access.".into(),
             ),
         },
+    }
+}
+
+/// Fetch a provider-specific catalogue without changing the validity of the
+/// chat connection. OpenRouter intentionally serves image and video models on
+/// dedicated endpoints; a temporary failure of one optional route must not
+/// turn a valid chat credential into a failed connection test.
+async fn fetch_capability_catalogue(
+    endpoint: &str,
+    api_key: Option<&str>,
+    path: &str,
+    capability: &str,
+) -> Vec<TestConnectionModel> {
+    let mut request = probe_client().get(format!("{endpoint}{path}"));
+    if let Some(key) = api_key.filter(|key| !key.trim().is_empty()) {
+        request = request.bearer_auth(key);
+    }
+    let Ok(response) = request.send().await else {
+        return Vec::new();
+    };
+    if !response.status().is_success() {
+        return Vec::new();
+    }
+    response
+        .json::<serde_json::Value>()
+        .await
+        .ok()
+        .and_then(|body| catalog_models_from_body(&body, capability))
+        .unwrap_or_default()
+}
+
+fn catalog_models_from_body(
+    body: &serde_json::Value,
+    default_capability: &str,
+) -> Option<Vec<TestConnectionModel>> {
+    body["data"].as_array().and_then(|items| {
+        items
+            .iter()
+            .map(|model| {
+                let id = model["id"]
+                    .as_str()
+                    .filter(|id| !id.trim().is_empty())?
+                    .to_string();
+                let display_name = model["name"]
+                    .as_str()
+                    .filter(|name| !name.trim().is_empty())
+                    .unwrap_or(&id)
+                    .to_string();
+                let mut capabilities = Vec::new();
+                let output_modalities = model["architecture"]["output_modalities"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(serde_json::Value::as_str);
+                for modality in output_modalities {
+                    let capability = match modality.to_ascii_lowercase().as_str() {
+                        "text" => "chat",
+                        "image" => "image",
+                        "video" => "video",
+                        _ => continue,
+                    };
+                    if !capabilities.iter().any(|known| known == capability) {
+                        capabilities.push(capability.to_string());
+                    }
+                }
+                if capabilities.is_empty() {
+                    capabilities.push(default_capability.to_string());
+                }
+                Some(TestConnectionModel {
+                    id,
+                    display_name,
+                    capabilities,
+                })
+            })
+            .collect()
+    })
+}
+
+fn merge_catalog(target: &mut Vec<TestConnectionModel>, discovered: Vec<TestConnectionModel>) {
+    for model in discovered {
+        if let Some(existing) = target.iter_mut().find(|entry| entry.id == model.id) {
+            for capability in model.capabilities {
+                if !existing.capabilities.contains(&capability) {
+                    existing.capabilities.push(capability);
+                }
+            }
+            if existing.display_name == existing.id && model.display_name != model.id {
+                existing.display_name = model.display_name;
+            }
+        } else {
+            target.push(model);
+        }
     }
 }
 
@@ -488,6 +616,7 @@ pub async fn test(
             ok: false,
             status: "invalid_url".into(),
             models: vec![],
+            catalog: vec![],
             hint: Some("Enter a valid endpoint before testing the connection.".into()),
         }));
     };
@@ -496,6 +625,7 @@ pub async fn test(
             ok: false,
             status: "invalid_url".into(),
             models: vec![],
+            catalog: vec![],
             hint: Some("Enter a valid endpoint before testing the connection.".into()),
         }));
     }
@@ -526,6 +656,7 @@ pub async fn test(
                             ok: false,
                             status: "credential_required".into(),
                             models: vec![],
+                            catalog: vec![],
                             hint: Some(
                                 "The endpoint or provider changed. Enter the API key again before testing."
                                     .into(),
@@ -558,9 +689,75 @@ pub async fn test(
             }
         }
     }
-    Json(ApiResponse::ok(
-        probe_models(&endpoint, key, req.origin_preset, &requested_models).await,
-    ))
+    let response = probe_models(&endpoint, key, req.origin_preset, &requested_models).await;
+
+    // A saved named connection is a durable catalog target. Persist the live
+    // snapshot under its immutable connection id; two connections exposing
+    // the same model id must never overwrite one another.
+    if let Some(connection_id) = req.connection_id.as_deref() {
+        let lookup_id = connection_id.to_string();
+        if let Ok(Some(connection)) = state
+            .db
+            .with_read_conn(move |conn| store::get(conn, &lookup_id))
+            .await
+        {
+            let agent_type = match connection.origin_preset {
+                ExternalApiConnectionPreset::LiteLlm => AgentType::LiteLlm,
+                ExternalApiConnectionPreset::Nvidia => AgentType::Nvidia,
+                ExternalApiConnectionPreset::OpenRouter | ExternalApiConnectionPreset::Other => {
+                    AgentType::Custom
+                }
+            };
+            if response.ok {
+                let models = response
+                    .catalog
+                    .iter()
+                    .map(|model| crate::db::model_catalog::DiscoveredModel {
+                        model_id: model.id.clone(),
+                        display_name: model.display_name.clone(),
+                        capabilities: model.capabilities.clone(),
+                        reasoning_modes: Vec::new(),
+                        default_reasoning_mode: None,
+                    })
+                    .collect();
+                if let Err(error) = crate::core::model_catalog::reconcile_http_catalog(
+                    &state.db,
+                    connection_id,
+                    agent_type,
+                    models,
+                )
+                .await
+                {
+                    return Json(ApiResponse::err(format!(
+                        "Connection validated, but its model catalog could not be persisted: {error}"
+                    )));
+                }
+            } else {
+                let reason = match response.status.as_str() {
+                    "auth_error" | "credential_required" => ModelUnavailableReason::AuthRequired,
+                    "timeout" => ModelUnavailableReason::Timeout,
+                    "invalid_catalogue" => ModelUnavailableReason::InvalidCatalog,
+                    _ => ModelUnavailableReason::ProviderError,
+                };
+                if let Err(error) = crate::core::model_catalog::record_http_refresh_failure(
+                    &state.db,
+                    connection_id,
+                    agent_type,
+                    reason,
+                    response
+                        .hint
+                        .clone()
+                        .unwrap_or_else(|| response.status.clone()),
+                )
+                .await
+                {
+                    tracing::warn!("failed to record HTTP model catalog refresh: {error}");
+                }
+            }
+        }
+    }
+
+    Json(ApiResponse::ok(response))
 }
 
 fn view(connection: ExternalApiConnection, config: &AppConfig) -> ConnectionView {
@@ -1011,5 +1208,42 @@ mod tests {
             model_ids_from_body(&serde_json::json!({"data": [{"name": "missing-id"}]})),
             None
         );
+    }
+
+    #[test]
+    fn capability_catalogues_merge_without_inventing_media_support() {
+        let chat = serde_json::json!({"data": [
+            {"id": "shared", "name": "Shared", "architecture": {"output_modalities": ["text"]}},
+            {"id": "chat-only"}
+        ]});
+        let image = serde_json::json!({"data": [
+            {"id": "shared", "name": "Shared image", "architecture": {"output_modalities": ["image"]}},
+            {"id": "image-only", "name": "Image only"}
+        ]});
+        let video = serde_json::json!({"data": [
+            {"id": "bytedance/seedance", "name": "Seedance"}
+        ]});
+        let mut catalog = catalog_models_from_body(&chat, "chat").unwrap();
+        merge_catalog(
+            &mut catalog,
+            catalog_models_from_body(&image, "image").unwrap(),
+        );
+        merge_catalog(
+            &mut catalog,
+            catalog_models_from_body(&video, "video").unwrap(),
+        );
+
+        let shared = catalog.iter().find(|model| model.id == "shared").unwrap();
+        assert_eq!(shared.capabilities, vec!["chat", "image"]);
+        let chat_only = catalog
+            .iter()
+            .find(|model| model.id == "chat-only")
+            .unwrap();
+        assert_eq!(chat_only.capabilities, vec!["chat"]);
+        let seedance = catalog
+            .iter()
+            .find(|model| model.id == "bytedance/seedance")
+            .unwrap();
+        assert_eq!(seedance.capabilities, vec!["video"]);
     }
 }
