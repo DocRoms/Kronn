@@ -20,6 +20,10 @@ async fn run_shell_cmd(cmd: &str) -> Result<std::process::Output> {
 }
 
 pub mod chat_codec;
+pub mod media_asset_url;
+pub mod media_codec;
+pub mod media_runner;
+pub mod media_worker;
 pub mod runner;
 pub mod tools;
 
@@ -53,6 +57,13 @@ const KNOWN_AGENTS: &[AgentDef] = &[
         binary: "codex",
         origin: "US",
         install_cmd: "npm install -g @openai/codex",
+    },
+    AgentDef {
+        name: "OpenCode",
+        agent_type: AgentType::OpenCode,
+        binary: "opencode",
+        origin: "OpenCode",
+        install_cmd: "npm install -g opencode-ai",
     },
     AgentDef {
         name: "Vibe",
@@ -123,8 +134,9 @@ const KNOWN_AGENTS: &[AgentDef] = &[
 /// Keep this list in sync with `entrypoint.sh`. The
 /// `cross_agent_macos_skip_covers_npm_agents` test enforces that every
 /// `npm install`-style agent is present here.
-pub(crate) const MACOS_HOST_BIN_SKIP: &[&str] =
-    &["claude", "codex", "gemini", "copilot", "kiro-cli"];
+pub(crate) const MACOS_HOST_BIN_SKIP: &[&str] = &[
+    "claude", "codex", "opencode", "gemini", "copilot", "kiro-cli",
+];
 
 /// Pure: should a *resolved* binary be ignored because it is a Darwin host
 /// binary that cannot `exec()` in this Linux container?
@@ -439,7 +451,15 @@ async fn detect_agent(def: &AgentDef) -> AgentDetection {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentAuthStatus {
-    pub ready: bool,
+    /// `Some(true)` — Kronn found a positive, confirmed auth signal.
+    /// `Some(false)` — Kronn confirmed the runner cannot authenticate; this is
+    /// the only value that should ever gate dispatch.
+    /// `None` — Kronn has no reliable signal either way (e.g. the runner
+    /// accepts environment credentials, its own provider config, or a local
+    /// / no-auth provider Kronn cannot enumerate from here). Treat as
+    /// runnable, same as `Some(true)`; `setup_command` remains a hint, not a
+    /// warning.
+    pub ready: Option<bool>,
     pub setup_command: Option<&'static str>,
 }
 
@@ -598,6 +618,46 @@ fn gemini_config_and_auth_ready(
     }
 }
 
+/// `opencode auth login` persists one JSON object keyed by provider id at
+/// `~/.local/share/opencode/auth.json` (verified against `opencode auth
+/// login --help`/`opencode auth list`, which reads the same file). A
+/// non-empty object there means at least one provider is confirmed
+/// configured; a missing file or an unparsable/empty object means this
+/// particular file has nothing to offer — it says nothing about whether
+/// *other* auth mechanisms are in play (see `opencode_auth_ready`).
+fn opencode_auth_file_ready(path: &std::path::Path) -> bool {
+    match std::fs::read_to_string(path) {
+        Ok(raw) => serde_json::from_str::<serde_json::Value>(&raw)
+            .ok()
+            .and_then(|value| value.as_object().map(|map| !map.is_empty()))
+            .unwrap_or(false),
+        Err(_) => false,
+    }
+}
+
+/// Whether OpenCode can authenticate a session.
+///
+/// `~/.local/share/opencode/auth.json` having a configured provider is a
+/// confirmed positive signal (`Some(true)`). But OpenCode also accepts
+/// provider credentials Kronn has no visibility into from a filesystem
+/// check: environment variables, a project or user `opencode.json(c)`, an
+/// `.env` picked up by the CLI itself, or a local / no-auth provider
+/// (Ollama, LM Studio, a self-hosted OpenAI-compatible endpoint) that needs
+/// no credential at all. A missing, empty, or unparsable auth file is
+/// therefore not proof of "not ready" — it only means this one file has no
+/// answer. Claiming `Some(false)` here would silently disable a runtime
+/// that may well work; report `None` ("unknown, assume runnable") instead
+/// and let `opencode acp` surface its own auth error if it truly has none.
+/// This mirrors Vibe, whose CLI-owned keyring Kronn also declines to
+/// second-guess.
+fn opencode_auth_ready() -> Option<bool> {
+    let home = std::env::var_os("KRONN_HOST_HOME")
+        .or_else(|| std::env::var_os("HOME"))
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(std::path::PathBuf::from)?;
+    opencode_auth_file_ready(&home.join(".local/share/opencode/auth.json")).then_some(true)
+}
+
 fn gemini_auth_ready(config: &AppConfig) -> bool {
     let home = std::env::var_os("KRONN_HOST_HOME")
         .or_else(|| std::env::var_os("HOME"))
@@ -621,15 +681,19 @@ fn gemini_auth_ready(config: &AppConfig) -> bool {
 pub fn agent_auth_status(agent_type: &AgentType, config: &AppConfig) -> AgentAuthStatus {
     match agent_type {
         AgentType::GeminiCli => AgentAuthStatus {
-            ready: gemini_auth_ready(config),
+            ready: Some(gemini_auth_ready(config)),
             setup_command: Some("gemini"),
         },
+        AgentType::OpenCode => AgentAuthStatus {
+            ready: opencode_auth_ready(),
+            setup_command: Some("opencode auth login"),
+        },
         AgentType::Vibe => AgentAuthStatus {
-            ready: true,
+            ready: Some(true),
             setup_command: Some("vibe --setup"),
         },
         _ => AgentAuthStatus {
-            ready: true,
+            ready: Some(true),
             setup_command: None,
         },
     }
@@ -640,7 +704,7 @@ pub fn apply_configured_status(agents: &mut [AgentDetection], config: &AppConfig
     for agent in agents {
         agent.enabled = !config.disabled_agents.contains(&agent.agent_type);
         let auth = agent_auth_status(&agent.agent_type, config);
-        agent.auth_ready = Some(auth.ready);
+        agent.auth_ready = auth.ready;
         agent.auth_setup_command = auth.setup_command.map(str::to_string);
     }
 }
@@ -706,6 +770,7 @@ async fn probe_runtime(def: &AgentDef) -> bool {
     let npx_pkg = match def.agent_type {
         AgentType::ClaudeCode => Some("@anthropic-ai/claude-code"),
         AgentType::Codex => Some("@openai/codex"),
+        AgentType::OpenCode => Some("opencode-ai"),
         AgentType::GeminiCli => Some("@google/gemini-cli"),
         AgentType::CopilotCli => Some("@github/copilot"),
         AgentType::Vibe => None, // uvx, handled differently
@@ -1018,12 +1083,14 @@ fn check_prerequisite(cmd: &str) -> bool {
 /// Prerequisite needed for each agent's install command
 fn install_prerequisite(agent_type: &AgentType) -> Option<(&'static str, &'static str)> {
     match agent_type {
-        AgentType::ClaudeCode | AgentType::Codex | AgentType::GeminiCli | AgentType::CopilotCli => {
-            Some((
-                "npm",
-                "Node.js is required. Install it from https://nodejs.org",
-            ))
-        }
+        AgentType::ClaudeCode
+        | AgentType::Codex
+        | AgentType::OpenCode
+        | AgentType::GeminiCli
+        | AgentType::CopilotCli => Some((
+            "npm",
+            "Node.js is required. Install it from https://nodejs.org",
+        )),
         AgentType::Vibe | AgentType::LiteLlm => Some((
             "uv",
             "uv is required. Install it from https://docs.astral.sh/uv",
@@ -1068,6 +1135,7 @@ pub async fn uninstall_agent(agent_type: &AgentType) -> Result<String> {
     let uninstall_cmd = match def.agent_type {
         AgentType::ClaudeCode => "npm uninstall -g @anthropic-ai/claude-code",
         AgentType::Codex => "npm uninstall -g @openai/codex",
+        AgentType::OpenCode => "npm uninstall -g opencode-ai",
         #[cfg(unix)]
         AgentType::Vibe => "uv tool uninstall mistral-vibe 2>/dev/null || pipx uninstall mistral-vibe 2>/dev/null || pip3 uninstall -y mistral-vibe",
         #[cfg(windows)]
@@ -1109,7 +1177,7 @@ mod tests {
     fn vibe_auth_is_delegated_to_the_cli_keyring() {
         let config = crate::core::config::default_config();
         let status = agent_auth_status(&AgentType::Vibe, &config);
-        assert!(status.ready);
+        assert_eq!(status.ready, Some(true));
         assert_eq!(status.setup_command, Some("vibe --setup"));
     }
 
@@ -1124,7 +1192,7 @@ mod tests {
             AgentType::Ollama,
         ] {
             let status = agent_auth_status(&agent, &config);
-            assert!(status.ready, "{agent:?}");
+            assert_eq!(status.ready, Some(true), "{agent:?}");
             assert_eq!(status.setup_command, None, "{agent:?}");
         }
     }
@@ -1165,8 +1233,148 @@ mod tests {
             }
         }
 
-        assert!(!status.ready);
+        assert_eq!(status.ready, Some(false));
         assert_eq!(status.setup_command, Some("gemini"));
+    }
+
+    #[test]
+    fn opencode_auth_file_ready_true_when_any_provider_configured() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("auth.json");
+        std::fs::write(&path, r#"{"anthropic":{"type":"api","key":"sk-x"}}"#).unwrap();
+        assert!(opencode_auth_file_ready(&path));
+    }
+
+    #[test]
+    fn opencode_auth_file_ready_false_when_missing_empty_or_invalid() {
+        let temp = tempfile::tempdir().unwrap();
+        assert!(!opencode_auth_file_ready(&temp.path().join("missing.json")));
+
+        let empty = temp.path().join("empty.json");
+        std::fs::write(&empty, "{}").unwrap();
+        assert!(!opencode_auth_file_ready(&empty));
+
+        let invalid = temp.path().join("invalid.json");
+        std::fs::write(&invalid, "not json").unwrap();
+        assert!(!opencode_auth_file_ready(&invalid));
+    }
+
+    /// A missing auth file is not evidence of "not ready": OpenCode also
+    /// accepts environment credentials, `.env`/provider config, and local or
+    /// no-auth providers (Ollama, LM Studio, a self-hosted endpoint) that
+    /// Kronn cannot see from this filesystem check alone. Reporting
+    /// `Some(false)` here would disable a runtime that may well work — the
+    /// honest answer is "unknown, assume runnable" (`None`). The setup
+    /// command stays a hint regardless, never a blocking claim.
+    #[test]
+    #[serial]
+    fn opencode_missing_auth_file_is_unknown_not_blocked() {
+        let temp = tempfile::tempdir().unwrap();
+        let original_home = std::env::var_os("KRONN_HOST_HOME");
+        std::env::set_var("KRONN_HOST_HOME", temp.path());
+
+        let config = crate::core::config::default_config();
+        let status = agent_auth_status(&AgentType::OpenCode, &config);
+
+        match original_home {
+            Some(value) => std::env::set_var("KRONN_HOST_HOME", value),
+            None => std::env::remove_var("KRONN_HOST_HOME"),
+        }
+
+        assert_eq!(
+            status.ready, None,
+            "a missing auth file must never claim credentials are absent"
+        );
+        assert_ne!(status.ready, Some(false));
+        assert_eq!(status.setup_command, Some("opencode auth login"));
+    }
+
+    /// An empty (`{}`) or unparsable auth file is the same "no answer from
+    /// this file" signal as a missing one — not a confirmed negative. A
+    /// half-written file (crash mid-`opencode auth login`) or a file left
+    /// over from a removed provider says nothing about environment
+    /// credentials or local/no-auth providers configured elsewhere.
+    #[test]
+    #[serial]
+    fn opencode_invalid_or_empty_auth_file_is_unknown_not_blocked() {
+        let temp = tempfile::tempdir().unwrap();
+        let opencode_dir = temp.path().join(".local/share/opencode");
+        std::fs::create_dir_all(&opencode_dir).unwrap();
+        let original_home = std::env::var_os("KRONN_HOST_HOME");
+        std::env::set_var("KRONN_HOST_HOME", temp.path());
+        let config = crate::core::config::default_config();
+
+        std::fs::write(opencode_dir.join("auth.json"), "{}").unwrap();
+        let empty_status = agent_auth_status(&AgentType::OpenCode, &config);
+
+        std::fs::write(opencode_dir.join("auth.json"), "not json").unwrap();
+        let invalid_status = agent_auth_status(&AgentType::OpenCode, &config);
+
+        match original_home {
+            Some(value) => std::env::set_var("KRONN_HOST_HOME", value),
+            None => std::env::remove_var("KRONN_HOST_HOME"),
+        }
+
+        assert_eq!(empty_status.ready, None);
+        assert_eq!(invalid_status.ready, None);
+    }
+
+    /// Environment credentials and local/no-auth providers are exactly the
+    /// cases Kronn cannot see by reading `auth.json` alone. Setting a
+    /// provider env var with no auth file present must not flip the status
+    /// to a confirmed negative — it stays the same honest "unknown".
+    #[test]
+    #[serial]
+    fn opencode_env_or_local_provider_credentials_are_not_second_guessed() {
+        let temp = tempfile::tempdir().unwrap();
+        let original_home = std::env::var_os("KRONN_HOST_HOME");
+        let original_key = std::env::var_os("ANTHROPIC_API_KEY");
+        std::env::set_var("KRONN_HOST_HOME", temp.path());
+        std::env::set_var("ANTHROPIC_API_KEY", "sk-env-configured");
+
+        let config = crate::core::config::default_config();
+        let status = agent_auth_status(&AgentType::OpenCode, &config);
+
+        match original_home {
+            Some(value) => std::env::set_var("KRONN_HOST_HOME", value),
+            None => std::env::remove_var("KRONN_HOST_HOME"),
+        }
+        match original_key {
+            Some(value) => std::env::set_var("ANTHROPIC_API_KEY", value),
+            None => std::env::remove_var("ANTHROPIC_API_KEY"),
+        }
+
+        assert_ne!(
+            status.ready,
+            Some(false),
+            "env-based or local/no-auth provider credentials must remain runnable"
+        );
+    }
+
+    /// The one unambiguous positive: a real, non-empty auth file is a
+    /// confirmed signal, not just "unknown but assumed runnable".
+    #[test]
+    #[serial]
+    fn opencode_with_auth_file_is_confirmed_ready() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join(".local/share/opencode")).unwrap();
+        std::fs::write(
+            temp.path().join(".local/share/opencode/auth.json"),
+            r#"{"opencode":{"type":"api","key":"sk-zen"}}"#,
+        )
+        .unwrap();
+        let original_home = std::env::var_os("KRONN_HOST_HOME");
+        std::env::set_var("KRONN_HOST_HOME", temp.path());
+
+        let config = crate::core::config::default_config();
+        let status = agent_auth_status(&AgentType::OpenCode, &config);
+
+        match original_home {
+            Some(value) => std::env::set_var("KRONN_HOST_HOME", value),
+            None => std::env::remove_var("KRONN_HOST_HOME"),
+        }
+
+        assert_eq!(status.ready, Some(true));
     }
 
     #[test]
@@ -1461,6 +1669,7 @@ mod tests {
         let all_types = [
             AgentType::ClaudeCode,
             AgentType::Codex,
+            AgentType::OpenCode,
             AgentType::Vibe,
             AgentType::GeminiCli,
             AgentType::Kiro,

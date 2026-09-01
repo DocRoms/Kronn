@@ -67,6 +67,8 @@ interface FormState {
   economy_model: string;
   default_model: string;
   reasoning_model: string;
+  image_model: string;
+  video_model: string;
   api_key: string;
   keyTouched: boolean;
 }
@@ -80,6 +82,8 @@ function emptyForm(): FormState {
     economy_model: '',
     default_model: '',
     reasoning_model: '',
+    image_model: '',
+    video_model: '',
     api_key: '',
     keyTouched: false,
   };
@@ -102,6 +106,8 @@ function formFromConnection(c: ExternalApiConnectionView): FormState {
     economy_model: c.economy_model ?? '',
     default_model: c.default_model ?? '',
     reasoning_model: c.reasoning_model ?? '',
+    image_model: c.image_model ?? '',
+    video_model: c.video_model ?? '',
     api_key: '',
     keyTouched: false,
   };
@@ -116,6 +122,8 @@ function toPayload(form: FormState): UpsertExternalApiConnection {
     economy_model: form.economy_model.trim() || null,
     default_model: form.default_model.trim() || null,
     reasoning_model: form.reasoning_model.trim() || null,
+    image_model: form.image_model.trim() || null,
+    video_model: form.video_model.trim() || null,
     // Only send the key when the user actually typed one, so editing a
     // connection without retyping its key keeps the stored credential.
     api_key: form.keyTouched ? form.api_key : null,
@@ -185,6 +193,15 @@ function ConnectionForm({
     openRouterKeyValid &&
     !submitting;
   const modelsUnlocked = testResult?.ok === true && testResult.models.length > 0;
+  const catalogModels = (capability: 'chat' | 'image' | 'video') => {
+    if (!testResult?.catalog) {
+      return capability === 'chat'
+        ? (testResult?.models ?? []).map(id => ({ id, display_name: id, capabilities: ['chat'] }))
+        : [];
+    }
+    return testResult.catalog
+      .filter(model => model.capabilities.includes(capability));
+  };
 
   return (
     <div className="set-ext-api-form" data-testid="ext-api-form">
@@ -335,7 +352,7 @@ function ConnectionForm({
                 );
               const models = [...new Set([
                 value,
-                ...(testResult?.models ?? []),
+                ...catalogModels('chat').map(model => model.id),
               ].filter(Boolean))];
               return (
                 <div className="set-ext-api-tier" key={tier} data-tier={tier}>
@@ -365,6 +382,63 @@ function ConnectionForm({
               );
             })}
           </div>
+        </div>
+
+        <div className="set-ext-api-tier-panel" data-testid="ext-api-media-panel">
+          <div className="set-ext-api-tier-panel-title">
+            <span>{t('config.extApi.mediaTitle')}</span>
+            <small>{t('config.extApi.mediaOptional')}</small>
+          </div>
+          <div className="set-ext-api-tiers">
+            {(['image', 'video'] as const).map(modality => {
+              const value = modality === 'image' ? form.image_model : form.video_model;
+              const setValue = (next: string) =>
+                setForm(prev =>
+                  modality === 'image'
+                    ? { ...prev, image_model: next }
+                    : { ...prev, video_model: next },
+                );
+              // Keep an already-saved value visible even when a provider no
+              // longer returns it. This is the same explicit, non-destructive
+              // behaviour as the text tiers; the user can see and replace it
+              // after a successful connection test.
+              const discovered = catalogModels(modality);
+              const discoveredIds = discovered.map(model => model.id);
+              const models = [...new Set([value, ...discoveredIds].filter(Boolean))];
+              return (
+                <div className="set-ext-api-tier" key={modality} data-tier={modality}>
+                  <span className="set-ext-api-tier-label">
+                    <span aria-hidden="true">{modality === 'image' ? '🖼' : '🎬'}</span>{' '}
+                    {t(`config.extApi.media.${modality}`)}
+                  </span>
+                  <SearchableSelect
+                    className="searchable-select--compact"
+                    value={value}
+                    options={models.map(model => ({
+                      value: model,
+                      label: discovered.find(item => item.id === model)?.display_name ?? model,
+                      keywords: model.replaceAll('/', ' '),
+                      disabled: model === value && !discoveredIds.includes(model),
+                      description: model === value && !discoveredIds.includes(model)
+                        ? t('modelCatalog.unavailable')
+                        : model,
+                    }))}
+                    onChange={setValue}
+                    label={t(`config.extApi.media.${modality}`)}
+                    placeholder={t(`config.extApi.mediaPlaceholder.${modality}`)}
+                    emptyLabel={t('config.searchModelEmpty')}
+                    clearLabel={t('config.defaultModel')}
+                    disabled={!testResult?.ok || (discovered.length === 0 && !value)}
+                    testId={`ext-api-media-${modality}`}
+                  />
+                  {value && modelCostSuffix ? (
+                    <span className="text-2xs text-muted">{modelCostSuffix(value)}</span>
+                  ) : null}
+                </div>
+              );
+            })}
+          </div>
+          <div className="set-hint-xs">{t('config.extApi.mediaHint')}</div>
         </div>
       </div>
 

@@ -12,6 +12,46 @@ use super::{AgentSettings, AgentType, ExtractSpec, ModelTier, PaginationSpec};
 // Quick Prompts (reusable prompt templates with variables)
 // ═══════════════════════════════════════════════════════════════════════════════
 
+/// Where a declared template variable obtains its value at execution time.
+///
+/// The declaration is deliberately a reference only. In particular a
+/// `ProjectEnv` declaration stores `<env.NAME>`, never the secret value.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptVariableSource {
+    #[default]
+    UserInput,
+    KronnContext,
+    ProjectEnv,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct PromptVariableOption {
+    /// Stable execution value. Renaming the label never changes run payloads.
+    pub value: String,
+    pub label: String,
+    /// Disabled options remain in version history but cannot be selected by a
+    /// new run.
+    #[serde(default = "default_variable_option_enabled")]
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum PromptVariableControl {
+    Text,
+    Textarea,
+    Select {
+        options: Vec<PromptVariableOption>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        default_value: Option<String>,
+    },
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct PromptVariable {
@@ -37,9 +77,162 @@ pub struct PromptVariable {
     /// malformed pattern; logged).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pattern: Option<String>,
+    /// Resolution strategy. Omitted legacy definitions remain manual inputs.
+    #[serde(default)]
+    pub source: Option<PromptVariableSource>,
+    /// Declarative source reference (`<env.NAME>` for `ProjectEnv`).
+    /// This field must never carry a resolved value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_ref: Option<String>,
+    /// Project environment variables are read-only unless the template author
+    /// explicitly allows an audited launch-time override.
+    #[serde(default)]
+    pub allow_manual_override: bool,
+    /// Presentation and bounded-value contract. Missing legacy values are
+    /// regular single-line text inputs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub control: Option<PromptVariableControl>,
+}
+
+impl PromptVariable {
+    /// Only a `UserInput` variable is ever collected from the launcher.
+    /// `allow_manual_override` makes an override *possible* for a
+    /// project-resolved variable, never mandatory: Kronn still resolves the
+    /// value when the launcher leaves the optional override blank, so an
+    /// override-enabled `ProjectEnv`/`KronnContext` declaration must not be
+    /// treated as a required input.
+    pub fn requires_user_input(&self) -> bool {
+        self.source.clone().unwrap_or_default() == PromptVariableSource::UserInput
+    }
+
+    pub fn validate_source(&self) -> Result<(), String> {
+        match self.source.clone().unwrap_or_default() {
+            PromptVariableSource::UserInput => Ok(()),
+            PromptVariableSource::KronnContext => self
+                .source_ref
+                .as_deref()
+                .filter(|reference| is_reference(reference, "context"))
+                .map(|_| ())
+                .ok_or_else(|| {
+                    format!(
+                        "Context variable `{}` must reference <context.NAME>",
+                        self.name
+                    )
+                }),
+            PromptVariableSource::ProjectEnv => {
+                let reference = self.source_ref.as_deref().unwrap_or_default();
+                if is_reference(reference, "env") {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "Project environment variable `{}` must reference <env.NAME>",
+                        self.name
+                    ))
+                }
+            }
+        }
+    }
+
+    pub fn default_input_value(&self) -> Option<&str> {
+        match self.control.as_ref() {
+            Some(PromptVariableControl::Select { default_value, .. }) => default_value.as_deref(),
+            _ => None,
+        }
+    }
+
+    pub fn accepts_value(&self, value: &str) -> bool {
+        match self.control.as_ref() {
+            Some(PromptVariableControl::Select { options, .. }) => options
+                .iter()
+                .any(|option| option.enabled && option.value == value),
+            _ => true,
+        }
+    }
+
+    fn validate_control(&self) -> Result<(), String> {
+        let Some(PromptVariableControl::Select {
+            options,
+            default_value,
+        }) = self.control.as_ref()
+        else {
+            return Ok(());
+        };
+        if options.is_empty() {
+            return Err(format!(
+                "Select variable `{}` must declare at least one option",
+                self.name
+            ));
+        }
+        let mut values = std::collections::HashSet::new();
+        let mut labels = std::collections::HashSet::new();
+        for option in options {
+            if option.value.trim().is_empty()
+                || option.label.trim().is_empty()
+                || !values.insert(option.value.as_str())
+                || !labels.insert(option.label.as_str())
+            {
+                return Err(format!(
+                    "Select variable `{}` requires unique non-empty option values and labels",
+                    self.name
+                ));
+            }
+        }
+        if !options.iter().any(|option| option.enabled) {
+            return Err(format!(
+                "Select variable `{}` must keep at least one active option",
+                self.name
+            ));
+        }
+        if default_value.as_ref().is_some_and(|default| {
+            !options
+                .iter()
+                .any(|option| option.enabled && option.value == *default)
+        }) {
+            return Err(format!(
+                "Select variable `{}` default must reference an active option",
+                self.name
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// A source declaration has no room for a literal.  Keep the accepted syntax
+/// deliberately narrow so persisted definitions can be inspected without
+/// guessing whether a string is a reference or a secret value.
+fn is_reference(reference: &str, namespace: &str) -> bool {
+    let Some(name) = reference
+        .strip_prefix(&format!("<{namespace}."))
+        .and_then(|value| value.strip_suffix('>'))
+    else {
+        return false;
+    };
+    let mut chars = name.chars();
+    matches!(chars.next(), Some(first) if first.is_ascii_alphabetic() || first == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Reject invalid declarations at every authoring boundary.  Runtime
+/// resolution can then rely on the declaration shape without ever accepting
+/// a persisted literal as an environment reference.
+pub fn validate_prompt_variables(variables: &[PromptVariable]) -> Result<(), String> {
+    let mut names = std::collections::HashSet::new();
+    for variable in variables {
+        if variable.name.trim().is_empty() || !names.insert(variable.name.trim()) {
+            return Err("Variable names must be non-empty and unique".into());
+        }
+        variable.validate_source()?;
+        variable.validate_control()?;
+    }
+    Ok(())
 }
 
 fn default_variable_required() -> bool {
+    true
+}
+
+fn default_variable_option_enabled() -> bool {
     true
 }
 
@@ -271,11 +464,19 @@ pub struct RunQuickExecRequest {
     #[serde(default)]
     #[ts(type = "Record<string, string>")]
     pub variables: ::std::collections::HashMap<String, String>,
+    /// Deterministic source-discussion context for a launch proposed inline
+    /// from a discussion (KT-476). Server-owned: never accepted from the
+    /// wire, so an HTTP caller cannot spoof another project's environment or
+    /// worktree.
+    #[serde(skip)]
+    #[ts(skip)]
+    pub launch: Option<crate::core::launch_context::LaunchContext>,
 }
 
 #[derive(Debug, Serialize, TS)]
 #[ts(export)]
 pub struct RunQuickExecResponse {
+    pub run_id: String,
     pub success: bool,
     pub duration_ms: u64,
     #[ts(type = "any")]
@@ -436,6 +637,12 @@ pub struct RunQuickApiRequest {
     #[serde(skip)]
     #[ts(skip)]
     pub agent: Option<String>,
+    /// Deterministic source-discussion context for a launch proposed inline
+    /// from a discussion (KT-476). Server-owned: never accepted from the
+    /// wire, so an HTTP caller cannot spoof another project's environment.
+    #[serde(skip)]
+    #[ts(skip)]
+    pub launch: Option<crate::core::launch_context::LaunchContext>,
 }
 
 /// Response from `POST /api/quick-apis/:id/run`. Mirrors the
@@ -443,6 +650,7 @@ pub struct RunQuickApiRequest {
 #[derive(Debug, Serialize, TS)]
 #[ts(export)]
 pub struct RunQuickApiResponse {
+    pub run_id: String,
     pub success: bool,
     pub duration_ms: u64,
     /// Parsed envelope (data/status/summary) on success, `None` on failure.
@@ -475,9 +683,111 @@ pub struct BatchRunQuickApiRequest {
 #[derive(Debug, Serialize, TS)]
 #[ts(export)]
 pub struct BatchRunQuickApiResponse {
+    pub run_id: String,
     /// Overall status: `OK` (all succeeded), `PARTIAL` (some failed), `ERROR` (all failed).
     pub status: String,
     pub duration_ms: u64,
     pub envelope: Option<serde_json::Value>,
     pub error: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn variable(source: PromptVariableSource, source_ref: Option<&str>) -> PromptVariable {
+        PromptVariable {
+            name: "token".into(),
+            label: "Token".into(),
+            placeholder: String::new(),
+            description: None,
+            required: true,
+            pattern: None,
+            source: Some(source),
+            source_ref: source_ref.map(str::to_owned),
+            allow_manual_override: false,
+            control: None,
+        }
+    }
+
+    #[test]
+    fn project_environment_variables_keep_only_a_declarative_reference() {
+        let declaration = variable(PromptVariableSource::ProjectEnv, Some("<env.API_TOKEN>"));
+        assert!(declaration.validate_source().is_ok());
+        assert!(!declaration.requires_user_input());
+        assert!(
+            variable(PromptVariableSource::ProjectEnv, Some("secret-value"))
+                .validate_source()
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn allowing_an_override_never_makes_a_resolved_variable_a_required_input() {
+        let mut declaration = variable(PromptVariableSource::ProjectEnv, Some("<env.API_TOKEN>"));
+        declaration.allow_manual_override = true;
+        // An override is possible but optional: Kronn still resolves the value
+        // from the project, so the launcher must not be forced to supply one.
+        assert!(!declaration.requires_user_input());
+        let mut context = variable(PromptVariableSource::KronnContext, Some("<context.locale>"));
+        context.allow_manual_override = true;
+        assert!(!context.requires_user_input());
+    }
+
+    #[test]
+    fn context_variables_require_a_source_reference() {
+        assert!(variable(PromptVariableSource::KronnContext, None)
+            .validate_source()
+            .is_err());
+    }
+
+    #[test]
+    fn declarations_reject_literals_and_duplicate_names() {
+        let mut first = variable(PromptVariableSource::ProjectEnv, Some("<env.API_TOKEN>"));
+        let second = first.clone();
+        assert!(validate_prompt_variables(&[first.clone(), second]).is_err());
+        first.source_ref = Some("<env.123bad>".into());
+        assert!(validate_prompt_variables(&[first]).is_err());
+    }
+
+    #[test]
+    fn legacy_variables_default_to_text_and_selects_validate_their_contract() {
+        let legacy: PromptVariable = serde_json::from_value(serde_json::json!({
+            "name": "topic",
+            "label": "Topic",
+            "placeholder": "",
+            "required": true,
+            "source": "user_input",
+            "allow_manual_override": false
+        }))
+        .unwrap();
+        assert!(legacy.control.is_none());
+        assert!(legacy.accepts_value("anything"));
+
+        let mut select = variable(PromptVariableSource::UserInput, None);
+        select.control = Some(PromptVariableControl::Select {
+            options: vec![
+                PromptVariableOption {
+                    value: "fr".into(),
+                    label: "Français".into(),
+                    enabled: true,
+                },
+                PromptVariableOption {
+                    value: "en".into(),
+                    label: "English".into(),
+                    enabled: false,
+                },
+            ],
+            default_value: Some("fr".into()),
+        });
+        assert!(validate_prompt_variables(&[select.clone()]).is_ok());
+        assert!(select.accepts_value("fr"));
+        assert!(!select.accepts_value("en"));
+        assert_eq!(select.default_input_value(), Some("fr"));
+
+        if let Some(PromptVariableControl::Select { default_value, .. }) = select.control.as_mut() {
+            *default_value = Some("en".into());
+        }
+        assert!(validate_prompt_variables(&[select]).is_err());
+    }
 }

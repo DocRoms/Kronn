@@ -1,7 +1,9 @@
+pub mod acp;
 pub mod agents;
 pub mod api;
 pub mod core;
 pub mod db;
+pub mod delivery;
 pub mod models;
 pub mod workflows;
 
@@ -660,6 +662,23 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             post(api::live_pages::add_dataset),
         )
         .route("/api/pages/{id}/publish", post(api::live_pages::publish))
+        // ── Live Page inline Kronn actions (KT-538) ──
+        .route(
+            "/api/pages/{id}/actions",
+            get(api::live_page_actions::list_for_live_page),
+        )
+        .route(
+            "/api/live-page-actions/{id}",
+            get(api::live_page_actions::get),
+        )
+        .route(
+            "/api/live-page-actions/{id}/cancel",
+            post(api::live_page_actions::cancel),
+        )
+        .route(
+            "/api/live-page-actions/{id}/launch",
+            post(api::live_page_actions::launch),
+        )
         // ── OpenAPI / Swagger UI ──
         // Spec served at `/api/openapi.json` by SwaggerUi (its `.url()`
         // mounts the spec route automatically). Interactive UI at
@@ -1108,6 +1127,20 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route("/api/agents/install", post(api::agents::install))
         .route("/api/agents/uninstall", post(api::agents::uninstall))
         .route("/api/agents/toggle", post(api::agents::toggle))
+        // ── Dynamic model catalogs (KT-531) ──
+        .route("/api/model-catalogs", get(api::model_catalog::list))
+        .route(
+            "/api/model-catalogs/refresh",
+            post(api::model_catalog::refresh),
+        )
+        .route(
+            "/api/model-catalogs/manual",
+            post(api::model_catalog::create_manual).put(api::model_catalog::update_manual),
+        )
+        .route(
+            "/api/model-catalogs/manual/delete",
+            post(api::model_catalog::delete_manual),
+        )
         // ── RTK (Rust Token Killer) — host-side compression proxy ──
         .route("/api/rtk/activate", post(api::rtk::activate))
         .route("/api/rtk/deactivate", post(api::rtk::deactivate))
@@ -1160,6 +1193,19 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         // ── Debug (log ringbuffer — backs Settings > Debug viewer) ──
         .route("/api/debug/logs", get(api::debug::get_logs))
         .route("/api/debug/logs/clear", post(api::debug::clear_logs))
+        // ── Discussion storage weight (own endpoint: summing message
+        // content scans the messages table, and the indicator is opt-in) ──
+        .route("/api/discussion-weights", get(api::discussion_weight::list))
+        .route(
+            "/api/discussion-weights/{id}",
+            get(api::discussion_weight::get_one),
+        )
+        // ── Media generation (image / video) ──
+        .route("/api/media/generate", post(api::media::generate))
+        .route("/api/media/jobs/{id}", get(api::media::get_job))
+        .route("/api/media/jobs/{id}/cancel", post(api::media::cancel_job))
+        .route("/api/media/costs", get(api::media::spend))
+        .route("/api/media/estimate", get(api::media::estimate))
         // ── Secret themes (hidden palette unlock via code) ──
         .route("/api/themes/unlock", post(api::themes::unlock))
         // ── Document generation (5 formats through the Python sidecar) ──
@@ -1523,11 +1569,45 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
                 .delete(api::quick_execs::delete),
         )
         .route("/api/quick-execs/{id}/run", post(api::quick_execs::run))
+        .route("/api/runs", get(api::shared_runs::list))
+        .route("/api/runs/{id}", get(api::shared_runs::get))
+        .route(
+            "/api/discussions/{id}/actions",
+            get(api::discussion_actions::list_for_discussion),
+        )
+        .route(
+            "/api/discussion-actions/{id}",
+            get(api::discussion_actions::get),
+        )
+        .route(
+            "/api/discussion-actions/{id}/cancel",
+            post(api::discussion_actions::cancel),
+        )
+        .route(
+            "/api/discussion-actions/{id}/launch",
+            post(api::discussion_actions::launch),
+        )
         .route(
             "/api/quick-execs/{id}/export",
             get(api::quick_execs::export),
         )
         .route("/api/quick-execs/import", post(api::quick_execs::import))
+        .route(
+            "/api/execution-context/preview",
+            post(api::execution_variables::preview),
+        )
+        .route(
+            "/api/execution-context/{run_kind}/{run_id}",
+            get(api::execution_variables::metadata),
+        )
+        .route(
+            "/api/execution-context/{run_kind}/{run_id}/reveal",
+            post(api::execution_variables::reveal),
+        )
+        .route(
+            "/api/execution-context/{run_kind}/{run_id}/extend",
+            post(api::execution_variables::extend),
+        )
         .route(
             "/api/discussions/{id}/agent-resume-jobs",
             get(api::agent_jobs::list_for_discussion),
@@ -1561,6 +1641,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route(
             "/api/discussions/{id}/agent-handoffs",
             get(api::discussions::agent_handoff_mode),
+        )
+        .route(
+            "/api/discussions/{id}/execution-variable-retention",
+            get(api::discussions::execution_variable_retention),
         )
         .route(
             "/api/discussions/{id}/export",

@@ -33,18 +33,21 @@ const resolve = <T>(value: T) => vi.fn().mockResolvedValue(value);
  *  completeness test. */
 export const API_NAMESPACES = [
   'setup',
+  'media',
   'config',
   'contacts',
   'projects',
   'agents',
   'mcps',
   'discussions',
+  'discussionActions',
   'planning',
   'workflows',
   'pages',
   'quickPrompts',
   'quickApis',
   'quickExecs',
+  'executionVariables',
   'skills',
   'profiles',
   'directives',
@@ -67,6 +70,9 @@ export const API_NAMESPACES = [
   'health',
   // KT-190 — joined-CLI token telemetry coverage.
   'telemetry',
+  // KT-243 — shared RunStatusCard/SharedRun read model.
+  'runsApi',
+  'modelCatalogApi',
 ] as const;
 
 /** Flat top-level helpers (non-namespace exports). */
@@ -95,12 +101,14 @@ interface DefaultMock {
   agents: Record<string, AnyFn>;
   mcps: Record<string, AnyFn>;
   discussions: Record<string, AnyFn>;
+  discussionActions: Record<string, AnyFn>;
   planning: Record<string, AnyFn>;
   workflows: Record<string, AnyFn>;
   pages: Record<string, AnyFn>;
   quickPrompts: Record<string, AnyFn>;
   quickApis: Record<string, AnyFn>;
   quickExecs: Record<string, AnyFn>;
+  executionVariables: Record<string, AnyFn>;
   skills: Record<string, AnyFn>;
   profiles: Record<string, AnyFn>;
   directives: Record<string, AnyFn>;
@@ -109,6 +117,7 @@ interface DefaultMock {
   liteLlm: Record<string, AnyFn>;
   nvidia: Record<string, AnyFn>;
   externalApi: Record<string, AnyFn>;
+  media: Record<string, AnyFn>;
   debugApi: Record<string, AnyFn>;
   themes: Record<string, AnyFn>;
   docs: Record<string, AnyFn>;
@@ -121,6 +130,8 @@ interface DefaultMock {
   orchestration: Record<string, AnyFn>;
   learnings: Record<string, AnyFn>;
   telemetry: Record<string, AnyFn>;
+  runsApi: Record<string, AnyFn>;
+  modelCatalogApi: Record<string, AnyFn>;
   measuredRatio: AnyFn;
 }
 
@@ -168,7 +179,7 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       saveGlobalContext: resolve(undefined),
       getGlobalContextMode: resolve('always'),
       saveGlobalContextMode: resolve(undefined),
-      getServerConfig: resolve({ pseudo: null, avatar_email: null, host: 'localhost', port: 3140, default_model_tier: 'default', default_summary_strategy: 'Off', agent_handoffs_enabled: false, agent_handoff_paid_limit: 1, agent_handoff_paid_unlimited: false, agent_handoff_blocked_agents: [] }),
+      getServerConfig: resolve({ pseudo: null, avatar_email: null, host: 'localhost', port: 3140, default_model_tier: 'default', default_summary_strategy: 'Off', agent_handoffs_enabled: false, agent_handoff_paid_limit: 1, agent_handoff_paid_unlimited: false, agent_handoff_blocked_agents: [], execution_variable_retention_days: 30 }),
       setServerConfig: resolve(undefined),
       getNetworkExposure: resolve({ exposed: false, restart_required: false, port: 3140, reachable_ips: [] }),
       setNetworkExposure: resolve({ exposed: false, restart_required: false, port: 3140, reachable_ips: [] }),
@@ -368,6 +379,7 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       update: resolve(undefined),
       nativeAgentMode: resolve({ disabled: false }),
       agentHandoffMode: resolve({ global_enabled: false, disabled: false, unlimited_override: false, effective_enabled: false, paid_limit: 1 }),
+      executionVariableRetention: resolve({ global_days: 30, override_days: null, effective_days: 30 }),
       workspaces: resolve([]),
       archive: resolve(undefined),
       unarchive: resolve(undefined),
@@ -498,6 +510,20 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       import: resolve({}),
     },
 
+    executionVariables: {
+      preview: resolve({ run_kind: 'preview', run_id: 'preview-run', metadata: { id: 'preview-snapshot', resolved_at: '2026-01-01T00:00:00Z', expires_at: '2026-01-01T00:10:00Z', purged: false, provenance: [] } }),
+      metadata: resolve({
+        run_kind: 'quick_prompt',
+        run_id: '',
+        resolved_at: null,
+        snapshot_id: null,
+        retention_expires_at: null,
+        variables: [],
+      }),
+      reveal: resolve(''),
+      extend: resolve(undefined),
+    },
+
     rtk: {
       activate: resolve({ success: true, stdout: '', stderr: '' }),
       deactivate: resolve({ success: true, stdout: '', stderr: '' }),
@@ -570,6 +596,16 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       }),
     },
 
+    media: {
+      // KT-540 — media generation. Nothing queued and nothing billed: the
+      // neutral state any discussion test mounts into.
+      generate: resolve({ job_id: '', status: 'pending', model: '' }),
+      job: resolve(null),
+      cancel: resolve(null),
+      costs: resolve({ entries: [], image_total_usd: 0, video_total_usd: 0, total_usd: 0 }),
+      // No past generation means no estimate — never a fabricated zero.
+      estimate: resolve({ model: '', estimated_usd: null, samples: 0 }),
+    },
     externalApi: {
       // KT-339 — unified External API connections. Empty list = the neutral
       // "no connections yet" state so any settings test mounts clean.
@@ -699,6 +735,24 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
     // coverage figure, and "no sessions" is the honest neutral state.
     telemetry: {
       coverage: resolve([]),
+    },
+    discussionActions: {
+      list: resolve([]),
+      get: resolve(null),
+      cancel: resolve(null),
+      launch: resolve(null),
+    },
+    // KT-243 — empty by default: a card with no runId/model mounts clean.
+    runsApi: {
+      list: resolve([]),
+      get: resolve(null),
+    },
+    modelCatalogApi: {
+      list: resolve({ targets: [] }),
+      refresh: resolve(null),
+      createManual: resolve(null),
+      updateManual: resolve(null),
+      deleteManual: resolve(undefined),
     },
     measuredRatio: vi.fn(() => null),
   };

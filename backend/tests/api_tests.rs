@@ -3,7 +3,7 @@
 //! These tests exercise the full HTTP layer (router + handlers + DB)
 //! using `tower::ServiceExt::oneshot` with an in-memory SQLite database.
 
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use axum::{
     body::Body,
@@ -480,6 +480,523 @@ async fn quick_exec_crud_and_csv_run_round_trip() {
     assert_eq!(deleted["success"], true);
     let (_, empty) = get_json(app, "/api/quick-execs").await;
     assert!(empty["data"].as_array().unwrap().is_empty());
+}
+
+async fn wait_for_terminal_action(app: Router, action_id: &str) -> Value {
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let (_, action) =
+                get_json(app.clone(), &format!("/api/discussion-actions/{action_id}")).await;
+            let state = action["data"]["state"].as_str().unwrap_or_default();
+            if matches!(
+                state,
+                "succeeded" | "failed" | "cancelled" | "preflight_failed"
+            ) {
+                break action;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("action did not publish a terminal state")
+}
+
+#[tokio::test]
+async fn discussion_action_http_contract_is_durable_and_idempotent() {
+    let state = test_state();
+    let app = build_router_with_auth(state.clone(), false);
+    let (_, created) = post_json(
+        app.clone(),
+        "/api/quick-execs",
+        serde_json::json!({
+            "name": "Inline collector",
+            "command": "echo",
+            "args": ["{\"ok\":true}"],
+            "timeout_secs": 10,
+            "output_format": "json",
+            "variables": []
+        }),
+    )
+    .await;
+    assert_eq!(created["success"], true, "{created}");
+    let target_id = created["data"]["id"].as_str().unwrap().to_string();
+
+    state
+        .db
+        .with_conn(move |connection| {
+            let now = chrono::Utc::now().to_rfc3339();
+            connection.execute(
+                "INSERT INTO discussions (id, title, created_at, updated_at)
+                 VALUES ('disc-actions', 'Inline actions', ?1, ?1)",
+                [&now],
+            )?;
+            for message_id in ["msg-launch", "msg-cancel"] {
+                let content = format!(
+                    "```kronn-action\n{{\"kind\":\"quick_exec\",\"target_id\":\"{target_id}\"}}\n```"
+                );
+                // Real production transaction: message row + `kronn-action`
+                // ingestion commit or roll back together (see
+                // `db::discussions::insert_message`'s SAVEPOINT), instead of a
+                // raw `INSERT INTO messages` plus a hand-rolled ingest call.
+                let msg = agent_action_message(message_id, &content);
+                kronn::db::discussions::insert_message(connection, "disc-actions", &msg)?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    let (_, listed) = get_json(app.clone(), "/api/discussions/disc-actions/actions").await;
+    assert_eq!(listed["success"], true, "{listed}");
+    assert_eq!(listed["data"].as_array().unwrap().len(), 2);
+
+    let launch_id = "action:msg-launch:0";
+    let (_, fetched) = get_json(app.clone(), &format!("/api/discussion-actions/{launch_id}")).await;
+    assert_eq!(fetched["data"]["state"], "proposed", "{fetched}");
+
+    let (_, launched) = post_json(
+        app.clone(),
+        &format!("/api/discussion-actions/{launch_id}/launch"),
+        serde_json::json!({"variables": {}}),
+    )
+    .await;
+    assert_eq!(launched["success"], true, "{launched}");
+    assert_eq!(launched["data"]["state"], "launching", "{launched}");
+
+    let (_, duplicate) = post_json(
+        app.clone(),
+        &format!("/api/discussion-actions/{launch_id}/launch"),
+        serde_json::json!({"variables": {}}),
+    )
+    .await;
+    assert_eq!(duplicate["success"], true, "{duplicate}");
+    assert_ne!(duplicate["data"]["state"], "proposed", "{duplicate}");
+
+    let completed = wait_for_terminal_action(app.clone(), launch_id).await;
+    assert_eq!(completed["data"]["state"], "succeeded", "{completed}");
+    assert!(
+        completed["data"]["shared_run_id"].is_string(),
+        "{completed}"
+    );
+    assert!(completed["data"]["deep_link"].is_string(), "{completed}");
+
+    let cancel_id = "action:msg-cancel:0";
+    let (_, cancelled) = post_json(
+        app.clone(),
+        &format!("/api/discussion-actions/{cancel_id}/cancel"),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(cancelled["data"]["state"], "cancelled", "{cancelled}");
+    let (_, cancelled_again) = post_json(
+        app,
+        &format!("/api/discussion-actions/{cancel_id}/cancel"),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(cancelled_again["data"]["state"], "cancelled");
+}
+
+/// KT-476 review — the four target families must ingest through the SAME
+/// production message-insertion transaction used by real agent turns, not a
+/// bespoke test-only path.
+#[tokio::test]
+async fn discussion_action_ingests_all_four_target_families_through_the_real_message_transaction() {
+    let state = test_state();
+    let app = build_router_with_auth(state.clone(), false);
+    let (_, qp) = post_json(
+        app.clone(),
+        "/api/quick-prompts",
+        serde_json::json!({
+            "name": "Frame issue", "prompt_template": "Frame this",
+            "variables": [],
+        }),
+    )
+    .await;
+    assert_eq!(qp["success"], true, "{qp}");
+    let (_, qa) = post_json(
+        app.clone(),
+        "/api/quick-apis",
+        serde_json::json!({
+            "name": "Read ticket", "api_plugin_slug": "tracker", "api_config_id": "config",
+            "api_endpoint_path": "/ticket", "variables": [],
+        }),
+    )
+    .await;
+    assert_eq!(qa["success"], true, "{qa}");
+    let (_, qe) = post_json(
+        app.clone(),
+        "/api/quick-execs",
+        serde_json::json!({
+            "name": "Collect logs", "command": "printf", "args": [], "timeout_secs": 10,
+            "output_format": "json", "variables": [],
+        }),
+    )
+    .await;
+    assert_eq!(qe["success"], true, "{qe}");
+    let (_, wf) = post_json(
+        app.clone(),
+        "/api/workflows",
+        serde_json::json!({
+            "name": "Publish report",
+            "trigger": {"type": "Manual"},
+            "steps": [{"name": "s1", "agent": "ClaudeCode", "prompt_template": "test", "mode": {"type": "Normal"}}],
+            "actions": [],
+        }),
+    )
+    .await;
+    assert_eq!(wf["success"], true, "{wf}");
+
+    let content = format!(
+        "```kronn-action\n{{\"kind\":\"quick_prompt\",\"target_id\":\"{}\"}}\n```\n\
+         ```kronn-action\n{{\"kind\":\"quick_api\",\"target_id\":\"{}\"}}\n```\n\
+         ```kronn-action\n{{\"kind\":\"quick_exec\",\"target_id\":\"{}\"}}\n```\n\
+         ```kronn-action\n{{\"kind\":\"workflow\",\"target_id\":\"{}\"}}\n```",
+        qp["data"]["id"].as_str().unwrap(),
+        qa["data"]["id"].as_str().unwrap(),
+        qe["data"]["id"].as_str().unwrap(),
+        wf["data"]["id"].as_str().unwrap(),
+    );
+    state
+        .db
+        .with_conn(move |connection| {
+            let now = chrono::Utc::now().to_rfc3339();
+            connection.execute(
+                "INSERT INTO discussions (id, title, created_at, updated_at)
+                 VALUES ('disc-all-kinds', 'All kinds', ?1, ?1)",
+                [&now],
+            )?;
+            let msg = agent_action_message("msg-all-kinds", &content);
+            kronn::db::discussions::insert_message(connection, "disc-all-kinds", &msg)
+        })
+        .await
+        .unwrap();
+
+    let (_, listed) = get_json(app, "/api/discussions/disc-all-kinds/actions").await;
+    let kinds: Vec<&str> = listed["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|action| action["kind"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        kinds,
+        vec!["quick_prompt", "quick_api", "quick_exec", "workflow"],
+        "{listed}"
+    );
+    assert!(
+        listed["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|action| action["state"] == "proposed"),
+        "{listed}"
+    );
+}
+
+/// KT-476 review — a GLOBAL Quick Exec launched from a project-scoped
+/// discussion must resolve THAT project's environment exactly like a target
+/// declared on the project directly (the LaunchContext contract).
+#[tokio::test]
+async fn discussion_action_launch_context_resolves_project_env_for_a_global_target() {
+    let state = test_state();
+    let secret = kronn::core::crypto::generate_secret();
+    state.config.write().await.encryption_secret = Some(secret.clone());
+    let app = build_router_with_auth(state.clone(), false);
+
+    // A real, existing directory — the exec step validates `work_dir` exists
+    // on disk before spawning, and a global target now resolves the
+    // discussion's project as its worktree (KT-476 LaunchContext).
+    let project_path = std::env::temp_dir().to_string_lossy().into_owned();
+    state
+        .db
+        .with_conn({
+            let secret = secret.clone();
+            move |connection| {
+                let now = chrono::Utc::now().to_rfc3339();
+                connection.execute(
+                    "INSERT INTO projects (id,name,path,created_at,updated_at)
+                     VALUES ('launch-ctx-project','Launch ctx',?2,?1,?1)",
+                    rusqlite::params![now, project_path],
+                )?;
+                kronn::db::mcps::upsert_server(
+                    connection,
+                    &kronn::models::McpServer {
+                        id: "launch-ctx-server".into(),
+                        name: "Server".into(),
+                        description: String::new(),
+                        transport: kronn::models::McpTransport::Stdio {
+                            command: "server".into(),
+                            args: vec![],
+                        },
+                        source: kronn::models::McpSource::Registry,
+                        api_spec: None,
+                    },
+                )?;
+                let values =
+                    HashMap::from([("TOKEN".to_string(), "project-env-value".to_string())]);
+                kronn::db::mcps::insert_config(
+                    connection,
+                    &kronn::models::McpConfig {
+                        id: "launch-ctx-config".into(),
+                        server_id: "launch-ctx-server".into(),
+                        label: "Config".into(),
+                        env_keys: vec!["TOKEN".into()],
+                        env_encrypted: kronn::db::mcps::encrypt_env(&values, &secret).unwrap(),
+                        args_override: None,
+                        is_global: false,
+                        include_general: false,
+                        config_hash: "hash".into(),
+                        project_ids: vec!["launch-ctx-project".into()],
+                        host_sync: kronn::models::HostSyncMode::None,
+                    },
+                )?;
+                connection.execute(
+                    "INSERT INTO discussions (id, title, project_id, created_at, updated_at)
+                     VALUES ('disc-launch-ctx', 'Launch ctx', 'launch-ctx-project', ?1, ?1)",
+                    [&now],
+                )?;
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+
+    // A GLOBAL Quick Exec: no project_id of its own.
+    let (_, qe) = post_json(
+        app.clone(),
+        "/api/quick-execs",
+        serde_json::json!({
+            "name": "Push status", "command": "echo", "args": ["{\"ok\":true}"], "timeout_secs": 10,
+            "output_format": "json",
+            "variables": [{
+                "name": "token", "label": "Token", "placeholder": "", "required": true,
+                "source": "project_env", "source_ref": "<env.TOKEN>",
+                "allow_manual_override": false,
+            }],
+        }),
+    )
+    .await;
+    assert_eq!(qe["success"], true, "{qe}");
+    let target_id = qe["data"]["id"].as_str().unwrap().to_string();
+    assert!(
+        qe["data"]["project_id"].is_null(),
+        "target must stay global"
+    );
+
+    let content =
+        format!("```kronn-action\n{{\"kind\":\"quick_exec\",\"target_id\":\"{target_id}\"}}\n```");
+    state
+        .db
+        .with_conn(move |connection| {
+            let msg = agent_action_message("msg-launch-ctx", &content);
+            kronn::db::discussions::insert_message(connection, "disc-launch-ctx", &msg)
+        })
+        .await
+        .unwrap();
+
+    let action_id = "action:msg-launch-ctx:0";
+    let (_, proposed) =
+        get_json(app.clone(), &format!("/api/discussion-actions/{action_id}")).await;
+    assert_eq!(
+        proposed["data"]["project_id"], "launch-ctx-project",
+        "the proposal inherits the discussion's project: {proposed}"
+    );
+
+    let (_, launched) = post_json(
+        app.clone(),
+        &format!("/api/discussion-actions/{action_id}/launch"),
+        serde_json::json!({"variables": {}}),
+    )
+    .await;
+    assert_eq!(launched["success"], true, "{launched}");
+
+    let completed = wait_for_terminal_action(app, action_id).await;
+    assert_eq!(completed["data"]["state"], "succeeded", "{completed}");
+    let run_id = completed["data"]["shared_run_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // The execution-variable snapshot is the durable, auditable proof of
+    // which project's environment actually resolved this run.
+    let snapshot_project_id: Option<String> = state
+        .db
+        .with_conn(move |connection| {
+            Ok(connection.query_row(
+                "SELECT project_id FROM execution_variable_snapshots
+                 WHERE run_kind = 'quick_exec' AND run_id = ?1",
+                [&run_id],
+                |row| row.get(0),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        snapshot_project_id.as_deref(),
+        Some("launch-ctx-project"),
+        "a global target launched from a project-scoped discussion must resolve THAT project's environment"
+    );
+}
+
+/// KT-476 review — an `allow_manual_override` value can be overridden at
+/// launch, but the operator's plaintext value must never be persisted in
+/// `discussion_actions.values_json` or replayed by a later GET.
+#[tokio::test]
+async fn discussion_action_allow_manual_override_never_leaks_plaintext_through_the_api() {
+    let state = test_state();
+    let secret = kronn::core::crypto::generate_secret();
+    state.config.write().await.encryption_secret = Some(secret.clone());
+    let app = build_router_with_auth(state.clone(), false);
+
+    state
+        .db
+        .with_conn(|connection| {
+            let now = chrono::Utc::now().to_rfc3339();
+            Ok(connection.execute(
+                "INSERT INTO discussions (id, title, created_at, updated_at)
+                 VALUES ('disc-override', 'Override', ?1, ?1)",
+                [&now],
+            )?)
+        })
+        .await
+        .unwrap();
+
+    let (_, qe) = post_json(
+        app.clone(),
+        "/api/quick-execs",
+        serde_json::json!({
+            "name": "Push status", "command": "echo", "args": ["{\"ok\":true}"], "timeout_secs": 10,
+            "output_format": "json",
+            "variables": [{
+                "name": "token", "label": "Token", "placeholder": "", "required": true,
+                "source": "project_env", "source_ref": "<env.TOKEN>",
+                "allow_manual_override": true,
+            }],
+        }),
+    )
+    .await;
+    let target_id = qe["data"]["id"].as_str().unwrap().to_string();
+
+    let content =
+        format!("```kronn-action\n{{\"kind\":\"quick_exec\",\"target_id\":\"{target_id}\"}}\n```");
+    state
+        .db
+        .with_conn(move |connection| {
+            let msg = agent_action_message("msg-override", &content);
+            kronn::db::discussions::insert_message(connection, "disc-override", &msg)
+        })
+        .await
+        .unwrap();
+
+    let action_id = "action:msg-override:0";
+    let (_, proposed) =
+        get_json(app.clone(), &format!("/api/discussion-actions/{action_id}")).await;
+    assert_eq!(proposed["data"]["values"][0]["allow_manual_override"], true);
+    assert_eq!(proposed["data"]["values"][0]["provenance"], "project_env");
+    assert!(proposed["data"]["values"][0]["value"].is_null());
+
+    let (_, launched) = post_json(
+        app.clone(),
+        &format!("/api/discussion-actions/{action_id}/launch"),
+        serde_json::json!({"variables": {"token": "operator-typed-secret"}}),
+    )
+    .await;
+    assert_eq!(launched["success"], true, "{launched}");
+    assert!(
+        !launched.to_string().contains("operator-typed-secret"),
+        "the launch response must never echo the manually supplied value: {launched}"
+    );
+
+    let completed = wait_for_terminal_action(app.clone(), action_id).await;
+    assert_eq!(completed["data"]["state"], "succeeded", "{completed}");
+    assert!(
+        !completed.to_string().contains("operator-typed-secret"),
+        "a later GET must never replay the manually supplied plaintext value: {completed}"
+    );
+
+    // The value DID reach the executor — proven through the one durable,
+    // encrypted place it may live: the execution-variable snapshot.
+    let run_id = completed["data"]["shared_run_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let key = kronn::core::crypto::parse_secret(&secret).unwrap();
+    let values = state
+        .db
+        .with_conn(move |connection| {
+            kronn::db::execution_variable_snapshots::load_values(
+                connection,
+                "quick_exec",
+                &run_id,
+                &key,
+                chrono::Utc::now(),
+            )
+        })
+        .await
+        .unwrap()
+        .expect("snapshot must still be live");
+    assert_eq!(values["token"], "operator-typed-secret");
+}
+
+/// KT-476 review — invalid JSON and an empty `target_id` must surface as a
+/// readable, actionable `preflight_failed` card through the SAME production
+/// message-insertion boundary, never a silently dropped fence.
+#[tokio::test]
+async fn discussion_action_invalid_proposals_are_actionable_through_the_real_message_transaction() {
+    let state = test_state();
+    let app = build_router_with_auth(state.clone(), false);
+    state
+        .db
+        .with_conn(|connection| {
+            let now = chrono::Utc::now().to_rfc3339();
+            Ok(connection.execute(
+                "INSERT INTO discussions (id, title, created_at, updated_at)
+                 VALUES ('disc-invalid', 'Invalid', ?1, ?1)",
+                [&now],
+            )?)
+        })
+        .await
+        .unwrap();
+
+    let bad_json = "```kronn-action\n{not valid json\n```";
+    let empty_target = "```kronn-action\n{\"kind\":\"workflow\",\"target_id\":\"\"}\n```";
+    state
+        .db
+        .with_conn(move |connection| {
+            kronn::db::discussions::insert_message(
+                connection,
+                "disc-invalid",
+                &agent_action_message("msg-bad-json", bad_json),
+            )?;
+            kronn::db::discussions::insert_message(
+                connection,
+                "disc-invalid",
+                &agent_action_message("msg-empty-target", empty_target),
+            )
+        })
+        .await
+        .unwrap();
+
+    let (_, listed) = get_json(app, "/api/discussions/disc-invalid/actions").await;
+    let actions = listed["data"].as_array().unwrap();
+    assert_eq!(actions.len(), 2, "{listed}");
+    assert!(
+        actions
+            .iter()
+            .all(|action| action["state"] == "preflight_failed"),
+        "{listed}"
+    );
+    assert!(actions.iter().any(|action| action["kind"] == "invalid"
+        && action["diagnostic"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("JSON invalide")));
+    assert!(actions.iter().any(|action| action["kind"] == "workflow"
+        && action["diagnostic"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("aucune cible")));
 }
 
 #[tokio::test]
@@ -1018,6 +1535,54 @@ async fn live_page_create_publish_and_read_round_trip() {
 }
 
 #[tokio::test]
+async fn live_page_action_routes_persist_and_fail_closed_for_an_unknown_target() {
+    let app = test_app();
+    let (_, created) = post_json(
+        app.clone(),
+        "/api/pages",
+        serde_json::json!({
+            "title": "Operations",
+            "html": concat!(
+                "<button data-kronn-action=\"deploy\">Deploy</button>",
+                "<script type=\"application/kronn-action\" data-action-id=\"deploy\">",
+                "{\"kind\":\"workflow\",\"target_id\":\"missing-workflow\"}",
+                "</script>"
+            ),
+            "datasets": []
+        }),
+    )
+    .await;
+    assert_eq!(created["success"], true, "{created}");
+    let page_id = created["data"]["id"].as_str().unwrap();
+
+    let (_, listed) = get_json(app.clone(), &format!("/api/pages/{page_id}/actions")).await;
+    assert_eq!(listed["success"], true, "{listed}");
+    let action = &listed["data"][0];
+    assert_eq!(action["action_ref"], "deploy");
+    assert_eq!(action["state"], "preflight_failed");
+    assert!(action["diagnostic"]
+        .as_str()
+        .is_some_and(|message| message.contains("n’existe plus")));
+    let action_id = action["id"].as_str().unwrap();
+
+    let (_, launch) = post_json(
+        app.clone(),
+        &format!("/api/live-page-actions/{action_id}/launch"),
+        serde_json::json!({
+            "variables": {"forged": "value"},
+            "bindings": {"row": "forged"}
+        }),
+    )
+    .await;
+    assert_eq!(launch["success"], true, "{launch}");
+    assert_eq!(launch["data"]["state"], "preflight_failed");
+
+    let (_, reloaded) = get_json(app, &format!("/api/live-page-actions/{action_id}")).await;
+    assert_eq!(reloaded["data"]["id"], action_id);
+    assert_eq!(reloaded["data"]["state"], "preflight_failed");
+}
+
+#[tokio::test]
 async fn live_page_library_state_discussion_link_and_delete_round_trip() {
     let state = test_state();
     state
@@ -1428,6 +1993,36 @@ async fn planning_api_rejects_dependency_cycles_and_identifies_agent_events() {
         retried["data"]["events"].as_array().unwrap().len(),
         removed["data"]["events"].as_array().unwrap().len(),
     );
+}
+
+/// An Agent/main-channel message built for `kronn::db::discussions::insert_message`
+/// — the real production transaction (message row + `kronn-action` ingestion in
+/// the same SAVEPOINT), never a raw `INSERT INTO messages` plus a manual
+/// `ingest_message_actions` call.
+fn agent_action_message(id: &str, content: &str) -> kronn::models::DiscussionMessage {
+    kronn::models::DiscussionMessage {
+        recovered_partial: false,
+        session_tokens_at_message: None,
+        author_cli_ordinal: None,
+        model: None,
+        lint_report: None,
+        id: id.into(),
+        role: kronn::models::MessageRole::Agent,
+        channel: kronn::models::MessageChannel::Main,
+        content: content.into(),
+        agent_type: Some(kronn::models::AgentType::ClaudeCode),
+        timestamp: chrono::Utc::now(),
+        tokens_used: 0,
+        auth_mode: None,
+        model_tier: None,
+        cost_usd: None,
+        author_pseudo: None,
+        author_avatar_email: None,
+        source_msg_id: None,
+        duration_ms: None,
+        target_agent: None,
+        reply_to_message_id: None,
+    }
 }
 
 fn test_state() -> AppState {
@@ -3713,6 +4308,97 @@ async fn discussions_create_and_list() {
 }
 
 #[tokio::test]
+async fn discussion_detail_keeps_checkpointed_text_visible_during_restart_recovery() {
+    let state = test_state();
+    let app = build_router_with_auth(state.clone(), false);
+    let (status, created) = post_json(
+        app.clone(),
+        "/api/discussions",
+        serde_json::json!({
+            "title": "Restart recovery",
+            "agent": "ClaudeCode",
+            "language": "fr",
+            "initial_prompt": "Analyse ceci",
+            "no_agent": true,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let discussion_id = created["data"]["id"].as_str().unwrap().to_string();
+    let trigger_message_id = created["data"]["messages"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let did = discussion_id.clone();
+    let trigger = trigger_message_id.clone();
+    state
+        .db
+        .with_conn(move |conn| {
+            kronn::db::agent_dispatch::enqueue(
+                conn,
+                kronn::db::agent_dispatch::NewAgentDispatchJob {
+                    id: "job-restart-http",
+                    discussion_id: &did,
+                    trigger_message_id: &trigger,
+                    trigger_sort_order: 0,
+                    dedupe_key: "restart-http",
+                    agent_override: Some(&kronn::models::AgentType::ClaudeCode),
+                    chain_prompt_ids: &[],
+                    batch_item: None,
+                    group_id: None,
+                    group_concurrency_limit: None,
+                },
+            )?;
+            conn.execute(
+                "UPDATE agent_dispatch_jobs
+                    SET attempts = 2, last_error = 'backend_restarted'
+                  WHERE id = 'job-restart-http'",
+                [],
+            )?;
+            kronn::db::discussions::set_partial_response_for_dispatch(
+                conn,
+                &did,
+                "Début d'analyse conservé.",
+                (&kronn::models::AgentType::ClaudeCode, Some("sonnet-test")),
+                "job-restart-http",
+                &trigger,
+                None,
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    let (status, detail) = get_json(app, &format!("/api/discussions/{discussion_id}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        detail["data"]["partial_response"]["content"],
+        "Début d'analyse conservé."
+    );
+    assert_eq!(
+        detail["data"]["partial_response"]["dispatch"]["id"],
+        "job-restart-http"
+    );
+    assert_eq!(
+        detail["data"]["partial_response"]["dispatch"]["trigger_message_id"],
+        trigger_message_id
+    );
+    assert_eq!(
+        detail["data"]["partial_response"]["trigger_message_id"],
+        trigger_message_id
+    );
+    assert_eq!(
+        detail["data"]["partial_response"]["dispatch"]["last_error"],
+        "backend_restarted"
+    );
+    assert_eq!(
+        detail["data"]["partial_response"]["dispatch"]["attempts"],
+        2
+    );
+}
+
+#[tokio::test]
 async fn discussions_delete_message_keeps_an_explicit_timeline_marker() {
     let state = test_state();
     let app = build_router_with_auth(state, false);
@@ -3971,6 +4657,66 @@ async fn discussion_agent_handoff_mode_round_trips_through_http() {
 }
 
 #[tokio::test]
+async fn discussion_execution_variable_retention_can_override_then_inherit() {
+    let state = test_state();
+    state
+        .db
+        .with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO discussions
+                 (id, title, agent, language, participants_json, created_at,
+                  updated_at, message_count, workspace_mode)
+                 VALUES ('d-variable-retention', 'Variable retention', 'Codex', 'fr', '[]',
+                         datetime('now'), datetime('now'), 0, 'Direct')",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let app = build_router_with_auth(state, false);
+
+    let (_, initial) = get_json(
+        app.clone(),
+        "/api/discussions/d-variable-retention/execution-variable-retention",
+    )
+    .await;
+    assert_eq!(initial["data"]["global_days"], 30);
+    assert_eq!(initial["data"]["effective_days"], 30);
+    assert!(initial["data"]["override_days"].is_null());
+
+    let (_, updated) = patch_json(
+        app.clone(),
+        "/api/discussions/d-variable-retention",
+        serde_json::json!({ "execution_variable_retention_days": 7 }),
+    )
+    .await;
+    assert_eq!(updated["success"], true);
+    let (_, overridden) = get_json(
+        app.clone(),
+        "/api/discussions/d-variable-retention/execution-variable-retention",
+    )
+    .await;
+    assert_eq!(overridden["data"]["override_days"], 7);
+    assert_eq!(overridden["data"]["effective_days"], 7);
+
+    let (_, cleared) = patch_json(
+        app.clone(),
+        "/api/discussions/d-variable-retention",
+        serde_json::json!({ "execution_variable_retention_days": null }),
+    )
+    .await;
+    assert_eq!(cleared["success"], true);
+    let (_, inherited) = get_json(
+        app,
+        "/api/discussions/d-variable-retention/execution-variable-retention",
+    )
+    .await;
+    assert!(inherited["data"]["override_days"].is_null());
+    assert_eq!(inherited["data"]["effective_days"], 30);
+}
+
+#[tokio::test]
 async fn discussions_create_uses_default_language() {
     let state = test_state();
 
@@ -4174,6 +4920,218 @@ async fn project_docker_routes_return_a_safe_empty_state_without_compose() {
     assert!(action["error"]
         .as_str()
         .is_some_and(|error| error.contains("Compose")));
+}
+
+#[tokio::test]
+async fn execution_context_http_routes_keep_values_masked_reveal_on_demand_and_audit_extension() {
+    let state = test_state();
+    let secret = kronn::core::crypto::generate_secret();
+    state.config.write().await.encryption_secret = Some(secret.clone());
+    let key = kronn::core::crypto::parse_secret(&secret).unwrap();
+    let now = chrono::Utc::now();
+    let values = HashMap::from([("token".to_string(), "http-secret-value".to_string())]);
+    let provenance = vec![kronn::core::execution_variables::VariableProvenance {
+        name: "token".into(),
+        source: kronn::models::PromptVariableSource::ProjectEnv,
+        source_ref: Some("<env.API_TOKEN>".into()),
+        effective_source_ref: "mcp:test".into(),
+        overridden: false,
+    }];
+    let snapshot_id = state
+        .db
+        .with_conn(move |connection| {
+            kronn::db::execution_variable_snapshots::insert(
+                connection,
+                kronn::db::execution_variable_snapshots::NewSnapshot {
+                    run_kind: "quick_exec",
+                    run_id: "qe-http-run",
+                    project_id: None,
+                    environment_ref: "project_mcp_configs",
+                    resolved_at: now,
+                    retention_days: 30,
+                    expires_at: Some(now + chrono::Duration::days(30)),
+                    values: &values,
+                    provenance: &provenance,
+                },
+                &key,
+            )
+        })
+        .await
+        .unwrap();
+    let route = "/api/execution-context/quick_exec/qe-http-run";
+
+    let (status, metadata) = get_json(build_router_with_auth(state.clone(), false), route).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(metadata["success"], true, "{metadata}");
+    assert_eq!(metadata["data"]["id"], snapshot_id);
+    assert_eq!(metadata["data"]["purged"], false);
+    assert_eq!(metadata["data"]["provenance"][0]["name"], "token");
+    assert!(
+        !metadata.to_string().contains("http-secret-value"),
+        "metadata leaked the encrypted value: {metadata}"
+    );
+
+    let (status, revealed) = post_json(
+        build_router_with_auth(state.clone(), false),
+        &format!("{route}/reveal"),
+        serde_json::json!({ "variable": "token" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(revealed["success"], true, "{revealed}");
+    assert_eq!(revealed["data"], "http-secret-value");
+
+    let (status, extended) = post_json(
+        build_router_with_auth(state.clone(), false),
+        &format!("{route}/extend"),
+        serde_json::json!({ "days": 45 }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(extended["success"], true, "{extended}");
+
+    let (reveal_audits, retention_audits): (i64, i64) = state
+        .db
+        .with_conn(move |connection| {
+            Ok((
+                connection.query_row(
+                    "SELECT COUNT(*) FROM execution_variable_reveal_audit WHERE snapshot_id=?1 AND variable_name='token'",
+                    [&snapshot_id],
+                    |row| row.get(0),
+                )?,
+                connection.query_row(
+                    "SELECT COUNT(*) FROM execution_variable_retention_audit WHERE snapshot_id=?1",
+                    [&snapshot_id],
+                    |row| row.get(0),
+                )?,
+            ))
+        })
+        .await
+        .unwrap();
+    assert_eq!(reveal_audits, 1);
+    assert_eq!(retention_audits, 1);
+
+    let (_, missing) = get_json(
+        build_router_with_auth(state, false),
+        "/api/execution-context/quick_exec/unknown-run",
+    )
+    .await;
+    assert_eq!(missing["success"], false, "{missing}");
+}
+
+#[tokio::test]
+async fn execution_variable_preview_is_short_lived_masked_and_audited() {
+    let state = test_state();
+    let secret = kronn::core::crypto::generate_secret();
+    state.config.write().await.encryption_secret = Some(secret.clone());
+    let seeded_secret = secret.clone();
+    state
+        .db
+        .with_conn(move |connection| {
+            let now = chrono::Utc::now().to_rfc3339();
+            connection.execute(
+                "INSERT INTO projects (id,name,path,created_at,updated_at)
+                 VALUES ('preview-project','Preview','/tmp/preview',?1,?1)",
+                [&now],
+            )?;
+            kronn::db::mcps::upsert_server(
+                connection,
+                &kronn::models::McpServer {
+                    id: "preview-server".into(),
+                    name: "Preview server".into(),
+                    description: String::new(),
+                    transport: kronn::models::McpTransport::Stdio {
+                        command: "preview".into(),
+                        args: vec![],
+                    },
+                    source: kronn::models::McpSource::Registry,
+                    api_spec: None,
+                },
+            )?;
+            let values =
+                HashMap::from([("API_TOKEN".to_string(), "preview-only-secret".to_string())]);
+            kronn::db::mcps::insert_config(
+                connection,
+                &kronn::models::McpConfig {
+                    id: "preview-config".into(),
+                    server_id: "preview-server".into(),
+                    label: "Preview config".into(),
+                    env_keys: vec!["API_TOKEN".into()],
+                    env_encrypted: kronn::db::mcps::encrypt_env(&values, &seeded_secret).unwrap(),
+                    args_override: None,
+                    is_global: false,
+                    include_general: false,
+                    config_hash: "preview-hash".into(),
+                    project_ids: vec!["preview-project".into()],
+                    host_sync: kronn::models::HostSyncMode::None,
+                },
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    let (status, preview) = post_json(
+        build_router_with_auth(state.clone(), false),
+        "/api/execution-context/preview",
+        serde_json::json!({
+            "project_id": "preview-project",
+            "variables": [{
+                "name": "token",
+                "label": "Token",
+                "placeholder": "",
+                "required": true,
+                "source": "project_env",
+                "source_ref": "<env.API_TOKEN>",
+                "allow_manual_override": false
+            }]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(preview["success"], true, "{preview}");
+    assert!(!preview.to_string().contains("preview-only-secret"));
+    assert_eq!(preview["data"]["run_kind"], "preview");
+    assert_eq!(
+        preview["data"]["metadata"]["provenance"][0]["name"],
+        "token"
+    );
+    let run_id = preview["data"]["run_id"].as_str().unwrap().to_string();
+    let route = format!("/api/execution-context/preview/{run_id}");
+
+    let (_, revealed) = post_json(
+        build_router_with_auth(state.clone(), false),
+        &format!("{route}/reveal"),
+        serde_json::json!({ "variable": "token" }),
+    )
+    .await;
+    assert_eq!(revealed["data"], "preview-only-secret");
+
+    let (_, refused_extension) = post_json(
+        build_router_with_auth(state.clone(), false),
+        &format!("{route}/extend"),
+        serde_json::json!({ "days": 30 }),
+    )
+    .await;
+    assert_eq!(refused_extension["success"], false);
+
+    let (retention_days, reveal_audits): (u32, i64) = state
+        .db
+        .with_conn(move |connection| {
+            connection.query_row(
+                "SELECT s.retention_days,
+                        (SELECT COUNT(*) FROM execution_variable_reveal_audit a WHERE a.snapshot_id=s.id)
+                 FROM execution_variable_snapshots s
+                 WHERE s.run_kind='preview' AND s.run_id=?1",
+                [&run_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(Into::into)
+        })
+        .await
+        .unwrap();
+    assert_eq!(retention_days, 0);
+    assert_eq!(reveal_audits, 1);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -5129,6 +6087,7 @@ async fn server_config_returns_defaults() {
     assert_eq!(json["data"]["agent_handoffs_enabled"], false);
     assert_eq!(json["data"]["agent_handoff_paid_limit"], 1);
     assert_eq!(json["data"]["agent_handoff_paid_unlimited"], false);
+    assert_eq!(json["data"]["execution_variable_retention_days"], 30);
     assert_eq!(
         json["data"]["agent_handoff_blocked_agents"],
         serde_json::json!([])
@@ -5165,6 +6124,24 @@ async fn server_config_persists_and_clamps_agent_timeouts_independently() {
     let (_, clamped) = get_json(app, "/api/config/server").await;
     assert_eq!(clamped["data"]["agent_global_timeout_min"], 240);
     assert_eq!(clamped["data"]["local_agent_global_timeout_min"], 240);
+}
+
+#[tokio::test]
+async fn server_config_updates_execution_variable_retention_including_zero() {
+    let app = test_app();
+
+    for days in [45, 0] {
+        let (_, updated) = post_json(
+            app.clone(),
+            "/api/config/server",
+            serde_json::json!({ "execution_variable_retention_days": days }),
+        )
+        .await;
+        assert_eq!(updated["success"], true);
+
+        let (_, persisted) = get_json(app.clone(), "/api/config/server").await;
+        assert_eq!(persisted["data"]["execution_variable_retention_days"], days);
+    }
 }
 
 #[tokio::test]
@@ -5771,6 +6748,9 @@ async fn external_api_test_state(endpoint: String) -> AppState {
         reasoning_model: None,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
+        image_model: None,
+        video_model: None,
+        media_endpoint: None,
     };
     let insert = connection.clone();
     state
@@ -5826,6 +6806,9 @@ async fn external_api_nvidia_update_refreshes_the_models_used_by_global_selector
         reasoning_model: Some("nvidia/old-reasoning".into()),
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
+        image_model: None,
+        video_model: None,
+        media_endpoint: None,
     };
     state
         .db
@@ -5915,6 +6898,86 @@ async fn external_api_openrouter_validates_the_key_before_unlocking_the_catalogu
 }
 
 #[tokio::test]
+async fn external_api_openrouter_keeps_dedicated_media_catalogues_capability_scoped() {
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let upstream = MockServer::start().await;
+    for (route, body) in [
+        (
+            "/v1/models",
+            serde_json::json!({"data": [{
+                "id": "text/chat",
+                "name": "Chat",
+                "architecture": {"output_modalities": ["text"]}
+            }]}),
+        ),
+        (
+            "/v1/images/models",
+            serde_json::json!({"data": [{
+                "id": "image/generator",
+                "name": "Image generator",
+                "architecture": {"output_modalities": ["image"]}
+            }]}),
+        ),
+        (
+            "/v1/videos/models",
+            serde_json::json!({"data": [{
+                "id": "bytedance/seedance",
+                "name": "Seedance"
+            }]}),
+        ),
+    ] {
+        Mock::given(method("GET"))
+            .and(path(route))
+            .and(header("authorization", "Bearer sk-or-v1-media"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .expect(1)
+            .mount(&upstream)
+            .await;
+    }
+    Mock::given(method("GET"))
+        .and(path("/v1/key"))
+        .and(header("authorization", "Bearer sk-or-v1-media"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": {"label": "media key"}
+        })))
+        .expect(1)
+        .mount(&upstream)
+        .await;
+
+    let (_, response) = post_json(
+        test_app(),
+        "/api/external-api/connections/test",
+        serde_json::json!({
+            "endpoint": upstream.uri(),
+            "api_key": "sk-or-v1-media",
+            "origin_preset": "open_router"
+        }),
+    )
+    .await;
+
+    assert_eq!(response["data"]["models"], serde_json::json!(["text/chat"]));
+    let catalog = response["data"]["catalog"].as_array().unwrap();
+    let capabilities = |id: &str| {
+        catalog
+            .iter()
+            .find(|model| model["id"] == id)
+            .map(|model| model["capabilities"].clone())
+            .unwrap()
+    };
+    assert_eq!(capabilities("text/chat"), serde_json::json!(["chat"]));
+    assert_eq!(
+        capabilities("image/generator"),
+        serde_json::json!(["image"])
+    );
+    assert_eq!(
+        capabilities("bytedance/seedance"),
+        serde_json::json!(["video"])
+    );
+}
+
+#[tokio::test]
 async fn external_api_openrouter_explains_a_key_saved_without_its_prefix() {
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -5965,7 +7028,11 @@ async fn external_api_nvidia_catalogue_does_not_probe_an_arbitrary_first_model()
     Mock::given(method("GET"))
         .and(path("/v1/models"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "data": [{"id": "nvidia/public-but-unavailable"}]
+            "data": [{
+                "id": "nvidia/public-but-unavailable",
+                "name": "NVIDIA visual model",
+                "architecture": {"output_modalities": ["image"]}
+            }]
         })))
         .expect(1)
         .mount(&upstream)
@@ -5992,6 +7059,10 @@ async fn external_api_nvidia_catalogue_does_not_probe_an_arbitrary_first_model()
     assert_eq!(
         response["data"]["models"],
         serde_json::json!(["nvidia/public-but-unavailable"])
+    );
+    assert_eq!(
+        response["data"]["catalog"][0]["capabilities"],
+        serde_json::json!(["image"])
     );
     assert!(response["data"]["hint"]
         .as_str()
@@ -14008,6 +15079,10 @@ mod cold_api_handlers_tests {
                 description: None,
                 required: true,
                 pattern: None,
+                source: Default::default(),
+                source_ref: None,
+                allow_manual_override: false,
+                control: None,
             }],
             enabled: true,
             created_at: now,
@@ -14067,6 +15142,10 @@ mod cold_api_handlers_tests {
                 description: None,
                 required: true,
                 pattern: None,
+                source: Default::default(),
+                source_ref: None,
+                allow_manual_override: false,
+                control: None,
             }],
             agent: kronn::models::AgentType::ClaudeCode,
             connection_id: None,
@@ -14971,4 +16050,1687 @@ mod cold_api_handlers_tests {
             panic!("a non-shared disc must not federate its messages");
         }
     }
+}
+
+// ── Discussion storage weight (KT-541) ─────────────────────────────────────
+//
+// The endpoint is batch-only by design: summing message content scans the
+// messages table, so an unbounded form would turn a sidebar repaint into a
+// table-wide aggregate. These tests pin that refusal at the HTTP boundary,
+// not just in the store.
+
+#[tokio::test]
+async fn discussion_weights_refuses_an_unbounded_request() {
+    let app = test_app();
+
+    let (status, body) = get_json(app.clone(), "/api/discussion-weights").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["success"], false);
+    let error = body["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("discussion_ids"),
+        "the refusal must name the missing parameter, got {error}"
+    );
+
+    // An empty or comma-only value is the same absence, not an empty batch.
+    let (_, blank) = get_json(app, "/api/discussion-weights?discussion_ids=,,").await;
+    assert_eq!(blank["success"], false);
+}
+
+#[tokio::test]
+async fn discussion_weights_refuses_a_batch_over_the_cap() {
+    let app = test_app();
+    let ids: Vec<String> = (0..201).map(|i| format!("d{i}")).collect();
+    let uri = format!("/api/discussion-weights?discussion_ids={}", ids.join(","));
+
+    let (status, body) = get_json(app, &uri).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["success"], false);
+    let error = body["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("201"),
+        "the refusal must be quantified, got {error}"
+    );
+    assert!(error.contains("200"), "and state the cap, got {error}");
+}
+
+#[tokio::test]
+async fn discussion_weights_answers_sparsely_and_splits_the_masses() {
+    let state = test_state();
+    state
+        .db
+        .with_conn(|connection| {
+            let now = chrono::Utc::now().to_rfc3339();
+            connection.execute(
+                "INSERT INTO discussions (id, title, created_at, updated_at)
+                 VALUES ('disc-heavy', 'Heavy room', ?1, ?1),
+                        ('disc-empty', 'Empty room', ?1, ?1)",
+                [&now],
+            )?;
+            connection.execute(
+                "INSERT INTO messages (id, discussion_id, role, content, timestamp)
+                 VALUES ('m1', 'disc-heavy', 'User', 'éàc', ?1)",
+                [&now],
+            )?;
+            connection.execute(
+                "INSERT INTO context_files
+                    (id, discussion_id, filename, mime_type, original_size,
+                     extracted_text, extracted_size, disk_path, created_at)
+                 VALUES ('cf1', 'disc-heavy', 'clip.mp4', 'video/mp4', 1621340,
+                         '', 0, '/tmp/clip.mp4', ?1)",
+                [&now],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let app = build_router_with_auth(state, false);
+
+    let (status, body) = get_json(
+        app,
+        "/api/discussion-weights?discussion_ids=disc-heavy,disc-empty,disc-absent",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["success"], true);
+
+    let weights = &body["data"]["weights"];
+    // Sparse: only what actually holds something comes back, so the UI can
+    // tell "empty" apart from "not loaded".
+    assert!(weights["disc-heavy"].is_object());
+    assert!(
+        weights["disc-empty"].is_null(),
+        "an empty discussion is absent"
+    );
+    assert!(weights["disc-absent"].is_null(), "an unknown id is absent");
+
+    let heavy = &weights["disc-heavy"];
+    assert_eq!(heavy["disk_bytes"], 1_621_340);
+    assert_eq!(heavy["extracted_text_bytes"], 0);
+    // Bytes, not characters: "éàc" is 3 chars but 5 UTF-8 bytes (2 + 2 + 1).
+    assert_eq!(heavy["message_bytes"], 5);
+    assert_eq!(heavy["total_bytes"], 1_621_345);
+    // Only the disk blobs can be reclaimed without losing conversation.
+    assert_eq!(heavy["reclaimable_bytes"], 1_621_340);
+    assert_eq!(heavy["level"], "green");
+
+    // The thresholds in force travel with the answer, and the fallback flag
+    // is reported rather than hidden.
+    assert_eq!(body["data"]["thresholds"]["amber_bytes"], 25 * 1024 * 1024);
+    assert_eq!(body["data"]["thresholds"]["red_bytes"], 100 * 1024 * 1024);
+    assert_eq!(body["data"]["thresholds_from_defaults"], false);
+}
+
+#[tokio::test]
+async fn discussion_weights_grades_the_level_from_the_configured_thresholds() {
+    let state = test_state();
+    state.config.write().await.server.discussion_weight = kronn::models::DiscussionWeightConfig {
+        enabled: true,
+        amber_bytes: 10,
+        red_bytes: 100,
+    };
+    state
+        .db
+        .with_conn(|connection| {
+            let now = chrono::Utc::now().to_rfc3339();
+            connection.execute(
+                "INSERT INTO discussions (id, title, created_at, updated_at)
+                 VALUES ('disc-amber', 'Amber', ?1, ?1), ('disc-red', 'Red', ?1, ?1)",
+                [&now],
+            )?;
+            connection.execute(
+                "INSERT INTO context_files
+                    (id, discussion_id, filename, mime_type, original_size,
+                     extracted_text, extracted_size, disk_path, created_at)
+                 VALUES ('a', 'disc-amber', 'a.png', 'image/png', 50, '', 0, '/tmp/a', ?1),
+                        ('r', 'disc-red', 'r.png', 'image/png', 500, '', 0, '/tmp/r', ?1)",
+                [&now],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let app = build_router_with_auth(state, false);
+
+    let (_, body) = get_json(
+        app,
+        "/api/discussion-weights?discussion_ids=disc-amber,disc-red",
+    )
+    .await;
+    assert_eq!(body["data"]["weights"]["disc-amber"]["level"], "amber");
+    assert_eq!(body["data"]["weights"]["disc-red"]["level"], "red");
+}
+
+#[tokio::test]
+async fn discussion_weights_reports_a_threshold_fallback_instead_of_hiding_it() {
+    let state = test_state();
+    // Inverted pair: unusable as a scale, so the defaults must take over as a
+    // whole and say so.
+    state.config.write().await.server.discussion_weight = kronn::models::DiscussionWeightConfig {
+        enabled: true,
+        amber_bytes: 900,
+        red_bytes: 100,
+    };
+    state
+        .db
+        .with_conn(|connection| {
+            let now = chrono::Utc::now().to_rfc3339();
+            connection.execute(
+                "INSERT INTO discussions (id, title, created_at, updated_at)
+                 VALUES ('disc-x', 'X', ?1, ?1)",
+                [&now],
+            )?;
+            connection.execute(
+                "INSERT INTO messages (id, discussion_id, role, content, timestamp)
+                 VALUES ('m1', 'disc-x', 'User', 'hello', ?1)",
+                [&now],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let app = build_router_with_auth(state, false);
+
+    let (_, body) = get_json(app, "/api/discussion-weights?discussion_ids=disc-x").await;
+    assert_eq!(body["data"]["thresholds_from_defaults"], true);
+    assert_eq!(body["data"]["thresholds"]["amber_bytes"], 25 * 1024 * 1024);
+    assert_eq!(body["data"]["thresholds"]["red_bytes"], 100 * 1024 * 1024);
+}
+
+#[tokio::test]
+async fn a_single_discussion_weight_answers_zeros_rather_than_a_404() {
+    let app = test_app();
+
+    // The caller named this discussion explicitly, so zeros are the answer —
+    // not an error it would have to special-case.
+    let (status, body) = get_json(app, "/api/discussion-weights/ghost").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["success"], true);
+    assert_eq!(body["data"]["discussion_id"], "ghost");
+    assert_eq!(body["data"]["total_bytes"], 0);
+    assert_eq!(body["data"]["level"], "green");
+}
+
+// ── Media generation (KT-540) ──────────────────────────────────────────────
+//
+// The request never carries a model name: the model comes from the
+// connection's configured slot, so a caller cannot dispatch an arbitrary — and
+// arbitrarily priced — model. These tests pin that, plus the spend ceilings.
+
+async fn seed_media_connection(state: &kronn::AppState, image: Option<&str>, video: Option<&str>) {
+    let image = image.map(str::to_string);
+    let video = video.map(str::to_string);
+    state
+        .db
+        .with_conn(move |connection| {
+            let now = chrono::Utc::now().to_rfc3339();
+            connection.execute(
+                "INSERT INTO discussions (id, title, created_at, updated_at)
+                 VALUES ('disc-media', 'Media room', ?1, ?1)",
+                [&now],
+            )?;
+            connection.execute(
+                "INSERT INTO external_api_connections
+                    (id, display_name, mention_alias, endpoint, credential_slug,
+                     origin_preset, created_at, updated_at, image_model, video_model)
+                 VALUES ('conn-media', 'OpenRouter', 'openrouter',
+                         'https://openrouter.ai/api', 'conn-media', 'open_router',
+                         ?1, ?1, ?2, ?3)",
+                rusqlite::params![now, image, video],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn media_generate_refuses_a_modality_with_no_configured_model() {
+    let state = test_state();
+    // Video slot configured, image slot empty.
+    seed_media_connection(&state, None, Some("bytedance/seedance-2.0-mini")).await;
+    let app = build_router_with_auth(state, false);
+
+    let (status, body) = post_json(
+        app,
+        "/api/media/generate",
+        serde_json::json!({
+            "connection_id": "conn-media",
+            "modality": "image",
+            "prompt": "un chat",
+            "discussion_id": "disc-media"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["success"], false);
+    let error = body["error"].as_str().unwrap_or_default();
+    // The message must say what to configure, not just "failed".
+    assert!(error.contains("image"), "got {error}");
+    assert!(error.contains("no"), "got {error}");
+}
+
+#[tokio::test]
+async fn media_generate_queues_a_job_using_the_configured_model() {
+    let state = test_state();
+    seed_media_connection(&state, None, Some("bytedance/seedance-2.0-mini")).await;
+    let app = build_router_with_auth(state, false);
+
+    let (status, body) = post_json(
+        app.clone(),
+        "/api/media/generate",
+        serde_json::json!({
+            "connection_id": "conn-media",
+            "modality": "video",
+            "prompt": "un chat qui saute",
+            "discussion_id": "disc-media",
+            "duration_secs": 5,
+            "resolution": "480p",
+            "generate_audio": false
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["success"], true);
+    // Echoed so the caller sees what will actually be billed.
+    assert_eq!(body["data"]["model"], "bytedance/seedance-2.0-mini");
+    assert_eq!(body["data"]["status"], "pending");
+    let job_id = body["data"]["job_id"].as_str().unwrap().to_string();
+
+    let (_, job) = get_json(app, &format!("/api/media/jobs/{job_id}")).await;
+    assert_eq!(job["success"], true);
+    assert_eq!(job["data"]["modality"], "video");
+    assert_eq!(job["data"]["status"], "pending");
+    assert_eq!(job["data"]["attempts"], 0);
+    // Nothing billed and nothing rendered yet: absent, not zero.
+    assert!(job["data"]["cost_usd"].is_null());
+    assert!(job["data"]["width"].is_null());
+}
+
+#[tokio::test]
+async fn media_generate_caps_duration_and_resolution() {
+    let state = test_state();
+    seed_media_connection(&state, None, Some("bytedance/seedance-2.0-mini")).await;
+    let app = build_router_with_auth(state, false);
+
+    for (label, payload) in [
+        ("too long", serde_json::json!({ "duration_secs": 60 })),
+        ("zero", serde_json::json!({ "duration_secs": 0 })),
+        (
+            "unknown resolution",
+            serde_json::json!({ "resolution": "8k" }),
+        ),
+    ] {
+        let mut body = serde_json::json!({
+            "connection_id": "conn-media",
+            "modality": "video",
+            "prompt": "un chat",
+            "discussion_id": "disc-media"
+        });
+        for (k, v) in payload.as_object().unwrap() {
+            body[k] = v.clone();
+        }
+        let (_, answer) = post_json(app.clone(), "/api/media/generate", body).await;
+        assert_eq!(answer["success"], false, "{label} must be refused");
+    }
+}
+
+#[tokio::test]
+async fn media_generate_refuses_an_empty_prompt_and_an_unknown_connection() {
+    let state = test_state();
+    seed_media_connection(&state, Some("meta/muse-image"), None).await;
+    let app = build_router_with_auth(state, false);
+
+    let (_, blank) = post_json(
+        app.clone(),
+        "/api/media/generate",
+        serde_json::json!({
+            "connection_id": "conn-media", "modality": "image",
+            "prompt": "   ", "discussion_id": "disc-media"
+        }),
+    )
+    .await;
+    assert_eq!(blank["success"], false);
+
+    let (_, unknown) = post_json(
+        app,
+        "/api/media/generate",
+        serde_json::json!({
+            "connection_id": "nope", "modality": "image",
+            "prompt": "un chat", "discussion_id": "disc-media"
+        }),
+    )
+    .await;
+    assert_eq!(unknown["success"], false);
+    assert!(unknown["error"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("nope"));
+}
+
+#[tokio::test]
+async fn a_queued_media_job_can_be_cancelled_once() {
+    let state = test_state();
+    seed_media_connection(&state, None, Some("bytedance/seedance-2.0-mini")).await;
+    let app = build_router_with_auth(state, false);
+
+    let (_, created) = post_json(
+        app.clone(),
+        "/api/media/generate",
+        serde_json::json!({
+            "connection_id": "conn-media", "modality": "video",
+            "prompt": "un chat", "discussion_id": "disc-media"
+        }),
+    )
+    .await;
+    let job_id = created["data"]["job_id"].as_str().unwrap().to_string();
+
+    let (_, first) = post_json(
+        app.clone(),
+        &format!("/api/media/jobs/{job_id}/cancel"),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(first["data"], true);
+
+    // Already settled: a second cancel changes nothing.
+    let (_, second) = post_json(
+        app,
+        &format!("/api/media/jobs/{job_id}/cancel"),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(second["data"], false);
+}
+
+#[tokio::test]
+async fn media_model_slots_round_trip_through_the_connection_api() {
+    let state = test_state();
+    let app = build_router_with_auth(state, false);
+
+    let (_, created) = post_json(
+        app.clone(),
+        "/api/external-api/connections",
+        serde_json::json!({
+            "display_name": "OpenRouter media",
+            "mention_alias": "ormedia",
+            "endpoint": "https://openrouter.ai/api",
+            "origin_preset": "open_router",
+            "api_key": "sk-or-v1-testkeyforintegrationtests",
+            "image_model": "meta/muse-image",
+            "video_model": "bytedance/seedance-2.0-mini"
+        }),
+    )
+    .await;
+    assert_eq!(created["success"], true, "{created}");
+
+    let (_, listed) = get_json(app, "/api/external-api/connections").await;
+    let rows = listed["data"].as_array().cloned().unwrap_or_default();
+    let mine = rows
+        .iter()
+        .find(|row| row["mention_alias"] == "ormedia")
+        .expect("connection listed");
+    assert_eq!(mine["image_model"], "meta/muse-image");
+    assert_eq!(mine["video_model"], "bytedance/seedance-2.0-mini");
+}
+
+#[tokio::test]
+async fn media_costs_are_reported_in_their_own_counter() {
+    let state = test_state();
+    seed_media_connection(
+        &state,
+        Some("meta/muse-image"),
+        Some("bytedance/seedance-2.0-mini"),
+    )
+    .await;
+    // Two settled generations plus one still pending.
+    state
+        .db
+        .with_conn(|connection| {
+            let now = chrono::Utc::now().to_rfc3339();
+            connection.execute(
+                "INSERT INTO media_jobs
+                    (id, modality, status, connection_id, model, prompt, discussion_id,
+                     cost_usd, is_byok, attempts, scheduled_at, deadline_at, created_at,
+                     updated_at, completed_at)
+                 VALUES
+                    ('j-vid', 'video', 'completed', 'conn-media', 'bytedance/seedance-2.0-mini',
+                     'p', 'disc-media', 0.0708932, 0, 1, ?1, ?1, ?1, ?1, ?1),
+                    ('j-img', 'image', 'completed', 'conn-media', 'meta/muse-image',
+                     'p', 'disc-media', 0.01, 0, 1, ?1, ?1, ?1, ?1, ?1),
+                    ('j-run', 'video', 'pending', 'conn-media', 'bytedance/seedance-2.0-mini',
+                     'p', 'disc-media', NULL, 0, 0, ?1, ?1, ?1, ?1, NULL)",
+                [&now],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let app = build_router_with_auth(state, false);
+
+    let (status, body) = get_json(app, "/api/media/costs").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["success"], true);
+
+    // Only billed generations count: a pending job is not free, it is simply
+    // not billed yet, so it must not appear as a zero.
+    let entries = body["data"]["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 2, "{body}");
+    assert!(entries.iter().all(|e| e["id"] != "j-run"));
+
+    // Amounts are the provider's declared values, verbatim.
+    assert_eq!(body["data"]["video_total_usd"], 0.0708932);
+    assert_eq!(body["data"]["image_total_usd"], 0.01);
+    assert_eq!(body["data"]["total_usd"], 0.0808932);
+
+    // Per-generation detail carries what was billed and on which model.
+    let video = entries.iter().find(|e| e["id"] == "j-vid").unwrap();
+    assert_eq!(video["modality"], "video");
+    assert_eq!(video["model"], "bytedance/seedance-2.0-mini");
+    assert_eq!(video["is_byok"], false);
+}
+
+#[tokio::test]
+async fn media_costs_are_empty_rather_than_zeroed_when_nothing_was_billed() {
+    let app = test_app();
+    let (_, body) = get_json(app, "/api/media/costs").await;
+    assert_eq!(body["success"], true);
+    assert_eq!(body["data"]["entries"].as_array().unwrap().len(), 0);
+    assert_eq!(body["data"]["total_usd"], 0.0);
+}
+
+#[tokio::test]
+async fn a_queued_media_job_is_immediately_visible_as_a_shared_run() {
+    let state = test_state();
+    seed_media_connection(&state, None, Some("bytedance/seedance-2.0-mini")).await;
+    let app = build_router_with_auth(state.clone(), false);
+
+    let (_, created) = post_json(
+        app,
+        "/api/media/generate",
+        serde_json::json!({
+            "connection_id": "conn-media", "modality": "video",
+            "prompt": "un chat", "discussion_id": "disc-media"
+        }),
+    )
+    .await;
+    let job_id = created["data"]["job_id"].as_str().unwrap().to_string();
+
+    let lookup = job_id.clone();
+    let run = state
+        .db
+        .with_read_conn(move |conn| kronn::db::shared_runs::get(conn, &lookup))
+        .await
+        .unwrap()
+        .expect("shared run published while still queued");
+
+    // One kind for both modalities; the modality lives in the result.
+    assert!(matches!(run.kind, kronn::models::SharedRunKind::Media));
+    // 1:1 identity, so a restart cannot produce a duplicate run.
+    assert_eq!(run.id, job_id);
+    assert!(matches!(run.status, kronn::models::SharedRunStatus::Queued));
+    assert_eq!(run.discussion_id.as_deref(), Some("disc-media"));
+
+    let result = run.result.expect("versioned result");
+    assert_eq!(result["schema_version"], 1);
+    assert_eq!(result["modality"], "video");
+    // Never an invented percentage: the provider does not measure progress.
+    assert!(result.get("progress").is_none(), "got {result}");
+    // Nothing billed nor rendered yet: absent, not zero.
+    assert!(result.get("cost_usd").is_none());
+    assert!(result.get("width").is_none());
+    // No secret, no payload, no signed URL.
+    assert!(run.diagnostic.is_none());
+}
+
+#[tokio::test]
+async fn cancelling_a_media_job_updates_its_run_without_any_manual_sync() {
+    let state = test_state();
+    seed_media_connection(&state, None, Some("bytedance/seedance-2.0-mini")).await;
+    let app = build_router_with_auth(state.clone(), false);
+
+    let (_, created) = post_json(
+        app.clone(),
+        "/api/media/generate",
+        serde_json::json!({
+            "connection_id": "conn-media", "modality": "video",
+            "prompt": "un chat", "discussion_id": "disc-media"
+        }),
+    )
+    .await;
+    let job_id = created["data"]["job_id"].as_str().unwrap().to_string();
+
+    post_json(
+        app,
+        &format!("/api/media/jobs/{job_id}/cancel"),
+        serde_json::json!({}),
+    )
+    .await;
+
+    // Read straight from storage: the previous version of this test called
+    // sync_media() by hand after the POST, so it proved the projection and NOT
+    // the endpoint. Nothing is synced here.
+    let lookup = job_id.clone();
+    let run = state
+        .db
+        .with_read_conn(move |conn| kronn::db::shared_runs::get(conn, &lookup))
+        .await
+        .unwrap()
+        .expect("run");
+    assert!(matches!(
+        run.status,
+        kronn::models::SharedRunStatus::Cancelled
+    ));
+}
+
+#[tokio::test]
+async fn media_transitions_broadcast_a_shared_run_updated_event() {
+    let state = test_state();
+    seed_media_connection(&state, None, Some("bytedance/seedance-2.0-mini")).await;
+    // Subscribed BEFORE the request, so the queue event cannot be missed.
+    let mut events = state.ws_broadcast.subscribe();
+    let app = build_router_with_auth(state.clone(), false);
+
+    let (_, created) = post_json(
+        app.clone(),
+        "/api/media/generate",
+        serde_json::json!({
+            "connection_id": "conn-media", "modality": "video",
+            "prompt": "un chat", "discussion_id": "disc-media"
+        }),
+    )
+    .await;
+    let job_id = created["data"]["job_id"].as_str().unwrap().to_string();
+
+    // Queuing must notify live views: a 100 s generation cannot stay invisible
+    // until the provider answers.
+    let queued = tokio::time::timeout(std::time::Duration::from_secs(2), events.recv())
+        .await
+        .expect("an event within 2s")
+        .expect("broadcast alive");
+    match queued {
+        kronn::models::WsMessage::SharedRunUpdated { run_id } => assert_eq!(run_id, job_id),
+        other => panic!("expected SharedRunUpdated, got {other:?}"),
+    }
+
+    post_json(
+        app,
+        &format!("/api/media/jobs/{job_id}/cancel"),
+        serde_json::json!({}),
+    )
+    .await;
+
+    let cancelled = tokio::time::timeout(std::time::Duration::from_secs(2), events.recv())
+        .await
+        .expect("a second event within 2s")
+        .expect("broadcast alive");
+    match cancelled {
+        kronn::models::WsMessage::SharedRunUpdated { run_id } => assert_eq!(run_id, job_id),
+        other => panic!("expected SharedRunUpdated, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn media_generate_refuses_an_unknown_discussion() {
+    let state = test_state();
+    seed_media_connection(&state, None, Some("bytedance/seedance-2.0-mini")).await;
+    let app = build_router_with_auth(state, false);
+
+    let (_, body) = post_json(
+        app,
+        "/api/media/generate",
+        serde_json::json!({
+            "connection_id": "conn-media", "modality": "video",
+            "prompt": "un chat", "discussion_id": "no-such-disc"
+        }),
+    )
+    .await;
+    // An orphan asset nobody can reach is worse than a refusal.
+    assert_eq!(body["success"], false);
+    assert!(body["error"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("no-such-disc"));
+}
+
+#[tokio::test]
+async fn a_media_job_inherits_the_project_scope_of_its_discussion() {
+    let state = test_state();
+    seed_media_connection(&state, None, Some("bytedance/seedance-2.0-mini")).await;
+    state
+        .db
+        .with_conn(|connection| {
+            let now = chrono::Utc::now().to_rfc3339();
+            connection.execute(
+                "INSERT INTO projects (id, name, path, created_at, updated_at)
+                 VALUES ('proj-1', 'P', '/tmp/proj-1', ?1, ?1)",
+                [&now],
+            )?;
+            connection.execute(
+                "INSERT INTO discussions (id, title, project_id, created_at, updated_at)
+                 VALUES ('disc-scoped', 'Scoped', 'proj-1', ?1, ?1)",
+                [&now],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let app = build_router_with_auth(state.clone(), false);
+
+    let (_, created) = post_json(
+        app,
+        "/api/media/generate",
+        serde_json::json!({
+            "connection_id": "conn-media", "modality": "video",
+            "prompt": "un chat", "discussion_id": "disc-scoped"
+        }),
+    )
+    .await;
+    assert_eq!(created["success"], true, "{created}");
+    let job_id = created["data"]["job_id"].as_str().unwrap().to_string();
+
+    // Without this the run disappears from project views.
+    let lookup = job_id.clone();
+    let run = state
+        .db
+        .with_read_conn(move |conn| kronn::db::shared_runs::get(conn, &lookup))
+        .await
+        .unwrap()
+        .expect("run");
+    assert_eq!(run.project_id.as_deref(), Some("proj-1"));
+    assert_eq!(run.discussion_id.as_deref(), Some("disc-scoped"));
+}
+
+#[tokio::test]
+async fn media_generate_creates_a_discussion_when_none_is_given() {
+    // An agent asking for a standalone image should not have to invent a room
+    // first — but the asset is a context file, so a discussion must exist.
+    let state = test_state();
+    seed_media_connection(&state, Some("meta/muse-image"), None).await;
+    let app = build_router_with_auth(state.clone(), false);
+
+    let (status, body) = post_json(
+        app.clone(),
+        "/api/media/generate",
+        serde_json::json!({
+            "connection_id": "conn-media",
+            "modality": "image",
+            "prompt": "un chat tigré sur un rebord de fenêtre au soleil"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["success"], true, "{body}");
+    let job_id = body["data"]["job_id"].as_str().unwrap().to_string();
+
+    // The created discussion holds the prompt as its first message: a room
+    // containing a generated asset with no trace of the request would be
+    // unreadable a day later.
+    let lookup = job_id.clone();
+    let (discussion_id, title, first_message) = state
+        .db
+        .with_read_conn(move |conn| {
+            let job = kronn::db::media_jobs::get(conn, &lookup)?.expect("job");
+            let discussion_id = job.discussion_id.expect("a discussion was created");
+            let title: String = conn.query_row(
+                "SELECT title FROM discussions WHERE id = ?1",
+                rusqlite::params![discussion_id],
+                |row| row.get(0),
+            )?;
+            let content: String = conn.query_row(
+                "SELECT content FROM messages WHERE discussion_id = ?1",
+                rusqlite::params![discussion_id],
+                |row| row.get(0),
+            )?;
+            Ok((discussion_id, title, content))
+        })
+        .await
+        .unwrap();
+
+    assert!(first_message.contains("chat tigré"));
+    // The title is read in a sidebar, so it is shortened rather than raw.
+    assert!(title.len() <= 64, "title too long for a sidebar: {title}");
+
+    // And the run is scoped to that discussion, so it is reachable.
+    let run_lookup = job_id.clone();
+    let run = state
+        .db
+        .with_read_conn(move |conn| kronn::db::shared_runs::get(conn, &run_lookup))
+        .await
+        .unwrap()
+        .expect("run");
+    assert_eq!(run.discussion_id.as_deref(), Some(discussion_id.as_str()));
+}
+
+#[tokio::test]
+async fn a_long_prompt_yields_a_readable_discussion_title() {
+    let state = test_state();
+    seed_media_connection(&state, Some("meta/muse-image"), None).await;
+    let app = build_router_with_auth(state.clone(), false);
+
+    let long_prompt = "un ".repeat(200);
+    let (_, body) = post_json(
+        app,
+        "/api/media/generate",
+        serde_json::json!({
+            "connection_id": "conn-media", "modality": "image", "prompt": long_prompt
+        }),
+    )
+    .await;
+    assert_eq!(body["success"], true, "{body}");
+    let job_id = body["data"]["job_id"].as_str().unwrap().to_string();
+
+    let title = state
+        .db
+        .with_read_conn(move |conn| {
+            let job = kronn::db::media_jobs::get(conn, &job_id)?.expect("job");
+            let discussion_id = job.discussion_id.expect("discussion");
+            let title: String = conn.query_row(
+                "SELECT title FROM discussions WHERE id = ?1",
+                rusqlite::params![discussion_id],
+                |row| row.get(0),
+            )?;
+            Ok(title)
+        })
+        .await
+        .unwrap();
+
+    // Truncated with an ellipsis rather than dumped whole.
+    assert!(
+        title.chars().count() <= 61,
+        "{} chars",
+        title.chars().count()
+    );
+    assert!(title.ends_with('…'));
+}
+
+#[tokio::test]
+async fn media_estimate_is_measured_from_past_generations_not_a_hardcoded_rate() {
+    let state = test_state();
+    seed_media_connection(
+        &state,
+        Some("meta/muse-image"),
+        Some("bytedance/seedance-2.0-mini"),
+    )
+    .await;
+    state
+        .db
+        .with_conn(|connection| {
+            let now = chrono::Utc::now().to_rfc3339();
+            // A real billed clip: 0.0708932 USD for 5042 ms.
+            connection.execute(
+                "INSERT INTO media_jobs
+                    (id, modality, status, connection_id, model, prompt, cost_usd, is_byok,
+                     rendered_duration_ms, attempts, scheduled_at, deadline_at, created_at, updated_at)
+                 VALUES ('past', 'video', 'completed', 'conn-media',
+                         'bytedance/seedance-2.0-mini', 'p', 0.0708932, 0, 5042, 1, ?1, ?1, ?1, ?1)",
+                [&now],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let app = build_router_with_auth(state, false);
+
+    let (status, body) = get_json(
+        app,
+        "/api/media/estimate?connection_id=conn-media&modality=video&duration_secs=10",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["success"], true, "{body}");
+    assert_eq!(body["data"]["samples"], 1);
+    assert_eq!(body["data"]["model"], "bytedance/seedance-2.0-mini");
+
+    // 10 s at the observed per-second cost of a 5.042 s clip.
+    let estimate = body["data"]["estimated_usd"].as_f64().expect("an estimate");
+    let expected = 0.0708932 / 5.042 * 10.0;
+    assert!(
+        (estimate - expected).abs() < 1e-6,
+        "got {estimate}, expected ~{expected}"
+    );
+}
+
+#[tokio::test]
+async fn media_estimate_says_unknown_rather_than_free_when_nothing_was_billed() {
+    let state = test_state();
+    seed_media_connection(
+        &state,
+        Some("meta/muse-image"),
+        Some("bytedance/seedance-2.0-mini"),
+    )
+    .await;
+    let app = build_router_with_auth(state, false);
+
+    let (_, body) = get_json(
+        app.clone(),
+        "/api/media/estimate?connection_id=conn-media&modality=video&duration_secs=5",
+    )
+    .await;
+    assert_eq!(body["success"], true);
+    // Absent, NOT zero: a fabricated estimate would read as "this is free".
+    assert!(body["data"]["estimated_usd"].is_null(), "{body}");
+    assert_eq!(body["data"]["samples"], 0);
+
+    // A video estimate also needs a duration to scale a per-second cost.
+    let (_, no_duration) = get_json(
+        app,
+        "/api/media/estimate?connection_id=conn-media&modality=video",
+    )
+    .await;
+    assert!(no_duration["data"]["estimated_usd"].is_null());
+}
+
+#[tokio::test]
+async fn byok_generations_do_not_drag_the_estimate_to_zero() {
+    let state = test_state();
+    seed_media_connection(&state, Some("meta/muse-image"), None).await;
+    state
+        .db
+        .with_conn(|connection| {
+            let now = chrono::Utc::now().to_rfc3339();
+            connection.execute(
+                "INSERT INTO media_jobs
+                    (id, modality, status, connection_id, model, prompt, cost_usd, is_byok,
+                     attempts, scheduled_at, deadline_at, created_at, updated_at)
+                 VALUES ('byok', 'image', 'completed', 'conn-media', 'meta/muse-image',
+                         'p', 0.0, 1, 1, ?1, ?1, ?1, ?1),
+                        ('paid', 'image', 'completed', 'conn-media', 'meta/muse-image',
+                         'p', 0.02, 0, 1, ?1, ?1, ?1, ?1)",
+                [&now],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let app = build_router_with_auth(state, false);
+
+    let (_, body) = get_json(
+        app,
+        "/api/media/estimate?connection_id=conn-media&modality=image",
+    )
+    .await;
+    // Only the billed row counts: averaging a BYOK zero would tell everyone
+    // else the generation is nearly free.
+    assert_eq!(body["data"]["samples"], 1);
+    assert!((body["data"]["estimated_usd"].as_f64().unwrap() - 0.02).abs() < 1e-9);
+}
+
+#[tokio::test]
+async fn an_expired_media_job_broadcasts_through_the_real_worker_sweep() {
+    // Codex was right that the previous proof was hollow: it recreated the
+    // projection with sync_media() after expiring the row, so it validated the
+    // mapper and not the loop. This one runs the actual `tick` and watches the
+    // broadcast channel — an expired job leaves `pending`, so if `tick` does
+    // not publish it, nothing ever will and a card stays `running`.
+    let state = test_state();
+    seed_media_connection(&state, None, Some("bytedance/seedance-2.0-mini")).await;
+
+    let past = chrono::Utc::now() - chrono::Duration::hours(2);
+    state
+        .db
+        .with_conn(move |connection| {
+            let stamp = past.to_rfc3339();
+            connection.execute(
+                "INSERT INTO media_jobs
+                    (id, modality, status, connection_id, model, prompt, discussion_id,
+                     provider_job_id, is_byok, attempts, scheduled_at, deadline_at,
+                     created_at, updated_at)
+                 VALUES ('overdue', 'video', 'running', 'conn-media',
+                         'bytedance/seedance-2.0-mini', 'p', 'disc-media',
+                         'provider-abc', 0, 1, ?1, ?1, ?1, ?1)",
+                [&stamp],
+            )?;
+            // Its run reflects the pre-expiry state, as a live card would.
+            let job = kronn::db::media_jobs::get(connection, "overdue")?.expect("job");
+            kronn::db::shared_runs::sync_media(connection, &job)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    let mut events = state.ws_broadcast.subscribe();
+    let client = reqwest::Client::new();
+
+    kronn::agents::media_runner::tick(&state, &client)
+        .await
+        .expect("sweep");
+
+    // The sweep must have announced the expiry itself.
+    let event = tokio::time::timeout(std::time::Duration::from_secs(2), events.recv())
+        .await
+        .expect("a broadcast within 2s")
+        .expect("channel alive");
+    match event {
+        kronn::models::WsMessage::SharedRunUpdated { run_id } => assert_eq!(run_id, "overdue"),
+        other => panic!("expected SharedRunUpdated, got {other:?}"),
+    }
+
+    // And the published run carries the terminal state, read without any
+    // manual projection.
+    let run = state
+        .db
+        .with_read_conn(|conn| kronn::db::shared_runs::get(conn, "overdue"))
+        .await
+        .unwrap()
+        .expect("run");
+    assert!(matches!(
+        run.status,
+        kronn::models::SharedRunStatus::Timeout
+    ));
+    assert_eq!(run.diagnostic.as_deref(), Some("deadline exceeded"));
+
+    // It is terminal: a second sweep has nothing left to announce.
+    let job = state
+        .db
+        .with_read_conn(|conn| kronn::db::media_jobs::get(conn, "overdue"))
+        .await
+        .unwrap()
+        .expect("job");
+    assert_eq!(job.status, kronn::models::MediaJobStatus::TimedOut);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// KT-549 — the inline placeholder: a deterministic anchor per launch, the
+// completed asset landing on that exact message (never a pre-existing one),
+// several jobs advancing independently, and a clear terminal failure.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Creates a connection whose media traffic actually goes to `endpoint`
+/// (a local mock server), through the real creation endpoint — so the stored
+/// credential is wired exactly as a live setup would, not hand-inserted.
+async fn seed_stub_media_connection(
+    app: Router,
+    endpoint: &str,
+    image_model: Option<&str>,
+    video_model: Option<&str>,
+) -> String {
+    let mut body = serde_json::json!({
+        "display_name": "Stub media",
+        "mention_alias": format!("stubmedia-{}", uuid::Uuid::new_v4()),
+        "endpoint": endpoint,
+        "origin_preset": "open_router",
+        "api_key": "sk-or-v1-stub-media-test",
+    });
+    if let Some(model) = image_model {
+        body["image_model"] = serde_json::json!(model);
+    }
+    if let Some(model) = video_model {
+        body["video_model"] = serde_json::json!(model);
+    }
+    let (_, created) = post_json(app, "/api/external-api/connections", body).await;
+    assert_eq!(created["success"], true, "{created}");
+    created["data"]["id"].as_str().unwrap().to_string()
+}
+
+async fn insert_bare_discussion(state: &AppState, id: &str) {
+    let id = id.to_string();
+    state
+        .db
+        .with_conn(move |conn| {
+            let now = chrono::Utc::now().to_rfc3339();
+            conn.execute(
+                "INSERT INTO discussions (id, title, created_at, updated_at) VALUES (?1, 'Media', ?2, ?2)",
+                rusqlite::params![id, now],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
+/// Seeds a message OUTSIDE the `next_message_seq` counter (`sort_order = -1`,
+/// which no auto-anchored message can ever produce) so it never collides with
+/// one `insert_prompt_message` creates afterwards — this is what stands in
+/// for "a message that predates the launch" in these tests.
+async fn insert_bare_message(state: &AppState, id: &str, discussion_id: &str, content: &str) {
+    let id = id.to_string();
+    let discussion_id = discussion_id.to_string();
+    let content = content.to_string();
+    state
+        .db
+        .with_conn(move |conn| {
+            let now = chrono::Utc::now().to_rfc3339();
+            conn.execute(
+                "INSERT INTO messages (id, discussion_id, role, content, timestamp, sort_order) \
+                 VALUES (?1, ?2, 'User', ?3, ?4, -1)",
+                rusqlite::params![id, discussion_id, content, now],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
+async fn count_messages(state: &AppState) -> i64 {
+    state
+        .db
+        .with_read_conn(|conn| {
+            Ok(conn.query_row("SELECT COUNT(*) FROM messages", [], |row| row.get(0))?)
+        })
+        .await
+        .unwrap()
+}
+
+async fn count_media_jobs(state: &AppState) -> i64 {
+    state
+        .db
+        .with_read_conn(|conn| {
+            Ok(conn.query_row("SELECT COUNT(*) FROM media_jobs", [], |row| row.get(0))?)
+        })
+        .await
+        .unwrap()
+}
+
+/// KT-549 blocker #1: rejecting the request BEFORE any write means an unknown
+/// connection must leave no anchor message and no job behind — the old
+/// ordering created the message first and validated the connection after.
+#[tokio::test]
+async fn media_generate_with_an_unknown_connection_creates_no_message_or_job() {
+    let state = test_state();
+    insert_bare_discussion(&state, "disc-stub").await;
+    let app = build_router_with_auth(state.clone(), false);
+    let before = count_messages(&state).await;
+
+    let (_, resp) = post_json(
+        app,
+        "/api/media/generate",
+        serde_json::json!({
+            "connection_id": "does-not-exist", "modality": "image",
+            "prompt": "un chat", "discussion_id": "disc-stub"
+        }),
+    )
+    .await;
+    assert_eq!(resp["success"], false, "{resp}");
+    assert_eq!(
+        count_messages(&state).await,
+        before,
+        "a rejected request must leave no orphan message"
+    );
+    assert_eq!(count_media_jobs(&state).await, 0);
+}
+
+/// Same invariant, on the OTHER pre-write validation: a connection that
+/// exists but has no model configured for the requested modality.
+#[tokio::test]
+async fn media_generate_with_no_model_configured_creates_no_message_or_job() {
+    let state = test_state();
+    // Video slot configured, image slot empty.
+    seed_media_connection(&state, None, Some("bytedance/seedance-2.0-mini")).await;
+    let app = build_router_with_auth(state.clone(), false);
+    let before = count_messages(&state).await;
+
+    let (_, resp) = post_json(
+        app,
+        "/api/media/generate",
+        serde_json::json!({
+            "connection_id": "conn-media", "modality": "image",
+            "prompt": "un chat", "discussion_id": "disc-media"
+        }),
+    )
+    .await;
+    assert_eq!(resp["success"], false, "{resp}");
+    assert_eq!(
+        count_messages(&state).await,
+        before,
+        "a refused modality must leave no orphan message"
+    );
+    assert_eq!(count_media_jobs(&state).await, 0);
+}
+
+#[tokio::test]
+async fn media_generate_anchors_each_launch_to_its_own_dedicated_message_not_the_previous_one() {
+    let state = test_state();
+    seed_media_connection(&state, Some("meta/muse-image"), None).await;
+    // The trap the old "latest message" fallback fell into: a message already
+    // sitting in the discussion before either launch.
+    insert_bare_message(&state, "m-preexisting", "disc-media", "bonjour").await;
+    let app = build_router_with_auth(state.clone(), false);
+
+    let (_, first) = post_json(
+        app.clone(),
+        "/api/media/generate",
+        serde_json::json!({
+            "connection_id": "conn-media", "modality": "image",
+            "prompt": "un chat", "discussion_id": "disc-media"
+        }),
+    )
+    .await;
+    assert_eq!(first["success"], true, "{first}");
+    let first_anchor = first["data"]["message_id"].as_str().unwrap().to_string();
+
+    let (_, second) = post_json(
+        app,
+        "/api/media/generate",
+        serde_json::json!({
+            "connection_id": "conn-media", "modality": "image",
+            "prompt": "un chien", "discussion_id": "disc-media"
+        }),
+    )
+    .await;
+    let second_anchor = second["data"]["message_id"].as_str().unwrap().to_string();
+
+    assert_ne!(
+        first_anchor, "m-preexisting",
+        "must not latch onto a message that predates the launch"
+    );
+    assert_ne!(second_anchor, "m-preexisting");
+    assert_ne!(
+        first_anchor, second_anchor,
+        "two launches in the same discussion must not collide on one anchor"
+    );
+
+    let lookup1 = first_anchor.clone();
+    let lookup2 = second_anchor.clone();
+    let (content1, content2) = state
+        .db
+        .with_read_conn(move |conn| {
+            let c1: String = conn.query_row(
+                "SELECT content FROM messages WHERE id = ?1",
+                rusqlite::params![lookup1],
+                |row| row.get(0),
+            )?;
+            let c2: String = conn.query_row(
+                "SELECT content FROM messages WHERE id = ?1",
+                rusqlite::params![lookup2],
+                |row| row.get(0),
+            )?;
+            Ok((c1, c2))
+        })
+        .await
+        .unwrap();
+    // Each anchor is a real message carrying exactly the prompt that launched
+    // it, so the transcript slot explains itself.
+    assert_eq!(content1, "un chat");
+    assert_eq!(content2, "un chien");
+}
+
+#[tokio::test]
+async fn a_completed_media_job_attaches_its_asset_to_its_own_anchor_never_the_previous_message() {
+    use base64::Engine;
+    use wiremock::matchers::{body_string_contains, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let upstream = MockServer::start().await;
+    let payload = base64::engine::general_purpose::STANDARD.encode(b"fake-png-bytes");
+    Mock::given(method("POST"))
+        .and(path("/v1/images"))
+        .and(body_string_contains("un chat"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id": "gen-img-1",
+            "data": [{"b64_json": payload}],
+            "usage": {"cost": 0.01, "is_byok": false}
+        })))
+        .mount(&upstream)
+        .await;
+
+    let state = test_state();
+    insert_bare_discussion(&state, "disc-stub").await;
+    insert_bare_message(&state, "m-preexisting", "disc-stub", "bonjour").await;
+    let app = build_router_with_auth(state.clone(), false);
+    let connection_id =
+        seed_stub_media_connection(app.clone(), &upstream.uri(), Some("stub/image"), None).await;
+
+    let (_, created) = post_json(
+        app,
+        "/api/media/generate",
+        serde_json::json!({
+            "connection_id": connection_id, "modality": "image",
+            "prompt": "un chat", "discussion_id": "disc-stub"
+        }),
+    )
+    .await;
+    assert_eq!(created["success"], true, "{created}");
+    let job_id = created["data"]["job_id"].as_str().unwrap().to_string();
+    let anchor = created["data"]["message_id"].as_str().unwrap().to_string();
+    assert_ne!(anchor, "m-preexisting");
+
+    let client = reqwest::Client::new();
+    kronn::agents::media_runner::tick(&state, &client)
+        .await
+        .expect("sweep");
+
+    let lookup = job_id.clone();
+    let job = state
+        .db
+        .with_read_conn(move |conn| kronn::db::media_jobs::get(conn, &lookup))
+        .await
+        .unwrap()
+        .expect("job");
+    assert_eq!(
+        job.status,
+        kronn::models::MediaJobStatus::Completed,
+        "{job:?}"
+    );
+    let context_file_id = job.context_file_id.clone().expect("asset persisted");
+
+    let lookup = context_file_id.clone();
+    let attached_to = state
+        .db
+        .with_read_conn(move |conn| {
+            Ok(conn.query_row(
+                "SELECT message_id FROM context_files WHERE id = ?1",
+                rusqlite::params![lookup],
+                |row| row.get::<_, Option<String>>(0),
+            )?)
+        })
+        .await
+        .unwrap();
+    // The asset attaches to the job's OWN anchor — never to whatever message
+    // happened to already be in the discussion.
+    assert_eq!(attached_to.as_deref(), Some(anchor.as_str()));
+
+    let preexisting_files: i64 = state
+        .db
+        .with_read_conn(|conn| {
+            Ok(conn.query_row(
+                "SELECT COUNT(*) FROM context_files WHERE message_id = 'm-preexisting'",
+                [],
+                |row| row.get(0),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(preexisting_files, 0);
+}
+
+#[tokio::test]
+async fn a_media_job_against_an_unreachable_endpoint_settles_as_a_clear_terminal_failure() {
+    let state = test_state();
+    insert_bare_discussion(&state, "disc-stub").await;
+    let app = build_router_with_auth(state.clone(), false);
+    // Nothing listens here: a deterministic, zero-cost, no-credential way to
+    // exercise the real failure path without a live provider.
+    let connection_id =
+        seed_stub_media_connection(app.clone(), "http://127.0.0.1:1", Some("stub/image"), None)
+            .await;
+
+    let (_, created) = post_json(
+        app,
+        "/api/media/generate",
+        serde_json::json!({
+            "connection_id": connection_id, "modality": "image",
+            "prompt": "un chat", "discussion_id": "disc-stub"
+        }),
+    )
+    .await;
+    let job_id = created["data"]["job_id"].as_str().unwrap().to_string();
+
+    let client = reqwest::Client::new();
+    kronn::agents::media_runner::tick(&state, &client)
+        .await
+        .expect("sweep");
+
+    let lookup = job_id.clone();
+    let job = state
+        .db
+        .with_read_conn(move |conn| kronn::db::media_jobs::get(conn, &lookup))
+        .await
+        .unwrap()
+        .expect("job");
+    // Refused (unsafe to resubmit) or a transient failure retried until the
+    // deadline — either way there must be no silent hang, and once it does
+    // settle the reason must be human-readable, never a raw payload.
+    if job.status != kronn::models::MediaJobStatus::Pending {
+        assert_eq!(job.status, kronn::models::MediaJobStatus::Failed, "{job:?}");
+    }
+
+    let lookup = job_id.clone();
+    let run = state
+        .db
+        .with_read_conn(move |conn| kronn::db::shared_runs::get(conn, &lookup))
+        .await
+        .unwrap()
+        .expect("run");
+    if job.status == kronn::models::MediaJobStatus::Failed {
+        assert!(run.diagnostic.is_some(), "a failure must explain itself");
+    }
+}
+
+#[tokio::test]
+async fn three_concurrent_media_jobs_advance_independently_without_cross_attribution() {
+    use base64::Engine;
+    use wiremock::matchers::{body_string_contains, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let upstream = MockServer::start().await;
+    let cat_bytes = base64::engine::general_purpose::STANDARD.encode(b"cat-image-bytes");
+    let dog_bytes = base64::engine::general_purpose::STANDARD.encode(b"dog-image-bytes");
+    Mock::given(method("POST"))
+        .and(path("/v1/images"))
+        .and(body_string_contains("un chat"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id": "gen-img-cat", "data": [{"b64_json": cat_bytes}],
+            "usage": {"cost": 0.01, "is_byok": false}
+        })))
+        .mount(&upstream)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/images"))
+        .and(body_string_contains("un chien"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id": "gen-img-dog", "data": [{"b64_json": dog_bytes}],
+            "usage": {"cost": 0.02, "is_byok": false}
+        })))
+        .mount(&upstream)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/videos"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id": "prov-vid-1", "status": "pending"
+        })))
+        .mount(&upstream)
+        .await;
+    let content_url = format!("{}/v1/videos/prov-vid-1/content?index=0", upstream.uri());
+    Mock::given(method("GET"))
+        .and(path("/v1/videos/prov-vid-1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id": "prov-vid-1", "status": "completed",
+            "unsigned_urls": [content_url],
+            "usage": {"cost": 0.0708932, "is_byok": false},
+            "generation_id": "gen-vid-1"
+        })))
+        .mount(&upstream)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v1/videos/prov-vid-1/content"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"video-bytes".to_vec()))
+        .mount(&upstream)
+        .await;
+
+    let state = test_state();
+    insert_bare_discussion(&state, "disc-stub").await;
+    let app = build_router_with_auth(state.clone(), false);
+    let connection_id = seed_stub_media_connection(
+        app.clone(),
+        &upstream.uri(),
+        Some("stub/image"),
+        Some("stub/video"),
+    )
+    .await;
+
+    let mut job_ids = Vec::new();
+    for (modality, prompt) in [
+        ("image", "un chat"),
+        ("image", "un chien"),
+        ("video", "un poisson qui nage"),
+    ] {
+        let (_, created) = post_json(
+            app.clone(),
+            "/api/media/generate",
+            serde_json::json!({
+                "connection_id": connection_id, "modality": modality,
+                "prompt": prompt, "discussion_id": "disc-stub"
+            }),
+        )
+        .await;
+        assert_eq!(created["success"], true, "{created}");
+        job_ids.push((
+            modality,
+            created["data"]["job_id"].as_str().unwrap().to_string(),
+        ));
+    }
+    let client = reqwest::Client::new();
+    // First sweep: both images complete synchronously; the video only submits.
+    kronn::agents::media_runner::tick(&state, &client)
+        .await
+        .expect("first sweep");
+
+    let video_id = job_ids
+        .iter()
+        .find(|(modality, _)| *modality == "video")
+        .map(|(_, id)| id.clone())
+        .unwrap();
+    let lookup = video_id.clone();
+    let video_after_submit = state
+        .db
+        .with_read_conn(move |conn| kronn::db::media_jobs::get(conn, &lookup))
+        .await
+        .unwrap()
+        .expect("video job");
+    assert!(
+        video_after_submit.provider_job_id.is_some(),
+        "the video must have a handle after its submit tick"
+    );
+    assert_ne!(
+        video_after_submit.status,
+        kronn::models::MediaJobStatus::Completed,
+        "a video is never done after a single tick"
+    );
+
+    // Force the backoff so the second sweep polls right away instead of a
+    // real multi-second sleep.
+    let video_id_for_force = video_id.clone();
+    state
+        .db
+        .with_conn(move |conn| {
+            let now = chrono::Utc::now().to_rfc3339();
+            conn.execute(
+                "UPDATE media_jobs SET scheduled_at = ?1 WHERE id = ?2",
+                rusqlite::params![now, video_id_for_force],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    kronn::agents::media_runner::tick(&state, &client)
+        .await
+        .expect("second sweep");
+
+    // Every job settled, each with the bytes and cost of ITS OWN request —
+    // proof that a shared single-threaded sweep never mixed them up.
+    let mut by_prompt = HashMap::new();
+    for (modality, id) in &job_ids {
+        let lookup = id.clone();
+        let job = state
+            .db
+            .with_read_conn(move |conn| kronn::db::media_jobs::get(conn, &lookup))
+            .await
+            .unwrap()
+            .expect("job");
+        assert_eq!(
+            job.status,
+            kronn::models::MediaJobStatus::Completed,
+            "{modality} job {id} did not settle: {job:?}"
+        );
+        by_prompt.insert(id.clone(), job);
+    }
+
+    let cat_id = &job_ids[0].1;
+    let dog_id = &job_ids[1].1;
+    let cat_file = by_prompt[cat_id].context_file_id.clone().unwrap();
+    let dog_file = by_prompt[dog_id].context_file_id.clone().unwrap();
+    assert_ne!(cat_file, dog_file);
+    let cat_cost = by_prompt[cat_id].cost.expect("billed").cost_usd;
+    let dog_cost = by_prompt[dog_id].cost.expect("billed").cost_usd;
+    assert!(
+        (cat_cost - 0.01).abs() < 1e-9,
+        "cat cost leaked: {cat_cost}"
+    );
+    assert!(
+        (dog_cost - 0.02).abs() < 1e-9,
+        "dog cost leaked: {dog_cost}"
+    );
+
+    // Each job's asset is pinned to that job's own anchor message, never to
+    // another job's.
+    let lookup = video_id.clone();
+    let video_job = state
+        .db
+        .with_read_conn(move |conn| kronn::db::media_jobs::get(conn, &lookup))
+        .await
+        .unwrap()
+        .expect("video job");
+    let anchors_seen: Vec<Option<String>> = vec![
+        by_prompt[cat_id].message_id.clone(),
+        by_prompt[dog_id].message_id.clone(),
+        video_job.message_id.clone(),
+    ];
+    let unique: std::collections::HashSet<_> = anchors_seen.iter().flatten().collect();
+    assert_eq!(
+        unique.len(),
+        3,
+        "each job must keep its own anchor: {anchors_seen:?}"
+    );
+}
+
+/// KT-549 blocker #2: one video plus two images claimed in the same sweep
+/// must advance CONCURRENTLY, not one after another. A deliberately slow stub
+/// (each request delayed) makes the distinction observable: a sequential
+/// `tick` would take at least three times the delay; a concurrent one keeps
+/// the whole batch close to a single round trip. The prior test only proved
+/// no cross-attribution across two sequential ticks — it never measured
+/// whether the requests actually overlapped.
+#[tokio::test]
+async fn three_claimed_media_jobs_advance_concurrently_not_sequentially() {
+    use base64::Engine;
+    use wiremock::matchers::{body_string_contains, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const DELAY_MS: u64 = 500;
+    let upstream = MockServer::start().await;
+    let payload = base64::engine::general_purpose::STANDARD.encode(b"slow-bytes");
+    for prompt in ["un chat lent", "un chien lent"] {
+        Mock::given(method("POST"))
+            .and(path("/v1/images"))
+            .and(body_string_contains(prompt))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_delay(std::time::Duration::from_millis(DELAY_MS))
+                    .set_body_json(serde_json::json!({
+                        "id": format!("gen-{prompt}"),
+                        "data": [{"b64_json": payload}],
+                        "usage": {"cost": 0.01, "is_byok": false}
+                    })),
+            )
+            .mount(&upstream)
+            .await;
+    }
+    Mock::given(method("POST"))
+        .and(path("/v1/videos"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_delay(std::time::Duration::from_millis(DELAY_MS))
+                .set_body_json(serde_json::json!({ "id": "prov-vid-slow", "status": "pending" })),
+        )
+        .mount(&upstream)
+        .await;
+
+    let state = test_state();
+    insert_bare_discussion(&state, "disc-stub").await;
+    let app = build_router_with_auth(state.clone(), false);
+    let connection_id = seed_stub_media_connection(
+        app.clone(),
+        &upstream.uri(),
+        Some("stub/image"),
+        Some("stub/video"),
+    )
+    .await;
+
+    for (modality, prompt) in [
+        ("image", "un chat lent"),
+        ("image", "un chien lent"),
+        ("video", "un poisson lent"),
+    ] {
+        let (_, created) = post_json(
+            app.clone(),
+            "/api/media/generate",
+            serde_json::json!({
+                "connection_id": connection_id, "modality": modality,
+                "prompt": prompt, "discussion_id": "disc-stub"
+            }),
+        )
+        .await;
+        assert_eq!(created["success"], true, "{created}");
+    }
+
+    let client = reqwest::Client::new();
+    let started = std::time::Instant::now();
+    kronn::agents::media_runner::tick(&state, &client)
+        .await
+        .expect("sweep");
+    let elapsed = started.elapsed();
+
+    // Sequential would take at least 3 * DELAY_MS (~1.5 s); real concurrency
+    // keeps the whole batch close to one round trip. The threshold sits well
+    // under the sequential floor while leaving generous room for scheduling
+    // overhead on a loaded CI box.
+    assert!(
+        elapsed < std::time::Duration::from_millis(DELAY_MS * 2),
+        "batch took {elapsed:?} for 3 jobs each delayed {DELAY_MS}ms — \
+         advanced sequentially instead of concurrently"
+    );
+}
+
+#[tokio::test]
+async fn a_settled_media_job_is_never_reprocessed_by_a_later_sweep() {
+    use base64::Engine;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let upstream = MockServer::start().await;
+    let payload = base64::engine::general_purpose::STANDARD.encode(b"fake-png-bytes");
+    Mock::given(method("POST"))
+        .and(path("/v1/images"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id": "gen-img-1", "data": [{"b64_json": payload}],
+            "usage": {"cost": 0.01, "is_byok": false}
+        })))
+        // Exactly once: a second POST here would mean the settled job got
+        // billed again by a later, redundant sweep.
+        .expect(1)
+        .mount(&upstream)
+        .await;
+
+    let state = test_state();
+    insert_bare_discussion(&state, "disc-stub").await;
+    let app = build_router_with_auth(state.clone(), false);
+    let connection_id =
+        seed_stub_media_connection(app.clone(), &upstream.uri(), Some("stub/image"), None).await;
+
+    let (_, created) = post_json(
+        app,
+        "/api/media/generate",
+        serde_json::json!({
+            "connection_id": connection_id, "modality": "image",
+            "prompt": "un chat", "discussion_id": "disc-stub"
+        }),
+    )
+    .await;
+    let job_id = created["data"]["job_id"].as_str().unwrap().to_string();
+
+    let client = reqwest::Client::new();
+    kronn::agents::media_runner::tick(&state, &client)
+        .await
+        .expect("first sweep settles it");
+    // A restart, a duplicate cron tick, whatever — replaying the sweep must be
+    // a no-op for a job that already settled.
+    kronn::agents::media_runner::tick(&state, &client)
+        .await
+        .expect("second sweep is a no-op");
+
+    let lookup = job_id.clone();
+    let job = state
+        .db
+        .with_read_conn(move |conn| kronn::db::media_jobs::get(conn, &lookup))
+        .await
+        .unwrap()
+        .expect("job");
+    assert_eq!(job.status, kronn::models::MediaJobStatus::Completed);
+    assert_eq!(
+        job.attempts, 1,
+        "a settled job must not be reclaimed by a later sweep"
+    );
+
+    let context_file_count: i64 = state
+        .db
+        .with_read_conn(|conn| {
+            Ok(conn.query_row("SELECT COUNT(*) FROM context_files", [], |row| row.get(0))?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        context_file_count, 1,
+        "no duplicate asset from the redundant sweep"
+    );
 }

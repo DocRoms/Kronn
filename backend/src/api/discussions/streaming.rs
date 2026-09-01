@@ -17,6 +17,7 @@ use std::time::Duration;
 use axum::response::sse::{Event, Sse};
 use chrono::Utc;
 use futures::StreamExt;
+use rusqlite::OptionalExtension;
 use uuid::Uuid;
 
 use crate::agents::runner::{self, AgentIo};
@@ -823,7 +824,22 @@ fn clear_awaiting_after_terminal(
         // idle window in which the remaining model placeholder disappears.
         return Ok(());
     }
-    crate::db::discussions::set_awaiting_agent(conn, discussion_id, false)
+    crate::db::discussions::set_awaiting_agent(conn, discussion_id, false)?;
+    // retention=0 means run-lifetime only. Once the final dispatch for this
+    // discussion is terminal, irreversibly discard any QP child ciphertext.
+    crate::db::execution_variable_snapshots::purge_run_lifetime_snapshot(
+        conn,
+        "quick_prompt",
+        discussion_id,
+        Utc::now(),
+    )?;
+    crate::db::execution_variable_snapshots::purge_run_lifetime_snapshot(
+        conn,
+        "quick_prompt_batch_item",
+        discussion_id,
+        Utc::now(),
+    )?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1240,7 +1256,7 @@ async fn make_agent_stream_inner(
         let config = state.config.read().await;
         crate::agents::agent_auth_status(&agent_type, &config)
     };
-    if !auth_status.ready {
+    if auth_status.ready == Some(false) {
         let persisted_error =
             auth_required_system_message(&agent_type, &disc.language, auth_status.setup_command);
         let safe_error = persisted_error.content.clone();
@@ -2028,7 +2044,129 @@ async fn make_agent_stream_inner(
         global_mcp_context.as_deref(),
         &agent_type,
     ) + context_files_prompt.len();
-    let prompt_disc = discussion_at_dispatch_trigger(&disc, dispatch_trigger_message_id.as_deref());
+    let mut prompt_disc =
+        discussion_at_dispatch_trigger(&disc, dispatch_trigger_message_id.as_deref());
+    // QP values are never persisted in messages. Hydrate only this temporary
+    // dispatch copy from the immutable encrypted snapshot.
+    // Lineage is intentionally not part of the public Discussion model, so
+    // read the durable QP marker here. It distinguishes ordinary discussion
+    // dispatch (which has no snapshot) from a QP launch whose snapshot must
+    // exist and decrypt before an agent can start.
+    let qp_launch = {
+        let did = disc.id.clone();
+        state
+            .db
+            .with_read_conn(move |conn| {
+                Ok(conn
+                    .query_row(
+                        "SELECT originating_qp_id IS NOT NULL FROM discussions WHERE id=?1",
+                        [did],
+                        |row| row.get::<_, bool>(0),
+                    )
+                    .optional()?
+                    .unwrap_or(false))
+            })
+            .await
+            .unwrap_or(false)
+    };
+    if qp_launch {
+        let secret = match state.config.read().await.encryption_secret.clone() {
+            Some(secret) => secret,
+            None => {
+                finish_tracked_preflight(&mut completion_tx);
+                let stream: SseStream = Box::pin(futures::stream::once(async {
+                    Ok::<_, Infallible>(Event::default().event("error").data(
+                        serde_json::json!({"error": "Quick Prompt variable snapshot key unavailable"}).to_string(),
+                    ))
+                }));
+                return Sse::new(prepend_initial_event(stream, initial_event.take()));
+            }
+        };
+        let key = match crate::core::crypto::parse_secret(&secret) {
+            Ok(key) => key,
+            Err(_) => {
+                finish_tracked_preflight(&mut completion_tx);
+                let stream: SseStream = Box::pin(futures::stream::once(async {
+                    Ok::<_, Infallible>(Event::default().event("error").data(
+                        serde_json::json!({"error": "Quick Prompt variable snapshot key unavailable"}).to_string(),
+                    ))
+                }));
+                return Sse::new(prepend_initial_event(stream, initial_event.take()));
+            }
+        };
+        let disc_id = disc.id.clone();
+        let workflow_run_id = disc.workflow_run_id.clone();
+        let values = state
+            .db
+            .with_conn(move |conn| {
+                for (kind, id) in [
+                    ("quick_prompt", Some(disc_id.as_str())),
+                    ("quick_prompt_batch_item", Some(disc_id.as_str())),
+                    ("quick_prompt_compare", workflow_run_id.as_deref()),
+                ] {
+                    if let Some(id) = id {
+                        if let Some(values) = crate::db::execution_variable_snapshots::load_values(
+                            conn,
+                            kind,
+                            id,
+                            &key,
+                            chrono::Utc::now(),
+                        )? {
+                            return Ok(Some(values));
+                        }
+                    }
+                }
+                // A BatchQuickPrompt child points at its child batch
+                // run. Environment variables are resolved once on the
+                // parent Workflow run, so follow that durable link and
+                // reuse the immutable parent snapshot on every child
+                // dispatch/resume.
+                if let Some(batch_run_id) = workflow_run_id.as_deref() {
+                    let parent_id: Option<String> = conn
+                        .query_row(
+                            "SELECT parent_run_id FROM workflow_runs WHERE id=?1",
+                            [batch_run_id],
+                            |row| row.get(0),
+                        )
+                        .optional()?;
+                    if let Some(parent_id) = parent_id {
+                        if let Some(values) = crate::db::execution_variable_snapshots::load_values(
+                            conn,
+                            "workflow",
+                            &parent_id,
+                            &key,
+                            chrono::Utc::now(),
+                        )? {
+                            return Ok(Some(values));
+                        }
+                    }
+                }
+                Ok::<_, anyhow::Error>(None)
+            })
+            .await;
+        let values = match values {
+            Ok(Some(values)) => values,
+            Ok(None) | Err(_) => {
+                // A QP dispatch may never fall through with placeholders: it
+                // would turn a failed preflight or expired snapshot into an
+                // agent side effect with incomplete input.
+                finish_tracked_preflight(&mut completion_tx);
+                let stream: SseStream = Box::pin(futures::stream::once(async {
+                    Ok::<_, Infallible>(Event::default().event("error").data(
+                        serde_json::json!({"error": "Quick Prompt variable snapshot unavailable or expired"}).to_string(),
+                    ))
+                }));
+                return Sse::new(prepend_initial_event(stream, initial_event.take()));
+            }
+        };
+        if let Some(first_message) = prompt_disc.messages.first_mut() {
+            first_message.content = values
+                .iter()
+                .fold(first_message.content.clone(), |rendered, (name, value)| {
+                    rendered.replace(&format!("{{{{{name}}}}}"), value)
+                });
+        }
+    }
     let prompt = build_agent_prompt(&prompt_disc, &agent_type, extra_context_len);
 
     let auth_mode_str = auth_mode_for(&agent_type, &tokens);
@@ -2044,6 +2182,30 @@ async fn make_agent_stream_inner(
         disc_tier,
         Some(&model_tiers_config),
     );
+
+    let runtime_target_id = external_connection
+        .as_ref()
+        .map(|connection| crate::db::model_catalog::http_runtime_target_id(&connection.id));
+    if let Some(failure) = crate::core::model_catalog::preflight_check(
+        &state.db,
+        runtime_target_id.as_deref(),
+        agent_type.clone(),
+        disc_tier,
+        disc_model.as_deref(),
+        Some(&model_tiers_config),
+    )
+    .await
+    {
+        let payload = serde_json::json!({
+            "error": "model_catalog_preflight_failed",
+            "preflight_failure": failure,
+        });
+        finish_tracked_preflight(&mut completion_tx);
+        let stream: SseStream = Box::pin(futures::stream::once(async move {
+            Ok::<_, Infallible>(Event::default().event("error").data(payload.to_string()))
+        }));
+        return Sse::new(prepend_initial_event(stream, initial_event.take()));
+    }
 
     let disc_id = discussion_id.clone();
     let disc_project_id = disc.project_id.clone();
@@ -2215,6 +2377,10 @@ async fn make_agent_stream_inner(
             // Forward to the agent process env so the kronn-internal MCP
             // bridge knows which discussion to introspect when called.
             discussion_id: Some(&discussion_id),
+            acp_session_store: Some(runner::AcpSessionStore::new(
+                state.db.clone(),
+                discussion_id.clone(),
+            )),
             task_worker_context: cli_task_worker_context.as_ref(),
             // Only HTTP agents consume this: CLI agents already reach the same
             // primitives through the stdio bridge, and handing them a second
@@ -2279,27 +2445,49 @@ async fn make_agent_stream_inner(
                 // so a restart-time recovery rebuilds the message with provenance.
                 let checkpoint_agent = agent_type.clone();
                 let checkpoint_model = attempted_model.clone();
-                // Helper: best-effort flush, never propagates DB errors to the agent loop.
+                let checkpoint_dispatch_id = dispatch_job_id.clone();
+                let checkpoint_trigger_message_id = dispatch_trigger_message_id.clone();
+                let checkpoint_connection_id = dispatch_connection_id.clone();
+                // Await each best-effort flush. Serial writes cannot land out
+                // of order or resurrect a stale draft after terminal cleanup.
                 let do_checkpoint = |partial: String| {
                     let did = checkpoint_disc_id.clone();
                     let db = checkpoint_db.clone();
                     let agent = checkpoint_agent.clone();
                     let model = checkpoint_model.clone();
-                    tokio::spawn(async move {
+                    let dispatch_id = checkpoint_dispatch_id.clone();
+                    let trigger_message_id = checkpoint_trigger_message_id.clone();
+                    let connection_id = checkpoint_connection_id.clone();
+                    async move {
                         if let Err(e) = db
                             .with_conn(move |conn| {
-                                crate::db::discussions::set_partial_response(
-                                    conn,
-                                    &did,
-                                    Some(&partial),
-                                    Some((&agent, model.as_deref())),
-                                )
+                                if let (Some(dispatch_id), Some(trigger_message_id)) =
+                                    (dispatch_id.as_deref(), trigger_message_id.as_deref())
+                                {
+                                    crate::db::discussions::set_partial_response_for_dispatch(
+                                        conn,
+                                        &did,
+                                        &partial,
+                                        (&agent, model.as_deref()),
+                                        dispatch_id,
+                                        trigger_message_id,
+                                        connection_id.as_deref(),
+                                    )
+                                    .map(|_| ())
+                                } else {
+                                    crate::db::discussions::set_partial_response(
+                                        conn,
+                                        &did,
+                                        Some(&partial),
+                                        Some((&agent, model.as_deref())),
+                                    )
+                                }
                             })
                             .await
                         {
                             tracing::warn!("partial_response checkpoint failed: {}", e);
                         }
-                    });
+                    }
                 };
 
                 // Stream stderr logs to the client in real-time
@@ -2433,7 +2621,7 @@ async fn make_agent_stream_inner(
                                 if chunks_since_checkpoint >= CHECKPOINT_CHUNKS
                                     || last_checkpoint.elapsed() >= CHECKPOINT_INTERVAL
                                 {
-                                    do_checkpoint(full_response.clone());
+                                    do_checkpoint(full_response.clone()).await;
                                     last_checkpoint = tokio::time::Instant::now();
                                     chunks_since_checkpoint = 0;
                                 }
@@ -2567,7 +2755,7 @@ async fn make_agent_stream_inner(
                         if chunks_since_checkpoint >= CHECKPOINT_CHUNKS
                             || last_checkpoint.elapsed() >= CHECKPOINT_INTERVAL
                         {
-                            do_checkpoint(full_response.clone());
+                            do_checkpoint(full_response.clone()).await;
                             last_checkpoint = tokio::time::Instant::now();
                             chunks_since_checkpoint = 0;
                         }
@@ -2842,6 +3030,8 @@ async fn make_agent_stream_inner(
 
                 let tokens_used = if stream_json_tokens > 0 {
                     stream_json_tokens
+                } else if let Some(reported) = process.reported_token_usage() {
+                    reported
                 } else {
                     let (cleaned, count) =
                         runner::parse_token_usage(&agent_type, &full_response, &stderr_lines);
@@ -3349,15 +3539,25 @@ async fn make_agent_stream_inner(
                 // interruption mid-run stays flagged and the boot reconcile
                 // catches it — no blind window.
                 let did_clear = disc_id.clone();
+                let dispatch_id_for_clear = dispatch_job_id.clone();
                 let _ = state
                     .db
                     .with_conn(move |conn| {
                         // Attempt both clears even if the first fails — a `?` here
                         // would leave the awaiting marker stale on a partial-clear
                         // error and trigger needless boot reconcile work.
-                        let partial = crate::db::discussions::set_partial_response(
-                            conn, &did_clear, None, None,
-                        );
+                        let partial = if let Some(dispatch_id) = dispatch_id_for_clear.as_deref() {
+                            crate::db::discussions::clear_partial_response_for_dispatch(
+                                conn,
+                                &did_clear,
+                                dispatch_id,
+                            )
+                            .map(|_| ())
+                        } else {
+                            crate::db::discussions::set_partial_response(
+                                conn, &did_clear, None, None,
+                            )
+                        };
                         let awaiting =
                             clear_awaiting_after_terminal(conn, &did_clear, tracked_dispatch);
                         partial.and(awaiting)
@@ -3924,6 +4124,8 @@ pub(super) async fn run_agent_streaming(
 
     let tokens_used = if stream_tokens > 0 {
         stream_tokens
+    } else if let Some(reported) = process.reported_token_usage() {
+        reported
     } else {
         let (cleaned, count) = runner::parse_token_usage(agent_type, &full_response, &stderr);
         if count > 0 {

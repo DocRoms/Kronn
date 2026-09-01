@@ -17,6 +17,7 @@ interface SearchableSelectProps {
   placeholder: string;
   emptyLabel: string;
   clearLabel?: string;
+  clearable?: boolean;
   disabled?: boolean;
   testId?: string;
   className?: string;
@@ -32,6 +33,7 @@ export function SearchableSelect({
   placeholder,
   emptyLabel,
   clearLabel,
+  clearable = true,
   disabled = false,
   testId,
   className,
@@ -153,7 +155,7 @@ export function SearchableSelect({
             }
           }}
         />
-        {value && !disabled ? (
+        {value && !disabled && clearable ? (
           <button
             type="button"
             className="searchable-select-clear"

@@ -23,6 +23,9 @@ const blankVariable = (): PromptVariable => ({
   description: null,
   required: true,
   pattern: null,
+  source: 'user_input',
+  source_ref: null,
+  allow_manual_override: false,
 });
 
 export function QuickExecForm({ editExec, projects, onSave, onCancel }: QuickExecFormProps) {

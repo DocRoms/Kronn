@@ -32,6 +32,13 @@ This folder is the project's living knowledge base, shared by humans and AI agen
   [task delegation guide](guides/task-orchestration.md), and [`releases/`](releases/)
   for older release history.
 
+## In development: 0.13.0
+
+- Automation variables can reference encrypted project values without copying
+  secrets into templates. Launch previews are masked and audited, while each
+  run resolves a fresh encrypted snapshot. See the
+  [execution-variable architecture](architecture/execution-variables.md).
+
 ## Layout
 
 - **`architecture/`** — High-level diagrams and component overviews.

@@ -50,7 +50,23 @@ interface LivePageOpenLinkRequest {
   url: string;
 }
 
+interface LivePageActionRequest {
+  type: 'kronn:page-action';
+  version: 1;
+  channel_id: string;
+  action_ref: string;
+  bindings: Record<string, string>;
+  anchor: { left: number; top: number; width: number; height: number };
+}
+
+export interface LivePageActionIntent {
+  actionRef: string;
+  bindings: Record<string, string>;
+  anchor: { left: number; top: number; width: number; height: number };
+}
+
 const MAX_LIVE_PAGE_LINK_CHARS = 8 * 1024;
+const LIVE_PAGE_ACTION_REF = /^[A-Za-z0-9._~-]{1,256}$/;
 
 export function runtimeData(detail: LivePageDetail): LivePageRuntimeData {
   return {
@@ -86,6 +102,11 @@ export function buildSandboxDocument(html: string, channelId: string): string {
     const stopImmediate=Event.prototype.stopImmediatePropagation;
     const portPost=MessagePort.prototype.postMessage;
     const portStart=MessagePort.prototype.start;
+    const closest=Element.prototype.closest;
+    const getAttribute=Element.prototype.getAttribute;
+    const getBounds=Element.prototype.getBoundingClientRect;
+    const parseJson=JSON.parse;
+    const objectEntries=Object.entries;
     let latest=null;
     let linkPort=null;
     Object.defineProperty(window,'KronnPageData',{configurable:false,get:()=>latest});
@@ -128,6 +149,26 @@ export function buildSandboxDocument(html: string, channelId: string): string {
     addEventListener('click',event=>{
       if(event.defaultPrevented||event.button!==0)return;
       const element=event.target instanceof Element?event.target:event.target&&event.target.parentElement;
+      const action=element?closest.call(element,'[data-kronn-action]'):null;
+      if(action){
+        event.preventDefault();
+        if(!linkPort||(userActivation&&!userActivation.isActive))return;
+        const actionRef=(getAttribute.call(action,'data-kronn-action')||'').trim();
+        if(!/^[A-Za-z0-9._~-]{1,256}$/.test(actionRef))return;
+        let bindings={};
+        const raw=getAttribute.call(action,'data-kronn-bindings');
+        if(raw){
+          try{
+            const parsed=parseJson(raw);
+            if(parsed&&typeof parsed==='object'&&!Array.isArray(parsed)){
+              bindings=Object.fromEntries(objectEntries(parsed).filter(([key,value])=>key.length<=128&&typeof value==='string'&&value.length<=4096));
+            }
+          }catch(_error){}
+        }
+        const rect=getBounds.call(action);
+        portPost.call(linkPort,{type:'kronn:page-action',version:1,channel_id:channel,action_ref:actionRef,bindings,anchor:{left:rect.left,top:rect.top,width:rect.width,height:rect.height}});
+        return;
+      }
       const anchor=element&&element.closest?element.closest('a[href]'):null;
       if(!anchor||anchor.target.toLowerCase()!=='_blank')return;
       event.preventDefault();
@@ -204,16 +245,33 @@ export interface LivePageOpenLinkRelay {
 export function createLivePageOpenLinkRelay(
   channelId: string,
   openExternal: (url: string, target: string, features: string) => unknown = window.open.bind(window),
+  onAction?: (intent: LivePageActionIntent) => void,
 ): LivePageOpenLinkRelay {
   let activePort: MessagePort | null = null;
-  const onMessage = (message: LivePageOpenLinkRequest) => {
+  const onMessage = (message: LivePageOpenLinkRequest | LivePageActionRequest) => {
     if (
       !message
-      || message.type !== 'kronn:page-open-link'
       || message.version !== 1
       || message.channel_id !== channelId
     ) return;
     if (navigator.userActivation && !navigator.userActivation.isActive) return;
+    if (message.type === 'kronn:page-action') {
+      if (
+        typeof message.action_ref !== 'string'
+        || !LIVE_PAGE_ACTION_REF.test(message.action_ref)
+        || !message.bindings
+        || typeof message.bindings !== 'object'
+        || !message.anchor
+      ) return;
+      const bindings = Object.fromEntries(Object.entries(message.bindings).filter(([key, value]) => (
+        key.length <= 128 && typeof value === 'string' && value.length <= 4096
+      ))) as Record<string, string>;
+      const anchor = message.anchor;
+      if (![anchor.left, anchor.top, anchor.width, anchor.height].every(Number.isFinite)) return;
+      onAction?.({ actionRef: message.action_ref, bindings, anchor });
+      return;
+    }
+    if (message.type !== 'kronn:page-open-link') return;
     const url = safeLivePageLink(message.url);
     if (!url) return;
     openExternal(url, '_blank', 'noopener,noreferrer');

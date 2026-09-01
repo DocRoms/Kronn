@@ -209,6 +209,8 @@ pub async fn upload_context_file(
                 // Freshly uploaded files are pending until the user sends a
                 // message; send_message pins them to that message id.
                 message_id: None,
+                // A user upload has no attested generation job.
+                ai_generation: None,
                 created_at: chrono::Utc::now(),
             };
             Json(ApiResponse::ok(crate::models::UploadContextFileResponse {

@@ -583,6 +583,42 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "153_quick_prompt_external_connection",
         include_str!("sql/153_quick_prompt_external_connection.sql"),
     ),
+    (
+        "154_execution_variable_snapshots",
+        include_str!("sql/154_execution_variable_snapshots.sql"),
+    ),
+    ("155_shared_runs", include_str!("sql/155_shared_runs.sql")),
+    (
+        "156_partial_response_dispatch",
+        include_str!("sql/156_partial_response_dispatch.sql"),
+    ),
+    ("157_media_jobs", include_str!("sql/157_media_jobs.sql")),
+    (
+        "158_external_api_media_models",
+        include_str!("sql/158_external_api_media_models.sql"),
+    ),
+    (
+        "159_discussion_actions",
+        include_str!("sql/159_discussion_actions.sql"),
+    ),
+    (
+        "160_live_page_actions",
+        include_str!("sql/160_live_page_actions.sql"),
+    ),
+    (
+        "161_acp_runtime_sessions",
+        include_str!("sql/161_acp_runtime_sessions.sql"),
+    ),
+    (
+        // KT-538 owns 160 and KT-542 owns 161 on the integration branch.
+        "162_model_catalog",
+        include_str!("sql/162_model_catalog.sql"),
+    ),
+    (
+        // 163 reserved for a concurrent KT-368 lot on the integration branch.
+        "164_model_catalog_cost_privacy",
+        include_str!("sql/164_model_catalog_cost_privacy.sql"),
+    ),
 ];
 
 /// Apply one migration inside the caller-owned transaction.
@@ -856,6 +892,117 @@ pub(crate) fn run_through(conn: &Connection, stop_after: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn migration_161_installs_the_durable_acp_runtime_session_store() {
+        let conn = Connection::open_in_memory().unwrap();
+        let migration_index = MIGRATIONS
+            .iter()
+            .position(|(name, _)| *name == "161_acp_runtime_sessions")
+            .unwrap();
+        let previous_migration = MIGRATIONS[migration_index - 1].0;
+        assert_eq!(previous_migration, "160_live_page_actions");
+        run_through(&conn, previous_migration).unwrap();
+        let table_before_161: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'acp_runtime_sessions')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!table_before_161);
+        run(&conn).unwrap();
+        let table_exists: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'acp_runtime_sessions')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let receipt_exists: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM _migrations WHERE name = '161_acp_runtime_sessions')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(table_exists);
+        assert!(receipt_exists);
+    }
+
+    #[test]
+    fn model_catalog_upgrades_from_its_immediate_predecessor() {
+        let conn = Connection::open_in_memory().unwrap();
+        let model_catalog_index = MIGRATIONS
+            .iter()
+            .position(|(name, _)| *name == "162_model_catalog")
+            .expect("model catalog migration is registered");
+        let predecessor = MIGRATIONS
+            .get(model_catalog_index.saturating_sub(1))
+            .expect("model catalog has a predecessor")
+            .0;
+        assert_eq!(predecessor, "161_acp_runtime_sessions");
+        run_through(&conn, predecessor).unwrap();
+        let table_exists = |name: &str| -> bool {
+            conn.query_row(
+                "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                [name],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        assert!(!table_exists("model_catalog_entries"));
+
+        run(&conn).unwrap();
+
+        assert!(table_exists("model_catalog_entries"));
+        let receipt: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM _migrations WHERE name = '162_model_catalog'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(receipt, 1);
+    }
+
+    #[test]
+    fn model_catalog_cost_privacy_upgrades_from_162_model_catalog() {
+        let conn = Connection::open_in_memory().unwrap();
+        let index = MIGRATIONS
+            .iter()
+            .position(|(name, _)| *name == "164_model_catalog_cost_privacy")
+            .expect("cost/privacy overlay migration is registered");
+        let predecessor = MIGRATIONS
+            .get(index.saturating_sub(1))
+            .expect("cost/privacy overlay migration has a predecessor")
+            .0;
+        assert_eq!(predecessor, "162_model_catalog");
+        run_through(&conn, predecessor).unwrap();
+        let column_exists = |name: &str| -> bool {
+            conn.query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('model_catalog_entries') WHERE name = ?1",
+                [name],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        assert!(!column_exists("cost_hint"));
+        assert!(!column_exists("privacy_note"));
+
+        run(&conn).unwrap();
+
+        assert!(column_exists("cost_hint"));
+        assert!(column_exists("privacy_note"));
+        let receipt: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM _migrations WHERE name = '164_model_catalog_cost_privacy'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(receipt, 1);
+    }
 
     #[test]
     fn run_with_backup_creates_backup_file() {
@@ -2083,6 +2230,70 @@ mod tests {
             })
             .unwrap();
         assert_eq!(foreign_key_errors, 0);
+    }
+
+    #[test]
+    fn migration_156_adopts_one_unambiguous_running_checkpoint() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        run_through(&conn, "155_shared_runs").unwrap();
+        conn.execute_batch(
+            "INSERT INTO external_api_connections
+                (id, display_name, mention_alias, endpoint, credential_slug, origin_preset)
+             VALUES ('router', 'OpenRouter', 'openrouter', 'https://openrouter.ai/api',
+                     'router-secret', 'open_router');
+             INSERT INTO discussions
+                (id, title, agent, created_at, updated_at, partial_response,
+                 partial_response_started_at, partial_response_agent_type,
+                 partial_response_model, partial_response_message_id)
+             VALUES ('d-upgrade', 'Upgrade', 'Custom', '2026-09-01T09:00:00Z',
+                     '2026-09-01T09:00:00Z', 'legacy fragment',
+                     '2026-09-01T09:01:00Z', 'Custom', 'z-ai/glm-5.3', 'partial-upgrade');
+             INSERT INTO messages
+                (id, discussion_id, role, content, timestamp, sort_order, received_at)
+             VALUES ('u-upgrade', 'd-upgrade', 'User', 'analyse',
+                     '2026-09-01T09:00:00Z', 1, '2026-09-01T09:00:00Z');",
+        )
+        .unwrap();
+        crate::db::agent_dispatch::enqueue(
+            &conn,
+            crate::db::agent_dispatch::NewAgentDispatchJob {
+                id: "job-upgrade",
+                discussion_id: "d-upgrade",
+                trigger_message_id: "u-upgrade",
+                trigger_sort_order: 1,
+                dedupe_key: "upgrade",
+                agent_override: Some(&crate::models::AgentType::Custom),
+                chain_prompt_ids: &[],
+                batch_item: None,
+                group_id: None,
+                group_concurrency_limit: None,
+            },
+        )
+        .unwrap();
+        crate::db::agent_dispatch::claim(&conn, "job-upgrade")
+            .unwrap()
+            .unwrap();
+        conn.execute(
+            "UPDATE agent_dispatch_jobs SET connection_id = 'router' WHERE id = 'job-upgrade'",
+            [],
+        )
+        .unwrap();
+
+        run(&conn).unwrap();
+        let adopted: (Option<String>, Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT partial_response_dispatch_id,
+                        partial_response_trigger_message_id,
+                        partial_response_connection_id
+                   FROM discussions WHERE id = 'd-upgrade'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(adopted.0.as_deref(), Some("job-upgrade"));
+        assert_eq!(adopted.1.as_deref(), Some("u-upgrade"));
+        assert_eq!(adopted.2.as_deref(), Some("router"));
     }
 
     #[test]

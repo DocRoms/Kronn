@@ -5,7 +5,23 @@
 // ║  Regenerate: `make typegen`. CI fails if this file drifts from the models.  ║
 // ╚═══════════════════════════════════════════════════════════════════════════╝
 
-export type ActiveAgentDispatch = { id: string, trigger_message_id: string, agent_type: AgentType, status: string, };
+export type ActiveAgentDispatch = { id: string, trigger_message_id: string, agent_type: AgentType, status: string,
+/**
+ * Number of times this durable dispatch has been claimed. A value above
+ * one makes a post-restart retry distinguishable from a first launch.
+ */
+attempts?: number,
+/**
+ * Durable transition reason, notably `backend_restarted` while a crashed
+ * invocation is waiting to resume.
+ */
+last_error?: string,
+/**
+ * Exact external HTTP connection used by a `Custom` dispatch (for
+ * example OpenRouter). The generic agent type alone is not enough to
+ * render or resume that provider honestly.
+ */
+connection_id?: string, };
 
 /**
  * Result of adding a contact, with optional diagnostic hint for unreachable peers.
@@ -257,7 +273,7 @@ export type AgentResumeJobStatus = "pending" | "running" | "completed" | "failed
  */
 export type AgentResumeJobView = { id: string, discussion_id: string, target_agent: AgentType, source_dispatch_job_id: string | null, task_execution_id: string | null, quick_exec_id: string | null, kind: AgentResumeJobKind, status: AgentResumeJobStatus, reason: string, scheduled_at: string, chain_depth: number, wake_budget: number, watchdog_redispatches: number, completion_dispatch_id: string | null, result: QuickExecResult | null, failure_kind: AgentResumeFailureKind | null, started_at: string | null, completed_at: string | null, last_error: string | null, created_at: string, updated_at: string, };
 
-export type AgentsConfig = { claude_code: AgentConfig, codex: AgentConfig, gemini_cli: AgentConfig, kiro: AgentConfig, vibe: AgentConfig, copilot_cli: AgentConfig, ollama: AgentConfig, lite_llm: AgentConfig, nvidia: AgentConfig,
+export type AgentsConfig = { claude_code: AgentConfig, codex: AgentConfig, open_code: AgentConfig, gemini_cli: AgentConfig, kiro: AgentConfig, vibe: AgentConfig, copilot_cli: AgentConfig, ollama: AgentConfig, lite_llm: AgentConfig, nvidia: AgentConfig,
 /**
  * Per-agent model tier overrides (Economy/Reasoning model names).
  */
@@ -273,7 +289,7 @@ model?: string | null,
  */
 tier?: ModelTier | null, reasoning_effort?: string | null, max_tokens?: number | null, };
 
-export type AgentType = "ClaudeCode" | "Codex" | "Vibe" | "GeminiCli" | "Kiro" | "CopilotCli" | "Ollama" | "LiteLlm" | "Nvidia" | "Custom";
+export type AgentType = "ClaudeCode" | "Codex" | "OpenCode" | "Vibe" | "GeminiCli" | "Kiro" | "CopilotCli" | "Ollama" | "LiteLlm" | "Nvidia" | "Custom";
 
 export type AgentUsageSummary = { agent_type: string, total_tokens: number, message_count: number, by_project: Array<AgentProjectUsage>, };
 
@@ -733,7 +749,7 @@ concurrent_limit?: number | null, };
  * envelope produced by the BatchApiCall executor — the frontend renders
  * `envelope.data.items[]` as a per-item result table.
  */
-export type BatchRunQuickApiResponse = {
+export type BatchRunQuickApiResponse = { run_id: string,
 /**
  * Overall status: `OK` (all succeeded), `PARTIAL` (some failed), `ERROR` (all failed).
  */
@@ -949,6 +965,88 @@ export type CampaignWorkerSelection = { target: MessageTarget, model?: string | 
 export type CancellationCleanupPolicy = "preserve" | "remove_if_clean";
 
 /**
+ * One model as Kronn's shared contract sees it. `id` is an opaque encoding
+ * of `(runtime_target_id, model_id)` — stable across reconciliation, free of
+ * delimiter ambiguity and never derived from `display_name`.
+ */
+export type CatalogModelEntry = { id: string,
+/**
+ * Durable execution target namespace. CLI families use
+ * `agent:<canonical-slug>`; named OpenAI-compatible connections use
+ * `http:<immutable-connection-id>`. Transport selection is intentionally
+ * not encoded here: direct CLI and ACP are routes to the same target.
+ */
+runtime_target_id: string,
+/**
+ * Projection metadata used by existing UI and runner code. It is not
+ * part of the catalog identity.
+ */
+agent_type: AgentType,
+/**
+ * The exact model identifier as the runtime/provider knows it — what a
+ * `--model` flag or API `model` field must receive.
+ */
+model_id: string, display_name: string,
+/**
+ * Operator-set label override. When present, selectors show this
+ * instead of `display_name`, even after the record is reconciled to
+ * `Live` (KT-531: operator display choices survive reconciliation).
+ */
+display_alias?: string | null, provenance: ModelProvenance, availability: ModelAvailability, unavailable_reason?: ModelUnavailableReason | null, unavailable_detail?: string | null, capabilities: Array<string>, reasoning_modes: Array<string>, default_reasoning_mode?: string | null,
+/**
+ * Operator-assigned Economy/Default/Reasoning tier, if any. Survives
+ * reconciliation the same way `display_alias` does.
+ */
+tier_assignment?: ModelTier | null,
+/**
+ * Coarse cost classification. `None` means neither reconciliation nor an
+ * operator has assessed it — the UI must render this as "unknown", never
+ * as free or paid. Overlay field: survives reconciliation like
+ * `display_alias`/`tier_assignment`.
+ */
+cost_hint?: ModelCostHint | null,
+/**
+ * Free-text confidentiality note (e.g. "routed through a third-party
+ * gateway"). Structural/provider-level, never per-model boilerplate
+ * invented for a specific name. Overlay field, same survival rule as
+ * `cost_hint`.
+ */
+privacy_note?: string | null,
+/**
+ * True when this identity was ever created as a manual entry (even if
+ * its provenance has since been promoted to `Live` by reconciliation).
+ * Kept for the audit trail required by KT-531.
+ */
+manual_origin: boolean,
+/**
+ * First time this identity was ever seen (any provenance).
+ */
+first_seen_at: string,
+/**
+ * Last time this identity was confirmed present by a live discovery.
+ * Manual and migrated rows remain `None` until a live reconciliation.
+ */
+last_seen_at?: string | null,
+/**
+ * Last time Kronn attempted to verify this identity, live or not.
+ */
+last_checked_at: string, created_at: string, updated_at: string, };
+
+/**
+ * Structured, catalog-driven preflight diagnostic. Shared by discussion
+ * dispatch, Quick Prompt runs, comparisons and workflow steps so the UI
+ * renders one consistent card regardless of the launch surface.
+ */
+export type CatalogPreflightFailure = { runtime_target_id: string, agent_type: AgentType, model_id?: string | null, reason: ModelUnavailableReason, detail: string, last_checked_at: string,
+/**
+ * Machine-readable recommended next step (`"configure_manual_model"`,
+ * `"recheck_catalog"`, `"install_cli"`, `"authenticate"`). The frontend
+ * maps this to the recheck/settings shortcut; it is deliberately not a
+ * prose sentence so i18n stays centralized in the frontend dictionaries.
+ */
+recommended_action: string, };
+
+/**
  * What a CI check is known to be. `Unknown` is its own value: a check nobody
  * could read is not a passing one.
  */
@@ -1120,7 +1218,21 @@ export type ContextFile = { id: string, discussion_id: string, filename: string,
  * the composer) or a legacy disc-wide file. Always serialized (even when
  * null) so the frontend can split pending-vs-attached without ambiguity.
  */
-message_id: string | null, created_at: string, };
+message_id: string | null,
+/**
+ * Present only when this file is the recorded output of a completed AI
+ * media job. `None` means "no attested AI provenance", never "probably
+ * human" based on a filename or MIME-type heuristic.
+ */
+ai_generation: ContextFileAiGeneration | null, created_at: string, };
+
+/**
+ * Provenance recorded by Kronn for an asset produced by an AI media job.
+ *
+ * Its presence is the attestation used by clients to label an asset as AI
+ * generated. Ordinary uploads never receive inferred provenance.
+ */
+export type ContextFileAiGeneration = { model: string, prompt: string, };
 
 export type CreateAdHocCompareRequest = { discussion_ids: Array<string>, };
 
@@ -1147,6 +1259,11 @@ tier?: ModelTier,
  * `None` = not a QP launch (briefing / manual / etc.).
  */
 originating_qp_id?: string | null,
+/**
+ * Raw launch inputs for an originating Quick Prompt. The server resolves
+ * project/context sources and renders the canonical stored template.
+ */
+launch_variables?: { [key in string]: string },
 /**
  * F9 — create a "human-only" disc: the agent runner never spawns on
  * `send_message`. Used by the contact-click → 1:1 human↔human chat flow.
@@ -1324,6 +1441,8 @@ gate_step?: string | null, };
  * Response for [`decide_run`].
  */
 export type DecideRunResponse = { run_id: string, new_status: RunStatus, };
+
+export type DeleteManualModelRequest = { runtime_target_id: string, model_id: string, };
 
 /**
  * Worker → backend/principal delivery (ADR §5, KT-319 DoD-1). Every field DoD-1
@@ -1686,6 +1805,22 @@ test_mode_restore_branch?: string | null,
  */
 test_mode_stash_ref?: string | null, created_at: string, updated_at: string, };
 
+export type DiscussionAction = { id: string, discussion_id: string, source_message_id: string, fence_index: number, kind: DiscussionActionKind, target_id: string, target_name: string, project_id: string | null, state: DiscussionActionState, values: Array<DiscussionActionValue>, shared_run_id: string | null, result_discussion_id: string | null, deep_link: string | null, diagnostic: string | null, launched_at: string | null, finished_at: string | null, created_at: string, updated_at: string, };
+
+export type DiscussionActionKind = "quick_prompt" | "quick_api" | "quick_exec" | "workflow" | "invalid";
+
+export type DiscussionActionState = "proposed" | "launching" | "running" | "succeeded" | "failed" | "cancelled" | "preflight_failed";
+
+export type DiscussionActionValue = { name: string, label: string, placeholder: string, description: string | null, required: boolean, control?: PromptVariableControl,
+/**
+ * Mirrors `PromptVariable::allow_manual_override` from the target's own
+ * declaration: whether a `project_env`/`kronn_context` value may be
+ * optionally overridden at launch instead of always being read-only.
+ */
+allow_manual_override: boolean, provenance: DiscussionActionValueProvenance, value?: string, source_ref?: string, suggested_by?: string, suggested_value?: string, };
+
+export type DiscussionActionValueProvenance = "user_input" | "agent_suggestion" | "kronn_context" | "project_env" | "dynamic_binding";
+
 export type DiscussionAgentHandoffMode = { global_enabled: boolean, disabled: boolean, unlimited_override: boolean, effective_enabled: boolean,
 /**
  * `None` means no financial quota; structural loop guards still apply.
@@ -1698,7 +1833,13 @@ export type DiscussionDetail = { active_agent_dispatches: Array<ActiveAgentDispa
  * to the transcript lets the UI show what was requested even when the
  * concrete model that eventually answered differs.
  */
-message_targets: { [key in string]: Array<MessageTarget> }, id: string, project_id: string | null, title: string, agent: AgentType, language: string, participants: Array<AgentType>, messages: Array<DiscussionMessage>, message_count: number,
+message_targets: { [key in string]: Array<MessageTarget> },
+/**
+ * Latest DB checkpoint for a response that has not reached a terminal
+ * message yet. Lets a reconnect render saved text instead of an empty
+ * loader while boot recovery/re-dispatch is settling.
+ */
+partial_response?: InFlightAgentResponse, id: string, project_id: string | null, title: string, agent: AgentType, language: string, participants: Array<AgentType>, messages: Array<DiscussionMessage>, message_count: number,
 /**
  * Subset of `message_count` excluding `MessageRole::System` rows. The
  * streaming layer persists every tool call + every cached-summary
@@ -1791,6 +1932,20 @@ test_mode_restore_branch?: string | null,
  * `None` when the main repo was clean or the user declined the stash.
  */
 test_mode_stash_ref?: string | null, created_at: string, updated_at: string, };
+
+export type DiscussionExecutionVariableRetention = {
+/**
+ * Global default from server configuration.
+ */
+global_days: number,
+/**
+ * Discussion-specific override. `None` means inherit the global default.
+ */
+override_days: number | null,
+/**
+ * Value used for the next execution in this discussion.
+ */
+effective_days: number, };
 
 export type DiscussionExportEnvelope = { kind: string, version: number, exported_at: string, secret_policy: string, source_discussion_id: string, discussion: Discussion, messages: Array<DiscussionMessage>, attachments: Array<PortableDiscussionAttachment>, revision_events: Array<PortableDiscussionRevisionEvent>, plan: Array<PortableDiscussionPlanItem>,
 /**
@@ -2048,6 +2203,64 @@ cli_billable_tokens: number | null, cli_sessions: number, cli_sessions_measured:
  */
 cli_sessions_unmeasured: number, };
 
+/**
+ * Where the bytes of one discussion live, ordered by recoverability.
+ */
+export type DiscussionWeight = { discussion_id: string,
+/**
+ * Attachment bytes held on disk. Reclaimable without losing the thread.
+ */
+disk_bytes: number,
+/**
+ * Extracted document text kept in the database. Reclaimable, but the
+ * document search over those files goes with it.
+ */
+extracted_text_bytes: number,
+/**
+ * Message content bytes. Not reclaimable without losing conversation.
+ */
+message_bytes: number, };
+
+/**
+ * Sidebar weight indicator settings.
+ *
+ * Deliberately not an `Option`: an absent section loads straight into a valid
+ * effective state, so no caller has to interpret `None`. Each field carries
+ * its own default too, so a PARTIAL section (`enabled = false` alone) keeps
+ * usable thresholds instead of collapsing them to zero.
+ */
+export type DiscussionWeightConfig = { enabled: boolean, amber_bytes: number, red_bytes: number, };
+
+/**
+ * Batch answer. `weights` is SPARSE and indexed by discussion id: an id that
+ * was requested but holds nothing is absent, which the UI must render as
+ * "empty" rather than as a zero it could confuse with a failed load.
+ */
+export type DiscussionWeightsResponse = { weights: { [key in string]: DiscussionWeightView }, thresholds: WeightThresholds,
+/**
+ * True when the configured pair was unusable and the defaults took over.
+ * Surfaced rather than hidden, so a bad config is visible.
+ */
+thresholds_from_defaults: boolean, };
+
+/**
+ * One discussion's weight with its graded level, as served to the UI.
+ */
+export type DiscussionWeightView = { total_bytes: number, reclaimable_bytes: number, level: WeightLevel, discussion_id: string,
+/**
+ * Attachment bytes held on disk. Reclaimable without losing the thread.
+ */
+disk_bytes: number,
+/**
+ * Extracted document text kept in the database. Reclaimable, but the
+ * document search over those files goes with it.
+ */
+extracted_text_bytes: number,
+/**
+ * Message content bytes. Not reclaimable without losing conversation.
+ */
+message_bytes: number, };
+
 export type DiscussionWorkspace = { id: string, disc_id: string, session_pk: number | null, session_agent_type: string | null, task_id: string | null, task_reference: string | null, project_id: string, workspace_path: string | null, canonical_path: string | null, branch: string, head_sha: string | null, ownership: string, state: string,
 /**
  * Managed-worktree lineage (KT-318, migration 127). Populated only for a
@@ -2161,7 +2374,17 @@ export type ExportPluginBundleRequest = { config_ids: Array<string>, include_val
  * A named OpenAI-compatible API connection. The credential itself stays in
  * Kronn's encrypted credential store; this model persists only its slug.
  */
-export type ExternalApiConnection = { id: string, display_name: string, mention_alias: string, endpoint: string | null, credential_slug: string, origin_preset: ExternalApiConnectionPreset, economy_model: string | null, default_model: string | null, reasoning_model: string | null, created_at: string, updated_at: string, };
+export type ExternalApiConnection = { id: string, display_name: string, mention_alias: string, endpoint: string | null, credential_slug: string, origin_preset: ExternalApiConnectionPreset, economy_model: string | null, default_model: string | null, reasoning_model: string | null, created_at: string, updated_at: string,
+/**
+ * Media generation slots. Modalities, NOT quality tiers: making them
+ * ModelTier variants would let a text step select "tier Image".
+ */
+image_model?: string | null, video_model?: string | null,
+/**
+ * Override for providers serving media from another host than their chat
+ * endpoint. Empty means "derive from `endpoint`".
+ */
+media_endpoint?: string | null, };
 
 export type ExternalApiConnectionPreset = "lite_llm" | "nvidia" | "open_router" | "other";
 
@@ -2478,6 +2701,14 @@ export type ImportResult = { warnings: Array<string>, invalid_paths: Array<strin
  */
 export type ImportWorkflowRequest = { content: string, project_id?: string | null, };
 
+/**
+ * Durable snapshot of the text already emitted by an in-flight agent.
+ *
+ * It lives on `DiscussionDetail` rather than in `messages`: until completion
+ * (or boot recovery) this is a checkpoint, not a second transcript row.
+ */
+export type InFlightAgentResponse = { message_id: string, content: string, started_at?: string | null, agent_type?: AgentType | null, model?: string | null, trigger_message_id?: string | null, connection_id?: string | null, dispatch?: ActiveAgentDispatch | null, };
+
 export type InstructionFile = { path: string,
 /**
  * `None` when the file could not be read. NOT 0 — an unreadable file is not
@@ -2570,6 +2801,19 @@ custom_prompt?: string | null,
  * oversize, and no way to graft a checkpoint onto the wrong pipeline.
  */
 resume_run_id?: string | null, };
+
+export type LaunchDiscussionActionRequest = { variables?: Record<string, string>, };
+
+export type LaunchLivePageActionRequest = { variables?: Record<string, string>,
+/**
+ * Row/card SELECTOR for `dynamic_binding` fields, keyed by variable
+ * name — never a resolved value. For example the clicked collection
+ * item's key-field value. The real field value is always looked up
+ * server-side from the live dataset/page row (`resolve_dynamic_binding`)
+ * — a caller can choose which existing row to bind to, never inject an
+ * arbitrary resolved value.
+ */
+bindings?: Record<string, string>, };
 
 /**
  * The versioned, backward-compatible wire response for a single-task launch —
@@ -2755,6 +2999,16 @@ pinned: boolean,
  * Archived Pages remain addressable by workflows and can be restored.
  */
 archived: boolean, };
+
+export type LivePageAction = { id: string, live_page_id: string, live_page_revision_id: string, action_ref: string, kind: DiscussionActionKind, target_id: string, target_name: string, project_id: string | null, state: DiscussionActionState, values: Array<DiscussionActionValue>, shared_run_id: string | null, result_discussion_id: string | null, deep_link: string | null, diagnostic: string | null, launched_at: string | null, finished_at: string | null, created_at: string, updated_at: string,
+/**
+ * True when `live_page_revision_id` no longer matches the Page's live
+ * `current_revision_id`. The `(live_page_id, action_ref)` anchor itself
+ * always survives a refresh or a content update — this flag exists so
+ * the human sees an explicit explanation instead of silently trusting
+ * values that may no longer reflect the currently displayed Page.
+ */
+stale_source: boolean, };
 
 export type LivePageDataset = { id: string, page_id: string, name: string, kind: LivePageDatasetKind, current: any, schema: any, max_points: number, max_age_days: number | null, updated_at: string, };
 
@@ -2997,6 +3251,52 @@ export type McpSource = "Registry" | "Detected" | "Manual" | "HostImported";
 export type McpTransport = { "Stdio": { command: string, args: Array<string>, } } | { "Sse": { url: string, } } | { "Streamable": { url: string, } } | "ApiOnly";
 
 /**
+ * Cost of one generation, as the provider declared it.
+ */
+export type MediaCost = {
+/**
+ * Verbatim provider value. Recomputing it from a published rate drifts
+ * from the actual invoice.
+ */
+cost_usd: number,
+/**
+ * Bring-your-own-key generations can legitimately cost nothing; keeping
+ * the flag stops a zero from looking like a measurement failure.
+ */
+is_byok: boolean, };
+
+export type MediaJobStatus = "pending" | "running" | "completed" | "failed" | "cancelled" | "timed_out";
+
+/**
+ * What the model outputs. The execution family is the same for both, so this
+ * belongs to the job and its result — not to a separate run kind.
+ */
+export type MediaModality = "image" | "video";
+
+/**
+ * Generation parameters as REQUESTED. The provider may honour them loosely,
+ * so nothing downstream may treat these as describing the output.
+ */
+export type MediaParams = { duration_secs?: number | null, resolution?: string | null, aspect_ratio?: string | null, generate_audio?: boolean | null, };
+
+/**
+ * Coarse provider phase, for progress reporting.
+ */
+export type MediaPhase = "submitting" | "polling" | "downloading" | "persisting";
+
+/**
+ * What actually came back, read from the produced file.
+ */
+export type MediaRendered = { width?: number | null, height?: number | null, duration_ms?: number | null, };
+
+/**
+ * Versioned payload published on the shared run. `progress` is absent unless
+ * the provider actually measures it — an invented percentage is worse than
+ * none, because it looks authoritative.
+ */
+export type MediaRunResult = { schema_version: number, modality: MediaModality, phase: MediaPhase, progress?: number | null, generation_id?: string | null, asset_id?: string | null, message_id?: string | null, cost_usd?: number | null, is_byok?: boolean | null, width?: number | null, height?: number | null, media_duration_ms?: number | null, };
+
+/**
  * Lean attachment descriptor surfaced to agents via `disc_get_message`. The
  * `disk_path` lets a file-tool-capable agent open the image directly.
  */
@@ -3053,6 +3353,40 @@ export type MessageTargetKind = "discussion_agent" | "agent" | "cli";
 
 export type Metric = { label: string, value: string, };
 
+export type ModelAvailability = "available" | "unavailable";
+
+export type ModelCatalogSnapshot = { targets: Array<ModelCatalogView>, };
+
+/**
+ * Response for one runtime target — the resolved list plus
+ * the metadata a selector needs to render provenance honestly.
+ */
+export type ModelCatalogView = { runtime_target_id: string, target_label?: string | null, agent_type: AgentType, models: Array<CatalogModelEntry>,
+/**
+ * Whether the most recent refresh attempt for this runtime reached a
+ * live source successfully. `false` means every model below is at best
+ * `Cached`/`Manual`/`Migrated`.
+ */
+live_refresh_ok: boolean,
+/**
+ * The live snapshot backing this view is older than the freshness
+ * window, or there has never been one. The UI must never present
+ * `Cached`/`Migrated` entries as a current discovery when this is true.
+ */
+stale: boolean, last_live_success_at?: string | null, last_attempt_at?: string | null, last_error_reason?: ModelUnavailableReason | null, last_error_detail?: string | null, };
+
+/**
+ * Coarse, catalog-driven cost classification. Never inferred from a
+ * hardcoded model name: `Free`/`Paid` are only set when a discovery or
+ * reconciliation step has an actual structural signal (see
+ * `db::model_catalog::reconcile_live`'s gateway overlay), and an operator can
+ * always override via the manual catalog entry. `Unknown` — not `Paid` — is
+ * the honest default when no such signal exists (KT-543: OpenCode Zen).
+ */
+export type ModelCostHint = "free" | "paid" | "unknown";
+
+export type ModelProvenance = "live" | "cached" | "manual" | "migrated";
+
 /**
  * Abstract model capability tier. Kronn maps each tier to a concrete --model flag per agent.
  * Priority: AgentSettings.model (explicit) > ModelTier > Default (no flag).
@@ -3077,7 +3411,14 @@ default?: string | null, reasoning?: string | null, };
 /**
  * Global model tier overrides per agent.
  */
-export type ModelTiersConfig = { claude_code: ModelTierConfig, codex: ModelTierConfig, gemini_cli: ModelTierConfig, kiro: ModelTierConfig, vibe: ModelTierConfig, copilot_cli: ModelTierConfig, ollama: ModelTierConfig, lite_llm: ModelTierConfig, nvidia: ModelTierConfig, };
+export type ModelTiersConfig = { claude_code: ModelTierConfig, codex: ModelTierConfig, open_code: ModelTierConfig, gemini_cli: ModelTierConfig, kiro: ModelTierConfig, vibe: ModelTierConfig, copilot_cli: ModelTierConfig, ollama: ModelTierConfig, lite_llm: ModelTierConfig, nvidia: ModelTierConfig, };
+
+/**
+ * Normalized reason a model is unavailable, or why a discovery attempt could
+ * not confirm it. Shared verbatim across the catalog, preflight diagnostics
+ * and audit history so the UI never has to parse a provider-specific string.
+ */
+export type ModelUnavailableReason = "disappeared" | "auth_required" | "timeout" | "cli_missing" | "invalid_catalog" | "provider_error" | "unsupported";
 
 /**
  * Config for the "Multi-agent review" option on an Agent step (see
@@ -3908,7 +4249,47 @@ required: boolean,
  * regex is treated as "no constraint" (never blocks a launch on a
  * malformed pattern; logged).
  */
-pattern?: string | null, };
+pattern?: string | null,
+/**
+ * Resolution strategy. Omitted legacy definitions remain manual inputs.
+ */
+source: PromptVariableSource | null,
+/**
+ * Declarative source reference (`<env.NAME>` for `ProjectEnv`).
+ * This field must never carry a resolved value.
+ */
+source_ref?: string | null,
+/**
+ * Project environment variables are read-only unless the template author
+ * explicitly allows an audited launch-time override.
+ */
+allow_manual_override: boolean,
+/**
+ * Presentation and bounded-value contract. Missing legacy values are
+ * regular single-line text inputs.
+ */
+control?: PromptVariableControl, };
+
+export type PromptVariableControl = { "type": "text" } | { "type": "textarea" } | { "type": "select", options: Array<PromptVariableOption>, default_value?: string, };
+
+export type PromptVariableOption = {
+/**
+ * Stable execution value. Renaming the label never changes run payloads.
+ */
+value: string, label: string,
+/**
+ * Disabled options remain in version history but cannot be selected by a
+ * new run.
+ */
+enabled: boolean, };
+
+/**
+ * Where a declared template variable obtains its value at execution time.
+ *
+ * The declaration is deliberately a reference only. In particular a
+ * `ProjectEnv` declaration stores `<env.NAME>`, never the secret value.
+ */
+export type PromptVariableSource = "user_input" | "kronn_context" | "project_env";
 
 /**
  * Aggregate over a proposal's item states.
@@ -4172,6 +4553,8 @@ export type RecentMessagePreview = { sort_order: number, role: string, agent_typ
 preview: string, };
 
 export type RecoveryStatus = { configured: boolean, };
+
+export type RefreshModelCatalogRequest = { runtime_target_id: string, agent_type: AgentType, force?: boolean, };
 
 export type RemoteRepo = { name: string, full_name: string, clone_url: string, ssh_url: string, description: string | null, language: string | null, stargazers_count: number, updated_at: string, source: string, already_cloned: boolean, };
 
@@ -4534,7 +4917,7 @@ variables?: Record<string, string>, };
  * Response from `POST /api/quick-apis/:id/run`. Mirrors the
  * `/test-api-call` shape so the frontend can reuse the same UI.
  */
-export type RunQuickApiResponse = { success: boolean, duration_ms: number,
+export type RunQuickApiResponse = { run_id: string, success: boolean, duration_ms: number,
 /**
  * Parsed envelope (data/status/summary) on success, `None` on failure.
  */
@@ -4546,7 +4929,7 @@ error: string | null, };
 
 export type RunQuickExecRequest = { variables?: Record<string, string>, };
 
-export type RunQuickExecResponse = { success: boolean, duration_ms: number, data: any, stdout: string | null, stderr: string | null, error: string | null, };
+export type RunQuickExecResponse = { run_id: string, success: boolean, duration_ms: number, data: any, stdout: string | null, stderr: string | null, error: string | null, };
 
 export type RunStatus = "Pending" | "Running" | "Success" | "Partial" | "Failed" | "Cancelled" | "WaitingApproval" | "StoppedByGuard" | "Interrupted";
 
@@ -4632,6 +5015,11 @@ failure_notify_url: string | null,
  * still referenced by a retained child are always preserved.
  */
 run_retention_days: number,
+/**
+ * Encrypted execution-variable snapshot retention. `0` keeps metadata
+ * but disables value retention. Product default: 30 days.
+ */
+execution_variable_retention_days: number,
 /**
  * KT-373 — refuse to provision a worktree below this much free disk, in
  * GiB. On 2026-08-21 the dev volume hit 100% with seven worktrees each
@@ -4791,7 +5179,12 @@ agent_handoff_paid_unlimited: boolean,
  * Agents that cannot be started automatically from another agent's
  * generated reply. Empty keeps the historical allow-all behaviour.
  */
-agent_handoff_blocked_agents: Array<AgentType>, };
+agent_handoff_blocked_agents: Array<AgentType>,
+/**
+ * Sidebar storage-weight indicator. Validation and fallback live in
+ * `models::discussion_weight`; this is only the persisted field.
+ */
+discussion_weight: DiscussionWeightConfig, };
 
 export type ServerConfigPublic = { host: string, port: number, domain: string | null, max_concurrent_agents: number, agent_stall_timeout_min: number, agent_global_timeout_min: number, local_agent_global_timeout_min: number, auth_enabled: boolean, pseudo: string | null, avatar_email: string | null, bio: string | null, debug_mode: boolean,
 /**
@@ -4811,7 +5204,17 @@ default_model_tier: ModelTier,
  * `Off` by default in 0.8.6 onwards. UI surfaces an explanation of
  * when to re-enable (small-context agents without MCP access).
  */
-default_summary_strategy: SummaryStrategy, agent_handoffs_enabled: boolean, agent_handoff_paid_limit: number, agent_handoff_paid_unlimited: boolean, agent_handoff_blocked_agents: Array<AgentType>, };
+default_summary_strategy: SummaryStrategy, agent_handoffs_enabled: boolean, agent_handoff_paid_limit: number, agent_handoff_paid_unlimited: boolean, agent_handoff_blocked_agents: Array<AgentType>,
+/**
+ * Sidebar storage-weight indicator: lets the frontend skip the batch
+ * call entirely when disabled, and grade colours without a round-trip.
+ */
+discussion_weight: DiscussionWeightConfig,
+/**
+ * Default retention for encrypted execution-variable snapshots.
+ * Zero purges values as soon as the run reaches a terminal state.
+ */
+execution_variable_retention_days: number, };
 
 /**
  * Configurable ceilings for one CLI session.
@@ -4900,6 +5303,12 @@ export type SetupStatus = { is_first_run: boolean, current_step: SetupStep, agen
 export type SetupStep = "Agents" | "ScanPaths" | "Detection" | "Complete";
 
 export type ShareDiscussionRequest = { contact_ids: Array<string>, };
+
+export type SharedRun = { id: string, kind: SharedRunKind, source_id: string, project_id: string | null, discussion_id: string | null, status: SharedRunStatus, started_at: string | null, finished_at: string | null, duration_ms: number | null, result: unknown, diagnostic: string | null, created_at: string, updated_at: string, };
+
+export type SharedRunKind = "quick_prompt" | "quick_api" | "quick_exec" | "workflow" | "media";
+
+export type SharedRunStatus = "preflight_failed" | "queued" | "running" | "success" | "failed" | "cancelled" | "timeout";
 
 export type Skill = { id: string, name: string, description: string, icon: string, category: SkillCategory, content: string, is_builtin: boolean,
 /**
@@ -5681,7 +6090,12 @@ agent_handoffs_disabled?: boolean | null,
  * Remove the financial quota for this discussion only. The global master
  * switch, per-agent blocks and structural loop guards still apply.
  */
-agent_handoffs_unlimited?: boolean | null, };
+agent_handoffs_unlimited?: boolean | null,
+/**
+ * Per-discussion encrypted execution-variable retention override.
+ * Zero keeps values only for the lifetime of the active run.
+ */
+execution_variable_retention_days?: number | null | null, };
 
 export type UpdateLivePageHtmlRequest = { html: string, created_by_agent?: string | null, };
 
@@ -5736,6 +6150,25 @@ export type UploadContextFileResponse = { file: ContextFile,
  * Suggested skill IDs based on file extension
  */
 suggested_skills: Array<string>, };
+
+/**
+ * Payload for creating or updating a manual catalog entry. Identity
+ * (`runtime_target_id` + `model_id`) is immutable once created — editing it would
+ * silently orphan every reference that already resolved to the old
+ * identity, so a caller who wants a different `model_id` must delete and
+ * recreate the entry.
+ */
+export type UpsertManualModelRequest = { runtime_target_id: string, agent_type: AgentType, model_id: string, display_name: string, capabilities?: Array<string>, reasoning_modes?: Array<string>, default_reasoning_mode?: string | null, tier_assignment?: ModelTier | null,
+/**
+ * Operator override/correction. Unlike `tier_assignment`, `None` here
+ * preserves whatever value already exists (manually set or
+ * auto-derived by reconciliation) instead of clearing it — an unrelated
+ * edit (e.g. renaming the model) must not silently wipe an
+ * auto-detected OpenCode Zen cost/privacy overlay just because the
+ * caller's form doesn't know about this field yet. Send `Some(..)` to
+ * set or correct it.
+ */
+cost_hint?: ModelCostHint | null, privacy_note?: string | null, };
 
 /**
  * A ranked usage entry (for top N lists)
@@ -5937,6 +6370,10 @@ withheld_by_routing: number, };
  * surface where Kronn owns the runner.
  */
 export type WakeMode = "native_dispatch" | "external_poll";
+
+export type WeightLevel = "green" | "amber" | "red";
+
+export type WeightThresholds = { amber_bytes: number, red_bytes: number, };
 
 /**
  * Lifecycle of a CLI worker control offer (KT-328). `pending` is the published,
@@ -6608,4 +7045,4 @@ step_index: number, total_steps: number,
 /**
  * Step name at `step_index`, or null when between steps.
  */
-current_step: string | null, } | { "type": "partial_response_recovered", discussion_ids: Array<string>, } | { "type": "agent_runs_interrupted", discussion_ids: Array<string>, } | { "type": "audit_finished", project_id: string, status: string, last_completed_step: number, total_steps: number, warned_steps: Array<number>, discussion_id: string | null, };
+current_step: string | null, } | { "type": "shared_run_updated", run_id: string, } | { "type": "partial_response_recovered", discussion_ids: Array<string>, } | { "type": "agent_runs_interrupted", discussion_ids: Array<string>, } | { "type": "audit_finished", project_id: string, status: string, last_completed_step: number, total_steps: number, warned_steps: Array<number>, discussion_id: string | null, };

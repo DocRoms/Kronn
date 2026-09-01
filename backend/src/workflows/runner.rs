@@ -388,6 +388,11 @@ async fn execute_run_with_notify_policy(
                     total_steps: total_steps_for_ws,
                     current_step,
                 });
+            let _ = state
+                .ws_broadcast
+                .send(crate::models::WsMessage::SharedRunUpdated {
+                    run_id: run_id_for_ws.clone(),
+                });
         };
 
     let db = state.db.clone();
@@ -676,6 +681,38 @@ async fn execute_run_with_notify_policy(
     if let Some(ref trigger_ctx) = run.trigger_context {
         inject_trigger_context(&mut ctx, trigger_ctx);
     }
+    // Execution variables never transit through trigger_context. Load the
+    // run-scoped encrypted snapshot directly into this in-memory context. A
+    // technical resume uses the same run id and therefore the same snapshot.
+    if !workflow.variables.is_empty() {
+        let secret = state
+            .config
+            .read()
+            .await
+            .encryption_secret
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("Variable snapshot key unavailable"))?;
+        let key = crate::core::crypto::parse_secret(&secret).map_err(anyhow::Error::msg)?;
+        let run_id = run.id.clone();
+        let values = state
+            .db
+            .with_conn(move |conn| {
+                crate::db::execution_variable_snapshots::load_values(
+                    conn,
+                    "workflow",
+                    &run_id,
+                    &key,
+                    Utc::now(),
+                )
+            })
+            .await?
+            .ok_or_else(|| {
+                anyhow::anyhow!("Workflow execution variable snapshot unavailable or expired")
+            })?;
+        for (name, value) in values {
+            ctx.set(name, value);
+        }
+    }
     // 0.7.0 Phase 3 — pre-seed every declared artifact to "" so a step
     // referencing `{{artifacts.review}}` on round 1 (before any step
     // wrote it) renders cleanly rather than leaving the literal
@@ -754,6 +791,69 @@ async fn execute_run_with_notify_policy(
                     condition_result: None,
                     envelope_detected: None,
                     step_kind: Some("Preflight".into()),
+                    step_api_plugin_slug: None,
+                    step_api_endpoint_path: None,
+                    is_rollback: false,
+                    child_run_id: None,
+                    native_tool_calls: Box::default(),
+                    step_agent: None,
+                    step_model: None,
+                });
+                let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
+                let db_p = db.clone();
+                db_p.with_conn(move |conn| crate::db::workflows::update_run_progress(conn, snap))
+                    .await?;
+                emit(RunEvent::RunError { error: msg });
+                return Ok(());
+            }
+
+            // Resolve every statically reachable Agent step before the first
+            // one starts. Dynamic branches are checked again immediately
+            // before dispatch by `execute_step`.
+            let mut catalog_failures = Vec::new();
+            for step in workflow
+                .steps
+                .iter()
+                .filter(|step| matches!(step.step_type, StepType::Agent))
+            {
+                let tier = step
+                    .agent_settings
+                    .as_ref()
+                    .and_then(|settings| settings.tier)
+                    .unwrap_or_default();
+                let model = step
+                    .agent_settings
+                    .as_ref()
+                    .and_then(|settings| settings.model.as_deref());
+                if let Some(failure) = crate::core::model_catalog::preflight_check(
+                    &state.db,
+                    None,
+                    step.agent.clone(),
+                    tier,
+                    model,
+                    Some(&agents_config.model_tiers),
+                )
+                .await
+                {
+                    catalog_failures.push((step.name.clone(), failure));
+                }
+            }
+            if !catalog_failures.is_empty() {
+                let msg = format!(
+                    "preflight_failed:{}",
+                    serde_json::to_string(&catalog_failures).unwrap_or_default()
+                );
+                run.status = RunStatus::Failed;
+                run.step_results.push(StepResult {
+                    step_name: "__preflight__".to_string(),
+                    status: RunStatus::Failed,
+                    output: msg.clone(),
+                    tokens_used: 0,
+                    duration_ms: 0,
+                    started_at: None,
+                    condition_result: None,
+                    envelope_detected: None,
+                    step_kind: Some("preflight_failed".into()),
                     step_api_plugin_slug: None,
                     step_api_endpoint_path: None,
                     is_rollback: false,
@@ -1266,6 +1366,7 @@ async fn execute_run_with_notify_policy(
                             )),
                             Some(&ollama_context_overrides),
                             native_tools,
+                            Some(&state.db),
                         )
                         .await;
                         // execute_step took ownership of progress_tx and dropped
@@ -2270,6 +2371,7 @@ async fn execute_run_with_notify_policy(
                         )),
                         Some(&ollama_context_overrides),
                         native_tools,
+                        Some(&state.db),
                     )
                     .await
                 }
@@ -2386,9 +2488,21 @@ async fn execute_run_with_notify_policy(
     }
 
     let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
+    let terminal_snapshot_run_id = (!paused_for_approval).then(|| run.id.clone());
     let db5 = db.clone();
-    db5.with_conn(move |conn| crate::db::workflows::update_run_progress(conn, snap))
-        .await?;
+    db5.with_conn(move |conn| {
+        let updated = crate::db::workflows::update_run_progress(conn, snap)?;
+        if let Some(run_id) = terminal_snapshot_run_id.as_deref() {
+            crate::db::execution_variable_snapshots::purge_run_lifetime_snapshot(
+                conn,
+                "workflow",
+                run_id,
+                Utc::now(),
+            )?;
+        }
+        Ok(updated)
+    })
+    .await?;
 
     // Emit run done
     emit(RunEvent::RunDone {
@@ -2610,6 +2724,11 @@ pub async fn resume_run(
                 step_index: gate_step_idx as i32,
                 total_steps: workflow.steps.len() as u32,
                 current_step: None,
+            });
+        let _ = state
+            .ws_broadcast
+            .send(crate::models::WsMessage::SharedRunUpdated {
+                run_id: run.id.clone(),
             });
         // Cleanup workspace if it exists.
         if let Some(ws_path) = run.workspace_path.as_ref().map(std::path::PathBuf::from) {
@@ -4335,6 +4454,10 @@ mod tests {
                 description: None,
                 required: true,
                 pattern: None,
+                source: Default::default(),
+                source_ref: None,
+                allow_manual_override: false,
+                control: None,
             }],
             agent: AgentType::ClaudeCode,
             connection_id: None,
@@ -4706,11 +4829,38 @@ mod tests {
     async fn insert_wf_and_run(state: &crate::AppState, wf: &Workflow, run: &WorkflowRun) {
         let wf_db = wf.clone();
         let run_db = run.clone();
+        let run_id = run.id.clone();
+        let project_id = wf.project_id.clone();
+        let secret = state
+            .config
+            .read()
+            .await
+            .encryption_secret
+            .clone()
+            .expect("test encryption secret");
         state
             .db
             .with_conn(move |conn| {
                 crate::db::workflows::insert_workflow(conn, &wf_db)?;
                 crate::db::workflows::insert_run(conn, &run_db)?;
+                let key = crate::core::crypto::parse_secret(&secret).map_err(anyhow::Error::msg)?;
+                let values = std::collections::HashMap::new();
+                let provenance = Vec::new();
+                crate::db::execution_variable_snapshots::insert(
+                    conn,
+                    crate::db::execution_variable_snapshots::NewSnapshot {
+                        run_kind: "workflow",
+                        run_id: &run_id,
+                        project_id: project_id.as_deref(),
+                        environment_ref: "project_mcp_configs",
+                        resolved_at: chrono::Utc::now(),
+                        retention_days: 30,
+                        expires_at: Some(chrono::Utc::now() + chrono::Duration::days(30)),
+                        values: &values,
+                        provenance: &provenance,
+                    },
+                    &key,
+                )?;
                 Ok(())
             })
             .await

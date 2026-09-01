@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, act, cleanup, fireEvent, waitFor } from '@testing-library/react';
+import { useRef, useState } from 'react';
 import { I18nProvider } from '../../lib/I18nContext';
 import { loadDraft } from '../../lib/chat-drafts';
 import { clearReplyDraft, loadReplyDraft } from '../../lib/chat-reply-drafts';
@@ -149,11 +150,28 @@ vi.mock('../../lib/api', () => ({
   orchestration: {
     discussionLinks: vi.fn().mockResolvedValue([]),
   },
+  // KT-243 — DiscussionAttachedRuns polls attached SharedRuns per discussion.
+  runsApi: {
+    list: vi.fn().mockResolvedValue([]),
+    get: vi.fn(),
+  },
+  // KT-476 — the message list fetches proposed inline actions per discussion.
+  discussionActions: {
+    list: vi.fn().mockResolvedValue([]),
+    get: vi.fn(),
+    cancel: vi.fn(),
+    launch: vi.fn(),
+  },
   config: {
     getUiLanguage: vi.fn().mockResolvedValue('fr'),
     saveUiLanguage: vi.fn().mockResolvedValue(undefined),
     // 0.8.6 phase 4 — NewDiscussionForm fetches the default tier on mount.
     getServerConfig: vi.fn().mockResolvedValue({ default_model_tier: 'default' }),
+  },
+  // KT-531 — AgentSwitchPicker reads the dynamic model catalog when its
+  // popover opens.
+  modelCatalogApi: {
+    list: vi.fn().mockResolvedValue({ targets: [] }),
   },
 }));
 
@@ -164,12 +182,14 @@ vi.mock('../../hooks/useWebSocket', () => ({
 
 import {
   discussions as discussionsApi,
+  externalApi as externalApiConnections,
   planning as planningApi,
   projects as projectsApi,
+  runsApi,
 } from '../../lib/api';
 import { DiscussionsPage } from '../DiscussionsPage';
 import { findRenderedTextRanges } from '../../lib/discussionMessageSearch';
-import type { AgentDetection, AgentType, AgentsConfig, AiAuditStatus, ContextFile, Discussion, Project } from '../../types/generated';
+import type { AgentDetection, AgentType, AgentsConfig, AiAuditStatus, ContextFile, Discussion, Project, SharedRun } from '../../types/generated';
 import type { ToastFn } from '../../hooks/useToast';
 
 const noop = () => {};
@@ -183,6 +203,8 @@ beforeEach(() => {
   vi.mocked(discussionsApi.listContextFiles).mockResolvedValue([]);
   vi.mocked(discussionsApi.deleteMessage).mockReset();
   vi.mocked(discussionsApi.deleteMessage).mockResolvedValue(undefined);
+  vi.mocked(runsApi.list).mockReset();
+  vi.mocked(runsApi.list).mockResolvedValue([]);
   vi.mocked(projectsApi.validateAudit).mockReset();
   vi.mocked(projectsApi.validateAudit).mockResolvedValue('Validated');
   sessionStorage.clear();
@@ -701,6 +723,203 @@ describe('DiscussionsPage', () => {
     expect(screen.queryByText("En file — en attente d'un créneau agent")).toBeNull();
   });
 
+  it('renders a checkpointed response after backend restart instead of an empty placeholder', async () => {
+    const fullDisc = {
+      ...makeListDiscussion('d-restart-partial', 1),
+      agent: 'Custom' as const,
+      participants: ['Custom' as const],
+      awaiting_agent: true,
+      messages: [{
+        id: 'u-restart', role: 'User' as const, channel: 'main' as const,
+        content: 'Analyse longtemps', agent_type: null,
+        timestamp: '2026-09-01T09:45:13Z', tokens_used: 0, auth_mode: null,
+      }],
+      active_agent_dispatches: [{
+        id: 'job-restart',
+        trigger_message_id: 'u-restart',
+        agent_type: 'Custom' as const,
+        status: 'Pending',
+        attempts: 2,
+        last_error: 'backend_restarted',
+        connection_id: 'openrouter-main',
+      }],
+      partial_response: {
+        message_id: 'partial-restart',
+        content: 'Les 1 919 caractères déjà analysés restent visibles.',
+        started_at: '2026-09-01T09:46:40Z',
+        agent_type: 'Custom' as const,
+        model: 'claude-sonnet',
+        trigger_message_id: 'u-restart',
+        connection_id: 'openrouter-main',
+        dispatch: {
+          id: 'job-restart',
+          trigger_message_id: 'u-restart',
+          agent_type: 'Custom' as const,
+          status: 'Pending',
+          attempts: 2,
+          last_error: 'backend_restarted',
+          connection_id: 'openrouter-main',
+        },
+      },
+    };
+    vi.mocked(externalApiConnections.list).mockResolvedValueOnce([{
+      id: 'openrouter-main',
+      display_name: 'OpenRouter',
+      mention_alias: 'openrouter',
+      origin_preset: 'open_router',
+    } as never]);
+    vi.mocked(discussionsApi.get).mockResolvedValue(fullDisc);
+
+    await wrap(
+      <DiscussionsPage
+        projects={[]}
+        agents={[]}
+        allDiscussions={[fullDisc]}
+        configLanguage="fr"
+        agentAccess={null}
+        refetchDiscussions={noop}
+        refetchProjects={noop}
+        onNavigate={noop}
+        toast={toastFn}
+        initialActiveDiscussionId="d-restart-partial"
+        {...liftedProps()}
+      />,
+    );
+
+    const response = await screen.findByTestId('streaming-agent-Custom');
+    expect(response).toHaveTextContent('OpenRouter');
+    expect(response).toHaveTextContent('Les 1 919 caractères déjà analysés restent visibles.');
+    expect(response).toHaveTextContent('Backend redémarré — brouillon sauvegardé');
+    expect(response).not.toHaveTextContent("Agent en cours d'exécution...");
+  });
+
+  it('keeps the latest local chunks visible when an accepted stream disconnects', async () => {
+    const fullDisc = {
+      ...makeListDiscussion('d-stream-disconnect', 1),
+      messages: [{
+        id: 'u-existing', role: 'User' as const, channel: 'main' as const,
+        content: 'Question précédente', agent_type: null,
+        timestamp: '2026-09-01T09:45:13Z', tokens_used: 0, auth_mode: null,
+      }],
+    };
+    let detailFetches = 0;
+    vi.mocked(discussionsApi.get).mockImplementation(async () => {
+      detailFetches += 1;
+      if (detailFetches === 1) return fullDisc;
+      throw new Error('backend restarting');
+    });
+    vi.mocked(discussionsApi.sendMessageStream).mockImplementation(
+      async (_discId, payload, onText, _onDone, onError, _signal, onStart, _onLog, onAccepted) => {
+        onStart?.();
+        onAccepted?.({
+          message_id: payload.client_message_id ?? 'u-new',
+          sort_order: 2,
+          duplicate: false,
+        });
+        onText?.('Analyse locale déjà reçue avant la coupure.');
+        // Same-frame failure: the rAF-backed lifted map has not rendered yet.
+        // The synchronous recovery buffer must still retain this chunk.
+        onError?.('network disconnected');
+      },
+    );
+
+    function StatefulDiscussion() {
+      const [sendingMap, setSendingMap] = useState<Record<string, boolean>>({});
+      const [streamingMap, setStreamingMap] = useState<Record<string, string>>({});
+      const [sendingStartMap, setSendingStartMap] = useState<Record<string, number>>({});
+      const [queuedMap, setQueuedMap] = useState<Record<string, boolean>>({});
+      const abortControllers = useRef<Record<string, AbortController>>({});
+      return (
+        <DiscussionsPage
+          projects={[]}
+          agents={[]}
+          allDiscussions={[fullDisc]}
+          configLanguage="fr"
+          agentAccess={null}
+          refetchDiscussions={noop}
+          refetchProjects={noop}
+          onNavigate={noop}
+          toast={toastFn}
+          initialActiveDiscussionId="d-stream-disconnect"
+          sendingMap={sendingMap}
+          setSendingMap={setSendingMap}
+          queuedMap={queuedMap}
+          setQueuedMap={setQueuedMap}
+          sendingStartMap={sendingStartMap}
+          setSendingStartMap={setSendingStartMap}
+          streamingMap={streamingMap}
+          setStreamingMap={setStreamingMap}
+          noteStreamTick={noop}
+          abortControllers={abortControllers}
+          cleanupStream={(discId) => {
+            setSendingMap(previous => ({ ...previous, [discId]: false }));
+            setStreamingMap(previous => {
+              const { [discId]: _removed, ...rest } = previous;
+              return rest;
+            });
+          }}
+          markDiscussionSeen={noop}
+          onActiveDiscussionChange={noop}
+          lastSeenMsgCount={{}}
+        />
+      );
+    }
+
+    await wrap(<StatefulDiscussion />);
+    const chatInput = document.querySelector('textarea') as HTMLTextAreaElement;
+    await act(async () => {
+      fireEvent.change(chatInput, { target: { value: 'Lancer une longue analyse' } });
+    });
+    await act(async () => {
+      fireEvent.click(document.querySelector('button[aria-label="Send message"]') as HTMLButtonElement);
+      await new Promise(resolve => setTimeout(resolve, 10));
+    });
+
+    await waitFor(() => {
+      expect(document.body).toHaveTextContent('Analyse locale déjà reçue avant la coupure.');
+    });
+    expect(screen.getAllByText('Analyse locale déjà reçue avant la coupure.')).toHaveLength(1);
+    expect(document.body).toHaveTextContent('Connexion au flux interrompue');
+    expect(document.body).not.toHaveTextContent("Agent en cours d'exécution...");
+  });
+
+  it('renders a legacy checkpoint even when no active dispatch row survives', async () => {
+    const fullDisc = {
+      ...makeListDiscussion('d-orphan-checkpoint', 1),
+      messages: [{
+        id: 'u-orphan', role: 'User' as const, channel: 'main' as const,
+        content: 'Analyse interrompue', agent_type: null,
+        timestamp: '2026-09-01T09:45:13Z', tokens_used: 0, auth_mode: null,
+      }],
+      partial_response: {
+        message_id: 'partial-orphan',
+        content: 'Fragment durable sans ligne de dispatch.',
+        agent_type: 'ClaudeCode' as const,
+        trigger_message_id: 'u-orphan',
+      },
+    };
+    vi.mocked(discussionsApi.get).mockResolvedValue(fullDisc);
+
+    await wrap(
+      <DiscussionsPage
+        projects={[]}
+        agents={[]}
+        allDiscussions={[fullDisc]}
+        configLanguage="fr"
+        agentAccess={null}
+        refetchDiscussions={noop}
+        refetchProjects={noop}
+        onNavigate={noop}
+        toast={toastFn}
+        initialActiveDiscussionId="d-orphan-checkpoint"
+        {...liftedProps()}
+      />,
+    );
+
+    expect(await screen.findByTestId('streaming-agent-ClaudeCode'))
+      .toHaveTextContent('Fragment durable sans ligne de dispatch.');
+  });
+
   it('keeps overlapping reply slots attached to their own turns and reorders a late reply', async () => {
     const fullDisc = {
       ...makeListDiscussion('d-overlap', 5),
@@ -907,6 +1126,7 @@ describe('DiscussionsPage', () => {
         extracted_size: 128,
         disk_path: null,
         message_id: 'm-agent',
+        ai_generation: null,
         created_at: '2026-01-01T00:00:01Z',
       }]);
 
@@ -966,6 +1186,7 @@ describe('DiscussionsPage', () => {
       extracted_size: 256,
       disk_path: null,
       message_id: 'm-first',
+      ai_generation: null,
       created_at: '2026-01-01T00:01:00Z',
     };
     vi.mocked(discussionsApi.get).mockImplementation(async id => id === 'd1' ? first : second);
@@ -993,7 +1214,9 @@ describe('DiscussionsPage', () => {
     );
 
     await waitFor(() => expect(discussionsApi.listContextFiles).toHaveBeenCalledWith('d1'));
-    expect(screen.queryByRole('button', { name: /Parcourir tous les assets/ })).toBeNull();
+    // The Assets entry is also where a first media generation starts, so an
+    // empty discussion must keep it discoverable instead of hiding it.
+    expect(screen.getByRole('button', { name: /Parcourir tous les assets.*0/ })).toBeVisible();
     fireEvent.click(screen.getByRole('button', { name: /Discussion d2 —/ }));
     await waitFor(() => expect(discussionsApi.listContextFiles).toHaveBeenCalledWith('d2'));
     fireEvent.click(screen.getByRole('button', { name: /Discussion d1 —/ }));
@@ -1004,6 +1227,150 @@ describe('DiscussionsPage', () => {
     });
     fireEvent.click(await screen.findByRole('button', { name: /Parcourir tous les assets.*1/ }));
     expect((await screen.findAllByText('late-report.csv')).length).toBeGreaterThan(0);
+  });
+
+  it('relists media after the LAST event of a burst, not the first', async () => {
+    // The success arrives while a relist is already scheduled. Skipping events
+    // in flight meant that relist read the still-running state and nothing
+    // ever read again: the bubble showed success with no asset to open.
+    const disc = {
+      ...makeListDiscussion('d-burst', 1),
+      messages: [
+        { id: 'm-burst', role: 'User', channel: 'main', content: 'un renard', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null, source_msg_id: 'kronn-media-anchor:run-burst' },
+      ],
+    } satisfies Discussion;
+    vi.mocked(discussionsApi.get).mockResolvedValue(disc);
+
+    const mediaRun = (status: 'running' | 'success', assetId: string | null): SharedRun => ({
+      id: 'run-burst',
+      kind: 'media',
+      source_id: 'connection',
+      project_id: null,
+      discussion_id: disc.id,
+      status,
+      started_at: null,
+      finished_at: null,
+      duration_ms: null,
+      result: { schema_version: 1, message_id: 'm-burst', modality: 'image', model: 'stub/image', asset_id: assetId },
+      diagnostic: null,
+      created_at: '2026-01-01T00:00:02Z',
+      updated_at: '2026-01-01T00:00:02Z',
+    });
+    let settledServerSide = false;
+    vi.mocked(runsApi.list).mockImplementation(async filters => {
+      if (filters?.kind !== 'media') return [];
+      return [settledServerSide ? mediaRun('success', 'asset-burst') : mediaRun('running', null)];
+    });
+
+    const { useWebSocket } = await import('../../hooks/useWebSocket');
+    // Several components subscribe; the event goes to every handler, exactly
+    // as the real socket broadcasts it.
+    const wsHandlers = new Set<(msg: { type: string; run_id: string }) => void>();
+    vi.mocked(useWebSocket).mockImplementation(handler => {
+      wsHandlers.add(handler as (msg: { type: string; run_id: string }) => void);
+      return { connected: true, connectionState: 'connected' };
+    });
+    const emitRunUpdated = () => {
+      for (const handler of wsHandlers) handler({ type: 'shared_run_updated', run_id: 'run-burst' });
+    };
+
+    await wrap(
+      <DiscussionsPage
+        projects={[]}
+        agents={[]}
+        allDiscussions={[disc]}
+        configLanguage="fr"
+        agentAccess={null}
+        refetchDiscussions={noop}
+        refetchProjects={noop}
+        onNavigate={noop}
+        toast={toastFn}
+        initialActiveDiscussionId={disc.id}
+        {...liftedProps()}
+      />
+    );
+
+    // Burst: the second event lands while the first relist is still pending.
+    await act(async () => { emitRunUpdated(); });
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 100)); });
+    await act(async () => { emitRunUpdated(); });
+
+    // The first schedule would fire about here, still reading "running".
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 160)); });
+    settledServerSide = true;
+
+    // A relist must still be owed, and it must see the settled job.
+    await waitFor(
+      () => expect(document.querySelector('[data-media-run-id="run-burst"]'))
+        .toHaveAttribute('data-media-asset-id', 'asset-burst'),
+      { timeout: 3_000 },
+    );
+  });
+
+  it('ignores a late media relist from the discussion that was just left', async () => {
+    const first = {
+      ...makeListDiscussion('d-media-a', 1),
+      messages: [
+        { id: 'm-media-a', role: 'User', channel: 'main', content: 'Ancien média', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null, source_msg_id: 'kronn-media-anchor:run-a' },
+      ],
+    } satisfies Discussion;
+    const second = {
+      ...makeListDiscussion('d-media-b', 1),
+      messages: [
+        { id: 'm-media-b', role: 'User', channel: 'main', content: 'Média visible', agent_type: null, timestamp: '2026-01-01T00:00:01Z', tokens_used: 0, auth_mode: null, source_msg_id: 'kronn-media-anchor:run-b' },
+      ],
+    } satisfies Discussion;
+    vi.mocked(discussionsApi.get).mockImplementation(async id => id === first.id ? first : second);
+
+    let resolveFirst!: (runs: SharedRun[]) => void;
+    let resolveSecond!: (runs: SharedRun[]) => void;
+    const firstRuns = new Promise<SharedRun[]>(resolve => { resolveFirst = resolve; });
+    const secondRuns = new Promise<SharedRun[]>(resolve => { resolveSecond = resolve; });
+    vi.mocked(runsApi.list).mockImplementation(async filters => {
+      if (filters?.kind !== 'media') return [];
+      return filters.discussionId === first.id ? firstRuns : secondRuns;
+    });
+    const mediaRun = (id: string, discussionId: string, messageId: string): SharedRun => ({
+      id,
+      kind: 'media',
+      source_id: 'connection',
+      project_id: null,
+      discussion_id: discussionId,
+      status: 'running',
+      started_at: null,
+      finished_at: null,
+      duration_ms: null,
+      result: { message_id: messageId, modality: 'image', model: 'stub/image' },
+      diagnostic: null,
+      created_at: '2026-01-01T00:00:02Z',
+      updated_at: '2026-01-01T00:00:02Z',
+    });
+
+    await wrap(
+      <DiscussionsPage
+        projects={[]}
+        agents={[]}
+        allDiscussions={[first, second]}
+        configLanguage="fr"
+        agentAccess={null}
+        refetchDiscussions={noop}
+        refetchProjects={noop}
+        onNavigate={noop}
+        toast={toastFn}
+        initialActiveDiscussionId={first.id}
+        {...liftedProps()}
+      />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: /Discussion d-media-b —/ }));
+    resolveSecond([mediaRun('run-b', second.id, 'm-media-b')]);
+    await waitFor(() => expect(document.querySelector('[data-media-run-id="run-b"]')).not.toBeNull());
+
+    // The abandoned A request resolves last. It must not erase B's live row.
+    resolveFirst([mediaRun('run-a', first.id, 'm-media-a')]);
+    await act(async () => { await firstRuns; });
+    expect(document.querySelector('[data-media-run-id="run-b"]')).not.toBeNull();
+    expect(document.querySelector('[data-media-run-id="run-a"]')).toBeNull();
   });
 
   it('opens the discussion asset inventory and jumps back to the source message', async () => {
@@ -1023,6 +1390,7 @@ describe('DiscussionsPage', () => {
       extracted_size: 128,
       disk_path: null,
       message_id: 'm-asset',
+      ai_generation: null,
       created_at: '2026-01-01T00:01:00Z',
     }]);
     const scrollIntoView = vi.fn();

@@ -8,13 +8,15 @@ import { MessageDateSeparator } from '../components/MessageDateSeparator';
 import { groupMessagesWithToolFold } from '../lib/discussionMessageGrouping';
 import { localCalendarDayKey } from '../lib/discussionDates';
 import { ChatInput } from '../components/ChatInput';
-import { discussions as discussionsApi, projects as projectsApi, skills as skillsApi, profiles as profilesApi, directives as directivesApi, contacts as contactsApi, workflows as workflowsApi, quickPrompts as quickPromptsApi, planning as planningApi, orchestration as orchestrationApi, externalApi as externalApiConnections } from '../lib/api';
+import { discussions as discussionsApi, discussionActions as discussionActionsApi, projects as projectsApi, skills as skillsApi, profiles as profilesApi, directives as directivesApi, contacts as contactsApi, workflows as workflowsApi, quickPrompts as quickPromptsApi, planning as planningApi, orchestration as orchestrationApi, externalApi as externalApiConnections, runsApi } from '../lib/api';
 import type { ExternalApiConnectionView } from '../lib/api';
 import { GitPanel } from '../components/GitPanel';
 import { TerminalPanel } from '../components/TerminalPanel';
 import { DiscussionPlanPanel } from '../components/DiscussionPlanPanel';
 import { DiscussionSettingsPanel } from '../components/DiscussionSettingsPanel';
 import { DiscussionAssetsPanel } from '../components/DiscussionAssetsPanel';
+import { DiscussionAttachedRuns } from '../components/DiscussionAttachedRuns';
+import { InlineMediaJob } from '../components/InlineMediaJob';
 import { BatchComparePanel } from '../components/BatchComparePanel';
 import { TestModeBanner } from '../components/TestModeBanner';
 import { TestModeModal } from '../components/TestModeModal';
@@ -29,7 +31,7 @@ import { parseAgentQuestions } from '../lib/agent-question-parse';
 import { userError } from '../lib/userError';
 import { getDeployedVersion, setDeployedVersion } from '../lib/qp-improver-banner';
 import { sanitizeQpImproverPayload } from '../lib/qp-improver-sanitize';
-import type { Project, AgentDetection, Discussion, DiscussionDetail, DiscussionMessage, MessageChannel, AgentType, AgentsConfig, Skill, AgentProfile, Directive, McpConfigDisplay, McpIncompatibility, Contact, WsMessage, ContextFile, BatchRunSummary, DiscussionPlan, ProposalListResponse, ExecutionDiscussionLink, MessageSearchHit, MessageTarget, ParticipantView } from '../types/generated';
+import type { Project, AgentDetection, Discussion, DiscussionDetail, DiscussionMessage, MessageChannel, AgentType, AgentsConfig, Skill, AgentProfile, Directive, McpConfigDisplay, McpIncompatibility, Contact, WsMessage, ContextFile, BatchRunSummary, DiscussionPlan, ProposalListResponse, ExecutionDiscussionLink, MessageSearchHit, MessageTarget, ParticipantView, DiscussionAction, SharedRun } from '../types/generated';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { useQpChain } from '../hooks/useQpChain';
 import { useMessageQueue, type QueuedMessage } from '../hooks/useMessageQueue';
@@ -61,7 +63,19 @@ import {
 import { externalConnectionForDiscussion } from '../lib/externalAgentIdentity';
 
 type LoadedDiscussion = Discussion
-  & Partial<Pick<DiscussionDetail, 'active_agent_dispatches' | 'message_targets'>>;
+  & Partial<Pick<DiscussionDetail, 'active_agent_dispatches' | 'message_targets' | 'partial_response'>>;
+
+type InterruptedStreamState = {
+  text: string;
+  triggerMessageId: string | null;
+  agent: AgentType;
+  responseMessageId?: string;
+};
+
+// Mirrors DiscussionAttachedRuns' own relist debounce: a burst of
+// `shared_run_updated` events for brand-new media jobs collapses into one
+// relist instead of one per event.
+const MEDIA_JOBS_RELIST_DEBOUNCE_MS = 250;
 
 function newClientMessageId(): string {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
@@ -142,6 +156,9 @@ function StreamingAgentReplyBubble({
   onToggleLogs,
   stopping,
   onStop,
+  recovering,
+  recoveryLabel,
+  agentLabel,
 }: {
   agent: AgentType;
   triggerMessageId: string;
@@ -152,8 +169,12 @@ function StreamingAgentReplyBubble({
   onToggleLogs: () => void;
   stopping: boolean;
   onStop: () => void;
+  recovering: boolean;
+  recoveryLabel: string | null;
+  agentLabel?: string;
 }) {
   const { t } = useT();
+  const displayAgent = agentLabel ?? AGENT_LABELS[agent] ?? agent;
   return (
     <div
       className="disc-msg-row"
@@ -165,8 +186,10 @@ function StreamingAgentReplyBubble({
       <div className="disc-msg-bubble" data-role="agent">
         <div className="disc-msg-agent-label" style={{ color: agentTextColor(agent), justifyContent: 'space-between' }}>
           <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-            <Cpu size={10} /> {AGENT_LABELS[agent] ?? agent}
-            <Loader2 size={10} style={{ animation: 'spin 1s linear infinite', marginLeft: 4 }} />
+            <Cpu size={10} /> {displayAgent}
+            {recovering
+              ? <AlertTriangle size={10} style={{ marginLeft: 4 }} />
+              : <Loader2 size={10} style={{ animation: 'spin 1s linear infinite', marginLeft: 4 }} />}
           </span>
           <span className="disc-pending-agent-actions">
             <span className="disc-streaming-elapsed">
@@ -179,8 +202,8 @@ function StreamingAgentReplyBubble({
               className="disc-pending-agent-stop"
               onClick={onStop}
               disabled={stopping}
-              aria-label={t('disc.stopThisReply', AGENT_LABELS[agent] ?? agent)}
-              title={t('disc.stopThisReply', AGENT_LABELS[agent] ?? agent)}
+              aria-label={t('disc.stopThisReply', displayAgent)}
+              title={t('disc.stopThisReply', displayAgent)}
             >
               {stopping
                 ? <Loader2 size={11} style={{ animation: 'spin 1s linear infinite' }} />
@@ -189,6 +212,12 @@ function StreamingAgentReplyBubble({
             </button>
           </span>
         </div>
+        {recoveryLabel && (
+          <div className="disc-stream-recovery" role="status">
+            <AlertTriangle size={12} />
+            <span>{recoveryLabel}</span>
+          </div>
+        )}
         {text ? (
           <div className="disc-streaming-md">
             <MarkdownContent content={text} />
@@ -395,6 +424,11 @@ export function DiscussionsPage({
   });
   const [focusCollapsedSidebarRail, setFocusCollapsedSidebarRail] = useState(false);
   const [activeDiscussionId, setActiveDiscussionId] = useState<string | null>(initialActiveDiscussionId ?? null);
+  // Async media relists can finish after the user has switched discussions.
+  // Keep the current id outside callback closures so a late response can
+  // never replace the visible discussion's placeholders.
+  const activeDiscussionIdRef = useRef(activeDiscussionId);
+  activeDiscussionIdRef.current = activeDiscussionId;
   const [showNewDiscussion, setShowNewDiscussion] = useState(false);
   const [showGitPanel, setShowGitPanel] = useState(false);
   const [showTerminalPanel, setShowTerminalPanel] = useState(false);
@@ -403,6 +437,13 @@ export function DiscussionsPage({
   const [showPlanPanel, setShowPlanPanel] = useState(false);
   const [showSettingsPanel, setShowSettingsPanel] = useState(false);
   const [showAssetsPanel, setShowAssetsPanel] = useState(false);
+  const [assetOpenRequest, setAssetOpenRequest] = useState<{ assetId: string; nonce: number } | null>(null);
+  // KT-243 — carries the target run_id of the latest `shared_run_updated` WS
+  // event so <DiscussionAttachedRuns> can relist only for a run_id it does
+  // not already know (a known run's own card self-hydrates) — this flows
+  // through the page's single existing socket subscription instead of
+  // opening a second one of its own.
+  const [attachedRunsEvent, setAttachedRunsEvent] = useState<{ runId: string; seq: number } | undefined>();
   const [showMessageSearch, setShowMessageSearch] = useState(false);
   const [showDiscussionNotes, setShowDiscussionNotes] = useState<boolean>(() => {
     try { return localStorage.getItem('kronn:showDiscussionNotes') !== 'false'; } catch { return true; }
@@ -433,7 +474,21 @@ export function DiscussionsPage({
   const [discussionPlan, setDiscussionPlan] = useState<DiscussionPlan | null>(null);
   const [proposalInbox, setProposalInbox] = useState<ProposalListResponse | null>(null);
   const [proposalInboxDiscussionId, setProposalInboxDiscussionId] = useState<string | null>(null);
+  const [discussionActions, setDiscussionActions] = useState<DiscussionAction[]>([]);
   const [executionDiscussionLinks, setExecutionDiscussionLinks] = useState<ExecutionDiscussionLink[]>([]);
+  const discussionActionsByMessageId = useMemo(() => {
+    const byMessage = new Map<string, DiscussionAction[]>();
+    discussionActions.forEach(action => {
+      const current = byMessage.get(action.source_message_id) ?? [];
+      current.push(action);
+      byMessage.set(action.source_message_id, current);
+    });
+    return byMessage;
+  }, [discussionActions]);
+  const handleDiscussionActionChanged = useCallback((changed: DiscussionAction) => {
+    setDiscussionActions(current => current.map(action =>
+      action.id === changed.id ? changed : action));
+  }, []);
 
   const refreshExecutionDiscussionLinks = useCallback(() => {
     orchestrationApi.discussionLinks()
@@ -596,6 +651,18 @@ export function DiscussionsPage({
     blockingMessageId?: string;
   } | null>(null);
   const [partialForcing, setPartialForcing] = useState(false);
+  const [interruptedStreams, setInterruptedStreams] = useState<Record<string, InterruptedStreamState>>({});
+  // Cache of fully-loaded discussions (with messages and runtime detail).
+  const [loadedDiscussions, setLoadedDiscussions] = useState<Record<string, LoadedDiscussion>>({});
+  // Stream callbacks outlive the render that started the request. Read the
+  // lifted buffers through refs so a late completion/error sees the latest
+  // chunks and provenance instead of the empty snapshot captured on send.
+  const streamingMapRef = useRef(streamingMap);
+  const streamingTargetMapRef = useRef(streamingTargetMap);
+  const streamingTurnMapRef = useRef(streamingTurnMap);
+  streamingMapRef.current = streamingMap;
+  streamingTargetMapRef.current = streamingTargetMap;
+  streamingTurnMapRef.current = streamingTurnMap;
   const partialForcingRef = useRef(false);
   // Mirrors `partialPending` for the WebSocket handler, which reads it from a
   // closure created before the refusal happened.
@@ -616,6 +683,75 @@ export function DiscussionsPage({
       const files = await discussionsApi.listContextFiles(discId);
       setContextFilesMap(prev => ({ ...prev, [discId]: files }));
     } catch { /* ignore */ }
+  }, []);
+  // KT-549 — media generations, keyed by the message they are anchored to
+  // (each launch gets its own fresh message; see `media.generate`). Lets the
+  // transcript render the live placeholder right after that exact bubble,
+  // instead of a generic strip disconnected from where the launch happened.
+  const [mediaJobsByMessage, setMediaJobsByMessage] = useState<Record<string, SharedRun>>({});
+  const mediaJobsLoadSequenceRef = useRef<Record<string, number>>({});
+  const loadMediaJobs = useCallback((discId: string) => {
+    const sequence = (mediaJobsLoadSequenceRef.current[discId] ?? 0) + 1;
+    mediaJobsLoadSequenceRef.current[discId] = sequence;
+    // Runs are paged instead of capped: a durable transcript cannot silently
+    // turn its 201st-oldest media anchor back into a generic user message.
+    const listAll = async () => {
+      const runs: SharedRun[] = [];
+      const pageSize = 200;
+      for (let offset = 0; ; offset += pageSize) {
+        const page = await runsApi.list({
+          discussionId: discId,
+          kind: 'media',
+          limit: pageSize,
+          offset,
+        });
+        runs.push(...page);
+        if (page.length < pageSize) return runs;
+      }
+    };
+    void listAll()
+      .then(runs => {
+        if (
+          activeDiscussionIdRef.current !== discId
+          || mediaJobsLoadSequenceRef.current[discId] !== sequence
+        ) return;
+        const map: Record<string, SharedRun> = {};
+        for (const run of runs) {
+          const messageId = (run.result as { message_id?: string } | null)?.message_id;
+          // The API is newest-first. Keep the first run deterministically if a
+          // legacy database contains several jobs on one anchor.
+          if (messageId && !map[messageId]) map[messageId] = run;
+        }
+        setMediaJobsByMessage(map);
+      })
+      .catch(() => { /* each card self-hydrates via its own runId subscription */ });
+  }, []);
+  const openMediaAsset = useCallback((assetId: string) => {
+    setShowGitPanel(false);
+    setShowTerminalPanel(false);
+    setShowPlanPanel(false);
+    setShowSettingsPanel(false);
+    setShowAssetsPanel(true);
+    setAssetOpenRequest(current => ({ assetId, nonce: (current?.nonce ?? 0) + 1 }));
+  }, []);
+  useEffect(() => {
+    if (!showAssetsPanel) setAssetOpenRequest(null);
+  }, [showAssetsPanel]);
+  const mediaJobsRelistTimer = useRef<{ id: number; discId: string } | null>(null);
+  const scheduleMediaJobsRelist = useCallback((discId: string) => {
+    // Every event pushes the deadline back, so the relist always runs after
+    // the LAST one. Skipping events while a timer was in flight dropped the
+    // final state of a burst: a job could stay "success with no asset", and
+    // its bubble offered no way to open the media it had just produced.
+    if (mediaJobsRelistTimer.current) window.clearTimeout(mediaJobsRelistTimer.current.id);
+    const id = window.setTimeout(() => {
+      mediaJobsRelistTimer.current = null;
+      loadMediaJobs(discId);
+    }, MEDIA_JOBS_RELIST_DEBOUNCE_MS);
+    mediaJobsRelistTimer.current = { id, discId };
+  }, [loadMediaJobs]);
+  useEffect(() => () => {
+    if (mediaJobsRelistTimer.current) window.clearTimeout(mediaJobsRelistTimer.current.id);
   }, []);
   const [contactsList, setContactsList] = useState<Contact[]>([]);
   const [contactsOnline, setContactsOnline] = useState<Record<string, boolean>>({});
@@ -645,11 +781,44 @@ export function DiscussionsPage({
         console.warn('Failed to load batch run summaries:', e);
       });
   }, []);
+  const reconcileLoadedDiscussion = useCallback((disc: LoadedDiscussion) => {
+    setLoadedDiscussions(prev => ({ ...prev, [disc.id]: disc }));
+    setInterruptedStreams(previous => {
+      const held = previous[disc.id];
+      if (!held) return previous;
+      const durable = disc.partial_response;
+      if (durable?.content) {
+        const text = durable.content.length >= held.text.length ? durable.content : held.text;
+        if (text === held.text && held.responseMessageId === durable.message_id) return previous;
+        return {
+          ...previous,
+          [disc.id]: { ...held, text, responseMessageId: durable.message_id },
+        };
+      }
+      const hasSettledReply = disc.messages.some(message => (
+        message.role === 'Agent'
+        && (
+          (held.responseMessageId && message.id === held.responseMessageId)
+          || (held.triggerMessageId && message.reply_to_message_id === held.triggerMessageId)
+        )
+      ));
+      if (!hasSettledReply) return previous;
+      const { [disc.id]: _settled, ...rest } = previous;
+      return rest;
+    });
+  }, []);
+
   const reloadDiscussion = useCallback((discId: string) => {
     discussionsApi.get(discId).then(disc => {
-      if (disc) setLoadedDiscussions(prev => ({ ...prev, [disc.id]: disc }));
+      if (!disc) return;
+      reconcileLoadedDiscussion(disc);
+      /*
+       * A stream interrupted by a backend reload keeps its local text until
+       * this detail fetch proves either a newer durable checkpoint or a
+       * settled Agent message. Network failure deliberately changes nothing.
+       */
     }).catch(() => {});
-  }, []);
+  }, [reconcileLoadedDiscussion]);
   const openBatchReview = useCallback(async (runId: string, label: string, discIds: string[]) => {
     setBatchReview({ runId, label, discIds });
     setBatchReviewDiscs([]);
@@ -778,9 +947,19 @@ export function DiscussionsPage({
   const appendStreamChunk = useRafBatchedStream(
     buildStreamingFlush(setStreamingMap, noteStreamTick),
   );
-
-  // Cache of fully-loaded discussions (with messages)
-  const [loadedDiscussions, setLoadedDiscussions] = useState<Record<string, LoadedDiscussion>>({});
+  // rAF batching deliberately delays the lifted state update. Keep a raw
+  // synchronous copy too, otherwise a disconnect in the same frame as the
+  // last chunk can still observe an empty `streamingMap`.
+  const receivedStreamTextRef = useRef<Record<string, string>>({});
+  const appendRememberedStreamChunk = useCallback((discId: string, text: string) => {
+    receivedStreamTextRef.current[discId] = (receivedStreamTextRef.current[discId] ?? '') + text;
+    appendStreamChunk(discId, text);
+  }, [appendStreamChunk]);
+  const latestStreamText = useCallback((discId: string) => (
+    [streamingMapRef.current[discId], receivedStreamTextRef.current[discId]]
+      .filter((value): value is string => !!value)
+      .reduce((longest, value) => value.length > longest.length ? value : longest, '')
+  ), []);
 
   // Fetch full discussion (with messages) when active discussion changes
   // or when sending finishes (to pick up the agent's response).
@@ -797,14 +976,14 @@ export function DiscussionsPage({
     const fetchActive = () => {
       discussionsApi.get(activeDiscussionId).then(disc => {
         if (!cancelled && disc) {
-          setLoadedDiscussions(prev => ({ ...prev, [disc.id]: disc }));
+          reconcileLoadedDiscussion(disc);
         }
       }).catch(() => { /* ignore fetch errors */ });
     };
     fetchActive();
     const id = setInterval(fetchActive, 5000);
     return () => { cancelled = true; clearInterval(id); };
-  }, [activeDiscussionId, activeSending]);
+  }, [activeDiscussionId, activeSending, reconcileLoadedDiscussion]);
 
   // Clear worktree error when switching discussions
   useEffect(() => { setWorktreeError(null); }, [activeDiscussionId]);
@@ -1026,6 +1205,18 @@ export function DiscussionsPage({
   }, [activeDiscussionId, activeDiscussion?.message_count]);
 
   useEffect(() => {
+    if (!activeDiscussionId) {
+      setDiscussionActions([]);
+      return;
+    }
+    let cancelled = false;
+    discussionActionsApi.list(activeDiscussionId)
+      .then(actions => { if (!cancelled) setDiscussionActions(actions); })
+      .catch(() => { if (!cancelled) setDiscussionActions([]); });
+    return () => { cancelled = true; };
+  }, [activeDiscussionId, activeDiscussion?.message_count]);
+
+  useEffect(() => {
     const refreshPlan = (event: Event) => {
       const discussionId = (event as CustomEvent<{ discussionId?: string }>).detail?.discussionId;
       if (!discussionId || discussionId !== activeDiscussionId) return;
@@ -1084,39 +1275,74 @@ export function DiscussionsPage({
   const activeDiscussionUnseenBasis = activeDiscussion ? unseenBasis(activeDiscussion) : 0;
 
   const sending = activeDiscussionId ? !!sendingMap[activeDiscussionId] : false;
+  const interruptedStream = activeDiscussionId ? interruptedStreams[activeDiscussionId] : undefined;
+  const durablePartial = activeDiscussion?.partial_response;
   const pendingReplySlots = useMemo(() => {
-    if (!activeDiscussion || (!sending && !activeDiscussion.awaiting_agent)) return [];
+    if (!activeDiscussion || (
+      !sending
+      && !activeDiscussion.awaiting_agent
+      && !activeDiscussion.partial_response
+      && !interruptedStream
+    )) return [];
     const durable = pendingAgentReplies(activeDiscussion);
-    const triggerMessageId = streamingTurnMap[activeDiscussion.id];
-    const streamingAgent = streamingTargetMap[activeDiscussion.id] ?? activeDiscussion.agent;
-    if (!sending || !triggerMessageId || durable.some(reply => (
+    const checkpoint = activeDiscussion.partial_response;
+    const fallbackUserMessageId = [...activeDiscussion.messages]
+      .reverse()
+      .find(message => message.role === 'User')?.id;
+    const triggerMessageId = streamingTurnMap[activeDiscussion.id]
+      ?? checkpoint?.trigger_message_id
+      ?? interruptedStream?.triggerMessageId
+      ?? fallbackUserMessageId;
+    const streamingAgent = streamingTargetMap[activeDiscussion.id]
+      ?? checkpoint?.agent_type
+      ?? interruptedStream?.agent
+      ?? activeDiscussion.agent;
+    if ((!sending && !interruptedStream) || !triggerMessageId || durable.some(reply => (
       reply.triggerMessageId === triggerMessageId && reply.agent === streamingAgent
     ))) {
       return durable;
     }
     return [...durable, {
-      id: `optimistic:${triggerMessageId}:${streamingAgent}`,
+      id: checkpoint?.message_id ?? `optimistic:${triggerMessageId}:${streamingAgent}`,
       triggerMessageId,
       agent: streamingAgent,
-      status: 'Running',
+      status: sending ? 'Running' : 'Pending',
     }];
-  }, [activeDiscussion, sending, streamingTargetMap, streamingTurnMap]);
-  const visibleStreamingReply = activeDiscussion && sending
+  }, [activeDiscussion, interruptedStream, sending, streamingTargetMap, streamingTurnMap]);
+  const streamingText = activeDiscussionId ? (streamingMap[activeDiscussionId] ?? '') : '';
+  const resilientStreamingText = [streamingText, interruptedStream?.text, durablePartial?.content]
+    .filter((value): value is string => !!value)
+    .reduce((longest, value) => value.length > longest.length ? value : longest, '');
+  const recoveryDispatchId = durablePartial?.dispatch?.id;
+  const recoveryConnectionId = durablePartial?.dispatch?.connection_id
+    ?? durablePartial?.connection_id;
+  const recoveryAgentLabel = recoveryConnectionId
+    ? externalConnections.find(connection => connection.id === recoveryConnectionId)?.display_name
+    : undefined;
+  const recoveryTriggerId = durablePartial?.dispatch?.trigger_message_id
+    ?? durablePartial?.trigger_message_id
+    ?? interruptedStream?.triggerMessageId
+    ?? undefined;
+  const visibleStreamingReply = activeDiscussion && (sending || resilientStreamingText)
     ? pendingReplySlots.find(reply => (
-        reply.triggerMessageId === streamingTurnMap[activeDiscussion.id]
-        && reply.agent === (streamingTargetMap[activeDiscussion.id] ?? activeDiscussion.agent)
+        recoveryDispatchId
+          ? reply.id === recoveryDispatchId
+          : reply.triggerMessageId === (streamingTurnMap[activeDiscussion.id] ?? recoveryTriggerId)
+            && reply.agent === (streamingTargetMap[activeDiscussion.id]
+              ?? durablePartial?.agent_type
+              ?? interruptedStream?.agent
+              ?? activeDiscussion.agent)
       ))
       ?? pendingReplySlots.find(reply => reply.status === 'Running')
       ?? pendingReplySlots[0]
     : undefined;
-  const streamingText = activeDiscussionId ? (streamingMap[activeDiscussionId] ?? '') : '';
   // Deferred value for markdown rendering — every SSE chunk pushes a new
   // streamingText, and ReactMarkdown re-parses the whole buffer each time.
   // For long responses (5000+ chars), each parse takes 5-20 ms × 30 fps =
   // saturated main thread. useDeferredValue lets the input/scroll handlers
   // run first; the markdown re-parse happens at lower priority and may be
   // interrupted if a new chunk arrives. Visible lag is ~1 frame at worst.
-  const deferredStreamingText = useDeferredValue(streamingText);
+  const deferredStreamingText = useDeferredValue(resilientStreamingText);
 
   // Auto-read new agent responses when TTS is enabled
   const prevMsgCountRef = useRef(-1);
@@ -1182,6 +1408,23 @@ export function DiscussionsPage({
 
   // WebSocket-based real-time events (presence, chat, invites)
   const handleWsMessage = useCallback((msg: WsMessage) => {
+    // KT-243 — a run attached to some discussion changed; forward the exact
+    // run_id so the attached-runs strip only relists for a run it doesn't
+    // already track (a known run's own card self-hydrates via its own
+    // scoped subscription).
+    if (msg.type === 'shared_run_updated') {
+      setAttachedRunsEvent(prev => ({ runId: msg.run_id, seq: (prev?.seq ?? 0) + 1 }));
+      // A brand-new media job (not yet in the by-message map) needs a relist
+      // so its placeholder appears; a known one's own RunStatusCard
+      // self-hydrates via its own scoped subscription.
+      if (activeDiscussionId) {
+        scheduleMediaJobsRelist(activeDiscussionId);
+        // The launch may have come from MCP, the HTTP API, or another open
+        // client. Only the local form callback already knows its new anchor;
+        // reloading here makes every accepted launch materialize live.
+        reloadDiscussion(activeDiscussionId);
+      }
+    }
     if (msg.type === 'presence') {
       const contact = contactsList.find(c => c.invite_code === msg.from_invite_code);
       if (contact) {
@@ -1353,6 +1596,7 @@ export function DiscussionsPage({
     refetchBatchSummaries,
     refetchDiscussions,
     reloadDiscussion,
+    scheduleMediaJobsRelist,
     setQueuedMap,
     setSendingMap,
     t,
@@ -1648,7 +1892,7 @@ export function DiscussionsPage({
 
   // ─── Callbacks ───────────────────────────────────────────────────────────
 
-  const cleanupStream = useCallback((discId: string) => {
+  const cleanupStream = useCallback((discId: string, promoteToMessage = true) => {
     // Reported scroll-jump bug: when the SSE stream finishes, the
     // streaming bubble unmounts (driven by `sending=false`) BEFORE the
     // refetch lands the persisted agent message. The DOM briefly loses
@@ -1665,10 +1909,10 @@ export function DiscussionsPage({
     // The async refetch arrives shortly after and REPLACES the
     // optimistic with the persisted message (matching content), so the
     // final state converges and no duplicate is left behind.
-    const streamedText = streamingMap[discId];
-    const targetAgent = streamingTargetMap[discId];
-    const triggerMessageId = streamingTurnMap[discId];
-    if (streamedText && streamedText.length > 0) {
+    const streamedText = latestStreamText(discId);
+    const targetAgent = streamingTargetMapRef.current[discId];
+    const triggerMessageId = streamingTurnMapRef.current[discId];
+    if (promoteToMessage && streamedText.length > 0) {
       setLoadedDiscussions(prev => {
         const disc = prev[discId];
         if (!disc) return prev;
@@ -1712,7 +1956,8 @@ export function DiscussionsPage({
       const { [discId]: _drop, ...rest } = prev;
       return rest;
     });
-  }, [cleanupStreamBase, refetchDiscussions, refetchProjects, reloadDiscussion, streamingMap, streamingTargetMap, streamingTurnMap]);
+    delete receivedStreamTextRef.current[discId];
+  }, [cleanupStreamBase, latestStreamText, refetchDiscussions, refetchProjects, reloadDiscussion]);
 
   // Called by ChatHeader after any inline API update (title, skills, profiles, etc.)
   const handleDiscussionUpdated = useCallback(() => {
@@ -1809,7 +2054,7 @@ export function DiscussionsPage({
       if (controller.signal.aborted) return;
       await discussionsApi.runAgent(
         discId,
-        (text) => appendStreamChunk(discId, text),
+        (text) => appendRememberedStreamChunk(discId, text),
         () => cleanupStream(discId),
         (error) => { console.error('Agent error:', error); const e = userError(error); if (e.includes('checked out') || e.includes('worktree')) { setWorktreeError(e); } else { toast(e, 'error'); } cleanupStream(discId); },
         controller.signal,
@@ -1977,7 +2222,7 @@ export function DiscussionsPage({
     resetAgentLogs();
     await discussionsApi.runAgent(
       discId,
-      (text) => appendStreamChunk(discId, text),
+      (text) => appendRememberedStreamChunk(discId, text),
       () => cleanupStream(discId),
       (error) => { console.error('Agent error:', error); const e = userError(error); if (e.includes('checked out') || e.includes('worktree')) { setWorktreeError(e); } else { toast(e, 'error'); } cleanupStream(discId); },
       controller.signal,
@@ -2263,7 +2508,22 @@ export function DiscussionsPage({
       } else {
         toast(errStr, 'error');
       }
-      cleanupStream(discId);
+      // A post-acceptance transport failure (backend rebuild, network cut,
+      // laptop sleep) is not proof that the durable run failed. Preserve the
+      // visible text locally while the five-second detail poll reconnects and
+      // reconciles it with `partial_response` or the terminal Agent message.
+      const visiblePartial = latestStreamText(discId);
+      if (acceptedReceipt && visiblePartial?.trim()) {
+        setInterruptedStreams(previous => ({
+          ...previous,
+          [discId]: {
+            text: visiblePartial,
+            triggerMessageId: clientMessageId,
+            agent: primaryTarget ?? activeDiscussion?.agent ?? 'ClaudeCode',
+          },
+        }));
+      }
+      cleanupStream(discId, false);
     };
     try {
       await discussionsApi.sendMessageStream(
@@ -2279,7 +2539,7 @@ export function DiscussionsPage({
           client_message_id: clientMessageId,
           reply_to_message_id: replyTargetId,
         },
-        (text) => appendStreamChunk(discId, text),
+        (text) => appendRememberedStreamChunk(discId, text),
         () => {
           // A cleanly closed stream without an acceptance receipt must not
           // consume the draft. This is a protocol failure, equivalent to a
@@ -2536,6 +2796,17 @@ export function DiscussionsPage({
     }
   }, [activeDiscussionId, loadContextFiles]);
 
+  // Same rehydration guarantee for the inline media placeholders: reopening a
+  // discussion (or switching to it) must show pending/failed jobs exactly as
+  // they were, without waiting for a live event.
+  useEffect(() => {
+    if (activeDiscussionId) {
+      loadMediaJobs(activeDiscussionId);
+    } else {
+      setMediaJobsByMessage({});
+    }
+  }, [activeDiscussionId, loadMediaJobs]);
+
   const handleUploadFiles = useCallback(async (files: File[]) => {
     if (!activeDiscussionId) return;
     setUploadingFiles(true);
@@ -2598,7 +2869,7 @@ export function DiscussionsPage({
     resetAgentLogs();
     await discussionsApi.runAgent(
       discId,
-      (text) => appendStreamChunk(discId, text),
+      (text) => appendRememberedStreamChunk(discId, text),
       () => cleanupStream(discId),
       (error) => {
         console.error('Agent error:', error);
@@ -2955,7 +3226,7 @@ export function DiscussionsPage({
           target_agent: targetAgent,
           target_agents: targets.map(target => target.agent_type),
         },
-        (text) => appendStreamChunk(discId, text),
+        (text) => appendRememberedStreamChunk(discId, text),
         () => cleanupStream(discId),
         (error) => {
           console.error('Agent error:', error);
@@ -3514,6 +3785,13 @@ export function DiscussionsPage({
               </div>
             )}
 
+            {/* KT-243 — a run launched elsewhere (QP batch, QA/QE,
+                Workflow) that got attached to this discussion via its
+                discussion_id shows up here automatically, through the
+                shared RunStatusCard/SharedRun model. Self-hides when
+                there are no attached runs. */}
+            <DiscussionAttachedRuns discussionId={activeDiscussion.id} runEvent={attachedRunsEvent} />
+
             {/* 0.8.3 (#280) — Audit-running warning. When an audit
                 is in progress on the same project, Kronn has filtered
                 `.mcp.json` down to the audit allowlist (~5 servers)
@@ -3773,7 +4051,7 @@ export function DiscussionsPage({
                   if (orchState[activeDiscussion.id]?.active) return null;
                   const replies = messageIds.flatMap(messageId => pendingByAnchor.get(messageId) ?? []);
                   return replies.map(reply => (
-                    sending && reply.id === visibleStreamingReply?.id
+                    reply.id === visibleStreamingReply?.id && (sending || !!resilientStreamingText)
                       ? (
                           <StreamingAgentReplyBubble
                             key={reply.id}
@@ -3786,7 +4064,16 @@ export function DiscussionsPage({
                             onToggleLogs={() => setShowLogs(value => !value)}
                             stopping={stoppingDispatchIds.has(reply.id)}
                             onStop={() => { void handleStopDispatch(reply.id); }}
-                          />
+                            recovering={!sending || durablePartial?.dispatch?.last_error === 'backend_restarted'}
+                            recoveryLabel={
+                              durablePartial?.dispatch?.last_error === 'backend_restarted'
+                                ? t('disc.streamRestartSaved', durablePartial.dispatch.attempts ?? 1)
+                                : !sending
+                                  ? t('disc.streamDisconnectedSaved')
+                                  : null
+                            }
+                            agentLabel={recoveryAgentLabel}
+                            />
                         )
                       : (
                           <PendingAgentReplyBubble
@@ -3850,6 +4137,23 @@ export function DiscussionsPage({
                     );
                   }
                   const pending = renderPendingAfter([msg.id]);
+                  const mediaRun = mediaJobsByMessage[msg.id];
+                  const isDedicatedMediaAnchor = mediaRun
+                    && msg.source_msg_id === `kronn-media-anchor:${mediaRun.id}`;
+                  if (isDedicatedMediaAnchor) {
+                    return (
+                      <Fragment key={msg.id}>
+                        {separator}
+                        <InlineMediaJob
+                          messageId={msg.id}
+                          prompt={msg.content}
+                          run={mediaRun}
+                          onOpenAsset={openMediaAsset}
+                        />
+                        {pending}
+                      </Fragment>
+                    );
+                  }
                   return (
                     <Fragment key={msg.id}>
                       {separator}
@@ -3858,6 +4162,7 @@ export function DiscussionsPage({
                         targets={activeDiscussion.message_targets?.[msg.id] ?? []}
                         idx={idx}
                         attachments={attachmentsByMessageId[msg.id] ?? EMPTY_ATTACHMENTS}
+                        discussionMedia={activeContextFiles}
                         pendingAttachment={pendingFileMsgIds.has(msg.id)}
                         isLastUser={msg.role === 'User' && idx === lastUserIdx}
                         isLastAgent={msg.role === 'Agent' && idx === lastAgentIdx}
@@ -3891,6 +4196,12 @@ export function DiscussionsPage({
                         projectId={activeDiscussion.project_id ?? null}
                         chainableQPs={chainableQPs}
                         onLaunchQp={qp => handleSendMessage(qp.prompt_template)}
+                        actions={discussionActionsByMessageId.get(msg.id) ?? []}
+                        onActionChanged={handleDiscussionActionChanged}
+                        onOpenActionDiscussion={discussionId => {
+                          setActiveDiscussionId(discussionId);
+                          ensureDiscussionVisible(discussionId);
+                        }}
                         isSearchMatch={messageSearchMatches.some(match => match.messageId === msg.id)}
                         isSearchCurrent={
                           messageSearchMatches[messageSearchIndex]?.messageId === msg.id
@@ -4799,7 +5110,20 @@ export function DiscussionsPage({
               <DiscussionAssetsPanel
                 discussionId={activeDiscussion.id}
                 files={activeContextFiles}
+                connections={externalConnections}
                 onClose={() => setShowAssetsPanel(false)}
+                onMediaLaunched={(jobId) => {
+                  const launchedDiscussionId = activeDiscussion.id;
+                  void runsApi.get(jobId).then(run => {
+                    if (activeDiscussionIdRef.current !== launchedDiscussionId) return;
+                    const messageId = (run.result as { message_id?: string } | null)?.message_id;
+                    if (messageId) {
+                      setMediaJobsByMessage(current => ({ ...current, [messageId]: run }));
+                    }
+                  }).catch(() => { /* the scheduled relist remains authoritative */ });
+                  reloadDiscussion(activeDiscussion.id);
+                }}
+                openAssetRequest={assetOpenRequest}
                 onNavigateMessage={(messageId) => {
                   setShowAssetsPanel(false);
                   setStickToBottom(false);

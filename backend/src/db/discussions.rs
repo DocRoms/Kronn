@@ -55,7 +55,10 @@ pub fn set_partial_response(
                      partial_response_agent_type = ?4, \
                      partial_response_model = ?5, \
                      partial_response_message_id = \
-                         COALESCE(partial_response_message_id, ?6) \
+                         COALESCE(partial_response_message_id, ?6), \
+                     partial_response_dispatch_id = NULL, \
+                     partial_response_trigger_message_id = NULL, \
+                     partial_response_connection_id = NULL \
                  WHERE id = ?1",
                 params![
                     disc_id,
@@ -72,13 +75,80 @@ pub fn set_partial_response(
                 "UPDATE discussions \
                  SET partial_response = NULL, partial_response_started_at = NULL, \
                      partial_response_agent_type = NULL, partial_response_model = NULL, \
-                     partial_response_message_id = NULL \
+                     partial_response_message_id = NULL, \
+                     partial_response_dispatch_id = NULL, \
+                     partial_response_trigger_message_id = NULL, \
+                     partial_response_connection_id = NULL \
                  WHERE id = ?1",
                 params![disc_id],
             )?;
         }
     }
     Ok(())
+}
+
+/// Checkpoint text for one exact durable dispatch.
+///
+/// The first writer owns the discussion's legacy single checkpoint slot until
+/// it completes or boot recovery clears it. A newer queued follow-up therefore
+/// cannot silently relabel a response that is already streaming.
+pub fn set_partial_response_for_dispatch(
+    conn: &Connection,
+    disc_id: &str,
+    partial: &str,
+    provenance: (&AgentType, Option<&str>),
+    dispatch_id: &str,
+    trigger_message_id: &str,
+    connection_id: Option<&str>,
+) -> Result<bool> {
+    let agent_type = format_agent_type(provenance.0);
+    let changed = conn.execute(
+        "UPDATE discussions
+            SET partial_response = ?2,
+                partial_response_started_at = COALESCE(partial_response_started_at, ?3),
+                partial_response_agent_type = ?4,
+                partial_response_model = ?5,
+                partial_response_message_id = COALESCE(partial_response_message_id, ?6),
+                partial_response_dispatch_id = ?7,
+                partial_response_trigger_message_id = ?8,
+                partial_response_connection_id = ?9
+          WHERE id = ?1
+            AND (partial_response_dispatch_id IS NULL OR partial_response_dispatch_id = ?7)",
+        params![
+            disc_id,
+            partial,
+            Utc::now().to_rfc3339(),
+            agent_type,
+            provenance.1,
+            uuid::Uuid::new_v4().to_string(),
+            dispatch_id,
+            trigger_message_id,
+            connection_id,
+        ],
+    )?;
+    Ok(changed > 0)
+}
+
+/// Clear only the checkpoint owned by `dispatch_id`.
+///
+/// This prevents a late terminal callback from deleting a newer run's draft.
+pub fn clear_partial_response_for_dispatch(
+    conn: &Connection,
+    disc_id: &str,
+    dispatch_id: &str,
+) -> Result<bool> {
+    let changed = conn.execute(
+        "UPDATE discussions
+            SET partial_response = NULL, partial_response_started_at = NULL,
+                partial_response_agent_type = NULL, partial_response_model = NULL,
+                partial_response_message_id = NULL,
+                partial_response_dispatch_id = NULL,
+                partial_response_trigger_message_id = NULL,
+                partial_response_connection_id = NULL
+          WHERE id = ?1 AND partial_response_dispatch_id = ?2",
+        params![disc_id, dispatch_id],
+    )?;
+    Ok(changed > 0)
 }
 
 /// Recover any in-flight agent responses that were checkpointed but never
@@ -224,12 +294,15 @@ pub fn recover_partial_responses(conn: &Connection) -> Result<Vec<String>> {
         Option<String>,
         Option<String>,
         Option<String>,
+        Option<String>,
+        Option<String>,
     );
     let triples: Vec<PartialRow> = {
         let mut stmt = conn.prepare(
             "SELECT id, partial_response, partial_response_started_at, \
                     partial_response_agent_type, partial_response_model, \
-                    partial_response_message_id \
+                    partial_response_message_id, partial_response_trigger_message_id, \
+                    partial_response_dispatch_id \
              FROM discussions WHERE partial_response IS NOT NULL",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -240,6 +313,8 @@ pub fn recover_partial_responses(conn: &Connection) -> Result<Vec<String>> {
                 row.get::<_, Option<String>>(3)?,
                 row.get::<_, Option<String>>(4)?,
                 row.get::<_, Option<String>>(5)?,
+                row.get::<_, Option<String>>(6)?,
+                row.get::<_, Option<String>>(7)?,
             ))
         })?;
         rows.filter_map(|r| r.ok()).collect()
@@ -253,7 +328,17 @@ pub fn recover_partial_responses(conn: &Connection) -> Result<Vec<String>> {
         Voici ce qu'il avait écrit jusque-là. Relancez la discussion pour reprendre.";
 
     let mut recovered = Vec::with_capacity(triples.len());
-    for (disc_id, partial, started_at_str, agent_type_str, model, checkpoint_id) in triples {
+    for (
+        disc_id,
+        partial,
+        started_at_str,
+        agent_type_str,
+        model,
+        checkpoint_id,
+        trigger_message_id,
+        dispatch_id,
+    ) in triples
+    {
         let content = format!("{}{}", partial.trim_end(), FOOTER);
         // Restore the checkpoint's provenance (KT-37). Legacy pre-089
         // checkpoints have NULL agent/model → the recovered bubble stays
@@ -292,15 +377,17 @@ pub fn recover_partial_responses(conn: &Connection) -> Result<Vec<String>> {
             source_msg_id: None,
             duration_ms: None,
             target_agent: None,
-            reply_to_message_id: None,
+            reply_to_message_id: trigger_message_id,
             author_cli_ordinal: None,
         };
         let recovery_result = (|| -> Result<()> {
             let transaction = conn.unchecked_transaction()?;
             insert_message(&transaction, &disc_id, &msg)?;
             transaction.execute(
-                "UPDATE messages SET recovered_partial = 1 WHERE id = ?1",
-                [&msg.id],
+                "UPDATE messages
+                 SET recovered_partial = 1, agent_dispatch_job_id = ?2
+                 WHERE id = ?1",
+                params![&msg.id, dispatch_id],
             )?;
             set_partial_response(&transaction, &disc_id, None, None)?;
             transaction.commit()?;
@@ -330,6 +417,73 @@ pub fn has_pending_partial(conn: &Connection, disc_id: &str) -> Result<bool> {
         |row| row.get(0),
     )?;
     Ok(count > 0)
+}
+
+/// Return the checkpointed response currently attached to one discussion.
+/// This is a read-only projection: recovery remains the only path that turns
+/// the snapshot into a durable transcript message.
+pub fn get_in_flight_agent_response(
+    conn: &Connection,
+    disc_id: &str,
+    default_agent: &AgentType,
+) -> Result<Option<InFlightAgentResponse>> {
+    conn.query_row(
+        "SELECT d.partial_response_message_id, d.partial_response,
+                d.partial_response_started_at, d.partial_response_agent_type,
+                d.partial_response_model, d.partial_response_trigger_message_id,
+                d.partial_response_connection_id,
+                j.id, j.trigger_message_id, j.agent_override_json, j.status,
+                j.attempts, j.last_error, j.connection_id
+           FROM discussions d
+           LEFT JOIN agent_dispatch_jobs j ON j.id = d.partial_response_dispatch_id
+          WHERE d.id = ?1 AND d.partial_response IS NOT NULL",
+        [disc_id],
+        |row| {
+            let checkpoint_agent = row
+                .get::<_, Option<String>>(3)?
+                .as_deref()
+                .map(parse_agent_type);
+            let dispatch_id = row.get::<_, Option<String>>(7)?;
+            let dispatch = if let Some(id) = dispatch_id {
+                let override_json = row.get::<_, Option<String>>(9)?;
+                let agent_type = override_json
+                    .as_deref()
+                    .and_then(|value| serde_json::from_str(value).ok())
+                    .or_else(|| checkpoint_agent.clone())
+                    .unwrap_or_else(|| default_agent.clone());
+                Some(ActiveAgentDispatch {
+                    id,
+                    trigger_message_id: row.get(8)?,
+                    agent_type,
+                    status: row.get(10)?,
+                    attempts: Some(row.get::<_, i64>(11)?.max(0) as u32),
+                    last_error: row.get(12)?,
+                    connection_id: row.get::<_, Option<String>>(13)?.or(row.get(6)?),
+                })
+            } else {
+                None
+            };
+            let started_at = row
+                .get::<_, Option<String>>(2)?
+                .as_deref()
+                .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+                .map(|value| value.with_timezone(&Utc));
+            Ok(InFlightAgentResponse {
+                message_id: row
+                    .get::<_, Option<String>>(0)?
+                    .unwrap_or_else(|| format!("partial:{disc_id}")),
+                content: row.get(1)?,
+                started_at,
+                agent_type: checkpoint_agent,
+                model: row.get(4)?,
+                trigger_message_id: row.get(5)?,
+                connection_id: row.get(6)?,
+                dispatch,
+            })
+        },
+    )
+    .optional()
+    .map_err(Into::into)
 }
 
 /// Column list shared by every `SELECT ... FROM discussions d` that maps rows
@@ -735,6 +889,19 @@ pub fn get_disc_agent_handoff_policy(
         )
         .optional()?;
     Ok(value)
+}
+
+pub fn get_execution_variable_retention_days(
+    conn: &Connection,
+    disc_id: &str,
+) -> Result<Option<Option<u32>>> {
+    Ok(conn
+        .query_row(
+            "SELECT execution_variable_retention_days FROM discussions WHERE id = ?1",
+            params![disc_id],
+            |row| row.get::<_, Option<u32>>(0),
+        )
+        .optional()?)
 }
 
 pub fn set_disc_agent_handoffs_disabled(
@@ -1773,6 +1940,17 @@ pub fn update_discussion_summary_strategy(
     Ok(affected > 0)
 }
 
+pub fn update_execution_variable_retention_days(
+    conn: &Connection,
+    id: &str,
+    days: Option<u32>,
+) -> Result<bool> {
+    Ok(conn.execute(
+        "UPDATE discussions SET execution_variable_retention_days=?1,updated_at=?2 WHERE id=?3",
+        params![days, Utc::now().to_rfc3339(), id],
+    )? > 0)
+}
+
 /// Update workspace_path and worktree_branch for a discussion (used after worktree creation).
 pub fn update_discussion_workspace(
     conn: &Connection,
@@ -2222,7 +2400,7 @@ pub fn insert_message(
     // path skips it entirely (zero overhead on bulk inserts).
     if matches!(msg.channel, crate::models::MessageChannel::Main)
         && matches!(msg.role, crate::models::MessageRole::Agent)
-        && msg.content.contains("kronn-plan-action")
+        && (msg.content.contains("kronn-plan-action") || msg.content.contains("kronn-action"))
     {
         conn.execute_batch("SAVEPOINT insert_message_h")?;
         return match insert_message_inner(conn, discussion_id, msg) {
@@ -2306,6 +2484,12 @@ fn insert_message_inner(
         && matches!(msg.role, crate::models::MessageRole::Agent)
     {
         super::planning_proposals::ingest_message_proposals(
+            conn,
+            discussion_id,
+            &msg.id,
+            &msg.content,
+        )?;
+        super::discussion_actions::ingest_message_actions(
             conn,
             discussion_id,
             &msg.id,
@@ -2571,6 +2755,7 @@ pub fn delete_last_agent_messages(conn: &Connection, discussion_id: &str) -> Res
 pub enum TombstoneMessageError {
     NotFound,
     DispatchInProgress,
+    Immutable,
     Other(anyhow::Error),
 }
 
@@ -2579,6 +2764,10 @@ impl std::fmt::Display for TombstoneMessageError {
         match self {
             Self::NotFound => write!(formatter, "message not found"),
             Self::DispatchInProgress => write!(formatter, "message still has an active dispatch"),
+            Self::Immutable => write!(
+                formatter,
+                "execution context cards are immutable and cannot be deleted"
+            ),
             Self::Other(error) => error.fmt(formatter),
         }
     }
@@ -2609,11 +2798,11 @@ pub fn tombstone_message(
     message_id: &str,
 ) -> std::result::Result<Vec<String>, TombstoneMessageError> {
     let transaction = conn.unchecked_transaction()?;
-    let content = transaction
+    let (content, role) = transaction
         .query_row(
-            "SELECT content FROM messages WHERE id = ?1 AND discussion_id = ?2",
+            "SELECT content, role FROM messages WHERE id = ?1 AND discussion_id = ?2",
             params![message_id, discussion_id],
-            |row| row.get::<_, String>(0),
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
         )
         .optional()?
         .ok_or(TombstoneMessageError::NotFound)?;
@@ -2621,6 +2810,15 @@ pub fn tombstone_message(
     if content.starts_with("[kronn:message-deleted]") {
         transaction.commit()?;
         return Ok(Vec::new());
+    }
+
+    // The execution_context card is the durable, value-free provenance record
+    // for a run's resolved variables. It must never be tombstoned so the audit
+    // surface stays truthful for QP/QA/QE/WF alike. Scope the guard to the
+    // System card so an ordinary message that merely starts with the reserved
+    // text stays deletable.
+    if role == "System" && content.starts_with("execution_context:") {
+        return Err(TombstoneMessageError::Immutable);
     }
 
     let dispatch_active: bool = transaction.query_row(
@@ -3331,6 +3529,7 @@ pub(crate) fn parse_agent_type(s: &str) -> AgentType {
     match s {
         "ClaudeCode" => AgentType::ClaudeCode,
         "Codex" => AgentType::Codex,
+        "OpenCode" => AgentType::OpenCode,
         "Vibe" => AgentType::Vibe,
         "GeminiCli" => AgentType::GeminiCli,
         "Kiro" => AgentType::Kiro,
@@ -3346,6 +3545,7 @@ fn format_agent_type(a: &AgentType) -> String {
     match a {
         AgentType::ClaudeCode => "ClaudeCode".into(),
         AgentType::Codex => "Codex".into(),
+        AgentType::OpenCode => "OpenCode".into(),
         AgentType::Vibe => "Vibe".into(),
         AgentType::GeminiCli => "GeminiCli".into(),
         AgentType::Kiro => "Kiro".into(),
@@ -3456,18 +3656,31 @@ pub fn context_file_exists(conn: &Connection, file_id: &str) -> rusqlite::Result
     )
 }
 
+// AI provenance is joined from the completed media job that actually produced
+// the file. The scalar id lookup intentionally selects at most one job even if
+// a damaged database contains duplicate references, so a context file can
+// never be duplicated in list responses.
+const CONTEXT_FILE_SELECT: &str =
+    "SELECT cf.id, cf.discussion_id, cf.filename, cf.mime_type, cf.original_size,
+            cf.extracted_size, cf.disk_path, cf.message_id, cf.created_at,
+            mj.model, mj.prompt
+     FROM context_files cf
+     LEFT JOIN media_jobs mj ON mj.id = (
+         SELECT source.id FROM media_jobs source
+         WHERE source.context_file_id = cf.id AND source.status = 'completed'
+         ORDER BY source.completed_at DESC, source.created_at DESC, source.id DESC
+         LIMIT 1
+     )";
+
 /// Fetch a single context file by id (incl. `disk_path`). Used by the F8
 /// `fetch-file` endpoint to stream a federated attachment's bytes to a peer.
 pub fn get_context_file(
     conn: &Connection,
     file_id: &str,
 ) -> rusqlite::Result<Option<crate::models::ContextFile>> {
-    conn.query_row(
-        "SELECT id, discussion_id, filename, mime_type, original_size, extracted_size, disk_path, message_id, created_at
-         FROM context_files WHERE id = ?1",
-        rusqlite::params![file_id],
-        map_context_file_row,
-    ).optional()
+    let sql = format!("{CONTEXT_FILE_SELECT} WHERE cf.id = ?1");
+    conn.query_row(&sql, rusqlite::params![file_id], map_context_file_row)
+        .optional()
 }
 
 /// Insert a context file received from a peer (F8), pinned to a specific
@@ -3497,10 +3710,8 @@ pub fn list_context_files(
     conn: &Connection,
     discussion_id: &str,
 ) -> rusqlite::Result<Vec<crate::models::ContextFile>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, discussion_id, filename, mime_type, original_size, extracted_size, disk_path, message_id, created_at
-         FROM context_files WHERE discussion_id = ?1 ORDER BY created_at"
-    )?;
+    let sql = format!("{CONTEXT_FILE_SELECT} WHERE cf.discussion_id = ?1 ORDER BY cf.created_at");
+    let mut stmt = conn.prepare(&sql)?;
     let rows = stmt
         .query_map(rusqlite::params![discussion_id], map_context_file_row)?
         .filter_map(|r| r.ok())
@@ -3509,8 +3720,10 @@ pub fn list_context_files(
 }
 
 /// Row → ContextFile mapper shared by the disc-wide and per-message list queries.
-/// Both SELECT the same column order: ... disk_path, message_id, created_at.
+/// All SELECT the same column order: context file fields, then AI provenance.
 fn map_context_file_row(row: &rusqlite::Row) -> rusqlite::Result<crate::models::ContextFile> {
+    let ai_model: Option<String> = row.get(9)?;
+    let ai_prompt: Option<String> = row.get(10)?;
     Ok(crate::models::ContextFile {
         id: row.get(0)?,
         discussion_id: row.get(1)?,
@@ -3528,6 +3741,9 @@ fn map_context_file_row(row: &rusqlite::Row) -> rusqlite::Result<crate::models::
                     .and_utc()
             })
             .unwrap_or_else(|_| Utc::now()),
+        ai_generation: ai_model
+            .zip(ai_prompt)
+            .map(|(model, prompt)| crate::models::ContextFileAiGeneration { model, prompt }),
     })
 }
 
@@ -3538,10 +3754,8 @@ pub fn list_context_files_for_message(
     conn: &Connection,
     message_id: &str,
 ) -> rusqlite::Result<Vec<crate::models::ContextFile>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, discussion_id, filename, mime_type, original_size, extracted_size, disk_path, message_id, created_at
-         FROM context_files WHERE message_id = ?1 ORDER BY created_at"
-    )?;
+    let sql = format!("{CONTEXT_FILE_SELECT} WHERE cf.message_id = ?1 ORDER BY cf.created_at");
+    let mut stmt = conn.prepare(&sql)?;
     let rows = stmt
         .query_map(rusqlite::params![message_id], map_context_file_row)?
         .filter_map(|r| r.ok())
@@ -3553,6 +3767,23 @@ pub fn list_context_files_for_message(
 /// a freshly-sent message, so they render in that message's bubble instead of
 /// staying sticky in the composer. Returns the count linked. Idempotent for a
 /// given send: a second call links nothing because the rows are no longer NULL.
+/// Pins one file to one message, by id.
+///
+/// Generated assets go through here instead of being left pending: a file with
+/// `message_id IS NULL` is understood everywhere as "uploaded, not sent yet",
+/// so `link_pending_context_files_to_message` would hand a generated video to
+/// whatever the human types next.
+pub fn anchor_context_file_to_message(
+    conn: &Connection,
+    file_id: &str,
+    message_id: &str,
+) -> rusqlite::Result<usize> {
+    conn.execute(
+        "UPDATE context_files SET message_id = ?2 WHERE id = ?1",
+        rusqlite::params![file_id, message_id],
+    )
+}
+
 pub fn link_pending_context_files_to_message(
     conn: &Connection,
     discussion_id: &str,

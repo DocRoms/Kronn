@@ -272,6 +272,7 @@ mod tests {
             auth_strict_localhost: false,
             failure_notify_url: None,
             run_retention_days: 0,
+            execution_variable_retention_days: 30,
             disk_critical_gib: crate::models::setup::DEFAULT_DISK_CRITICAL_GIB,
             disk_warning_gib: crate::models::setup::DEFAULT_DISK_WARNING_GIB,
             max_concurrent_agents: 5,
@@ -294,6 +295,7 @@ mod tests {
             agent_handoff_paid_limit: 1,
             agent_handoff_paid_unlimited: false,
             agent_handoff_blocked_agents: vec![],
+            discussion_weight: crate::models::DiscussionWeightConfig::default(),
         }
     }
 

@@ -61,9 +61,13 @@ pub enum WsMessage {
         online: bool,
     },
     /// Heartbeat ping (sent by client).
-    Ping { timestamp: i64 },
+    Ping {
+        timestamp: i64,
+    },
     /// Heartbeat pong (reply to ping).
-    Pong { timestamp: i64 },
+    Pong {
+        timestamp: i64,
+    },
     /// Chat message in a shared discussion.
     ChatMessage {
         shared_discussion_id: String,
@@ -237,20 +241,27 @@ pub enum WsMessage {
         /// Step name at `step_index`, or null when between steps.
         current_step: Option<String>,
     },
+    SharedRunUpdated {
+        run_id: String,
+    },
     /// Broadcast once at backend boot when `recover_partial_responses`
     /// resurrected in-flight agent responses that were cut short by a
     /// restart. Each id in the list got a new Agent message with an
     /// "interrupted" footer — the frontend refetches those discs + toasts
     /// the user so they don't resend their prompt on top of a silently
     /// recovered conversation.
-    PartialResponseRecovered { discussion_ids: Vec<String> },
+    PartialResponseRecovered {
+        discussion_ids: Vec<String>,
+    },
     /// Broadcast once at backend boot when `reconcile_awaiting_agents`
     /// found discussions that were owed an agent run which never started before
     /// a restart (queued batch child, or an auto-reply never spawned). Each id
     /// got an "interrupted" notice message — NOT a re-spawn (an interruption
     /// may be deliberate). The frontend refetches those discs + toasts the user
     /// so they can relaunch if they want.
-    AgentRunsInterrupted { discussion_ids: Vec<String> },
+    AgentRunsInterrupted {
+        discussion_ids: Vec<String>,
+    },
     /// Broadcast when an audit pipeline reaches its end, whatever the
     /// outcome. The audit may have been launched from another page or from
     /// the MCP bridge — without this the UI goes quiet and the user can't

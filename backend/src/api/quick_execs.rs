@@ -149,6 +149,28 @@ pub async fn run(
     Path(id): Path<String>,
     Json(request): Json<RunQuickExecRequest>,
 ) -> Json<ApiResponse<RunQuickExecResponse>> {
+    let launch = request.launch.clone().unwrap_or_default();
+    let run_id = uuid::Uuid::new_v4().to_string();
+    let created_at = Utc::now();
+    let queued = crate::models::SharedRun {
+        id: run_id.clone(),
+        kind: crate::models::SharedRunKind::QuickExec,
+        source_id: id.clone(),
+        project_id: None,
+        discussion_id: launch.discussion_id.clone(),
+        status: crate::models::SharedRunStatus::Queued,
+        started_at: None,
+        finished_at: None,
+        duration_ms: None,
+        result: None,
+        diagnostic: None,
+        created_at,
+        updated_at: created_at,
+    };
+    if let Err(error) = crate::api::shared_runs::persist_and_broadcast(&state, queued).await {
+        return Json(ApiResponse::err(format!("DB error: {error}")));
+    }
+
     let lookup_id = id.clone();
     let item = match state
         .db
@@ -156,21 +178,159 @@ pub async fn run(
         .await
     {
         Ok(Some(item)) => item,
-        Ok(None) => return Json(ApiResponse::err("Quick Exec not found")),
+        Ok(None) => {
+            let response = RunQuickExecResponse {
+                run_id: run_id.clone(),
+                success: false,
+                duration_ms: 0,
+                data: None,
+                stdout: None,
+                stderr: None,
+                error: Some("Quick Exec not found".into()),
+            };
+            if let Err(error) = persist_quick_exec_terminal(
+                &state,
+                &id,
+                None,
+                launch.discussion_id.clone(),
+                created_at,
+                &response,
+                crate::models::SharedRunStatus::PreflightFailed,
+            )
+            .await
+            {
+                return Json(ApiResponse::err(format!("DB error: {error}")));
+            }
+            return Json(ApiResponse::ok(response));
+        }
         Err(error) => return Json(ApiResponse::err(format!("DB error: {error}"))),
     };
-    if let Err(error) = validate_variables(&item.variables, &request.variables) {
-        return Json(ApiResponse::err(error));
-    }
-    let project_id = item.project_id.clone();
-    let work_dir = if let Some(project_id) = project_id {
+    // A GLOBAL Quick Exec launched from a project-scoped discussion resolves
+    // that project's environment/worktree exactly like one declared on the
+    // project directly (KT-476 LaunchContext).
+    let project_id = launch
+        .effective_project_id(item.project_id.as_deref())
+        .map(str::to_owned);
+    let (secret, retention_days) = {
+        let config = state.config.read().await;
+        let Some(secret) = config.encryption_secret.clone() else {
+            let response = RunQuickExecResponse {
+                run_id: run_id.clone(),
+                success: false,
+                duration_ms: 0,
+                data: None,
+                stdout: None,
+                stderr: None,
+                error: Some("Variable preflight unavailable: encryption key missing".into()),
+            };
+            let _ = persist_quick_exec_terminal(
+                &state,
+                &id,
+                project_id.clone(),
+                launch.discussion_id.clone(),
+                created_at,
+                &response,
+                crate::models::SharedRunStatus::PreflightFailed,
+            )
+            .await;
+            return Json(ApiResponse::ok(response));
+        };
+        (secret, config.server.execution_variable_retention_days)
+    };
+    let declarations = item.variables.clone();
+    let supplied = request.variables.clone();
+    let selected_project = project_id.clone();
+    let launch_context = launch.context.clone();
+    let launch_discussion_id = launch.discussion_id.clone();
+    let snapshot_run_id = run_id.clone();
+    let prepared = state
+        .db
+        .with_conn(move |conn| {
+            crate::core::execution_variables::prepare(
+                conn,
+                crate::core::execution_variables::PrepareRequest {
+                    declarations: &declarations,
+                    supplied: &supplied,
+                    context: &launch_context,
+                    project_id: selected_project.as_deref(),
+                    discussion_id: launch_discussion_id.as_deref(),
+                    environment_ref: "project_mcp_configs",
+                    run_kind: "quick_exec",
+                    run_id: &snapshot_run_id,
+                    encryption_secret: &secret,
+                    retention_days,
+                },
+            )
+        })
+        .await;
+    let resolved = match prepared {
+        Ok(Ok(prepared)) => prepared.resolved,
+        Ok(Err(failures)) => {
+            let response = RunQuickExecResponse {
+                run_id: run_id.clone(),
+                success: false,
+                duration_ms: 0,
+                data: None,
+                stdout: None,
+                stderr: None,
+                error: Some(format!(
+                    "preflight_failed:{}",
+                    serde_json::to_string(&failures).unwrap_or_default()
+                )),
+            };
+            if let Err(error) = persist_quick_exec_terminal(
+                &state,
+                &id,
+                project_id.clone(),
+                launch.discussion_id.clone(),
+                created_at,
+                &response,
+                crate::models::SharedRunStatus::PreflightFailed,
+            )
+            .await
+            {
+                return Json(ApiResponse::err(format!("DB error: {error}")));
+            }
+            return Json(ApiResponse::ok(response));
+        }
+        Err(error) => {
+            return Json(ApiResponse::err(format!(
+                "Variable preflight failed: {error}"
+            )))
+        }
+    };
+    let work_dir = if let Some(pid) = project_id.clone() {
         match state
             .db
-            .with_conn(move |conn| crate::db::projects::get_project(conn, &project_id))
+            .with_conn(move |conn| crate::db::projects::get_project(conn, &pid))
             .await
         {
             Ok(Some(project)) => project.path,
-            Ok(None) => return Json(ApiResponse::err("Quick Exec project not found")),
+            Ok(None) => {
+                let response = RunQuickExecResponse {
+                    run_id: run_id.clone(),
+                    success: false,
+                    duration_ms: 0,
+                    data: None,
+                    stdout: None,
+                    stderr: None,
+                    error: Some("Quick Exec project not found".into()),
+                };
+                if let Err(error) = persist_quick_exec_terminal(
+                    &state,
+                    &id,
+                    project_id.clone(),
+                    launch.discussion_id.clone(),
+                    created_at,
+                    &response,
+                    crate::models::SharedRunStatus::PreflightFailed,
+                )
+                .await
+                {
+                    return Json(ApiResponse::err(format!("DB error: {error}")));
+                }
+                return Json(ApiResponse::ok(response));
+            }
             Err(error) => return Json(ApiResponse::err(format!("DB error: {error}"))),
         }
     } else {
@@ -178,10 +338,8 @@ pub async fn run(
     };
 
     let mut context = TemplateContext::new();
-    for variable in &item.variables {
-        if let Some(value) = request.variables.get(&variable.name) {
-            context.set(variable.name.clone(), value.clone());
-        }
+    for (name, value) in resolved.values {
+        context.set(name, value);
     }
     let step = WorkflowStep {
         name: item.name.clone(),
@@ -191,6 +349,25 @@ pub async fn run(
         exec_timeout_secs: Some(item.timeout_secs),
         ..WorkflowStep::default()
     };
+    let running_at = Utc::now();
+    let running = crate::models::SharedRun {
+        id: run_id.clone(),
+        kind: crate::models::SharedRunKind::QuickExec,
+        source_id: id.clone(),
+        project_id: project_id.clone(),
+        discussion_id: launch.discussion_id.clone(),
+        status: crate::models::SharedRunStatus::Running,
+        started_at: Some(running_at),
+        finished_at: None,
+        duration_ms: None,
+        result: None,
+        diagnostic: None,
+        created_at,
+        updated_at: running_at,
+    };
+    if let Err(error) = crate::api::shared_runs::persist_and_broadcast(&state, running).await {
+        return Json(ApiResponse::err(format!("DB error: {error}")));
+    }
     let outcome = crate::workflows::exec_step::execute_exec_step_with_output_limit(
         &step,
         std::slice::from_ref(&item.command),
@@ -199,25 +376,99 @@ pub async fn run(
         crate::workflows::exec_step::MAX_COLLECT_OUTPUT_BYTES,
     )
     .await;
+    let terminal_snapshot_run_id = run_id.clone();
+    let _ = state
+        .db
+        .with_conn(move |conn| {
+            crate::db::execution_variable_snapshots::purge_run_lifetime_snapshot(
+                conn,
+                "quick_exec",
+                &terminal_snapshot_run_id,
+                Utc::now(),
+            )
+        })
+        .await;
     if outcome.result.status != RunStatus::Success {
-        return Json(ApiResponse::ok(RunQuickExecResponse {
+        let status = if outcome.result.output.contains("timed out after") {
+            crate::models::SharedRunStatus::Timeout
+        } else {
+            crate::models::SharedRunStatus::Failed
+        };
+        let response = RunQuickExecResponse {
+            run_id: run_id.clone(),
             success: false,
             duration_ms: outcome.result.duration_ms,
             data: None,
             stdout: None,
             stderr: None,
             error: Some(outcome.result.output),
-        }));
+        };
+        if let Err(error) = persist_quick_exec_terminal(
+            &state,
+            &id,
+            project_id.clone(),
+            launch.discussion_id.clone(),
+            created_at,
+            &response,
+            status,
+        )
+        .await
+        {
+            return Json(ApiResponse::err(format!("DB error: {error}")));
+        }
+        return Json(ApiResponse::ok(response));
     }
     let Some(envelope) = extract_step_envelope(&outcome.result.output) else {
-        return Json(ApiResponse::err("Quick Exec returned no structured result"));
+        let response = RunQuickExecResponse {
+            run_id: run_id.clone(),
+            success: false,
+            duration_ms: outcome.result.duration_ms,
+            data: None,
+            stdout: None,
+            stderr: None,
+            error: Some("Quick Exec returned no structured result".into()),
+        };
+        if let Err(error) = persist_quick_exec_terminal(
+            &state,
+            &id,
+            project_id.clone(),
+            launch.discussion_id.clone(),
+            created_at,
+            &response,
+            crate::models::SharedRunStatus::Failed,
+        )
+        .await
+        {
+            return Json(ApiResponse::err(format!("DB error: {error}")));
+        }
+        return Json(ApiResponse::ok(response));
     };
     let raw: serde_json::Value = match serde_json::from_str(&envelope.data_json) {
         Ok(value) => value,
         Err(error) => {
-            return Json(ApiResponse::err(format!(
-                "Invalid Quick Exec result: {error}"
-            )))
+            let response = RunQuickExecResponse {
+                run_id: run_id.clone(),
+                success: false,
+                duration_ms: outcome.result.duration_ms,
+                data: None,
+                stdout: None,
+                stderr: None,
+                error: Some(format!("Invalid Quick Exec result: {error}")),
+            };
+            if let Err(error) = persist_quick_exec_terminal(
+                &state,
+                &id,
+                project_id.clone(),
+                launch.discussion_id.clone(),
+                created_at,
+                &response,
+                crate::models::SharedRunStatus::Failed,
+            )
+            .await
+            {
+                return Json(ApiResponse::err(format!("DB error: {error}")));
+            }
+            return Json(ApiResponse::ok(response));
         }
     };
     let stdout = raw
@@ -228,24 +479,76 @@ pub async fn run(
         .get("stderr")
         .and_then(|value| value.as_str())
         .map(str::to_string);
-    match crate::workflows::collect_api_data_step::quick_exec_value(&raw, item.output_format) {
-        Ok(data) => Json(ApiResponse::ok(RunQuickExecResponse {
-            success: true,
-            duration_ms: outcome.result.duration_ms,
-            data: Some(data),
-            stdout,
-            stderr,
-            error: None,
-        })),
-        Err(error) => Json(ApiResponse::ok(RunQuickExecResponse {
-            success: false,
-            duration_ms: outcome.result.duration_ms,
-            data: None,
-            stdout,
-            stderr,
-            error: Some(error),
-        })),
+    let (response, status) =
+        match crate::workflows::collect_api_data_step::quick_exec_value(&raw, item.output_format) {
+            Ok(data) => (
+                RunQuickExecResponse {
+                    run_id: run_id.clone(),
+                    success: true,
+                    duration_ms: outcome.result.duration_ms,
+                    data: Some(data),
+                    stdout,
+                    stderr,
+                    error: None,
+                },
+                crate::models::SharedRunStatus::Success,
+            ),
+            Err(error) => (
+                RunQuickExecResponse {
+                    run_id: run_id.clone(),
+                    success: false,
+                    duration_ms: outcome.result.duration_ms,
+                    data: None,
+                    stdout,
+                    stderr,
+                    error: Some(error),
+                },
+                crate::models::SharedRunStatus::Failed,
+            ),
+        };
+    if let Err(error) = persist_quick_exec_terminal(
+        &state,
+        &id,
+        project_id,
+        launch.discussion_id.clone(),
+        created_at,
+        &response,
+        status,
+    )
+    .await
+    {
+        return Json(ApiResponse::err(format!("DB error: {error}")));
     }
+    Json(ApiResponse::ok(response))
+}
+
+async fn persist_quick_exec_terminal(
+    state: &AppState,
+    source_id: &str,
+    project_id: Option<String>,
+    discussion_id: Option<String>,
+    created_at: chrono::DateTime<Utc>,
+    response: &RunQuickExecResponse,
+    status: crate::models::SharedRunStatus,
+) -> anyhow::Result<()> {
+    let now = chrono::Utc::now();
+    let run = crate::models::SharedRun {
+        id: response.run_id.clone(),
+        kind: crate::models::SharedRunKind::QuickExec,
+        source_id: source_id.to_owned(),
+        project_id,
+        discussion_id,
+        status,
+        started_at: (response.duration_ms > 0)
+            .then_some(now - chrono::Duration::milliseconds(response.duration_ms as i64)),
+        finished_at: Some(now),
+        duration_ms: Some(response.duration_ms),
+        result: response.data.clone(),
+        diagnostic: response.error.clone(),
+        created_at,
+        updated_at: now,
+    };
+    crate::api::shared_runs::persist_and_broadcast(state, run).await
 }
 
 pub async fn export(
@@ -360,12 +663,7 @@ fn validate_request(request: &CreateQuickExecRequest) -> Result<(), String> {
     if matches!(request.timeout_secs, Some(0 | 1801..)) {
         return Err("Quick Exec timeout must be between 1 and 1800 seconds".to_string());
     }
-    let mut names = std::collections::HashSet::new();
-    for variable in &request.variables {
-        if variable.name.trim().is_empty() || !names.insert(variable.name.trim()) {
-            return Err("Quick Exec variable names must be non-empty and unique".to_string());
-        }
-    }
+    crate::models::validate_prompt_variables(&request.variables)?;
     Ok(())
 }
 
@@ -374,6 +672,10 @@ pub(crate) fn validate_variables(
     values: &std::collections::HashMap<String, String>,
 ) -> Result<(), String> {
     for variable in declarations {
+        variable.validate_source()?;
+        if !variable.requires_user_input() {
+            continue;
+        }
         let value = values.get(&variable.name).map(String::as_str).unwrap_or("");
         if variable.required && value.trim().is_empty() {
             return Err(format!("Missing required variable `{}`", variable.name));

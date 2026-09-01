@@ -125,8 +125,8 @@ describe('scanUndeclaredVars', () => {
     const prompt = 'Process ticket {{ticket_id}} with brief {{brief}}.';
     const result = scanUndeclaredVars(prompt, baseOpts({
       workflowVariables: [
-        { name: 'ticket_id', label: '', placeholder: '', description: null, required: true },
-        { name: 'brief', label: '', placeholder: '', description: null, required: false },
+        { name: 'ticket_id', label: '', placeholder: '', description: null, required: true, source: 'user_input', source_ref: null, allow_manual_override: false },
+        { name: 'brief', label: '', placeholder: '', description: null, required: false, source: 'user_input', source_ref: null, allow_manual_override: false },
       ],
     }));
     expect(result).toEqual([]);
@@ -136,7 +136,7 @@ describe('scanUndeclaredVars', () => {
     const prompt = 'Process ticket {{ticket_id}} with brief {{undeclared_var}}.';
     const result = scanUndeclaredVars(prompt, baseOpts({
       workflowVariables: [
-        { name: 'ticket_id', label: '', placeholder: '', description: null, required: true },
+        { name: 'ticket_id', label: '', placeholder: '', description: null, required: true, source: 'user_input', source_ref: null, allow_manual_override: false },
       ],
     }));
     expect(result).toHaveLength(1);

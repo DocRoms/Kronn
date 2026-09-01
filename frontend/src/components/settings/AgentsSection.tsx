@@ -4,6 +4,7 @@ import { userError } from '../../lib/userError';
 import { useAsyncGuard } from '../../hooks/useAsyncGuard';
 import { OllamaCard } from './OllamaCard';
 import { ExternalApiSection } from './ExternalApiSection';
+import { ModelCatalogSection } from './ModelCatalogSection';
 import { CompressionSection } from './CompressionSection';
 import { ContextHelp } from '../ContextHelp';
 import { SearchableSelect } from '../SearchableSelect';
@@ -832,11 +833,15 @@ export function AgentsSection({
               </div>
             );
           }
-          const permFlag: Record<string, { flag: string; descKey: string }> = {
+          const permFlag: Record<string, { flag?: string; descKey: string }> = {
             ClaudeCode: { flag: '--dangerously-skip-permissions', descKey: 'config.fullAccess' },
             Codex: { flag: '--sandbox=danger-full-access', descKey: 'config.fullAccess' },
             GeminiCli: { flag: '--yolo', descKey: 'config.fullAccess' },
             CopilotCli: { flag: '--allow-all-tools', descKey: 'config.fullAccess' },
+            // OpenCode runs over ACP (`opencode acp`): full access widens the
+            // live AcpPermissionBroker's auto-approval scope instead of a
+            // static CLI flag, so there is no flag literal to show here.
+            OpenCode: { descKey: 'config.fullAccessAcp' },
           };
           const perm = permFlag[agent.agent_type];
           const tokenField: Record<string, { key: string; hint: string; url: string }> = {
@@ -855,13 +860,15 @@ export function AgentsSection({
             ? agentAccess?.claude_code?.full_access ?? false
             : agent.agent_type === 'Codex'
               ? agentAccess?.codex?.full_access ?? false
-              : agent.agent_type === 'GeminiCli'
-                ? agentAccess?.gemini_cli?.full_access ?? false
-                : agent.agent_type === 'Vibe'
-                  ? agentAccess?.vibe?.full_access ?? false
-                  : agent.agent_type === 'CopilotCli'
-                    ? agentAccess?.copilot_cli?.full_access ?? false
-                    : false;
+              : agent.agent_type === 'OpenCode'
+                ? agentAccess?.open_code?.full_access ?? false
+                : agent.agent_type === 'GeminiCli'
+                  ? agentAccess?.gemini_cli?.full_access ?? false
+                  : agent.agent_type === 'Vibe'
+                    ? agentAccess?.vibe?.full_access ?? false
+                    : agent.agent_type === 'CopilotCli'
+                      ? agentAccess?.copilot_cli?.full_access ?? false
+                      : false;
 
           return (
           <React.Fragment key={agent.name}>
@@ -1121,7 +1128,7 @@ export function AgentsSection({
               <div className="set-agent-panel set-agent-panel-access">
                 <div className="set-agent-section-title">
                   <span>{t('config.fullAccessBadge')}</span>
-                  <code>{perm.flag}</code>
+                  {perm.flag && <code>{perm.flag}</code>}
                 </div>
                 <div
                   role="switch"
@@ -1393,6 +1400,7 @@ export function AgentsSection({
                 const newTiers: ModelTiersConfig = {
                   claude_code: tierOf('claude_code'),
                   codex: tierOf('codex'),
+                  open_code: tierOf('open_code'),
                   gemini_cli: tierOf('gemini_cli'),
                   kiro: tierOf('kiro'),
                   vibe: tierOf('vibe'),
@@ -1532,6 +1540,8 @@ export function AgentsSection({
           </React.Fragment>
           );
         })}
+
+        <ModelCatalogSection />
 
         {/* KT-339 — unified External API zone: LiteLLM, NVIDIA and any other
             OpenAI-compatible service live here as named connections. */}

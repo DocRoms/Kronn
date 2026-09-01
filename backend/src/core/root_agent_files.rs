@@ -56,6 +56,7 @@ pub fn adapter_for_agent_type(agent: &crate::models::AgentType) -> Option<AgentA
         crate::models::AgentType::Vibe => Some(AgentAdapter::Vibe),
         crate::models::AgentType::CopilotCli => Some(AgentAdapter::Copilot),
         crate::models::AgentType::Codex
+        | crate::models::AgentType::OpenCode
         | crate::models::AgentType::Ollama
         | crate::models::AgentType::LiteLlm
         | crate::models::AgentType::Nvidia

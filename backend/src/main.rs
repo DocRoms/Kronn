@@ -242,6 +242,12 @@ async fn main() -> anyhow::Result<()> {
         Err(e) => tracing::error!("External API connection backfill failed: {e}"),
     }
 
+    if let Err(e) =
+        kronn::core::model_catalog::migrate_hardcoded_catalog_once(&database, &app_config).await
+    {
+        tracing::error!("Model catalog migration failed: {e}");
+    }
+
     // Build state via the shared factory — keep both mains in sync when
     // new runtime fields are added to AppState (see lib.rs doc).
     let config_arc = Arc::new(RwLock::new(app_config));
@@ -533,6 +539,48 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    match state
+        .db
+        .with_conn(|conn| {
+            kronn::db::execution_variable_snapshots::purge_expired(conn, chrono::Utc::now())
+        })
+        .await
+    {
+        Ok(0) => {}
+        Ok(count) => tracing::info!("Purged {count} expired execution-variable snapshot(s)"),
+        Err(error) => tracing::warn!("Execution-variable snapshot purge failed: {error}"),
+    }
+    // Expiry is enforced continuously as well as at boot. Reveals and runtime
+    // loads already reject expired rows; this bounded sweep irreversibly drops
+    // ciphertext without extending retention on reads.
+    {
+        let purge_db = state.db.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60 * 60));
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                match purge_db
+                    .with_conn(|conn| {
+                        kronn::db::execution_variable_snapshots::purge_expired(
+                            conn,
+                            chrono::Utc::now(),
+                        )
+                    })
+                    .await
+                {
+                    Ok(0) => {}
+                    Ok(count) => {
+                        tracing::info!("Purged {count} expired execution-variable snapshot(s)")
+                    }
+                    Err(error) => {
+                        tracing::warn!("Execution-variable snapshot purge failed: {error}")
+                    }
+                }
+            }
+        });
+    }
+
     // Reap abandoned MCP sessions (2026-06-08). `count_live_participants` is
     // presence-sticky — any `status='active'` session suppresses Kronn's
     // auto-response (no per-message staleness window, which had wrongly
@@ -708,6 +756,12 @@ async fn main() -> anyhow::Result<()> {
     // Start WebSocket client manager (outbound connections to contacts)
     let ws_state = state.clone();
     tokio::spawn(async move { kronn::core::ws_client::run(ws_state).await });
+
+    // Media generation worker. Reclaims first: a job left `running` by a
+    // killed process is already generating and already billed, so it must
+    // resume polling instead of being abandoned or paid for twice.
+    let media_state = state.clone();
+    tokio::spawn(async move { kronn::agents::media_runner::run_loop(media_state).await });
 
     // Build router
     let app = build_router(state);

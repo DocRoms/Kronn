@@ -1097,6 +1097,7 @@ mod tests {
         for agent in &[
             AgentType::ClaudeCode,
             AgentType::Codex,
+            AgentType::OpenCode,
             AgentType::Vibe,
             AgentType::GeminiCli,
             AgentType::Kiro,
@@ -1614,6 +1615,62 @@ mod tests {
         assert_eq!(files[1].filename, "data.csv");
         assert_eq!(files[0].original_size, 100);
         assert_eq!(files[1].extracted_size, 7); // "a,b\n1,2".len()
+        assert!(files.iter().all(|file| file.ai_generation.is_none()));
+    }
+
+    #[test]
+    fn completed_media_job_attests_context_file_ai_provenance() {
+        let conn = test_conn();
+        insert_discussion(&conn, &make_discussion("d-ai-asset")).unwrap();
+        insert_context_file(
+            &conn,
+            "cf-ai",
+            "d-ai-asset",
+            "generated.mp4",
+            "video/mp4",
+            4096,
+            "",
+            Some("/tmp/generated.mp4"),
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE context_files SET message_id = 'm-ai' WHERE id = 'cf-ai'",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO media_jobs
+                (id, modality, status, connection_id, model, prompt, params_json,
+                 discussion_id, message_id, context_file_id, attempts,
+                 scheduled_at, deadline_at, completed_at, created_at, updated_at)
+             VALUES
+                ('job-ai', 'video', 'completed', 'openrouter-main',
+                 'provider/video-model', 'A quiet sunrise over the ocean', '{}',
+                 'd-ai-asset', 'm-ai', 'cf-ai', 1,
+                 '2026-09-01T08:00:00Z', '2026-09-01T08:10:00Z',
+                 '2026-09-01T08:02:00Z', '2026-09-01T08:00:00Z',
+                 '2026-09-01T08:02:00Z')",
+            [],
+        )
+        .unwrap();
+
+        let listed = list_context_files(&conn, "d-ai-asset").unwrap();
+        assert_eq!(listed.len(), 1);
+        let provenance = listed[0].ai_generation.as_ref().unwrap();
+        assert_eq!(provenance.model, "provider/video-model");
+        assert_eq!(provenance.prompt, "A quiet sunrise over the ocean");
+
+        let fetched = get_context_file(&conn, "cf-ai").unwrap().unwrap();
+        assert_eq!(
+            fetched.ai_generation.as_ref().unwrap().model,
+            provenance.model
+        );
+        let per_message = list_context_files_for_message(&conn, "m-ai").unwrap();
+        assert_eq!(per_message.len(), 1);
+        assert_eq!(
+            per_message[0].ai_generation.as_ref().unwrap().prompt,
+            provenance.prompt
+        );
     }
 
     #[test]
@@ -1800,6 +1857,22 @@ mod tests {
             list_messages(&conn, "d-active-tombstone").unwrap()[0].content,
             "Content of m-active-tombstone",
         );
+    }
+
+    #[test]
+    fn tombstone_message_refuses_an_immutable_execution_context_card() {
+        let conn = test_conn();
+        insert_discussion(&conn, &make_discussion("d-exec-ctx")).unwrap();
+        let mut card = make_message("m-exec-ctx", MessageRole::System, None);
+        card.content = "execution_context:{\"snapshot_id\":\"s1\"}".into();
+        insert_message(&conn, "d-exec-ctx", &card).unwrap();
+
+        let error = tombstone_message(&conn, "d-exec-ctx", "m-exec-ctx").unwrap_err();
+
+        assert!(matches!(error, TombstoneMessageError::Immutable));
+        assert!(list_messages(&conn, "d-exec-ctx").unwrap()[0]
+            .content
+            .starts_with("execution_context:"));
     }
 
     #[test]
@@ -2991,6 +3064,9 @@ mod tests {
                 reasoning_model: None,
                 created_at: now,
                 updated_at: now,
+                image_model: None,
+                video_model: None,
+                media_endpoint: None,
             },
         )
         .unwrap();

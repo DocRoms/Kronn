@@ -180,6 +180,26 @@ pub(crate) fn persist_dispatch_settlement(
         let still_awaiting =
             crate::db::agent_dispatch::has_active_for_discussion(&transaction, discussion_id)?;
         crate::db::discussions::set_awaiting_agent(&transaction, discussion_id, still_awaiting)?;
+        // This is the authoritative terminal settlement for a tracked/plural QP
+        // turn: `clear_awaiting_after_terminal` deliberately defers to us while a
+        // dispatch is still active. Once the last dispatch is terminal, purge any
+        // retention=0 QP ciphertext here so tracked launches do not keep it
+        // forever. Errors propagate (never silently swallowed) so a purge
+        // failure rolls the settlement back instead of leaking the secret.
+        if !still_awaiting {
+            crate::db::execution_variable_snapshots::purge_run_lifetime_snapshot(
+                &transaction,
+                "quick_prompt",
+                discussion_id,
+                chrono::Utc::now(),
+            )?;
+            crate::db::execution_variable_snapshots::purge_run_lifetime_snapshot(
+                &transaction,
+                "quick_prompt_batch_item",
+                discussion_id,
+                chrono::Utc::now(),
+            )?;
+        }
         if let Some(run_id) = group_id {
             batch_run = crate::db::workflows::increment_batch_progress_with_outcome(
                 &transaction,
@@ -1417,6 +1437,93 @@ mod chain_render_tests {
         let batch = settled.batch_run.unwrap();
         assert_eq!(batch.batch_completed, 1);
         assert_eq!(batch.status, crate::models::RunStatus::Success);
+    }
+
+    #[tokio::test]
+    async fn tracked_qp_settlement_purges_zero_retention_ciphertext_at_terminal() {
+        // A tracked QP dispatch settles here, not in `clear_awaiting_after_terminal`.
+        // Once the last dispatch is terminal, retention=0 ciphertext must be purged
+        // on this authoritative path too — otherwise tracked launches keep it forever.
+        let db = Arc::new(crate::db::Database::open_in_memory().unwrap());
+        db.with_conn(|conn| {
+            let now = chrono::Utc::now();
+            let now_text = now.to_rfc3339();
+            conn.execute(
+                "INSERT INTO discussions (id, title, created_at, updated_at)
+                 VALUES ('d-purge', 'Purge', ?1, ?1)",
+                [&now_text],
+            )?;
+            conn.execute(
+                "INSERT INTO messages
+                 (id, discussion_id, role, content, timestamp, sort_order, received_at)
+                 VALUES ('u-purge', 'd-purge', 'User', 'go', ?1, 1, ?1)",
+                [&now_text],
+            )?;
+            let values =
+                std::collections::HashMap::from([("token".to_string(), "ephemeral".to_string())]);
+            crate::db::execution_variable_snapshots::insert(
+                conn,
+                crate::db::execution_variable_snapshots::NewSnapshot {
+                    run_kind: "quick_prompt",
+                    run_id: "d-purge",
+                    project_id: None,
+                    environment_ref: "project_mcp_configs",
+                    resolved_at: now,
+                    retention_days: 0,
+                    expires_at: None,
+                    values: &values,
+                    provenance: &[],
+                },
+                &[6u8; 32],
+            )?;
+            crate::db::agent_dispatch::enqueue_for_latest_user(
+                conn,
+                crate::db::agent_dispatch::NewLatestUserDispatch {
+                    id: "j-purge",
+                    discussion_id: "d-purge",
+                    dedupe_key: "message:u-purge",
+                    agent_override: None,
+                    chain_prompt_ids: &[],
+                    batch_item: None,
+                    group_id: None,
+                    group_concurrency_limit: None,
+                },
+            )?;
+            crate::db::agent_dispatch::claim(conn, "j-purge")?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        db.with_conn(|conn| {
+            persist_dispatch_settlement(
+                conn,
+                "j-purge",
+                "d-purge",
+                None,
+                crate::db::workflows::BatchChildOutcome::Success,
+                None,
+                None,
+            )
+        })
+        .await
+        .unwrap();
+
+        db.with_conn(|conn| {
+            let purged: bool = conn.query_row(
+                "SELECT values_encrypted IS NULL FROM execution_variable_snapshots
+                 WHERE run_kind='quick_prompt' AND run_id='d-purge'",
+                [],
+                |row| row.get(0),
+            )?;
+            assert!(
+                purged,
+                "zero-retention ciphertext must be purged at terminal settlement"
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test]

@@ -372,6 +372,7 @@ describe('AgentsSection — full-access switch', () => {
     return {
       claude_code: { ...blank },
       codex: { ...blank },
+      open_code: { ...blank },
       gemini_cli: { ...blank },
       kiro: { ...blank },
       vibe: { ...blank },
@@ -380,7 +381,7 @@ describe('AgentsSection — full-access switch', () => {
       lite_llm: { ...blank },
       nvidia: { ...blank },
       model_tiers: {
-        claude_code: { ...blankTier }, codex: { ...blankTier }, gemini_cli: { ...blankTier },
+        claude_code: { ...blankTier }, codex: { ...blankTier }, open_code: { ...blankTier }, gemini_cli: { ...blankTier },
         kiro: { ...blankTier }, vibe: { ...blankTier }, copilot_cli: { ...blankTier }, ollama: { ...blankTier },
         lite_llm: { ...blankTier },
         nvidia: { ...blankTier },
@@ -413,6 +414,30 @@ describe('AgentsSection — full-access switch', () => {
     });
     expect(screen.getByText('--sandbox=danger-full-access')).toBeTruthy();
     expect(screen.queryByText('--full-auto')).toBeNull();
+  });
+
+  it('shows the ACP permission description for OpenCode instead of a fabricated CLI flag (KT-543)', () => {
+    const { container } = renderSection({
+      agents: [makeAgent({ name: 'AgentOpenCode', agent_type: 'OpenCode', installed: true, enabled: true })],
+      agentAccess: accessConfig(),
+    });
+    const panel = container.querySelector('[data-agent-type="OpenCode"] .set-agent-panel-access');
+    expect(panel).toBeTruthy();
+    expect(screen.getByText('config.fullAccessAcp')).toBeTruthy();
+    expect(panel?.querySelector('code')).toBeNull();
+  });
+
+  it('toggles OpenCode full_access via open_code, not a missing agentAccess key', async () => {
+    const { refetchAgentAccess } = renderSection({
+      agents: [makeAgent({ name: 'AgentOpenCode', agent_type: 'OpenCode', installed: true, enabled: true })],
+      agentAccess: accessConfig(),
+    });
+    expect(screen.getByRole('switch').getAttribute('aria-checked')).toBe('false');
+    fireEvent.click(screen.getByRole('switch'));
+    await waitFor(() =>
+      expect(setAgentAccessMock).toHaveBeenCalledWith({ agent: 'OpenCode', full_access: true }),
+    );
+    await waitFor(() => expect(refetchAgentAccess).toHaveBeenCalled());
   });
 
   it('calls configApi.setAgentAccess + refetchAgentAccess on click (toggles the flag)', async () => {
