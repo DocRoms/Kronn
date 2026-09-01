@@ -1511,7 +1511,8 @@ TOOLS = [
             "Call `page_list` first. Data arrives through `window.KronnPageData` "
             "and `kronn:page-data`; use the returned id in PublishPageData. Scope "
             "inherits from a bound discussion, while host CLIs may create standalone "
-            "Pages. See `tool_manual({tool: \"page_create\"})`."
+            "Pages. Typed inline QP/QA/QE/Workflow CTAs are documented by "
+            "`tool_manual({tool: \"page_create\"})`."
         ),
         "inputSchema": {
             "type": "object",
@@ -9469,6 +9470,18 @@ TOOL_MANUALS = {
         "may omit discussion_id and create a standalone Page. The returned id is the exact "
         "PublishPageData.page_publish.page_id. HTML reads the initial value from "
         "window.KronnPageData and listens for the `kronn:page-data` CustomEvent."
+        "\n\nA human-gated inline action pairs a visible element carrying "
+        "`data-kronn-action=\"stable-ref\"` with an inert "
+        "`<script type=\"application/kronn-action\" data-action-id=\"stable-ref\">` "
+        "JSON block. The shared reference is 1–256 URL-safe characters "
+        "(`[A-Za-z0-9._~-]`). Its shape is `{kind,target_id,project_id?,values?}` and kind is "
+        "quick_prompt, quick_api, quick_exec or workflow; discover and use a real "
+        "target id. A Page-only value may use provenance `dynamic_binding` plus a "
+        "source_ref such as `<page.title>`, `<page.dataset.summary.owner>` or "
+        "`<page.dataset.tickets.find(key).id>`. For the last form, "
+        "`data-kronn-bindings` carries only a JSON selector map keyed by variable name. "
+        "Never put secrets or resolved environment values in HTML. The sandbox emits "
+        "an intention; only the native card's explicit human launch can execute it."
     ),
     "workflow_create_draft": (
         "The workflow always lands with `enabled:false`; no cron fires until the user "

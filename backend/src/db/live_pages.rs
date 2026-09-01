@@ -230,6 +230,7 @@ pub fn create_live_page(
          VALUES (1, ?1)",
         [page.created_at.to_rfc3339()],
     )?;
+    crate::db::live_page_actions::ingest_page_actions(&tx, &page.id, &revision.id, &revision.html)?;
     tx.commit()?;
     Ok(())
 }
@@ -433,6 +434,12 @@ pub fn update_live_page_html(
     tx.execute(
         "UPDATE live_pages SET current_revision_id = ?2, updated_at = ?3 WHERE id = ?1",
         params![canonical_page_id, revision.id, now.to_rfc3339()],
+    )?;
+    crate::db::live_page_actions::ingest_page_actions(
+        &tx,
+        &canonical_page_id,
+        &revision.id,
+        &revision.html,
     )?;
     tx.commit()?;
     Ok(revision)

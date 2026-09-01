@@ -8,9 +8,31 @@
   overflow: visible;
 }
 
+.discussion-action-card__toggle {
+  width: 100%;
+  padding: 0;
+  border: 0;
+  color: inherit;
+  background: transparent;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
 .discussion-action-card__header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
   padding: 12px 14px 10px;
+}
+
+.discussion-action-card[data-expanded='true'] .discussion-action-card__header {
   border-bottom: 1px solid var(--kr-border-subtle);
+}
+
+.discussion-action-card__heading {
+  min-width: 0;
+  flex: 1;
 }
 
 .discussion-action-card__eyebrow {
@@ -37,11 +59,21 @@
   gap: 12px;
 }
 
-.discussion-action-card__title-row h4 {
+.discussion-action-card__title-row strong {
   margin: 0;
   color: var(--kr-text-primary);
   font-size: var(--kr-fs-sm);
   font-weight: 650;
+}
+
+.discussion-action-card__chevron {
+  flex: none;
+  color: var(--kr-text-dim);
+  transition: transform 140ms ease;
+}
+
+.discussion-action-card[data-expanded='true'] .discussion-action-card__chevron {
+  transform: rotate(180deg);
 }
 
 .discussion-action-card__state {

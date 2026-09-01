@@ -7,7 +7,7 @@ import {
 } from 'lucide-react';
 import type {
   LivePage, LivePageDetail, LivePageDiscussionLink, LivePagePublication,
-  LivePageRevision, LivePageWorkflowLink,
+  LivePageAction, LivePageRevision, LivePageWorkflowLink,
 } from '../types/generated';
 import { docs as docsApi, pages as pagesApi, workflows as workflowsApi } from '../lib/api';
 import { datasetRecords, recordsToRows } from '../lib/live-page-csv';
@@ -20,6 +20,7 @@ import {
 import { formatRelativeTime } from '../lib/relativeTime';
 import { CopyIdPill } from '../components/CopyIdPill';
 import { RunStatusCard } from '../components/RunStatusCard';
+import { LivePageActionCard } from '../components/LivePageActionCard';
 import type { RunStatusCardModel } from '../lib/runStatusCardModel';
 import { CollectionFavoritesHeader } from '../components/CollectionFavoritesHeader';
 import { CollectionRowActions } from '../components/CollectionRowActions';
@@ -150,6 +151,13 @@ export function PagesPage({
   const [recentPublications, setRecentPublications] = useState<LivePagePublication[]>([]);
   const [pageRunCard, setPageRunCard] = useState<RunStatusCardModel | null>(null);
   const [linkedDiscussions, setLinkedDiscussions] = useState<LivePageDiscussionLink[]>([]);
+  const [pageActions, setPageActions] = useState<LivePageAction[]>([]);
+  const [activeAction, setActiveAction] = useState<{
+    activation: number;
+    actionRef: string;
+    bindings: Record<string, string>;
+    anchor: { left: number; top: number; width: number; height: number };
+  } | null>(null);
   const [revisions, setRevisions] = useState<LivePageRevision[]>([]);
   const [query, setQuery] = useState('');
   const [collapsedSections, setCollapsedSections] = useState<Set<string>>(readCollapsedPageSections);
@@ -179,6 +187,8 @@ export function PagesPage({
   const [datasetExportBusy, setDatasetExportBusy] = useState(false);
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const linkRelayRef = useRef<ReturnType<typeof createLivePageOpenLinkRelay> | null>(null);
+  const pageActionsRef = useRef<LivePageAction[]>([]);
+  const actionActivationRef = useRef(0);
   const [bridgeChannel] = useState(channelId);
   const requestedPageIdRef = useRef(initialSelectedPageId);
   const selectionConsumedRef = useRef(onInitialSelectionConsumed);
@@ -205,18 +215,22 @@ export function PagesPage({
   }, [collapsedSections]);
 
   const loadDetail = useCallback(async (pageId: string) => {
-    const [nextDetail, workflows, publications, discussions, pageRevisions] = await Promise.all([
+    const [nextDetail, workflows, publications, discussions, pageRevisions, actions] = await Promise.all([
       pagesApi.get(pageId),
       pagesApi.workflows(pageId),
       pagesApi.publications(pageId),
       pagesApi.discussions(pageId),
       pagesApi.revisions(pageId),
+      pagesApi.actions(pageId),
     ]);
     setDetail(nextDetail);
     setLinkedWorkflows(workflows);
     setRecentPublications(publications);
     setLinkedDiscussions(discussions);
     setRevisions(pageRevisions);
+    setPageActions(actions);
+    pageActionsRef.current = actions;
+    setActiveAction(null);
     setComparisonRevisionId(null);
     setHtmlDraft(nextDetail.revision.html);
   }, []);
@@ -244,6 +258,9 @@ export function PagesPage({
         setRecentPublications([]);
         setLinkedDiscussions([]);
         setRevisions([]);
+        setPageActions([]);
+        pageActionsRef.current = [];
+        setActiveAction(null);
       }
       if (requested) {
         requestedPageIdRef.current = null;
@@ -603,13 +620,34 @@ export function PagesPage({
     }, '*');
   }, [bridgeChannel, detail]);
   useEffect(() => {
-    const relay = createLivePageOpenLinkRelay(bridgeChannel);
+    const relay = createLivePageOpenLinkRelay(bridgeChannel, undefined, intent => {
+      const exists = pageActionsRef.current.some(action => action.action_ref === intent.actionRef);
+      if (!exists) {
+        setError(t('disc.action.unavailablePageAction'));
+        return;
+      }
+      actionActivationRef.current += 1;
+      setActiveAction({ ...intent, activation: actionActivationRef.current });
+      setError(null);
+    });
     linkRelayRef.current = relay;
     return () => {
       if (linkRelayRef.current === relay) linkRelayRef.current = null;
       relay.dispose();
     };
-  }, [bridgeChannel]);
+  }, [bridgeChannel, t]);
+
+  const selectedAction = activeAction
+    ? pageActions.find(action => action.action_ref === activeAction.actionRef) ?? null
+    : null;
+
+  const handlePageActionChanged = useCallback((changed: LivePageAction) => {
+    setPageActions(current => {
+      const next = current.map(action => action.id === changed.id ? changed : action);
+      pageActionsRef.current = next;
+      return next;
+    });
+  }, []);
   useEffect(() => { publishToFrame(); }, [publishToFrame]);
 
   return (
@@ -1149,14 +1187,33 @@ export function PagesPage({
                 )}
               </div>
             ) : (
-              <iframe
-                ref={iframeRef}
-                title={detail.title}
-                sandbox="allow-scripts"
-                srcDoc={document}
-                onLoad={publishToFrame}
-                data-testid="live-page-frame"
-              />
+              <div className="live-pages-frame-shell">
+                <iframe
+                  ref={iframeRef}
+                  title={detail.title}
+                  sandbox="allow-scripts"
+                  srcDoc={document}
+                  onLoad={publishToFrame}
+                  data-testid="live-page-frame"
+                />
+                {selectedAction && activeAction && (
+                  <div
+                    className="live-pages-action-anchor"
+                    style={{
+                      top: Math.max(8, activeAction.anchor.top + activeAction.anchor.height + 6),
+                      left: Math.max(8, activeAction.anchor.left),
+                    }}
+                  >
+                    <LivePageActionCard
+                      key={`${selectedAction.id}:${activeAction.activation}`}
+                      action={selectedAction}
+                      bindings={activeAction.bindings}
+                      onChanged={handlePageActionChanged}
+                      onOpenDiscussion={discussionId => onNavigateDiscussion?.(discussionId)}
+                    />
+                  </div>
+                )}
+              </div>
             )}
           </>
         ) : !loading && (

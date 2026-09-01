@@ -33,6 +33,7 @@ pub mod git_ops;
 pub mod id_resolver;
 pub mod learnings;
 pub mod lite_llm;
+pub mod live_page_actions;
 pub mod live_pages;
 pub mod maintenance;
 pub mod mcp_remote;

@@ -46,6 +46,8 @@ describe('Live Page sandbox', () => {
     expect(output).toContain('stopImmediate.call(event)');
     expect(output).toContain('portPost.call(linkPort');
     expect(output).toContain("element.closest('a[href]')");
+    expect(output).toContain("closest.call(element,'[data-kronn-action]')");
+    expect(output).toContain("type:'kronn:page-action'");
     expect(output).toContain("anchor.target.toLowerCase()!=='_blank'");
     expect(output).toContain('userActivation&&!userActivation.isActive');
     expect(output).toContain("Object.defineProperty(window,'open'");
@@ -106,6 +108,51 @@ describe('Live Page sandbox', () => {
     port.postMessage(valid);
     await new Promise(resolve => setTimeout(resolve, 0));
     expect(openExternal).not.toHaveBeenCalled();
+  });
+
+  it('forwards a typed action intention through the private port without executing it', async () => {
+    const postMessage = vi.fn();
+    const onAction = vi.fn();
+    const relay = createLivePageOpenLinkRelay('channel-1', vi.fn(), onAction);
+    relay.connect({ postMessage } as unknown as Window);
+    const port = (postMessage.mock.calls[0][2] as MessagePort[])[0];
+    port.postMessage({
+      type: 'kronn:page-action',
+      version: 1,
+      channel_id: 'channel-1',
+      action_ref: 'frame-ticket',
+      bindings: { ticket: 'KT-538', ignored: { forged: true } },
+      anchor: { left: 12, top: 40, width: 100, height: 32 },
+    });
+
+    await vi.waitFor(() => expect(onAction).toHaveBeenCalledWith({
+      actionRef: 'frame-ticket',
+      bindings: { ticket: 'KT-538' },
+      anchor: { left: 12, top: 40, width: 100, height: 32 },
+    }));
+    relay.dispose();
+  });
+
+  it('rejects action references that cannot form a stable URL-safe server id', async () => {
+    const postMessage = vi.fn();
+    const onAction = vi.fn();
+    const relay = createLivePageOpenLinkRelay('channel-1', vi.fn(), onAction);
+    relay.connect({ postMessage } as unknown as Window);
+    const port = (postMessage.mock.calls[0][2] as MessagePort[])[0];
+    const request = {
+      type: 'kronn:page-action',
+      version: 1,
+      channel_id: 'channel-1',
+      bindings: {},
+      anchor: { left: 12, top: 40, width: 100, height: 32 },
+    };
+    port.postMessage({ ...request, action_ref: '../route' });
+    port.postMessage({ ...request, action_ref: 'contains space' });
+    port.postMessage({ ...request, action_ref: 'x'.repeat(257) });
+
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(onAction).not.toHaveBeenCalled();
+    relay.dispose();
   });
 
   it('rejects a valid private-port request without active user activation', async () => {

@@ -1535,6 +1535,54 @@ async fn live_page_create_publish_and_read_round_trip() {
 }
 
 #[tokio::test]
+async fn live_page_action_routes_persist_and_fail_closed_for_an_unknown_target() {
+    let app = test_app();
+    let (_, created) = post_json(
+        app.clone(),
+        "/api/pages",
+        serde_json::json!({
+            "title": "Operations",
+            "html": concat!(
+                "<button data-kronn-action=\"deploy\">Deploy</button>",
+                "<script type=\"application/kronn-action\" data-action-id=\"deploy\">",
+                "{\"kind\":\"workflow\",\"target_id\":\"missing-workflow\"}",
+                "</script>"
+            ),
+            "datasets": []
+        }),
+    )
+    .await;
+    assert_eq!(created["success"], true, "{created}");
+    let page_id = created["data"]["id"].as_str().unwrap();
+
+    let (_, listed) = get_json(app.clone(), &format!("/api/pages/{page_id}/actions")).await;
+    assert_eq!(listed["success"], true, "{listed}");
+    let action = &listed["data"][0];
+    assert_eq!(action["action_ref"], "deploy");
+    assert_eq!(action["state"], "preflight_failed");
+    assert!(action["diagnostic"]
+        .as_str()
+        .is_some_and(|message| message.contains("n’existe plus")));
+    let action_id = action["id"].as_str().unwrap();
+
+    let (_, launch) = post_json(
+        app.clone(),
+        &format!("/api/live-page-actions/{action_id}/launch"),
+        serde_json::json!({
+            "variables": {"forged": "value"},
+            "bindings": {"row": "forged"}
+        }),
+    )
+    .await;
+    assert_eq!(launch["success"], true, "{launch}");
+    assert_eq!(launch["data"]["state"], "preflight_failed");
+
+    let (_, reloaded) = get_json(app, &format!("/api/live-page-actions/{action_id}")).await;
+    assert_eq!(reloaded["data"]["id"], action_id);
+    assert_eq!(reloaded["data"]["state"], "preflight_failed");
+}
+
+#[tokio::test]
 async fn live_page_library_state_discussion_link_and_delete_round_trip() {
     let state = test_state();
     state

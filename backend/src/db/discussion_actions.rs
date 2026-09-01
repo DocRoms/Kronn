@@ -11,6 +11,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
+use super::kronn_action_engine;
 use crate::models::{PromptVariable, PromptVariableControl, PromptVariableSource};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -28,7 +29,7 @@ pub enum DiscussionActionKind {
 }
 
 impl DiscussionActionKind {
-    fn as_db_str(self) -> &'static str {
+    pub(crate) fn as_db_str(self) -> &'static str {
         match self {
             Self::QuickPrompt => "quick_prompt",
             Self::QuickApi => "quick_api",
@@ -38,7 +39,7 @@ impl DiscussionActionKind {
         }
     }
 
-    fn from_db_str(value: &str) -> Option<Self> {
+    pub(crate) fn from_db_str(value: &str) -> Option<Self> {
         match value {
             "quick_prompt" => Some(Self::QuickPrompt),
             "quick_api" => Some(Self::QuickApi),
@@ -64,7 +65,7 @@ pub enum DiscussionActionState {
 }
 
 impl DiscussionActionState {
-    fn from_db_str(value: &str) -> Option<Self> {
+    pub(crate) fn from_db_str(value: &str) -> Option<Self> {
         match value {
             "proposed" => Some(Self::Proposed),
             "launching" => Some(Self::Launching),
@@ -86,6 +87,15 @@ pub enum DiscussionActionValueProvenance {
     AgentSuggestion,
     KronnContext,
     ProjectEnv,
+    /// Resolved from the Live Page/card/dataset-row the CTA was clicked in
+    /// (KT-538). Only accepted for Live-Page-authored proposals — a
+    /// discussion `kronn-action` fence still fails closed on this provenance,
+    /// exactly like the readonly, never-resolved `dynamic_binding` KT-476
+    /// removed. Unlike that dead field, this variant is only ever populated
+    /// by `live_page_actions::claim_launch` looking up the real dataset
+    /// value server-side; the value a sandboxed click claims is never
+    /// trusted directly. See `backend/src/db/live_page_actions.rs`.
+    DynamicBinding,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -163,26 +173,26 @@ pub enum ClaimLaunchOutcome {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct ActionFence {
-    kind: DiscussionActionKind,
-    target_id: String,
+pub(crate) struct ActionFence {
+    pub(crate) kind: DiscussionActionKind,
+    pub(crate) target_id: String,
     #[serde(default)]
-    project_id: Option<String>,
+    pub(crate) project_id: Option<String>,
     #[serde(default)]
-    values: Vec<ActionFenceValue>,
+    pub(crate) values: Vec<ActionFenceValue>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct ActionFenceValue {
-    name: String,
+pub(crate) struct ActionFenceValue {
+    pub(crate) name: String,
     #[serde(default)]
-    value: Option<String>,
+    pub(crate) value: Option<String>,
     #[serde(default = "user_input_provenance")]
-    provenance: DiscussionActionValueProvenance,
+    pub(crate) provenance: DiscussionActionValueProvenance,
     #[serde(default)]
-    source_ref: Option<String>,
+    pub(crate) source_ref: Option<String>,
     #[serde(default)]
-    suggested_by: Option<String>,
+    pub(crate) suggested_by: Option<String>,
 }
 
 fn user_input_provenance() -> DiscussionActionValueProvenance {
@@ -217,13 +227,13 @@ pub fn extract_action_fences(content: &str) -> Vec<String> {
     fences
 }
 
-struct TargetContract {
-    name: String,
-    project_id: Option<String>,
-    variables: Vec<PromptVariable>,
+pub(crate) struct TargetContract {
+    pub(crate) name: String,
+    pub(crate) project_id: Option<String>,
+    pub(crate) variables: Vec<PromptVariable>,
 }
 
-fn target_contract(
+pub(crate) fn target_contract(
     conn: &Connection,
     kind: DiscussionActionKind,
     target_id: &str,
@@ -264,9 +274,16 @@ fn target_contract(
     })
 }
 
-fn resolved_values(
+/// `allow_dynamic_binding` gates the `DynamicBinding` provenance: `false` for
+/// discussion `kronn-action` fences (fails closed, mirroring the KT-476
+/// removal of the dead `dynamic_binding` field), `true` for Live Page action
+/// blocks (KT-538), where `live_page_actions::claim_launch` resolves the
+/// value server-side from the real dataset/page row instead of ever trusting
+/// a client-declared value for it.
+pub(crate) fn resolved_values(
     declarations: &[PromptVariable],
     proposed: Vec<ActionFenceValue>,
+    allow_dynamic_binding: bool,
 ) -> Result<Vec<DiscussionActionValue>> {
     let mut proposed = proposed
         .into_iter()
@@ -339,6 +356,39 @@ fn resolved_values(
                         source_ref: proposal.source_ref,
                         suggested_by: proposal.suggested_by,
                         suggested_value,
+                    }
+                }
+                Some(proposal)
+                    if proposal.provenance == DiscussionActionValueProvenance::DynamicBinding =>
+                {
+                    if !allow_dynamic_binding {
+                        anyhow::bail!(
+                            "dynamic_binding proposals are not accepted for discussion actions (variable `{}`)",
+                            declaration.name
+                        );
+                    }
+                    let source_ref = proposal
+                        .source_ref
+                        .filter(|value| !value.trim().is_empty())
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "dynamic_binding variable `{}` requires a source_ref",
+                                declaration.name
+                            )
+                        })?;
+                    DiscussionActionValue {
+                        name: declaration.name.clone(),
+                        label,
+                        placeholder: declaration.placeholder.clone(),
+                        description: declaration.description.clone(),
+                        required: declaration.required,
+                        control: declaration.control.clone(),
+                        allow_manual_override: declaration.allow_manual_override,
+                        provenance: DiscussionActionValueProvenance::DynamicBinding,
+                        value: None,
+                        source_ref: Some(source_ref),
+                        suggested_by: None,
+                        suggested_value: None,
                     }
                 }
                 Some(_) => anyhow::bail!(
@@ -424,7 +474,7 @@ pub fn ingest_message_actions(
         let mut diagnostic = None;
         let (target_name, target_project, values) = match contract {
             Some(contract) => {
-                let values = match resolved_values(&contract.variables, fence.values) {
+                let values = match resolved_values(&contract.variables, fence.values, false) {
                     Ok(values) => values,
                     Err(error) => {
                         diagnostic = Some(error.to_string());
@@ -580,76 +630,26 @@ const SELECT_ACTION: &str = "SELECT id, discussion_id, source_message_id,
     finished_at, created_at, updated_at FROM discussion_actions";
 
 fn refresh_from_shared_run(conn: &Connection, action: &mut DiscussionAction) -> Result<()> {
-    if !matches!(
-        action.state,
-        DiscussionActionState::Launching | DiscussionActionState::Running
-    ) {
-        return Ok(());
-    }
-    let Some(run_id) = action.shared_run_id.as_deref() else {
-        // The launch claim is the idempotency boundary. If the backend stops
-        // after claiming but before publishing a durable run/discussion id,
-        // never retry the external action automatically: that could duplicate
-        // side effects. Surface a bounded, actionable terminal state instead.
-        let stale = action
-            .launched_at
-            .as_deref()
-            .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
-            .is_some_and(|launched| {
-                Utc::now()
-                    .signed_duration_since(launched.with_timezone(&Utc))
-                    .num_minutes()
-                    >= 5
-            });
-        if action.state == DiscussionActionState::Launching && stale {
-            let now = Utc::now().to_rfc3339();
-            let diagnostic = "The launch was interrupted before Kronn published its run. It was not retried automatically to avoid duplicate side effects.".to_string();
-            conn.execute(
-                "UPDATE discussion_actions SET state = 'failed', diagnostic = ?2,
-                 finished_at = ?3, updated_at = ?3 WHERE id = ?1 AND state = 'launching'",
-                params![action.id, diagnostic, now],
-            )?;
-            action.state = DiscussionActionState::Failed;
-            action.diagnostic = Some(diagnostic);
-            action.finished_at = Some(now.clone());
-            action.updated_at = now;
-        }
-        return Ok(());
+    let mut core = kronn_action_engine::ActionCore {
+        id: action.id.clone(),
+        state: action.state,
+        values: std::mem::take(&mut action.values),
+        shared_run_id: action.shared_run_id.clone(),
+        diagnostic: action.diagnostic.clone(),
+        launched_at: action.launched_at.clone(),
+        finished_at: action.finished_at.clone(),
+        updated_at: action.updated_at.clone(),
     };
-    let Some(run) = crate::db::shared_runs::get(conn, run_id)? else {
-        return Ok(());
-    };
-    use crate::models::SharedRunStatus;
-    let next = match run.status {
-        SharedRunStatus::Queued | SharedRunStatus::Running => DiscussionActionState::Running,
-        SharedRunStatus::Success => DiscussionActionState::Succeeded,
-        SharedRunStatus::Failed | SharedRunStatus::Timeout => DiscussionActionState::Failed,
-        SharedRunStatus::Cancelled => DiscussionActionState::Cancelled,
-        SharedRunStatus::PreflightFailed => DiscussionActionState::PreflightFailed,
-    };
-    if next == action.state && run.diagnostic == action.diagnostic {
-        return Ok(());
-    }
-    let state = match next {
-        DiscussionActionState::Running => "running",
-        DiscussionActionState::Succeeded => "succeeded",
-        DiscussionActionState::Failed => "failed",
-        DiscussionActionState::Cancelled => "cancelled",
-        DiscussionActionState::PreflightFailed => "preflight_failed",
-        DiscussionActionState::Proposed | DiscussionActionState::Launching => unreachable!(),
-    };
-    let now = Utc::now().to_rfc3339();
-    let finished_at = (!matches!(next, DiscussionActionState::Running))
-        .then(|| run.finished_at.unwrap_or_else(Utc::now).to_rfc3339());
-    conn.execute(
-        "UPDATE discussion_actions SET state = ?2, diagnostic = ?3,
-         finished_at = ?4, updated_at = ?5 WHERE id = ?1",
-        params![action.id, state, run.diagnostic, finished_at, now],
+    kronn_action_engine::refresh_from_shared_run(
+        conn,
+        kronn_action_engine::ActionTable::Discussion,
+        &mut core,
     )?;
-    action.state = next;
-    action.diagnostic = run.diagnostic;
-    action.finished_at = finished_at;
-    action.updated_at = now;
+    action.state = core.state;
+    action.values = core.values;
+    action.diagnostic = core.diagnostic;
+    action.finished_at = core.finished_at;
+    action.updated_at = core.updated_at;
     Ok(())
 }
 
@@ -681,12 +681,7 @@ pub fn list_for_discussion(
 }
 
 pub fn cancel(conn: &Connection, id: &str) -> Result<Option<DiscussionAction>> {
-    let now = Utc::now().to_rfc3339();
-    conn.execute(
-        "UPDATE discussion_actions SET state = 'cancelled', finished_at = ?2,
-         updated_at = ?2 WHERE id = ?1 AND state = 'proposed'",
-        params![id, now],
-    )?;
+    kronn_action_engine::cancel(conn, kronn_action_engine::ActionTable::Discussion, id)?;
     get(conn, id)
 }
 
@@ -704,125 +699,42 @@ pub fn claim_launch(
         transaction.commit()?;
         return Ok(Some(ClaimLaunchOutcome::Existing(action)));
     }
-    for (name, supplied_value) in supplied {
-        let Some(value) = action.values.iter_mut().find(|value| value.name == *name) else {
-            anyhow::bail!("unknown action variable `{name}`");
-        };
-        // A `project_env`/`kronn_context` value is read-only UNLESS its own
-        // declaration opted into an audited manual override — mirrors
-        // `execution_variables::resolve()`'s `allow_manual_override` contract.
-        let overridable = value.allow_manual_override
-            || matches!(
-                value.provenance,
-                DiscussionActionValueProvenance::UserInput
-                    | DiscussionActionValueProvenance::AgentSuggestion
-            );
-        if !overridable {
-            anyhow::bail!("action variable `{name}` is resolved by Kronn and is read-only");
-        }
-        value.value = Some(supplied_value.clone());
-        if value.provenance == DiscussionActionValueProvenance::AgentSuggestion
-            && value.suggested_value.as_deref() != Some(supplied_value.as_str())
-        {
-            value.provenance = DiscussionActionValueProvenance::UserInput;
-        }
-    }
-    for value in &action.values {
-        if value.required
-            && matches!(
-                value.provenance,
-                DiscussionActionValueProvenance::UserInput
-                    | DiscussionActionValueProvenance::AgentSuggestion
-            )
-            && value.value.as_deref().unwrap_or_default().trim().is_empty()
-        {
-            anyhow::bail!("required action variable `{}` is missing", value.name);
-        }
-    }
-
-    // The runtime value is handed to the executor in memory only, for this
-    // one launch. Kronn's encrypted, retention-bound execution-variable
-    // snapshot is the ONE place a manually supplied value may be durably
-    // stored — never this row's `values_json`, which every future GET
-    // replays verbatim to the client.
-    let variables: std::collections::HashMap<String, String> = action
-        .values
-        .iter()
-        .filter_map(|value| {
-            value
-                .value
-                .as_ref()
-                .map(|v| (value.name.clone(), v.clone()))
-        })
-        .collect();
-    for value in &mut action.values {
-        if value.allow_manual_override
-            || matches!(
-                value.provenance,
-                DiscussionActionValueProvenance::UserInput
-                    | DiscussionActionValueProvenance::AgentSuggestion
-            )
-        {
-            value.value = None;
-        }
-    }
-
-    let now = Utc::now().to_rfc3339();
-    let changed = transaction.execute(
-        "UPDATE discussion_actions SET state = 'launching', values_json = ?2,
-         launched_at = ?3, updated_at = ?3 WHERE id = ?1 AND state = 'proposed'",
-        params![id, serde_json::to_string(&action.values)?, now],
+    let mut core = kronn_action_engine::ActionCore {
+        id: action.id.clone(),
+        state: action.state,
+        values: std::mem::take(&mut action.values),
+        shared_run_id: action.shared_run_id.clone(),
+        diagnostic: action.diagnostic.clone(),
+        launched_at: action.launched_at.clone(),
+        finished_at: action.finished_at.clone(),
+        updated_at: action.updated_at.clone(),
+    };
+    let claimed_variables = kronn_action_engine::claim_launch(
+        &transaction,
+        kronn_action_engine::ActionTable::Discussion,
+        &mut core,
+        supplied,
     )?;
-    let claimed = get(&transaction, id)?.expect("claimed action still exists");
+    action.state = core.state;
+    action.values = core.values;
+    action.launched_at = core.launched_at;
+    action.updated_at = core.updated_at;
     transaction.commit()?;
-    if changed == 1 {
-        Ok(Some(ClaimLaunchOutcome::Claimed {
-            action: claimed,
-            variables,
-        }))
-    } else {
-        Ok(Some(ClaimLaunchOutcome::Existing(claimed)))
-    }
+    Ok(Some(match claimed_variables {
+        Some(variables) => ClaimLaunchOutcome::Claimed { action, variables },
+        None => ClaimLaunchOutcome::Existing(action),
+    }))
 }
 
-pub struct ActionCompletion {
-    pub state: DiscussionActionState,
-    pub shared_run_id: Option<String>,
-    pub result_discussion_id: Option<String>,
-    pub deep_link: Option<String>,
-    pub diagnostic: Option<String>,
-}
+pub use kronn_action_engine::ActionCompletion;
 
 pub fn complete(conn: &Connection, id: &str, completion: ActionCompletion) -> Result<()> {
-    let state = match completion.state {
-        DiscussionActionState::Running => "running",
-        DiscussionActionState::Succeeded => "succeeded",
-        DiscussionActionState::Failed => "failed",
-        DiscussionActionState::PreflightFailed => "preflight_failed",
-        DiscussionActionState::Cancelled => "cancelled",
-        DiscussionActionState::Proposed | DiscussionActionState::Launching => {
-            anyhow::bail!("invalid terminal action transition")
-        }
-    };
-    let now = Utc::now().to_rfc3339();
-    let finished_at = (completion.state != DiscussionActionState::Running).then_some(now.clone());
-    conn.execute(
-        "UPDATE discussion_actions SET state = ?2, shared_run_id = ?3,
-         result_discussion_id = ?4, deep_link = ?5, diagnostic = ?6,
-         finished_at = ?7, updated_at = ?8
-         WHERE id = ?1 AND state IN ('launching','running')",
-        params![
-            id,
-            state,
-            completion.shared_run_id,
-            completion.result_discussion_id,
-            completion.deep_link,
-            completion.diagnostic,
-            finished_at,
-            now,
-        ],
-    )?;
-    Ok(())
+    kronn_action_engine::complete(
+        conn,
+        kronn_action_engine::ActionTable::Discussion,
+        id,
+        completion,
+    )
 }
 
 #[cfg(test)]
