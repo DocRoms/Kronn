@@ -41,10 +41,16 @@ const FILES = [
 beforeEach(() => {
   contextFileBlob.mockReset();
   contextFileBlob.mockResolvedValue(new Blob(['x']));
+  // Exercise the component's documented non-IntersectionObserver fallback;
+  // browser intersection behaviour is covered by the component contract.
+  vi.stubGlobal('IntersectionObserver', undefined);
   globalThis.URL.createObjectURL = vi.fn(() => 'blob:stub');
   globalThis.URL.revokeObjectURL = vi.fn();
 });
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+});
 
 describe('MessageAttachments — mixed carousel', () => {
   it('counts every image AND video in one sequence', async () => {
@@ -95,17 +101,39 @@ describe('MessageAttachments — mixed carousel', () => {
     expect(video.getAttribute('preload')).toBe('metadata');
   });
 
-  it('fetches the clip only when it becomes the selected entry', async () => {
+  it('loads a real thumbnail for a visible library clip and reuses its blob in the player', async () => {
     render(<MessageAttachments files={FILES} discussionId="d1" t={t} variant="library" />);
-    // Images prefetch for their thumbnails; the video must not.
-    await waitFor(() => expect(contextFileBlob).toHaveBeenCalled());
-    const askedBefore = contextFileBlob.mock.calls.map(c => c[1]);
-    expect(askedBefore).not.toContain('v1');
-
-    fireEvent.click(screen.getByTestId('attach-video-thumb'));
+    // jsdom has no IntersectionObserver, so visible-card loading falls back to
+    // immediate preparation. A browser does the same only near the viewport.
     await waitFor(() =>
       expect(contextFileBlob.mock.calls.map(c => c[1])).toContain('v1'),
     );
+    expect(await screen.findByTestId('attach-video-poster')).toHaveAttribute('src', 'blob:stub');
+    const videoFetchesBeforeOpen = contextFileBlob.mock.calls.filter(c => c[1] === 'v1').length;
+
+    fireEvent.click(screen.getByTestId('attach-video-thumb'));
+    await waitFor(() => expect(screen.getByTestId('media-player-video')).toBeTruthy());
+    expect(contextFileBlob.mock.calls.filter(c => c[1] === 'v1')).toHaveLength(videoFetchesBeforeOpen);
+  });
+
+  it('keeps the video URL valid when the viewer is closed and reopened', async () => {
+    const { unmount } = render(
+      <MessageAttachments files={FILES} discussionId="d1" t={t} variant="library" />,
+    );
+    await screen.findByTestId('attach-video-poster');
+
+    fireEvent.click(screen.getByTestId('attach-video-thumb'));
+    await waitFor(() => expect(screen.getByTestId('media-player-video')).toHaveAttribute('src', 'blob:stub'));
+    fireEvent.click(screen.getByRole('button', { name: 'disc.attachmentClose' }));
+    expect(URL.revokeObjectURL).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByTestId('attach-video-thumb'));
+    await waitFor(() => expect(screen.getByTestId('media-player-video')).toHaveAttribute('src', 'blob:stub'));
+    expect(contextFileBlob.mock.calls.filter(c => c[1] === 'v1')).toHaveLength(1);
+    expect(URL.revokeObjectURL).not.toHaveBeenCalled();
+
+    unmount();
+    await waitFor(() => expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:stub'));
   });
 
   it('leaves a non-media document out of the carousel', async () => {

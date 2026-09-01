@@ -606,28 +606,25 @@ describe('ExternalApiSection', () => {
     expect(screen.queryByTestId('ext-api-saved-test-result-saved-1')).toBeNull();
   });
 
-  it('lets a media model be typed on a connection', async () => {
-    // The media catalogues live on separate provider routes and belong to
-    // another ticket, so this is free text for now: typing a model works today
-    // and becomes a picker later without changing what is stored.
+  it('uses the tested searchable catalogue for image and video models', async () => {
     renderSection();
     fireEvent.click(await screen.findByTestId('ext-api-add-connection'));
     await waitFor(() => expect(screen.getByTestId('ext-api-media-panel')).toBeTruthy());
 
     const video = screen.getByTestId('ext-api-media-video') as HTMLInputElement;
     const image = screen.getByTestId('ext-api-media-image') as HTMLInputElement;
-    // Empty by default: a provider with no media model shows nothing to fill.
+    // Exactly like the text tiers: no unverified catalogue can be selected.
     expect(video.value).toBe('');
     expect(image.value).toBe('');
+    expect(video).toBeDisabled();
+    expect(image).toBeDisabled();
 
-    fireEvent.change(video, { target: { value: 'bytedance/seedance-2.0-mini' } });
-    expect((screen.getByTestId('ext-api-media-video') as HTMLInputElement).value).toBe(
-      'bytedance/seedance-2.0-mini',
-    );
+    fireEvent.click(screen.getByTestId('ext-api-test'));
+    await waitFor(() => expect(video).not.toBeDisabled());
+    expectTierOption('ext-api-media-image', 'model-a');
+    chooseTier('ext-api-media-video', 'model-b');
 
-    // Unlike the text tiers, media fields need no catalogue, so they are
-    // usable before any connection test.
-    expect(video).not.toBeDisabled();
+    expect((screen.getByTestId('ext-api-media-video') as HTMLInputElement).value).toBe('model-b');
   });
 
   it('keeps the media block separate from the three text tiers', async () => {

@@ -2435,7 +2435,7 @@ const fr: TranslationDict = {
   'config.extApi.media.video': 'Vidéo',
   'config.extApi.mediaPlaceholder.image': 'ex. meta/muse-image',
   'config.extApi.mediaPlaceholder.video': 'ex. bytedance/seedance-2.0-mini',
-  'config.extApi.mediaHint': 'Laissez vide si ce fournisseur n\u2019a pas de modèle image ou vidéo. Saisissez l\u2019identifiant exact du modèle ; un sélecteur remplacera cette saisie quand les catalogues média seront disponibles.',
+  'config.extApi.mediaHint': 'Testez la connexion, puis recherchez et sélectionnez le modèle image ou vidéo exact. Un modèle déjà enregistré reste visible si le fournisseur ne le liste plus.',
   'config.extApi.modelsLoaded': '{0} modèle(s) chargé(s).',
   'config.extApi.noModels': 'La connexion fonctionne mais ne renvoie aucun modèle.',
   'config.nvidiaOffline': 'endpoint injoignable',
