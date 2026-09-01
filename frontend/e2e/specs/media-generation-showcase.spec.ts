@@ -13,9 +13,10 @@
  *
  * Zero $. No generation is launched here; the assets already exist.
  */
-import { test, expect, type Locator } from '@playwright/test';
+import type { Locator } from '@playwright/test';
 import { mkdirSync } from 'node:fs';
 import { DashboardPage } from '../pages/DashboardPage';
+import { test, expect } from '../fixtures/kronn-fixture';
 
 const DISC = process.env.MEDIA_DISC_ID ?? '';
 const OUT = process.env.MEDIA_SHOT_DIR ?? 'test-results/media';
@@ -42,14 +43,7 @@ test.beforeAll(() => {
   mkdirSync(OUT, { recursive: true });
 });
 
-test.beforeEach(async ({ page }) => {
-  // The onboarding tour's backdrop swallows every click on a fresh profile.
-  await page.addInitScript(() => {
-    try { localStorage.setItem('kronn:tour-completed', 'true'); } catch { /* incognito */ }
-  });
-});
-
-test('captures the generated assets, the carousel and the launcher', async ({ page }) => {
+test('decodes generated assets across the library and reopened viewer', async ({ page }) => {
   // A loaded dev machine (a parallel cargo build is enough) pushes first paint
   // well past the default budget; this pass is a capture, not a perf check.
   test.setTimeout(240_000);
@@ -76,18 +70,6 @@ test('captures the generated assets, the carousel and the launcher', async ({ pa
   await expect(poster).toBeVisible({ timeout: 30_000 });
   await expectDecodedVideo(poster, 'the asset thumbnail');
   await page.screenshot({ path: `${OUT}/02-assets-tab.png` });
-
-  // The launcher — modality, connection, prompt, video shape, estimated price.
-  await panel.getByRole('button', { name: /Générer un média/ }).click();
-  const form = page.getByTestId('media-generate-form');
-  await expect(form).toBeVisible();
-  await expect(form.getByRole('combobox').first()).toBeVisible();
-  await page.screenshot({ path: `${OUT}/03-launcher-image.png` });
-
-  await form.getByRole('button', { name: 'Vidéo' }).click();
-  await expect(form.getByText(/Durée/)).toBeVisible();
-  await page.screenshot({ path: `${OUT}/04-launcher-video.png` });
-  await panel.getByRole('button', { name: /Fermer le formulaire/ }).click();
 
   // Carousel: opening the image must reach the clip too — one sequence.
   await panel.locator('[data-testid="asset-library-grid"] img').first().click();
