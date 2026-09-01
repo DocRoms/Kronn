@@ -831,6 +831,9 @@ pub struct ServerConfigPublic {
     /// Sidebar storage-weight indicator: lets the frontend skip the batch
     /// call entirely when disabled, and grade colours without a round-trip.
     pub discussion_weight: crate::models::DiscussionWeightConfig,
+    /// Default retention for encrypted execution-variable snapshots.
+    /// Zero purges values as soon as the run reaches a terminal state.
+    pub execution_variable_retention_days: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -866,4 +869,8 @@ pub struct UpdateServerConfigRequest {
     /// Whole section at once: the toggle and the pair are persisted together
     /// so a rejected pair can never leave a half-applied state.
     pub discussion_weight: Option<crate::models::DiscussionWeightConfig>,
+    /// Default encrypted execution-variable retention. Zero means that values
+    /// exist only for the lifetime of the active execution.
+    #[serde(default)]
+    pub execution_variable_retention_days: Option<u32>,
 }

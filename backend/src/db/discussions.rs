@@ -737,6 +737,19 @@ pub fn get_disc_agent_handoff_policy(
     Ok(value)
 }
 
+pub fn get_execution_variable_retention_days(
+    conn: &Connection,
+    disc_id: &str,
+) -> Result<Option<Option<u32>>> {
+    Ok(conn
+        .query_row(
+            "SELECT execution_variable_retention_days FROM discussions WHERE id = ?1",
+            params![disc_id],
+            |row| row.get::<_, Option<u32>>(0),
+        )
+        .optional()?)
+}
+
 pub fn set_disc_agent_handoffs_disabled(
     conn: &Connection,
     disc_id: &str,
@@ -1776,7 +1789,7 @@ pub fn update_discussion_summary_strategy(
 pub fn update_execution_variable_retention_days(
     conn: &Connection,
     id: &str,
-    days: u32,
+    days: Option<u32>,
 ) -> Result<bool> {
     Ok(conn.execute(
         "UPDATE discussions SET execution_variable_retention_days=?1,updated_at=?2 WHERE id=?3",

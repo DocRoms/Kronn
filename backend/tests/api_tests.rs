@@ -3971,6 +3971,66 @@ async fn discussion_agent_handoff_mode_round_trips_through_http() {
 }
 
 #[tokio::test]
+async fn discussion_execution_variable_retention_can_override_then_inherit() {
+    let state = test_state();
+    state
+        .db
+        .with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO discussions
+                 (id, title, agent, language, participants_json, created_at,
+                  updated_at, message_count, workspace_mode)
+                 VALUES ('d-variable-retention', 'Variable retention', 'Codex', 'fr', '[]',
+                         datetime('now'), datetime('now'), 0, 'Direct')",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let app = build_router_with_auth(state, false);
+
+    let (_, initial) = get_json(
+        app.clone(),
+        "/api/discussions/d-variable-retention/execution-variable-retention",
+    )
+    .await;
+    assert_eq!(initial["data"]["global_days"], 30);
+    assert_eq!(initial["data"]["effective_days"], 30);
+    assert!(initial["data"]["override_days"].is_null());
+
+    let (_, updated) = patch_json(
+        app.clone(),
+        "/api/discussions/d-variable-retention",
+        serde_json::json!({ "execution_variable_retention_days": 7 }),
+    )
+    .await;
+    assert_eq!(updated["success"], true);
+    let (_, overridden) = get_json(
+        app.clone(),
+        "/api/discussions/d-variable-retention/execution-variable-retention",
+    )
+    .await;
+    assert_eq!(overridden["data"]["override_days"], 7);
+    assert_eq!(overridden["data"]["effective_days"], 7);
+
+    let (_, cleared) = patch_json(
+        app.clone(),
+        "/api/discussions/d-variable-retention",
+        serde_json::json!({ "execution_variable_retention_days": null }),
+    )
+    .await;
+    assert_eq!(cleared["success"], true);
+    let (_, inherited) = get_json(
+        app,
+        "/api/discussions/d-variable-retention/execution-variable-retention",
+    )
+    .await;
+    assert!(inherited["data"]["override_days"].is_null());
+    assert_eq!(inherited["data"]["effective_days"], 30);
+}
+
+#[tokio::test]
 async fn discussions_create_uses_default_language() {
     let state = test_state();
 
@@ -5226,6 +5286,7 @@ async fn server_config_returns_defaults() {
     assert_eq!(json["data"]["agent_handoffs_enabled"], false);
     assert_eq!(json["data"]["agent_handoff_paid_limit"], 1);
     assert_eq!(json["data"]["agent_handoff_paid_unlimited"], false);
+    assert_eq!(json["data"]["execution_variable_retention_days"], 30);
     assert_eq!(
         json["data"]["agent_handoff_blocked_agents"],
         serde_json::json!([])
@@ -5262,6 +5323,24 @@ async fn server_config_persists_and_clamps_agent_timeouts_independently() {
     let (_, clamped) = get_json(app, "/api/config/server").await;
     assert_eq!(clamped["data"]["agent_global_timeout_min"], 240);
     assert_eq!(clamped["data"]["local_agent_global_timeout_min"], 240);
+}
+
+#[tokio::test]
+async fn server_config_updates_execution_variable_retention_including_zero() {
+    let app = test_app();
+
+    for days in [45, 0] {
+        let (_, updated) = post_json(
+            app.clone(),
+            "/api/config/server",
+            serde_json::json!({ "execution_variable_retention_days": days }),
+        )
+        .await;
+        assert_eq!(updated["success"], true);
+
+        let (_, persisted) = get_json(app.clone(), "/api/config/server").await;
+        assert_eq!(persisted["data"]["execution_variable_retention_days"], days);
+    }
 }
 
 #[tokio::test]

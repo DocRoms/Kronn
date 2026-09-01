@@ -1586,6 +1586,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             get(api::discussions::agent_handoff_mode),
         )
         .route(
+            "/api/discussions/{id}/execution-variable-retention",
+            get(api::discussions::execution_variable_retention),
+        )
+        .route(
             "/api/discussions/{id}/export",
             get(api::disc_portability::export_discussion),
         )
