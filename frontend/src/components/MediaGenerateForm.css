@@ -90,3 +90,12 @@
   font-size: 11px;
   color: var(--kr-success);
 }
+
+/* The reason the launcher cannot run yet, stated in place rather than found by
+   opening an empty form. */
+.disc-assets-generate-hint {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--kr-text-dim);
+}
