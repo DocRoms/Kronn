@@ -8,7 +8,7 @@ import { MessageDateSeparator } from '../components/MessageDateSeparator';
 import { groupMessagesWithToolFold } from '../lib/discussionMessageGrouping';
 import { localCalendarDayKey } from '../lib/discussionDates';
 import { ChatInput } from '../components/ChatInput';
-import { discussions as discussionsApi, discussionActions as discussionActionsApi, projects as projectsApi, skills as skillsApi, profiles as profilesApi, directives as directivesApi, contacts as contactsApi, workflows as workflowsApi, quickPrompts as quickPromptsApi, planning as planningApi, orchestration as orchestrationApi, externalApi as externalApiConnections } from '../lib/api';
+import { discussions as discussionsApi, discussionActions as discussionActionsApi, projects as projectsApi, skills as skillsApi, profiles as profilesApi, directives as directivesApi, contacts as contactsApi, workflows as workflowsApi, quickPrompts as quickPromptsApi, planning as planningApi, orchestration as orchestrationApi, externalApi as externalApiConnections, runsApi } from '../lib/api';
 import type { ExternalApiConnectionView } from '../lib/api';
 import { GitPanel } from '../components/GitPanel';
 import { TerminalPanel } from '../components/TerminalPanel';
@@ -16,6 +16,7 @@ import { DiscussionPlanPanel } from '../components/DiscussionPlanPanel';
 import { DiscussionSettingsPanel } from '../components/DiscussionSettingsPanel';
 import { DiscussionAssetsPanel } from '../components/DiscussionAssetsPanel';
 import { DiscussionAttachedRuns } from '../components/DiscussionAttachedRuns';
+import { InlineMediaJob } from '../components/InlineMediaJob';
 import { BatchComparePanel } from '../components/BatchComparePanel';
 import { TestModeBanner } from '../components/TestModeBanner';
 import { TestModeModal } from '../components/TestModeModal';
@@ -30,7 +31,7 @@ import { parseAgentQuestions } from '../lib/agent-question-parse';
 import { userError } from '../lib/userError';
 import { getDeployedVersion, setDeployedVersion } from '../lib/qp-improver-banner';
 import { sanitizeQpImproverPayload } from '../lib/qp-improver-sanitize';
-import type { Project, AgentDetection, Discussion, DiscussionDetail, DiscussionMessage, MessageChannel, AgentType, AgentsConfig, Skill, AgentProfile, Directive, McpConfigDisplay, McpIncompatibility, Contact, WsMessage, ContextFile, BatchRunSummary, DiscussionPlan, ProposalListResponse, ExecutionDiscussionLink, MessageSearchHit, MessageTarget, ParticipantView, DiscussionAction } from '../types/generated';
+import type { Project, AgentDetection, Discussion, DiscussionDetail, DiscussionMessage, MessageChannel, AgentType, AgentsConfig, Skill, AgentProfile, Directive, McpConfigDisplay, McpIncompatibility, Contact, WsMessage, ContextFile, BatchRunSummary, DiscussionPlan, ProposalListResponse, ExecutionDiscussionLink, MessageSearchHit, MessageTarget, ParticipantView, DiscussionAction, SharedRun } from '../types/generated';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { useQpChain } from '../hooks/useQpChain';
 import { useMessageQueue, type QueuedMessage } from '../hooks/useMessageQueue';
@@ -70,6 +71,11 @@ type InterruptedStreamState = {
   agent: AgentType;
   responseMessageId?: string;
 };
+
+// Mirrors DiscussionAttachedRuns' own relist debounce: a burst of
+// `shared_run_updated` events for brand-new media jobs collapses into one
+// relist instead of one per event.
+const MEDIA_JOBS_RELIST_DEBOUNCE_MS = 250;
 
 function newClientMessageId(): string {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
@@ -418,6 +424,11 @@ export function DiscussionsPage({
   });
   const [focusCollapsedSidebarRail, setFocusCollapsedSidebarRail] = useState(false);
   const [activeDiscussionId, setActiveDiscussionId] = useState<string | null>(initialActiveDiscussionId ?? null);
+  // Async media relists can finish after the user has switched discussions.
+  // Keep the current id outside callback closures so a late response can
+  // never replace the visible discussion's placeholders.
+  const activeDiscussionIdRef = useRef(activeDiscussionId);
+  activeDiscussionIdRef.current = activeDiscussionId;
   const [showNewDiscussion, setShowNewDiscussion] = useState(false);
   const [showGitPanel, setShowGitPanel] = useState(false);
   const [showTerminalPanel, setShowTerminalPanel] = useState(false);
@@ -426,6 +437,7 @@ export function DiscussionsPage({
   const [showPlanPanel, setShowPlanPanel] = useState(false);
   const [showSettingsPanel, setShowSettingsPanel] = useState(false);
   const [showAssetsPanel, setShowAssetsPanel] = useState(false);
+  const [assetOpenRequest, setAssetOpenRequest] = useState<{ assetId: string; nonce: number } | null>(null);
   // KT-243 — carries the target run_id of the latest `shared_run_updated` WS
   // event so <DiscussionAttachedRuns> can relist only for a run_id it does
   // not already know (a known run's own card self-hydrates) — this flows
@@ -671,6 +683,72 @@ export function DiscussionsPage({
       const files = await discussionsApi.listContextFiles(discId);
       setContextFilesMap(prev => ({ ...prev, [discId]: files }));
     } catch { /* ignore */ }
+  }, []);
+  // KT-549 — media generations, keyed by the message they are anchored to
+  // (each launch gets its own fresh message; see `media.generate`). Lets the
+  // transcript render the live placeholder right after that exact bubble,
+  // instead of a generic strip disconnected from where the launch happened.
+  const [mediaJobsByMessage, setMediaJobsByMessage] = useState<Record<string, SharedRun>>({});
+  const mediaJobsLoadSequenceRef = useRef<Record<string, number>>({});
+  const loadMediaJobs = useCallback((discId: string) => {
+    const sequence = (mediaJobsLoadSequenceRef.current[discId] ?? 0) + 1;
+    mediaJobsLoadSequenceRef.current[discId] = sequence;
+    // Runs are paged instead of capped: a durable transcript cannot silently
+    // turn its 201st-oldest media anchor back into a generic user message.
+    const listAll = async () => {
+      const runs: SharedRun[] = [];
+      const pageSize = 200;
+      for (let offset = 0; ; offset += pageSize) {
+        const page = await runsApi.list({
+          discussionId: discId,
+          kind: 'media',
+          limit: pageSize,
+          offset,
+        });
+        runs.push(...page);
+        if (page.length < pageSize) return runs;
+      }
+    };
+    void listAll()
+      .then(runs => {
+        if (
+          activeDiscussionIdRef.current !== discId
+          || mediaJobsLoadSequenceRef.current[discId] !== sequence
+        ) return;
+        const map: Record<string, SharedRun> = {};
+        for (const run of runs) {
+          const messageId = (run.result as { message_id?: string } | null)?.message_id;
+          // The API is newest-first. Keep the first run deterministically if a
+          // legacy database contains several jobs on one anchor.
+          if (messageId && !map[messageId]) map[messageId] = run;
+        }
+        setMediaJobsByMessage(map);
+      })
+      .catch(() => { /* each card self-hydrates via its own runId subscription */ });
+  }, []);
+  const openMediaAsset = useCallback((assetId: string) => {
+    setShowGitPanel(false);
+    setShowTerminalPanel(false);
+    setShowPlanPanel(false);
+    setShowSettingsPanel(false);
+    setShowAssetsPanel(true);
+    setAssetOpenRequest(current => ({ assetId, nonce: (current?.nonce ?? 0) + 1 }));
+  }, []);
+  useEffect(() => {
+    if (!showAssetsPanel) setAssetOpenRequest(null);
+  }, [showAssetsPanel]);
+  const mediaJobsRelistTimer = useRef<{ id: number; discId: string } | null>(null);
+  const scheduleMediaJobsRelist = useCallback((discId: string) => {
+    if (mediaJobsRelistTimer.current?.discId === discId) return;
+    if (mediaJobsRelistTimer.current) window.clearTimeout(mediaJobsRelistTimer.current.id);
+    const id = window.setTimeout(() => {
+      mediaJobsRelistTimer.current = null;
+      loadMediaJobs(discId);
+    }, MEDIA_JOBS_RELIST_DEBOUNCE_MS);
+    mediaJobsRelistTimer.current = { id, discId };
+  }, [loadMediaJobs]);
+  useEffect(() => () => {
+    if (mediaJobsRelistTimer.current) window.clearTimeout(mediaJobsRelistTimer.current.id);
   }, []);
   const [contactsList, setContactsList] = useState<Contact[]>([]);
   const [contactsOnline, setContactsOnline] = useState<Record<string, boolean>>({});
@@ -1333,6 +1411,16 @@ export function DiscussionsPage({
     // scoped subscription).
     if (msg.type === 'shared_run_updated') {
       setAttachedRunsEvent(prev => ({ runId: msg.run_id, seq: (prev?.seq ?? 0) + 1 }));
+      // A brand-new media job (not yet in the by-message map) needs a relist
+      // so its placeholder appears; a known one's own RunStatusCard
+      // self-hydrates via its own scoped subscription.
+      if (activeDiscussionId) {
+        scheduleMediaJobsRelist(activeDiscussionId);
+        // The launch may have come from MCP, the HTTP API, or another open
+        // client. Only the local form callback already knows its new anchor;
+        // reloading here makes every accepted launch materialize live.
+        reloadDiscussion(activeDiscussionId);
+      }
     }
     if (msg.type === 'presence') {
       const contact = contactsList.find(c => c.invite_code === msg.from_invite_code);
@@ -1505,6 +1593,7 @@ export function DiscussionsPage({
     refetchBatchSummaries,
     refetchDiscussions,
     reloadDiscussion,
+    scheduleMediaJobsRelist,
     setQueuedMap,
     setSendingMap,
     t,
@@ -2703,6 +2792,17 @@ export function DiscussionsPage({
       loadContextFiles(activeDiscussionId);
     }
   }, [activeDiscussionId, loadContextFiles]);
+
+  // Same rehydration guarantee for the inline media placeholders: reopening a
+  // discussion (or switching to it) must show pending/failed jobs exactly as
+  // they were, without waiting for a live event.
+  useEffect(() => {
+    if (activeDiscussionId) {
+      loadMediaJobs(activeDiscussionId);
+    } else {
+      setMediaJobsByMessage({});
+    }
+  }, [activeDiscussionId, loadMediaJobs]);
 
   const handleUploadFiles = useCallback(async (files: File[]) => {
     if (!activeDiscussionId) return;
@@ -4034,6 +4134,23 @@ export function DiscussionsPage({
                     );
                   }
                   const pending = renderPendingAfter([msg.id]);
+                  const mediaRun = mediaJobsByMessage[msg.id];
+                  const isDedicatedMediaAnchor = mediaRun
+                    && msg.source_msg_id === `kronn-media-anchor:${mediaRun.id}`;
+                  if (isDedicatedMediaAnchor) {
+                    return (
+                      <Fragment key={msg.id}>
+                        {separator}
+                        <InlineMediaJob
+                          messageId={msg.id}
+                          prompt={msg.content}
+                          run={mediaRun}
+                          onOpenAsset={openMediaAsset}
+                        />
+                        {pending}
+                      </Fragment>
+                    );
+                  }
                   return (
                     <Fragment key={msg.id}>
                       {separator}
@@ -4992,6 +5109,18 @@ export function DiscussionsPage({
                 files={activeContextFiles}
                 connections={externalConnections}
                 onClose={() => setShowAssetsPanel(false)}
+                onMediaLaunched={(jobId) => {
+                  const launchedDiscussionId = activeDiscussion.id;
+                  void runsApi.get(jobId).then(run => {
+                    if (activeDiscussionIdRef.current !== launchedDiscussionId) return;
+                    const messageId = (run.result as { message_id?: string } | null)?.message_id;
+                    if (messageId) {
+                      setMediaJobsByMessage(current => ({ ...current, [messageId]: run }));
+                    }
+                  }).catch(() => { /* the scheduled relist remains authoritative */ });
+                  reloadDiscussion(activeDiscussion.id);
+                }}
+                openAssetRequest={assetOpenRequest}
                 onNavigateMessage={(messageId) => {
                   setShowAssetsPanel(false);
                   setStickToBottom(false);

@@ -90,11 +90,17 @@ it silently.
 ## Where the asset lands
 
 The asset is downloaded server-side and stored as a context file, so no signed
-provider URL is ever handed to a browser. It is pinned in the same transaction
-to the message that asked for it (`media_jobs.message_id`, resolved at request
-time). Leaving it at `message_id IS NULL` would mean "uploaded, not sent yet",
-and the next human message would claim the generated video as its own
-attachment.
+provider URL is ever handed to a browser. Each launch in an existing discussion
+creates its own durable media anchor message. A caller-provided `message_id` is
+a causal source (`reply_to_message_id`), not an anchor to reuse: concurrent
+generations started from one prompt therefore keep distinct transcript
+positions and run identities.
+
+The anchor is rendered as one media bubble whose state changes in place from
+pending/running to success or failure. On success, its action opens the
+canonical Assets panel and selects that exact persisted asset in the media
+viewer. The Assets entry remains available when a discussion has no file yet,
+because it is also the entry point for the first generation.
 
 Completion emits `ContextFilesChanged`, so an open discussion shows the asset
 without a reload.

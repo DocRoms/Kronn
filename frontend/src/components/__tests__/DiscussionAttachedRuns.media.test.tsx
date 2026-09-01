@@ -1,11 +1,12 @@
 /**
- * KT-540 — the in-discussion progress placeholder.
+ * KT-549 — media runs left this panel.
  *
- * There is deliberately no second live system: a media job publishes a shared
- * run the moment it is QUEUED, and this panel already lists a discussion's runs
- * without filtering by kind. So the placeholder is the shared card, and what
- * needs proving is that a media run really reaches it — and that it says
- * "queued" rather than pretending to measure progress nobody measured.
+ * KT-540 first showed a media generation here (no kind filter, since nothing
+ * excluded it). KT-549 gave every launch its own anchor message and a live
+ * placeholder rendered inline in the transcript at that exact position
+ * (`InlineMediaJob`) — so a media run showing up here TOO would duplicate the
+ * same status in two places on screen. This panel now filters it out
+ * client-side; other kinds are unaffected.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup, waitFor } from '@testing-library/react';
@@ -71,44 +72,34 @@ afterEach(() => {
 });
 
 describe('DiscussionAttachedRuns — media', () => {
-  it('lists a queued media generation without any kind filter', async () => {
+  it('excludes a queued media generation: it has its own inline placeholder now', async () => {
     runsList.mockResolvedValue([mediaRun()]);
     render(<DiscussionAttachedRuns discussionId="disc-1" />);
 
     await waitFor(() => expect(runsList).toHaveBeenCalled());
-    // The panel must not ask for a subset: media appears because nothing
-    // excludes it, which is why no second live system was needed.
+    // Still no server-side kind filter — the exclusion happens client-side so
+    // the same list endpoint keeps serving every other consumer unfiltered.
     const params = runsList.mock.calls[0][0] as Record<string, unknown>;
     expect(params.kind).toBeUndefined();
     expect(params.discussionId).toBe('disc-1');
 
-    await waitFor(() => expect(screen.getByTestId('run-status-card')).toBeTruthy());
-    expect(screen.getByTestId('run-status-card').getAttribute('data-kind')).toBe('media');
+    // Nothing to show: a media-only result renders no card and no panel.
+    expect(screen.queryByTestId('run-status-card')).toBeNull();
+    expect(screen.queryByTestId('disc-attached-runs')).toBeNull();
   });
 
-  it('shows a queued generation as queued, not as measured progress', async () => {
-    runsList.mockResolvedValue([mediaRun()]);
-    render(<DiscussionAttachedRuns discussionId="disc-1" />);
-    await waitFor(() => expect(screen.getByTestId('run-status-card')).toBeTruthy());
-
-    expect(screen.getByTestId('run-status-card').getAttribute('data-status')).toBe('queued');
-    // A ~100 s generation must be visible while it waits, but nothing may
-    // pretend to know how far along it is.
-    expect(screen.queryByRole('progressbar')).toBeNull();
-  });
-
-  it('keeps media alongside other kinds in the same panel', async () => {
+  it('keeps other kinds while excluding media from the same panel', async () => {
     runsList.mockResolvedValue([
       mediaRun(),
       mediaRun({ id: 'wf-1', kind: 'workflow', status: 'running', result: null }),
     ]);
     render(<DiscussionAttachedRuns discussionId="disc-1" />);
 
-    await waitFor(() => expect(screen.getAllByTestId('run-status-card')).toHaveLength(2));
+    await waitFor(() => expect(screen.getAllByTestId('run-status-card')).toHaveLength(1));
     const kinds = screen
       .getAllByTestId('run-status-card')
       .map(card => card.getAttribute('data-kind'));
-    expect(kinds).toContain('media');
+    expect(kinds).not.toContain('media');
     expect(kinds).toContain('workflow');
   });
 });

@@ -136,13 +136,14 @@ pub fn list(
     project_id: Option<&str>,
     discussion_id: Option<&str>,
     limit: u32,
+    offset: u32,
 ) -> Result<Vec<SharedRun>> {
     let mut statement = conn.prepare(
         "SELECT id,kind,source_id,project_id,discussion_id,status,started_at,finished_at,duration_ms,result_json,diagnostic,created_at,updated_at
          FROM shared_runs
          WHERE (?1 IS NULL OR kind=?1) AND (?2 IS NULL OR source_id=?2)
            AND (?3 IS NULL OR project_id=?3) AND (?4 IS NULL OR discussion_id=?4)
-         ORDER BY created_at DESC LIMIT ?5",
+         ORDER BY created_at DESC LIMIT ?5 OFFSET ?6",
     )?;
     let rows = statement.query_map(
         params![
@@ -150,7 +151,8 @@ pub fn list(
             source_id,
             project_id,
             discussion_id,
-            limit.min(200)
+            limit.min(200),
+            offset,
         ],
         row,
     )?;

@@ -3784,24 +3784,6 @@ pub fn anchor_context_file_to_message(
     )
 }
 
-/// Id of the newest message of a discussion, in display order.
-///
-/// Used to anchor a generated asset to the turn that asked for it when the
-/// caller does not name one: read at request time, never at completion, so a
-/// message the human writes during the generation cannot capture the asset.
-pub fn latest_message_id(
-    conn: &Connection,
-    discussion_id: &str,
-) -> rusqlite::Result<Option<String>> {
-    conn.query_row(
-        "SELECT id FROM messages WHERE discussion_id = ?1 \
-         ORDER BY sort_order DESC, timestamp DESC LIMIT 1",
-        rusqlite::params![discussion_id],
-        |row| row.get(0),
-    )
-    .optional()
-}
-
 pub fn link_pending_context_files_to_message(
     conn: &Connection,
     discussion_id: &str,

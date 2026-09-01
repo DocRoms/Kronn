@@ -29,6 +29,8 @@ export function DiscussionAssetsPanel({
   onNavigateMessage,
   t,
   connections = [],
+  onMediaLaunched,
+  openAssetRequest,
 }: {
   discussionId: string;
   files: ContextFile[];
@@ -38,6 +40,12 @@ export function DiscussionAssetsPanel({
   /// External API connections, so a generation can be launched from the tab
   /// that will hold its result. Empty hides the launcher entirely.
   connections?: ExternalApiConnectionView[];
+  /// Fired once the backend accepted a job, so the discussion can reveal the
+  /// fresh anchor message the inline placeholder renders at.
+  onMediaLaunched?: (jobId: string, messageId: string) => void;
+  /** One-shot request from a transcript media bubble. The nonce lets the same
+   * asset be deliberately opened again after the viewer was closed. */
+  openAssetRequest?: { assetId: string; nonce: number } | null;
 }) {
   const [query, setQuery] = useState('');
   const [filter, setFilter] = useState<AssetFilter>('all');
@@ -52,6 +60,15 @@ export function DiscussionAssetsPanel({
   }, [discussionId]);
 
   useEffect(() => setVisibleCount(PAGE_SIZE), [query, filter]);
+
+  useEffect(() => {
+    if (!openAssetRequest) return;
+    setQuery('');
+    setFilter('all');
+    const ordered = [...files].sort((left, right) => right.created_at.localeCompare(left.created_at));
+    const index = ordered.findIndex(file => file.id === openAssetRequest.assetId);
+    if (index >= 0) setVisibleCount(Math.max(PAGE_SIZE, index + 1));
+  }, [files, openAssetRequest]);
 
   const counts = useMemo(() => ({
     all: files.length,
@@ -141,6 +158,7 @@ export function DiscussionAssetsPanel({
             discussionId={discussionId}
             connections={connections}
             t={t}
+            onLaunched={onMediaLaunched}
           />
         )}
       </div>
@@ -185,6 +203,7 @@ export function DiscussionAssetsPanel({
               variant="library"
               onNavigateMessage={onNavigateMessage}
               carouselScope={carouselScope}
+              openRequest={openAssetRequest}
             />
             {visibleCount < filteredFiles.length && (
               <button

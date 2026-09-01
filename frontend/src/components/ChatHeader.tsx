@@ -541,10 +541,11 @@ export function ChatHeader({
             <Search size={13} />
           </button>
         )}
-        {onToggleAssetsPanel && assetCount > 0 && (
+        {onToggleAssetsPanel && (
           <button
             type="button"
             className="disc-icon-btn disc-assets-header-btn"
+            data-testid="discussion-assets-toggle"
             data-active={showAssetsPanel}
             onClick={onToggleAssetsPanel}
             title={t('disc.assets.open', assetCount)}

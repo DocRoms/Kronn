@@ -496,16 +496,31 @@ pub async fn tick(state: &crate::AppState, client: &reqwest::Client) -> Result<(
         .with_read_conn(move |conn| crate::db::media_jobs::due(conn, now, BATCH))
         .await?;
 
+    // Claimed first and sequentially: `claim` is the single atomic
+    // compare-and-swap that stops two workers billing the same generation
+    // twice, and it is a fast local UPDATE — nothing here waits on a
+    // provider.
+    let mut claimed_jobs = Vec::new();
     for job in due {
         let id = job.id.clone();
         let claimed = state
             .db
             .with_conn(move |conn| crate::db::media_jobs::claim(conn, &id, now))
             .await?;
-        if !claimed {
-            // Another worker took it; never run a billed generation twice.
-            continue;
+        if claimed {
+            claimed_jobs.push(job);
         }
+        // Not claimed: another worker took it first; never run a billed
+        // generation twice.
+    }
+
+    // Advanced CONCURRENTLY: a slow video submission must not block two image
+    // jobs claimed in the same sweep from completing (KT-549). Bounded by
+    // construction — `due()` never returns more than `BATCH` rows — so no
+    // extra semaphore is needed. DB writes inside each advance still
+    // serialize on the single connection mutex; only the provider I/O
+    // actually overlaps, which is the point.
+    let advances = claimed_jobs.into_iter().map(|job| async move {
         let outcome = advance_claimed(state, client, &job, now).await;
         if let Err(failure) = &outcome {
             settle_failed_advance(&state.db, &job, failure, now).await?;
@@ -517,6 +532,10 @@ pub async fn tick(state: &crate::AppState, client: &reqwest::Client) -> Result<(
         if let Err(e) = crate::api::shared_runs::publish_media_job(state, &job.id).await {
             tracing::warn!(job = %job.id, error = %e, "media run publication failed");
         }
+        Ok::<(), anyhow::Error>(())
+    });
+    for result in futures::future::join_all(advances).await {
+        result?;
     }
     Ok(())
 }

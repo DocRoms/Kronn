@@ -3426,6 +3426,7 @@ button.disc-contact-open {
 
 .disc-msg-row[data-role="agent"],
 .disc-msg-row[data-role="system"],
+.disc-msg-row[data-role="media"],
 .disc-msg-row[data-role="orchestrator"] {
   justify-content: flex-start;
 }
@@ -3545,6 +3546,26 @@ button.disc-contact-open {
   );
   box-shadow: var(--kr-shadow-sm);
 }
+
+.disc-msg-bubble[data-role="media"] {
+  width: min(88%, 90ch);
+  border: 1px solid rgba(var(--kr-accent-rgb), 0.24);
+  border-left: 3px solid var(--kr-accent);
+  background: linear-gradient(135deg, rgba(var(--kr-accent-rgb), 0.08), var(--kr-bg-subtle));
+  box-shadow: var(--kr-shadow-sm);
+}
+
+.disc-media-msg-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  margin-bottom: 8px;
+  color: var(--kr-text-secondary);
+  font-size: var(--kr-fs-sm);
+}
+
+.disc-media-msg-header svg { flex: 0 0 auto; margin-top: 2px; color: var(--kr-accent); }
+.disc-media-msg-open { margin-top: 8px; }
 
 .disc-msg-bubble-full {
   width: 100%;

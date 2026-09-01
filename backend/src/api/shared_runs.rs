@@ -16,6 +16,8 @@ pub struct ListRunsQuery {
     pub discussion_id: Option<String>,
     #[serde(default = "default_limit")]
     pub limit: u32,
+    #[serde(default)]
+    pub offset: u32,
 }
 fn default_limit() -> u32 {
     50
@@ -112,6 +114,7 @@ pub async fn list(
                 query.project_id.as_deref(),
                 query.discussion_id.as_deref(),
                 query.limit,
+                query.offset,
             )
         })
         .await;

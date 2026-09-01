@@ -219,6 +219,7 @@ export function MessageAttachments({
   variant = 'message',
   onNavigateMessage,
   carouselScope,
+  openRequest,
 }: {
   files: ContextFile[];
   discussionId: string;
@@ -230,6 +231,8 @@ export function MessageAttachments({
   /// under one message reaches every image AND clip of the discussion instead
   /// of stopping at that message's own attachments.
   carouselScope?: ContextFile[];
+  /** Controlled one-shot open request from outside the attachment grid. */
+  openRequest?: { assetId: string; nonce: number } | null;
 }) {
   const imageFiles = useMemo(() => files.filter(isImageFile), [files]);
   // Membership is decided on METADATA, not on a loaded blob: filtering on
@@ -252,6 +255,7 @@ export function MessageAttachments({
   const mountedRef = useRef(false);
   const discussionRef = useRef(discussionId);
   const cleanupSequenceRef = useRef(0);
+  const handledOpenNonceRef = useRef<number | null>(null);
 
   const releaseMediaUrls = useCallback(() => {
     generationRef.current += 1;
@@ -280,6 +284,7 @@ export function MessageAttachments({
       setUrls({});
       setFailedIds(new Set());
       setSelectedId(null);
+      handledOpenNonceRef.current = null;
     }
     mountedRef.current = true;
     cleanupSequenceRef.current += 1;
@@ -327,6 +332,13 @@ export function MessageAttachments({
     ? carouselFiles.findIndex(file => file.id === selectedId)
     : -1;
   const selectedFile = selectedIndex >= 0 ? carouselFiles[selectedIndex] : null;
+
+  useEffect(() => {
+    if (!openRequest || handledOpenNonceRef.current === openRequest.nonce) return;
+    if (!carouselFiles.some(file => file.id === openRequest.assetId)) return;
+    handledOpenNonceRef.current = openRequest.nonce;
+    setSelectedId(openRequest.assetId);
+  }, [carouselFiles, openRequest]);
 
   // A clip weighs megabytes, so its bytes are fetched only once it is the one
   // being looked at — never for the whole carousel.
@@ -386,6 +398,7 @@ export function MessageAttachments({
           className="disc-image-lightbox"
           role="dialog"
           aria-modal="true"
+          data-asset-id={selectedFile.id}
           aria-label={t('disc.attachmentGallery')}
           onClick={() => setSelectedId(null)}
         >

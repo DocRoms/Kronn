@@ -185,10 +185,11 @@ import {
   externalApi as externalApiConnections,
   planning as planningApi,
   projects as projectsApi,
+  runsApi,
 } from '../../lib/api';
 import { DiscussionsPage } from '../DiscussionsPage';
 import { findRenderedTextRanges } from '../../lib/discussionMessageSearch';
-import type { AgentDetection, AgentType, AgentsConfig, AiAuditStatus, ContextFile, Discussion, Project } from '../../types/generated';
+import type { AgentDetection, AgentType, AgentsConfig, AiAuditStatus, ContextFile, Discussion, Project, SharedRun } from '../../types/generated';
 import type { ToastFn } from '../../hooks/useToast';
 
 const noop = () => {};
@@ -202,6 +203,8 @@ beforeEach(() => {
   vi.mocked(discussionsApi.listContextFiles).mockResolvedValue([]);
   vi.mocked(discussionsApi.deleteMessage).mockReset();
   vi.mocked(discussionsApi.deleteMessage).mockResolvedValue(undefined);
+  vi.mocked(runsApi.list).mockReset();
+  vi.mocked(runsApi.list).mockResolvedValue([]);
   vi.mocked(projectsApi.validateAudit).mockReset();
   vi.mocked(projectsApi.validateAudit).mockResolvedValue('Validated');
   sessionStorage.clear();
@@ -1211,7 +1214,9 @@ describe('DiscussionsPage', () => {
     );
 
     await waitFor(() => expect(discussionsApi.listContextFiles).toHaveBeenCalledWith('d1'));
-    expect(screen.queryByRole('button', { name: /Parcourir tous les assets/ })).toBeNull();
+    // The Assets entry is also where a first media generation starts, so an
+    // empty discussion must keep it discoverable instead of hiding it.
+    expect(screen.getByRole('button', { name: /Parcourir tous les assets.*0/ })).toBeVisible();
     fireEvent.click(screen.getByRole('button', { name: /Discussion d2 —/ }));
     await waitFor(() => expect(discussionsApi.listContextFiles).toHaveBeenCalledWith('d2'));
     fireEvent.click(screen.getByRole('button', { name: /Discussion d1 —/ }));
@@ -1222,6 +1227,72 @@ describe('DiscussionsPage', () => {
     });
     fireEvent.click(await screen.findByRole('button', { name: /Parcourir tous les assets.*1/ }));
     expect((await screen.findAllByText('late-report.csv')).length).toBeGreaterThan(0);
+  });
+
+  it('ignores a late media relist from the discussion that was just left', async () => {
+    const first = {
+      ...makeListDiscussion('d-media-a', 1),
+      messages: [
+        { id: 'm-media-a', role: 'User', channel: 'main', content: 'Ancien média', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null, source_msg_id: 'kronn-media-anchor:run-a' },
+      ],
+    } satisfies Discussion;
+    const second = {
+      ...makeListDiscussion('d-media-b', 1),
+      messages: [
+        { id: 'm-media-b', role: 'User', channel: 'main', content: 'Média visible', agent_type: null, timestamp: '2026-01-01T00:00:01Z', tokens_used: 0, auth_mode: null, source_msg_id: 'kronn-media-anchor:run-b' },
+      ],
+    } satisfies Discussion;
+    vi.mocked(discussionsApi.get).mockImplementation(async id => id === first.id ? first : second);
+
+    let resolveFirst!: (runs: SharedRun[]) => void;
+    let resolveSecond!: (runs: SharedRun[]) => void;
+    const firstRuns = new Promise<SharedRun[]>(resolve => { resolveFirst = resolve; });
+    const secondRuns = new Promise<SharedRun[]>(resolve => { resolveSecond = resolve; });
+    vi.mocked(runsApi.list).mockImplementation(async filters => {
+      if (filters?.kind !== 'media') return [];
+      return filters.discussionId === first.id ? firstRuns : secondRuns;
+    });
+    const mediaRun = (id: string, discussionId: string, messageId: string): SharedRun => ({
+      id,
+      kind: 'media',
+      source_id: 'connection',
+      project_id: null,
+      discussion_id: discussionId,
+      status: 'running',
+      started_at: null,
+      finished_at: null,
+      duration_ms: null,
+      result: { message_id: messageId, modality: 'image', model: 'stub/image' },
+      diagnostic: null,
+      created_at: '2026-01-01T00:00:02Z',
+      updated_at: '2026-01-01T00:00:02Z',
+    });
+
+    await wrap(
+      <DiscussionsPage
+        projects={[]}
+        agents={[]}
+        allDiscussions={[first, second]}
+        configLanguage="fr"
+        agentAccess={null}
+        refetchDiscussions={noop}
+        refetchProjects={noop}
+        onNavigate={noop}
+        toast={toastFn}
+        initialActiveDiscussionId={first.id}
+        {...liftedProps()}
+      />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: /Discussion d-media-b —/ }));
+    resolveSecond([mediaRun('run-b', second.id, 'm-media-b')]);
+    await waitFor(() => expect(document.querySelector('[data-media-run-id="run-b"]')).not.toBeNull());
+
+    // The abandoned A request resolves last. It must not erase B's live row.
+    resolveFirst([mediaRun('run-a', first.id, 'm-media-a')]);
+    await act(async () => { await firstRuns; });
+    expect(document.querySelector('[data-media-run-id="run-b"]')).not.toBeNull();
+    expect(document.querySelector('[data-media-run-id="run-a"]')).toBeNull();
   });
 
   it('opens the discussion asset inventory and jumps back to the source message', async () => {

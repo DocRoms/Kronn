@@ -19,6 +19,12 @@ const RELIST_DEBOUNCE_MS = 250;
  * automatically, through the same server model and card used everywhere
  * else — no discussion-specific rendering logic.
  *
+ * `media` runs are deliberately excluded (KT-549): each media launch gets its
+ * own anchor message, and its live placeholder renders inline in the
+ * transcript at that exact position (`InlineMediaJob`) rather than in this
+ * generic strip — showing both would duplicate the same status twice on
+ * screen.
+ *
  * `runEvent` is forwarded by the page's single `useWebSocket` subscription
  * on `shared_run_updated` — this component deliberately does not open its
  * own socket subscription (no duplicated live logic, DoD #2/#6). A known
@@ -36,7 +42,7 @@ export function DiscussionAttachedRuns({ discussionId, runEvent }: { discussionI
   const reload = useCallback(() => {
     runsApi
       .list({ discussionId, limit: 20 })
-      .then(setRuns)
+      .then(list => setRuns(list.filter(run => run.kind !== 'media')))
       .catch(() => {
         /* Transient list failure — individual cards still self-hydrate. */
       });

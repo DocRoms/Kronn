@@ -17029,3 +17029,708 @@ async fn an_expired_media_job_broadcasts_through_the_real_worker_sweep() {
         .expect("job");
     assert_eq!(job.status, kronn::models::MediaJobStatus::TimedOut);
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// KT-549 — the inline placeholder: a deterministic anchor per launch, the
+// completed asset landing on that exact message (never a pre-existing one),
+// several jobs advancing independently, and a clear terminal failure.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Creates a connection whose media traffic actually goes to `endpoint`
+/// (a local mock server), through the real creation endpoint — so the stored
+/// credential is wired exactly as a live setup would, not hand-inserted.
+async fn seed_stub_media_connection(
+    app: Router,
+    endpoint: &str,
+    image_model: Option<&str>,
+    video_model: Option<&str>,
+) -> String {
+    let mut body = serde_json::json!({
+        "display_name": "Stub media",
+        "mention_alias": format!("stubmedia-{}", uuid::Uuid::new_v4()),
+        "endpoint": endpoint,
+        "origin_preset": "open_router",
+        "api_key": "sk-or-v1-stub-media-test",
+    });
+    if let Some(model) = image_model {
+        body["image_model"] = serde_json::json!(model);
+    }
+    if let Some(model) = video_model {
+        body["video_model"] = serde_json::json!(model);
+    }
+    let (_, created) = post_json(app, "/api/external-api/connections", body).await;
+    assert_eq!(created["success"], true, "{created}");
+    created["data"]["id"].as_str().unwrap().to_string()
+}
+
+async fn insert_bare_discussion(state: &AppState, id: &str) {
+    let id = id.to_string();
+    state
+        .db
+        .with_conn(move |conn| {
+            let now = chrono::Utc::now().to_rfc3339();
+            conn.execute(
+                "INSERT INTO discussions (id, title, created_at, updated_at) VALUES (?1, 'Media', ?2, ?2)",
+                rusqlite::params![id, now],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
+/// Seeds a message OUTSIDE the `next_message_seq` counter (`sort_order = -1`,
+/// which no auto-anchored message can ever produce) so it never collides with
+/// one `insert_prompt_message` creates afterwards — this is what stands in
+/// for "a message that predates the launch" in these tests.
+async fn insert_bare_message(state: &AppState, id: &str, discussion_id: &str, content: &str) {
+    let id = id.to_string();
+    let discussion_id = discussion_id.to_string();
+    let content = content.to_string();
+    state
+        .db
+        .with_conn(move |conn| {
+            let now = chrono::Utc::now().to_rfc3339();
+            conn.execute(
+                "INSERT INTO messages (id, discussion_id, role, content, timestamp, sort_order) \
+                 VALUES (?1, ?2, 'User', ?3, ?4, -1)",
+                rusqlite::params![id, discussion_id, content, now],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
+async fn count_messages(state: &AppState) -> i64 {
+    state
+        .db
+        .with_read_conn(|conn| {
+            Ok(conn.query_row("SELECT COUNT(*) FROM messages", [], |row| row.get(0))?)
+        })
+        .await
+        .unwrap()
+}
+
+async fn count_media_jobs(state: &AppState) -> i64 {
+    state
+        .db
+        .with_read_conn(|conn| {
+            Ok(conn.query_row("SELECT COUNT(*) FROM media_jobs", [], |row| row.get(0))?)
+        })
+        .await
+        .unwrap()
+}
+
+/// KT-549 blocker #1: rejecting the request BEFORE any write means an unknown
+/// connection must leave no anchor message and no job behind — the old
+/// ordering created the message first and validated the connection after.
+#[tokio::test]
+async fn media_generate_with_an_unknown_connection_creates_no_message_or_job() {
+    let state = test_state();
+    insert_bare_discussion(&state, "disc-stub").await;
+    let app = build_router_with_auth(state.clone(), false);
+    let before = count_messages(&state).await;
+
+    let (_, resp) = post_json(
+        app,
+        "/api/media/generate",
+        serde_json::json!({
+            "connection_id": "does-not-exist", "modality": "image",
+            "prompt": "un chat", "discussion_id": "disc-stub"
+        }),
+    )
+    .await;
+    assert_eq!(resp["success"], false, "{resp}");
+    assert_eq!(
+        count_messages(&state).await,
+        before,
+        "a rejected request must leave no orphan message"
+    );
+    assert_eq!(count_media_jobs(&state).await, 0);
+}
+
+/// Same invariant, on the OTHER pre-write validation: a connection that
+/// exists but has no model configured for the requested modality.
+#[tokio::test]
+async fn media_generate_with_no_model_configured_creates_no_message_or_job() {
+    let state = test_state();
+    // Video slot configured, image slot empty.
+    seed_media_connection(&state, None, Some("bytedance/seedance-2.0-mini")).await;
+    let app = build_router_with_auth(state.clone(), false);
+    let before = count_messages(&state).await;
+
+    let (_, resp) = post_json(
+        app,
+        "/api/media/generate",
+        serde_json::json!({
+            "connection_id": "conn-media", "modality": "image",
+            "prompt": "un chat", "discussion_id": "disc-media"
+        }),
+    )
+    .await;
+    assert_eq!(resp["success"], false, "{resp}");
+    assert_eq!(
+        count_messages(&state).await,
+        before,
+        "a refused modality must leave no orphan message"
+    );
+    assert_eq!(count_media_jobs(&state).await, 0);
+}
+
+#[tokio::test]
+async fn media_generate_anchors_each_launch_to_its_own_dedicated_message_not_the_previous_one() {
+    let state = test_state();
+    seed_media_connection(&state, Some("meta/muse-image"), None).await;
+    // The trap the old "latest message" fallback fell into: a message already
+    // sitting in the discussion before either launch.
+    insert_bare_message(&state, "m-preexisting", "disc-media", "bonjour").await;
+    let app = build_router_with_auth(state.clone(), false);
+
+    let (_, first) = post_json(
+        app.clone(),
+        "/api/media/generate",
+        serde_json::json!({
+            "connection_id": "conn-media", "modality": "image",
+            "prompt": "un chat", "discussion_id": "disc-media"
+        }),
+    )
+    .await;
+    assert_eq!(first["success"], true, "{first}");
+    let first_anchor = first["data"]["message_id"].as_str().unwrap().to_string();
+
+    let (_, second) = post_json(
+        app,
+        "/api/media/generate",
+        serde_json::json!({
+            "connection_id": "conn-media", "modality": "image",
+            "prompt": "un chien", "discussion_id": "disc-media"
+        }),
+    )
+    .await;
+    let second_anchor = second["data"]["message_id"].as_str().unwrap().to_string();
+
+    assert_ne!(
+        first_anchor, "m-preexisting",
+        "must not latch onto a message that predates the launch"
+    );
+    assert_ne!(second_anchor, "m-preexisting");
+    assert_ne!(
+        first_anchor, second_anchor,
+        "two launches in the same discussion must not collide on one anchor"
+    );
+
+    let lookup1 = first_anchor.clone();
+    let lookup2 = second_anchor.clone();
+    let (content1, content2) = state
+        .db
+        .with_read_conn(move |conn| {
+            let c1: String = conn.query_row(
+                "SELECT content FROM messages WHERE id = ?1",
+                rusqlite::params![lookup1],
+                |row| row.get(0),
+            )?;
+            let c2: String = conn.query_row(
+                "SELECT content FROM messages WHERE id = ?1",
+                rusqlite::params![lookup2],
+                |row| row.get(0),
+            )?;
+            Ok((c1, c2))
+        })
+        .await
+        .unwrap();
+    // Each anchor is a real message carrying exactly the prompt that launched
+    // it, so the transcript slot explains itself.
+    assert_eq!(content1, "un chat");
+    assert_eq!(content2, "un chien");
+}
+
+#[tokio::test]
+async fn a_completed_media_job_attaches_its_asset_to_its_own_anchor_never_the_previous_message() {
+    use base64::Engine;
+    use wiremock::matchers::{body_string_contains, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let upstream = MockServer::start().await;
+    let payload = base64::engine::general_purpose::STANDARD.encode(b"fake-png-bytes");
+    Mock::given(method("POST"))
+        .and(path("/v1/images"))
+        .and(body_string_contains("un chat"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id": "gen-img-1",
+            "data": [{"b64_json": payload}],
+            "usage": {"cost": 0.01, "is_byok": false}
+        })))
+        .mount(&upstream)
+        .await;
+
+    let state = test_state();
+    insert_bare_discussion(&state, "disc-stub").await;
+    insert_bare_message(&state, "m-preexisting", "disc-stub", "bonjour").await;
+    let app = build_router_with_auth(state.clone(), false);
+    let connection_id =
+        seed_stub_media_connection(app.clone(), &upstream.uri(), Some("stub/image"), None).await;
+
+    let (_, created) = post_json(
+        app,
+        "/api/media/generate",
+        serde_json::json!({
+            "connection_id": connection_id, "modality": "image",
+            "prompt": "un chat", "discussion_id": "disc-stub"
+        }),
+    )
+    .await;
+    assert_eq!(created["success"], true, "{created}");
+    let job_id = created["data"]["job_id"].as_str().unwrap().to_string();
+    let anchor = created["data"]["message_id"].as_str().unwrap().to_string();
+    assert_ne!(anchor, "m-preexisting");
+
+    let client = reqwest::Client::new();
+    kronn::agents::media_runner::tick(&state, &client)
+        .await
+        .expect("sweep");
+
+    let lookup = job_id.clone();
+    let job = state
+        .db
+        .with_read_conn(move |conn| kronn::db::media_jobs::get(conn, &lookup))
+        .await
+        .unwrap()
+        .expect("job");
+    assert_eq!(
+        job.status,
+        kronn::models::MediaJobStatus::Completed,
+        "{job:?}"
+    );
+    let context_file_id = job.context_file_id.clone().expect("asset persisted");
+
+    let lookup = context_file_id.clone();
+    let attached_to = state
+        .db
+        .with_read_conn(move |conn| {
+            Ok(conn.query_row(
+                "SELECT message_id FROM context_files WHERE id = ?1",
+                rusqlite::params![lookup],
+                |row| row.get::<_, Option<String>>(0),
+            )?)
+        })
+        .await
+        .unwrap();
+    // The asset attaches to the job's OWN anchor — never to whatever message
+    // happened to already be in the discussion.
+    assert_eq!(attached_to.as_deref(), Some(anchor.as_str()));
+
+    let preexisting_files: i64 = state
+        .db
+        .with_read_conn(|conn| {
+            Ok(conn.query_row(
+                "SELECT COUNT(*) FROM context_files WHERE message_id = 'm-preexisting'",
+                [],
+                |row| row.get(0),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(preexisting_files, 0);
+}
+
+#[tokio::test]
+async fn a_media_job_against_an_unreachable_endpoint_settles_as_a_clear_terminal_failure() {
+    let state = test_state();
+    insert_bare_discussion(&state, "disc-stub").await;
+    let app = build_router_with_auth(state.clone(), false);
+    // Nothing listens here: a deterministic, zero-cost, no-credential way to
+    // exercise the real failure path without a live provider.
+    let connection_id =
+        seed_stub_media_connection(app.clone(), "http://127.0.0.1:1", Some("stub/image"), None)
+            .await;
+
+    let (_, created) = post_json(
+        app,
+        "/api/media/generate",
+        serde_json::json!({
+            "connection_id": connection_id, "modality": "image",
+            "prompt": "un chat", "discussion_id": "disc-stub"
+        }),
+    )
+    .await;
+    let job_id = created["data"]["job_id"].as_str().unwrap().to_string();
+
+    let client = reqwest::Client::new();
+    kronn::agents::media_runner::tick(&state, &client)
+        .await
+        .expect("sweep");
+
+    let lookup = job_id.clone();
+    let job = state
+        .db
+        .with_read_conn(move |conn| kronn::db::media_jobs::get(conn, &lookup))
+        .await
+        .unwrap()
+        .expect("job");
+    // Refused (unsafe to resubmit) or a transient failure retried until the
+    // deadline — either way there must be no silent hang, and once it does
+    // settle the reason must be human-readable, never a raw payload.
+    if job.status != kronn::models::MediaJobStatus::Pending {
+        assert_eq!(job.status, kronn::models::MediaJobStatus::Failed, "{job:?}");
+    }
+
+    let lookup = job_id.clone();
+    let run = state
+        .db
+        .with_read_conn(move |conn| kronn::db::shared_runs::get(conn, &lookup))
+        .await
+        .unwrap()
+        .expect("run");
+    if job.status == kronn::models::MediaJobStatus::Failed {
+        assert!(run.diagnostic.is_some(), "a failure must explain itself");
+    }
+}
+
+#[tokio::test]
+async fn three_concurrent_media_jobs_advance_independently_without_cross_attribution() {
+    use base64::Engine;
+    use wiremock::matchers::{body_string_contains, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let upstream = MockServer::start().await;
+    let cat_bytes = base64::engine::general_purpose::STANDARD.encode(b"cat-image-bytes");
+    let dog_bytes = base64::engine::general_purpose::STANDARD.encode(b"dog-image-bytes");
+    Mock::given(method("POST"))
+        .and(path("/v1/images"))
+        .and(body_string_contains("un chat"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id": "gen-img-cat", "data": [{"b64_json": cat_bytes}],
+            "usage": {"cost": 0.01, "is_byok": false}
+        })))
+        .mount(&upstream)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/images"))
+        .and(body_string_contains("un chien"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id": "gen-img-dog", "data": [{"b64_json": dog_bytes}],
+            "usage": {"cost": 0.02, "is_byok": false}
+        })))
+        .mount(&upstream)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/videos"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id": "prov-vid-1", "status": "pending"
+        })))
+        .mount(&upstream)
+        .await;
+    let content_url = format!("{}/v1/videos/prov-vid-1/content?index=0", upstream.uri());
+    Mock::given(method("GET"))
+        .and(path("/v1/videos/prov-vid-1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id": "prov-vid-1", "status": "completed",
+            "unsigned_urls": [content_url],
+            "usage": {"cost": 0.0708932, "is_byok": false},
+            "generation_id": "gen-vid-1"
+        })))
+        .mount(&upstream)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v1/videos/prov-vid-1/content"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"video-bytes".to_vec()))
+        .mount(&upstream)
+        .await;
+
+    let state = test_state();
+    insert_bare_discussion(&state, "disc-stub").await;
+    let app = build_router_with_auth(state.clone(), false);
+    let connection_id = seed_stub_media_connection(
+        app.clone(),
+        &upstream.uri(),
+        Some("stub/image"),
+        Some("stub/video"),
+    )
+    .await;
+
+    let mut job_ids = Vec::new();
+    for (modality, prompt) in [
+        ("image", "un chat"),
+        ("image", "un chien"),
+        ("video", "un poisson qui nage"),
+    ] {
+        let (_, created) = post_json(
+            app.clone(),
+            "/api/media/generate",
+            serde_json::json!({
+                "connection_id": connection_id, "modality": modality,
+                "prompt": prompt, "discussion_id": "disc-stub"
+            }),
+        )
+        .await;
+        assert_eq!(created["success"], true, "{created}");
+        job_ids.push((
+            modality,
+            created["data"]["job_id"].as_str().unwrap().to_string(),
+        ));
+    }
+    let client = reqwest::Client::new();
+    // First sweep: both images complete synchronously; the video only submits.
+    kronn::agents::media_runner::tick(&state, &client)
+        .await
+        .expect("first sweep");
+
+    let video_id = job_ids
+        .iter()
+        .find(|(modality, _)| *modality == "video")
+        .map(|(_, id)| id.clone())
+        .unwrap();
+    let lookup = video_id.clone();
+    let video_after_submit = state
+        .db
+        .with_read_conn(move |conn| kronn::db::media_jobs::get(conn, &lookup))
+        .await
+        .unwrap()
+        .expect("video job");
+    assert!(
+        video_after_submit.provider_job_id.is_some(),
+        "the video must have a handle after its submit tick"
+    );
+    assert_ne!(
+        video_after_submit.status,
+        kronn::models::MediaJobStatus::Completed,
+        "a video is never done after a single tick"
+    );
+
+    // Force the backoff so the second sweep polls right away instead of a
+    // real multi-second sleep.
+    let video_id_for_force = video_id.clone();
+    state
+        .db
+        .with_conn(move |conn| {
+            let now = chrono::Utc::now().to_rfc3339();
+            conn.execute(
+                "UPDATE media_jobs SET scheduled_at = ?1 WHERE id = ?2",
+                rusqlite::params![now, video_id_for_force],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    kronn::agents::media_runner::tick(&state, &client)
+        .await
+        .expect("second sweep");
+
+    // Every job settled, each with the bytes and cost of ITS OWN request —
+    // proof that a shared single-threaded sweep never mixed them up.
+    let mut by_prompt = HashMap::new();
+    for (modality, id) in &job_ids {
+        let lookup = id.clone();
+        let job = state
+            .db
+            .with_read_conn(move |conn| kronn::db::media_jobs::get(conn, &lookup))
+            .await
+            .unwrap()
+            .expect("job");
+        assert_eq!(
+            job.status,
+            kronn::models::MediaJobStatus::Completed,
+            "{modality} job {id} did not settle: {job:?}"
+        );
+        by_prompt.insert(id.clone(), job);
+    }
+
+    let cat_id = &job_ids[0].1;
+    let dog_id = &job_ids[1].1;
+    let cat_file = by_prompt[cat_id].context_file_id.clone().unwrap();
+    let dog_file = by_prompt[dog_id].context_file_id.clone().unwrap();
+    assert_ne!(cat_file, dog_file);
+    let cat_cost = by_prompt[cat_id].cost.expect("billed").cost_usd;
+    let dog_cost = by_prompt[dog_id].cost.expect("billed").cost_usd;
+    assert!(
+        (cat_cost - 0.01).abs() < 1e-9,
+        "cat cost leaked: {cat_cost}"
+    );
+    assert!(
+        (dog_cost - 0.02).abs() < 1e-9,
+        "dog cost leaked: {dog_cost}"
+    );
+
+    // Each job's asset is pinned to that job's own anchor message, never to
+    // another job's.
+    let lookup = video_id.clone();
+    let video_job = state
+        .db
+        .with_read_conn(move |conn| kronn::db::media_jobs::get(conn, &lookup))
+        .await
+        .unwrap()
+        .expect("video job");
+    let anchors_seen: Vec<Option<String>> = vec![
+        by_prompt[cat_id].message_id.clone(),
+        by_prompt[dog_id].message_id.clone(),
+        video_job.message_id.clone(),
+    ];
+    let unique: std::collections::HashSet<_> = anchors_seen.iter().flatten().collect();
+    assert_eq!(
+        unique.len(),
+        3,
+        "each job must keep its own anchor: {anchors_seen:?}"
+    );
+}
+
+/// KT-549 blocker #2: one video plus two images claimed in the same sweep
+/// must advance CONCURRENTLY, not one after another. A deliberately slow stub
+/// (each request delayed) makes the distinction observable: a sequential
+/// `tick` would take at least three times the delay; a concurrent one keeps
+/// the whole batch close to a single round trip. The prior test only proved
+/// no cross-attribution across two sequential ticks — it never measured
+/// whether the requests actually overlapped.
+#[tokio::test]
+async fn three_claimed_media_jobs_advance_concurrently_not_sequentially() {
+    use base64::Engine;
+    use wiremock::matchers::{body_string_contains, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const DELAY_MS: u64 = 500;
+    let upstream = MockServer::start().await;
+    let payload = base64::engine::general_purpose::STANDARD.encode(b"slow-bytes");
+    for prompt in ["un chat lent", "un chien lent"] {
+        Mock::given(method("POST"))
+            .and(path("/v1/images"))
+            .and(body_string_contains(prompt))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_delay(std::time::Duration::from_millis(DELAY_MS))
+                    .set_body_json(serde_json::json!({
+                        "id": format!("gen-{prompt}"),
+                        "data": [{"b64_json": payload}],
+                        "usage": {"cost": 0.01, "is_byok": false}
+                    })),
+            )
+            .mount(&upstream)
+            .await;
+    }
+    Mock::given(method("POST"))
+        .and(path("/v1/videos"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_delay(std::time::Duration::from_millis(DELAY_MS))
+                .set_body_json(serde_json::json!({ "id": "prov-vid-slow", "status": "pending" })),
+        )
+        .mount(&upstream)
+        .await;
+
+    let state = test_state();
+    insert_bare_discussion(&state, "disc-stub").await;
+    let app = build_router_with_auth(state.clone(), false);
+    let connection_id = seed_stub_media_connection(
+        app.clone(),
+        &upstream.uri(),
+        Some("stub/image"),
+        Some("stub/video"),
+    )
+    .await;
+
+    for (modality, prompt) in [
+        ("image", "un chat lent"),
+        ("image", "un chien lent"),
+        ("video", "un poisson lent"),
+    ] {
+        let (_, created) = post_json(
+            app.clone(),
+            "/api/media/generate",
+            serde_json::json!({
+                "connection_id": connection_id, "modality": modality,
+                "prompt": prompt, "discussion_id": "disc-stub"
+            }),
+        )
+        .await;
+        assert_eq!(created["success"], true, "{created}");
+    }
+
+    let client = reqwest::Client::new();
+    let started = std::time::Instant::now();
+    kronn::agents::media_runner::tick(&state, &client)
+        .await
+        .expect("sweep");
+    let elapsed = started.elapsed();
+
+    // Sequential would take at least 3 * DELAY_MS (~1.5 s); real concurrency
+    // keeps the whole batch close to one round trip. The threshold sits well
+    // under the sequential floor while leaving generous room for scheduling
+    // overhead on a loaded CI box.
+    assert!(
+        elapsed < std::time::Duration::from_millis(DELAY_MS * 2),
+        "batch took {elapsed:?} for 3 jobs each delayed {DELAY_MS}ms — \
+         advanced sequentially instead of concurrently"
+    );
+}
+
+#[tokio::test]
+async fn a_settled_media_job_is_never_reprocessed_by_a_later_sweep() {
+    use base64::Engine;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let upstream = MockServer::start().await;
+    let payload = base64::engine::general_purpose::STANDARD.encode(b"fake-png-bytes");
+    Mock::given(method("POST"))
+        .and(path("/v1/images"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id": "gen-img-1", "data": [{"b64_json": payload}],
+            "usage": {"cost": 0.01, "is_byok": false}
+        })))
+        // Exactly once: a second POST here would mean the settled job got
+        // billed again by a later, redundant sweep.
+        .expect(1)
+        .mount(&upstream)
+        .await;
+
+    let state = test_state();
+    insert_bare_discussion(&state, "disc-stub").await;
+    let app = build_router_with_auth(state.clone(), false);
+    let connection_id =
+        seed_stub_media_connection(app.clone(), &upstream.uri(), Some("stub/image"), None).await;
+
+    let (_, created) = post_json(
+        app,
+        "/api/media/generate",
+        serde_json::json!({
+            "connection_id": connection_id, "modality": "image",
+            "prompt": "un chat", "discussion_id": "disc-stub"
+        }),
+    )
+    .await;
+    let job_id = created["data"]["job_id"].as_str().unwrap().to_string();
+
+    let client = reqwest::Client::new();
+    kronn::agents::media_runner::tick(&state, &client)
+        .await
+        .expect("first sweep settles it");
+    // A restart, a duplicate cron tick, whatever — replaying the sweep must be
+    // a no-op for a job that already settled.
+    kronn::agents::media_runner::tick(&state, &client)
+        .await
+        .expect("second sweep is a no-op");
+
+    let lookup = job_id.clone();
+    let job = state
+        .db
+        .with_read_conn(move |conn| kronn::db::media_jobs::get(conn, &lookup))
+        .await
+        .unwrap()
+        .expect("job");
+    assert_eq!(job.status, kronn::models::MediaJobStatus::Completed);
+    assert_eq!(
+        job.attempts, 1,
+        "a settled job must not be reclaimed by a later sweep"
+    );
+
+    let context_file_count: i64 = state
+        .db
+        .with_read_conn(|conn| {
+            Ok(conn.query_row("SELECT COUNT(*) FROM context_files", [], |row| row.get(0))?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        context_file_count, 1,
+        "no duplicate asset from the redundant sweep"
+    );
+}

@@ -41,6 +41,8 @@ describe('MediaGenerateForm', () => {
       job_id: 'job-1',
       status: 'pending',
       model: 'bytedance/seedance-2.0-mini',
+      discussion_id: 'd-1',
+      message_id: 'msg-anchor-1',
     });
   });
 
@@ -73,7 +75,7 @@ describe('MediaGenerateForm', () => {
     // The slot decides the model: a caller-supplied one would let the UI bill
     // something the operator never configured.
     expect(body).not.toHaveProperty('model');
-    expect(onLaunched).toHaveBeenCalledWith('job-1');
+    expect(onLaunched).toHaveBeenCalledWith('job-1', 'msg-anchor-1');
     expect(
       await screen.findByText('disc.media.launched:bytedance/seedance-2.0-mini'),
     ).toBeInTheDocument();

@@ -5,7 +5,7 @@
 // modality follows from that choice. Asking for a modality first meant asking a
 // question the configuration already answers — and offering a modality nobody
 // had configured.
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Clapperboard, Image as ImageIcon, Loader2, Sparkles } from 'lucide-react';
 import { media } from '../lib/api';
 import type { ExternalApiConnectionView, MediaModality } from '../lib/api';
@@ -55,7 +55,10 @@ export function MediaGenerateForm({
   discussionId: string;
   connections: ExternalApiConnectionView[];
   t: T;
-  onLaunched?: (jobId: string) => void;
+  /** Fired once the backend accepted the job — after this, the form is
+   *  already reset and reusable, so the caller can rely on it purely as a
+   *  signal to reveal the new anchor message (not as a "busy" gate). */
+  onLaunched?: (jobId: string, messageId: string) => void;
 }) {
   const slots = useMemo(() => slotsOf(connections), [connections]);
   const [selectedKey, setSelectedKey] = useState<string>('');
@@ -67,6 +70,10 @@ export function MediaGenerateForm({
   const [error, setError] = useState<string | null>(null);
   const [launched, setLaunched] = useState<{ model: string } | null>(null);
   const [estimate, setEstimate] = useState<{ usd: number | null; samples: number } | null>(null);
+  // A transport failure is ambiguous: the backend may have committed the job
+  // even though its response never reached the browser. Reuse the same key
+  // only for an identical retry, so it can never schedule a second charge.
+  const pendingLaunchRef = useRef<{ signature: string; key: string } | null>(null);
 
   useEffect(() => {
     if (slots.length === 0) {
@@ -108,10 +115,23 @@ export function MediaGenerateForm({
 
   const submit = useCallback(async () => {
     if (!selected || !prompt.trim() || busy) return;
+    const signature = JSON.stringify({
+      connectionId: selected.connectionId,
+      modality: selected.modality,
+      prompt: prompt.trim(),
+      discussionId,
+      aspectRatio,
+      durationSecs: selected.modality === 'video' ? durationSecs : null,
+      resolution: selected.modality === 'video' ? resolution : null,
+    });
+    if (pendingLaunchRef.current?.signature !== signature) {
+      pendingLaunchRef.current = { signature, key: crypto.randomUUID() };
+    }
     setBusy(true);
     setError(null);
     try {
       const job = await media.generate({
+        idempotency_key: pendingLaunchRef.current.key,
         connection_id: selected.connectionId,
         modality: selected.modality,
         prompt: prompt.trim(),
@@ -123,7 +143,8 @@ export function MediaGenerateForm({
       });
       setLaunched({ model: job.model });
       setPrompt('');
-      onLaunched?.(job.job_id);
+      pendingLaunchRef.current = null;
+      onLaunched?.(job.job_id, job.message_id);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {

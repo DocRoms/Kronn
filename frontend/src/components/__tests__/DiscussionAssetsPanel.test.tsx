@@ -155,6 +155,55 @@ describe('DiscussionAssetsPanel', () => {
     expect(dialog).toHaveTextContent('1 / 2');
     expect(within(dialog).getByRole('img', { name: 'two.png' })).toBeInTheDocument();
   });
+  it('opens the exact requested asset once and allows an explicit reopen', async () => {
+    discussionsApi.contextFileBlob.mockResolvedValue(new Blob(['video'], { type: 'video/mp4' }));
+    const files = [
+      file(1, { filename: 'other.png', mime_type: 'image/png', disk_path: '/tmp/other.png' }),
+      file(2, { filename: 'target.mp4', mime_type: 'video/mp4', disk_path: '/tmp/target.mp4' }),
+    ];
+    const baseProps = {
+      discussionId: 'disc-1',
+      files,
+      onClose: vi.fn(),
+      onNavigateMessage: vi.fn(),
+      t,
+    };
+    const { rerender } = render(
+      <DiscussionAssetsPanel
+        {...baseProps}
+        openAssetRequest={{ assetId: 'file-2', nonce: 1 }}
+      />,
+    );
+
+    const video = await screen.findByTestId('media-player-video');
+    expect(video).toHaveAttribute('aria-label', 'disc.media.playerLabel:target.mp4');
+    expect((video as HTMLVideoElement).autoplay).toBe(true);
+
+    fireEvent.click(screen.getByRole('button', { name: 'disc.attachmentClose' }));
+    expect(screen.queryByRole('dialog', { name: 'disc.attachmentGallery' })).toBeNull();
+
+    // An ordinary rerender must not reopen a viewer the human just closed.
+    rerender(
+      <DiscussionAssetsPanel
+        {...baseProps}
+        openAssetRequest={{ assetId: 'file-2', nonce: 1 }}
+      />,
+    );
+    expect(screen.queryByRole('dialog', { name: 'disc.attachmentGallery' })).toBeNull();
+
+    // A fresh click on the same bubble carries a new nonce and deliberately
+    // opens that same asset again.
+    rerender(
+      <DiscussionAssetsPanel
+        {...baseProps}
+        openAssetRequest={{ assetId: 'file-2', nonce: 2 }}
+      />,
+    );
+    expect(await screen.findByTestId('media-player-video')).toHaveAttribute(
+      'aria-label',
+      'disc.media.playerLabel:target.mp4',
+    );
+  });
   it('reaches images and clips filtered out of the grid', async () => {
     // The "images" filter hides the clip from the inventory, but the carousel
     // is a viewer for everything the discussion generated: one sequence,

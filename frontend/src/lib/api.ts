@@ -2745,6 +2745,7 @@ export interface ExternalApiConnectionTestResult {
 export type MediaModality = 'image' | 'video';
 
 export interface GenerateMediaBody {
+  idempotency_key: string;
   connection_id: string;
   modality: MediaModality;
   prompt: string;
@@ -2763,6 +2764,10 @@ export interface GeneratedMediaJob {
   model: string;
   /** Discussion the asset will land in — including one this call created. */
   discussion_id: string;
+  /** The message this job is anchored to — freshly created for this launch
+   *  unless an existing one was named. The inline placeholder, and later the
+   *  asset, render at this exact transcript position. */
+  message_id: string;
 }
 
 export interface MediaJobView {
@@ -3164,13 +3169,14 @@ export const userContext = {
 
 export const runsApi = {
   get: (id: string) => api<SharedRun>('GET', `/runs/${encodeURIComponent(id)}`),
-  list: (filters: { kind?: string; sourceId?: string; projectId?: string; discussionId?: string; limit?: number } = {}) => {
+  list: (filters: { kind?: string; sourceId?: string; projectId?: string; discussionId?: string; limit?: number; offset?: number } = {}) => {
     const query = new URLSearchParams();
     if (filters.kind) query.set('kind', filters.kind);
     if (filters.sourceId) query.set('source_id', filters.sourceId);
     if (filters.projectId) query.set('project_id', filters.projectId);
     if (filters.discussionId) query.set('discussion_id', filters.discussionId);
     if (filters.limit) query.set('limit', String(filters.limit));
+    if (filters.offset) query.set('offset', String(filters.offset));
     return api<SharedRun[]>('GET', `/runs${query.size ? `?${query}` : ''}`);
   },
 };
