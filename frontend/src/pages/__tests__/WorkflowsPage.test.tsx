@@ -129,6 +129,13 @@ vi.mock('../../lib/api', () => ({
     models: vi.fn().mockResolvedValue({ models: [] }),
     health: vi.fn().mockResolvedValue({ reachable: false, models: [] }),
   },
+  // KT-531 — AgentSwitchPicker reads the dynamic model catalog when its
+  // popover opens. Pre-existing gap in this manual mock (the base catalog
+  // foundation landed without updating it) surfaced while testing KT-543;
+  // fixed here so opening the picker in these tests doesn't throw.
+  modelCatalogApi: {
+    list: vi.fn().mockResolvedValue({ targets: [] }),
+  },
 }));
 
 const defaultModelTiers = {
