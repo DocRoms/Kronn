@@ -19,19 +19,25 @@ import { DashboardPage } from '../pages/DashboardPage';
 const ONE_PIXEL_PNG_B64 =
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
 
-function startStubProvider(): Promise<{ server: Server; port: number }> {
+function startStubProvider(answerDelayMs = 0): Promise<{ server: Server; port: number }> {
   return new Promise((resolve, reject) => {
     const server = createServer((req, res) => {
       const chunks: Buffer[] = [];
       req.on('data', chunk => chunks.push(chunk));
       req.on('end', () => {
         if (req.method === 'POST' && req.url?.startsWith('/v1/images')) {
-          res.writeHead(200, { 'content-type': 'application/json' });
-          res.end(JSON.stringify({
-            id: 'gen-e2e-1',
-            data: [{ b64_json: ONE_PIXEL_PNG_B64 }],
-            usage: { cost: 0.01, is_byok: false },
-          }));
+          // A delay is what makes "the client was closed WHILE it generated"
+          // testable at all: an instant answer leaves no such window.
+          const answer = () => {
+            res.writeHead(200, { 'content-type': 'application/json' });
+            res.end(JSON.stringify({
+              id: 'gen-e2e-1',
+              data: [{ b64_json: ONE_PIXEL_PNG_B64 }],
+              usage: { cost: 0.01, is_byok: false },
+            }));
+          };
+          if (answerDelayMs > 0) setTimeout(answer, answerDelayMs);
+          else answer();
           return;
         }
         res.writeHead(404, { 'content-type': 'application/json' });
@@ -147,8 +153,11 @@ test('a launch materializes an inline placeholder that becomes the asset in plac
   // and exposes the exact asset to the canonical Assets viewer.
   await expect(firstCard).toHaveAttribute('data-status', 'success', { timeout: 30_000 });
   await expect(secondBubble.getByTestId('run-status-card')).toHaveAttribute('data-status', 'success', { timeout: 30_000 });
+  // The status card hydrates from its own run subscription while the bubble's
+  // asset comes from the relist, so the asset lands just after the success.
+  // Waiting for it is the real contract; reading it once only tests timing.
+  await expect(firstBubble).toHaveAttribute('data-media-asset-id', /.+/, { timeout: 15_000 });
   const firstAssetId = await firstBubble.getAttribute('data-media-asset-id');
-  expect(firstAssetId).toBeTruthy();
   await firstBubble.getByTestId('media-bubble-open-asset').click();
   await expect(page.getByRole('complementary', { name: 'Assets' })).toBeVisible();
   const viewer = page.getByRole('dialog', { name: /Visionneuse|viewer/i });
@@ -165,6 +174,90 @@ test('a launch materializes an inline placeholder that becomes the asset in plac
   await expect(firstBubbleAfterReload.getByTestId('media-bubble-open-asset')).toBeVisible();
   const secondBubbleAfterReload = page.locator('[data-message-id][data-media-run-id]', { hasText: promptTwo });
   await expect(secondBubbleAfterReload.getByTestId('run-status-card')).toHaveAttribute('data-status', 'success', { timeout: 10_000 });
+});
+
+test('a generation that finished while the client was away rehydrates from the server alone', async ({ page, request }) => {
+  test.setTimeout(120_000);
+  // The provider answers only after the client is gone, so the success can
+  // reach the browser through a server read and nothing else — no live event
+  // ever carried it.
+  stub = await startStubProvider(8_000);
+
+  const connection = await request.post('/api/external-api/connections', {
+    data: {
+      display_name: `E2E stub away ${Date.now()}`,
+      mention_alias: `e2eaway${Date.now()}`,
+      endpoint: `http://127.0.0.1:${stub.port}`,
+      origin_preset: 'open_router',
+      api_key: 'sk-or-v1-e2e-stub-not-a-real-key',
+      image_model: 'stub/e2e-image',
+    },
+  });
+  expect(connection.ok()).toBe(true);
+  const connectionId = (await connection.json())?.data?.id as string;
+  expect(connectionId).toBeTruthy();
+  createdConnectionIds.add(connectionId);
+
+  const discussion = await request.post('/api/discussions', {
+    data: {
+      title: `KT-549 away rehydration ${Date.now()}`,
+      agent: 'Codex',
+      language: 'fr',
+      initial_prompt: 'Discussion de test KT-549, sans agent.',
+      no_agent: true,
+    },
+  });
+  expect(discussion.ok()).toBe(true);
+  const discussionId = (await discussion.json())?.data?.id as string;
+  expect(discussionId).toBeTruthy();
+  createdDiscussionIds.add(discussionId);
+
+  const dashboard = new DashboardPage(page);
+  await dashboard.goto();
+  await dashboard.openDiscussion(discussionId);
+  await page.getByTestId('discussion-assets-toggle').click();
+  const panel = page.getByRole('complementary', { name: 'Assets' });
+  await expect(panel).toBeVisible();
+  await panel.getByTestId('assets-generate-toggle').click();
+  const form = panel.getByTestId('media-generate-form');
+  await expect(form).toBeVisible();
+
+  const prompt = 'un renard en origami KT-549 pendant absence';
+  await form.locator('textarea').fill(prompt);
+  await form.getByRole('button', { name: /Générer/ }).click();
+
+  // Still running when we walk away — otherwise this test would prove nothing
+  // more than the reload case already does.
+  const bubble = page.locator('[data-message-id][data-media-run-id]', { hasText: prompt });
+  await expect(bubble).toBeVisible({ timeout: 10_000 });
+  const card = bubble.getByTestId('run-status-card');
+  await expect(card).not.toHaveAttribute('data-status', 'success');
+
+  // Leave: the socket closes and no live update can reach this client.
+  await page.goto('about:blank');
+  await expect(page.locator('body')).toBeVisible();
+
+  // The job settles server-side while nobody is watching.
+  await request.get(`/api/discussions/${discussionId}`);
+  await expect
+    .poll(
+      async () => {
+        const runs = await request.get(`/api/runs?kind=media&discussion_id=${discussionId}`);
+        const body = await runs.json();
+        const rows = (body?.data ?? []) as Array<{ status?: string }>;
+        return rows[0]?.status ?? 'none';
+      },
+      { timeout: 60_000, intervals: [1_000] },
+    )
+    .toBe('success');
+
+  // Come back to a client that never saw the transition happen.
+  await dashboard.goto();
+  await dashboard.openDiscussion(discussionId);
+  const bubbleOnReturn = page.locator('[data-message-id][data-media-run-id]', { hasText: prompt });
+  await expect(bubbleOnReturn.getByTestId('run-status-card')).toHaveAttribute('data-status', 'success', { timeout: 15_000 });
+  await expect(bubbleOnReturn.getByTestId('media-bubble-open-asset')).toBeVisible();
+  await expect(bubbleOnReturn).toHaveAttribute('data-media-asset-id', /.+/);
 });
 
 test('an unreachable connection settles as a clear terminal failure, not a silent hang', async ({ page, request }) => {

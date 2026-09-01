@@ -739,7 +739,10 @@ export function DiscussionsPage({
   }, [showAssetsPanel]);
   const mediaJobsRelistTimer = useRef<{ id: number; discId: string } | null>(null);
   const scheduleMediaJobsRelist = useCallback((discId: string) => {
-    if (mediaJobsRelistTimer.current?.discId === discId) return;
+    // Every event pushes the deadline back, so the relist always runs after
+    // the LAST one. Skipping events while a timer was in flight dropped the
+    // final state of a burst: a job could stay "success with no asset", and
+    // its bubble offered no way to open the media it had just produced.
     if (mediaJobsRelistTimer.current) window.clearTimeout(mediaJobsRelistTimer.current.id);
     const id = window.setTimeout(() => {
       mediaJobsRelistTimer.current = null;

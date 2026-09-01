@@ -1229,6 +1229,84 @@ describe('DiscussionsPage', () => {
     expect((await screen.findAllByText('late-report.csv')).length).toBeGreaterThan(0);
   });
 
+  it('relists media after the LAST event of a burst, not the first', async () => {
+    // The success arrives while a relist is already scheduled. Skipping events
+    // in flight meant that relist read the still-running state and nothing
+    // ever read again: the bubble showed success with no asset to open.
+    const disc = {
+      ...makeListDiscussion('d-burst', 1),
+      messages: [
+        { id: 'm-burst', role: 'User', channel: 'main', content: 'un renard', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null, source_msg_id: 'kronn-media-anchor:run-burst' },
+      ],
+    } satisfies Discussion;
+    vi.mocked(discussionsApi.get).mockResolvedValue(disc);
+
+    const mediaRun = (status: 'running' | 'success', assetId: string | null): SharedRun => ({
+      id: 'run-burst',
+      kind: 'media',
+      source_id: 'connection',
+      project_id: null,
+      discussion_id: disc.id,
+      status,
+      started_at: null,
+      finished_at: null,
+      duration_ms: null,
+      result: { schema_version: 1, message_id: 'm-burst', modality: 'image', model: 'stub/image', asset_id: assetId },
+      diagnostic: null,
+      created_at: '2026-01-01T00:00:02Z',
+      updated_at: '2026-01-01T00:00:02Z',
+    });
+    let settledServerSide = false;
+    vi.mocked(runsApi.list).mockImplementation(async filters => {
+      if (filters?.kind !== 'media') return [];
+      return [settledServerSide ? mediaRun('success', 'asset-burst') : mediaRun('running', null)];
+    });
+
+    const { useWebSocket } = await import('../../hooks/useWebSocket');
+    // Several components subscribe; the event goes to every handler, exactly
+    // as the real socket broadcasts it.
+    const wsHandlers = new Set<(msg: { type: string; run_id: string }) => void>();
+    vi.mocked(useWebSocket).mockImplementation(handler => {
+      wsHandlers.add(handler as (msg: { type: string; run_id: string }) => void);
+      return { connected: true, connectionState: 'connected' };
+    });
+    const emitRunUpdated = () => {
+      for (const handler of wsHandlers) handler({ type: 'shared_run_updated', run_id: 'run-burst' });
+    };
+
+    await wrap(
+      <DiscussionsPage
+        projects={[]}
+        agents={[]}
+        allDiscussions={[disc]}
+        configLanguage="fr"
+        agentAccess={null}
+        refetchDiscussions={noop}
+        refetchProjects={noop}
+        onNavigate={noop}
+        toast={toastFn}
+        initialActiveDiscussionId={disc.id}
+        {...liftedProps()}
+      />
+    );
+
+    // Burst: the second event lands while the first relist is still pending.
+    await act(async () => { emitRunUpdated(); });
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 100)); });
+    await act(async () => { emitRunUpdated(); });
+
+    // The first schedule would fire about here, still reading "running".
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 160)); });
+    settledServerSide = true;
+
+    // A relist must still be owed, and it must see the settled job.
+    await waitFor(
+      () => expect(document.querySelector('[data-media-run-id="run-burst"]'))
+        .toHaveAttribute('data-media-asset-id', 'asset-burst'),
+      { timeout: 3_000 },
+    );
+  });
+
   it('ignores a late media relist from the discussion that was just left', async () => {
     const first = {
       ...makeListDiscussion('d-media-a', 1),
