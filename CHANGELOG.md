@@ -61,6 +61,13 @@ Release notes for 0.9.3 and earlier are available in the
   same-origin tab since these surfaces have no Dashboard shell to navigate
   within.
 
+- OpenCode no longer gets locked out of a discussion just because
+  `~/.local/share/opencode/auth.json` is missing, empty, or unreadable.
+  OpenCode also accepts environment credentials, its own provider config, and
+  local or no-auth providers Kronn cannot see from that one file, so the
+  absence of a confirmed auth signal now reports "unknown, assume runnable"
+  instead of a hard "not ready" that blocked dispatch outright.
+
 ## [0.12.0] - 2026-08-30
 
 ### Added
