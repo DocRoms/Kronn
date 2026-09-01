@@ -965,6 +965,74 @@ export type CampaignWorkerSelection = { target: MessageTarget, model?: string | 
 export type CancellationCleanupPolicy = "preserve" | "remove_if_clean";
 
 /**
+ * One model as Kronn's shared contract sees it. `id` is an opaque encoding
+ * of `(runtime_target_id, model_id)` — stable across reconciliation, free of
+ * delimiter ambiguity and never derived from `display_name`.
+ */
+export type CatalogModelEntry = { id: string,
+/**
+ * Durable execution target namespace. CLI families use
+ * `agent:<canonical-slug>`; named OpenAI-compatible connections use
+ * `http:<immutable-connection-id>`. Transport selection is intentionally
+ * not encoded here: direct CLI and ACP are routes to the same target.
+ */
+runtime_target_id: string,
+/**
+ * Projection metadata used by existing UI and runner code. It is not
+ * part of the catalog identity.
+ */
+agent_type: AgentType,
+/**
+ * The exact model identifier as the runtime/provider knows it — what a
+ * `--model` flag or API `model` field must receive.
+ */
+model_id: string, display_name: string,
+/**
+ * Operator-set label override. When present, selectors show this
+ * instead of `display_name`, even after the record is reconciled to
+ * `Live` (KT-531: operator display choices survive reconciliation).
+ */
+display_alias?: string | null, provenance: ModelProvenance, availability: ModelAvailability, unavailable_reason?: ModelUnavailableReason | null, unavailable_detail?: string | null, capabilities: Array<string>, reasoning_modes: Array<string>, default_reasoning_mode?: string | null,
+/**
+ * Operator-assigned Economy/Default/Reasoning tier, if any. Survives
+ * reconciliation the same way `display_alias` does.
+ */
+tier_assignment?: ModelTier | null,
+/**
+ * True when this identity was ever created as a manual entry (even if
+ * its provenance has since been promoted to `Live` by reconciliation).
+ * Kept for the audit trail required by KT-531.
+ */
+manual_origin: boolean,
+/**
+ * First time this identity was ever seen (any provenance).
+ */
+first_seen_at: string,
+/**
+ * Last time this identity was confirmed present by a live discovery.
+ * Manual and migrated rows remain `None` until a live reconciliation.
+ */
+last_seen_at?: string | null,
+/**
+ * Last time Kronn attempted to verify this identity, live or not.
+ */
+last_checked_at: string, created_at: string, updated_at: string, };
+
+/**
+ * Structured, catalog-driven preflight diagnostic. Shared by discussion
+ * dispatch, Quick Prompt runs, comparisons and workflow steps so the UI
+ * renders one consistent card regardless of the launch surface.
+ */
+export type CatalogPreflightFailure = { runtime_target_id: string, agent_type: AgentType, model_id?: string | null, reason: ModelUnavailableReason, detail: string, last_checked_at: string,
+/**
+ * Machine-readable recommended next step (`"configure_manual_model"`,
+ * `"recheck_catalog"`, `"install_cli"`, `"authenticate"`). The frontend
+ * maps this to the recheck/settings shortcut; it is deliberately not a
+ * prose sentence so i18n stays centralized in the frontend dictionaries.
+ */
+recommended_action: string, };
+
+/**
  * What a CI check is known to be. `Unknown` is its own value: a check nobody
  * could read is not a passing one.
  */
@@ -1359,6 +1427,8 @@ gate_step?: string | null, };
  * Response for [`decide_run`].
  */
 export type DecideRunResponse = { run_id: string, new_status: RunStatus, };
+
+export type DeleteManualModelRequest = { runtime_target_id: string, model_id: string, };
 
 /**
  * Worker → backend/principal delivery (ADR §5, KT-319 DoD-1). Every field DoD-1
@@ -3269,6 +3339,30 @@ export type MessageTargetKind = "discussion_agent" | "agent" | "cli";
 
 export type Metric = { label: string, value: string, };
 
+export type ModelAvailability = "available" | "unavailable";
+
+export type ModelCatalogSnapshot = { targets: Array<ModelCatalogView>, };
+
+/**
+ * Response for one runtime target — the resolved list plus
+ * the metadata a selector needs to render provenance honestly.
+ */
+export type ModelCatalogView = { runtime_target_id: string, target_label?: string | null, agent_type: AgentType, models: Array<CatalogModelEntry>,
+/**
+ * Whether the most recent refresh attempt for this runtime reached a
+ * live source successfully. `false` means every model below is at best
+ * `Cached`/`Manual`/`Migrated`.
+ */
+live_refresh_ok: boolean,
+/**
+ * The live snapshot backing this view is older than the freshness
+ * window, or there has never been one. The UI must never present
+ * `Cached`/`Migrated` entries as a current discovery when this is true.
+ */
+stale: boolean, last_live_success_at?: string | null, last_attempt_at?: string | null, last_error_reason?: ModelUnavailableReason | null, last_error_detail?: string | null, };
+
+export type ModelProvenance = "live" | "cached" | "manual" | "migrated";
+
 /**
  * Abstract model capability tier. Kronn maps each tier to a concrete --model flag per agent.
  * Priority: AgentSettings.model (explicit) > ModelTier > Default (no flag).
@@ -3294,6 +3388,13 @@ default?: string | null, reasoning?: string | null, };
  * Global model tier overrides per agent.
  */
 export type ModelTiersConfig = { claude_code: ModelTierConfig, codex: ModelTierConfig, open_code: ModelTierConfig, gemini_cli: ModelTierConfig, kiro: ModelTierConfig, vibe: ModelTierConfig, copilot_cli: ModelTierConfig, ollama: ModelTierConfig, lite_llm: ModelTierConfig, nvidia: ModelTierConfig, };
+
+/**
+ * Normalized reason a model is unavailable, or why a discovery attempt could
+ * not confirm it. Shared verbatim across the catalog, preflight diagnostics
+ * and audit history so the UI never has to parse a provider-specific string.
+ */
+export type ModelUnavailableReason = "disappeared" | "auth_required" | "timeout" | "cli_missing" | "invalid_catalog" | "provider_error" | "unsupported";
 
 /**
  * Config for the "Multi-agent review" option on an Agent step (see
@@ -4428,6 +4529,8 @@ export type RecentMessagePreview = { sort_order: number, role: string, agent_typ
 preview: string, };
 
 export type RecoveryStatus = { configured: boolean, };
+
+export type RefreshModelCatalogRequest = { runtime_target_id: string, agent_type: AgentType, force?: boolean, };
 
 export type RemoteRepo = { name: string, full_name: string, clone_url: string, ssh_url: string, description: string | null, language: string | null, stargazers_count: number, updated_at: string, source: string, already_cloned: boolean, };
 
@@ -6023,6 +6126,15 @@ export type UploadContextFileResponse = { file: ContextFile,
  * Suggested skill IDs based on file extension
  */
 suggested_skills: Array<string>, };
+
+/**
+ * Payload for creating or updating a manual catalog entry. Identity
+ * (`runtime_target_id` + `model_id`) is immutable once created — editing it would
+ * silently orphan every reference that already resolved to the old
+ * identity, so a caller who wants a different `model_id` must delete and
+ * recreate the entry.
+ */
+export type UpsertManualModelRequest = { runtime_target_id: string, agent_type: AgentType, model_id: string, display_name: string, capabilities?: Array<string>, reasoning_modes?: Array<string>, default_reasoning_mode?: string | null, tier_assignment?: ModelTier | null, };
 
 /**
  * A ranked usage entry (for top N lists)

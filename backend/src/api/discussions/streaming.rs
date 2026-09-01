@@ -2183,6 +2183,30 @@ async fn make_agent_stream_inner(
         Some(&model_tiers_config),
     );
 
+    let runtime_target_id = external_connection
+        .as_ref()
+        .map(|connection| crate::db::model_catalog::http_runtime_target_id(&connection.id));
+    if let Some(failure) = crate::core::model_catalog::preflight_check(
+        &state.db,
+        runtime_target_id.as_deref(),
+        agent_type.clone(),
+        disc_tier,
+        disc_model.as_deref(),
+        Some(&model_tiers_config),
+    )
+    .await
+    {
+        let payload = serde_json::json!({
+            "error": "model_catalog_preflight_failed",
+            "preflight_failure": failure,
+        });
+        finish_tracked_preflight(&mut completion_tx);
+        let stream: SseStream = Box::pin(futures::stream::once(async move {
+            Ok::<_, Infallible>(Event::default().event("error").data(payload.to_string()))
+        }));
+        return Sse::new(prepend_initial_event(stream, initial_event.take()));
+    }
+
     let disc_id = discussion_id.clone();
     let disc_project_id = disc.project_id.clone();
 

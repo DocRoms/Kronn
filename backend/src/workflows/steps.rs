@@ -125,6 +125,7 @@ pub async fn execute_step(
     http_endpoints: Option<&crate::models::setup::HttpEndpoints>,
     ollama_context_overrides: Option<&std::collections::HashMap<String, u64>>,
     native_tools: Option<Arc<dyn crate::agents::tools::ToolExecutor>>,
+    catalog_db: Option<&crate::db::Database>,
 ) -> StepOutcome {
     let start = Instant::now();
 
@@ -220,6 +221,56 @@ pub async fn execute_step(
     // Execute with retry logic
     let max_attempts = step.retry.as_ref().map(|r| r.max_retries + 1).unwrap_or(1);
     let mut last_error = String::new();
+
+    // Authoritative check immediately before the first possible provider
+    // dispatch. Initial workflow-wide validation remains in the runner, but
+    // availability can change while earlier steps execute.
+    if let Some(database) = catalog_db {
+        let tier = step
+            .agent_settings
+            .as_ref()
+            .and_then(|settings| settings.tier)
+            .unwrap_or_default();
+        let model = step
+            .agent_settings
+            .as_ref()
+            .and_then(|settings| settings.model.as_deref());
+        if let Some(failure) = crate::core::model_catalog::preflight_check(
+            database,
+            None,
+            step.agent.clone(),
+            tier,
+            model,
+            model_tiers,
+        )
+        .await
+        {
+            return StepOutcome {
+                result: StepResult {
+                    step_name: step.name.clone(),
+                    status: RunStatus::Failed,
+                    output: format!(
+                        "preflight_failed:{}",
+                        serde_json::to_string(&failure).unwrap_or_default()
+                    ),
+                    tokens_used: 0,
+                    duration_ms: start.elapsed().as_millis() as u64,
+                    started_at: None,
+                    condition_result: None,
+                    envelope_detected: None,
+                    step_kind: Some("preflight_failed".into()),
+                    step_agent: Some(step.agent.clone()),
+                    step_model: failure.model_id,
+                    step_api_plugin_slug: None,
+                    step_api_endpoint_path: None,
+                    is_rollback: false,
+                    child_run_id: None,
+                    native_tool_calls: Box::default(),
+                },
+                condition_action: None,
+            };
+        }
+    }
 
     for attempt in 0..max_attempts {
         if attempt > 0 {
@@ -2203,6 +2254,7 @@ mod http_native_tool_step_tests {
             }),
             None,
             Some(tools),
+            None,
         )
         .await;
 
@@ -2290,6 +2342,7 @@ mod http_native_tool_step_tests {
             None,
             Some(&overrides),
             Some(tools),
+            None,
         )
         .await;
         match previous_host {

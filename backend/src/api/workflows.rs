@@ -2922,6 +2922,7 @@ pub async fn test_step(
             Some(&http_endpoints),
             Some(&ollama_context_overrides),
             native_tools,
+            Some(&state.db),
         )
         .await;
 

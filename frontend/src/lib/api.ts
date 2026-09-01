@@ -213,6 +213,14 @@ import type {
   ExternalApiConnectionPreset,
   SharedRun,
 } from '../types/generated';
+import type {
+  CatalogModelEntry,
+  DeleteManualModelRequest,
+  ModelCatalogSnapshot,
+  ModelCatalogView,
+  RefreshModelCatalogRequest,
+  UpsertManualModelRequest,
+} from '../types/generated';
 import type { DiscoverKeysResponse, TestModeEnterResult, TestModeExitResponse } from '../types/extensions';
 
 // ─── Auth token ──────────────────────────────────────────────────────────────
@@ -2721,6 +2729,13 @@ export interface ExternalApiConnectionTestResult {
   ok: boolean;
   status: 'success' | 'invalid_url' | 'credential_required' | 'auth_error' | 'http_error' | 'timeout' | 'transport_error' | 'invalid_catalogue';
   models: string[];
+  /** Capability-bearing union from provider-specific catalogue routes. Older
+   * backends omit it; callers keep `models` as the chat-only fallback. */
+  catalog?: Array<{
+    id: string;
+    display_name: string;
+    capabilities: string[];
+  }>;
   hint: string | null;
 }
 
@@ -3158,6 +3173,19 @@ export const runsApi = {
     if (filters.limit) query.set('limit', String(filters.limit));
     return api<SharedRun[]>('GET', `/runs${query.size ? `?${query}` : ''}`);
   },
+};
+
+/** Shared catalog consumed by discussion, QP/compare and workflow pickers. */
+export const modelCatalogApi = {
+  list: () => api<ModelCatalogSnapshot>('GET', '/model-catalogs'),
+  refresh: (request: RefreshModelCatalogRequest) =>
+    api<ModelCatalogView>('POST', '/model-catalogs/refresh', request),
+  createManual: (request: UpsertManualModelRequest) =>
+    api<CatalogModelEntry>('POST', '/model-catalogs/manual', request),
+  updateManual: (request: UpsertManualModelRequest) =>
+    api<CatalogModelEntry>('PUT', '/model-catalogs/manual', request),
+  deleteManual: (request: DeleteManualModelRequest) =>
+    api<void>('POST', '/model-catalogs/manual/delete', request),
 };
 
 // ─── Continual Learning (0.10.0) ───────────────────────────────────────────────

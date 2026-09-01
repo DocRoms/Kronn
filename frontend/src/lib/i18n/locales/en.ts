@@ -1,6 +1,25 @@
 import type { TranslationDict } from '../../i18n';
 
 const en: TranslationDict = {
+  'modelCatalog.title': 'Model catalogs',
+  'modelCatalog.description': 'Detected, cached or manually configured models for each target.',
+  'modelCatalog.add': 'Add a model',
+  'modelCatalog.target': 'Agent or connection',
+  'modelCatalog.modelId': 'Exact model identifier',
+  'modelCatalog.displayName': 'Display name',
+  'modelCatalog.tier': 'Default tier',
+  'modelCatalog.noTier': 'No tier',
+  'modelCatalog.reasoningModes': 'Reasoning modes',
+  'modelCatalog.stale': 'Catalog needs rechecking',
+  'modelCatalog.current': 'Catalog verified',
+  'modelCatalog.recheck': 'Recheck catalog',
+  'modelCatalog.empty': 'No known model. Recheck or add one manually.',
+  'modelCatalog.count': '{0} known models',
+  'modelCatalog.provenance.live': 'Detected',
+  'modelCatalog.provenance.cached': 'Cached — recheck',
+  'modelCatalog.provenance.manual': 'Manual',
+  'modelCatalog.provenance.migrated': 'Migrated configuration',
+  'modelCatalog.unavailable': 'Unavailable',
   // ── Nav & Tabs ──
   'nav.projects': 'Projects',
   'nav.discussions': 'Discussions',

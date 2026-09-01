@@ -6898,6 +6898,86 @@ async fn external_api_openrouter_validates_the_key_before_unlocking_the_catalogu
 }
 
 #[tokio::test]
+async fn external_api_openrouter_keeps_dedicated_media_catalogues_capability_scoped() {
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let upstream = MockServer::start().await;
+    for (route, body) in [
+        (
+            "/v1/models",
+            serde_json::json!({"data": [{
+                "id": "text/chat",
+                "name": "Chat",
+                "architecture": {"output_modalities": ["text"]}
+            }]}),
+        ),
+        (
+            "/v1/images/models",
+            serde_json::json!({"data": [{
+                "id": "image/generator",
+                "name": "Image generator",
+                "architecture": {"output_modalities": ["image"]}
+            }]}),
+        ),
+        (
+            "/v1/videos/models",
+            serde_json::json!({"data": [{
+                "id": "bytedance/seedance",
+                "name": "Seedance"
+            }]}),
+        ),
+    ] {
+        Mock::given(method("GET"))
+            .and(path(route))
+            .and(header("authorization", "Bearer sk-or-v1-media"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .expect(1)
+            .mount(&upstream)
+            .await;
+    }
+    Mock::given(method("GET"))
+        .and(path("/v1/key"))
+        .and(header("authorization", "Bearer sk-or-v1-media"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": {"label": "media key"}
+        })))
+        .expect(1)
+        .mount(&upstream)
+        .await;
+
+    let (_, response) = post_json(
+        test_app(),
+        "/api/external-api/connections/test",
+        serde_json::json!({
+            "endpoint": upstream.uri(),
+            "api_key": "sk-or-v1-media",
+            "origin_preset": "open_router"
+        }),
+    )
+    .await;
+
+    assert_eq!(response["data"]["models"], serde_json::json!(["text/chat"]));
+    let catalog = response["data"]["catalog"].as_array().unwrap();
+    let capabilities = |id: &str| {
+        catalog
+            .iter()
+            .find(|model| model["id"] == id)
+            .map(|model| model["capabilities"].clone())
+            .unwrap()
+    };
+    assert_eq!(capabilities("text/chat"), serde_json::json!(["chat"]));
+    assert_eq!(
+        capabilities("image/generator"),
+        serde_json::json!(["image"])
+    );
+    assert_eq!(
+        capabilities("bytedance/seedance"),
+        serde_json::json!(["video"])
+    );
+}
+
+#[tokio::test]
 async fn external_api_openrouter_explains_a_key_saved_without_its_prefix() {
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -6948,7 +7028,11 @@ async fn external_api_nvidia_catalogue_does_not_probe_an_arbitrary_first_model()
     Mock::given(method("GET"))
         .and(path("/v1/models"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "data": [{"id": "nvidia/public-but-unavailable"}]
+            "data": [{
+                "id": "nvidia/public-but-unavailable",
+                "name": "NVIDIA visual model",
+                "architecture": {"output_modalities": ["image"]}
+            }]
         })))
         .expect(1)
         .mount(&upstream)
@@ -6975,6 +7059,10 @@ async fn external_api_nvidia_catalogue_does_not_probe_an_arbitrary_first_model()
     assert_eq!(
         response["data"]["models"],
         serde_json::json!(["nvidia/public-but-unavailable"])
+    );
+    assert_eq!(
+        response["data"]["catalog"][0]["capabilities"],
+        serde_json::json!(["image"])
     );
     assert!(response["data"]["hint"]
         .as_str()

@@ -609,6 +609,11 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "161_acp_runtime_sessions",
         include_str!("sql/161_acp_runtime_sessions.sql"),
     ),
+    (
+        // KT-538 owns 160 and KT-542 owns 161 on the integration branch.
+        "162_model_catalog",
+        include_str!("sql/162_model_catalog.sql"),
+    ),
 ];
 
 /// Apply one migration inside the caller-owned transaction.
@@ -918,6 +923,42 @@ mod tests {
             .unwrap();
         assert!(table_exists);
         assert!(receipt_exists);
+    }
+
+    #[test]
+    fn model_catalog_upgrades_from_its_immediate_predecessor() {
+        let conn = Connection::open_in_memory().unwrap();
+        let model_catalog_index = MIGRATIONS
+            .iter()
+            .position(|(name, _)| *name == "162_model_catalog")
+            .expect("model catalog migration is registered");
+        let predecessor = MIGRATIONS
+            .get(model_catalog_index.saturating_sub(1))
+            .expect("model catalog has a predecessor")
+            .0;
+        assert_eq!(predecessor, "161_acp_runtime_sessions");
+        run_through(&conn, predecessor).unwrap();
+        let table_exists = |name: &str| -> bool {
+            conn.query_row(
+                "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                [name],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        assert!(!table_exists("model_catalog_entries"));
+
+        run(&conn).unwrap();
+
+        assert!(table_exists("model_catalog_entries"));
+        let receipt: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM _migrations WHERE name = '162_model_catalog'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(receipt, 1);
     }
 
     #[test]

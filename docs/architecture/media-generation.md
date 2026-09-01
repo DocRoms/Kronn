@@ -19,6 +19,15 @@ connection stores `integrate.api.nvidia.com` while visual models answer on
 The model is always read from the slot, never from the caller — an API or UI
 client cannot bill a model the operator did not configure.
 
+The slots themselves are selected from the shared capability-bearing model
+catalog after a successful connection test. OpenRouter is queried through its
+three real catalog routes: chat (`/v1/models`), image
+(`/v1/images/models`) and video (`/v1/videos/models`). The Image picker only
+shows records confirmed with `image`; Video only records confirmed with
+`video`. A formerly saved id that is no longer detected stays visible as
+unavailable, but is neither presented nor persisted as a detected capability.
+NVIDIA model records follow the same output-capability parsing contract.
+
 ## Not OpenAI-compatible
 
 `MediaCodec` (`backend/src/agents/media_codec.rs`) is a separate trait from

@@ -4,6 +4,7 @@ import { userError } from '../../lib/userError';
 import { useAsyncGuard } from '../../hooks/useAsyncGuard';
 import { OllamaCard } from './OllamaCard';
 import { ExternalApiSection } from './ExternalApiSection';
+import { ModelCatalogSection } from './ModelCatalogSection';
 import { CompressionSection } from './CompressionSection';
 import { ContextHelp } from '../ContextHelp';
 import { SearchableSelect } from '../SearchableSelect';
@@ -1533,6 +1534,8 @@ export function AgentsSection({
           </React.Fragment>
           );
         })}
+
+        <ModelCatalogSection />
 
         {/* KT-339 — unified External API zone: LiteLLM, NVIDIA and any other
             OpenAI-compatible service live here as named connections. */}

@@ -242,6 +242,12 @@ async fn main() -> anyhow::Result<()> {
         Err(e) => tracing::error!("External API connection backfill failed: {e}"),
     }
 
+    if let Err(e) =
+        kronn::core::model_catalog::migrate_hardcoded_catalog_once(&database, &app_config).await
+    {
+        tracing::error!("Model catalog migration failed: {e}");
+    }
+
     // Build state via the shared factory — keep both mains in sync when
     // new runtime fields are added to AppState (see lib.rs doc).
     let config_arc = Arc::new(RwLock::new(app_config));

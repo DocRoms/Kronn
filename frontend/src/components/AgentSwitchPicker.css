@@ -150,9 +150,9 @@
   align-items: center;
   justify-content: center;
   gap: 3px;
-  min-width: 48px;
-  height: 28px;
-  padding: 0 6px;
+  min-width: 62px;
+  height: 38px;
+  padding: 0 6px 9px;
   border: 1px solid var(--kr-border-ghost);
   border-radius: var(--kr-r-sm);
   background: var(--kr-bg-surface);
@@ -161,6 +161,24 @@
   font-size: 9px;
   font-weight: 650;
   cursor: pointer;
+}
+
+.kr-agent-switch-catalog-meta {
+  position: absolute;
+  right: 3px;
+  bottom: 2px;
+  left: 3px;
+  overflow: hidden;
+  color: var(--kr-text-tertiary);
+  font-size: 7px;
+  font-weight: 500;
+  line-height: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.kr-agent-switch-tier-option:disabled .kr-agent-switch-catalog-meta {
+  color: var(--kr-danger);
 }
 
 .kr-agent-switch-tier-option:hover:not(:disabled) {
