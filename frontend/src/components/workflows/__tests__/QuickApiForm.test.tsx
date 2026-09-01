@@ -104,7 +104,7 @@ const editApi: QuickApi = {
   api_timeout_ms: null,
   api_max_retries: null,
   variables: [
-    { name: 'thingId', label: 'Thing id', placeholder: '42', description: null, required: true },
+    { name: 'thingId', label: 'Thing id', placeholder: '42', description: null, required: true, source: 'user_input', source_ref: null, allow_manual_override: false },
   ],
   profile_ids: ['p1'],
   directive_ids: ['d1'],

@@ -17,6 +17,7 @@ use std::time::Duration;
 use axum::response::sse::{Event, Sse};
 use chrono::Utc;
 use futures::StreamExt;
+use rusqlite::OptionalExtension;
 use uuid::Uuid;
 
 use crate::agents::runner::{self, AgentIo};
@@ -823,7 +824,22 @@ fn clear_awaiting_after_terminal(
         // idle window in which the remaining model placeholder disappears.
         return Ok(());
     }
-    crate::db::discussions::set_awaiting_agent(conn, discussion_id, false)
+    crate::db::discussions::set_awaiting_agent(conn, discussion_id, false)?;
+    // retention=0 means run-lifetime only. Once the final dispatch for this
+    // discussion is terminal, irreversibly discard any QP child ciphertext.
+    crate::db::execution_variable_snapshots::purge_run_lifetime_snapshot(
+        conn,
+        "quick_prompt",
+        discussion_id,
+        Utc::now(),
+    )?;
+    crate::db::execution_variable_snapshots::purge_run_lifetime_snapshot(
+        conn,
+        "quick_prompt_batch_item",
+        discussion_id,
+        Utc::now(),
+    )?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -2028,7 +2044,129 @@ async fn make_agent_stream_inner(
         global_mcp_context.as_deref(),
         &agent_type,
     ) + context_files_prompt.len();
-    let prompt_disc = discussion_at_dispatch_trigger(&disc, dispatch_trigger_message_id.as_deref());
+    let mut prompt_disc =
+        discussion_at_dispatch_trigger(&disc, dispatch_trigger_message_id.as_deref());
+    // QP values are never persisted in messages. Hydrate only this temporary
+    // dispatch copy from the immutable encrypted snapshot.
+    // Lineage is intentionally not part of the public Discussion model, so
+    // read the durable QP marker here. It distinguishes ordinary discussion
+    // dispatch (which has no snapshot) from a QP launch whose snapshot must
+    // exist and decrypt before an agent can start.
+    let qp_launch = {
+        let did = disc.id.clone();
+        state
+            .db
+            .with_read_conn(move |conn| {
+                Ok(conn
+                    .query_row(
+                        "SELECT originating_qp_id IS NOT NULL FROM discussions WHERE id=?1",
+                        [did],
+                        |row| row.get::<_, bool>(0),
+                    )
+                    .optional()?
+                    .unwrap_or(false))
+            })
+            .await
+            .unwrap_or(false)
+    };
+    if qp_launch {
+        let secret = match state.config.read().await.encryption_secret.clone() {
+            Some(secret) => secret,
+            None => {
+                finish_tracked_preflight(&mut completion_tx);
+                let stream: SseStream = Box::pin(futures::stream::once(async {
+                    Ok::<_, Infallible>(Event::default().event("error").data(
+                        serde_json::json!({"error": "Quick Prompt variable snapshot key unavailable"}).to_string(),
+                    ))
+                }));
+                return Sse::new(prepend_initial_event(stream, initial_event.take()));
+            }
+        };
+        let key = match crate::core::crypto::parse_secret(&secret) {
+            Ok(key) => key,
+            Err(_) => {
+                finish_tracked_preflight(&mut completion_tx);
+                let stream: SseStream = Box::pin(futures::stream::once(async {
+                    Ok::<_, Infallible>(Event::default().event("error").data(
+                        serde_json::json!({"error": "Quick Prompt variable snapshot key unavailable"}).to_string(),
+                    ))
+                }));
+                return Sse::new(prepend_initial_event(stream, initial_event.take()));
+            }
+        };
+        let disc_id = disc.id.clone();
+        let workflow_run_id = disc.workflow_run_id.clone();
+        let values = state
+            .db
+            .with_conn(move |conn| {
+                for (kind, id) in [
+                    ("quick_prompt", Some(disc_id.as_str())),
+                    ("quick_prompt_batch_item", Some(disc_id.as_str())),
+                    ("quick_prompt_compare", workflow_run_id.as_deref()),
+                ] {
+                    if let Some(id) = id {
+                        if let Some(values) = crate::db::execution_variable_snapshots::load_values(
+                            conn,
+                            kind,
+                            id,
+                            &key,
+                            chrono::Utc::now(),
+                        )? {
+                            return Ok(Some(values));
+                        }
+                    }
+                }
+                // A BatchQuickPrompt child points at its child batch
+                // run. Environment variables are resolved once on the
+                // parent Workflow run, so follow that durable link and
+                // reuse the immutable parent snapshot on every child
+                // dispatch/resume.
+                if let Some(batch_run_id) = workflow_run_id.as_deref() {
+                    let parent_id: Option<String> = conn
+                        .query_row(
+                            "SELECT parent_run_id FROM workflow_runs WHERE id=?1",
+                            [batch_run_id],
+                            |row| row.get(0),
+                        )
+                        .optional()?;
+                    if let Some(parent_id) = parent_id {
+                        if let Some(values) = crate::db::execution_variable_snapshots::load_values(
+                            conn,
+                            "workflow",
+                            &parent_id,
+                            &key,
+                            chrono::Utc::now(),
+                        )? {
+                            return Ok(Some(values));
+                        }
+                    }
+                }
+                Ok::<_, anyhow::Error>(None)
+            })
+            .await;
+        let values = match values {
+            Ok(Some(values)) => values,
+            Ok(None) | Err(_) => {
+                // A QP dispatch may never fall through with placeholders: it
+                // would turn a failed preflight or expired snapshot into an
+                // agent side effect with incomplete input.
+                finish_tracked_preflight(&mut completion_tx);
+                let stream: SseStream = Box::pin(futures::stream::once(async {
+                    Ok::<_, Infallible>(Event::default().event("error").data(
+                        serde_json::json!({"error": "Quick Prompt variable snapshot unavailable or expired"}).to_string(),
+                    ))
+                }));
+                return Sse::new(prepend_initial_event(stream, initial_event.take()));
+            }
+        };
+        if let Some(first_message) = prompt_disc.messages.first_mut() {
+            first_message.content = values
+                .iter()
+                .fold(first_message.content.clone(), |rendered, (name, value)| {
+                    rendered.replace(&format!("{{{{{name}}}}}"), value)
+                });
+        }
+    }
     let prompt = build_agent_prompt(&prompt_disc, &agent_type, extra_context_len);
 
     let auth_mode_str = auth_mode_for(&agent_type, &tokens);

@@ -99,7 +99,7 @@ const sampleQpWithVar: QuickPrompt = {
   name: 'Analyse ticket',
   icon: '🎯',
   prompt_template: 'Analyse the ticket {{ticket}} and report findings.',
-  variables: [{ name: 'ticket', label: 'Ticket', placeholder: 'EW-1234', description: '', required: true }],
+  variables: [{ name: 'ticket', label: 'Ticket', placeholder: 'EW-1234', description: '', required: true, source: 'user_input', source_ref: null, allow_manual_override: false }],
   agent: 'ClaudeCode',
   project_id: null, skill_ids: [], profile_ids: [], directive_ids: [], tier: 'default', description: '',
   created_at: '2026-01-01T00:00:00Z',
@@ -394,9 +394,15 @@ describe('WorkflowsPage — QP launch double-click race', () => {
     await waitFor(() => expect(mockQuickPromptsApi.compareAgents).toHaveBeenCalledTimes(1));
     expect(mockDiscussionsApi.create).not.toHaveBeenCalled();
     expect(ticketInput.value).toBe('EW-9100');
+    // No-plaintext contract (KT-537): the client sends the raw template plus
+    // the variable map; the backend hydrates just before dispatch. The entered
+    // value must survive as the variable, never as a pre-rendered prompt.
     expect(mockQuickPromptsApi.compareAgents).toHaveBeenCalledWith(
       sampleQpWithVar.id,
-      expect.objectContaining({ prompt: 'Analyse the ticket EW-9100 and report findings.' }),
+      expect.objectContaining({
+        prompt: 'Analyse the ticket {{ticket}} and report findings.',
+        variables: { ticket: 'EW-9100' },
+      }),
     );
   });
 
@@ -608,8 +614,8 @@ describe('WorkflowsPage — QP launch double-click race', () => {
       id: 'qp-3',
       prompt_template: 'Investigate {{ticket}} priority {{priority}}.',
       variables: [
-        { name: 'ticket', label: 'Ticket', placeholder: 'EW-1234', description: '', required: true },
-        { name: 'priority', label: 'Priority', placeholder: 'P1', description: '', required: true },
+        { name: 'ticket', label: 'Ticket', placeholder: 'EW-1234', description: '', required: true, source: 'user_input', source_ref: null, allow_manual_override: false },
+        { name: 'priority', label: 'Priority', placeholder: 'P1', description: '', required: true, source: 'user_input', source_ref: null, allow_manual_override: false },
       ],
     };
     mockQuickPromptsApi.list.mockResolvedValue([twoVarQp]);

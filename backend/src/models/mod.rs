@@ -66,11 +66,12 @@ pub use workflows::*;
 /// - Absent key → `None` (outer Option is None → use existing value)
 /// - Explicit null → `Some(None)` (set to null)
 /// - Present value → `Some(Some(value))` (set to value)
-pub(crate) fn deserialize_optional_field<'de, D>(
+pub(crate) fn deserialize_optional_field<'de, D, T>(
     deserializer: D,
-) -> Result<Option<Option<String>>, D::Error>
+) -> Result<Option<Option<T>>, D::Error>
 where
     D: Deserializer<'de>,
+    T: Deserialize<'de>,
 {
     Ok(Some(Option::deserialize(deserializer)?))
 }

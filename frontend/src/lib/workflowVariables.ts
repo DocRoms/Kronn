@@ -102,6 +102,9 @@ export function mergeDeclaredAndDetected(workflow: Workflow): PromptVariable[] {
       placeholder: '',
       description: 'Auto-detected from a step template ({{' + name + '}}).',
       required: true,
+      source: 'user_input',
+      source_ref: null,
+      allow_manual_override: false,
     }));
   return [...declared, ...autoDetected];
 }

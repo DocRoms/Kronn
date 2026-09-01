@@ -39,11 +39,13 @@ import type {
   DiscussionDetail,
   DiscussionNativeAgentMode,
   DiscussionAgentHandoffMode,
+  DiscussionExecutionVariableRetention,
   DiscussionMeta,
   DiscussionSession,
   DiscussionWorkspace,
   ParticipantView,
   CreateDiscussionRequest,
+  PromptVariable,
   SendMessageRequest,
   ReviseMessageRequest,
   MessageRevisionReceipt,
@@ -724,7 +726,7 @@ export const config = {
       'GET',
       `/discussion-weights?discussion_ids=${encodeURIComponent(discussionIds.join(','))}`,
     ),
-  setServerConfig: (req: { domain?: string; max_concurrent_agents?: number; agent_stall_timeout_min?: number; agent_global_timeout_min?: number; local_agent_global_timeout_min?: number; pseudo?: string; avatar_email?: string; bio?: string; debug_mode?: boolean; discussion_notes_enabled?: boolean; default_model_tier?: 'economy' | 'default' | 'reasoning'; default_summary_strategy?: 'Auto' | 'OnDemand' | 'Off'; agent_handoffs_enabled?: boolean; agent_handoff_paid_limit?: number; agent_handoff_paid_unlimited?: boolean; agent_handoff_blocked_agents?: AgentType[]; discussion_weight?: DiscussionWeightConfig }) => api<void>('POST', '/config/server', req),
+  setServerConfig: (req: { domain?: string; max_concurrent_agents?: number; agent_stall_timeout_min?: number; agent_global_timeout_min?: number; local_agent_global_timeout_min?: number; pseudo?: string; avatar_email?: string; bio?: string; debug_mode?: boolean; discussion_notes_enabled?: boolean; default_model_tier?: 'economy' | 'default' | 'reasoning'; default_summary_strategy?: 'Auto' | 'OnDemand' | 'Off'; agent_handoffs_enabled?: boolean; agent_handoff_paid_limit?: number; agent_handoff_paid_unlimited?: boolean; agent_handoff_blocked_agents?: AgentType[]; discussion_weight?: DiscussionWeightConfig; execution_variable_retention_days?: number }) => api<void>('POST', '/config/server', req),
   regenerateAuthToken: () => api<string>('POST', '/config/auth-token/regenerate'),
 };
 
@@ -1427,11 +1429,13 @@ export const discussions = {
   ),
   create: (req: CreateDiscussionRequest) => api<Discussion>('POST', '/discussions', req),
   delete: (id: string) => api<void>('DELETE', `/discussions/${id}`),
-  update: (id: string, body: { title?: string; archived?: boolean; pinned?: boolean; skill_ids?: string[]; profile_ids?: string[]; directive_ids?: string[]; project_id?: string | null; tier?: ModelTier; agent?: AgentType; summary_strategy?: 'Auto' | 'OnDemand' | 'Off'; no_agent?: boolean; agent_handoffs_disabled?: boolean; agent_handoffs_unlimited?: boolean }) => api<void>('PATCH', `/discussions/${id}`, body),
+  update: (id: string, body: { title?: string; archived?: boolean; pinned?: boolean; skill_ids?: string[]; profile_ids?: string[]; directive_ids?: string[]; project_id?: string | null; tier?: ModelTier; agent?: AgentType; summary_strategy?: 'Auto' | 'OnDemand' | 'Off'; no_agent?: boolean; agent_handoffs_disabled?: boolean; agent_handoffs_unlimited?: boolean; execution_variable_retention_days?: number | null }) => api<void>('PATCH', `/discussions/${id}`, body),
   nativeAgentMode: (id: string) =>
     api<DiscussionNativeAgentMode>('GET', `/discussions/${id}/native-agent`),
   agentHandoffMode: (id: string) =>
     api<DiscussionAgentHandoffMode>('GET', `/discussions/${id}/agent-handoffs`),
+  executionVariableRetention: (id: string) =>
+    api<DiscussionExecutionVariableRetention>('GET', `/discussions/${id}/execution-variable-retention`),
   share: (id: string, contactIds: string[]) => api<string>('POST', `/discussions/${id}/share`, { contact_ids: contactIds }),
   /** Unified "join by code": paste any `kr-join-…` token and the backend
    *  resolves it LOCAL or cross-instance. If it isn't a local room, the backend
@@ -2217,6 +2221,40 @@ export const workflows = {
   },
 };
 
+export interface ExecutionVariableMetadata {
+  id: string;
+  resolved_at: string;
+  expires_at: string | null;
+  purged: boolean;
+  provenance: Array<{
+    name: string;
+    source: 'user_input' | 'kronn_context' | 'project_env';
+    source_ref: string | null;
+    effective_source_ref: string;
+    overridden: boolean;
+  }>;
+}
+
+export interface ExecutionVariablePreviewResponse {
+  run_kind: 'preview';
+  run_id: string;
+  metadata: ExecutionVariableMetadata;
+}
+
+export const executionVariables = {
+  preview: (projectId: string | null | undefined, variables: PromptVariable[]) =>
+    api<ExecutionVariablePreviewResponse>('POST', '/execution-context/preview', {
+      project_id: projectId ?? null,
+      variables,
+    }),
+  metadata: (runKind: string, runId: string) =>
+    api<ExecutionVariableMetadata>('GET', `/execution-context/${encodeURIComponent(runKind)}/${encodeURIComponent(runId)}`),
+  reveal: (runKind: string, runId: string, variable: string) =>
+    api<string>('POST', `/execution-context/${encodeURIComponent(runKind)}/${encodeURIComponent(runId)}/reveal`, { variable }),
+  extend: (runKind: string, runId: string, days: number) =>
+    api<void>('POST', `/execution-context/${encodeURIComponent(runKind)}/${encodeURIComponent(runId)}/extend`, { days }),
+};
+
 // ─── Pages vivantes (0.10.0) ──────────────────────────────────────────────
 
 export const pages = {
@@ -2246,6 +2284,7 @@ export const pages = {
 export interface BatchItem {
   title: string;
   prompt: string;
+  variables?: Record<string, string>;
 }
 
 export interface BatchPreview {
@@ -2314,6 +2353,7 @@ export const quickPrompts = {
     qpId: string,
     req: {
       prompt: string;
+      variables?: Record<string, string>;
       batch_name: string;
       targets: Array<{ agent: AgentType; tier: ModelTier; connection_id?: string }>;
       project_id?: string;

@@ -822,6 +822,7 @@ pub async fn get_server_config(
         agent_handoff_paid_unlimited: config.server.agent_handoff_paid_unlimited,
         agent_handoff_blocked_agents: config.server.agent_handoff_blocked_agents.clone(),
         discussion_weight: config.server.discussion_weight,
+        execution_variable_retention_days: config.server.execution_variable_retention_days,
     }))
 }
 
@@ -841,6 +842,9 @@ pub async fn set_server_config(
     let mut config = state.config.write().await;
     if let Some(weight) = req.discussion_weight {
         config.server.discussion_weight = weight;
+    }
+    if let Some(days) = req.execution_variable_retention_days {
+        config.server.execution_variable_retention_days = days;
     }
     if let Some(domain) = req.domain {
         config.server.domain = if domain.is_empty() {

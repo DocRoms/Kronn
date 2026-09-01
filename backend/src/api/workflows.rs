@@ -88,6 +88,19 @@ fn is_safe_trigger_var_name(name: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.')
 }
 
+fn build_secure_execution_trigger_obj(
+    snapshot_id: String,
+    resolved_at: chrono::DateTime<chrono::Utc>,
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut object = build_manual_trigger_obj(&std::collections::HashMap::new(), resolved_at);
+    object.insert("execution_snapshot_id".into(), snapshot_id.into());
+    object.insert(
+        "variables_resolved_at".into(),
+        resolved_at.to_rfc3339().into(),
+    );
+    object
+}
+
 fn validate_artifact_specs(
     specs: &::std::collections::HashMap<String, ArtifactSpec>,
 ) -> Result<(), String> {
@@ -252,11 +265,16 @@ fn validate_json_data_steps(steps: &[WorkflowStep]) -> Result<(), String> {
 /// "no constraint" (logged, never blocks a launch). This is the net that
 /// stops a typo like `7152` (vs `EW-7152`) from reaching the API as a
 /// literal path param and 404ing.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn validate_launch_variables(
     declared: &[crate::models::PromptVariable],
     provided: &std::collections::HashMap<String, String>,
 ) -> Result<(), String> {
+    crate::models::validate_prompt_variables(declared)?;
     for d in declared {
+        if !d.requires_user_input() {
+            continue;
+        }
         let label = if d.label.is_empty() {
             &d.name
         } else {
@@ -1130,6 +1148,9 @@ pub async fn create(
     if req.name.len() > 200 {
         return Json(ApiResponse::err("Workflow name too long (max 200 chars)"));
     }
+    if let Err(e) = crate::models::validate_prompt_variables(&req.variables) {
+        return Json(ApiResponse::err(e));
+    }
     if let Err(errors) = crate::workflows::template::validate_step_references(&req.steps) {
         return Json(ApiResponse::err(format!(
             "Références d'étapes invalides :\n- {}",
@@ -1392,6 +1413,11 @@ pub async fn update(
     if let Some(ref name) = req.name {
         if name.len() > 200 {
             return Json(ApiResponse::err("Workflow name too long (max 200 chars)"));
+        }
+    }
+    if let Some(ref variables) = req.variables {
+        if let Err(e) = crate::models::validate_prompt_variables(variables) {
+            return Json(ApiResponse::err(e));
         }
     }
 
@@ -2299,15 +2325,57 @@ pub async fn trigger(
     // - Unknown variables (sent but not declared) → silently dropped
     //   (defensive: don't let a stale form smuggle data in).
     let provided_vars = body.map(|Json(b)| b.variables).unwrap_or_default();
-    if let Err(msg) = validate_launch_variables(&wf.variables, &provided_vars) {
-        return sse_error(msg);
-    }
-    let trigger_obj = build_manual_trigger_obj(&provided_vars, Utc::now());
+    let (secret, retention_days) = {
+        let config = state.config.read().await;
+        let Some(secret) = config.encryption_secret.clone() else {
+            return sse_error("Variable preflight unavailable: encryption key missing");
+        };
+        (secret, config.server.execution_variable_retention_days)
+    };
+    let run_id = Uuid::new_v4().to_string();
+    let declarations = wf.variables.clone();
+    let supplied = provided_vars;
+    let project_id = wf.project_id.clone();
+    let snapshot_run_id = run_id.clone();
+    let prepared = state
+        .db
+        .with_conn(move |conn| {
+            crate::core::execution_variables::prepare(
+                conn,
+                crate::core::execution_variables::PrepareRequest {
+                    declarations: &declarations,
+                    supplied: &supplied,
+                    context: &std::collections::HashMap::new(),
+                    project_id: project_id.as_deref(),
+                    discussion_id: None,
+                    environment_ref: "project_mcp_configs",
+                    run_kind: "workflow",
+                    run_id: &snapshot_run_id,
+                    encryption_secret: &secret,
+                    retention_days,
+                },
+            )
+        })
+        .await;
+    let prepared = match prepared {
+        Ok(Ok(prepared)) => prepared,
+        Ok(Err(failures)) => {
+            return sse_error(format!(
+                "preflight_failed:{}",
+                serde_json::to_string(&failures).unwrap_or_default()
+            ))
+        }
+        Err(error) => return sse_error(format!("Variable preflight failed: {error}")),
+    };
+    // Persist metadata only. Secret and user-entered execution values live in
+    // the encrypted snapshot and are hydrated in-memory by the runner.
+    let trigger_obj =
+        build_secure_execution_trigger_obj(prepared.snapshot_id, prepared.resolved.resolved_at);
 
     // Atomic concurrency check + insert in a single transaction (avoids TOCTOU race)
     let now = Utc::now();
     let run = WorkflowRun {
-        id: Uuid::new_v4().to_string(),
+        id: run_id,
         workflow_id: wf.id.clone(),
         status: RunStatus::Pending,
         trigger_context: Some(serde_json::Value::Object(trigger_obj)),
@@ -4798,6 +4866,9 @@ mod tests {
             description: None,
             required,
             pattern: pattern.map(str::to_string),
+            source: Default::default(),
+            source_ref: None,
+            allow_manual_override: false,
         }
     }
 
@@ -5698,6 +5769,9 @@ mod tests {
                 description: None,
                 required: true,
                 pattern: None,
+                source: Default::default(),
+                source_ref: None,
+                allow_manual_override: false,
             }],
             agent: AgentType::ClaudeCode,
             connection_id: None,
@@ -6011,6 +6085,28 @@ mod tests {
         let obj = build_manual_trigger_obj(&HashMap::new(), Utc::now());
         assert_eq!(obj.get("type").and_then(|v| v.as_str()), Some("manual"));
         assert!(obj.get("triggered_at").and_then(|v| v.as_str()).is_some());
+    }
+
+    #[test]
+    fn secure_execution_trigger_context_never_contains_resolved_values() {
+        let now = Utc::now();
+        let object = build_secure_execution_trigger_obj("snapshot-1".into(), now);
+        let persisted = serde_json::to_string(&object).unwrap();
+        let expected_resolved_at = now.to_rfc3339();
+        assert_eq!(
+            object.get("execution_snapshot_id").and_then(|v| v.as_str()),
+            Some("snapshot-1")
+        );
+        assert_eq!(
+            object.get("variables_resolved_at").and_then(|v| v.as_str()),
+            Some(expected_resolved_at.as_str())
+        );
+        assert!(!persisted.contains("small-secret"));
+        assert_eq!(
+            object.len(),
+            4,
+            "only trigger and snapshot metadata may persist"
+        );
     }
 
     #[test]

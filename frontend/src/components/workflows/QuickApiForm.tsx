@@ -200,6 +200,9 @@ export function QuickApiForm({
         placeholder: '',
         description: null,
         required: true,
+        source: 'user_input',
+        source_ref: null,
+        allow_manual_override: false,
       });
     });
   }, [apiEndpointPath, apiQuery, apiPathParams, apiHeaders, apiBody]);

@@ -51,6 +51,9 @@ pub async fn create(
     if req.api_endpoint_path.is_empty() {
         return Json(ApiResponse::err("api_endpoint_path is required"));
     }
+    if let Err(error) = validate_prompt_variables(&req.variables) {
+        return Json(ApiResponse::err(error));
+    }
 
     let now = Utc::now();
     let qa = QuickApi {
@@ -106,6 +109,9 @@ pub async fn update(
         Ok(None) => return Json(ApiResponse::err("Quick API not found")),
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
     };
+    if let Err(error) = validate_prompt_variables(&req.variables) {
+        return Json(ApiResponse::err(error));
+    }
 
     let updated = QuickApi {
         id: existing.id,
@@ -386,38 +392,100 @@ pub async fn run_qa(
     };
     let shared_project_id = qa.project_id.clone();
 
-    // Validate required variables.
-    for v in &qa.variables {
-        if v.required {
-            let val = req.variables.get(&v.name).map(|s| s.trim()).unwrap_or("");
-            if val.is_empty() {
-                let response = RunQuickApiResponse {
-                    run_id: run_id.clone(),
-                    success: false,
-                    duration_ms: 0,
-                    envelope: None,
-                    error: Some(format!("Variable obligatoire manquante : `{}`", v.name)),
-                };
-                if let Err(error) = persist_quick_api_terminal(
-                    &state,
-                    &id,
-                    shared_project_id.clone(),
-                    created_at,
-                    &response,
-                    crate::models::SharedRunStatus::PreflightFailed,
-                )
-                .await
-                {
-                    return Json(ApiResponse::err(format!("DB error: {error}")));
-                }
-                return Json(ApiResponse::ok(response));
+    let (secret, retention_days) = {
+        let config = state.config.read().await;
+        let Some(secret) = config.encryption_secret.clone() else {
+            let response = RunQuickApiResponse {
+                run_id: run_id.clone(),
+                success: false,
+                duration_ms: 0,
+                envelope: None,
+                error: Some("Variable preflight unavailable: encryption key missing".into()),
+            };
+            let _ = persist_quick_api_terminal(
+                &state,
+                &id,
+                shared_project_id.clone(),
+                created_at,
+                &response,
+                crate::models::SharedRunStatus::PreflightFailed,
+            )
+            .await;
+            return Json(ApiResponse::ok(response));
+        };
+        (secret, config.server.execution_variable_retention_days)
+    };
+    let declarations = qa.variables.clone();
+    let supplied = req.variables.clone();
+    let project_id = qa.project_id.clone();
+    let snapshot_run_id = req
+        .workflow_run_id
+        .clone()
+        .unwrap_or_else(|| run_id.clone());
+    let is_workflow_execution = req.workflow_run_id.is_some();
+    let snapshot_run_kind = if is_workflow_execution {
+        "workflow"
+    } else {
+        "quick_api"
+    };
+    let prepared_snapshot_run_id = snapshot_run_id.clone();
+    let prepared = state
+        .db
+        .with_conn(move |conn| {
+            crate::core::execution_variables::prepare(
+                conn,
+                crate::core::execution_variables::PrepareRequest {
+                    declarations: &declarations,
+                    supplied: &supplied,
+                    context: &std::collections::HashMap::new(),
+                    project_id: project_id.as_deref(),
+                    discussion_id: None,
+                    environment_ref: "project_mcp_configs",
+                    run_kind: snapshot_run_kind,
+                    run_id: &prepared_snapshot_run_id,
+                    encryption_secret: &secret,
+                    retention_days,
+                },
+            )
+        })
+        .await;
+    let resolved = match prepared {
+        Ok(Ok(prepared)) => prepared.resolved,
+        Ok(Err(failures)) => {
+            let response = RunQuickApiResponse {
+                run_id: run_id.clone(),
+                success: false,
+                duration_ms: 0,
+                envelope: None,
+                error: Some(format!(
+                    "preflight_failed:{}",
+                    serde_json::to_string(&failures).unwrap_or_default()
+                )),
+            };
+            if let Err(error) = persist_quick_api_terminal(
+                &state,
+                &id,
+                shared_project_id.clone(),
+                created_at,
+                &response,
+                crate::models::SharedRunStatus::PreflightFailed,
+            )
+            .await
+            {
+                return Json(ApiResponse::err(format!("DB error: {error}")));
             }
+            return Json(ApiResponse::ok(response));
         }
-    }
+        Err(error) => {
+            return Json(ApiResponse::err(format!(
+                "Variable preflight failed: {error}"
+            )))
+        }
+    };
 
     // Build template context from variables.
     let mut ctx = crate::workflows::template::TemplateContext::new();
-    for (k, v) in &req.variables {
+    for (k, v) in &resolved.values {
         ctx.set(k.clone(), v.clone());
     }
 
@@ -562,6 +630,21 @@ pub async fn run_qa(
     } else {
         Some(outcome.result.output)
     };
+
+    if !is_workflow_execution {
+        let terminal_snapshot_run_id = snapshot_run_id.clone();
+        let _ = state
+            .db
+            .with_conn(move |conn| {
+                crate::db::execution_variable_snapshots::purge_run_lifetime_snapshot(
+                    conn,
+                    "quick_api",
+                    &terminal_snapshot_run_id,
+                    Utc::now(),
+                )
+            })
+            .await;
+    }
 
     let response = RunQuickApiResponse {
         run_id,
@@ -743,6 +826,67 @@ pub async fn batch_run_qa(
     let normalized_items: Vec<serde_json::Value> =
         normalize_batch_items(items_arr, first_var_name.as_deref());
 
+    // Resolve every declared source before the BatchApiCall executor can
+    // issue its first HTTP request. Item object fields provide user inputs;
+    // project-provided values are resolved once for this batch execution.
+    let supplied: std::collections::HashMap<String, String> = normalized_items
+        .first()
+        .and_then(serde_json::Value::as_object)
+        .into_iter()
+        .flat_map(|object| object.iter())
+        .filter_map(|(name, value)| {
+            value
+                .as_str()
+                .map(|value| (name.clone(), value.to_string()))
+        })
+        .collect();
+    let (secret, retention_days) = {
+        let config = state.config.read().await;
+        let Some(secret) = config.encryption_secret.clone() else {
+            return Json(ApiResponse::err(
+                "Variable preflight unavailable: encryption key missing",
+            ));
+        };
+        (secret, config.server.execution_variable_retention_days)
+    };
+    let declarations = qa.variables.clone();
+    let project_id = qa.project_id.clone();
+    let snapshot_run_id = run_id.clone();
+    let prepared = state
+        .db
+        .with_conn(move |conn| {
+            crate::core::execution_variables::prepare(
+                conn,
+                crate::core::execution_variables::PrepareRequest {
+                    declarations: &declarations,
+                    supplied: &supplied,
+                    context: &std::collections::HashMap::new(),
+                    project_id: project_id.as_deref(),
+                    discussion_id: None,
+                    environment_ref: "project_mcp_configs",
+                    run_kind: "quick_api_batch",
+                    run_id: &snapshot_run_id,
+                    encryption_secret: &secret,
+                    retention_days,
+                },
+            )
+        })
+        .await;
+    let resolved = match prepared {
+        Ok(Ok(prepared)) => prepared.resolved,
+        Ok(Err(failures)) => {
+            return Json(ApiResponse::err(format!(
+                "preflight_failed:{}",
+                serde_json::to_string(&failures).unwrap_or_default()
+            )))
+        }
+        Err(error) => {
+            return Json(ApiResponse::err(format!(
+                "Variable preflight failed: {error}"
+            )))
+        }
+    };
+
     // Serialize the items array as a JSON literal — the executor's
     // template engine renders the literal as-is when items_from doesn't
     // contain `{{` placeholders. No template variables in standalone runs.
@@ -838,7 +982,10 @@ pub async fn batch_run_qa(
         multi_agent_review: None,
     };
 
-    let ctx = crate::workflows::template::TemplateContext::new();
+    let mut ctx = crate::workflows::template::TemplateContext::new();
+    for (name, value) in resolved.values {
+        ctx.set(name, value);
+    }
     let running_at = Utc::now();
     let running = crate::models::SharedRun {
         id: run_id.clone(),
@@ -909,6 +1056,19 @@ pub async fn batch_run_qa(
     } else {
         None
     };
+
+    let terminal_snapshot_run_id = run_id.clone();
+    let _ = state
+        .db
+        .with_conn(move |conn| {
+            crate::db::execution_variable_snapshots::purge_run_lifetime_snapshot(
+                conn,
+                "quick_api_batch",
+                &terminal_snapshot_run_id,
+                Utc::now(),
+            )
+        })
+        .await;
 
     let shared_status = match &outcome.result.status {
         RunStatus::Success => crate::models::SharedRunStatus::Success,

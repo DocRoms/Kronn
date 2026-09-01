@@ -45,6 +45,7 @@ export const API_NAMESPACES = [
   'quickPrompts',
   'quickApis',
   'quickExecs',
+  'executionVariables',
   'skills',
   'profiles',
   'directives',
@@ -103,6 +104,7 @@ interface DefaultMock {
   quickPrompts: Record<string, AnyFn>;
   quickApis: Record<string, AnyFn>;
   quickExecs: Record<string, AnyFn>;
+  executionVariables: Record<string, AnyFn>;
   skills: Record<string, AnyFn>;
   profiles: Record<string, AnyFn>;
   directives: Record<string, AnyFn>;
@@ -171,7 +173,7 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       saveGlobalContext: resolve(undefined),
       getGlobalContextMode: resolve('always'),
       saveGlobalContextMode: resolve(undefined),
-      getServerConfig: resolve({ pseudo: null, avatar_email: null, host: 'localhost', port: 3140, default_model_tier: 'default', default_summary_strategy: 'Off', agent_handoffs_enabled: false, agent_handoff_paid_limit: 1, agent_handoff_paid_unlimited: false, agent_handoff_blocked_agents: [] }),
+      getServerConfig: resolve({ pseudo: null, avatar_email: null, host: 'localhost', port: 3140, default_model_tier: 'default', default_summary_strategy: 'Off', agent_handoffs_enabled: false, agent_handoff_paid_limit: 1, agent_handoff_paid_unlimited: false, agent_handoff_blocked_agents: [], execution_variable_retention_days: 30 }),
       setServerConfig: resolve(undefined),
       getNetworkExposure: resolve({ exposed: false, restart_required: false, port: 3140, reachable_ips: [] }),
       setNetworkExposure: resolve({ exposed: false, restart_required: false, port: 3140, reachable_ips: [] }),
@@ -371,6 +373,7 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       update: resolve(undefined),
       nativeAgentMode: resolve({ disabled: false }),
       agentHandoffMode: resolve({ global_enabled: false, disabled: false, unlimited_override: false, effective_enabled: false, paid_limit: 1 }),
+      executionVariableRetention: resolve({ global_days: 30, override_days: null, effective_days: 30 }),
       workspaces: resolve([]),
       archive: resolve(undefined),
       unarchive: resolve(undefined),
@@ -499,6 +502,20 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       run: resolve({ success: true, duration_ms: 0, data: null, stdout: '', stderr: '', error: null }),
       export: vi.fn(),
       import: resolve({}),
+    },
+
+    executionVariables: {
+      preview: resolve({ run_kind: 'preview', run_id: 'preview-run', metadata: { id: 'preview-snapshot', resolved_at: '2026-01-01T00:00:00Z', expires_at: '2026-01-01T00:10:00Z', purged: false, provenance: [] } }),
+      metadata: resolve({
+        run_kind: 'quick_prompt',
+        run_id: '',
+        resolved_at: null,
+        snapshot_id: null,
+        retention_expires_at: null,
+        variables: [],
+      }),
+      reveal: resolve(''),
+      extend: resolve(undefined),
     },
 
     rtk: {

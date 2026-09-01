@@ -33,17 +33,37 @@ import {
   isDeletedMessage,
 } from '../lib/messageContent';
 import { parseModelErrorEvent } from '../lib/modelErrorEvent';
+import { executionVariables } from '../lib/api';
 import {
   Cpu, AlertTriangle, Zap, Loader2, Pause, Play,
   Key, Settings, Send, Pencil, RotateCcw, Check, Copy, Clock, ShieldCheck,
   ChevronRight, ListTodo, User, Users, Trash2, Workflow,
-  Reply,
+  Reply, Eye, EyeOff,
 } from 'lucide-react';
 
 // Hoisted regexes (avoid creating new RegExp objects per message per render)
 const RE_AUTH_ERROR = /api.?key|invalid.*key|key.*not.*config|authenticat|unauthori|login|sign.?in/i;
 const RE_PARTIAL_RESPONSE = /Réponse partielle.*interrompu|Timeout d'inactivité/i;
 const EDIT_TEXTAREA_MAX_HEIGHT = 160;
+
+interface ExecutionContextCard {
+  run_kind: string;
+  run_id: string;
+  snapshot_id: string;
+  resolved_at: string;
+  expires_at?: string | null;
+  purged: boolean;
+  variables: Array<{ name: string; effective_source_ref: string; overridden: boolean }>;
+}
+
+function parseExecutionContext(content: string): ExecutionContextCard | null {
+  if (!content.startsWith('execution_context:')) return null;
+  try {
+    return JSON.parse(content.slice('execution_context:'.length)) as ExecutionContextCard;
+  } catch {
+    return null;
+  }
+}
 
 function resizeEditTextarea(textarea: HTMLTextAreaElement) {
   textarea.style.height = 'auto';
@@ -478,6 +498,39 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
   // recognises tool activity at a glance.
   const isKronnTool = msg.role === 'System' && msg.content.startsWith('[kronn-internal:');
   const isKronnPlanning = msg.role === 'System' && msg.content.startsWith('[kronn-planning:');
+  const executionContext = msg.role === 'System' ? parseExecutionContext(msg.content) : null;
+  const [revealedExecutionVariables, setRevealedExecutionVariables] = useState<Record<string, string>>({});
+  const [revealingExecutionVariable, setRevealingExecutionVariable] = useState<string | null>(null);
+  const [executionVariableError, setExecutionVariableError] = useState<string | null>(null);
+  const revealTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+  useEffect(() => () => {
+    Object.values(revealTimers.current).forEach(clearTimeout);
+  }, []);
+
+  const remaskExecutionVariable = (name: string) => {
+    if (revealTimers.current[name]) clearTimeout(revealTimers.current[name]);
+    delete revealTimers.current[name];
+    setRevealedExecutionVariables(current => {
+      const next = { ...current };
+      delete next[name];
+      return next;
+    });
+  };
+
+  const revealExecutionVariable = async (name: string) => {
+    if (!executionContext || revealingExecutionVariable) return;
+    setRevealingExecutionVariable(name);
+    setExecutionVariableError(null);
+    try {
+      const value = await executionVariables.reveal(executionContext.run_kind, executionContext.run_id, name);
+      setRevealedExecutionVariables(current => ({ ...current, [name]: value }));
+      revealTimers.current[name] = setTimeout(() => remaskExecutionVariable(name), 30_000);
+    } catch (error) {
+      setExecutionVariableError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setRevealingExecutionVariable(null);
+    }
+  };
   const kronnToolMatch = isKronnTool
     ? /^\[kronn-internal: ([a-z_]+)(?:\(([^)]*)\))?(?: → (.*))?\]$/s.exec(msg.content.trim())
     : null;
@@ -543,7 +596,8 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
           isKronnTool ? 'kronn-tool'
           : isKronnPlanning ? 'kronn-planning'
           : msg.content.startsWith('summary cached') ? 'summary'
-          : 'error'
+                  : executionContext ? 'execution-context'
+                  : 'error'
         ) : undefined}
         style={msg.role === 'Agent'
           ? { borderLeftColor: agentColor(agentType, mentionColors) }
@@ -718,13 +772,17 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
                       : 'var(--kr-error)',
                 }}
               >
-                {isKronnPlanning
+                {executionContext
+                  ? <ShieldCheck size={10} />
+                  : isKronnPlanning
                   ? <ListTodo size={10} />
                   : msg.content.startsWith('summary cached')
                     ? <Zap size={10} />
                     : <AlertTriangle size={10} />}
                 {' '}
-                {isKronnPlanning
+                {executionContext
+                  ? 'Execution context'
+                  : isKronnPlanning
                   ? t('planning.receipt')
                   : msg.content.startsWith('summary cached')
                     ? t('disc.summaryCached')
@@ -839,6 +897,41 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
           // the markdown render — we don't want a second copy of
           // `[kronn-internal: ...]` rendered as raw text below.
           null
+        ) : executionContext ? (
+          <section className="disc-execution-context" aria-label={t('executionVariables.contextAria')}>
+            <div><strong>{executionContext.run_kind}</strong> · {new Date(executionContext.resolved_at).toLocaleString()}</div>
+            <div>{executionContext.purged ? t('executionVariables.purged') : t('executionVariables.encryptedMasked')}</div>
+            <ul>
+              {executionContext.variables.map(variable => (
+                <li key={variable.name}>
+                  <code>{variable.name}</code> · {variable.effective_source_ref}
+                  {variable.overridden ? ` · ${t('executionVariables.manualOverride')}` : ''}
+                  {' · '}
+                  <code>{revealedExecutionVariables[variable.name] ?? '••••••'}</code>
+                  {!executionContext.purged && (
+                    <button
+                      type="button"
+                      className="disc-icon-btn"
+                      aria-label={revealedExecutionVariables[variable.name]
+                        ? t('executionVariables.remask', variable.name)
+                        : t('executionVariables.revealTemporarily', variable.name)}
+                      disabled={revealingExecutionVariable === variable.name}
+                      onClick={() => revealedExecutionVariables[variable.name]
+                        ? remaskExecutionVariable(variable.name)
+                        : void revealExecutionVariable(variable.name)}
+                    >
+                      {revealingExecutionVariable === variable.name
+                        ? <Loader2 size={12} className="spin" />
+                        : revealedExecutionVariables[variable.name]
+                          ? <EyeOff size={12} />
+                          : <Eye size={12} />}
+                    </button>
+                  )}
+                </li>
+              ))}
+            </ul>
+            {executionVariableError && <div role="alert">{executionVariableError}</div>}
+          </section>
         ) : modelError ? (
           <div className="disc-model-error-content" data-testid="disc-model-error-content">
             <p>{modelError.summary}</p>

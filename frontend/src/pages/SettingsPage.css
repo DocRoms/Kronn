@@ -4973,6 +4973,34 @@
   margin-top: 2px;
 }
 
+.set-db-retention {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(180px, 240px);
+  align-items: center;
+  gap: var(--kr-sp-2) var(--kr-sp-6);
+  margin-bottom: var(--kr-sp-6);
+  padding: var(--kr-sp-4) var(--kr-sp-5);
+  border: 1px solid var(--kr-border-soft);
+  border-radius: var(--kr-r-md);
+  background: var(--kr-bg-surface);
+}
+
+.set-db-retention .set-form-label {
+  margin: 0;
+}
+
+.set-db-retention small {
+  grid-column: 1 / -1;
+  color: var(--kr-text-faint);
+  font-size: var(--kr-fs-xs);
+}
+
+@media (max-width: 680px) {
+  .set-db-retention {
+    grid-template-columns: 1fr;
+  }
+}
+
 /* ── Usage section ─────────────────────────────────────── */
 
 /* Toggle group (tokens/cost, filter) */

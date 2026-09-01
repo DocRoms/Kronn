@@ -533,6 +533,48 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    match state
+        .db
+        .with_conn(|conn| {
+            kronn::db::execution_variable_snapshots::purge_expired(conn, chrono::Utc::now())
+        })
+        .await
+    {
+        Ok(0) => {}
+        Ok(count) => tracing::info!("Purged {count} expired execution-variable snapshot(s)"),
+        Err(error) => tracing::warn!("Execution-variable snapshot purge failed: {error}"),
+    }
+    // Expiry is enforced continuously as well as at boot. Reveals and runtime
+    // loads already reject expired rows; this bounded sweep irreversibly drops
+    // ciphertext without extending retention on reads.
+    {
+        let purge_db = state.db.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60 * 60));
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                match purge_db
+                    .with_conn(|conn| {
+                        kronn::db::execution_variable_snapshots::purge_expired(
+                            conn,
+                            chrono::Utc::now(),
+                        )
+                    })
+                    .await
+                {
+                    Ok(0) => {}
+                    Ok(count) => {
+                        tracing::info!("Purged {count} expired execution-variable snapshot(s)")
+                    }
+                    Err(error) => {
+                        tracing::warn!("Execution-variable snapshot purge failed: {error}")
+                    }
+                }
+            }
+        });
+    }
+
     // Reap abandoned MCP sessions (2026-06-08). `count_live_participants` is
     // presence-sticky — any `status='active'` session suppresses Kronn's
     // auto-response (no per-message staleness window, which had wrongly

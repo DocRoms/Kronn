@@ -203,30 +203,90 @@ pub async fn run(
         }
         Err(error) => return Json(ApiResponse::err(format!("DB error: {error}"))),
     };
-    if let Err(error) = validate_variables(&item.variables, &request.variables) {
-        let response = RunQuickExecResponse {
-            run_id: run_id.clone(),
-            success: false,
-            duration_ms: 0,
-            data: None,
-            stdout: None,
-            stderr: None,
-            error: Some(error),
+    let (secret, retention_days) = {
+        let config = state.config.read().await;
+        let Some(secret) = config.encryption_secret.clone() else {
+            let response = RunQuickExecResponse {
+                run_id: run_id.clone(),
+                success: false,
+                duration_ms: 0,
+                data: None,
+                stdout: None,
+                stderr: None,
+                error: Some("Variable preflight unavailable: encryption key missing".into()),
+            };
+            let _ = persist_quick_exec_terminal(
+                &state,
+                &id,
+                item.project_id.clone(),
+                created_at,
+                &response,
+                crate::models::SharedRunStatus::PreflightFailed,
+            )
+            .await;
+            return Json(ApiResponse::ok(response));
         };
-        if let Err(error) = persist_quick_exec_terminal(
-            &state,
-            &id,
-            item.project_id.clone(),
-            created_at,
-            &response,
-            crate::models::SharedRunStatus::PreflightFailed,
-        )
-        .await
-        {
-            return Json(ApiResponse::err(format!("DB error: {error}")));
+        (secret, config.server.execution_variable_retention_days)
+    };
+    let declarations = item.variables.clone();
+    let supplied = request.variables.clone();
+    let selected_project = item.project_id.clone();
+    let snapshot_run_id = run_id.clone();
+    let prepared = state
+        .db
+        .with_conn(move |conn| {
+            crate::core::execution_variables::prepare(
+                conn,
+                crate::core::execution_variables::PrepareRequest {
+                    declarations: &declarations,
+                    supplied: &supplied,
+                    context: &std::collections::HashMap::new(),
+                    project_id: selected_project.as_deref(),
+                    discussion_id: None,
+                    environment_ref: "project_mcp_configs",
+                    run_kind: "quick_exec",
+                    run_id: &snapshot_run_id,
+                    encryption_secret: &secret,
+                    retention_days,
+                },
+            )
+        })
+        .await;
+    let resolved = match prepared {
+        Ok(Ok(prepared)) => prepared.resolved,
+        Ok(Err(failures)) => {
+            let response = RunQuickExecResponse {
+                run_id: run_id.clone(),
+                success: false,
+                duration_ms: 0,
+                data: None,
+                stdout: None,
+                stderr: None,
+                error: Some(format!(
+                    "preflight_failed:{}",
+                    serde_json::to_string(&failures).unwrap_or_default()
+                )),
+            };
+            if let Err(error) = persist_quick_exec_terminal(
+                &state,
+                &id,
+                item.project_id.clone(),
+                created_at,
+                &response,
+                crate::models::SharedRunStatus::PreflightFailed,
+            )
+            .await
+            {
+                return Json(ApiResponse::err(format!("DB error: {error}")));
+            }
+            return Json(ApiResponse::ok(response));
         }
-        return Json(ApiResponse::ok(response));
-    }
+        Err(error) => {
+            return Json(ApiResponse::err(format!(
+                "Variable preflight failed: {error}"
+            )))
+        }
+    };
     let project_id = item.project_id.clone();
     let work_dir = if let Some(pid) = project_id.clone() {
         match state
@@ -266,10 +326,8 @@ pub async fn run(
     };
 
     let mut context = TemplateContext::new();
-    for variable in &item.variables {
-        if let Some(value) = request.variables.get(&variable.name) {
-            context.set(variable.name.clone(), value.clone());
-        }
+    for (name, value) in resolved.values {
+        context.set(name, value);
     }
     let step = WorkflowStep {
         name: item.name.clone(),
@@ -306,6 +364,18 @@ pub async fn run(
         crate::workflows::exec_step::MAX_COLLECT_OUTPUT_BYTES,
     )
     .await;
+    let terminal_snapshot_run_id = run_id.clone();
+    let _ = state
+        .db
+        .with_conn(move |conn| {
+            crate::db::execution_variable_snapshots::purge_run_lifetime_snapshot(
+                conn,
+                "quick_exec",
+                &terminal_snapshot_run_id,
+                Utc::now(),
+            )
+        })
+        .await;
     if outcome.result.status != RunStatus::Success {
         let status = if outcome.result.output.contains("timed out after") {
             crate::models::SharedRunStatus::Timeout
@@ -569,12 +639,7 @@ fn validate_request(request: &CreateQuickExecRequest) -> Result<(), String> {
     if matches!(request.timeout_secs, Some(0 | 1801..)) {
         return Err("Quick Exec timeout must be between 1 and 1800 seconds".to_string());
     }
-    let mut names = std::collections::HashSet::new();
-    for variable in &request.variables {
-        if variable.name.trim().is_empty() || !names.insert(variable.name.trim()) {
-            return Err("Quick Exec variable names must be non-empty and unique".to_string());
-        }
-    }
+    crate::models::validate_prompt_variables(&request.variables)?;
     Ok(())
 }
 
@@ -583,6 +648,10 @@ pub(crate) fn validate_variables(
     values: &std::collections::HashMap<String, String>,
 ) -> Result<(), String> {
     for variable in declarations {
+        variable.validate_source()?;
+        if !variable.requires_user_input() {
+            continue;
+        }
         let value = values.get(&variable.name).map(String::as_str).unwrap_or("");
         if variable.required && value.trim().is_empty() {
             return Err(format!("Missing required variable `{}`", variable.name));

@@ -26,7 +26,7 @@ vi.mock('../../lib/api', () => ({
     getScanDepth: vi.fn().mockResolvedValue(4),
     getScanPaths: vi.fn().mockResolvedValue(['/home/user/repos']),
     getScanIgnore: vi.fn().mockResolvedValue(['node_modules', '.git']),
-    getServerConfig: vi.fn().mockResolvedValue({ host: '127.0.0.1', port: 3140, domain: null, max_concurrent_agents: 5, agent_stall_timeout_min: 5, agent_global_timeout_min: 30, local_agent_global_timeout_min: 240, auth_enabled: true, discussion_notes_enabled: true }),
+    getServerConfig: vi.fn().mockResolvedValue({ host: '127.0.0.1', port: 3140, domain: null, max_concurrent_agents: 5, agent_stall_timeout_min: 5, agent_global_timeout_min: 30, local_agent_global_timeout_min: 240, auth_enabled: true, discussion_notes_enabled: true, execution_variable_retention_days: 30 }),
     setServerConfig: vi.fn().mockResolvedValue(undefined),
     getNetworkExposure: vi.fn().mockResolvedValue({ exposed: false, restart_required: false, port: 3140, reachable_ips: [] }),
     setNetworkExposure: vi.fn().mockResolvedValue({ exposed: false, restart_required: false, port: 3140, reachable_ips: [] }),
@@ -679,6 +679,21 @@ describe('SettingsPage', () => {
       local_agent_global_timeout_min: 180,
     }));
     expect(localGlobalSlider.value).toBe('180');
+  });
+
+  it('loads and persists the global execution-value retention policy', async () => {
+    (configApi.setServerConfig as ReturnType<typeof vi.fn>).mockClear();
+    await wrap(<SettingsPage {...defaultProps} />);
+
+    const select = screen.getByLabelText('Conservation des valeurs d’exécution') as HTMLSelectElement;
+    expect(select.value).toBe('30');
+    expect(document.getElementById('settings-database')).toContainElement(select);
+
+    await act(async () => { fireEvent.change(select, { target: { value: '0' } }); });
+    await waitFor(() => expect(configApi.setServerConfig).toHaveBeenCalledWith({
+      execution_variable_retention_days: 0,
+    }));
+    expect(select.value).toBe('0');
   });
 
   it('warns when inactivity can never outlast the absolute execution limit', async () => {

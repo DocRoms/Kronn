@@ -3,7 +3,7 @@
 //! These tests exercise the full HTTP layer (router + handlers + DB)
 //! using `tower::ServiceExt::oneshot` with an in-memory SQLite database.
 
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use axum::{
     body::Body,
@@ -3971,6 +3971,66 @@ async fn discussion_agent_handoff_mode_round_trips_through_http() {
 }
 
 #[tokio::test]
+async fn discussion_execution_variable_retention_can_override_then_inherit() {
+    let state = test_state();
+    state
+        .db
+        .with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO discussions
+                 (id, title, agent, language, participants_json, created_at,
+                  updated_at, message_count, workspace_mode)
+                 VALUES ('d-variable-retention', 'Variable retention', 'Codex', 'fr', '[]',
+                         datetime('now'), datetime('now'), 0, 'Direct')",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let app = build_router_with_auth(state, false);
+
+    let (_, initial) = get_json(
+        app.clone(),
+        "/api/discussions/d-variable-retention/execution-variable-retention",
+    )
+    .await;
+    assert_eq!(initial["data"]["global_days"], 30);
+    assert_eq!(initial["data"]["effective_days"], 30);
+    assert!(initial["data"]["override_days"].is_null());
+
+    let (_, updated) = patch_json(
+        app.clone(),
+        "/api/discussions/d-variable-retention",
+        serde_json::json!({ "execution_variable_retention_days": 7 }),
+    )
+    .await;
+    assert_eq!(updated["success"], true);
+    let (_, overridden) = get_json(
+        app.clone(),
+        "/api/discussions/d-variable-retention/execution-variable-retention",
+    )
+    .await;
+    assert_eq!(overridden["data"]["override_days"], 7);
+    assert_eq!(overridden["data"]["effective_days"], 7);
+
+    let (_, cleared) = patch_json(
+        app.clone(),
+        "/api/discussions/d-variable-retention",
+        serde_json::json!({ "execution_variable_retention_days": null }),
+    )
+    .await;
+    assert_eq!(cleared["success"], true);
+    let (_, inherited) = get_json(
+        app,
+        "/api/discussions/d-variable-retention/execution-variable-retention",
+    )
+    .await;
+    assert!(inherited["data"]["override_days"].is_null());
+    assert_eq!(inherited["data"]["effective_days"], 30);
+}
+
+#[tokio::test]
 async fn discussions_create_uses_default_language() {
     let state = test_state();
 
@@ -4174,6 +4234,218 @@ async fn project_docker_routes_return_a_safe_empty_state_without_compose() {
     assert!(action["error"]
         .as_str()
         .is_some_and(|error| error.contains("Compose")));
+}
+
+#[tokio::test]
+async fn execution_context_http_routes_keep_values_masked_reveal_on_demand_and_audit_extension() {
+    let state = test_state();
+    let secret = kronn::core::crypto::generate_secret();
+    state.config.write().await.encryption_secret = Some(secret.clone());
+    let key = kronn::core::crypto::parse_secret(&secret).unwrap();
+    let now = chrono::Utc::now();
+    let values = HashMap::from([("token".to_string(), "http-secret-value".to_string())]);
+    let provenance = vec![kronn::core::execution_variables::VariableProvenance {
+        name: "token".into(),
+        source: kronn::models::PromptVariableSource::ProjectEnv,
+        source_ref: Some("<env.API_TOKEN>".into()),
+        effective_source_ref: "mcp:test".into(),
+        overridden: false,
+    }];
+    let snapshot_id = state
+        .db
+        .with_conn(move |connection| {
+            kronn::db::execution_variable_snapshots::insert(
+                connection,
+                kronn::db::execution_variable_snapshots::NewSnapshot {
+                    run_kind: "quick_exec",
+                    run_id: "qe-http-run",
+                    project_id: None,
+                    environment_ref: "project_mcp_configs",
+                    resolved_at: now,
+                    retention_days: 30,
+                    expires_at: Some(now + chrono::Duration::days(30)),
+                    values: &values,
+                    provenance: &provenance,
+                },
+                &key,
+            )
+        })
+        .await
+        .unwrap();
+    let route = "/api/execution-context/quick_exec/qe-http-run";
+
+    let (status, metadata) = get_json(build_router_with_auth(state.clone(), false), route).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(metadata["success"], true, "{metadata}");
+    assert_eq!(metadata["data"]["id"], snapshot_id);
+    assert_eq!(metadata["data"]["purged"], false);
+    assert_eq!(metadata["data"]["provenance"][0]["name"], "token");
+    assert!(
+        !metadata.to_string().contains("http-secret-value"),
+        "metadata leaked the encrypted value: {metadata}"
+    );
+
+    let (status, revealed) = post_json(
+        build_router_with_auth(state.clone(), false),
+        &format!("{route}/reveal"),
+        serde_json::json!({ "variable": "token" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(revealed["success"], true, "{revealed}");
+    assert_eq!(revealed["data"], "http-secret-value");
+
+    let (status, extended) = post_json(
+        build_router_with_auth(state.clone(), false),
+        &format!("{route}/extend"),
+        serde_json::json!({ "days": 45 }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(extended["success"], true, "{extended}");
+
+    let (reveal_audits, retention_audits): (i64, i64) = state
+        .db
+        .with_conn(move |connection| {
+            Ok((
+                connection.query_row(
+                    "SELECT COUNT(*) FROM execution_variable_reveal_audit WHERE snapshot_id=?1 AND variable_name='token'",
+                    [&snapshot_id],
+                    |row| row.get(0),
+                )?,
+                connection.query_row(
+                    "SELECT COUNT(*) FROM execution_variable_retention_audit WHERE snapshot_id=?1",
+                    [&snapshot_id],
+                    |row| row.get(0),
+                )?,
+            ))
+        })
+        .await
+        .unwrap();
+    assert_eq!(reveal_audits, 1);
+    assert_eq!(retention_audits, 1);
+
+    let (_, missing) = get_json(
+        build_router_with_auth(state, false),
+        "/api/execution-context/quick_exec/unknown-run",
+    )
+    .await;
+    assert_eq!(missing["success"], false, "{missing}");
+}
+
+#[tokio::test]
+async fn execution_variable_preview_is_short_lived_masked_and_audited() {
+    let state = test_state();
+    let secret = kronn::core::crypto::generate_secret();
+    state.config.write().await.encryption_secret = Some(secret.clone());
+    let seeded_secret = secret.clone();
+    state
+        .db
+        .with_conn(move |connection| {
+            let now = chrono::Utc::now().to_rfc3339();
+            connection.execute(
+                "INSERT INTO projects (id,name,path,created_at,updated_at)
+                 VALUES ('preview-project','Preview','/tmp/preview',?1,?1)",
+                [&now],
+            )?;
+            kronn::db::mcps::upsert_server(
+                connection,
+                &kronn::models::McpServer {
+                    id: "preview-server".into(),
+                    name: "Preview server".into(),
+                    description: String::new(),
+                    transport: kronn::models::McpTransport::Stdio {
+                        command: "preview".into(),
+                        args: vec![],
+                    },
+                    source: kronn::models::McpSource::Registry,
+                    api_spec: None,
+                },
+            )?;
+            let values =
+                HashMap::from([("API_TOKEN".to_string(), "preview-only-secret".to_string())]);
+            kronn::db::mcps::insert_config(
+                connection,
+                &kronn::models::McpConfig {
+                    id: "preview-config".into(),
+                    server_id: "preview-server".into(),
+                    label: "Preview config".into(),
+                    env_keys: vec!["API_TOKEN".into()],
+                    env_encrypted: kronn::db::mcps::encrypt_env(&values, &seeded_secret).unwrap(),
+                    args_override: None,
+                    is_global: false,
+                    include_general: false,
+                    config_hash: "preview-hash".into(),
+                    project_ids: vec!["preview-project".into()],
+                    host_sync: kronn::models::HostSyncMode::None,
+                },
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    let (status, preview) = post_json(
+        build_router_with_auth(state.clone(), false),
+        "/api/execution-context/preview",
+        serde_json::json!({
+            "project_id": "preview-project",
+            "variables": [{
+                "name": "token",
+                "label": "Token",
+                "placeholder": "",
+                "required": true,
+                "source": "project_env",
+                "source_ref": "<env.API_TOKEN>",
+                "allow_manual_override": false
+            }]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(preview["success"], true, "{preview}");
+    assert!(!preview.to_string().contains("preview-only-secret"));
+    assert_eq!(preview["data"]["run_kind"], "preview");
+    assert_eq!(
+        preview["data"]["metadata"]["provenance"][0]["name"],
+        "token"
+    );
+    let run_id = preview["data"]["run_id"].as_str().unwrap().to_string();
+    let route = format!("/api/execution-context/preview/{run_id}");
+
+    let (_, revealed) = post_json(
+        build_router_with_auth(state.clone(), false),
+        &format!("{route}/reveal"),
+        serde_json::json!({ "variable": "token" }),
+    )
+    .await;
+    assert_eq!(revealed["data"], "preview-only-secret");
+
+    let (_, refused_extension) = post_json(
+        build_router_with_auth(state.clone(), false),
+        &format!("{route}/extend"),
+        serde_json::json!({ "days": 30 }),
+    )
+    .await;
+    assert_eq!(refused_extension["success"], false);
+
+    let (retention_days, reveal_audits): (u32, i64) = state
+        .db
+        .with_conn(move |connection| {
+            connection.query_row(
+                "SELECT s.retention_days,
+                        (SELECT COUNT(*) FROM execution_variable_reveal_audit a WHERE a.snapshot_id=s.id)
+                 FROM execution_variable_snapshots s
+                 WHERE s.run_kind='preview' AND s.run_id=?1",
+                [&run_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(Into::into)
+        })
+        .await
+        .unwrap();
+    assert_eq!(retention_days, 0);
+    assert_eq!(reveal_audits, 1);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -5129,6 +5401,7 @@ async fn server_config_returns_defaults() {
     assert_eq!(json["data"]["agent_handoffs_enabled"], false);
     assert_eq!(json["data"]["agent_handoff_paid_limit"], 1);
     assert_eq!(json["data"]["agent_handoff_paid_unlimited"], false);
+    assert_eq!(json["data"]["execution_variable_retention_days"], 30);
     assert_eq!(
         json["data"]["agent_handoff_blocked_agents"],
         serde_json::json!([])
@@ -5165,6 +5438,24 @@ async fn server_config_persists_and_clamps_agent_timeouts_independently() {
     let (_, clamped) = get_json(app, "/api/config/server").await;
     assert_eq!(clamped["data"]["agent_global_timeout_min"], 240);
     assert_eq!(clamped["data"]["local_agent_global_timeout_min"], 240);
+}
+
+#[tokio::test]
+async fn server_config_updates_execution_variable_retention_including_zero() {
+    let app = test_app();
+
+    for days in [45, 0] {
+        let (_, updated) = post_json(
+            app.clone(),
+            "/api/config/server",
+            serde_json::json!({ "execution_variable_retention_days": days }),
+        )
+        .await;
+        assert_eq!(updated["success"], true);
+
+        let (_, persisted) = get_json(app.clone(), "/api/config/server").await;
+        assert_eq!(persisted["data"]["execution_variable_retention_days"], days);
+    }
 }
 
 #[tokio::test]
@@ -14008,6 +14299,9 @@ mod cold_api_handlers_tests {
                 description: None,
                 required: true,
                 pattern: None,
+                source: Default::default(),
+                source_ref: None,
+                allow_manual_override: false,
             }],
             enabled: true,
             created_at: now,
@@ -14067,6 +14361,9 @@ mod cold_api_handlers_tests {
                 description: None,
                 required: true,
                 pattern: None,
+                source: Default::default(),
+                source_ref: None,
+                allow_manual_override: false,
             }],
             agent: kronn::models::AgentType::ClaudeCode,
             connection_id: None,

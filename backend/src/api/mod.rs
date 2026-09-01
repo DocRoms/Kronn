@@ -25,6 +25,7 @@ pub mod discover;
 pub mod discussion_weight;
 pub mod discussions;
 pub mod docs;
+pub mod execution_variables;
 pub mod external_api_connections;
 pub mod federation;
 pub mod git_ops;
