@@ -4016,6 +4016,7 @@ export function DiscussionsPage({
                         targets={activeDiscussion.message_targets?.[msg.id] ?? []}
                         idx={idx}
                         attachments={attachmentsByMessageId[msg.id] ?? EMPTY_ATTACHMENTS}
+                        discussionMedia={activeContextFiles}
                         pendingAttachment={pendingFileMsgIds.has(msg.id)}
                         isLastUser={msg.role === 'User' && idx === lastUserIdx}
                         isLastAgent={msg.role === 'Agent' && idx === lastAgentIdx}
@@ -4957,6 +4958,7 @@ export function DiscussionsPage({
               <DiscussionAssetsPanel
                 discussionId={activeDiscussion.id}
                 files={activeContextFiles}
+                connections={externalConnections}
                 onClose={() => setShowAssetsPanel(false)}
                 onNavigateMessage={(messageId) => {
                   setShowAssetsPanel(false);

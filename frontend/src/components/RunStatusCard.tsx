@@ -4,6 +4,7 @@ import { useT } from '../lib/I18nContext';
 import { formatDurationCompact } from '../lib/kronnToolParser';
 import { runsApi } from '../lib/api';
 import { useWebSocket } from '../hooks/useWebSocket';
+import { mediaRunDetails } from '../lib/mediaRunResult';
 import {
   sharedRunStatusCardModel,
   type RunStatusCardModel,
@@ -87,6 +88,9 @@ export function RunStatusCard({ model: initialModel, runId, compact = false }: {
 
   const duration = measuredDuration(model, now);
   const progress = model.progress;
+  // Media details only when the run actually carries them: a malformed or
+  // absent result degrades to none, never to zeros.
+  const media = model.kind === 'media' ? mediaRunDetails(model.result) : null;
   const progressPercent = progress && progress.total > 0
     ? Math.min(100, Math.max(0, (progress.completed / progress.total) * 100))
     : null;
@@ -119,6 +123,22 @@ export function RunStatusCard({ model: initialModel, runId, compact = false }: {
               <div className="run-status-card-progress-track" role="progressbar" aria-valuenow={progress.completed} aria-valuemax={progress.total}>
                 <span style={{ width: `${progressPercent}%` }} />
               </div>
+            </div>
+          )}
+          {media && (
+            <div className="run-status-card-media" data-testid="run-status-card-media" data-modality={media.modality}>
+              <span>{t(`run.media.${media.modality}`)}</span>
+              {media.width && media.height && (
+                // Real geometry from the produced file: the provider does not
+                // honour the requested resolution.
+                <span data-testid="run-status-card-media-size">{media.width}×{media.height}</span>
+              )}
+              {media.durationMs && <span>{Math.round(media.durationMs / 1000)}s</span>}
+              {media.costUsd != null && (
+                <span data-testid="run-status-card-media-cost">
+                  {media.isByok ? t('run.media.byok') : `$${media.costUsd.toFixed(4)}`}
+                </span>
+              )}
             </div>
           )}
           {model.diagnostic && <p className="run-status-card-diagnostic">{model.diagnostic}</p>}

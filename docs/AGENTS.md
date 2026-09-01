@@ -204,6 +204,14 @@ After completing a task: if you discovered something non-obvious (a gotcha, a mi
 
 → [`architecture/ui-structure.md`](architecture/ui-structure.md)
 
+## 9bis. Media generation (image / video)
+
+→ [`architecture/media-generation.md`](architecture/media-generation.md)
+
+Read it before touching a media path: submission is billable and the rules
+around resubmission, provider URLs and cost persistence exist to keep a crash
+from paying twice.
+
 ---
 
 ## 10. RTK integration

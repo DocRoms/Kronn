@@ -154,4 +154,40 @@ describe('DiscussionAssetsPanel', () => {
     expect(dialog).toHaveTextContent('1 / 2');
     expect(within(dialog).getByRole('img', { name: 'two.png' })).toBeInTheDocument();
   });
+  it('reaches images and clips filtered out of the grid', async () => {
+    // The "images" filter hides the clip from the inventory, but the carousel
+    // is a viewer for everything the discussion generated: one sequence,
+    // images and videos together.
+    render(
+      <DiscussionAssetsPanel
+        discussionId="disc-1"
+        files={[
+          file(3, { filename: 'clip.mp4', mime_type: 'video/mp4', disk_path: '/tmp/clip.mp4' }),
+          file(2, { filename: 'shot.png', mime_type: 'image/png', disk_path: '/tmp/shot.png' }),
+          file(1, { filename: 'notes.csv', mime_type: 'text/csv' }),
+        ]}
+        onClose={vi.fn()}
+        onNavigateMessage={vi.fn()}
+        t={t}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: /disc\.assets\.filterImages/ }));
+    expect(screen.queryByRole('button', { name: 'disc.media.playerLabel:clip.mp4' })).toBeNull();
+
+    const thumb = await screen.findByRole('button', { name: 'disc.attachmentImage:shot.png' });
+    await waitFor(() => expect(thumb).not.toBeDisabled());
+    fireEvent.click(thumb);
+
+    const dialog = screen.getByRole('dialog', { name: 'disc.attachmentGallery' });
+    // Two media in the discussion, the clip included, even under the filter.
+    expect(dialog).toHaveTextContent('2 / 2');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'disc.attachmentNext' }));
+    await waitFor(() =>
+      expect(within(dialog).getByTestId('media-player-video')).toHaveAttribute(
+        'aria-label',
+        'disc.media.playerLabel:clip.mp4',
+      ),
+    );
+  });
 });

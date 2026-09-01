@@ -2297,6 +2297,83 @@ TOOLS = [
     # (workflow_runs.total_duration_ms / qp_versions.avg_duration_ms).
     # Honour it to slash mobile token cost ~80% vs naïve polling.
     {
+        "name": "media_generate",
+        "description": (
+            "Generate an image or a video on a configured HTTP connection "
+            "(OpenRouter, NVIDIA). Returns `{job_id, status, model}`.\n\n"
+            "**You do NOT choose the model.** It comes from the connection's "
+            "configured image/video slot, so a generation cannot be billed on "
+            "a model the human did not select. A modality with no configured "
+            "slot is refused, naming what to configure.\n\n"
+            "**Cost is real.** Video is billed per second (~0.07 USD for 5 s "
+            "at 480p) and image per picture. Duration and resolution are "
+            "capped server-side. Ask for the shortest clip that answers the "
+            "need.\n\n"
+            "**`wait` defaults to false**, which is almost always right: a "
+            "video takes ~100 s and the asset lands in the discussion on its "
+            "own, so you can keep working and it will be there. Pass "
+            "`wait: true` ONLY when you must use the media inside the answer "
+            "you are currently writing.\n\n"
+            "The finished asset is attached to the discussion as a context "
+            "file, visible to every agent in it."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "connection_id": {
+                    "type": "string",
+                    "description": "External API connection id (from `mcp_list` or the settings UI).",
+                },
+                "modality": {
+                    "type": "string",
+                    "enum": ["image", "video"],
+                    "description": "What to produce. The model is taken from the matching configured slot.",
+                },
+                "prompt": {"type": "string", "description": "What to generate."},
+                "discussion_id": {
+                    "type": "string",
+                    "description": "Discussion the asset is attached to. Defaults to the bound discussion.",
+                },
+                "duration_secs": {
+                    "type": "integer",
+                    "description": "Video only. Server-capped; prefer the shortest clip that works.",
+                },
+                "resolution": {
+                    "type": "string",
+                    "description": "480p | 720p | 1080p. Higher costs more per second.",
+                },
+                "aspect_ratio": {"type": "string", "description": "e.g. 16:9, 9:16, 1:1."},
+                "generate_audio": {
+                    "type": "boolean",
+                    "description": "Video only. Audio raises the per-second price.",
+                },
+                "wait": {
+                    "type": "boolean",
+                    "description": "Block until the media is delivered. Default false — see the description.",
+                },
+            },
+            "required": ["connection_id", "modality", "prompt"],
+        },
+    },
+    {
+        "name": "media_job_status",
+        "description": (
+            "State of one media generation: `{id, modality, status, model, "
+            "context_file_id?, width?, height?, duration_ms?, cost_usd?, "
+            "is_byok?, last_error?, attempts}`.\n\n"
+            "Absent fields mean NOT MEASURED YET, never zero: a job still "
+            "running has no cost and no dimensions because nothing has been "
+            "billed or produced, not because they are null.\n\n"
+            "Dimensions are read from the produced file, not from the "
+            "request — providers do not honour the requested geometry."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {"job_id": {"type": "string", "description": "Job id (from `media_generate`)."}},
+            "required": ["job_id"],
+        },
+    },
+    {
         "name": "workflow_trigger",
         "description": (
             "Launch a Kronn workflow run from MCP — same effect as the "
@@ -7942,6 +8019,65 @@ def call_api_call(args):
 
 # ─── 0.8.6 phase 4 — MCP Remote Control (workflow_trigger / workflow_run_status / qp_run) ──
 
+def call_media_generate(args):
+    """Queue an image/video generation, optionally waiting for delivery.
+
+    The model is never taken from the caller: the backend resolves it from the
+    connection's configured slot, so an agent cannot dispatch — and bill — a
+    model the human did not choose.
+
+    `wait` defaults to false because a video takes ~100 s and the asset lands
+    in the discussion by itself. Waiting is for the case where the media must
+    appear in the answer being written right now.
+    """
+    for field in ("connection_id", "modality", "prompt"):
+        if not args.get(field):
+            raise RuntimeError(f"media_generate: missing required '{field}'")
+    modality = args["modality"]
+    if modality not in ("image", "video"):
+        raise RuntimeError("media_generate: modality must be 'image' or 'video'")
+
+    # `_disc_id()` is the shared entry point and already raises a clear error
+    # when nothing is bound, so an explicit id simply short-circuits it.
+    discussion_id = args.get("discussion_id") or _disc_id()
+
+    body = {
+        "connection_id": args["connection_id"],
+        "modality": modality,
+        "prompt": args["prompt"],
+        "discussion_id": discussion_id,
+    }
+    for key in ("duration_secs", "resolution", "aspect_ratio", "generate_audio"):
+        if args.get(key) is not None:
+            body[key] = args[key]
+
+    queued = _unwrap(_http("POST", "/api/media/generate", body))
+    if not args.get("wait"):
+        return queued
+
+    # Waiting path. The ceiling matches the server-side deadline so this can
+    # never outlive the job it is watching.
+    job_id = queued.get("job_id")
+    deadline = time.time() + 20 * 60
+    delay = 5
+    while time.time() < deadline:
+        time.sleep(delay)
+        delay = min(delay + 5, 30)
+        state = _unwrap(_http("GET", f"/api/media/jobs/{job_id}"))
+        if state.get("status") in ("completed", "failed", "cancelled", "timed_out"):
+            return state
+    # Timed out on OUR side only: the job keeps running and will still deliver.
+    return {**queued, "waited": False, "note": "still running; poll media_job_status"}
+
+
+def call_media_job_status(args):
+    """Read one media job. Absent fields mean not measured yet, never zero."""
+    job_id = args.get("job_id")
+    if not job_id:
+        raise RuntimeError("media_job_status: missing required 'job_id'")
+    return _unwrap(_http("GET", f"/api/media/jobs/{job_id}"))
+
+
 def call_workflow_trigger(args):
     """0.8.6 phase 4 — launch a workflow run via the JSON wrapper route.
 
@@ -10038,6 +10174,8 @@ DISPATCH = {
     # 0.8.6 phase 4 — MCP remote control. Launches + tracks workflows
     # and Quick Prompts from MCP, with smart-polling next_check hints
     # to cut mobile token cost ~80% (cf. [[project_mcp_remote_control_0_8_6]]).
+    "media_generate": call_media_generate,
+    "media_job_status": call_media_job_status,
     "workflow_trigger": call_workflow_trigger,
     "workflow_run_status": call_workflow_run_status,
     "qp_run": call_qp_run,

@@ -10,6 +10,10 @@ pub enum SharedRunKind {
     QuickApi,
     QuickExec,
     Workflow,
+    /// Media generation (image or video). ONE kind, not one per modality:
+    /// the execution family is identical and only the output differs, so the
+    /// modality lives in `result.modality`.
+    Media,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]

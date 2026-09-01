@@ -3747,6 +3747,41 @@ pub fn list_context_files_for_message(
 /// a freshly-sent message, so they render in that message's bubble instead of
 /// staying sticky in the composer. Returns the count linked. Idempotent for a
 /// given send: a second call links nothing because the rows are no longer NULL.
+/// Pins one file to one message, by id.
+///
+/// Generated assets go through here instead of being left pending: a file with
+/// `message_id IS NULL` is understood everywhere as "uploaded, not sent yet",
+/// so `link_pending_context_files_to_message` would hand a generated video to
+/// whatever the human types next.
+pub fn anchor_context_file_to_message(
+    conn: &Connection,
+    file_id: &str,
+    message_id: &str,
+) -> rusqlite::Result<usize> {
+    conn.execute(
+        "UPDATE context_files SET message_id = ?2 WHERE id = ?1",
+        rusqlite::params![file_id, message_id],
+    )
+}
+
+/// Id of the newest message of a discussion, in display order.
+///
+/// Used to anchor a generated asset to the turn that asked for it when the
+/// caller does not name one: read at request time, never at completion, so a
+/// message the human writes during the generation cannot capture the asset.
+pub fn latest_message_id(
+    conn: &Connection,
+    discussion_id: &str,
+) -> rusqlite::Result<Option<String>> {
+    conn.query_row(
+        "SELECT id FROM messages WHERE discussion_id = ?1 \
+         ORDER BY sort_order DESC, timestamp DESC LIMIT 1",
+        rusqlite::params![discussion_id],
+        |row| row.get(0),
+    )
+    .optional()
+}
+
 pub fn link_pending_context_files_to_message(
     conn: &Connection,
     discussion_id: &str,

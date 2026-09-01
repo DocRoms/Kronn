@@ -1648,6 +1648,9 @@ mod tests {
                             reasoning_model: None,
                             created_at: now,
                             updated_at: now,
+                            image_model: None,
+                            video_model: None,
+                            media_endpoint: None,
                         },
                     )?;
                 }

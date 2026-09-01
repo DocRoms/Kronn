@@ -9,8 +9,11 @@ use crate::models::{
     ModelTierConfig,
 };
 
+// New columns are appended so every existing positional index keeps its
+// meaning; a mid-list insertion would silently shift created_at/updated_at.
 const COLUMNS: &str = "id, display_name, mention_alias, endpoint, credential_slug, origin_preset, \
-    economy_model, default_model, reasoning_model, created_at, updated_at";
+    economy_model, default_model, reasoning_model, created_at, updated_at, \
+    image_model, video_model, media_endpoint";
 
 const LEGACY_LITELLM_ID: &str = "external-api-litellm";
 const LEGACY_NVIDIA_ID: &str = "external-api-nvidia";
@@ -84,6 +87,9 @@ fn row_to_connection(row: &rusqlite::Row<'_>) -> rusqlite::Result<ExternalApiCon
         reasoning_model: row.get(8)?,
         created_at: parse_dt(row.get(9)?),
         updated_at: parse_dt(row.get(10)?),
+        image_model: row.get(11)?,
+        video_model: row.get(12)?,
+        media_endpoint: row.get(13)?,
     })
 }
 
@@ -219,8 +225,9 @@ pub fn insert(conn: &Connection, connection: &ExternalApiConnection) -> Result<(
     conn.execute(
         "INSERT INTO external_api_connections (
              id, display_name, mention_alias, endpoint, credential_slug, origin_preset,
-             economy_model, default_model, reasoning_model, created_at, updated_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+             economy_model, default_model, reasoning_model, created_at, updated_at,
+             image_model, video_model, media_endpoint
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
         params![
             connection.id,
             connection.display_name,
@@ -233,6 +240,9 @@ pub fn insert(conn: &Connection, connection: &ExternalApiConnection) -> Result<(
             connection.reasoning_model,
             connection.created_at.to_rfc3339(),
             connection.updated_at.to_rfc3339(),
+            connection.image_model,
+            connection.video_model,
+            connection.media_endpoint,
         ],
     )?;
     Ok(())
@@ -244,7 +254,8 @@ pub fn update(conn: &Connection, connection: &ExternalApiConnection) -> Result<(
         "UPDATE external_api_connections SET
              display_name = ?2, mention_alias = ?3, endpoint = ?4, credential_slug = ?5,
              origin_preset = ?6, economy_model = ?7, default_model = ?8,
-             reasoning_model = ?9, updated_at = ?10
+             reasoning_model = ?9, updated_at = ?10, image_model = ?11,
+             video_model = ?12, media_endpoint = ?13
          WHERE id = ?1",
         params![
             connection.id,
@@ -257,6 +268,9 @@ pub fn update(conn: &Connection, connection: &ExternalApiConnection) -> Result<(
             connection.default_model,
             connection.reasoning_model,
             connection.updated_at.to_rfc3339(),
+            connection.image_model,
+            connection.video_model,
+            connection.media_endpoint,
         ],
     )?;
     Ok(())
@@ -353,6 +367,9 @@ mod tests {
             reasoning_model: None,
             created_at: now,
             updated_at: now,
+            image_model: None,
+            video_model: None,
+            media_endpoint: None,
         }
     }
 
@@ -726,6 +743,9 @@ mod tests {
                     reasoning_model: Some(format!("{alias}-reasoning")),
                     created_at: now,
                     updated_at: now,
+                    image_model: None,
+                    video_model: None,
+                    media_endpoint: None,
                 },
             )
             .unwrap();

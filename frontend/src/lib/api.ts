@@ -2659,6 +2659,16 @@ export interface ExternalApiConnectionView {
   economy_model: string | null;
   default_model: string | null;
   reasoning_model: string | null;
+  /** Media generation slots. Modalities, not quality tiers.
+   *
+   * Optional so a frontend can read a backend that predates these columns —
+   * during a rolling deploy the two sides are not necessarily in step, and a
+   * missing field must render as "not configured" rather than crash. */
+  image_model?: string | null;
+  video_model?: string | null;
+  /** Override for a provider serving media from another host; absent or null
+   * derives it from `endpoint`. */
+  media_endpoint?: string | null;
   created_at: string;
   updated_at: string;
   /** Whether a credential is currently stored; the value never crosses the wire. */
@@ -2673,6 +2683,10 @@ export interface UpsertExternalApiConnection {
   economy_model: string | null;
   default_model: string | null;
   reasoning_model: string | null;
+  /** Media generation slots; null when the provider has none. */
+  image_model?: string | null;
+  video_model?: string | null;
+  media_endpoint?: string | null;
   /** Tri-state: omitted/null keeps the stored key, '' clears it, a value replaces it. */
   api_key?: string | null;
 }
@@ -2683,6 +2697,83 @@ export interface ExternalApiConnectionTestResult {
   models: string[];
   hint: string | null;
 }
+
+/** Media generation (KT-540). Modalities, not tiers: the model comes from the
+ *  connection's image/video slot, never from the caller, so a UI cannot bill a
+ *  model the operator did not configure. */
+export type MediaModality = 'image' | 'video';
+
+export interface GenerateMediaBody {
+  connection_id: string;
+  modality: MediaModality;
+  prompt: string;
+  discussion_id?: string;
+  message_id?: string;
+  duration_secs?: number;
+  resolution?: string;
+  aspect_ratio?: string;
+  generate_audio?: boolean;
+}
+
+export interface GeneratedMediaJob {
+  job_id: string;
+  status: string;
+  /** Model the connection resolved, echoed so the caller sees what is billed. */
+  model: string;
+}
+
+export interface MediaJobView {
+  id: string;
+  modality: MediaModality;
+  status: string;
+  model: string;
+  context_file_id: string | null;
+  width: number | null;
+  height: number | null;
+  duration_ms: number | null;
+  discussion_id: string | null;
+  cost_usd: number;
+  is_byok: boolean;
+  completed_at: string | null;
+}
+
+export interface MediaEstimate {
+  model: string;
+  /** Absent when nothing comparable was billed yet — an unknown price is shown
+   *  as unknown rather than as zero. */
+  estimated_usd?: number | null;
+  samples: number;
+}
+
+export interface MediaSpendEntry {
+  id: string;
+  modality: MediaModality;
+  model: string;
+  cost_usd: number;
+  is_byok: boolean;
+  completed_at: string | null;
+  discussion_id: string | null;
+}
+
+export interface MediaSpend {
+  entries: MediaSpendEntry[];
+  image_total_usd: number;
+  video_total_usd: number;
+  total_usd: number;
+}
+
+export const media = {
+  generate: (body: GenerateMediaBody) =>
+    api<GeneratedMediaJob>('POST', '/media/generate', body),
+  job: (id: string) => api<MediaJobView>('GET', `/media/jobs/${id}`),
+  cancel: (id: string) => api<null>('POST', `/media/jobs/${id}/cancel`),
+  costs: () => api<MediaSpend>('GET', '/media/costs'),
+  estimate: (connectionId: string, modality: MediaModality, durationSecs?: number) => {
+    const params = new URLSearchParams({ connection_id: connectionId, modality });
+    if (durationSecs !== undefined) params.set('duration_secs', String(durationSecs));
+    return api<MediaEstimate>('GET', `/media/estimate?${params.toString()}`);
+  },
+};
 
 export const externalApi = {
   list: () => api<ExternalApiConnectionView[]>('GET', '/external-api/connections'),

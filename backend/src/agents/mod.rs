@@ -20,6 +20,10 @@ async fn run_shell_cmd(cmd: &str) -> Result<std::process::Output> {
 }
 
 pub mod chat_codec;
+pub mod media_asset_url;
+pub mod media_codec;
+pub mod media_runner;
+pub mod media_worker;
 pub mod runner;
 pub mod tools;
 

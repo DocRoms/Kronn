@@ -47,6 +47,16 @@ pub struct UpsertConnectionRequest {
     pub reasoning_model: Option<String>,
     #[serde(default)]
     pub api_key: Option<String>,
+    /// Media generation slots. Optional: a provider with no media catalogue
+    /// simply leaves them empty.
+    #[serde(default)]
+    pub image_model: Option<String>,
+    #[serde(default)]
+    pub video_model: Option<String>,
+    /// Override for providers serving media from another host. Empty derives
+    /// it from `endpoint`.
+    #[serde(default)]
+    pub media_endpoint: Option<String>,
 }
 
 /// A non-persisting probe for a saved connection or the form currently being
@@ -291,7 +301,10 @@ async fn probe_openrouter_credential(
 /// with the OpenAI chat contract. A 2xx response confirms the credential;
 /// 401/403 are classified as authentication errors, while every other HTTP
 /// status is a generic probe failure because it does not prove that the
-/// connection is usable. `None` = the credential passed.
+/// connection is usable. A 401/403 keeps the `auth_error` status — a public
+/// catalogue does not prove the credential either way — but its message names
+/// BOTH causes, a rejected key and a model out of reach, instead of blaming the
+/// key alone. `None` = the model answered.
 async fn probe_auth(
     endpoint: &str,
     api_key: &str,
@@ -311,14 +324,20 @@ async fn probe_auth(
         .json(&body);
     match request.send().await {
         Ok(response) if matches!(response.status().as_u16(), 401 | 403) => {
+            // A 401/403 here has TWO possible causes and the message must not
+            // pick one: the key may be rejected, or the key may be valid while
+            // this model is out of reach for the account, or simply not served
+            // by this endpoint. Blaming the key alone sent users hunting a
+            // credential that was fine — observed on an image-generation model,
+            // which lives on another endpoint. The status stays `auth_error`
+            // because a public catalogue does not prove the credential either.
             Some(TestConnectionResponse {
                 ok: false,
                 status: "auth_error".into(),
                 models: vec![],
-                hint: Some(
-                    "The endpoint rejected the credentials. Check the API key and its permissions."
-                        .into(),
-                ),
+                hint: Some(format!(
+                    "The endpoint refused '{model}'. Either the API key is rejected, or the key is valid but this model is not available to this account on this endpoint — image and video models are often served elsewhere. Check both before replacing the key."
+                )),
             })
         }
         Ok(response) if response.status().is_success() => None,
@@ -676,6 +695,9 @@ pub async fn create(
         reasoning_model: clean(req.reasoning_model),
         created_at: now,
         updated_at: now,
+        image_model: clean(req.image_model),
+        video_model: clean(req.video_model),
+        media_endpoint: clean(req.media_endpoint),
     };
 
     // The DB insert enforces the case-insensitive alias uniqueness, so it runs
@@ -767,6 +789,9 @@ pub async fn update(
         reasoning_model: clean(req.reasoning_model),
         created_at: existing.created_at,
         updated_at: Utc::now(),
+        image_model: clean(req.image_model),
+        video_model: clean(req.video_model),
+        media_endpoint: clean(req.media_endpoint),
     };
 
     let to_update = updated.clone();
@@ -882,6 +907,9 @@ mod tests {
             reasoning_model: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
+            image_model: None,
+            video_model: None,
+            media_endpoint: None,
         };
         assert_eq!(
             crate::db::external_api_connections::connection_mention_alias(&connection),
