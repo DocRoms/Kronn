@@ -1,8 +1,10 @@
 // KT-540 — launch a generation from the discussion that will hold the asset.
 //
-// The model is deliberately NOT a field: it comes from the connection's image
-// or video slot, so the UI cannot bill a model the operator never configured.
-// What the form does own is the prompt and the shape of the output.
+// There is no modality switch: the operator picks a CONFIGURED model, exactly
+// as the connection card offers its Economy/Standard/Advanced slots, and the
+// modality follows from that choice. Asking for a modality first meant asking a
+// question the configuration already answers — and offering a modality nobody
+// had configured.
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Clapperboard, Image as ImageIcon, Loader2, Sparkles } from 'lucide-react';
 import { media } from '../lib/api';
@@ -13,11 +15,35 @@ type T = (key: string, ...args: (string | number)[]) => string;
 
 const DURATIONS = [3, 5, 8];
 const RESOLUTIONS = ['480p', '720p', '1080p'];
-const RATIOS = ['16:9', '9:16', '1:1'];
+/// Ratios shown with a proportional preview, like the live-page mosaic layouts:
+/// `4:3` means nothing to most people until they see the shape.
+const RATIOS = ['16:9', '4:3', '1:1', '9:16'] as const;
 
-function slotFor(connection: ExternalApiConnectionView, modality: MediaModality): string | null {
-  const slot = modality === 'image' ? connection.image_model : connection.video_model;
-  return slot && slot.trim() ? slot : null;
+/** One configured media model: what the operator actually chooses. */
+type Slot = {
+  key: string;
+  connectionId: string;
+  connectionName: string;
+  modality: MediaModality;
+  model: string;
+};
+
+function slotsOf(connections: ExternalApiConnectionView[]): Slot[] {
+  const slots: Slot[] = [];
+  for (const connection of connections) {
+    for (const modality of ['image', 'video'] as const) {
+      const model = modality === 'image' ? connection.image_model : connection.video_model;
+      if (!model || !model.trim()) continue;
+      slots.push({
+        key: `${connection.id}:${modality}`,
+        connectionId: connection.id,
+        connectionName: connection.display_name,
+        modality,
+        model: model.trim(),
+      });
+    }
+  }
+  return slots;
 }
 
 export function MediaGenerateForm({
@@ -31,47 +57,42 @@ export function MediaGenerateForm({
   t: T;
   onLaunched?: (jobId: string) => void;
 }) {
-  const [modality, setModality] = useState<MediaModality>('image');
+  const slots = useMemo(() => slotsOf(connections), [connections]);
+  const [selectedKey, setSelectedKey] = useState<string>('');
   const [prompt, setPrompt] = useState('');
-  const [connectionId, setConnectionId] = useState('');
   const [durationSecs, setDurationSecs] = useState(5);
   const [resolution, setResolution] = useState('480p');
-  const [aspectRatio, setAspectRatio] = useState('16:9');
+  const [aspectRatio, setAspectRatio] = useState<string>('16:9');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [launched, setLaunched] = useState<{ model: string } | null>(null);
   const [estimate, setEstimate] = useState<{ usd: number | null; samples: number } | null>(null);
 
-  // Only connections that actually have this slot filled: offering the others
-  // would produce a refusal the user cannot act on from here.
-  const usable = useMemo(
-    () => connections.filter(connection => slotFor(connection, modality)),
-    [connections, modality],
-  );
-
   useEffect(() => {
-    if (usable.length === 0) {
-      setConnectionId('');
+    if (slots.length === 0) {
+      setSelectedKey('');
       return;
     }
-    if (!usable.some(connection => connection.id === connectionId)) {
-      setConnectionId(usable[0].id);
-    }
-  }, [usable, connectionId]);
+    if (!slots.some(slot => slot.key === selectedKey)) setSelectedKey(slots[0].key);
+  }, [slots, selectedKey]);
 
-  const selected = usable.find(connection => connection.id === connectionId) ?? null;
-  const model = selected ? slotFor(selected, modality) : null;
+  const selected = slots.find(slot => slot.key === selectedKey) ?? null;
+  const isVideo = selected?.modality === 'video';
 
   // Price of the click, derived from what this model was actually billed
   // before. Absent on a first run, and said so rather than shown as free.
   useEffect(() => {
-    if (!connectionId) {
+    if (!selected) {
       setEstimate(null);
       return;
     }
     let cancelled = false;
     media
-      .estimate(connectionId, modality, modality === 'video' ? durationSecs : undefined)
+      .estimate(
+        selected.connectionId,
+        selected.modality,
+        selected.modality === 'video' ? durationSecs : undefined,
+      )
       .then(result => {
         if (!cancelled) {
           setEstimate({ usd: result.estimated_usd ?? null, samples: result.samples });
@@ -83,21 +104,22 @@ export function MediaGenerateForm({
     return () => {
       cancelled = true;
     };
-  }, [connectionId, modality, durationSecs]);
+  }, [selected, durationSecs]);
 
   const submit = useCallback(async () => {
-    if (!connectionId || !prompt.trim() || busy) return;
+    if (!selected || !prompt.trim() || busy) return;
     setBusy(true);
     setError(null);
     try {
       const job = await media.generate({
-        connection_id: connectionId,
-        modality,
+        connection_id: selected.connectionId,
+        modality: selected.modality,
         prompt: prompt.trim(),
         discussion_id: discussionId,
-        ...(modality === 'video'
-          ? { duration_secs: durationSecs, resolution, aspect_ratio: aspectRatio }
-          : { aspect_ratio: aspectRatio }),
+        aspect_ratio: aspectRatio,
+        ...(selected.modality === 'video'
+          ? { duration_secs: durationSecs, resolution }
+          : {}),
       });
       setLaunched({ model: job.model });
       setPrompt('');
@@ -107,12 +129,15 @@ export function MediaGenerateForm({
     } finally {
       setBusy(false);
     }
-  }, [aspectRatio, busy, connectionId, discussionId, durationSecs, modality, onLaunched, prompt, resolution]);
+  }, [aspectRatio, busy, discussionId, durationSecs, onLaunched, prompt, resolution, selected]);
 
-  const modalities: Array<{ id: MediaModality; label: string; icon: typeof ImageIcon }> = [
-    { id: 'image', label: t('disc.media.modalityImage'), icon: ImageIcon },
-    { id: 'video', label: t('disc.media.modalityVideo'), icon: Clapperboard },
-  ];
+  if (slots.length === 0) {
+    return (
+      <p className="media-generate-empty" data-testid="media-generate-empty">
+        {t('disc.media.noSlot')}
+      </p>
+    );
+  }
 
   return (
     <form
@@ -123,103 +148,108 @@ export function MediaGenerateForm({
         void submit();
       }}
     >
-      <div className="media-generate-modalities" role="group" aria-label={t('disc.media.modality')}>
-        {modalities.map(item => {
-          const Icon = item.icon;
+      {/* Configured models, presented like the connection card's AI-mode
+          slots: the choice IS the modality. */}
+      <div className="media-generate-slots" role="radiogroup" aria-label={t('disc.media.model')}>
+        {slots.map(slot => {
+          const Icon = slot.modality === 'image' ? ImageIcon : Clapperboard;
           return (
             <button
-              key={item.id}
+              key={slot.key}
               type="button"
-              data-active={modality === item.id}
-              onClick={() => setModality(item.id)}
+              role="radio"
+              aria-checked={slot.key === selectedKey}
+              data-active={slot.key === selectedKey}
+              className="media-generate-slot"
+              onClick={() => setSelectedKey(slot.key)}
+              data-testid={`media-slot-${slot.key}`}
             >
-              <Icon size={13} aria-hidden="true" />
-              <span>{item.label}</span>
+              <span className="media-generate-slot-head">
+                <Icon size={12} aria-hidden="true" />
+                <span>{t(`disc.media.modality.${slot.modality}`)}</span>
+              </span>
+              <span className="media-generate-slot-model" title={slot.model}>{slot.model}</span>
+              <span className="media-generate-slot-conn">{slot.connectionName}</span>
             </button>
           );
         })}
       </div>
 
-      {usable.length === 0 ? (
-        <p className="media-generate-empty">{t('disc.media.noSlot')}</p>
-      ) : (
-        <>
+      <label className="media-generate-field">
+        <span>{t('disc.media.prompt')}</span>
+        <textarea
+          value={prompt}
+          onChange={event => setPrompt(event.target.value)}
+          rows={3}
+          placeholder={t('disc.media.promptPlaceholder')}
+        />
+      </label>
+
+      {isVideo && (
+        <div className="media-generate-row">
           <label className="media-generate-field">
-            <span>{t('disc.media.connection')}</span>
+            <span>{t('disc.media.duration')}</span>
             <select
-              value={connectionId}
-              onChange={event => setConnectionId(event.target.value)}
+              value={durationSecs}
+              onChange={event => setDurationSecs(Number(event.target.value))}
             >
-              {usable.map(connection => (
-                <option key={connection.id} value={connection.id}>
-                  {connection.display_name}
-                </option>
+              {DURATIONS.map(value => (
+                <option key={value} value={value}>{t('disc.media.seconds', value)}</option>
               ))}
             </select>
           </label>
-
-          {model && <p className="media-generate-model">{t('disc.media.modelUsed', model)}</p>}
-
           <label className="media-generate-field">
-            <span>{t('disc.media.prompt')}</span>
-            <textarea
-              value={prompt}
-              onChange={event => setPrompt(event.target.value)}
-              rows={3}
-              placeholder={t('disc.media.promptPlaceholder')}
-            />
-          </label>
-
-          {modality === 'video' && (
-            <div className="media-generate-row">
-              <label className="media-generate-field">
-                <span>{t('disc.media.duration')}</span>
-                <select
-                  value={durationSecs}
-                  onChange={event => setDurationSecs(Number(event.target.value))}
-                >
-                  {DURATIONS.map(value => (
-                    <option key={value} value={value}>{t('disc.media.seconds', value)}</option>
-                  ))}
-                </select>
-              </label>
-              <label className="media-generate-field">
-                <span>{t('disc.media.resolution')}</span>
-                <select value={resolution} onChange={event => setResolution(event.target.value)}>
-                  {RESOLUTIONS.map(value => <option key={value} value={value}>{value}</option>)}
-                </select>
-              </label>
-            </div>
-          )}
-
-          <label className="media-generate-field">
-            <span>{t('disc.media.aspectRatio')}</span>
-            <select value={aspectRatio} onChange={event => setAspectRatio(event.target.value)}>
-              {RATIOS.map(value => <option key={value} value={value}>{value}</option>)}
+            <span>{t('disc.media.resolution')}</span>
+            <select value={resolution} onChange={event => setResolution(event.target.value)}>
+              {RESOLUTIONS.map(value => <option key={value} value={value}>{value}</option>)}
             </select>
           </label>
-
-          <p className="media-generate-estimate">
-            {estimate && estimate.usd !== null && estimate.samples > 0
-              ? t('disc.media.estimate', estimate.usd.toFixed(4), estimate.samples)
-              : t('disc.media.estimateUnknown')}
-          </p>
-
-          {error && <p className="media-generate-error" role="alert">{error}</p>}
-          {launched && (
-            <p className="media-generate-launched" role="status">
-              {t('disc.media.launched', launched.model)}
-            </p>
-          )}
-
-          <button type="submit" className="btn btn-sm" disabled={busy || !prompt.trim()}>
-            {busy
-              ? <Loader2 size={13} aria-hidden="true" className="spin" />
-              : <Sparkles size={13} aria-hidden="true" />}
-            <span>{t('disc.media.generate')}</span>
-          </button>
-        </>
+        </div>
       )}
+
+      {/* Each ratio carries a box in its own proportions — the same trick the
+          live-page mosaic uses for layouts. */}
+      <fieldset className="media-generate-ratios">
+        <legend>{t('disc.media.aspectRatio')}</legend>
+        <div className="media-generate-ratio-choices">
+          {RATIOS.map(ratio => (
+            <button
+              key={ratio}
+              type="button"
+              role="radio"
+              aria-checked={ratio === aspectRatio}
+              aria-label={ratio}
+              data-active={ratio === aspectRatio}
+              className="media-generate-ratio"
+              onClick={() => setAspectRatio(ratio)}
+              data-testid={`media-ratio-${ratio}`}
+            >
+              <i className="media-generate-ratio-shape" data-ratio={ratio} aria-hidden="true" />
+              <span>{ratio}</span>
+            </button>
+          ))}
+        </div>
+      </fieldset>
+
+      <p className="media-generate-estimate">
+        {estimate && estimate.usd !== null && estimate.samples > 0
+          ? t('disc.media.estimate', estimate.usd.toFixed(4), estimate.samples)
+          : t('disc.media.estimateUnknown')}
+      </p>
+
+      {error && <p className="media-generate-error" role="alert">{error}</p>}
+      {launched && (
+        <p className="media-generate-launched" role="status">
+          {t('disc.media.launched', launched.model)}
+        </p>
+      )}
+
+      <button type="submit" className="btn btn-sm" disabled={busy || !prompt.trim()}>
+        {busy
+          ? <Loader2 size={13} aria-hidden="true" className="spin" />
+          : <Sparkles size={13} aria-hidden="true" />}
+        <span>{t('disc.media.generate')}</span>
+      </button>
     </form>
   );
 }
