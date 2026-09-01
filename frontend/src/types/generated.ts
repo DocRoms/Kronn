@@ -5,7 +5,23 @@
 // ║  Regenerate: `make typegen`. CI fails if this file drifts from the models.  ║
 // ╚═══════════════════════════════════════════════════════════════════════════╝
 
-export type ActiveAgentDispatch = { id: string, trigger_message_id: string, agent_type: AgentType, status: string, };
+export type ActiveAgentDispatch = { id: string, trigger_message_id: string, agent_type: AgentType, status: string,
+/**
+ * Number of times this durable dispatch has been claimed. A value above
+ * one makes a post-restart retry distinguishable from a first launch.
+ */
+attempts?: number,
+/**
+ * Durable transition reason, notably `backend_restarted` while a crashed
+ * invocation is waiting to resume.
+ */
+last_error?: string,
+/**
+ * Exact external HTTP connection used by a `Custom` dispatch (for
+ * example OpenRouter). The generic agent type alone is not enough to
+ * render or resume that provider honestly.
+ */
+connection_id?: string, };
 
 /**
  * Result of adding a contact, with optional diagnostic hint for unreachable peers.
@@ -1703,7 +1719,13 @@ export type DiscussionDetail = { active_agent_dispatches: Array<ActiveAgentDispa
  * to the transcript lets the UI show what was requested even when the
  * concrete model that eventually answered differs.
  */
-message_targets: { [key in string]: Array<MessageTarget> }, id: string, project_id: string | null, title: string, agent: AgentType, language: string, participants: Array<AgentType>, messages: Array<DiscussionMessage>, message_count: number,
+message_targets: { [key in string]: Array<MessageTarget> },
+/**
+ * Latest DB checkpoint for a response that has not reached a terminal
+ * message yet. Lets a reconnect render saved text instead of an empty
+ * loader while boot recovery/re-dispatch is settling.
+ */
+partial_response?: InFlightAgentResponse, id: string, project_id: string | null, title: string, agent: AgentType, language: string, participants: Array<AgentType>, messages: Array<DiscussionMessage>, message_count: number,
 /**
  * Subset of `message_count` excluding `MessageRole::System` rows. The
  * streaming layer persists every tool call + every cached-summary
@@ -2554,6 +2576,14 @@ export type ImportResult = { warnings: Array<string>, invalid_paths: Array<strin
  * unattached (the user picks a project later via the wizard).
  */
 export type ImportWorkflowRequest = { content: string, project_id?: string | null, };
+
+/**
+ * Durable snapshot of the text already emitted by an in-flight agent.
+ *
+ * It lives on `DiscussionDetail` rather than in `messages`: until completion
+ * (or boot recovery) this is a checkpoint, not a second transcript row.
+ */
+export type InFlightAgentResponse = { message_id: string, content: string, started_at?: string | null, agent_type?: AgentType | null, model?: string | null, trigger_message_id?: string | null, connection_id?: string | null, dispatch?: ActiveAgentDispatch | null, };
 
 export type InstructionFile = { path: string,
 /**

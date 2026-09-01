@@ -511,6 +511,37 @@ describe('discussions.sendMessageStream / reviseMessageStream / runAgent', () =>
     expect(onError).not.toHaveBeenCalled();
   });
 
+  it('treats an accepted stream EOF without done as an interruption', async () => {
+    mockStreamingFetch([
+      sse('accepted', { message_id: 'u-1', sort_order: 1, duplicate: false }),
+      sse('chunk', { text: 'saved prefix' }),
+    ]);
+    const { discussions } = await import('../api');
+    const onChunk = vi.fn();
+    const onDone = vi.fn();
+    const onError = vi.fn();
+    const onAccepted = vi.fn();
+
+    await discussions.sendMessageStream(
+      'd-1',
+      { content: 'hi' } as never,
+      onChunk,
+      onDone,
+      onError,
+      undefined,
+      undefined,
+      undefined,
+      onAccepted,
+    );
+
+    expect(onAccepted).toHaveBeenCalledWith({
+      message_id: 'u-1', sort_order: 1, duplicate: false,
+    });
+    expect(onChunk).toHaveBeenCalledWith('saved prefix');
+    expect(onDone).not.toHaveBeenCalled();
+    expect(onError).toHaveBeenCalledWith(expect.stringContaining('closed before a terminal event'));
+  });
+
   it('runAgent POSTs to /run with a null body', async () => {
     mockStreamingFetch([sse('chunk', { text: 'go' }), sse('done', {})]);
     const { discussions } = await import('../api');
