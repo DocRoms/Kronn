@@ -88,3 +88,26 @@ capability isolation and same-model isolation across HTTP connections.
 Generated TypeScript remains owned by `make typegen`.
 [src: file: backend/src/db/model_catalog.rs:675-917]
 [src: file: docs/testing-quality.md:1-38]
+
+## OpenCode Zen: cost hint and privacy note (KT-543)
+
+OpenCode's own docs qualify every model routed through its hosted gateway
+("OpenCode Zen") as `opencode/<model-id>` inside its multi-provider config.
+Neither ACP's `session/new` config options nor Zen's own `/v1/models`
+endpoint (verified: only `id`/`object`/`created`/`owned_by`) expose pricing,
+so migration 164 adds a generic, provider-agnostic overlay —
+`cost_hint` (`free`/`paid`/`unknown`) and `privacy_note` — to every catalog
+entry, not a Zen-specific table. `reconcile_live` auto-tags a first-seen
+model as `Unknown` with a structural (non-per-model) privacy note purely by
+checking the `opencode/` provider-namespace prefix on `runtime_target_id ==
+"agent:opencode"` — never a hardcoded model id. Both fields are
+operator-overridable through the same manual-entry path as
+`display_alias`/`tier_assignment`, but unlike `tier_assignment` a `None` in
+`UpsertManualModelRequest` preserves the existing value (COALESCE) instead
+of clearing it, so an unrelated edit (e.g. a rename) cannot silently wipe an
+auto-detected or previously-confirmed assessment.
+[src: file: backend/src/db/model_catalog.rs (derive_opencode_zen_overlay, reconcile_live)]
+[src: file: backend/src/db/sql/164_model_catalog_cost_privacy.sql]
+[src: file: backend/src/models/model_catalog.rs (ModelCostHint)]
+[src: url: https://opencode.ai/docs/zen/]
+[src: url: https://opencode.ai/zen/v1/models]
