@@ -5,12 +5,33 @@
   background: var(--kr-bg-base);
 }
 
+.standalone-live-page-frame-shell {
+  position: relative;
+  width: 100%;
+  height: 100%;
+}
+
 .standalone-live-page iframe {
   display: block;
   width: 100%;
   height: 100%;
   border: 0;
   background: #fff;
+}
+
+.standalone-live-page-action-error {
+  position: absolute;
+  z-index: 4;
+  top: 8px;
+  left: 8px;
+  right: 8px;
+  margin: 0;
+  padding: 8px 12px;
+  border: 1px solid rgba(var(--kr-error-rgb), 0.35);
+  border-radius: var(--kr-r-md);
+  background: var(--kr-bg-raised);
+  color: var(--kr-error);
+  font: 500 var(--kr-fs-sm) var(--kr-font-sans);
 }
 
 .standalone-live-page-state {

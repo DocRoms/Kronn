@@ -177,6 +177,21 @@ both the action's result-discussion anchor and the existing Page-to-discussion
 relationship in one transaction, so either side remains traceable after a
 reload or backend restart.
 
+The embedded Page viewer, the standalone tab and every mosaic tile share one
+`useLivePageActions` hook and the same `LivePageActionCard` rendering, so the
+load → validate → activate → mutate lifecycle is identical everywhere: each
+surface loads its own action list, fails closed on an `action_ref` absent from
+that list, and (for mosaic) keeps one tile's action state fully isolated from
+its siblings — a valid or fail-closed click in one tile never affects another,
+even when two tiles share the same `action_ref` string for different Pages.
+`[src: file: frontend/src/hooks/useLivePageActions.ts]`
+`[src: file: frontend/src/components/LivePageActionOverlay.tsx]`
+The standalone tab and mosaic tiles have no Dashboard shell to navigate
+within, so a terminal action's "open discussion" jump seeds the same
+session-storage reload checkpoint Dashboard already reads on mount
+(`dashboard-navigation.ts`) and opens it in a fresh same-origin tab instead of
+switching in place. `[src: file: frontend/src/lib/live-page-navigation.ts]`
+
 Workflow export bundle v2 includes each statically referenced Page's current
 HTML template and dataset contract, then remaps every `PublishPageData.page_id`
 on import. Retained values and publication/run history are excluded to avoid

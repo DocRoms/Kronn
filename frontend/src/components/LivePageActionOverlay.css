@@ -1,0 +1,13 @@
+.live-page-action-overlay {
+  position: absolute;
+  z-index: 4;
+  right: 8px;
+  max-width: 720px;
+  max-height: calc(100% - 16px);
+  overflow: auto;
+}
+.live-page-action-overlay .discussion-action-card { margin-top: 0; }
+
+@media (max-width: 720px) {
+  .live-page-action-overlay { right: 8px; left: 8px !important; width: auto; }
+}
