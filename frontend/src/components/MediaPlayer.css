@@ -1,0 +1,76 @@
+/* Video player. Own sheet so the shared component styles stay untouched. */
+
+.media-player {
+  position: relative;
+  display: flex;
+  width: 100%;
+}
+
+.media-player-video {
+  width: 100%;
+  max-height: 70vh;
+  border-radius: 6px;
+  background: #000;
+  /* Letterboxing inside the element rather than cropping: a generated clip is
+     often not exactly the ratio that was asked for. */
+  object-fit: contain;
+}
+
+.media-player-pip {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  padding: 2px 6px;
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  font-size: 12px;
+  line-height: 1.2;
+  cursor: pointer;
+}
+
+.media-player-pip:hover,
+.media-player-pip:focus-visible {
+  background: rgba(0, 0, 0, 0.8);
+}
+
+.media-player-pip:focus-visible {
+  outline: 2px solid var(--kr-accent, #fff);
+  outline-offset: 1px;
+}
+
+/* Video thumbnail in a message row or the asset library. Deliberately not a
+   <video> element: a row merely on screen must not pull megabytes. */
+.disc-attach-thumb--video {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 6px;
+  min-height: 22px;
+  border: 1px solid var(--kr-border, rgba(128, 128, 128, 0.3));
+  border-radius: 4px;
+  background: var(--kr-surface-2, rgba(0, 0, 0, 0.06));
+  color: var(--kr-text, inherit);
+  cursor: pointer;
+  font-size: 10px;
+}
+
+.disc-attach-thumb--video:hover,
+.disc-attach-thumb--video:focus-visible {
+  border-color: var(--kr-accent, currentColor);
+}
+
+.disc-attach-video-badge {
+  font-size: 9px;
+  line-height: 1;
+}
+
+.disc-image-lightbox-empty {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 120px;
+  min-height: 80px;
+  color: var(--kr-text-muted, inherit);
+}

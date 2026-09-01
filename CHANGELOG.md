@@ -13,6 +13,19 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Added
 
+- Image and video generation on HTTP connections (LiteLLM, NVIDIA, OpenRouter).
+  Media models are configured as their own slots on a connection — modalities,
+  not quality tiers — so a text step can never select "tier Image". A
+  generation is launched from a discussion's Assets tab or by an agent through
+  MCP (`media_generate`, `media_job_status`); the running job shows as a live
+  run card in the discussion, and the finished asset is stored server-side and
+  pinned to the message that asked for it. Videos play inline with native
+  Picture-in-Picture, and opening any asset browses every image and clip of the
+  discussion in one carousel. Media spend is its OWN counter, reported per
+  generation from the provider's billed figure, never recomputed from a
+  published rate. The estimate shown before sending comes from past billed
+  generations, and reads as unknown — never as free — when there is none.
+
 - Discussions now report their storage weight, split by what a cleanup could
   actually reclaim: attachment bytes held on disk, extracted document text, and
   message content. The sidebar shows a green / amber / red indicator whose

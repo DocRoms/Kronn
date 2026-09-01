@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useState } from 'react';
-import { FileText, Images, Search, X } from 'lucide-react';
+import { FileText, Images, Search, Sparkles, X } from 'lucide-react';
 import type { ContextFile } from '../types/generated';
+import type { ExternalApiConnectionView } from '../lib/api';
 import { MessageAttachments } from './MessageAttachments';
+import { MediaGenerateForm } from './MediaGenerateForm';
 
 type T = (key: string, ...args: (string | number)[]) => string;
 type AssetFilter = 'all' | 'images' | 'files' | 'pending';
@@ -19,21 +21,27 @@ export function DiscussionAssetsPanel({
   onClose,
   onNavigateMessage,
   t,
+  connections = [],
 }: {
   discussionId: string;
   files: ContextFile[];
   onClose: () => void;
   onNavigateMessage: (messageId: string) => void;
   t: T;
+  /// External API connections, so a generation can be launched from the tab
+  /// that will hold its result. Empty hides the launcher entirely.
+  connections?: ExternalApiConnectionView[];
 }) {
   const [query, setQuery] = useState('');
   const [filter, setFilter] = useState<AssetFilter>('all');
   const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
+  const [showGenerate, setShowGenerate] = useState(false);
 
   useEffect(() => {
     setQuery('');
     setFilter('all');
     setVisibleCount(PAGE_SIZE);
+    setShowGenerate(false);
   }, [discussionId]);
 
   useEffect(() => setVisibleCount(PAGE_SIZE), [query, filter]);
@@ -58,6 +66,22 @@ export function DiscussionAssetsPanel({
   }, [files, filter, query]);
 
   const visibleFiles = filteredFiles.slice(0, visibleCount);
+  // The carousel walks the whole discussion, not the current page or filter:
+  // opening one asset must reach every image and clip that was generated,
+  // which is the point of the tab. Same order as the grid above (newest
+  // first), so the counter matches what the eye just clicked.
+  const carouselScope = useMemo(
+    () => [...files].sort((left, right) => right.created_at.localeCompare(left.created_at)),
+    [files],
+  );
+  // The launcher only appears when some connection can actually serve a
+  // modality: an always-visible button that only ever refuses is worse than
+  // no button.
+  const canGenerate = connections.some(
+    connection =>
+      (connection.image_model && connection.image_model.trim())
+      || (connection.video_model && connection.video_model.trim()),
+  );
   const filters: Array<{ id: AssetFilter; label: string; icon?: typeof Images }> = [
     { id: 'all', label: t('disc.assets.filterAll') },
     { id: 'images', label: t('disc.assets.filterImages'), icon: Images },
@@ -82,6 +106,27 @@ export function DiscussionAssetsPanel({
           <X size={16} />
         </button>
       </header>
+
+      {canGenerate && (
+        <div className="disc-assets-generate">
+          <button
+            type="button"
+            className="btn btn-sm"
+            onClick={() => setShowGenerate(open => !open)}
+            aria-expanded={showGenerate}
+          >
+            <Sparkles size={13} aria-hidden="true" />
+            <span>{showGenerate ? t('disc.media.closeForm') : t('disc.media.newAsset')}</span>
+          </button>
+          {showGenerate && (
+            <MediaGenerateForm
+              discussionId={discussionId}
+              connections={connections}
+              t={t}
+            />
+          )}
+        </div>
+      )}
 
       <div className="disc-assets-panel-tools">
         <label className="disc-assets-search">
@@ -122,6 +167,7 @@ export function DiscussionAssetsPanel({
               t={t}
               variant="library"
               onNavigateMessage={onNavigateMessage}
+              carouselScope={carouselScope}
             />
             {visibleCount < filteredFiles.length && (
               <button

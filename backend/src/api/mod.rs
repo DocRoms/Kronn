@@ -36,6 +36,7 @@ pub mod live_pages;
 pub mod maintenance;
 pub mod mcp_remote;
 pub mod mcps;
+pub mod media;
 pub mod nvidia;
 pub mod ollama;
 pub mod openapi;

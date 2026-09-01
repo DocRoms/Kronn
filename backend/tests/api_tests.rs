@@ -6153,6 +6153,9 @@ async fn external_api_test_state(endpoint: String) -> AppState {
         reasoning_model: None,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
+        image_model: None,
+        video_model: None,
+        media_endpoint: None,
     };
     let insert = connection.clone();
     state
@@ -6208,6 +6211,9 @@ async fn external_api_nvidia_update_refreshes_the_models_used_by_global_selector
         reasoning_model: Some("nvidia/old-reasoning".into()),
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
+        image_model: None,
+        video_model: None,
+        media_endpoint: None,
     };
     state
         .db
@@ -15560,4 +15566,783 @@ async fn a_single_discussion_weight_answers_zeros_rather_than_a_404() {
     assert_eq!(body["data"]["discussion_id"], "ghost");
     assert_eq!(body["data"]["total_bytes"], 0);
     assert_eq!(body["data"]["level"], "green");
+}
+
+// ── Media generation (KT-540) ──────────────────────────────────────────────
+//
+// The request never carries a model name: the model comes from the
+// connection's configured slot, so a caller cannot dispatch an arbitrary — and
+// arbitrarily priced — model. These tests pin that, plus the spend ceilings.
+
+async fn seed_media_connection(state: &kronn::AppState, image: Option<&str>, video: Option<&str>) {
+    let image = image.map(str::to_string);
+    let video = video.map(str::to_string);
+    state
+        .db
+        .with_conn(move |connection| {
+            let now = chrono::Utc::now().to_rfc3339();
+            connection.execute(
+                "INSERT INTO discussions (id, title, created_at, updated_at)
+                 VALUES ('disc-media', 'Media room', ?1, ?1)",
+                [&now],
+            )?;
+            connection.execute(
+                "INSERT INTO external_api_connections
+                    (id, display_name, mention_alias, endpoint, credential_slug,
+                     origin_preset, created_at, updated_at, image_model, video_model)
+                 VALUES ('conn-media', 'OpenRouter', 'openrouter',
+                         'https://openrouter.ai/api', 'conn-media', 'open_router',
+                         ?1, ?1, ?2, ?3)",
+                rusqlite::params![now, image, video],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn media_generate_refuses_a_modality_with_no_configured_model() {
+    let state = test_state();
+    // Video slot configured, image slot empty.
+    seed_media_connection(&state, None, Some("bytedance/seedance-2.0-mini")).await;
+    let app = build_router_with_auth(state, false);
+
+    let (status, body) = post_json(
+        app,
+        "/api/media/generate",
+        serde_json::json!({
+            "connection_id": "conn-media",
+            "modality": "image",
+            "prompt": "un chat",
+            "discussion_id": "disc-media"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["success"], false);
+    let error = body["error"].as_str().unwrap_or_default();
+    // The message must say what to configure, not just "failed".
+    assert!(error.contains("image"), "got {error}");
+    assert!(error.contains("no"), "got {error}");
+}
+
+#[tokio::test]
+async fn media_generate_queues_a_job_using_the_configured_model() {
+    let state = test_state();
+    seed_media_connection(&state, None, Some("bytedance/seedance-2.0-mini")).await;
+    let app = build_router_with_auth(state, false);
+
+    let (status, body) = post_json(
+        app.clone(),
+        "/api/media/generate",
+        serde_json::json!({
+            "connection_id": "conn-media",
+            "modality": "video",
+            "prompt": "un chat qui saute",
+            "discussion_id": "disc-media",
+            "duration_secs": 5,
+            "resolution": "480p",
+            "generate_audio": false
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["success"], true);
+    // Echoed so the caller sees what will actually be billed.
+    assert_eq!(body["data"]["model"], "bytedance/seedance-2.0-mini");
+    assert_eq!(body["data"]["status"], "pending");
+    let job_id = body["data"]["job_id"].as_str().unwrap().to_string();
+
+    let (_, job) = get_json(app, &format!("/api/media/jobs/{job_id}")).await;
+    assert_eq!(job["success"], true);
+    assert_eq!(job["data"]["modality"], "video");
+    assert_eq!(job["data"]["status"], "pending");
+    assert_eq!(job["data"]["attempts"], 0);
+    // Nothing billed and nothing rendered yet: absent, not zero.
+    assert!(job["data"]["cost_usd"].is_null());
+    assert!(job["data"]["width"].is_null());
+}
+
+#[tokio::test]
+async fn media_generate_caps_duration_and_resolution() {
+    let state = test_state();
+    seed_media_connection(&state, None, Some("bytedance/seedance-2.0-mini")).await;
+    let app = build_router_with_auth(state, false);
+
+    for (label, payload) in [
+        ("too long", serde_json::json!({ "duration_secs": 60 })),
+        ("zero", serde_json::json!({ "duration_secs": 0 })),
+        (
+            "unknown resolution",
+            serde_json::json!({ "resolution": "8k" }),
+        ),
+    ] {
+        let mut body = serde_json::json!({
+            "connection_id": "conn-media",
+            "modality": "video",
+            "prompt": "un chat",
+            "discussion_id": "disc-media"
+        });
+        for (k, v) in payload.as_object().unwrap() {
+            body[k] = v.clone();
+        }
+        let (_, answer) = post_json(app.clone(), "/api/media/generate", body).await;
+        assert_eq!(answer["success"], false, "{label} must be refused");
+    }
+}
+
+#[tokio::test]
+async fn media_generate_refuses_an_empty_prompt_and_an_unknown_connection() {
+    let state = test_state();
+    seed_media_connection(&state, Some("meta/muse-image"), None).await;
+    let app = build_router_with_auth(state, false);
+
+    let (_, blank) = post_json(
+        app.clone(),
+        "/api/media/generate",
+        serde_json::json!({
+            "connection_id": "conn-media", "modality": "image",
+            "prompt": "   ", "discussion_id": "disc-media"
+        }),
+    )
+    .await;
+    assert_eq!(blank["success"], false);
+
+    let (_, unknown) = post_json(
+        app,
+        "/api/media/generate",
+        serde_json::json!({
+            "connection_id": "nope", "modality": "image",
+            "prompt": "un chat", "discussion_id": "disc-media"
+        }),
+    )
+    .await;
+    assert_eq!(unknown["success"], false);
+    assert!(unknown["error"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("nope"));
+}
+
+#[tokio::test]
+async fn a_queued_media_job_can_be_cancelled_once() {
+    let state = test_state();
+    seed_media_connection(&state, None, Some("bytedance/seedance-2.0-mini")).await;
+    let app = build_router_with_auth(state, false);
+
+    let (_, created) = post_json(
+        app.clone(),
+        "/api/media/generate",
+        serde_json::json!({
+            "connection_id": "conn-media", "modality": "video",
+            "prompt": "un chat", "discussion_id": "disc-media"
+        }),
+    )
+    .await;
+    let job_id = created["data"]["job_id"].as_str().unwrap().to_string();
+
+    let (_, first) = post_json(
+        app.clone(),
+        &format!("/api/media/jobs/{job_id}/cancel"),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(first["data"], true);
+
+    // Already settled: a second cancel changes nothing.
+    let (_, second) = post_json(
+        app,
+        &format!("/api/media/jobs/{job_id}/cancel"),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(second["data"], false);
+}
+
+#[tokio::test]
+async fn media_model_slots_round_trip_through_the_connection_api() {
+    let state = test_state();
+    let app = build_router_with_auth(state, false);
+
+    let (_, created) = post_json(
+        app.clone(),
+        "/api/external-api/connections",
+        serde_json::json!({
+            "display_name": "OpenRouter media",
+            "mention_alias": "ormedia",
+            "endpoint": "https://openrouter.ai/api",
+            "origin_preset": "open_router",
+            "api_key": "sk-or-v1-testkeyforintegrationtests",
+            "image_model": "meta/muse-image",
+            "video_model": "bytedance/seedance-2.0-mini"
+        }),
+    )
+    .await;
+    assert_eq!(created["success"], true, "{created}");
+
+    let (_, listed) = get_json(app, "/api/external-api/connections").await;
+    let rows = listed["data"].as_array().cloned().unwrap_or_default();
+    let mine = rows
+        .iter()
+        .find(|row| row["mention_alias"] == "ormedia")
+        .expect("connection listed");
+    assert_eq!(mine["image_model"], "meta/muse-image");
+    assert_eq!(mine["video_model"], "bytedance/seedance-2.0-mini");
+}
+
+#[tokio::test]
+async fn media_costs_are_reported_in_their_own_counter() {
+    let state = test_state();
+    seed_media_connection(
+        &state,
+        Some("meta/muse-image"),
+        Some("bytedance/seedance-2.0-mini"),
+    )
+    .await;
+    // Two settled generations plus one still pending.
+    state
+        .db
+        .with_conn(|connection| {
+            let now = chrono::Utc::now().to_rfc3339();
+            connection.execute(
+                "INSERT INTO media_jobs
+                    (id, modality, status, connection_id, model, prompt, discussion_id,
+                     cost_usd, is_byok, attempts, scheduled_at, deadline_at, created_at,
+                     updated_at, completed_at)
+                 VALUES
+                    ('j-vid', 'video', 'completed', 'conn-media', 'bytedance/seedance-2.0-mini',
+                     'p', 'disc-media', 0.0708932, 0, 1, ?1, ?1, ?1, ?1, ?1),
+                    ('j-img', 'image', 'completed', 'conn-media', 'meta/muse-image',
+                     'p', 'disc-media', 0.01, 0, 1, ?1, ?1, ?1, ?1, ?1),
+                    ('j-run', 'video', 'pending', 'conn-media', 'bytedance/seedance-2.0-mini',
+                     'p', 'disc-media', NULL, 0, 0, ?1, ?1, ?1, ?1, NULL)",
+                [&now],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let app = build_router_with_auth(state, false);
+
+    let (status, body) = get_json(app, "/api/media/costs").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["success"], true);
+
+    // Only billed generations count: a pending job is not free, it is simply
+    // not billed yet, so it must not appear as a zero.
+    let entries = body["data"]["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 2, "{body}");
+    assert!(entries.iter().all(|e| e["id"] != "j-run"));
+
+    // Amounts are the provider's declared values, verbatim.
+    assert_eq!(body["data"]["video_total_usd"], 0.0708932);
+    assert_eq!(body["data"]["image_total_usd"], 0.01);
+    assert_eq!(body["data"]["total_usd"], 0.0808932);
+
+    // Per-generation detail carries what was billed and on which model.
+    let video = entries.iter().find(|e| e["id"] == "j-vid").unwrap();
+    assert_eq!(video["modality"], "video");
+    assert_eq!(video["model"], "bytedance/seedance-2.0-mini");
+    assert_eq!(video["is_byok"], false);
+}
+
+#[tokio::test]
+async fn media_costs_are_empty_rather_than_zeroed_when_nothing_was_billed() {
+    let app = test_app();
+    let (_, body) = get_json(app, "/api/media/costs").await;
+    assert_eq!(body["success"], true);
+    assert_eq!(body["data"]["entries"].as_array().unwrap().len(), 0);
+    assert_eq!(body["data"]["total_usd"], 0.0);
+}
+
+#[tokio::test]
+async fn a_queued_media_job_is_immediately_visible_as_a_shared_run() {
+    let state = test_state();
+    seed_media_connection(&state, None, Some("bytedance/seedance-2.0-mini")).await;
+    let app = build_router_with_auth(state.clone(), false);
+
+    let (_, created) = post_json(
+        app,
+        "/api/media/generate",
+        serde_json::json!({
+            "connection_id": "conn-media", "modality": "video",
+            "prompt": "un chat", "discussion_id": "disc-media"
+        }),
+    )
+    .await;
+    let job_id = created["data"]["job_id"].as_str().unwrap().to_string();
+
+    let lookup = job_id.clone();
+    let run = state
+        .db
+        .with_read_conn(move |conn| kronn::db::shared_runs::get(conn, &lookup))
+        .await
+        .unwrap()
+        .expect("shared run published while still queued");
+
+    // One kind for both modalities; the modality lives in the result.
+    assert!(matches!(run.kind, kronn::models::SharedRunKind::Media));
+    // 1:1 identity, so a restart cannot produce a duplicate run.
+    assert_eq!(run.id, job_id);
+    assert!(matches!(run.status, kronn::models::SharedRunStatus::Queued));
+    assert_eq!(run.discussion_id.as_deref(), Some("disc-media"));
+
+    let result = run.result.expect("versioned result");
+    assert_eq!(result["schema_version"], 1);
+    assert_eq!(result["modality"], "video");
+    // Never an invented percentage: the provider does not measure progress.
+    assert!(result.get("progress").is_none(), "got {result}");
+    // Nothing billed nor rendered yet: absent, not zero.
+    assert!(result.get("cost_usd").is_none());
+    assert!(result.get("width").is_none());
+    // No secret, no payload, no signed URL.
+    assert!(run.diagnostic.is_none());
+}
+
+#[tokio::test]
+async fn cancelling_a_media_job_updates_its_run_without_any_manual_sync() {
+    let state = test_state();
+    seed_media_connection(&state, None, Some("bytedance/seedance-2.0-mini")).await;
+    let app = build_router_with_auth(state.clone(), false);
+
+    let (_, created) = post_json(
+        app.clone(),
+        "/api/media/generate",
+        serde_json::json!({
+            "connection_id": "conn-media", "modality": "video",
+            "prompt": "un chat", "discussion_id": "disc-media"
+        }),
+    )
+    .await;
+    let job_id = created["data"]["job_id"].as_str().unwrap().to_string();
+
+    post_json(
+        app,
+        &format!("/api/media/jobs/{job_id}/cancel"),
+        serde_json::json!({}),
+    )
+    .await;
+
+    // Read straight from storage: the previous version of this test called
+    // sync_media() by hand after the POST, so it proved the projection and NOT
+    // the endpoint. Nothing is synced here.
+    let lookup = job_id.clone();
+    let run = state
+        .db
+        .with_read_conn(move |conn| kronn::db::shared_runs::get(conn, &lookup))
+        .await
+        .unwrap()
+        .expect("run");
+    assert!(matches!(
+        run.status,
+        kronn::models::SharedRunStatus::Cancelled
+    ));
+}
+
+#[tokio::test]
+async fn media_transitions_broadcast_a_shared_run_updated_event() {
+    let state = test_state();
+    seed_media_connection(&state, None, Some("bytedance/seedance-2.0-mini")).await;
+    // Subscribed BEFORE the request, so the queue event cannot be missed.
+    let mut events = state.ws_broadcast.subscribe();
+    let app = build_router_with_auth(state.clone(), false);
+
+    let (_, created) = post_json(
+        app.clone(),
+        "/api/media/generate",
+        serde_json::json!({
+            "connection_id": "conn-media", "modality": "video",
+            "prompt": "un chat", "discussion_id": "disc-media"
+        }),
+    )
+    .await;
+    let job_id = created["data"]["job_id"].as_str().unwrap().to_string();
+
+    // Queuing must notify live views: a 100 s generation cannot stay invisible
+    // until the provider answers.
+    let queued = tokio::time::timeout(std::time::Duration::from_secs(2), events.recv())
+        .await
+        .expect("an event within 2s")
+        .expect("broadcast alive");
+    match queued {
+        kronn::models::WsMessage::SharedRunUpdated { run_id } => assert_eq!(run_id, job_id),
+        other => panic!("expected SharedRunUpdated, got {other:?}"),
+    }
+
+    post_json(
+        app,
+        &format!("/api/media/jobs/{job_id}/cancel"),
+        serde_json::json!({}),
+    )
+    .await;
+
+    let cancelled = tokio::time::timeout(std::time::Duration::from_secs(2), events.recv())
+        .await
+        .expect("a second event within 2s")
+        .expect("broadcast alive");
+    match cancelled {
+        kronn::models::WsMessage::SharedRunUpdated { run_id } => assert_eq!(run_id, job_id),
+        other => panic!("expected SharedRunUpdated, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn media_generate_refuses_an_unknown_discussion() {
+    let state = test_state();
+    seed_media_connection(&state, None, Some("bytedance/seedance-2.0-mini")).await;
+    let app = build_router_with_auth(state, false);
+
+    let (_, body) = post_json(
+        app,
+        "/api/media/generate",
+        serde_json::json!({
+            "connection_id": "conn-media", "modality": "video",
+            "prompt": "un chat", "discussion_id": "no-such-disc"
+        }),
+    )
+    .await;
+    // An orphan asset nobody can reach is worse than a refusal.
+    assert_eq!(body["success"], false);
+    assert!(body["error"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("no-such-disc"));
+}
+
+#[tokio::test]
+async fn a_media_job_inherits_the_project_scope_of_its_discussion() {
+    let state = test_state();
+    seed_media_connection(&state, None, Some("bytedance/seedance-2.0-mini")).await;
+    state
+        .db
+        .with_conn(|connection| {
+            let now = chrono::Utc::now().to_rfc3339();
+            connection.execute(
+                "INSERT INTO projects (id, name, path, created_at, updated_at)
+                 VALUES ('proj-1', 'P', '/tmp/proj-1', ?1, ?1)",
+                [&now],
+            )?;
+            connection.execute(
+                "INSERT INTO discussions (id, title, project_id, created_at, updated_at)
+                 VALUES ('disc-scoped', 'Scoped', 'proj-1', ?1, ?1)",
+                [&now],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let app = build_router_with_auth(state.clone(), false);
+
+    let (_, created) = post_json(
+        app,
+        "/api/media/generate",
+        serde_json::json!({
+            "connection_id": "conn-media", "modality": "video",
+            "prompt": "un chat", "discussion_id": "disc-scoped"
+        }),
+    )
+    .await;
+    assert_eq!(created["success"], true, "{created}");
+    let job_id = created["data"]["job_id"].as_str().unwrap().to_string();
+
+    // Without this the run disappears from project views.
+    let lookup = job_id.clone();
+    let run = state
+        .db
+        .with_read_conn(move |conn| kronn::db::shared_runs::get(conn, &lookup))
+        .await
+        .unwrap()
+        .expect("run");
+    assert_eq!(run.project_id.as_deref(), Some("proj-1"));
+    assert_eq!(run.discussion_id.as_deref(), Some("disc-scoped"));
+}
+
+#[tokio::test]
+async fn media_generate_creates_a_discussion_when_none_is_given() {
+    // An agent asking for a standalone image should not have to invent a room
+    // first — but the asset is a context file, so a discussion must exist.
+    let state = test_state();
+    seed_media_connection(&state, Some("meta/muse-image"), None).await;
+    let app = build_router_with_auth(state.clone(), false);
+
+    let (status, body) = post_json(
+        app.clone(),
+        "/api/media/generate",
+        serde_json::json!({
+            "connection_id": "conn-media",
+            "modality": "image",
+            "prompt": "un chat tigré sur un rebord de fenêtre au soleil"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["success"], true, "{body}");
+    let job_id = body["data"]["job_id"].as_str().unwrap().to_string();
+
+    // The created discussion holds the prompt as its first message: a room
+    // containing a generated asset with no trace of the request would be
+    // unreadable a day later.
+    let lookup = job_id.clone();
+    let (discussion_id, title, first_message) = state
+        .db
+        .with_read_conn(move |conn| {
+            let job = kronn::db::media_jobs::get(conn, &lookup)?.expect("job");
+            let discussion_id = job.discussion_id.expect("a discussion was created");
+            let title: String = conn.query_row(
+                "SELECT title FROM discussions WHERE id = ?1",
+                rusqlite::params![discussion_id],
+                |row| row.get(0),
+            )?;
+            let content: String = conn.query_row(
+                "SELECT content FROM messages WHERE discussion_id = ?1",
+                rusqlite::params![discussion_id],
+                |row| row.get(0),
+            )?;
+            Ok((discussion_id, title, content))
+        })
+        .await
+        .unwrap();
+
+    assert!(first_message.contains("chat tigré"));
+    // The title is read in a sidebar, so it is shortened rather than raw.
+    assert!(title.len() <= 64, "title too long for a sidebar: {title}");
+
+    // And the run is scoped to that discussion, so it is reachable.
+    let run_lookup = job_id.clone();
+    let run = state
+        .db
+        .with_read_conn(move |conn| kronn::db::shared_runs::get(conn, &run_lookup))
+        .await
+        .unwrap()
+        .expect("run");
+    assert_eq!(run.discussion_id.as_deref(), Some(discussion_id.as_str()));
+}
+
+#[tokio::test]
+async fn a_long_prompt_yields_a_readable_discussion_title() {
+    let state = test_state();
+    seed_media_connection(&state, Some("meta/muse-image"), None).await;
+    let app = build_router_with_auth(state.clone(), false);
+
+    let long_prompt = "un ".repeat(200);
+    let (_, body) = post_json(
+        app,
+        "/api/media/generate",
+        serde_json::json!({
+            "connection_id": "conn-media", "modality": "image", "prompt": long_prompt
+        }),
+    )
+    .await;
+    assert_eq!(body["success"], true, "{body}");
+    let job_id = body["data"]["job_id"].as_str().unwrap().to_string();
+
+    let title = state
+        .db
+        .with_read_conn(move |conn| {
+            let job = kronn::db::media_jobs::get(conn, &job_id)?.expect("job");
+            let discussion_id = job.discussion_id.expect("discussion");
+            let title: String = conn.query_row(
+                "SELECT title FROM discussions WHERE id = ?1",
+                rusqlite::params![discussion_id],
+                |row| row.get(0),
+            )?;
+            Ok(title)
+        })
+        .await
+        .unwrap();
+
+    // Truncated with an ellipsis rather than dumped whole.
+    assert!(
+        title.chars().count() <= 61,
+        "{} chars",
+        title.chars().count()
+    );
+    assert!(title.ends_with('…'));
+}
+
+#[tokio::test]
+async fn media_estimate_is_measured_from_past_generations_not_a_hardcoded_rate() {
+    let state = test_state();
+    seed_media_connection(
+        &state,
+        Some("meta/muse-image"),
+        Some("bytedance/seedance-2.0-mini"),
+    )
+    .await;
+    state
+        .db
+        .with_conn(|connection| {
+            let now = chrono::Utc::now().to_rfc3339();
+            // A real billed clip: 0.0708932 USD for 5042 ms.
+            connection.execute(
+                "INSERT INTO media_jobs
+                    (id, modality, status, connection_id, model, prompt, cost_usd, is_byok,
+                     rendered_duration_ms, attempts, scheduled_at, deadline_at, created_at, updated_at)
+                 VALUES ('past', 'video', 'completed', 'conn-media',
+                         'bytedance/seedance-2.0-mini', 'p', 0.0708932, 0, 5042, 1, ?1, ?1, ?1, ?1)",
+                [&now],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let app = build_router_with_auth(state, false);
+
+    let (status, body) = get_json(
+        app,
+        "/api/media/estimate?connection_id=conn-media&modality=video&duration_secs=10",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["success"], true, "{body}");
+    assert_eq!(body["data"]["samples"], 1);
+    assert_eq!(body["data"]["model"], "bytedance/seedance-2.0-mini");
+
+    // 10 s at the observed per-second cost of a 5.042 s clip.
+    let estimate = body["data"]["estimated_usd"].as_f64().expect("an estimate");
+    let expected = 0.0708932 / 5.042 * 10.0;
+    assert!(
+        (estimate - expected).abs() < 1e-6,
+        "got {estimate}, expected ~{expected}"
+    );
+}
+
+#[tokio::test]
+async fn media_estimate_says_unknown_rather_than_free_when_nothing_was_billed() {
+    let state = test_state();
+    seed_media_connection(
+        &state,
+        Some("meta/muse-image"),
+        Some("bytedance/seedance-2.0-mini"),
+    )
+    .await;
+    let app = build_router_with_auth(state, false);
+
+    let (_, body) = get_json(
+        app.clone(),
+        "/api/media/estimate?connection_id=conn-media&modality=video&duration_secs=5",
+    )
+    .await;
+    assert_eq!(body["success"], true);
+    // Absent, NOT zero: a fabricated estimate would read as "this is free".
+    assert!(body["data"]["estimated_usd"].is_null(), "{body}");
+    assert_eq!(body["data"]["samples"], 0);
+
+    // A video estimate also needs a duration to scale a per-second cost.
+    let (_, no_duration) = get_json(
+        app,
+        "/api/media/estimate?connection_id=conn-media&modality=video",
+    )
+    .await;
+    assert!(no_duration["data"]["estimated_usd"].is_null());
+}
+
+#[tokio::test]
+async fn byok_generations_do_not_drag_the_estimate_to_zero() {
+    let state = test_state();
+    seed_media_connection(&state, Some("meta/muse-image"), None).await;
+    state
+        .db
+        .with_conn(|connection| {
+            let now = chrono::Utc::now().to_rfc3339();
+            connection.execute(
+                "INSERT INTO media_jobs
+                    (id, modality, status, connection_id, model, prompt, cost_usd, is_byok,
+                     attempts, scheduled_at, deadline_at, created_at, updated_at)
+                 VALUES ('byok', 'image', 'completed', 'conn-media', 'meta/muse-image',
+                         'p', 0.0, 1, 1, ?1, ?1, ?1, ?1),
+                        ('paid', 'image', 'completed', 'conn-media', 'meta/muse-image',
+                         'p', 0.02, 0, 1, ?1, ?1, ?1, ?1)",
+                [&now],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let app = build_router_with_auth(state, false);
+
+    let (_, body) = get_json(
+        app,
+        "/api/media/estimate?connection_id=conn-media&modality=image",
+    )
+    .await;
+    // Only the billed row counts: averaging a BYOK zero would tell everyone
+    // else the generation is nearly free.
+    assert_eq!(body["data"]["samples"], 1);
+    assert!((body["data"]["estimated_usd"].as_f64().unwrap() - 0.02).abs() < 1e-9);
+}
+
+#[tokio::test]
+async fn an_expired_media_job_broadcasts_through_the_real_worker_sweep() {
+    // Codex was right that the previous proof was hollow: it recreated the
+    // projection with sync_media() after expiring the row, so it validated the
+    // mapper and not the loop. This one runs the actual `tick` and watches the
+    // broadcast channel — an expired job leaves `pending`, so if `tick` does
+    // not publish it, nothing ever will and a card stays `running`.
+    let state = test_state();
+    seed_media_connection(&state, None, Some("bytedance/seedance-2.0-mini")).await;
+
+    let past = chrono::Utc::now() - chrono::Duration::hours(2);
+    state
+        .db
+        .with_conn(move |connection| {
+            let stamp = past.to_rfc3339();
+            connection.execute(
+                "INSERT INTO media_jobs
+                    (id, modality, status, connection_id, model, prompt, discussion_id,
+                     provider_job_id, is_byok, attempts, scheduled_at, deadline_at,
+                     created_at, updated_at)
+                 VALUES ('overdue', 'video', 'running', 'conn-media',
+                         'bytedance/seedance-2.0-mini', 'p', 'disc-media',
+                         'provider-abc', 0, 1, ?1, ?1, ?1, ?1)",
+                [&stamp],
+            )?;
+            // Its run reflects the pre-expiry state, as a live card would.
+            let job = kronn::db::media_jobs::get(connection, "overdue")?.expect("job");
+            kronn::db::shared_runs::sync_media(connection, &job)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    let mut events = state.ws_broadcast.subscribe();
+    let client = reqwest::Client::new();
+
+    kronn::agents::media_runner::tick(&state, &client)
+        .await
+        .expect("sweep");
+
+    // The sweep must have announced the expiry itself.
+    let event = tokio::time::timeout(std::time::Duration::from_secs(2), events.recv())
+        .await
+        .expect("a broadcast within 2s")
+        .expect("channel alive");
+    match event {
+        kronn::models::WsMessage::SharedRunUpdated { run_id } => assert_eq!(run_id, "overdue"),
+        other => panic!("expected SharedRunUpdated, got {other:?}"),
+    }
+
+    // And the published run carries the terminal state, read without any
+    // manual projection.
+    let run = state
+        .db
+        .with_read_conn(|conn| kronn::db::shared_runs::get(conn, "overdue"))
+        .await
+        .unwrap()
+        .expect("run");
+    assert!(matches!(
+        run.status,
+        kronn::models::SharedRunStatus::Timeout
+    ));
+    assert_eq!(run.diagnostic.as_deref(), Some("deadline exceeded"));
+
+    // It is terminal: a second sweep has nothing left to announce.
+    let job = state
+        .db
+        .with_read_conn(|conn| kronn::db::media_jobs::get(conn, "overdue"))
+        .await
+        .unwrap()
+        .expect("job");
+    assert_eq!(job.status, kronn::models::MediaJobStatus::TimedOut);
 }

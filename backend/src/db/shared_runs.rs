@@ -9,6 +9,7 @@ fn kind(v: &SharedRunKind) -> &'static str {
         SharedRunKind::QuickApi => "quick_api",
         SharedRunKind::QuickExec => "quick_exec",
         SharedRunKind::Workflow => "workflow",
+        SharedRunKind::Media => "media",
     }
 }
 fn status(v: &SharedRunStatus) -> &'static str {
@@ -28,6 +29,7 @@ fn parse_kind(v: String) -> rusqlite::Result<SharedRunKind> {
         "quick_api" => Ok(SharedRunKind::QuickApi),
         "quick_exec" => Ok(SharedRunKind::QuickExec),
         "workflow" => Ok(SharedRunKind::Workflow),
+        "media" => Ok(SharedRunKind::Media),
         _ => Err(rusqlite::Error::FromSqlConversionFailure(
             1,
             rusqlite::types::Type::Text,
@@ -229,6 +231,66 @@ pub fn sync_workflow(conn: &Connection, run: &crate::models::WorkflowRun) -> Res
     upsert(conn, &shared)
 }
 use rusqlite::OptionalExtension;
+
+/// Projects a media job onto the shared run model consumed by RunStatusCard.
+///
+/// One kind, `Media`, with the modality carried in `result.modality` — the
+/// execution family is identical for image and video, only the output differs.
+/// `SharedRun.id` is the job id so the mapping is 1:1 and a restart cannot
+/// produce a duplicate run.
+///
+/// `progress` is deliberately never set: the provider does not measure it, and
+/// an invented percentage looks authoritative while being fiction. The
+/// diagnostic carries the job's bounded error only — never a payload or a
+/// signed URL.
+pub fn media_run(job: &crate::db::media_jobs::MediaJob) -> SharedRun {
+    use crate::models::{MediaPhase, MediaRunResult};
+
+    let phase = match job.status {
+        crate::models::MediaJobStatus::Pending if job.provider_job_id.is_none() => {
+            MediaPhase::Submitting
+        }
+        crate::models::MediaJobStatus::Pending => MediaPhase::Polling,
+        crate::models::MediaJobStatus::Running => MediaPhase::Downloading,
+        _ => MediaPhase::Persisting,
+    };
+
+    let mut result = MediaRunResult::new(job.modality, phase);
+    result.generation_id = job.provider_generation_id.clone();
+    result.asset_id = job.context_file_id.clone();
+    result.message_id = job.message_id.clone();
+    result.cost_usd = job.cost.map(|cost| cost.cost_usd);
+    result.is_byok = job.cost.map(|cost| cost.is_byok);
+    result.width = job.rendered.width;
+    result.height = job.rendered.height;
+    result.media_duration_ms = job.rendered.duration_ms;
+
+    let now = Utc::now();
+    SharedRun {
+        id: job.id.clone(),
+        kind: SharedRunKind::Media,
+        // No persisted media template exists yet, so the connection is the
+        // closest stable source identity.
+        source_id: job.connection_id.clone(),
+        project_id: job.project_id.clone(),
+        discussion_id: job.discussion_id.clone(),
+        status: job.status.shared_run_status(),
+        started_at: None,
+        finished_at: None,
+        duration_ms: None,
+        result: serde_json::to_value(&result).ok(),
+        diagnostic: job.last_error.clone(),
+        created_at: now,
+        updated_at: now,
+    }
+}
+
+/// Convenience for call sites that already hold a connection and only need the
+/// row written. Callers that must also notify live views use
+/// `api::shared_runs::publish_media_job`, which cannot forget the broadcast.
+pub fn sync_media(conn: &Connection, job: &crate::db::media_jobs::MediaJob) -> Result<()> {
+    upsert(conn, &media_run(job))
+}
 
 #[cfg(test)]
 mod tests {

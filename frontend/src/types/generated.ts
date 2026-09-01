@@ -2260,7 +2260,17 @@ export type ExportPluginBundleRequest = { config_ids: Array<string>, include_val
  * A named OpenAI-compatible API connection. The credential itself stays in
  * Kronn's encrypted credential store; this model persists only its slug.
  */
-export type ExternalApiConnection = { id: string, display_name: string, mention_alias: string, endpoint: string | null, credential_slug: string, origin_preset: ExternalApiConnectionPreset, economy_model: string | null, default_model: string | null, reasoning_model: string | null, created_at: string, updated_at: string, };
+export type ExternalApiConnection = { id: string, display_name: string, mention_alias: string, endpoint: string | null, credential_slug: string, origin_preset: ExternalApiConnectionPreset, economy_model: string | null, default_model: string | null, reasoning_model: string | null, created_at: string, updated_at: string,
+/**
+ * Media generation slots. Modalities, NOT quality tiers: making them
+ * ModelTier variants would let a text step select "tier Image".
+ */
+image_model?: string | null, video_model?: string | null,
+/**
+ * Override for providers serving media from another host than their chat
+ * endpoint. Empty means "derive from `endpoint`".
+ */
+media_endpoint?: string | null, };
 
 export type ExternalApiConnectionPreset = "lite_llm" | "nvidia" | "open_router" | "other";
 
@@ -3102,6 +3112,52 @@ api_spec?: ApiSpec | null, };
 export type McpSource = "Registry" | "Detected" | "Manual" | "HostImported";
 
 export type McpTransport = { "Stdio": { command: string, args: Array<string>, } } | { "Sse": { url: string, } } | { "Streamable": { url: string, } } | "ApiOnly";
+
+/**
+ * Cost of one generation, as the provider declared it.
+ */
+export type MediaCost = {
+/**
+ * Verbatim provider value. Recomputing it from a published rate drifts
+ * from the actual invoice.
+ */
+cost_usd: number,
+/**
+ * Bring-your-own-key generations can legitimately cost nothing; keeping
+ * the flag stops a zero from looking like a measurement failure.
+ */
+is_byok: boolean, };
+
+export type MediaJobStatus = "pending" | "running" | "completed" | "failed" | "cancelled" | "timed_out";
+
+/**
+ * What the model outputs. The execution family is the same for both, so this
+ * belongs to the job and its result — not to a separate run kind.
+ */
+export type MediaModality = "image" | "video";
+
+/**
+ * Generation parameters as REQUESTED. The provider may honour them loosely,
+ * so nothing downstream may treat these as describing the output.
+ */
+export type MediaParams = { duration_secs?: number | null, resolution?: string | null, aspect_ratio?: string | null, generate_audio?: boolean | null, };
+
+/**
+ * Coarse provider phase, for progress reporting.
+ */
+export type MediaPhase = "submitting" | "polling" | "downloading" | "persisting";
+
+/**
+ * What actually came back, read from the produced file.
+ */
+export type MediaRendered = { width?: number | null, height?: number | null, duration_ms?: number | null, };
+
+/**
+ * Versioned payload published on the shared run. `progress` is absent unless
+ * the provider actually measures it — an invented percentage is worse than
+ * none, because it looks authoritative.
+ */
+export type MediaRunResult = { schema_version: number, modality: MediaModality, phase: MediaPhase, progress?: number | null, generation_id?: string | null, asset_id?: string | null, message_id?: string | null, cost_usd?: number | null, is_byok?: boolean | null, width?: number | null, height?: number | null, media_duration_ms?: number | null, };
 
 /**
  * Lean attachment descriptor surfaced to agents via `disc_get_message`. The
@@ -5070,7 +5126,7 @@ export type ShareDiscussionRequest = { contact_ids: Array<string>, };
 
 export type SharedRun = { id: string, kind: SharedRunKind, source_id: string, project_id: string | null, discussion_id: string | null, status: SharedRunStatus, started_at: string | null, finished_at: string | null, duration_ms: number | null, result: unknown, diagnostic: string | null, created_at: string, updated_at: string, };
 
-export type SharedRunKind = "quick_prompt" | "quick_api" | "quick_exec" | "workflow";
+export type SharedRunKind = "quick_prompt" | "quick_api" | "quick_exec" | "workflow" | "media";
 
 export type SharedRunStatus = "preflight_failed" | "queued" | "running" | "success" | "failed" | "cancelled" | "timeout";
 

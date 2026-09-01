@@ -751,6 +751,12 @@ async fn main() -> anyhow::Result<()> {
     let ws_state = state.clone();
     tokio::spawn(async move { kronn::core::ws_client::run(ws_state).await });
 
+    // Media generation worker. Reclaims first: a job left `running` by a
+    // killed process is already generating and already billed, so it must
+    // resume polling instead of being abandoned or paid for twice.
+    let media_state = state.clone();
+    tokio::spawn(async move { kronn::agents::media_runner::run_loop(media_state).await });
+
     // Build router
     let app = build_router(state);
 

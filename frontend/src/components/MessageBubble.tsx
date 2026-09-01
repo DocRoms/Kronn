@@ -269,6 +269,9 @@ export interface MessageBubbleProps {
    * Rendered as a strip under the content: image thumbnails (fetched as
    * auth'd blobs) and filename chips for non-images. Empty for most msgs. */
   attachments?: ContextFile[];
+  /// Every media file of the discussion, so the carousel opened from this
+  /// message browses the whole thread rather than this bubble alone.
+  discussionMedia?: ContextFile[];
   /** F15+ — a federated attachment is announced but its binary hasn't been
    *  fetched/linked yet → show a "downloading…" placeholder until it lands. */
   pendingAttachment?: boolean;
@@ -290,7 +293,7 @@ export interface MessageBubbleProps {
 export const MessageBubble = memo(function MessageBubble(props: MessageBubbleProps) {
   const { msg, isLastUser, isLastAgent, isEditing, isCopied, isTtsActive, ttsState: tts, isExpandedSummary,
     prevUserTs, defaultAgent, defaultAgentAlias, targetConnectionAliases = {}, summaryCache, language, sending, editingText, hasFullAccess,
-    onCopy, onTts, onEditStart, onEditCancel, onEditSubmit, onEditTextChange, onRetry, onRetryAgentDispatch, onExpandSummary, onNavigate, discussionId, projectId, chainableQPs, onLaunchQp, attachments, pendingAttachment, isSearchMatch, isSearchCurrent, replyTarget, replies = [], onReply, onReplyNavigate, onDelete, isDeleting = false, targets = [], t } = props;
+    onCopy, onTts, onEditStart, onEditCancel, onEditSubmit, onEditTextChange, onRetry, onRetryAgentDispatch, onExpandSummary, onNavigate, discussionId, projectId, chainableQPs, onLaunchQp, attachments, discussionMedia, pendingAttachment, isSearchMatch, isSearchCurrent, replyTarget, replies = [], onReply, onReplyNavigate, onDelete, isDeleting = false, targets = [], t } = props;
   const editTextareaRef = useRef<HTMLTextAreaElement>(null);
   useLayoutEffect(() => {
     if (isEditing && editTextareaRef.current) {
@@ -1020,7 +1023,12 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
         )}
         </div>
         {attachments && attachments.length > 0 && discussionId && (
-          <MessageAttachments files={attachments} discussionId={discussionId} t={t} />
+          <MessageAttachments
+            files={attachments}
+            discussionId={discussionId}
+            t={t}
+            carouselScope={discussionMedia}
+          />
         )}
         {/* F15+ — federated file announced but not yet fetched/linked. Shows
          *  while the peer downloads the binary, replaced by the real attachment

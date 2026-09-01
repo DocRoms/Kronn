@@ -67,6 +67,8 @@ interface FormState {
   economy_model: string;
   default_model: string;
   reasoning_model: string;
+  image_model: string;
+  video_model: string;
   api_key: string;
   keyTouched: boolean;
 }
@@ -80,6 +82,8 @@ function emptyForm(): FormState {
     economy_model: '',
     default_model: '',
     reasoning_model: '',
+    image_model: '',
+    video_model: '',
     api_key: '',
     keyTouched: false,
   };
@@ -102,6 +106,8 @@ function formFromConnection(c: ExternalApiConnectionView): FormState {
     economy_model: c.economy_model ?? '',
     default_model: c.default_model ?? '',
     reasoning_model: c.reasoning_model ?? '',
+    image_model: c.image_model ?? '',
+    video_model: c.video_model ?? '',
     api_key: '',
     keyTouched: false,
   };
@@ -116,6 +122,8 @@ function toPayload(form: FormState): UpsertExternalApiConnection {
     economy_model: form.economy_model.trim() || null,
     default_model: form.default_model.trim() || null,
     reasoning_model: form.reasoning_model.trim() || null,
+    image_model: form.image_model.trim() || null,
+    video_model: form.video_model.trim() || null,
     // Only send the key when the user actually typed one, so editing a
     // connection without retyping its key keeps the stored credential.
     api_key: form.keyTouched ? form.api_key : null,
@@ -365,6 +373,48 @@ function ConnectionForm({
               );
             })}
           </div>
+        </div>
+
+        <div className="set-ext-api-tier-panel" data-testid="ext-api-media-panel">
+          <div className="set-ext-api-tier-panel-title">
+            <span>{t('config.extApi.mediaTitle')}</span>
+            <small>{t('config.extApi.mediaOptional')}</small>
+          </div>
+          {/* Free text rather than a picker: the media catalogues live on
+              separate provider routes and belong to another ticket. Typing a
+              model works today and becomes a picker later without changing
+              what is stored. */}
+          <div className="set-ext-api-tiers">
+            {(['image', 'video'] as const).map(modality => {
+              const value = modality === 'image' ? form.image_model : form.video_model;
+              const setValue = (next: string) =>
+                setForm(prev =>
+                  modality === 'image'
+                    ? { ...prev, image_model: next }
+                    : { ...prev, video_model: next },
+                );
+              return (
+                <div className="set-ext-api-tier" key={modality} data-tier={modality}>
+                  <span className="set-ext-api-tier-label">
+                    <span aria-hidden="true">{modality === 'image' ? '🖼' : '🎬'}</span>{' '}
+                    {t(`config.extApi.media.${modality}`)}
+                  </span>
+                  <input
+                    type="text"
+                    className="input input-compact"
+                    value={value}
+                    placeholder={t(`config.extApi.mediaPlaceholder.${modality}`)}
+                    data-testid={`ext-api-media-${modality}`}
+                    onChange={event => setValue(event.target.value)}
+                  />
+                  {value && modelCostSuffix ? (
+                    <span className="text-2xs text-muted">{modelCostSuffix(value)}</span>
+                  ) : null}
+                </div>
+              );
+            })}
+          </div>
+          <div className="set-hint-xs">{t('config.extApi.mediaHint')}</div>
         </div>
       </div>
 

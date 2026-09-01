@@ -1,0 +1,92 @@
+/* KT-540 — generation launcher inside the assets tab. Kept visually quiet:
+   it sits above an inventory, not in the composer. */
+.disc-assets-generate {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px 0;
+}
+
+.media-generate-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-secondary);
+}
+
+.media-generate-modalities {
+  display: flex;
+  gap: 4px;
+}
+
+.media-generate-modalities button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.media-generate-modalities button[data-active='true'] {
+  border-color: var(--accent);
+  color: var(--text-primary);
+}
+
+.media-generate-field {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.media-generate-field select,
+.media-generate-field textarea {
+  width: 100%;
+  padding: 5px 6px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-size: 12px;
+  font-family: inherit;
+  resize: vertical;
+}
+
+.media-generate-row {
+  display: flex;
+  gap: 8px;
+}
+
+.media-generate-row .media-generate-field {
+  flex: 1;
+  min-width: 0;
+}
+
+.media-generate-model,
+.media-generate-estimate,
+.media-generate-empty {
+  margin: 0;
+  font-size: 11px;
+  color: var(--text-tertiary, var(--text-secondary));
+}
+
+.media-generate-error {
+  margin: 0;
+  font-size: 11px;
+  color: var(--danger, #d9534f);
+}
+
+.media-generate-launched {
+  margin: 0;
+  font-size: 11px;
+  color: var(--success, #2f9e44);
+}

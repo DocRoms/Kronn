@@ -295,6 +295,10 @@ describe('ExternalApiSection', () => {
       economy_model: null,
       default_model: 'model-a',
       reasoning_model: null,
+      // Media slots travel with every save, empty or not. `media_endpoint` is
+      // an advanced override the form does not expose, so it is not sent.
+      image_model: null,
+      video_model: null,
       api_key: 'sk-together',
     });
     // The list is reloaded after a successful create.
@@ -601,4 +605,42 @@ describe('ExternalApiSection', () => {
     fireEvent.click(screen.getByTestId('ext-api-cancel'));
     expect(screen.queryByTestId('ext-api-saved-test-result-saved-1')).toBeNull();
   });
+
+  it('lets a media model be typed on a connection', async () => {
+    // The media catalogues live on separate provider routes and belong to
+    // another ticket, so this is free text for now: typing a model works today
+    // and becomes a picker later without changing what is stored.
+    renderSection();
+    fireEvent.click(await screen.findByTestId('ext-api-add-connection'));
+    await waitFor(() => expect(screen.getByTestId('ext-api-media-panel')).toBeTruthy());
+
+    const video = screen.getByTestId('ext-api-media-video') as HTMLInputElement;
+    const image = screen.getByTestId('ext-api-media-image') as HTMLInputElement;
+    // Empty by default: a provider with no media model shows nothing to fill.
+    expect(video.value).toBe('');
+    expect(image.value).toBe('');
+
+    fireEvent.change(video, { target: { value: 'bytedance/seedance-2.0-mini' } });
+    expect((screen.getByTestId('ext-api-media-video') as HTMLInputElement).value).toBe(
+      'bytedance/seedance-2.0-mini',
+    );
+
+    // Unlike the text tiers, media fields need no catalogue, so they are
+    // usable before any connection test.
+    expect(video).not.toBeDisabled();
+  });
+
+  it('keeps the media block separate from the three text tiers', async () => {
+    // Modalities are not quality levels: mixing them into the tier list would
+    // suggest a text step could pick "tier Image".
+    renderSection();
+    fireEvent.click(await screen.findByTestId('ext-api-add-connection'));
+    await waitFor(() => expect(screen.getByTestId('ext-api-media-panel')).toBeTruthy());
+
+    const mediaPanel = screen.getByTestId('ext-api-media-panel');
+    expect(mediaPanel.querySelector('[data-testid="ext-api-tier-economy"]')).toBeNull();
+    expect(mediaPanel.querySelector('[data-testid="ext-api-tier-reasoning"]')).toBeNull();
+    expect(mediaPanel.querySelector('[data-testid="ext-api-media-video"]')).toBeTruthy();
+  });
+
 });

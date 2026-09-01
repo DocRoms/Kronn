@@ -205,6 +205,55 @@ describe('RunStatusCard', () => {
     expect(vi.mocked(runsApi.get).mock.calls.length).toBe(callsBefore + 1);
   });
 
+  it('hydrates a media run on its own event and shows the produced geometry, not a progress bar', async () => {
+    // KT-540: media reuses this card and this socket. The scoping is shared by
+    // every kind, so what matters here is that a media run behaves like the
+    // others AND never grows a progress bar the provider cannot measure.
+    vi.mocked(runsApi.get).mockResolvedValue(
+      sharedRun({
+        id: 'media-1',
+        kind: 'media',
+        discussion_id: 'disc-1',
+        result: {
+          schema_version: 1,
+          modality: 'video',
+          phase: 'polling',
+          width: 864,
+          height: 496,
+          media_duration_ms: 5042,
+        },
+      }),
+    );
+
+    render(<RunStatusCard runId="media-1" />);
+    act(() => { MockIntersectionObserver.instances[0].setIntersecting(true); });
+    await waitFor(() => expect(runsApi.get).toHaveBeenCalledWith('media-1'));
+    // The socket opens only once the card is active; without this the first
+    // simulateMessage races the subscription.
+    await waitFor(() => expect(MockWebSocket.instances).toHaveLength(1));
+
+    vi.mocked(runsApi.get).mockClear();
+    await act(async () => {
+      MockWebSocket.instances[0].simulateMessage(
+        JSON.stringify({ type: 'shared_run_updated', run_id: 'other-run' }),
+      );
+    });
+    expect(runsApi.get).not.toHaveBeenCalled();
+
+    await act(async () => {
+      MockWebSocket.instances[0].simulateMessage(
+        JSON.stringify({ type: 'shared_run_updated', run_id: 'media-1' }),
+      );
+    });
+    await waitFor(() => expect(runsApi.get).toHaveBeenCalledWith('media-1'));
+
+    // Real geometry from the produced file, and no invented progress.
+    await waitFor(() =>
+      expect(screen.getByTestId('run-status-card-media-size').textContent).toBe('864×496'),
+    );
+    expect(screen.queryByRole('progressbar')).toBeNull();
+  });
+
   it('stops rehydrating on live events once the card leaves the viewport', async () => {
     vi.mocked(runsApi.get).mockResolvedValue(sharedRun({ id: 'run-3', kind: 'quick_api', status: 'running' }));
 

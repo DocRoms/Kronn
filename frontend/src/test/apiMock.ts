@@ -33,6 +33,7 @@ const resolve = <T>(value: T) => vi.fn().mockResolvedValue(value);
  *  completeness test. */
 export const API_NAMESPACES = [
   'setup',
+  'media',
   'config',
   'contacts',
   'projects',
@@ -113,6 +114,7 @@ interface DefaultMock {
   liteLlm: Record<string, AnyFn>;
   nvidia: Record<string, AnyFn>;
   externalApi: Record<string, AnyFn>;
+  media: Record<string, AnyFn>;
   debugApi: Record<string, AnyFn>;
   themes: Record<string, AnyFn>;
   docs: Record<string, AnyFn>;
@@ -590,6 +592,16 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       }),
     },
 
+    media: {
+      // KT-540 — media generation. Nothing queued and nothing billed: the
+      // neutral state any discussion test mounts into.
+      generate: resolve({ job_id: '', status: 'pending', model: '' }),
+      job: resolve(null),
+      cancel: resolve(null),
+      costs: resolve({ entries: [], image_total_usd: 0, video_total_usd: 0, total_usd: 0 }),
+      // No past generation means no estimate — never a fabricated zero.
+      estimate: resolve({ model: '', estimated_usd: null, samples: 0 }),
+    },
     externalApi: {
       // KT-339 — unified External API connections. Empty list = the neutral
       // "no connections yet" state so any settings test mounts clean.

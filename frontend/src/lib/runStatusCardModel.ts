@@ -1,6 +1,9 @@
 import type { SharedRun } from '../types/generated';
 
-export type RunStatusCardKind = 'quick_prompt' | 'quick_api' | 'quick_exec' | 'workflow';
+// `media` is ONE kind for both image and video: the execution family is
+// identical and only the output differs, so the modality is read from
+// `result.modality` rather than split into two kinds.
+export type RunStatusCardKind = 'quick_prompt' | 'quick_api' | 'quick_exec' | 'workflow' | 'media';
 export type RunStatusCardStatus =
   | 'preflight_failed'
   | 'queued'

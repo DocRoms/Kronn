@@ -19,6 +19,7 @@ pub mod learnings;
 pub mod lite_llm_model_failures;
 pub mod live_pages;
 pub mod mcps;
+pub mod media_jobs;
 pub mod migrations;
 pub mod orchestration;
 pub mod planning;

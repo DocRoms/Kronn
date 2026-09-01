@@ -135,4 +135,78 @@ describe('MessageAttachments', () => {
     fireEvent.keyDown(document, { key: 'Escape' });
     expect(screen.queryByRole('dialog', { name: 'disc.attachmentGallery' })).toBeNull();
   });
+  it('browses every image and clip of the discussion, not just this message', async () => {
+    // The grid under one message holds a single image; the discussion also
+    // holds an earlier clip and a later image pinned to other messages.
+    discussionsApi.contextFileBlob.mockResolvedValue(new Blob(['x'], { type: 'image/png' }));
+    const own = mkFile({ id: 'b', filename: 'own.png', message_id: 'm2' });
+    const wholeDiscussion = [
+      mkFile({
+        id: 'a',
+        filename: 'clip.mp4',
+        mime_type: 'video/mp4',
+        message_id: 'm1',
+        created_at: '2026-06-17T09:00:00Z',
+      }),
+      own,
+      mkFile({
+        id: 'c',
+        filename: 'later.png',
+        message_id: 'm3',
+        created_at: '2026-06-17T11:00:00Z',
+      }),
+    ];
+    render(
+      <MessageAttachments
+        files={[own]}
+        carouselScope={wholeDiscussion}
+        discussionId="d1"
+        t={t}
+      />,
+    );
+
+    // Only this message's own thumbnail is on screen...
+    expect(screen.queryByRole('button', { name: 'disc.attachmentImage:later.png' })).toBeNull();
+    const thumb = await screen.findByRole('button', { name: 'disc.attachmentImage:own.png' });
+    await waitFor(() => expect(thumb).not.toBeDisabled());
+    fireEvent.click(thumb);
+
+    // ...yet the carousel it opens walks the whole discussion, mixing the
+    // video in with the images.
+    const dialog = screen.getByRole('dialog', { name: 'disc.attachmentGallery' });
+    expect(dialog).toHaveTextContent('2 / 3');
+    fireEvent.click(screen.getByRole('button', { name: 'disc.attachmentNext' }));
+    expect(dialog).toHaveTextContent('3 / 3');
+    expect(within(dialog).getByRole('img', { name: 'later.png' })).toBeInTheDocument();
+    fireEvent.keyDown(document, { key: 'ArrowRight' });
+    expect(dialog).toHaveTextContent('1 / 3');
+    // The clip's bytes are fetched on selection, so the player appears once
+    // the blob lands — mixing a video into the same sequence as the images.
+    await waitFor(() =>
+      expect(within(dialog).getByTestId('media-player-video')).toHaveAttribute(
+        'aria-label',
+        'disc.media.playerLabel:clip.mp4',
+      ),
+    );
+  });
+
+  it('still opens a thumbnail the scope does not list', async () => {
+    // A filtered or paginated library must not open on nothing.
+    discussionsApi.contextFileBlob.mockResolvedValue(new Blob(['x'], { type: 'image/png' }));
+    const shown = mkFile({ id: 'z', filename: 'unlisted.png' });
+    render(
+      <MessageAttachments
+        files={[shown]}
+        carouselScope={[mkFile({ id: 'a', filename: 'other.png' })]}
+        discussionId="d1"
+        t={t}
+      />,
+    );
+    const thumb = await screen.findByRole('button', { name: 'disc.attachmentImage:unlisted.png' });
+    await waitFor(() => expect(thumb).not.toBeDisabled());
+    fireEvent.click(thumb);
+    const dialog = screen.getByRole('dialog', { name: 'disc.attachmentGallery' });
+    expect(within(dialog).getByRole('img', { name: 'unlisted.png' })).toBeInTheDocument();
+    expect(dialog).toHaveTextContent('2 / 2');
+  });
 });

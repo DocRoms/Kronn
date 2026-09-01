@@ -1169,6 +1169,12 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             "/api/discussion-weights/{id}",
             get(api::discussion_weight::get_one),
         )
+        // ── Media generation (image / video) ──
+        .route("/api/media/generate", post(api::media::generate))
+        .route("/api/media/jobs/{id}", get(api::media::get_job))
+        .route("/api/media/jobs/{id}/cancel", post(api::media::cancel_job))
+        .route("/api/media/costs", get(api::media::spend))
+        .route("/api/media/estimate", get(api::media::estimate))
         // ── Secret themes (hidden palette unlock via code) ──
         .route("/api/themes/unlock", post(api::themes::unlock))
         // ── Document generation (5 formats through the Python sidecar) ──
