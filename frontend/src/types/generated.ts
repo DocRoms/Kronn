@@ -3659,7 +3659,15 @@ export type OnInvalid = "Continue" | "Fail";
  */
 export type OrchestrationControlState = "running" | "paused" | "awaiting_human" | "completed" | "cancelled" | "failed";
 
-export type OrchestrationRequest = { agents: Array<AgentType>, max_rounds?: number | null, skill_ids?: Array<string>, profile_ids?: Array<string>, directive_ids?: Array<string>, };
+/**
+ * One orchestration/debate participant. `connection_id` disambiguates
+ * between named HTTP connections that share `AgentType::Custom` (KT-545
+ * DoD #4) — without it, two different "Custom" connections in the same
+ * debate would be indistinguishable.
+ */
+export type OrchestrationParticipant = { agent_type: AgentType, connection_id?: string | null, };
+
+export type OrchestrationRequest = { agents: Array<OrchestrationParticipant>, max_rounds?: number | null, skill_ids?: Array<string>, profile_ids?: Array<string>, directive_ids?: Array<string>, };
 
 export type OrchestrationResiliencePolicy = { activity_timeout_secs: number | null, review_timeout_secs: number | null, human_wait_timeout_secs: number | null, cancellation_cleanup_policy: CancellationCleanupPolicy, };
 
@@ -5376,11 +5384,21 @@ export type StartAgentBackgroundJobRequest = {
  */
 quick_exec_id: string, variables?: Record<string, string>, reason: string, dedupe_key: string, task_execution_id?: string | null, };
 
-export type StartBatchCompareImprovementRequest = { agent: AgentType, tier?: ModelTier, };
+export type StartBatchCompareImprovementRequest = { agent: AgentType, tier?: ModelTier,
+/**
+ * See `StartBatchCompareJudgeRequest::connection_id` (KT-545 DoD #4).
+ */
+connection_id?: string | null, };
 
 export type StartBatchCompareImprovementResponse = { discussion_id: string, };
 
-export type StartBatchCompareJudgeRequest = { agent: AgentType, tier?: ModelTier, };
+export type StartBatchCompareJudgeRequest = { agent: AgentType, tier?: ModelTier,
+/**
+ * Named external API connection to dispatch through, when `agent` is
+ * `Custom` or the operator wants a specific LiteLLM/NVIDIA connection
+ * rather than the legacy single-slot config (KT-545 DoD #4).
+ */
+connection_id?: string | null, };
 
 export type StartBatchCompareJudgeResponse = { judge_run_id: string, judge_discussion_id: string, status: string, };
 

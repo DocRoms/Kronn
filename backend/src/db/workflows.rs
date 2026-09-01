@@ -835,11 +835,7 @@ pub fn retry_batch_run(
                     "External API connection {connection_id} no longer matches its agent type"
                 );
             }
-            let model = match tier {
-                ModelTier::Economy => connection.economy_model,
-                ModelTier::Default => connection.default_model,
-                ModelTier::Reasoning => connection.reasoning_model,
-            };
+            let model = crate::http_transport::connection_tier_model(&connection, tier);
             Some(model.ok_or_else(|| {
                 anyhow::anyhow!(
                     "External API connection {} has no model configured for {:?}",

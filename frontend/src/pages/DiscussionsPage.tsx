@@ -3168,7 +3168,13 @@ export function DiscussionsPage({
       [discId]: { active: true, round: 0, totalRounds: orchRounds, currentAgent: null, agentStreams: [], systemMessages: [] },
     }));
 
-    await discussionsApi.orchestrate(discId, { agents: orchAgents, max_rounds: orchRounds, skill_ids: orchSkillIds, ...(orchDirectiveIds.length > 0 ? { directive_ids: orchDirectiveIds } : {}) }, {
+    // KT-545: the wire shape carries a per-participant connection_id so two
+    // named HTTP connections sharing AgentType::Custom stay distinguishable.
+    // The debate picker only offers built-in agent types today, so it is
+    // always null here — the backend will resolve each participant's
+    // connection independently once the picker grows connection awareness.
+    const orchParticipants = orchAgents.map(agent_type => ({ agent_type, connection_id: null }));
+    await discussionsApi.orchestrate(discId, { agents: orchParticipants, max_rounds: orchRounds, skill_ids: orchSkillIds, ...(orchDirectiveIds.length > 0 ? { directive_ids: orchDirectiveIds } : {}) }, {
       onSystem: (text) => {
         setOrchState(prev => {
           const s = prev[discId];

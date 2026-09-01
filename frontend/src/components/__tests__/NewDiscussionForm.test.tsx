@@ -13,6 +13,8 @@ vi.mock('../../lib/api', () => ({
   // mount. Tests don't care about the value (the form still passes its
   // 'default' fallback if the API throws), but the import must resolve.
   config: { getServerConfig: vi.fn().mockResolvedValue({ default_model_tier: 'default' }) },
+  // KT-531 — AgentSwitchPicker reads the dynamic catalog on open.
+  modelCatalogApi: { list: vi.fn().mockResolvedValue({ targets: [] }) },
 }));
 
 vi.mock('../../lib/I18nContext', () => ({

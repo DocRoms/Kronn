@@ -31,10 +31,23 @@ use crate::api::disc_prompts::{
     build_orchestration_prompt, build_synthesis_prompt, OrchestrationContext,
 };
 
-fn target_tier(agent: &AgentType, targets: &[MessageTarget], fallback: ModelTier) -> ModelTier {
+/// `connection_id` disambiguates between named HTTP connections that share
+/// `AgentType::Custom` — matching by `agent_type` alone would pick whichever
+/// Custom target happens to be first when a discussion carries more than one
+/// (KT-545 DoD #4).
+fn target_tier(
+    agent: &AgentType,
+    connection_id: Option<&str>,
+    targets: &[MessageTarget],
+    fallback: ModelTier,
+) -> ModelTier {
     targets
         .iter()
-        .find(|target| target.kind != MessageTargetKind::Cli && target.agent_type == *agent)
+        .find(|target| {
+            target.kind != MessageTargetKind::Cli
+                && target.agent_type == *agent
+                && target.connection_id.as_deref() == connection_id
+        })
         .and_then(|target| target.tier)
         .unwrap_or(fallback)
 }
@@ -62,13 +75,13 @@ pub async fn orchestrate(
     Path(id): Path<String>,
     Json(req): Json<OrchestrationRequest>,
 ) -> Sse<SseStream> {
-    let agents = req.agents;
+    let requested_participants = req.agents;
     let max_rounds = req.max_rounds.unwrap_or(3).min(3);
     let req_skill_ids = req.skill_ids;
     let req_directive_ids = req.directive_ids;
     let req_profile_ids = req.profile_ids;
 
-    if agents.len() < 2 {
+    if requested_participants.len() < 2 {
         let stream: SseStream = Box::pin(futures::stream::once(async {
             Ok::<_, Infallible>(
                 Event::default()
@@ -169,7 +182,7 @@ pub async fn orchestrate(
             .unwrap_or_default(),
         None => Vec::new(),
     };
-    let primary_tier = target_tier(&primary_agent_type, &initial_targets, disc_tier);
+    let primary_tier = target_tier(&primary_agent_type, None, &initial_targets, disc_tier);
     // Use skills from the orchestration request if provided, otherwise fall back to discussion skills
     let orch_skill_ids = if req_skill_ids.is_empty() {
         disc.skill_ids.clone()
@@ -187,16 +200,48 @@ pub async fn orchestrate(
         req_profile_ids
     };
 
-    // Reorder agents: non-primary first, primary last
-    let agents = {
-        let mut others: Vec<_> = agents
+    // Reorder participants: non-primary first, primary last. The primary's
+    // own connection (if the discussion's primary agent is itself a named
+    // Custom connection) is preserved rather than dropped by the re-append.
+    let participants = {
+        let primary_connection_id = requested_participants
             .iter()
-            .filter(|a| **a != primary_agent_type)
-            .cloned()
+            .find(|p| p.agent_type == primary_agent_type)
+            .and_then(|p| p.connection_id.clone());
+        let mut others: Vec<_> = requested_participants
+            .into_iter()
+            .filter(|p| p.agent_type != primary_agent_type)
             .collect();
-        others.push(primary_agent_type.clone());
+        others.push(OrchestrationParticipant {
+            agent_type: primary_agent_type.clone(),
+            connection_id: primary_connection_id,
+        });
         others
     };
+    let agents: Vec<AgentType> = participants.iter().map(|p| p.agent_type.clone()).collect();
+
+    // KT-545 DoD #3/#4: refuse a Custom participant with no (or mismatched)
+    // connection up front, before spawning any round — the same guard
+    // Compare's judge/improve launch applies, so a debate never silently
+    // dispatches to the wrong provider.
+    for participant in &participants {
+        if let Err(error) = crate::http_transport::validate_connection_target(
+            &state,
+            &participant.agent_type,
+            participant.connection_id.as_deref(),
+        )
+        .await
+        {
+            let stream: SseStream = Box::pin(futures::stream::once(async move {
+                Ok::<_, Infallible>(
+                    Event::default()
+                        .event("error")
+                        .data(serde_json::json!({ "error": error }).to_string()),
+                )
+            }));
+            return Sse::new(stream);
+        }
+    }
 
     // Validate that every agent in the final list (including the
     // re-injected primary) is actually runnable. The frontend already
@@ -509,9 +554,37 @@ pub async fn orchestrate(
 
             let mut this_round: Vec<(String, String)> = Vec::new();
 
-            for agent_type in &agents {
+            for participant in &participants {
+                let agent_type = &participant.agent_type;
+                let connection_id = participant.connection_id.as_deref();
                 let agent_name = agent_display_name(agent_type);
-                let agent_tier = target_tier(agent_type, &initial_targets, disc_tier);
+                let agent_tier =
+                    target_tier(agent_type, connection_id, &initial_targets, disc_tier);
+
+                // Named connection resolved fresh each round — mirrors how
+                // discussion dispatch resolves it (KT-545 DoD #4), so a
+                // debate participant on a Custom connection gets the exact
+                // same endpoint/credential/model as every other surface.
+                let connection = match connection_id {
+                    Some(cid) => {
+                        let lookup = cid.to_string();
+                        state
+                            .db
+                            .with_read_conn(move |conn| {
+                                crate::db::external_api_connections::get(conn, &lookup)
+                            })
+                            .await
+                            .ok()
+                            .flatten()
+                    }
+                    None => None,
+                };
+                let external_http = connection
+                    .as_ref()
+                    .and_then(|c| crate::http_transport::external_http_runtime(c, &tokens));
+                let round_model_override = connection
+                    .as_ref()
+                    .and_then(|c| crate::http_transport::connection_tier_model(c, agent_tier));
 
                 emit!(AgentStreamEvent::AgentStart {
                     data: serde_json::json!({ "agent": agent_name, "agent_type": agent_type, "round": round })
@@ -543,6 +616,8 @@ pub async fn orchestrate(
                     ollama_context_overrides: Some(&ollama_context_overrides),
                     http_request_timeout: Some(timeout_for_agent(agent_type)),
                     http_endpoints: Some(&http_endpoints),
+                    external_http: external_http.as_ref(),
+                    model_override: round_model_override.as_deref(),
                     context_files_prompt: &companion_context,
                     discussion_id: Some(&id),
                     acp_session_store: Some(runner::AcpSessionStore::new(
@@ -625,12 +700,13 @@ pub async fn orchestrate(
                         // Save to DB — always runs even if client is gone
                         {
                             // KT-37 — stamp the concrete model this round ran on.
-                            // The round config passes NO model_override, so the
-                            // runner resolves from the tier alone — mirror that
-                            // exactly (never disc.model: it belongs to the primary
-                            // agent, not to every debate participant).
+                            // Mirror exactly what the round's config resolved to:
+                            // `round_model_override` (a named connection's tier
+                            // model) when set, else the tier alone (never
+                            // disc.model: it belongs to the primary agent, not to
+                            // every debate participant).
                             let round_model = runner::effective_model_flag(
-                                None,
+                                round_model_override.as_deref(),
                                 agent_type,
                                 agent_tier,
                                 Some(&model_tiers_config),
@@ -1743,16 +1819,55 @@ mod orchestrate_validation_tests {
         ];
 
         assert_eq!(
-            target_tier(&AgentType::Codex, &targets, ModelTier::Default),
+            target_tier(&AgentType::Codex, None, &targets, ModelTier::Default),
             ModelTier::Reasoning,
         );
         assert_eq!(
-            target_tier(&AgentType::Ollama, &targets, ModelTier::Default),
+            target_tier(&AgentType::Ollama, None, &targets, ModelTier::Default),
             ModelTier::Economy,
         );
         assert_eq!(
-            target_tier(&AgentType::ClaudeCode, &targets, ModelTier::Default),
+            target_tier(&AgentType::ClaudeCode, None, &targets, ModelTier::Default),
             ModelTier::Default,
+        );
+    }
+
+    #[test]
+    fn target_tier_disambiguates_custom_connections() {
+        // KT-545 DoD #4: two different named connections both project to
+        // `AgentType::Custom` — matching by agent type alone would pick
+        // whichever came first, silently applying the wrong tier.
+        let targets = vec![
+            MessageTarget::agent(AgentType::Custom)
+                .with_connection("conn-groq")
+                .with_tier(ModelTier::Reasoning),
+            MessageTarget::agent(AgentType::Custom)
+                .with_connection("conn-together")
+                .with_tier(ModelTier::Economy),
+        ];
+
+        assert_eq!(
+            target_tier(
+                &AgentType::Custom,
+                Some("conn-groq"),
+                &targets,
+                ModelTier::Default
+            ),
+            ModelTier::Reasoning,
+        );
+        assert_eq!(
+            target_tier(
+                &AgentType::Custom,
+                Some("conn-together"),
+                &targets,
+                ModelTier::Default
+            ),
+            ModelTier::Economy,
+        );
+        assert_eq!(
+            target_tier(&AgentType::Custom, Some("conn-unknown"), &targets, ModelTier::Default),
+            ModelTier::Default,
+            "a connection absent from the initial targets must fall back, never borrow another connection's tier"
         );
     }
 }

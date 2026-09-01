@@ -690,10 +690,22 @@ pub struct ShareDiscussionRequest {
     pub contact_ids: Vec<String>,
 }
 
+/// One orchestration/debate participant. `connection_id` disambiguates
+/// between named HTTP connections that share `AgentType::Custom` (KT-545
+/// DoD #4) — without it, two different "Custom" connections in the same
+/// debate would be indistinguishable.
+#[derive(Debug, Clone, Deserialize, TS)]
+#[ts(export)]
+pub struct OrchestrationParticipant {
+    pub agent_type: AgentType,
+    #[serde(default)]
+    pub connection_id: Option<String>,
+}
+
 #[derive(Debug, Deserialize, TS)]
 #[ts(export)]
 pub struct OrchestrationRequest {
-    pub agents: Vec<AgentType>,
+    pub agents: Vec<OrchestrationParticipant>,
     pub max_rounds: Option<u32>,
     #[serde(default)]
     pub skill_ids: Vec<String>,

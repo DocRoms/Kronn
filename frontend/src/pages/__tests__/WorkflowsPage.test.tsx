@@ -129,6 +129,8 @@ vi.mock('../../lib/api', () => ({
     models: vi.fn().mockResolvedValue({ models: [] }),
     health: vi.fn().mockResolvedValue({ reachable: false, models: [] }),
   },
+  // KT-531 — AgentSwitchPicker reads the dynamic catalog on open.
+  modelCatalogApi: { list: vi.fn().mockResolvedValue({ targets: [] }) },
 }));
 
 const defaultModelTiers = {

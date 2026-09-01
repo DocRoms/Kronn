@@ -1292,14 +1292,7 @@ async fn make_agent_stream_inner(
     };
     let disc_model = disc_model.or_else(|| {
         external_connection.as_ref().and_then(|connection| {
-            let selected = match disc_tier {
-                crate::models::ModelTier::Economy => &connection.economy_model,
-                crate::models::ModelTier::Default => &connection.default_model,
-                crate::models::ModelTier::Reasoning => &connection.reasoning_model,
-            };
-            selected
-                .clone()
-                .or_else(|| connection.default_model.clone())
+            crate::http_transport::connection_tier_model(connection, disc_tier)
         })
     });
     let skill_ids = disc.skill_ids.clone();
