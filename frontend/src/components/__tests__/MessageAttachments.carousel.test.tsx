@@ -97,7 +97,8 @@ describe('MessageAttachments — mixed carousel', () => {
     // The player appears once the selected clip's bytes arrive.
     await waitFor(() => expect(screen.getByTestId('media-player-video')).toBeTruthy());
     const video = screen.getByTestId('media-player-video') as HTMLVideoElement;
-    expect(video.autoplay).toBe(false);
+    expect(video.autoplay).toBe(true);
+    expect(video.muted).toBe(true);
     expect(video.getAttribute('preload')).toBe('metadata');
   });
 
