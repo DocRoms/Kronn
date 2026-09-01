@@ -8,7 +8,9 @@
 //! therefore influence *what* is reported, never the layout, the identity, nor
 //! whether a claim counts as evidenced.
 
+use anyhow::Context;
 use chrono::{DateTime, Utc};
+use rusqlite::OptionalExtension;
 
 use crate::delivery::{
     DeliveryChange, DeliveryCommit, DeliveryDocumentation, DeliveryMetrics, DeliverySummaryError,
@@ -208,6 +210,109 @@ pub fn summary_from_manifest(
             },
         },
     )
+}
+
+/// Publish the accepted delivery's one report into the parent discussion.
+///
+/// Called on the approve path, and again on a replayed approve: the record is
+/// the idempotency guard, so a retry republishes nothing and a crash between
+/// the record and its message is repaired rather than left reportless.
+///
+/// Returns `None` when the execution carries no persisted manifest — an
+/// approval that never went through delivery has nothing to report, and that
+/// is not an error here (the approve guard is where a missing manifest is
+/// refused).
+pub async fn publish_accepted_delivery(
+    db: &crate::db::Database,
+    execution: &TaskExecution,
+) -> anyhow::Result<Option<crate::db::delivery_summaries::Published>> {
+    let execution_id = execution.id.clone();
+    let attempt_no = execution.attempt_no;
+    let task_id = execution.task_id.clone();
+
+    let (delivery, task, assignment_started_at) = db
+        .with_conn(move |conn| {
+            let delivery =
+                crate::db::worker_deliveries::get_delivery(conn, &execution_id, attempt_no)?;
+            let task = crate::db::planning::get_task(conn, &task_id)?;
+            let assignment_started_at: Option<String> = conn
+                .query_row(
+                    "SELECT created_at FROM task_execution_assignment_events \
+                     WHERE task_execution_id = ?1 ORDER BY generation DESC LIMIT 1",
+                    [execution_id.as_str()],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            Ok((delivery, task, assignment_started_at))
+        })
+        .await?;
+
+    let Some(delivery) = delivery else {
+        return Ok(None);
+    };
+    let task = task.context("the execution's task vanished before publication")?;
+    let manifest: DeliveryManifestV1 = serde_json::from_str(&delivery.manifest_json)
+        .context("the stored delivery manifest is not a valid v1 payload")?;
+
+    let delivered_at = parse_rfc3339(&delivery.created_at).unwrap_or_else(Utc::now);
+    // Measured from the current assignment: the worker's own attempt, not the
+    // whole execution with its earlier review rounds folded in.
+    let started_at = assignment_started_at
+        .as_deref()
+        .and_then(parse_rfc3339)
+        .unwrap_or(execution.created_at);
+    let duration_ms = (delivered_at - started_at).num_milliseconds().max(0) as u64;
+
+    let facts = ExecutionFacts::from_execution(execution, duration_ms);
+    let summary = summary_from_manifest(
+        &task.summary.reference,
+        &execution.id,
+        &manifest,
+        &facts,
+        delivered_at,
+    )?;
+
+    let stored = crate::db::delivery_summaries::StoredDeliverySummary {
+        execution_id: execution.id.clone(),
+        attempt_no,
+        canonical_json: summary.canonical_json(),
+        message_id: crate::db::delivery_summaries::message_id_for(&execution.id, attempt_no),
+        discussion_id: execution.parent_discussion_id.clone(),
+        correlation_id: format!("orch-delivery:{}:{}", execution.id, attempt_no),
+    };
+    let now = Utc::now();
+    let outcome = db
+        .with_conn(move |conn| {
+            crate::db::delivery_summaries::publish(conn, &stored, now, |stored| {
+                crate::api::orchestration::orchestrator_message(
+                    stored.message_id.clone(),
+                    render_stored(stored),
+                )
+            })
+        })
+        .await?;
+    Ok(Some(outcome))
+}
+
+/// Render the STORED payload, never the caller's.
+///
+/// A payload that no longer parses is reported as such instead of silently
+/// publishing nothing: an accepted delivery must leave a trace a human can
+/// follow back to the record.
+fn render_stored(stored: &crate::db::delivery_summaries::StoredDeliverySummary) -> String {
+    match serde_json::from_str::<DeliverySummaryV1>(&stored.canonical_json) {
+        Ok(summary) => summary.render_markdown(),
+        Err(error) => format!(
+            "## ✅ Delivery accepted — execution `{}` (attempt {})\n\n             The stored report could not be rendered: {error}. The canonical              payload is intact in `delivery_summaries` under correlation              `{}` — it is the record, this message is only its projection.\n",
+            stored.execution_id, stored.attempt_no, stored.correlation_id
+        ),
+    }
+}
+
+fn parse_rfc3339(value: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(value)
+        .ok()
+        .map(|parsed| parsed.with_timezone(&Utc))
 }
 
 #[cfg(test)]
