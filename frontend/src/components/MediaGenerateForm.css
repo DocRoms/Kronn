@@ -99,3 +99,100 @@
   line-height: 1.4;
   color: var(--kr-text-dim);
 }
+
+/* Configured models, laid out like the connection card's AI-mode slots. */
+.media-generate-slots {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.media-generate-slot {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1 1 132px;
+  min-width: 0;
+  padding: 6px 8px;
+  border: 1px solid var(--kr-border);
+  border-radius: var(--kr-r-sm);
+  background: var(--kr-bg-input);
+  color: var(--kr-text-muted);
+  text-align: left;
+  cursor: pointer;
+}
+
+.media-generate-slot[data-active='true'] {
+  border-color: var(--kr-accent);
+  color: var(--kr-text-primary);
+}
+
+.media-generate-slot-head {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.media-generate-slot-model,
+.media-generate-slot-conn {
+  overflow: hidden;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.media-generate-slot-conn { color: var(--kr-text-dim); }
+
+/* Aspect ratios: a box in the ratio's own proportions, so `4:3` is read as a
+   shape rather than as arithmetic. */
+.media-generate-ratios {
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.media-generate-ratios legend {
+  padding: 0;
+  font-size: 11px;
+  color: var(--kr-text-muted);
+}
+
+.media-generate-ratio-choices {
+  display: flex;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.media-generate-ratio {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  padding: 5px 7px;
+  border: 1px solid var(--kr-border);
+  border-radius: var(--kr-r-sm);
+  background: transparent;
+  color: var(--kr-text-muted);
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.media-generate-ratio[data-active='true'] {
+  border-color: var(--kr-accent);
+  color: var(--kr-text-primary);
+}
+
+.media-generate-ratio-shape {
+  display: block;
+  border: 1px solid currentColor;
+  border-radius: 2px;
+  opacity: 0.75;
+}
+
+/* One height, widths derived from the ratio — the shapes stay comparable. */
+.media-generate-ratio-shape[data-ratio='16:9'] { width: 28px; height: 16px; }
+.media-generate-ratio-shape[data-ratio='4:3']  { width: 21px; height: 16px; }
+.media-generate-ratio-shape[data-ratio='1:1']  { width: 16px; height: 16px; }
+.media-generate-ratio-shape[data-ratio='9:16'] { width: 9px;  height: 16px; }

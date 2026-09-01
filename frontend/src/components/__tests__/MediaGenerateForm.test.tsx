@@ -55,7 +55,7 @@ describe('MediaGenerateForm', () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole('button', { name: /disc\.media\.modalityVideo/ }));
+    fireEvent.click(screen.getByTestId('media-slot-conn-1:video'));
     fireEvent.change(screen.getByRole('textbox'), {
       target: { value: 'un chat en origami' },
     });
@@ -92,7 +92,7 @@ describe('MediaGenerateForm', () => {
     expect(await screen.findByText('disc.media.estimateUnknown')).toBeInTheDocument();
   });
 
-  it('offers only the connections holding that slot', async () => {
+  it('offers one entry per configured model, with no modality question', async () => {
     render(
       <MediaGenerateForm
         discussionId="d-1"
@@ -104,17 +104,38 @@ describe('MediaGenerateForm', () => {
       />,
     );
 
-    // Image is the default modality.
-    await waitFor(() =>
-      expect(screen.getByRole('option', { name: 'Images only' })).toBeInTheDocument(),
+    // One card per configured slot; the modality is a property of the choice,
+    // never a separate question.
+    expect(screen.getByTestId('media-slot-img-only:image')).toBeInTheDocument();
+    expect(screen.getByTestId('media-slot-vid-only:video')).toBeInTheDocument();
+    expect(screen.queryByTestId('media-slot-img-only:video')).toBeNull();
+    expect(screen.queryByTestId('media-slot-vid-only:image')).toBeNull();
+    // The first slot is preselected, so a prompt is enough to launch.
+    expect(screen.getByTestId('media-slot-img-only:image')).toHaveAttribute(
+      'aria-checked',
+      'true',
     );
-    expect(screen.queryByRole('option', { name: 'Videos only' })).toBeNull();
 
-    fireEvent.click(screen.getByRole('button', { name: /disc\.media\.modalityVideo/ }));
-    await waitFor(() =>
-      expect(screen.getByRole('option', { name: 'Videos only' })).toBeInTheDocument(),
+    // Duration only exists for a clip, and the image slot is the active one.
+    expect(screen.queryByText('disc.media.duration')).toBeNull();
+    fireEvent.click(screen.getByTestId('media-slot-vid-only:video'));
+    await waitFor(() => expect(screen.getByText('disc.media.duration')).toBeInTheDocument());
+  });
+
+  it('shows each aspect ratio as a shape, not just as arithmetic', () => {
+    render(
+      <MediaGenerateForm discussionId="d-1" connections={[connection()]} t={t} />,
     );
-    expect(screen.queryByRole('option', { name: 'Images only' })).toBeNull();
+    // A proportional box per ratio: `4:3` is unreadable to most people until
+    // they see it.
+    for (const ratio of ['16:9', '4:3', '1:1', '9:16']) {
+      const choice = screen.getByTestId(`media-ratio-${ratio}`);
+      expect(choice.querySelector('.media-generate-ratio-shape')).toHaveAttribute(
+        'data-ratio',
+        ratio,
+      );
+    }
+    expect(screen.getByTestId('media-ratio-16:9')).toHaveAttribute('aria-checked', 'true');
   });
 
   it('explains itself when no connection has a media model', () => {
