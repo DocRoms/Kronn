@@ -122,7 +122,7 @@ describe('MediaGenerateForm', () => {
     await waitFor(() => expect(screen.getByText('disc.media.duration')).toBeInTheDocument());
   });
 
-  it('shows each aspect ratio as a shape, not just as arithmetic', () => {
+  it('shows each aspect ratio as a shape, not just as arithmetic', async () => {
     render(
       <MediaGenerateForm discussionId="d-1" connections={[connection()]} t={t} />,
     );
@@ -136,6 +136,9 @@ describe('MediaGenerateForm', () => {
       );
     }
     expect(screen.getByTestId('media-ratio-16:9')).toHaveAttribute('aria-checked', 'true');
+    // Let the asynchronous estimate settle inside the test so React does not
+    // report a state update after the assertion phase has already ended.
+    expect(await screen.findByText('disc.media.estimate:0.0709,3')).toBeInTheDocument();
   });
 
   it('explains itself when no connection has a media model', () => {
