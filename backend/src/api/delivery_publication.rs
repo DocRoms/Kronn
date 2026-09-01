@@ -92,12 +92,19 @@ fn test_result(status: TestStatus) -> &'static str {
     }
 }
 
+/// Marker used when a manifest reports a verdict without anything to back it.
+///
+/// Explicit on purpose: a reader must see that the claim is unbacked, and a
+/// grep must be able to find every report that carries one.
+pub const EVIDENCE_NOT_PROVIDED: &str = "evidence not provided by the worker";
+
 /// Build the accepted summary from the reviewed manifest and the execution.
 ///
-/// Deliberately fallible on missing evidence: `DeliveryValidation` requires it,
-/// and inventing a placeholder would publish "validated" next to a claim nobody
-/// can check. A manifest that cannot produce a complete summary must surface as
-/// a refusal, not as a thinner report.
+/// Total by design once a delivery is accepted: the review gate is where an
+/// unevidenced claim gets refused, so failing here would leave an accepted
+/// delivery with no report at all. A missing proof therefore degrades the
+/// report — the validation is published with an explicit "not provided" marker
+/// and an attention point naming it — rather than suppressing it.
 pub fn summary_from_manifest(
     task_reference: &str,
     execution_id: &str,
@@ -127,16 +134,27 @@ pub fn summary_from_manifest(
         }
     };
 
+    let mut unevidenced: Vec<String> = Vec::new();
     let validations = manifest
         .tests
         .iter()
-        .map(|test| DeliveryValidation {
-            command: test.name.clone(),
-            result: test_result(test.status).to_owned(),
-            // The manifest reports verdicts, not timings; a fabricated duration
-            // would read as measured.
-            duration_ms: 0,
-            evidence: test.evidence.clone().unwrap_or_default(),
+        .map(|test| {
+            let evidence = match test.evidence.as_deref().map(str::trim) {
+                Some(text) if !text.is_empty() => text.to_owned(),
+                _ => {
+                    unevidenced.push(test.name.clone());
+                    EVIDENCE_NOT_PROVIDED.to_owned()
+                }
+            };
+            DeliveryValidation {
+                command: test.name.clone(),
+                result: test_result(test.status).to_owned(),
+                // The manifest reports verdicts, not timings. Left absent so
+                // the report says "not measured" instead of showing a zero
+                // that reads like a measurement.
+                duration_ms: None,
+                evidence,
+            }
         })
         .collect::<Vec<_>>();
 
@@ -150,17 +168,23 @@ pub fn summary_from_manifest(
 
     // Risks and limitations are both attention points, but losing which is
     // which would make the report less useful than the manifest it came from.
-    let attention_points = manifest
-        .risks
-        .iter()
-        .map(|risk| format!("risk: {risk}"))
-        .chain(
-            manifest
-                .limitations
-                .iter()
-                .map(|limitation| format!("limitation: {limitation}")),
-        )
-        .collect();
+    let attention_points =
+        manifest
+            .risks
+            .iter()
+            .map(|risk| format!("risk: {risk}"))
+            .chain(
+                manifest
+                    .limitations
+                    .iter()
+                    .map(|limitation| format!("limitation: {limitation}")),
+            )
+            // An unbacked validation is an attention point in its own right: the
+            // degraded report must be readable as degraded, not merely quieter.
+            .chain(unevidenced.iter().map(|name| {
+                format!("unverified: validation `{name}` was reported without evidence")
+            }))
+            .collect();
 
     DeliverySummaryV1::build(
         task_reference,
@@ -311,22 +335,50 @@ mod tests {
     }
 
     #[test]
-    fn a_validation_without_evidence_is_refused_rather_than_padded() {
+    fn a_validation_without_evidence_degrades_the_report_instead_of_losing_it() {
         let mut without = manifest();
         without.tests[0].evidence = None;
-        let refused = summary_from_manifest(
+        let summary = summary_from_manifest(
             "KT-544",
             "exec-1",
             &without,
             &facts(),
             at("2026-09-01T10:00:00Z"),
-        );
-        // Publishing "pass" next to a claim nobody can check is worse than
-        // refusing to publish.
+        )
+        .expect("an accepted delivery must always get its report");
+
+        // The claim is published, but marked as unbacked in both places a
+        // reader looks: the validation line and the attention points.
+        assert_eq!(summary.validations[0].evidence, EVIDENCE_NOT_PROVIDED);
         assert!(
-            refused.is_err(),
-            "an unevidenced validation must block the report"
+            summary
+                .attention_points
+                .iter()
+                .any(|point| point.starts_with("unverified: validation")),
+            "the degradation must be visible in the attention points: {:?}",
+            summary.attention_points
         );
+        let markdown = summary.render_markdown();
+        assert!(markdown.contains(EVIDENCE_NOT_PROVIDED));
+    }
+
+    #[test]
+    fn an_untimed_validation_says_so_rather_than_showing_zero_milliseconds() {
+        let summary = summary_from_manifest(
+            "KT-544",
+            "exec-1",
+            &manifest(),
+            &facts(),
+            at("2026-09-01T10:00:00Z"),
+        )
+        .unwrap();
+        assert_eq!(summary.validations[0].duration_ms, None);
+        let markdown = summary.render_markdown();
+        assert!(
+            markdown.contains("duration not measured"),
+            "an unmeasured duration must not render as a measurement: {markdown}"
+        );
+        assert!(!markdown.contains("(0 ms)"));
     }
 
     #[test]
