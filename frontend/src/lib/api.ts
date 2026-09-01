@@ -45,6 +45,7 @@ import type {
   DiscussionWorkspace,
   ParticipantView,
   CreateDiscussionRequest,
+  PromptVariable,
   SendMessageRequest,
   ReviseMessageRequest,
   MessageRevisionReceipt,
@@ -2234,7 +2235,18 @@ export interface ExecutionVariableMetadata {
   }>;
 }
 
+export interface ExecutionVariablePreviewResponse {
+  run_kind: 'preview';
+  run_id: string;
+  metadata: ExecutionVariableMetadata;
+}
+
 export const executionVariables = {
+  preview: (projectId: string | null | undefined, variables: PromptVariable[]) =>
+    api<ExecutionVariablePreviewResponse>('POST', '/execution-context/preview', {
+      project_id: projectId ?? null,
+      variables,
+    }),
   metadata: (runKind: string, runId: string) =>
     api<ExecutionVariableMetadata>('GET', `/execution-context/${encodeURIComponent(runKind)}/${encodeURIComponent(runId)}`),
   reveal: (runKind: string, runId: string, variable: string) =>

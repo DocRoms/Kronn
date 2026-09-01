@@ -26,6 +26,7 @@ import { WorkflowWizard } from '../components/workflows/WorkflowWizard';
 import { QuickPromptForm } from '../components/workflows/QuickPromptForm';
 import { QuickApiForm } from '../components/workflows/QuickApiForm';
 import { QuickExecForm } from '../components/workflows/QuickExecForm';
+import { ProvidedVariablesPreview } from '../components/workflows/ProvidedVariablesPreview';
 import { RunStatusCard } from '../components/RunStatusCard';
 import type { RunStatusCardModel } from '../lib/runStatusCardModel';
 import QPHistoryDrawer from '../components/QPHistoryDrawer';
@@ -568,7 +569,6 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
   const [launchingWorkflow, setLaunchingWorkflow] = useState<{
     workflow: Workflow;
     values: Record<string, string>;
-    overrides: Record<string, boolean>;
     submitting: boolean;
     error: string | null;
   } | null>(null);
@@ -1085,7 +1085,6 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     setLaunchingWorkflow({
       workflow: { ...wf, variables: vars },
       values: Object.fromEntries(vars.map(v => [v.name, ''])),
-      overrides: {},
       submitting: false,
       error: null,
     });
@@ -3000,16 +2999,19 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                               />
                             </div>
                           ))}
-                          {qp.variables.some(v => (v.source ?? 'user_input') !== 'user_input') && <>
-                            <h3 className="text-xs font-medium mt-4">{t('wf.launchProvidedTitle')}</h3>
-                            {qp.variables.filter(v => (v.source ?? 'user_input') !== 'user_input').map(v => (
-                              <div key={v.name} className="qp-launch-field">
-                                <label className="qp-launch-label">{v.label || v.name}</label>
-                                <input className="wf-input flex-1" value="••••••" readOnly aria-label={`${v.label || v.name} masked project value`} />
-                                <p className="text-2xs text-ghost">{v.source_ref} · resolved securely at dispatch</p>
-                              </div>
-                            ))}
-                          </>}
+                          {qp.variables.some(v => (v.source ?? 'user_input') !== 'user_input') && (
+                            <ProvidedVariablesPreview
+                              variables={qp.variables.filter(v => (v.source ?? 'user_input') !== 'user_input')}
+                              projectId={qp.project_id}
+                              values={launchVars}
+                              onValueChange={(name, value) => setLaunchVars(previous => {
+                                const next = { ...previous };
+                                if (value === undefined) delete next[name];
+                                else next[name] = value;
+                                return next;
+                              })}
+                            />
+                          )}
                           {/* Compare targets use the shared agent+tier picker,
                               so this launch surface speaks the same model
                               language as discussions, QPs and workflow steps. */}
@@ -3621,16 +3623,19 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                               />
                             </div>
                           ))}
-                          {qa.variables.some(v => (v.source ?? 'user_input') !== 'user_input') && <>
-                            <h3 className="text-xs font-medium mt-4">{t('wf.launchProvidedTitle')}</h3>
-                            {qa.variables.filter(v => (v.source ?? 'user_input') !== 'user_input').map(v => (
-                              <div key={v.name} className="qp-launch-field">
-                                <label className="qp-launch-label">{v.label || v.name}</label>
-                                <input className="wf-input flex-1" value="••••••" readOnly aria-label={`${v.label || v.name} masked project value`} />
-                                <p className="text-2xs text-ghost">{v.source_ref} · resolved securely at dispatch</p>
-                              </div>
-                            ))}
-                          </>}
+                          {qa.variables.some(v => (v.source ?? 'user_input') !== 'user_input') && (
+                            <ProvidedVariablesPreview
+                              variables={qa.variables.filter(v => (v.source ?? 'user_input') !== 'user_input')}
+                              projectId={qa.project_id}
+                              values={launchVarsQA}
+                              onValueChange={(name, value) => setLaunchVarsQA(previous => {
+                                const next = { ...previous };
+                                if (value === undefined) delete next[name];
+                                else next[name] = value;
+                                return next;
+                              })}
+                            />
+                          )}
                           <button
                             className="qp-launch-go-btn"
                             onClick={() => handleLaunchQA(qa)}
@@ -3807,16 +3812,19 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                               />
                             </div>
                           ))}
-                          {quickExec.variables.some(variable => (variable.source ?? 'user_input') !== 'user_input') && <>
-                            <h3 className="text-xs font-medium mt-4">{t('wf.launchProvidedTitle')}</h3>
-                            {quickExec.variables.filter(variable => (variable.source ?? 'user_input') !== 'user_input').map(variable => (
-                              <div className="qp-launch-field" key={variable.name}>
-                                <label className="qp-launch-label">{variable.label || variable.name}</label>
-                                <input className="wf-input flex-1" value="••••••" readOnly aria-label={`${variable.label || variable.name} masked project value`} />
-                                <p className="text-2xs text-ghost">{variable.source_ref} · resolved securely at dispatch</p>
-                              </div>
-                            ))}
-                          </>}
+                          {quickExec.variables.some(variable => (variable.source ?? 'user_input') !== 'user_input') && (
+                            <ProvidedVariablesPreview
+                              variables={quickExec.variables.filter(variable => (variable.source ?? 'user_input') !== 'user_input')}
+                              projectId={quickExec.project_id}
+                              values={runVarsQE}
+                              onValueChange={(name, value) => setRunVarsQE(previous => {
+                                const next = { ...previous };
+                                if (value === undefined) delete next[name];
+                                else next[name] = value;
+                                return next;
+                              })}
+                            />
+                          )}
                           {quickExec.variables.length > 0 && (
                             <button
                               className="qp-launch-go-btn"
@@ -3926,48 +3934,21 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                 </div>
               );
               })}
-              {provided.length > 0 && <>
-                <h3 className="text-xs font-medium mt-4 mb-2">{t('wf.launchProvidedTitle')}</h3>
-                {provided.map(v => (
-                  <div key={v.name} className="qp-launch-field mb-3">
-                    <label className="qp-launch-label">{v.label || v.name}</label>
-                    {launchingWorkflow.overrides[v.name] ? (
-                      <input
-                        className="wf-input flex-1"
-                        value={launchingWorkflow.values[v.name] ?? ''}
-                        onChange={event => setLaunchingWorkflow(previous => previous ? {
-                          ...previous,
-                          values: { ...previous.values, [v.name]: event.target.value },
-                          error: null,
-                        } : previous)}
-                        placeholder={t('wf.launchOverridePlaceholder')}
-                        aria-label={t('wf.launchOverrideAria', v.label || v.name)}
-                      />
-                    ) : (
-                      <input className="wf-input flex-1" value="••••••" readOnly aria-label={t('wf.launchMaskedAria', v.label || v.name)} />
-                    )}
-                    <p className="text-2xs text-ghost mt-1" style={{ margin: '2px 0 0' }}>
-                      {v.source_ref} · {t('wf.launchResolvedAtDispatch')}
-                    </p>
-                    {v.allow_manual_override && (
-                      <button
-                        type="button"
-                        className="wf-small-btn mt-1"
-                        onClick={() => setLaunchingWorkflow(previous => previous ? {
-                          ...previous,
-                          values: { ...previous.values, [v.name]: '' },
-                          overrides: { ...previous.overrides, [v.name]: !previous.overrides[v.name] },
-                          error: null,
-                        } : previous)}
-                      >
-                        {launchingWorkflow.overrides[v.name]
-                          ? t('wf.launchUseProjectValue')
-                          : t('wf.launchUseOverride')}
-                      </button>
-                    )}
-                  </div>
-                ))}
-              </>}
+              {provided.length > 0 && (
+                <ProvidedVariablesPreview
+                  variables={provided}
+                  projectId={launchingWorkflow.workflow.project_id}
+                  values={launchingWorkflow.values}
+                  disabled={launchingWorkflow.submitting}
+                  onValueChange={(name, value) => setLaunchingWorkflow(previous => {
+                    if (!previous) return previous;
+                    const values = { ...previous.values };
+                    if (value === undefined) delete values[name];
+                    else values[name] = value;
+                    return { ...previous, values, error: null };
+                  })}
+                />
+              )}
               </>;
             })()}
             {launchingWorkflow.error && (

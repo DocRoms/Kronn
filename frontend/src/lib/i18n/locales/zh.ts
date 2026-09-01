@@ -3756,6 +3756,8 @@ const zh: TranslationDict = {
   "wf.launchOverrideAria": "{0}，替代值",
   "wf.launchOverridePlaceholder": "可选替代值",
   "wf.launchResolvedAtDispatch": "运行开始时安全解析",
+  "wf.launchResolvedPreview": "当前值已于 {0} 检查，运行开始时会再次解析",
+  "wf.launchPreviewUnavailable": "值不可用：请在启动前检查项目及其配置。",
   "wf.launchUseOverride": "使用其他值",
   "wf.launchUseProjectValue": "使用项目值",
   "executionVariables.contextAria": "执行上下文",
