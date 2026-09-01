@@ -568,6 +568,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
   const [launchingWorkflow, setLaunchingWorkflow] = useState<{
     workflow: Workflow;
     values: Record<string, string>;
+    overrides: Record<string, boolean>;
     submitting: boolean;
     error: string | null;
   } | null>(null);
@@ -1084,6 +1085,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     setLaunchingWorkflow({
       workflow: { ...wf, variables: vars },
       values: Object.fromEntries(vars.map(v => [v.name, ''])),
+      overrides: {},
       submitting: false,
       error: null,
     });
@@ -3887,8 +3889,8 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
             <p className="text-xs text-muted mb-4">{t('wf.launchModalHint')}</p>
             {(() => {
               const declared = launchingWorkflow.workflow.variables ?? [];
-              const manual = declared.filter(v => (v.source ?? 'user_input') === 'user_input' || v.allow_manual_override);
-              const provided = declared.filter(v => (v.source ?? 'user_input') !== 'user_input' && !v.allow_manual_override);
+              const manual = declared.filter(v => (v.source ?? 'user_input') === 'user_input');
+              const provided = declared.filter(v => (v.source ?? 'user_input') !== 'user_input');
               return <>
               {manual.length > 0 && <h3 className="text-xs font-medium mb-2">{t('wf.launchInputsTitle')}</h3>}
               {manual.map((v, idx) => {
@@ -3929,10 +3931,40 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                 {provided.map(v => (
                   <div key={v.name} className="qp-launch-field mb-3">
                     <label className="qp-launch-label">{v.label || v.name}</label>
-                    <input className="wf-input flex-1" value="••••••" readOnly aria-label={`${v.label || v.name} masked project value`} />
+                    {launchingWorkflow.overrides[v.name] ? (
+                      <input
+                        className="wf-input flex-1"
+                        value={launchingWorkflow.values[v.name] ?? ''}
+                        onChange={event => setLaunchingWorkflow(previous => previous ? {
+                          ...previous,
+                          values: { ...previous.values, [v.name]: event.target.value },
+                          error: null,
+                        } : previous)}
+                        placeholder={t('wf.launchOverridePlaceholder')}
+                        aria-label={t('wf.launchOverrideAria', v.label || v.name)}
+                      />
+                    ) : (
+                      <input className="wf-input flex-1" value="••••••" readOnly aria-label={t('wf.launchMaskedAria', v.label || v.name)} />
+                    )}
                     <p className="text-2xs text-ghost mt-1" style={{ margin: '2px 0 0' }}>
-                      {v.source_ref} · resolved securely when the run starts
+                      {v.source_ref} · {t('wf.launchResolvedAtDispatch')}
                     </p>
+                    {v.allow_manual_override && (
+                      <button
+                        type="button"
+                        className="wf-small-btn mt-1"
+                        onClick={() => setLaunchingWorkflow(previous => previous ? {
+                          ...previous,
+                          values: { ...previous.values, [v.name]: '' },
+                          overrides: { ...previous.overrides, [v.name]: !previous.overrides[v.name] },
+                          error: null,
+                        } : previous)}
+                      >
+                        {launchingWorkflow.overrides[v.name]
+                          ? t('wf.launchUseProjectValue')
+                          : t('wf.launchUseOverride')}
+                      </button>
+                    )}
                   </div>
                 ))}
               </>}
@@ -3955,7 +3987,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                   // Validate required vars are filled.
                   const vars = launchingWorkflow.workflow.variables ?? [];
                   const missing = vars
-                    .filter(v => ((v.source ?? 'user_input') === 'user_input' || v.allow_manual_override)
+                    .filter(v => (v.source ?? 'user_input') === 'user_input'
                       && (v.required ?? true) && !(launchingWorkflow.values[v.name] ?? '').trim())
                     .map(v => v.label || v.name);
                   if (missing.length > 0) {

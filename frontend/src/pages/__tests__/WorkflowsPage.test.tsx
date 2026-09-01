@@ -1171,7 +1171,12 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
     mockWorkflowsApi.list.mockResolvedValue([labSummary()]);
     mockWorkflowsApi.get.mockResolvedValue(labWorkflow());
     mockWorkflowsApi.listRuns.mockResolvedValue([]);
-    mockWorkflowsApi.triggerStream.mockResolvedValue(undefined);
+    mockWorkflowsApi.triggerStream.mockReset().mockImplementation(async (
+      _id: string,
+      _onStepStart: unknown,
+      _onStepDone: unknown,
+      onRunDone: (result: { status: string }) => void,
+    ) => { onRunDone({ status: 'Success' }); });
 
     await wrap(<WorkflowsPage projects={[]} installedAgentTypes={['ClaudeCode']} agentAccess={fullConfig} />);
 
@@ -1203,6 +1208,7 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
   it('masks project variables and does not ask the user to provide them', async () => {
     mockWorkflowsApi.list.mockResolvedValue([labSummary()]);
     mockWorkflowsApi.get.mockResolvedValue(labWorkflow({
+      steps: [{ name: 'run', agent: 'ClaudeCode', prompt_template: 'Run securely', mode: { type: 'Normal' } } as never],
       variables: [{
         name: 'token', label: 'API token', placeholder: '', description: null,
         required: true, source: 'project_env', source_ref: '<env.API_TOKEN>',
@@ -1214,11 +1220,52 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
 
     await wrap(<WorkflowsPage projects={[]} installedAgentTypes={['ClaudeCode']} agentAccess={fullConfig} />);
     await act(async () => { fireEvent.click(screen.getAllByText('Lancer')[0]); });
-    expect(await screen.findByLabelText('API token masked project value')).toHaveValue('••••••');
+    expect(await screen.findByLabelText('API token, valeur du projet masquée')).toHaveValue('••••••');
     expect(screen.getByText(/<env\.API_TOKEN>/)).toBeInTheDocument();
     const buttons = screen.getAllByText('Lancer');
     await act(async () => { fireEvent.click(buttons[buttons.length - 1]); });
     await waitFor(() => expect(mockWorkflowsApi.triggerStream).toHaveBeenCalled());
+  });
+
+  it('keeps an allowed project override optional and sends it only when explicitly selected', async () => {
+    mockWorkflowsApi.list.mockResolvedValue([labSummary()]);
+    mockWorkflowsApi.get.mockResolvedValue(labWorkflow({
+      steps: [{ name: 'run', agent: 'ClaudeCode', prompt_template: 'Run securely', mode: { type: 'Normal' } } as never],
+      variables: [{
+        name: 'token', label: 'API token', placeholder: '', description: null,
+        required: true, source: 'project_env', source_ref: '<env.API_TOKEN>',
+        allow_manual_override: true,
+      }],
+    } as Partial<Workflow>));
+    mockWorkflowsApi.listRuns.mockResolvedValue([]);
+    mockWorkflowsApi.triggerStream.mockReset().mockImplementation(async (
+      _id: string,
+      _onStepStart: unknown,
+      _onStepDone: unknown,
+      onRunDone: (result: { status: string }) => void,
+    ) => { onRunDone({ status: 'Success' }); });
+
+    await wrap(<WorkflowsPage projects={[]} installedAgentTypes={['ClaudeCode']} agentAccess={fullConfig} />);
+    await act(async () => { fireEvent.click(screen.getAllByText('Lancer')[0]); });
+    expect(await screen.findByLabelText('API token, valeur du projet masquée')).toHaveValue('••••••');
+
+    // The author allows an override, but the project value remains the default:
+    // submitting an empty override must not turn it into a required user input.
+    let modalSubmit = document.querySelector('.wf-launch-submit-btn') as HTMLButtonElement;
+    await act(async () => { fireEvent.click(modalSubmit); });
+    await waitFor(() => expect(mockWorkflowsApi.triggerStream).toHaveBeenCalledTimes(1));
+
+    mockWorkflowsApi.triggerStream.mockClear();
+    await act(async () => { fireEvent.click(screen.getAllByText('Lancer')[0]); });
+    fireEvent.click(await screen.findByText('Utiliser une autre valeur'));
+    const override = screen.getByLabelText('API token, valeur de remplacement');
+    fireEvent.change(override, { target: { value: 'manual-value' } });
+    modalSubmit = document.querySelector('.wf-launch-submit-btn') as HTMLButtonElement;
+    await act(async () => { fireEvent.click(modalSubmit); });
+    await waitFor(() => expect(mockWorkflowsApi.triggerStream).toHaveBeenCalledTimes(1));
+    expect(mockWorkflowsApi.triggerStream.mock.calls[0].some((argument: unknown) =>
+      !!argument && typeof argument === 'object'
+      && (argument as Record<string, string>).token === 'manual-value')).toBe(true);
   });
 
   it('la popup valide le pattern déclaré AVANT de fermer (le rejet backend était invisible)', async () => {

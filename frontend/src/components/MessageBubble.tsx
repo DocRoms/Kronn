@@ -898,21 +898,23 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
           // `[kronn-internal: ...]` rendered as raw text below.
           null
         ) : executionContext ? (
-          <section className="disc-execution-context" aria-label="Execution context">
+          <section className="disc-execution-context" aria-label={t('executionVariables.contextAria')}>
             <div><strong>{executionContext.run_kind}</strong> · {new Date(executionContext.resolved_at).toLocaleString()}</div>
-            <div>{executionContext.purged ? 'Historical values purged' : 'Values encrypted and masked'}</div>
+            <div>{executionContext.purged ? t('executionVariables.purged') : t('executionVariables.encryptedMasked')}</div>
             <ul>
               {executionContext.variables.map(variable => (
                 <li key={variable.name}>
                   <code>{variable.name}</code> · {variable.effective_source_ref}
-                  {variable.overridden ? ' · manually overridden' : ''}
+                  {variable.overridden ? ` · ${t('executionVariables.manualOverride')}` : ''}
                   {' · '}
                   <code>{revealedExecutionVariables[variable.name] ?? '••••••'}</code>
                   {!executionContext.purged && (
                     <button
                       type="button"
                       className="disc-icon-btn"
-                      aria-label={revealedExecutionVariables[variable.name] ? `Remask ${variable.name}` : `Reveal ${variable.name} temporarily`}
+                      aria-label={revealedExecutionVariables[variable.name]
+                        ? t('executionVariables.remask', variable.name)
+                        : t('executionVariables.revealTemporarily', variable.name)}
                       disabled={revealingExecutionVariable === variable.name}
                       onClick={() => revealedExecutionVariables[variable.name]
                         ? remaskExecutionVariable(variable.name)
