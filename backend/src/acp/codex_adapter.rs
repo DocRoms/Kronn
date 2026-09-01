@@ -34,16 +34,16 @@
 
 use async_trait::async_trait;
 use serde_json::Value;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Child;
 use tokio::sync::{mpsc, Mutex};
 
-use super::permission_broker::{AcpAuditEntry, AcpPermissionBroker};
+use super::permission_broker::{AcpAuditEntry, AcpPermissionBroker, AcpSessionScope};
 use super::{
-    AcpAgent, AcpCapability, AcpConfigOption, AcpError, AcpInitialize, AcpNegotiatedCapabilities,
-    AcpSessionEvent, AcpSessionTarget, AcpTransport,
+    AcpAgent, AcpCapability, AcpConfigOption, AcpError, AcpInitialize, AcpMcpServer,
+    AcpNegotiatedCapabilities, AcpSessionEvent, AcpSessionTarget, AcpTransport,
 };
 
 pub struct CodexAcpAdapter {
@@ -56,6 +56,10 @@ pub struct CodexAcpAdapter {
     /// from the first turn's `thread.started` event.
     thread_id: Mutex<Option<String>>,
     current_child: Mutex<Option<Child>>,
+    /// Forwarded to the subprocess as `KRONN_DISCUSSION_ID` so the
+    /// kronn-internal MCP bridge knows which discussion to introspect
+    /// (KT-542 review: this was previously dropped on the adapter path).
+    discussion_id: Option<String>,
 }
 
 impl CodexAcpAdapter {
@@ -63,14 +67,17 @@ impl CodexAcpAdapter {
         model: Option<String>,
         full_access: bool,
         seed_native_thread_id: Option<String>,
+        discussion_id: Option<String>,
+        scope: AcpSessionScope,
     ) -> Self {
         Self {
             program: "codex".to_owned(),
             cwd: Mutex::new(None),
             model,
-            broker: AcpPermissionBroker::new(full_access),
+            broker: AcpPermissionBroker::scoped(full_access, scope),
             thread_id: Mutex::new(seed_native_thread_id),
             current_child: Mutex::new(None),
+            discussion_id,
         }
     }
 
@@ -84,13 +91,97 @@ impl CodexAcpAdapter {
     ) -> Self {
         Self {
             program: program.into(),
-            ..Self::new(model, full_access, seed_native_thread_id)
+            ..Self::new(
+                model,
+                full_access,
+                seed_native_thread_id,
+                None,
+                AcpSessionScope::new(None, "test"),
+            )
         }
     }
 
     pub fn permission_audit_log(&self) -> Vec<AcpAuditEntry> {
         self.broker.audit_log()
     }
+}
+
+/// Build a `-c mcp_servers={...}` override that REPLACES Codex's global
+/// `[mcp_servers]` table (`~/.codex/config.toml`, which merges EVERY synced
+/// project — `core::mcp_scanner::CodexSync` has no per-project support) with
+/// only THIS project's own command-only, non-secret-leaking servers plus the
+/// kronn-internal bridge. Without this, a Codex adapter session for project A
+/// would see every OTHER project's MCP servers (and their real credentials in
+/// `env`) merged into the same global file (KT-542 review). The candidate
+/// list is re-verified by the broker's own `authorize_mcp_servers` (defense
+/// in depth: never trust the freshly-read list is already correct). Returns
+/// `None` only when the kronn-internal bridge script itself can't be located
+/// on this host — mirrors `codex_task_worker_mcp_override`'s fail-closed
+/// shape rather than silently omitting the bridge.
+fn codex_project_mcp_override(cwd: &Path, broker: &AcpPermissionBroker) -> Option<String> {
+    let mut project_servers: Vec<AcpMcpServer> =
+        crate::core::mcp_scanner::read_mcp_json(&cwd.to_string_lossy())
+            .map(|file| {
+                file.mcp_servers
+                    .into_iter()
+                    .filter_map(|(id, entry)| {
+                        let command = entry.command.clone()?;
+                        (!command.trim().is_empty()
+                            && !crate::core::mcp_scanner::mcp_entry_leaks_secret(&entry))
+                        .then_some(AcpMcpServer {
+                            id,
+                            command,
+                            args: entry.args.unwrap_or_default(),
+                            allowed_tools: Vec::new(),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+    project_servers.sort_by(|left, right| left.id.cmp(&right.id));
+    let project_servers = broker.authorize_mcp_servers(project_servers);
+
+    let mut entries = String::new();
+    for server in &project_servers {
+        // Codex's own MCP entry key charset (`^[a-zA-Z0-9_-]+$`); a project
+        // server whose id doesn't match is skipped rather than producing
+        // invalid TOML the whole override would then fail to parse.
+        if server.id.is_empty()
+            || !server
+                .id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        {
+            continue;
+        }
+        let Ok(id_json) = serde_json::to_string(&server.id) else {
+            continue;
+        };
+        let Ok(command_json) = serde_json::to_string(&server.command) else {
+            continue;
+        };
+        let Ok(args_json) = serde_json::to_string(&server.args) else {
+            continue;
+        };
+        entries.push_str(&format!(
+            "{id_json}={{command={command_json},args={args_json}}},"
+        ));
+    }
+
+    let script = crate::agents::runner::disc_introspection_mcp_path()?;
+    broker.register_trusted_mcp_server(&AcpMcpServer {
+        id: "kronn-internal".to_owned(),
+        command: "python3".to_owned(),
+        args: vec![script.clone()],
+        allowed_tools: Vec::new(),
+    });
+    let script_json = serde_json::to_string(&script).ok()?;
+    let env_vars_json =
+        serde_json::to_string(crate::agents::runner::KRONN_INTERNAL_CODEX_ENV_VARS).ok()?;
+    entries.push_str(&format!(
+        "\"kronn-internal\"={{command=\"python3\",args=[{script_json}],env_vars={env_vars_json},startup_timeout_sec=30}}"
+    ));
+    Some(format!("mcp_servers={{{entries}}}"))
 }
 
 /// One line of `codex exec --json` JSONL output, reduced to what the adapter
@@ -205,7 +296,11 @@ impl AcpTransport for CodexAcpAdapter {
         // Codex only assigns a real thread id after the first turn runs (no
         // "create an empty thread" mode exists). Kronn's own correlation id
         // stands in as the opaque ACP target.
-        AcpSessionTarget::new(AcpAgent::Codex, uuid::Uuid::new_v4().to_string())
+        let target = AcpSessionTarget::new(AcpAgent::Codex, uuid::Uuid::new_v4().to_string())?;
+        self.broker
+            .bind_protocol_session(&target.session_id)
+            .map_err(AcpError::Transport)?;
+        Ok(target)
     }
 
     async fn config_options(&self) -> Vec<AcpConfigOption> {
@@ -221,7 +316,10 @@ impl AcpTransport for CodexAcpAdapter {
         Ok(())
     }
 
-    async fn resume_session(&self, _target: &AcpSessionTarget) -> Result<(), AcpError> {
+    async fn resume_session(&self, target: &AcpSessionTarget) -> Result<(), AcpError> {
+        self.broker
+            .bind_protocol_session(&target.session_id)
+            .map_err(AcpError::Transport)?;
         if self.thread_id.lock().await.is_some() {
             Ok(())
         } else {
@@ -250,7 +348,13 @@ impl AcpTransport for CodexAcpAdapter {
         args.push("--json".into());
         args.push("--skip-git-repo-check".into());
         args.push("-c".into());
-        args.push(crate::agents::runner::codex_kronn_internal_env_override());
+        args.push(
+            codex_project_mcp_override(&cwd, &self.broker).ok_or_else(|| {
+                AcpError::Transport(
+                    "Codex ACP adapter cannot build its project-scoped MCP configuration".into(),
+                )
+            })?,
+        );
         if let Some(model) = &self.model {
             args.push("--model".into());
             args.push(model.clone());
@@ -263,18 +367,34 @@ impl AcpTransport for CodexAcpAdapter {
                 args.push(format!("--sandbox={sandbox}"));
             }
         }
-        args.push(prompt.to_owned());
+        args.push("-".into());
 
         let mut command = crate::core::cmd::async_cmd(&self.program);
         command
             .args(&args)
             .current_dir(&cwd)
-            .stdin(Stdio::null())
+            .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
+        if let Some(discussion_id) = self.discussion_id.as_deref() {
+            command.env("KRONN_DISCUSSION_ID", discussion_id);
+        }
         let mut child = command
             .spawn()
             .map_err(|error| AcpError::Transport(format!("spawn codex: {error}")))?;
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| AcpError::Transport("codex stdin unavailable".into()))?;
+        stdin
+            .write_all(prompt.as_bytes())
+            .await
+            .map_err(|error| AcpError::Transport(format!("write codex prompt: {error}")))?;
+        stdin
+            .shutdown()
+            .await
+            .map_err(|error| AcpError::Transport(format!("close codex prompt stdin: {error}")))?;
+        drop(stdin);
         let stdout = child
             .stdout
             .take()
@@ -287,7 +407,8 @@ impl AcpTransport for CodexAcpAdapter {
             match lines.next_line().await {
                 Ok(Some(line)) => match parse_codex_line(&line) {
                     CodexLineEvent::ThreadStarted(Some(thread)) => {
-                        *self.thread_id.lock().await = Some(thread);
+                        *self.thread_id.lock().await = Some(thread.clone());
+                        let _ = events.send(AcpSessionEvent::NativeSessionId(thread)).await;
                     }
                     CodexLineEvent::ThreadStarted(None) => {}
                     CodexLineEvent::Text(text) => {
@@ -580,12 +701,9 @@ mod tests {
 
     #[tokio::test]
     async fn kronn_internal_mcp_override_forwards_only_env_var_names_never_values() {
-        // Codex reads project-authorized MCP servers (with real credentials)
-        // from its own already-synced `~/.codex/config.toml`; the adapter
-        // only narrows which env vars the kronn-internal server may forward,
-        // by name. This proves the exact same override string used by
-        // today's direct-CLI Codex invocation is present, and that nothing
-        // resembling a secret VALUE ever appears in argv.
+        // The adapter replaces Codex's global MCP table with this project's
+        // canonical non-secret servers plus the internal bridge. Only the
+        // bridge's narrow env-var NAMES may appear in argv, never values.
         let dir = tempfile::tempdir().unwrap();
         let argv_file = dir.path().join("argv.txt");
         let fixture = crate::acp::test_support::write_fixture_script(
@@ -610,11 +728,88 @@ mod tests {
 
         let argv = std::fs::read_to_string(&argv_file).unwrap();
         assert!(
-            argv.contains(&crate::agents::runner::codex_kronn_internal_env_override()),
-            "the exact narrow env-var-name override must be forwarded: {argv}"
+            argv.contains("mcp_servers={"),
+            "scoped override missing: {argv}"
+        );
+        assert!(
+            argv.contains("kronn-internal"),
+            "internal bridge missing: {argv}"
         );
         for var in crate::agents::runner::KRONN_INTERNAL_CODEX_ENV_VARS {
             assert!(argv.contains(var), "{var} must be listed by name: {argv}");
         }
+    }
+
+    #[tokio::test]
+    async fn production_context_keeps_prompt_off_argv_and_scopes_discussion_and_mcp() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(".mcp.json"),
+            r#"{"mcpServers":{"project-safe":{"command":"safe-server","args":["serve"]}}}"#,
+        )
+        .unwrap();
+        let argv_file = dir.path().join("argv.txt");
+        let stdin_file = dir.path().join("stdin.txt");
+        let discussion_file = dir.path().join("discussion.txt");
+        let fixture = crate::acp::test_support::write_fixture_script(
+            dir.path(),
+            &format!(
+                r#"printf '%s\n' "$*" > '{}'
+                printf '%s\n' "$KRONN_DISCUSSION_ID" > '{}'
+                IFS= read -r prompt
+                printf '%s' "$prompt" > '{}'
+                printf '%s\n' '{{"type":"thread.started","thread_id":"th-prod"}}'
+                printf '%s\n' '{{"type":"turn.completed","usage":{{"input_tokens":1,"output_tokens":2}}}}'"#,
+                argv_file.display(),
+                discussion_file.display(),
+                stdin_file.display(),
+            ),
+        );
+        let adapter = CodexAcpAdapter {
+            program: fixture.to_string_lossy().into_owned(),
+            ..CodexAcpAdapter::new(
+                None,
+                false,
+                None,
+                Some("disc-prod".into()),
+                AcpSessionScope::new(Some(dir.path().to_path_buf()), "disc-prod"),
+            )
+        };
+        let mut host = AcpHost::new(1, std::sync::Arc::new(adapter));
+        host.negotiate(AcpInitialize {
+            protocol_version: 1,
+            cwd: dir.path().to_string_lossy().into_owned(),
+            mcp_servers: vec![
+                AcpMcpServer {
+                    id: "project-safe".into(),
+                    command: "safe-server".into(),
+                    args: vec!["serve".into()],
+                    allowed_tools: vec![],
+                },
+                AcpMcpServer {
+                    id: "other-project".into(),
+                    command: "sneaky".into(),
+                    args: vec![],
+                    allowed_tools: vec![],
+                },
+            ],
+        })
+        .await
+        .unwrap();
+        let target = host.create_session().await.unwrap();
+        let secret_prompt = "prompt-secret-must-use-stdin";
+        let (tx, rx) = mpsc::channel(16);
+        host.prompt(&target, secret_prompt, tx).await.unwrap();
+        drain(rx).await;
+
+        let argv = std::fs::read_to_string(argv_file).unwrap();
+        assert!(!argv.contains(secret_prompt));
+        assert!(argv.contains("project-safe"));
+        assert!(!argv.contains("other-project"));
+        assert_eq!(std::fs::read_to_string(stdin_file).unwrap(), secret_prompt);
+        assert_eq!(
+            std::fs::read_to_string(discussion_file).unwrap().trim(),
+            "disc-prod"
+        );
     }
 }

@@ -41,8 +41,11 @@ Release notes for 0.9.3 and earlier are available in the
   `KRONN_ACP_ADAPTER_CLAUDE`). Direct CLI migration remains the production
   default for both; task workers always stay on it regardless of the toggle.
   A shared, scoped, audited permission broker denies filesystem/terminal
-  requests and unsafe tool calls by default, and project MCP servers are
-  never inlined with credentials into an ACP payload. See
+  requests, unbound sessions, out-of-project paths, and unauthorized MCP
+  server/tools by default. Project MCP servers are never inlined with
+  credentials, prompts travel on stdin, and normal discussions persist the
+  native Claude/Codex conversation id so a backend restart resumes the same
+  CLI session without reusing it across projects. See
   `docs/operations/acp-adapters.md`.
 
 ## [0.12.0] - 2026-08-30

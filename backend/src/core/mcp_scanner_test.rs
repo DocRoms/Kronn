@@ -53,6 +53,72 @@ mod tests {
         let _ = std::fs::remove_dir_all(tmp);
     }
 
+    // ─── mcp_args_carry_secret / mcp_entry_leaks_secret (KT-542 review) ───
+
+    #[test]
+    fn args_naming_a_credential_flag_are_detected_even_without_an_env_map() {
+        // The exact shape the KT-542 review called out: a secret embedded
+        // directly in `args` instead of `env`.
+        assert!(mcp_args_carry_secret(&[
+            "--token".to_string(),
+            "sk-super-secret".to_string()
+        ]));
+        assert!(mcp_args_carry_secret(&[
+            "--api-key".to_string(),
+            "x".to_string()
+        ]));
+        assert!(mcp_args_carry_secret(&[
+            "--api_key".to_string(),
+            "x".to_string()
+        ]));
+        assert!(mcp_args_carry_secret(&["--secret".to_string()]));
+        assert!(mcp_args_carry_secret(&["--auth-token=abc".to_string()]));
+        assert!(mcp_args_carry_secret(&[
+            "-key".to_string(),
+            "x".to_string()
+        ]));
+    }
+
+    #[test]
+    fn ordinary_non_secret_flags_are_never_flagged() {
+        assert!(!mcp_args_carry_secret(&[
+            "--project".to_string(),
+            "my-project".to_string()
+        ]));
+        assert!(!mcp_args_carry_secret(&["--verbose".to_string()]));
+        // A near-miss substring must never false-positive: "keyboard"
+        // contains "key" but is not the standalone flag part "key".
+        assert!(!mcp_args_carry_secret(&["--keyboard-shortcut".to_string()]));
+        assert!(!mcp_args_carry_secret(&[]));
+    }
+
+    #[test]
+    fn entry_leaks_secret_covers_both_env_and_args() {
+        let env_only = McpServerEntry {
+            command: Some("server".into()),
+            args: Some(vec!["--project".into()]),
+            url: None,
+            env: HashMap::from([("API_KEY".to_string(), "secret".to_string())]),
+        };
+        assert!(mcp_entry_leaks_secret(&env_only));
+
+        let args_only = McpServerEntry {
+            command: Some("server".into()),
+            args: Some(vec!["--token".into(), "secret".into()]),
+            url: None,
+            env: HashMap::new(),
+        };
+        assert!(mcp_entry_leaks_secret(&args_only));
+
+        let clean = McpServerEntry {
+            command: Some("server".into()),
+            args: Some(vec!["--project".into()]),
+            url: None,
+            env: HashMap::new(),
+        };
+        assert!(!mcp_entry_leaks_secret(&clean));
+    }
+
     // ─── write_mcp_json (Claude Code .mcp.json) ────────────────────────────
 
     #[test]

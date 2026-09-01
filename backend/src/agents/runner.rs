@@ -2013,6 +2013,80 @@ pub(crate) fn codex_kronn_internal_env_override() -> String {
     )
 }
 
+#[derive(Clone)]
+pub struct AcpSessionStore {
+    db: Arc<crate::db::Database>,
+    discussion_id: String,
+}
+
+impl AcpSessionStore {
+    pub fn new(db: Arc<crate::db::Database>, discussion_id: impl Into<String>) -> Self {
+        Self {
+            db,
+            discussion_id: discussion_id.into(),
+        }
+    }
+
+    fn runtime(agent_type: &AgentType) -> Option<&'static str> {
+        match agent_type {
+            AgentType::Codex => Some("codex_cli_adapter_v1"),
+            AgentType::ClaudeCode => Some("claude_cli_adapter_v1"),
+            _ => None,
+        }
+    }
+
+    async fn load(
+        &self,
+        agent_type: &AgentType,
+        project_scope: &Path,
+    ) -> Result<Option<String>, String> {
+        let runtime = Self::runtime(agent_type)
+            .ok_or_else(|| format!("{agent_type:?} has no durable ACP adapter session"))?;
+        let discussion_id = self.discussion_id.clone();
+        let agent_type = format!("{agent_type:?}");
+        let project_scope = project_scope.to_string_lossy().into_owned();
+        self.db
+            .with_conn(move |conn| {
+                crate::db::acp_runtime_sessions::get(
+                    conn,
+                    &discussion_id,
+                    &agent_type,
+                    runtime,
+                    &project_scope,
+                )
+            })
+            .await
+            .map_err(|error| format!("load ACP conversation id: {error}"))
+    }
+
+    async fn persist(
+        &self,
+        agent_type: &AgentType,
+        project_scope: &Path,
+        conversation_id: &str,
+    ) -> Result<(), String> {
+        let runtime = Self::runtime(agent_type)
+            .ok_or_else(|| format!("{agent_type:?} has no durable ACP adapter session"))?;
+        let discussion_id = self.discussion_id.clone();
+        let agent_type = format!("{agent_type:?}");
+        let project_scope = project_scope.to_string_lossy().into_owned();
+        let conversation_id = conversation_id.to_owned();
+        self.db
+            .with_conn(move |conn| {
+                crate::db::acp_runtime_sessions::upsert(
+                    conn,
+                    &discussion_id,
+                    &agent_type,
+                    runtime,
+                    &project_scope,
+                    &conversation_id,
+                )
+            })
+            .await
+            .map_err(|error| format!("persist ACP conversation id: {error}"))
+    }
+}
+
 /// Build the complete MCP table for an isolated Codex task worker.
 ///
 /// `--ignore-user-config` deliberately removes every user MCP and policy, so
@@ -2077,6 +2151,11 @@ pub struct AgentStartConfig<'a> {
     /// belong to a persistent discussion thread, or the auto-summary
     /// path itself).
     pub discussion_id: Option<&'a str>,
+    /// Durable adapter-session storage owned by a real discussion run. It is
+    /// deliberately separate from `discussion_sessions`: those rows represent
+    /// externally joined CLI participants and affect presence/routing, whereas
+    /// this state belongs to Kronn's own provider invocation.
+    pub acp_session_store: Option<AcpSessionStore>,
     /// CLI-only task-worker capability assembled by the discussion dispatcher.
     /// The MCP bridge receives this out-of-band through the child process
     /// environment; it is never rendered into the model prompt or accepted as
@@ -2155,6 +2234,7 @@ impl<'a> AgentStartConfig<'a> {
             external_http: None,
             context_files_prompt: "",
             discussion_id: None,
+            acp_session_store: None,
             task_worker_context: None,
             ollama_format: None,
             model_override: None,
@@ -2909,7 +2989,16 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
     // runner: `opencode acp` speaks bidirectional JSON-RPC, not line-oriented
     // model output. The ACP host owns initialize/session/prompt/cancel and
     // forwards only normalized text updates to the existing stream consumer.
-    match crate::acp::resolve_acp_route(config.agent_type) {
+    let acp_route = crate::acp::resolve_acp_route(config.agent_type);
+    let acp_resume_id = if acp_route == crate::acp::AcpProductionRoute::AdaptedAcp && !task_worker {
+        match config.acp_session_store.as_ref() {
+            Some(store) => store.load(config.agent_type, &work_dir).await?,
+            None => None,
+        }
+    } else {
+        None
+    };
+    match acp_route {
         crate::acp::AcpProductionRoute::NativeAcp => {
             // Kiro ships as a host binary; the Linux container needs its own
             // copy before the ACP subprocess can start.
@@ -2925,6 +3014,9 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                     project_path: config.project_path,
                     model_flag: model_flag.as_deref(),
                     parent_cancel: config.cancel_token.as_ref(),
+                    discussion_id: config.discussion_id,
+                    resume_id: None,
+                    session_store: None,
                 },
                 config.full_access,
             )
@@ -2951,6 +3043,9 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                     project_path: config.project_path,
                     model_flag: model_flag.as_deref(),
                     parent_cancel: config.cancel_token.as_ref(),
+                    discussion_id: config.discussion_id,
+                    resume_id: acp_resume_id.as_deref(),
+                    session_store: config.acp_session_store.clone(),
                 },
                 config.full_access,
             )
@@ -3181,22 +3276,32 @@ struct AcpSessionRequest<'a> {
     project_path: &'a str,
     model_flag: Option<&'a str>,
     parent_cancel: Option<&'a tokio_util::sync::CancellationToken>,
+    discussion_id: Option<&'a str>,
+    resume_id: Option<&'a str>,
+    session_store: Option<AcpSessionStore>,
 }
 
 async fn start_native_acp(
     request: AcpSessionRequest<'_>,
     full_access: bool,
 ) -> Result<AgentProcess, String> {
-    use crate::acp::{acp_agent, AcpJsonRpcTransport, AcpTransport};
+    use crate::acp::{acp_agent, AcpJsonRpcTransport, AcpSessionScope, AcpTransport};
 
     let agent_type = request.agent_type;
     let acp_agent_kind =
         acp_agent(agent_type).ok_or_else(|| format!("{agent_type:?} is not an ACP agent"))?;
+    let project_root = (!request.project_path.is_empty()).then(|| request.work_dir.to_path_buf());
+    let scope = AcpSessionScope::new(
+        project_root,
+        request.discussion_id.unwrap_or("unbound-discussion"),
+    );
     let transport: Arc<dyn AcpTransport> = Arc::new(
         AcpJsonRpcTransport::spawn_native(
             acp_agent_kind,
             &request.work_dir.to_string_lossy(),
             full_access,
+            request.discussion_id,
+            scope,
         )
         .await
         .map_err(|error| format!("{agent_type:?} ACP spawn failed: {error}"))?,
@@ -3222,21 +3327,33 @@ async fn start_adapted_acp(
     request: AcpSessionRequest<'_>,
     full_access: bool,
 ) -> Result<AgentProcess, String> {
-    use crate::acp::{AcpTransport, ClaudeAcpAdapter, CodexAcpAdapter};
+    use crate::acp::{AcpSessionScope, AcpTransport, ClaudeAcpAdapter, CodexAcpAdapter};
 
     let agent_type = request.agent_type;
     let model = request.model_flag.map(str::to_owned);
     if let Some(model) = &model {
         tracing::debug!(agent = ?agent_type, model, "ACP adapter model applied via direct CLI flag");
     }
+    let project_root = (!request.project_path.is_empty()).then(|| request.work_dir.to_path_buf());
+    let scope = AcpSessionScope::new(
+        project_root,
+        request.discussion_id.unwrap_or("unbound-discussion"),
+    );
+    let discussion_id = request.discussion_id.map(str::to_owned);
     let transport: Arc<dyn AcpTransport> = match agent_type {
-        AgentType::ClaudeCode => Arc::new(ClaudeAcpAdapter::new(model, full_access)),
-        // No durable cross-restart seed is threaded through from
-        // `AgentStartConfig` yet (it carries no DB handle to read a
-        // previously persisted native thread id) — a fresh session is
-        // started every time. Documented limitation: see KT-542 delivery
-        // notes / docs/operations/acp-adapters.md.
-        AgentType::Codex => Arc::new(CodexAcpAdapter::new(model, full_access, None)),
+        AgentType::ClaudeCode => Arc::new(ClaudeAcpAdapter::new(
+            model,
+            full_access,
+            discussion_id,
+            scope,
+        )),
+        AgentType::Codex => Arc::new(CodexAcpAdapter::new(
+            model,
+            full_access,
+            request.resume_id.map(str::to_owned),
+            discussion_id,
+            scope,
+        )),
         other => return Err(format!("{other:?} has no ACP adapter")),
     };
     run_acp_session(
@@ -3266,8 +3383,13 @@ async fn run_acp_session(
         project_path,
         model_flag,
         parent_cancel,
+        discussion_id: _,
+        resume_id,
+        session_store,
     } = request;
-    use crate::acp::{AcpCapability, AcpHost, AcpInitialize, AcpSessionEvent};
+    use crate::acp::{
+        acp_agent, AcpCapability, AcpHost, AcpInitialize, AcpSessionEvent, AcpSessionTarget,
+    };
     use tokio::io::AsyncWriteExt;
 
     let mut host = AcpHost::new(1, transport);
@@ -3285,10 +3407,27 @@ async fn run_acp_session(
                 format!("{agent_type:?} ACP cannot start with the project MCP registry: {error}")
             })?;
     }
-    let session = host
-        .create_session()
-        .await
-        .map_err(|error| format!("{agent_type:?} ACP session creation failed: {error}"))?;
+    let session = if let Some(conversation_id) = resume_id {
+        let agent = acp_agent(agent_type)
+            .ok_or_else(|| format!("{agent_type:?} has no ACP session identity"))?;
+        let target = AcpSessionTarget::new(agent, conversation_id.to_owned())
+            .map_err(|error| format!("{agent_type:?} ACP resume target is invalid: {error}"))?;
+        host.resume_session(&target)
+            .await
+            .map_err(|error| format!("{agent_type:?} ACP session resume failed: {error}"))?;
+        target
+    } else {
+        host.create_session()
+            .await
+            .map_err(|error| format!("{agent_type:?} ACP session creation failed: {error}"))?
+    };
+    if *agent_type == AgentType::ClaudeCode {
+        if let Some(store) = session_store.as_ref() {
+            store
+                .persist(agent_type, work_dir, &session.session_id)
+                .await?;
+        }
+    }
     // Apply the resolved tier/model against the options the session actually
     // returned (ACP session-config-options). The host applies it via
     // `session/set_config_option` only when a matching option value exists;
@@ -3325,6 +3464,8 @@ async fn run_acp_session(
     let task_usage = usage.clone();
     let process_agent_type = agent_type.clone();
     let event_agent_label = format!("{agent_type:?}");
+    let event_agent_type = agent_type.clone();
+    let event_work_dir = work_dir.to_path_buf();
 
     // Match the async agent task to the AgentProcess lifecycle without treating
     // the ACP child itself as a line-producing text process.
@@ -3344,6 +3485,9 @@ async fn run_acp_session(
         // receiving one batch after the response.
         let (event_tx, mut event_rx) = mpsc::channel::<AcpSessionEvent>(256);
         let forward_label = event_agent_label.clone();
+        let persistence_error = Arc::new(Mutex::new(None::<String>));
+        let forwarder_error = persistence_error.clone();
+        let event_store = session_store.clone();
         let forwarder = tokio::spawn(async move {
             while let Some(event) = event_rx.recv().await {
                 match event {
@@ -3370,6 +3514,16 @@ async fn run_acp_session(
                             output_tokens,
                         };
                     }
+                    AcpSessionEvent::NativeSessionId(conversation_id) => {
+                        if let Some(store) = event_store.as_ref() {
+                            if let Err(error) = store
+                                .persist(&event_agent_type, &event_work_dir, &conversation_id)
+                                .await
+                            {
+                                *forwarder_error.lock().unwrap() = Some(error);
+                            }
+                        }
+                    }
                     AcpSessionEvent::Completed => {}
                 }
             }
@@ -3382,10 +3536,15 @@ async fn run_acp_session(
             result = host.prompt(&session, &full_prompt, event_tx) => (result, false),
         };
         let _ = forwarder.await;
-        let ok = match &result {
-            Ok(()) if !cancelled => true,
-            Ok(()) => false,
-            Err(error) => {
+        let persistence_error = persistence_error.lock().unwrap().take();
+        let ok = match (&result, persistence_error.as_ref()) {
+            (_, Some(error)) => {
+                tracing::error!(agent = %event_agent_label, "ACP session persistence failed: {error}");
+                false
+            }
+            (Ok(()), None) if !cancelled => true,
+            (Ok(()), None) => false,
+            (Err(error), None) => {
                 tracing::warn!(agent = %event_agent_label, "ACP session failed: {error}");
                 false
             }
@@ -3426,15 +3585,19 @@ fn acp_project_mcp_servers(project_path: &str) -> Vec<crate::acp::AcpMcpServer> 
         .mcp_servers
         .into_iter()
         .filter_map(|(id, entry)| {
-            let command = entry.command?;
-            (!command.trim().is_empty() && entry.env.is_empty()).then_some(
-                crate::acp::AcpMcpServer {
-                    id,
-                    command,
-                    args: entry.args.unwrap_or_default(),
-                    allowed_tools: Vec::new(),
-                },
-            )
+            let command = entry.command.clone()?;
+            // Fail closed: a credential in `env` OR embedded directly in
+            // `args` (`["--token", "secret"]`) drops the whole server rather
+            // than partially redacting it — the ACP no-secret promise covers
+            // both shapes (KT-542 review).
+            (!command.trim().is_empty()
+                && !crate::core::mcp_scanner::mcp_entry_leaks_secret(&entry))
+            .then_some(crate::acp::AcpMcpServer {
+                id,
+                command,
+                args: entry.args.unwrap_or_default(),
+                allowed_tools: Vec::new(),
+            })
         })
         .collect();
     servers.sort_by(|left, right| left.id.cmp(&right.id));

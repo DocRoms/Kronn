@@ -53,10 +53,19 @@ in the logs without inspecting code.
 
 Every permission decision — live, for a native ACP agent's
 `session/request_permission`, or the adapters' static pre-session policy — is
-recorded by the shared `AcpPermissionBroker` with a normalized reason
-(`AcpAuditEntry { method, verdict, reason }`), retrievable via
+recorded by the shared `AcpPermissionBroker` with a normalized reason and
+non-secret correlation fields (discussion/session label, ACP protocol session,
+server, tool, and normalized locations), retrievable via
 `permission_audit_log()` on the transport/adapter. There is no HTTP endpoint
 exposing this log yet; it is available to Rust callers and to tests.
+
+Discussion-bound Codex and Claude adapter sessions persist their native
+conversation identifier in `acp_runtime_sessions`, keyed by discussion,
+agent, adapter runtime, and project scope. Codex records `thread.started`
+immediately while a turn is still streaming; Claude records the UUID Kronn
+passes with `--session-id` before the turn. A backend restart therefore
+re-seeds the adapter and resumes the same CLI conversation, but a different
+project path never reuses that identifier.
 
 ## Security model
 
@@ -68,40 +77,41 @@ exposing this log yet; it is available to Rust callers and to tests.
   adapters compute the same policy once per session and apply it as static
   flags (`--dangerously-skip-permissions` / `--sandbox=danger-full-access`
   under `full_access`, the CLI's own restrictive default otherwise).
+  A scoped live request must also match the bound ACP protocol session and
+  identify either an authorized MCP server/tool or at least one path wholly
+  contained by the canonical project root. Missing/malformed locations and
+  symlink escapes are denied, including under `full_access`.
 - **Filesystem / terminal:** Kronn has not bound a scoped executor for
   `fs/*`/`terminal/*` yet. Every such request — from any agent — gets a
   spec-correct JSON-RPC error (`-32001` "capability not granted"), never a
   fabricated "result" object and never a silent grant.
-- **MCP / secrets:** ACP sessions only ever see project-authorized MCP
-  servers. Native ACP agents get a command-only list inlined into the
-  `session/new` payload (any server needing an `env` value is dropped
-  wholesale, not partially redacted). The Codex/Claude adapters take a
-  stricter path: they never inline `mcpServers` into any Kronn-controlled
-  payload at all. Claude's adapter points `--mcp-config`/`--strict-mcp-config`
-  at the project's already-synced `.mcp.json` (the same 0600, secret-bearing
-  file today's direct-CLI Claude invocation reads); Codex reads its own
-  already-synced `~/.codex/config.toml` automatically, and the adapter only
-  narrows the `kronn-internal` server's forwarded env var *names* (never
-  values). No secret value is read into the adapter's own process, so none
-  can leak into a prompt, a session event, or a client payload.
+- **MCP / secrets:** every production broker is scoped to one project and
+  reconstructs the canonical `.mcp.json` declaration itself. A matching
+  server name never authorizes caller-supplied replacement commands or
+  arguments. Entries carrying `env` values or credential-like arguments are
+  dropped wholesale. Native ACP agents receive only the remaining command
+  declarations. Codex receives a complete `mcp_servers={...}` override, so
+  its global multi-project configuration cannot bleed into this discussion;
+  the trusted `kronn-internal` bridge forwards only a fixed list of env-var
+  names. Claude loads the project `.mcp.json` with `--strict-mcp-config` only
+  when the whole file exactly matches the broker-authorized set; otherwise
+  the config is omitted rather than partially authorizing a secret-bearing
+  file. Prompts are written on stdin for both adapters, never argv. Secret
+  values therefore enter neither adapter argv, ACP payloads, events, nor
+  audit records.
 
 ## Known limitations
 
-- **No cross-restart persistence for Codex yet.** Codex only assigns a real
-  `thread_id` after a turn runs; the adapter tracks it in memory and exposes
-  it via `AcpTransport::native_session_id`, and the constructor accepts a
-  seed id to resume a thread known from before a restart — both are unit
-  tested — but nothing in `start_agent_with_config`/`AgentStartConfig` yet
-  reads or writes that id to `discussion_sessions.conversation_id`
-  (`AgentStartConfig` carries no DB handle). A Kronn restart mid-Codex-adapter
-  session starts a fresh thread rather than resuming the old one. Claude does
-  not have this gap: `--session-id` lets Kronn choose the id up front, so it
-  survives a restart as long as the caller already has it.
 - **No live permission negotiation for the adapters.** Permission policy is
   computed once per session, not per tool call, because neither CLI's
   non-interactive mode offers a live callback.
 - **Task workers are excluded** (see above) — they stay on direct CLI
   migration unconditionally.
+- **Credential-bearing project MCP entries are omitted.** Secure credential
+  injection without putting values in adapter argv/payloads is not implemented
+  yet. A project mixing safe and credential-bearing entries is therefore
+  denied as a whole by Claude's strict config path; Codex/native ACP retain
+  only the independently reconstructed safe entries.
 - **`codex exec resume` cannot change the sandbox mode** — verified absent
   from `codex exec resume --help` though present on `codex exec` — so a
   resumed Codex adapter session keeps whatever sandbox policy its first turn
@@ -111,7 +121,8 @@ exposing this log yet; it is available to Rust callers and to tests.
 
 - **"no verified production ACP command" / adapter never engages:** check the
   exact toggle name (`KRONN_ACP_ADAPTER_CODEX` / `KRONN_ACP_ADAPTER_CLAUDE`,
-  case-sensitive, any value counts as set) and that it's set in the backend
+  case-sensitive; only `1` or `true`, ignoring case/outer whitespace, enables
+  it) and that it's set in the backend
   process's environment, not just the shell you're inspecting logs from.
 - **A run using the adapter behaves differently from the direct-CLI path
   (e.g. permission prompts, MCP tool availability):** compare against the
@@ -119,4 +130,5 @@ exposing this log yet; it is available to Rust callers and to tests.
   and a broker-derived static permission policy, which can be narrower than
   an ad hoc local `claude`/`codex` invocation.
 - **Rolling back:** unset the toggle. The change takes effect on the next
-  agent start; no migration or cleanup step is required.
+  agent start. The additive `acp_runtime_sessions` table can remain in place;
+  direct CLI migration does not read it.
