@@ -271,6 +271,15 @@ a workflow does not leak runtime data.
 
 **8. Launch variables (manual trigger forms).** `Workflow.variables: Vec<PromptVariable>` (migration `044_workflow_variables.sql`) mirrors `QuickPrompt.variables`. When a user clicks "Lancer" on a Manual-trigger workflow with non-empty `variables`, the page shows a launch modal asking for one value per declared variable; values are merged into the run's `trigger_context` so `{{var_name}}` resolves in step prompts (existing `inject_trigger_context` handles the path). `POST /api/workflows/:id/trigger` accepts an optional `Json<TriggerWorkflowRequest>` body with `{ variables: HashMap<String,String> }`; missing/empty required variables produce an SSE error before the run starts. Legacy callers (no body) keep working — `Option<Json<...>>` → `None` → no variables. Frontend scanner (`frontend/src/lib/scanUndeclaredVars.ts`) runs live in the wizard and warns when a step prompt references a `{{var}}` that doesn't match any earlier step / state / iter / artifact / declared variable, with a 1-click "add to launch variables" affordance.
 
+Each manual `PromptVariable` may also declare a presentation contract: `text`
+(the backward-compatible default), `textarea`, or a versioned single `select`.
+Select options persist a stable execution value, a display label and an active
+flag; disabled options remain readable in historical definitions but new runs
+cannot submit them. An optional default must reference an active option. QP,
+QA and Workflow editors share the same control editor, launch surfaces share
+the same renderer, and the backend validates the selected value again so an
+API caller cannot bypass the option version used by the saved automation.
+
 **Wizard 0.6.0 additions** (`frontend/src/lib/workflow-templates/v07-presets.ts`):
 - 3 non-trivial presets — `AUTO_DEV` (auto-dev with tests), `PR_GATE` (PR creation with Gate approval), `DEPLOY_ROLLBACK` (deploy with on_failure rollback).
 - STATE pedagogy chips on Agent step cards when an `on_result: Goto` is detected (hint at `{{state.X}}` write/read pattern).
