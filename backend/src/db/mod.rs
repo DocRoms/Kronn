@@ -8,6 +8,7 @@ pub mod cli_telemetry;
 pub mod compare;
 pub mod contacts;
 pub mod context_audits;
+pub mod delivery_summaries;
 pub mod disc_source;
 pub mod discussion_actions;
 pub mod discussion_sessions;

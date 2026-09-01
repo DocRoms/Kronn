@@ -610,12 +610,16 @@ const MIGRATIONS: &[(&str, &str)] = &[
         include_str!("sql/161_acp_runtime_sessions.sql"),
     ),
     (
-        // KT-538 owns 160 and KT-542 owns 161 on the integration branch.
+        // KT-538 owns 160 and KT-542 owns 161 on the integration branch;
+        // KT-531 owns 162.
         "162_model_catalog",
         include_str!("sql/162_model_catalog.sql"),
     ),
     (
-        // 163 reserved for a concurrent KT-368 lot on the integration branch.
+        "163_delivery_summaries",
+        include_str!("sql/163_delivery_summaries.sql"),
+    ),
+    (
         "164_model_catalog_cost_privacy",
         include_str!("sql/164_model_catalog_cost_privacy.sql"),
     ),
