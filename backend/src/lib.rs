@@ -1,7 +1,9 @@
+pub mod acp;
 pub mod agents;
 pub mod api;
 pub mod core;
 pub mod db;
+pub mod delivery;
 pub mod models;
 pub mod workflows;
 
@@ -1160,6 +1162,13 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         // ── Debug (log ringbuffer — backs Settings > Debug viewer) ──
         .route("/api/debug/logs", get(api::debug::get_logs))
         .route("/api/debug/logs/clear", post(api::debug::clear_logs))
+        // ── Discussion storage weight (own endpoint: summing message
+        // content scans the messages table, and the indicator is opt-in) ──
+        .route("/api/discussion-weights", get(api::discussion_weight::list))
+        .route(
+            "/api/discussion-weights/{id}",
+            get(api::discussion_weight::get_one),
+        )
         // ── Secret themes (hidden palette unlock via code) ──
         .route("/api/themes/unlock", post(api::themes::unlock))
         // ── Document generation (5 formats through the Python sidecar) ──
@@ -1523,6 +1532,8 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
                 .delete(api::quick_execs::delete),
         )
         .route("/api/quick-execs/{id}/run", post(api::quick_execs::run))
+        .route("/api/runs", get(api::shared_runs::list))
+        .route("/api/runs/{id}", get(api::shared_runs::get))
         .route(
             "/api/quick-execs/{id}/export",
             get(api::quick_execs::export),

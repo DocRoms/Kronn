@@ -1,4 +1,6 @@
 import type {
+  DiscussionWeightConfig,
+  DiscussionWeightsResponse,
   DiscussionImportProvenance,
   SetupStatus,
   SetScanPathsRequest,
@@ -203,6 +205,7 @@ import type {
   TaskExecutionObservability,
   ValidationSpec,
   ExternalApiConnectionPreset,
+  SharedRun,
 } from '../types/generated';
 import type { DiscoverKeysResponse, TestModeEnterResult, TestModeExitResponse } from '../types/extensions';
 
@@ -713,7 +716,15 @@ export const config = {
   restoreRecovery: (passphrase: string, recoveryCode?: string) =>
     api<void>('POST', '/config/recovery/restore', { passphrase, recovery_code: recoveryCode || null }),
   getServerConfig: () => api<ServerConfigPublic>('GET', '/config/server'),
-  setServerConfig: (req: { domain?: string; max_concurrent_agents?: number; agent_stall_timeout_min?: number; agent_global_timeout_min?: number; local_agent_global_timeout_min?: number; pseudo?: string; avatar_email?: string; bio?: string; debug_mode?: boolean; discussion_notes_enabled?: boolean; default_model_tier?: 'economy' | 'default' | 'reasoning'; default_summary_strategy?: 'Auto' | 'OnDemand' | 'Off'; agent_handoffs_enabled?: boolean; agent_handoff_paid_limit?: number; agent_handoff_paid_unlimited?: boolean; agent_handoff_blocked_agents?: AgentType[] }) => api<void>('POST', '/config/server', req),
+  /** Batch storage weight for the discussions currently on screen. Sparse:
+   * an id that holds nothing is absent from `weights`. Never call this to
+   * "get everything" — the endpoint refuses an unbounded request. */
+  discussionWeights: (discussionIds: string[]) =>
+    api<DiscussionWeightsResponse>(
+      'GET',
+      `/discussion-weights?discussion_ids=${encodeURIComponent(discussionIds.join(','))}`,
+    ),
+  setServerConfig: (req: { domain?: string; max_concurrent_agents?: number; agent_stall_timeout_min?: number; agent_global_timeout_min?: number; local_agent_global_timeout_min?: number; pseudo?: string; avatar_email?: string; bio?: string; debug_mode?: boolean; discussion_notes_enabled?: boolean; default_model_tier?: 'economy' | 'default' | 'reasoning'; default_summary_strategy?: 'Auto' | 'OnDemand' | 'Off'; agent_handoffs_enabled?: boolean; agent_handoff_paid_limit?: number; agent_handoff_paid_unlimited?: boolean; agent_handoff_blocked_agents?: AgentType[]; discussion_weight?: DiscussionWeightConfig }) => api<void>('POST', '/config/server', req),
   regenerateAuthToken: () => api<string>('POST', '/config/auth-token/regenerate'),
 };
 
@@ -2296,6 +2307,9 @@ export interface BatchRunResponse {
   run_id: string;
   discussion_ids: string[];
   batch_total: number;
+  /** Non-fatal SharedRun projection failures — the batch itself succeeded,
+   *  but the corresponding RunStatusCard may fail to rehydrate for these. */
+  shared_run_warnings?: string[];
 }
 
 export const quickPrompts = {
@@ -2980,6 +2994,19 @@ export const userContext = {
     api<UserContextFile>('PUT', `/user-context/${encodeURIComponent(name)}`, { content }),
   delete: (name: string) =>
     api<void>('DELETE', `/user-context/${encodeURIComponent(name)}`),
+};
+
+export const runsApi = {
+  get: (id: string) => api<SharedRun>('GET', `/runs/${encodeURIComponent(id)}`),
+  list: (filters: { kind?: string; sourceId?: string; projectId?: string; discussionId?: string; limit?: number } = {}) => {
+    const query = new URLSearchParams();
+    if (filters.kind) query.set('kind', filters.kind);
+    if (filters.sourceId) query.set('source_id', filters.sourceId);
+    if (filters.projectId) query.set('project_id', filters.projectId);
+    if (filters.discussionId) query.set('discussion_id', filters.discussionId);
+    if (filters.limit) query.set('limit', String(filters.limit));
+    return api<SharedRun[]>('GET', `/runs${query.size ? `?${query}` : ''}`);
+  },
 };
 
 // ─── Continual Learning (0.10.0) ───────────────────────────────────────────────

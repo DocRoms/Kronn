@@ -1382,6 +1382,8 @@ pub async fn generate_summary_on_demand(
     let (_cleaned, parsed_tokens) = runner::parse_token_usage(&disc.agent, &out, &stderr_lines);
     let tokens_used = if stream_json_tokens > 0 {
         stream_json_tokens
+    } else if let Some(reported) = process.reported_token_usage() {
+        reported
     } else {
         parsed_tokens
     };

@@ -55,6 +55,13 @@ const KNOWN_AGENTS: &[AgentDef] = &[
         install_cmd: "npm install -g @openai/codex",
     },
     AgentDef {
+        name: "OpenCode",
+        agent_type: AgentType::OpenCode,
+        binary: "opencode",
+        origin: "OpenCode",
+        install_cmd: "npm install -g opencode-ai",
+    },
+    AgentDef {
         name: "Vibe",
         agent_type: AgentType::Vibe,
         binary: "vibe",
@@ -123,8 +130,9 @@ const KNOWN_AGENTS: &[AgentDef] = &[
 /// Keep this list in sync with `entrypoint.sh`. The
 /// `cross_agent_macos_skip_covers_npm_agents` test enforces that every
 /// `npm install`-style agent is present here.
-pub(crate) const MACOS_HOST_BIN_SKIP: &[&str] =
-    &["claude", "codex", "gemini", "copilot", "kiro-cli"];
+pub(crate) const MACOS_HOST_BIN_SKIP: &[&str] = &[
+    "claude", "codex", "opencode", "gemini", "copilot", "kiro-cli",
+];
 
 /// Pure: should a *resolved* binary be ignored because it is a Darwin host
 /// binary that cannot `exec()` in this Linux container?
@@ -706,6 +714,7 @@ async fn probe_runtime(def: &AgentDef) -> bool {
     let npx_pkg = match def.agent_type {
         AgentType::ClaudeCode => Some("@anthropic-ai/claude-code"),
         AgentType::Codex => Some("@openai/codex"),
+        AgentType::OpenCode => Some("opencode-ai"),
         AgentType::GeminiCli => Some("@google/gemini-cli"),
         AgentType::CopilotCli => Some("@github/copilot"),
         AgentType::Vibe => None, // uvx, handled differently
@@ -1018,12 +1027,14 @@ fn check_prerequisite(cmd: &str) -> bool {
 /// Prerequisite needed for each agent's install command
 fn install_prerequisite(agent_type: &AgentType) -> Option<(&'static str, &'static str)> {
     match agent_type {
-        AgentType::ClaudeCode | AgentType::Codex | AgentType::GeminiCli | AgentType::CopilotCli => {
-            Some((
-                "npm",
-                "Node.js is required. Install it from https://nodejs.org",
-            ))
-        }
+        AgentType::ClaudeCode
+        | AgentType::Codex
+        | AgentType::OpenCode
+        | AgentType::GeminiCli
+        | AgentType::CopilotCli => Some((
+            "npm",
+            "Node.js is required. Install it from https://nodejs.org",
+        )),
         AgentType::Vibe | AgentType::LiteLlm => Some((
             "uv",
             "uv is required. Install it from https://docs.astral.sh/uv",
@@ -1068,6 +1079,7 @@ pub async fn uninstall_agent(agent_type: &AgentType) -> Result<String> {
     let uninstall_cmd = match def.agent_type {
         AgentType::ClaudeCode => "npm uninstall -g @anthropic-ai/claude-code",
         AgentType::Codex => "npm uninstall -g @openai/codex",
+        AgentType::OpenCode => "npm uninstall -g opencode-ai",
         #[cfg(unix)]
         AgentType::Vibe => "uv tool uninstall mistral-vibe 2>/dev/null || pipx uninstall mistral-vibe 2>/dev/null || pip3 uninstall -y mistral-vibe",
         #[cfg(windows)]
@@ -1461,6 +1473,7 @@ mod tests {
         let all_types = [
             AgentType::ClaudeCode,
             AgentType::Codex,
+            AgentType::OpenCode,
             AgentType::Vibe,
             AgentType::GeminiCli,
             AgentType::Kiro,

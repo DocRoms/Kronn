@@ -682,6 +682,7 @@ pub async fn set_agent_access(
     match req.agent {
         AgentType::ClaudeCode => config.agents.claude_code.full_access = req.full_access,
         AgentType::Codex => config.agents.codex.full_access = req.full_access,
+        AgentType::OpenCode => config.agents.open_code.full_access = req.full_access,
         AgentType::GeminiCli => config.agents.gemini_cli.full_access = req.full_access,
         AgentType::Kiro => config.agents.kiro.full_access = req.full_access,
         AgentType::Vibe => config.agents.vibe.full_access = req.full_access,
@@ -707,6 +708,7 @@ pub async fn set_agent_concurrency(
     let agent = match req.agent {
         AgentType::ClaudeCode => &mut config.agents.claude_code,
         AgentType::Codex => &mut config.agents.codex,
+        AgentType::OpenCode => &mut config.agents.open_code,
         AgentType::GeminiCli => &mut config.agents.gemini_cli,
         AgentType::Kiro => &mut config.agents.kiro,
         AgentType::Vibe => &mut config.agents.vibe,
@@ -754,6 +756,7 @@ pub async fn set_agent_mention_color(
     let agent = match req.agent {
         AgentType::ClaudeCode => &mut config.agents.claude_code,
         AgentType::Codex => &mut config.agents.codex,
+        AgentType::OpenCode => &mut config.agents.open_code,
         AgentType::GeminiCli => &mut config.agents.gemini_cli,
         AgentType::Kiro => &mut config.agents.kiro,
         AgentType::Vibe => &mut config.agents.vibe,
@@ -818,6 +821,7 @@ pub async fn get_server_config(
         agent_handoff_paid_limit: config.server.agent_handoff_paid_limit.min(5),
         agent_handoff_paid_unlimited: config.server.agent_handoff_paid_unlimited,
         agent_handoff_blocked_agents: config.server.agent_handoff_blocked_agents.clone(),
+        discussion_weight: config.server.discussion_weight,
     }))
 }
 
@@ -826,7 +830,18 @@ pub async fn set_server_config(
     State(state): State<AppState>,
     Json(req): Json<UpdateServerConfigRequest>,
 ) -> Json<ApiResponse<()>> {
+    // Validated before any mutation: this handler applies fields one by one,
+    // so refusing late would leave the earlier ones already written.
+    if let Some(weight) = req.discussion_weight {
+        if let Err(e) = weight.with_thresholds(weight.amber_bytes, weight.red_bytes) {
+            return Json(ApiResponse::err(e));
+        }
+    }
+
     let mut config = state.config.write().await;
+    if let Some(weight) = req.discussion_weight {
+        config.server.discussion_weight = weight;
+    }
     if let Some(domain) = req.domain {
         config.server.domain = if domain.is_empty() {
             None

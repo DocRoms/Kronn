@@ -14978,3 +14978,202 @@ mod cold_api_handlers_tests {
         }
     }
 }
+
+// ── Discussion storage weight (KT-541) ─────────────────────────────────────
+//
+// The endpoint is batch-only by design: summing message content scans the
+// messages table, so an unbounded form would turn a sidebar repaint into a
+// table-wide aggregate. These tests pin that refusal at the HTTP boundary,
+// not just in the store.
+
+#[tokio::test]
+async fn discussion_weights_refuses_an_unbounded_request() {
+    let app = test_app();
+
+    let (status, body) = get_json(app.clone(), "/api/discussion-weights").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["success"], false);
+    let error = body["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("discussion_ids"),
+        "the refusal must name the missing parameter, got {error}"
+    );
+
+    // An empty or comma-only value is the same absence, not an empty batch.
+    let (_, blank) = get_json(app, "/api/discussion-weights?discussion_ids=,,").await;
+    assert_eq!(blank["success"], false);
+}
+
+#[tokio::test]
+async fn discussion_weights_refuses_a_batch_over_the_cap() {
+    let app = test_app();
+    let ids: Vec<String> = (0..201).map(|i| format!("d{i}")).collect();
+    let uri = format!("/api/discussion-weights?discussion_ids={}", ids.join(","));
+
+    let (status, body) = get_json(app, &uri).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["success"], false);
+    let error = body["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("201"),
+        "the refusal must be quantified, got {error}"
+    );
+    assert!(error.contains("200"), "and state the cap, got {error}");
+}
+
+#[tokio::test]
+async fn discussion_weights_answers_sparsely_and_splits_the_masses() {
+    let state = test_state();
+    state
+        .db
+        .with_conn(|connection| {
+            let now = chrono::Utc::now().to_rfc3339();
+            connection.execute(
+                "INSERT INTO discussions (id, title, created_at, updated_at)
+                 VALUES ('disc-heavy', 'Heavy room', ?1, ?1),
+                        ('disc-empty', 'Empty room', ?1, ?1)",
+                [&now],
+            )?;
+            connection.execute(
+                "INSERT INTO messages (id, discussion_id, role, content, timestamp)
+                 VALUES ('m1', 'disc-heavy', 'User', 'éàc', ?1)",
+                [&now],
+            )?;
+            connection.execute(
+                "INSERT INTO context_files
+                    (id, discussion_id, filename, mime_type, original_size,
+                     extracted_text, extracted_size, disk_path, created_at)
+                 VALUES ('cf1', 'disc-heavy', 'clip.mp4', 'video/mp4', 1621340,
+                         '', 0, '/tmp/clip.mp4', ?1)",
+                [&now],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let app = build_router_with_auth(state, false);
+
+    let (status, body) = get_json(
+        app,
+        "/api/discussion-weights?discussion_ids=disc-heavy,disc-empty,disc-absent",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["success"], true);
+
+    let weights = &body["data"]["weights"];
+    // Sparse: only what actually holds something comes back, so the UI can
+    // tell "empty" apart from "not loaded".
+    assert!(weights["disc-heavy"].is_object());
+    assert!(
+        weights["disc-empty"].is_null(),
+        "an empty discussion is absent"
+    );
+    assert!(weights["disc-absent"].is_null(), "an unknown id is absent");
+
+    let heavy = &weights["disc-heavy"];
+    assert_eq!(heavy["disk_bytes"], 1_621_340);
+    assert_eq!(heavy["extracted_text_bytes"], 0);
+    // Bytes, not characters: "éàc" is 3 chars but 5 UTF-8 bytes (2 + 2 + 1).
+    assert_eq!(heavy["message_bytes"], 5);
+    assert_eq!(heavy["total_bytes"], 1_621_345);
+    // Only the disk blobs can be reclaimed without losing conversation.
+    assert_eq!(heavy["reclaimable_bytes"], 1_621_340);
+    assert_eq!(heavy["level"], "green");
+
+    // The thresholds in force travel with the answer, and the fallback flag
+    // is reported rather than hidden.
+    assert_eq!(body["data"]["thresholds"]["amber_bytes"], 25 * 1024 * 1024);
+    assert_eq!(body["data"]["thresholds"]["red_bytes"], 100 * 1024 * 1024);
+    assert_eq!(body["data"]["thresholds_from_defaults"], false);
+}
+
+#[tokio::test]
+async fn discussion_weights_grades_the_level_from_the_configured_thresholds() {
+    let state = test_state();
+    state.config.write().await.server.discussion_weight = kronn::models::DiscussionWeightConfig {
+        enabled: true,
+        amber_bytes: 10,
+        red_bytes: 100,
+    };
+    state
+        .db
+        .with_conn(|connection| {
+            let now = chrono::Utc::now().to_rfc3339();
+            connection.execute(
+                "INSERT INTO discussions (id, title, created_at, updated_at)
+                 VALUES ('disc-amber', 'Amber', ?1, ?1), ('disc-red', 'Red', ?1, ?1)",
+                [&now],
+            )?;
+            connection.execute(
+                "INSERT INTO context_files
+                    (id, discussion_id, filename, mime_type, original_size,
+                     extracted_text, extracted_size, disk_path, created_at)
+                 VALUES ('a', 'disc-amber', 'a.png', 'image/png', 50, '', 0, '/tmp/a', ?1),
+                        ('r', 'disc-red', 'r.png', 'image/png', 500, '', 0, '/tmp/r', ?1)",
+                [&now],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let app = build_router_with_auth(state, false);
+
+    let (_, body) = get_json(
+        app,
+        "/api/discussion-weights?discussion_ids=disc-amber,disc-red",
+    )
+    .await;
+    assert_eq!(body["data"]["weights"]["disc-amber"]["level"], "amber");
+    assert_eq!(body["data"]["weights"]["disc-red"]["level"], "red");
+}
+
+#[tokio::test]
+async fn discussion_weights_reports_a_threshold_fallback_instead_of_hiding_it() {
+    let state = test_state();
+    // Inverted pair: unusable as a scale, so the defaults must take over as a
+    // whole and say so.
+    state.config.write().await.server.discussion_weight = kronn::models::DiscussionWeightConfig {
+        enabled: true,
+        amber_bytes: 900,
+        red_bytes: 100,
+    };
+    state
+        .db
+        .with_conn(|connection| {
+            let now = chrono::Utc::now().to_rfc3339();
+            connection.execute(
+                "INSERT INTO discussions (id, title, created_at, updated_at)
+                 VALUES ('disc-x', 'X', ?1, ?1)",
+                [&now],
+            )?;
+            connection.execute(
+                "INSERT INTO messages (id, discussion_id, role, content, timestamp)
+                 VALUES ('m1', 'disc-x', 'User', 'hello', ?1)",
+                [&now],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let app = build_router_with_auth(state, false);
+
+    let (_, body) = get_json(app, "/api/discussion-weights?discussion_ids=disc-x").await;
+    assert_eq!(body["data"]["thresholds_from_defaults"], true);
+    assert_eq!(body["data"]["thresholds"]["amber_bytes"], 25 * 1024 * 1024);
+    assert_eq!(body["data"]["thresholds"]["red_bytes"], 100 * 1024 * 1024);
+}
+
+#[tokio::test]
+async fn a_single_discussion_weight_answers_zeros_rather_than_a_404() {
+    let app = test_app();
+
+    // The caller named this discussion explicitly, so zeros are the answer —
+    // not an error it would have to special-case.
+    let (status, body) = get_json(app, "/api/discussion-weights/ghost").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["success"], true);
+    assert_eq!(body["data"]["discussion_id"], "ghost");
+    assert_eq!(body["data"]["total_bytes"], 0);
+    assert_eq!(body["data"]["level"], "green");
+}

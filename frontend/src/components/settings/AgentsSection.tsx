@@ -1393,6 +1393,7 @@ export function AgentsSection({
                 const newTiers: ModelTiersConfig = {
                   claude_code: tierOf('claude_code'),
                   codex: tierOf('codex'),
+                  open_code: tierOf('open_code'),
                   gemini_cli: tierOf('gemini_cli'),
                   kiro: tierOf('kiro'),
                   vibe: tierOf('vibe'),

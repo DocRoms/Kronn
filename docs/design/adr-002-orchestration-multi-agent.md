@@ -544,7 +544,11 @@ Explicitly deferred, to keep V1 = *one task → one worker → one sub-discussio
 4. **Validation substrate — dedicated `task_execution_validation_runs`, decided.** Reuse the Quick Exec
    executor / allowlist / timeout / result shape, but a dedicated table with an optional `quick_exec_id`
    when a validation is sourced from a saved QE; `exit_code` is the verdict (§6). The generic
-   `owner_kind/owner_id` shared run table is deferred.
+   `owner_kind/owner_id` shared run table is deferred **for task-execution validation runs specifically**.
+   A narrower, purpose-built `shared_runs` table (`kind` ∈ QuickPrompt/QuickApi/QuickExec/Workflow,
+   `source_id`, optional `project_id`/`discussion_id`) now exists for the user-facing run status card
+   (KT-243, `backend/src/db/sql/155_shared_runs.sql`) — it is a display/rehydration projection for
+   QP/QA/QE/Workflow runs, not a replacement for the task-execution validation substrate decided above.
 5. **DeliveryManifest / ReviewDecision transport — decided.** Primary path is a dedicated, typed,
    attributable MCP tool (`task_exec_deliver` / `task_exec_review`); a `kronn-delivery` /
    `kronn-review` fence parsed like `kronn-plan-action` is the fallback for non-MCP runtimes (§5).

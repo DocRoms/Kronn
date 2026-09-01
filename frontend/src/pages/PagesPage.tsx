@@ -19,6 +19,8 @@ import {
 } from '../lib/live-page-sandbox';
 import { formatRelativeTime } from '../lib/relativeTime';
 import { CopyIdPill } from '../components/CopyIdPill';
+import { RunStatusCard } from '../components/RunStatusCard';
+import type { RunStatusCardModel } from '../lib/runStatusCardModel';
 import { CollectionFavoritesHeader } from '../components/CollectionFavoritesHeader';
 import { CollectionRowActions } from '../components/CollectionRowActions';
 import { CollectionSidebarFooter } from '../components/CollectionSidebarFooter';
@@ -146,6 +148,7 @@ export function PagesPage({
   const [error, setError] = useState<string | null>(null);
   const [linkedWorkflows, setLinkedWorkflows] = useState<LivePageWorkflowLink[]>([]);
   const [recentPublications, setRecentPublications] = useState<LivePagePublication[]>([]);
+  const [pageRunCard, setPageRunCard] = useState<RunStatusCardModel | null>(null);
   const [linkedDiscussions, setLinkedDiscussions] = useState<LivePageDiscussionLink[]>([]);
   const [revisions, setRevisions] = useState<LivePageRevision[]>([]);
   const [query, setQuery] = useState('');
@@ -275,6 +278,7 @@ export function PagesPage({
       return;
     }
     setSelectedId(page.id);
+    setPageRunCard(null);
     setLoading(true);
     try {
       await loadDetail(page.id);
@@ -293,16 +297,18 @@ export function PagesPage({
     if (!workflow.enabled || runningWorkflowId) return;
     setRunningWorkflowId(workflow.id);
     setWorkflowRunFeedback(null);
+    setPageRunCard({ id: workflow.id, kind: 'workflow', status: 'queued', freshness: 'unavailable' });
     await workflowsApi.triggerStream(
       workflow.id,
       () => undefined,
       () => undefined,
       result => {
         setRunningWorkflowId(null);
+        setPageRunCard(current => current);
         setWorkflowRunFeedback({
           workflowId: workflow.id,
-          kind: result.status === 'Completed' ? 'success' : 'error',
-          message: result.status === 'Completed'
+          kind: result.status === 'Success' ? 'success' : 'error',
+          message: result.status === 'Success'
             ? t('pages.workflowRunSuccess')
             : t('pages.workflowRunFailed', result.status),
         });
@@ -310,8 +316,18 @@ export function PagesPage({
       },
       message => {
         setRunningWorkflowId(null);
+        setPageRunCard(current => current ? { ...current, status: 'failed', diagnostic: message } : current);
         setWorkflowRunFeedback({ workflowId: workflow.id, kind: 'error', message });
       },
+      undefined,
+      undefined,
+      undefined,
+      runId => setPageRunCard(current => current ? {
+        ...current,
+        id: runId,
+        status: 'running',
+        freshness: 'rehydrated',
+      } : current),
     );
   }, [loadDetail, runningWorkflowId, selectedId, t]);
 
@@ -937,6 +953,7 @@ export function PagesPage({
                         </span>
                       )) : <small>{t('pages.noLinkedWorkflows')}</small>}
                     </div>
+                    {pageRunCard && <RunStatusCard runId={pageRunCard.id === runningWorkflowId ? undefined : pageRunCard.id} model={pageRunCard} />}
 
                     <div className="live-pages-dataset-sizes">
                       <div><Database size={12} /><span>{t('pages.datasetStorage')}</span></div>

@@ -15,6 +15,7 @@ import { TerminalPanel } from '../components/TerminalPanel';
 import { DiscussionPlanPanel } from '../components/DiscussionPlanPanel';
 import { DiscussionSettingsPanel } from '../components/DiscussionSettingsPanel';
 import { DiscussionAssetsPanel } from '../components/DiscussionAssetsPanel';
+import { DiscussionAttachedRuns } from '../components/DiscussionAttachedRuns';
 import { BatchComparePanel } from '../components/BatchComparePanel';
 import { TestModeBanner } from '../components/TestModeBanner';
 import { TestModeModal } from '../components/TestModeModal';
@@ -403,6 +404,12 @@ export function DiscussionsPage({
   const [showPlanPanel, setShowPlanPanel] = useState(false);
   const [showSettingsPanel, setShowSettingsPanel] = useState(false);
   const [showAssetsPanel, setShowAssetsPanel] = useState(false);
+  // KT-243 — carries the target run_id of the latest `shared_run_updated` WS
+  // event so <DiscussionAttachedRuns> can relist only for a run_id it does
+  // not already know (a known run's own card self-hydrates) — this flows
+  // through the page's single existing socket subscription instead of
+  // opening a second one of its own.
+  const [attachedRunsEvent, setAttachedRunsEvent] = useState<{ runId: string; seq: number } | undefined>();
   const [showMessageSearch, setShowMessageSearch] = useState(false);
   const [showDiscussionNotes, setShowDiscussionNotes] = useState<boolean>(() => {
     try { return localStorage.getItem('kronn:showDiscussionNotes') !== 'false'; } catch { return true; }
@@ -1182,6 +1189,13 @@ export function DiscussionsPage({
 
   // WebSocket-based real-time events (presence, chat, invites)
   const handleWsMessage = useCallback((msg: WsMessage) => {
+    // KT-243 — a run attached to some discussion changed; forward the exact
+    // run_id so the attached-runs strip only relists for a run it doesn't
+    // already track (a known run's own card self-hydrates via its own
+    // scoped subscription).
+    if (msg.type === 'shared_run_updated') {
+      setAttachedRunsEvent(prev => ({ runId: msg.run_id, seq: (prev?.seq ?? 0) + 1 }));
+    }
     if (msg.type === 'presence') {
       const contact = contactsList.find(c => c.invite_code === msg.from_invite_code);
       if (contact) {
@@ -3513,6 +3527,13 @@ export function DiscussionsPage({
                 <Loader2 size={13} className="disc-realtime-status-spinner" aria-hidden="true" />
               </div>
             )}
+
+            {/* KT-243 — a run launched elsewhere (QP batch, QA/QE,
+                Workflow) that got attached to this discussion via its
+                discussion_id shows up here automatically, through the
+                shared RunStatusCard/SharedRun model. Self-hides when
+                there are no attached runs. */}
+            <DiscussionAttachedRuns discussionId={activeDiscussion.id} runEvent={attachedRunsEvent} />
 
             {/* 0.8.3 (#280) — Audit-running warning. When an audit
                 is in progress on the same project, Kronn has filtered
