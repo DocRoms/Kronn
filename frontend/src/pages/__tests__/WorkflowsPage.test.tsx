@@ -92,6 +92,22 @@ vi.mock('../../lib/api', () => ({
     export: vi.fn(),
     import: vi.fn(),
   },
+  executionVariables: {
+    preview: vi.fn().mockResolvedValue({
+      run_kind: 'preview',
+      run_id: 'preview-run',
+      metadata: {
+        id: 'preview-snapshot',
+        resolved_at: '2026-09-01T08:00:00Z',
+        expires_at: '2026-09-01T08:10:00Z',
+        purged: false,
+        provenance: [],
+      },
+    }),
+    reveal: vi.fn().mockResolvedValue('project-value'),
+    metadata: vi.fn(),
+    extend: vi.fn(),
+  },
   pages: {
     list: vi.fn().mockResolvedValue([]),
     create: vi.fn(),

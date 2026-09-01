@@ -85,6 +85,16 @@ pub fn has_live_owner(conn: &Connection, run_kind: &str, run_id: &str) -> Result
                 .is_some(),
             None => true,
         },
+        // A preview is an authenticated, opaque and short-lived inspection
+        // surface. It is scoped to the selected project exactly like a QA/QE
+        // run, but is never a durable execution owner.
+        "preview" => match snapshot_project {
+            Some(id) => conn
+                .query_row("SELECT 1 FROM projects WHERE id=?1", [id], |_| Ok(()))
+                .optional()?
+                .is_some(),
+            None => true,
+        },
         _ => false,
     };
     Ok(authorized)
@@ -236,6 +246,22 @@ pub fn load_values(
 
 pub fn purge_expired(conn: &Connection, now: DateTime<Utc>) -> Result<usize> {
     Ok(conn.execute("UPDATE execution_variable_snapshots SET values_encrypted=NULL,purged_at=?1 WHERE values_encrypted IS NOT NULL AND expires_at IS NOT NULL AND expires_at<=?1", [now.to_rfc3339()])?)
+}
+
+/// Bound a launch-preview snapshot to a short window. Preview ciphertext is
+/// diagnostic UI state, not execution history, and can never inherit the
+/// normal 30-day retention policy.
+pub fn set_preview_expiry(
+    conn: &Connection,
+    snapshot_id: &str,
+    expires_at: DateTime<Utc>,
+) -> Result<bool> {
+    Ok(conn.execute(
+        "UPDATE execution_variable_snapshots
+         SET retention_days=0, expires_at=?2
+         WHERE id=?1 AND run_kind='preview'",
+        params![snapshot_id, expires_at.to_rfc3339()],
+    )? > 0)
 }
 
 /// Purge snapshots configured with retention=0 once their owning execution

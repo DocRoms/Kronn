@@ -1540,6 +1540,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         )
         .route("/api/quick-execs/import", post(api::quick_execs::import))
         .route(
+            "/api/execution-context/preview",
+            post(api::execution_variables::preview),
+        )
+        .route(
             "/api/execution-context/{run_kind}/{run_id}",
             get(api::execution_variables::metadata),
         )

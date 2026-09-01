@@ -505,6 +505,7 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
     },
 
     executionVariables: {
+      preview: resolve({ run_kind: 'preview', run_id: 'preview-run', metadata: { id: 'preview-snapshot', resolved_at: '2026-01-01T00:00:00Z', expires_at: '2026-01-01T00:10:00Z', purged: false, provenance: [] } }),
       metadata: resolve({
         run_kind: 'quick_prompt',
         run_id: '',

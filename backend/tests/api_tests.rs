@@ -4333,6 +4333,121 @@ async fn execution_context_http_routes_keep_values_masked_reveal_on_demand_and_a
     assert_eq!(missing["success"], false, "{missing}");
 }
 
+#[tokio::test]
+async fn execution_variable_preview_is_short_lived_masked_and_audited() {
+    let state = test_state();
+    let secret = kronn::core::crypto::generate_secret();
+    state.config.write().await.encryption_secret = Some(secret.clone());
+    let seeded_secret = secret.clone();
+    state
+        .db
+        .with_conn(move |connection| {
+            let now = chrono::Utc::now().to_rfc3339();
+            connection.execute(
+                "INSERT INTO projects (id,name,path,created_at,updated_at)
+                 VALUES ('preview-project','Preview','/tmp/preview',?1,?1)",
+                [&now],
+            )?;
+            kronn::db::mcps::upsert_server(
+                connection,
+                &kronn::models::McpServer {
+                    id: "preview-server".into(),
+                    name: "Preview server".into(),
+                    description: String::new(),
+                    transport: kronn::models::McpTransport::Stdio {
+                        command: "preview".into(),
+                        args: vec![],
+                    },
+                    source: kronn::models::McpSource::Registry,
+                    api_spec: None,
+                },
+            )?;
+            let values =
+                HashMap::from([("API_TOKEN".to_string(), "preview-only-secret".to_string())]);
+            kronn::db::mcps::insert_config(
+                connection,
+                &kronn::models::McpConfig {
+                    id: "preview-config".into(),
+                    server_id: "preview-server".into(),
+                    label: "Preview config".into(),
+                    env_keys: vec!["API_TOKEN".into()],
+                    env_encrypted: kronn::db::mcps::encrypt_env(&values, &seeded_secret).unwrap(),
+                    args_override: None,
+                    is_global: false,
+                    include_general: false,
+                    config_hash: "preview-hash".into(),
+                    project_ids: vec!["preview-project".into()],
+                    host_sync: kronn::models::HostSyncMode::None,
+                },
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    let (status, preview) = post_json(
+        build_router_with_auth(state.clone(), false),
+        "/api/execution-context/preview",
+        serde_json::json!({
+            "project_id": "preview-project",
+            "variables": [{
+                "name": "token",
+                "label": "Token",
+                "placeholder": "",
+                "required": true,
+                "source": "project_env",
+                "source_ref": "<env.API_TOKEN>",
+                "allow_manual_override": false
+            }]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(preview["success"], true, "{preview}");
+    assert!(!preview.to_string().contains("preview-only-secret"));
+    assert_eq!(preview["data"]["run_kind"], "preview");
+    assert_eq!(
+        preview["data"]["metadata"]["provenance"][0]["name"],
+        "token"
+    );
+    let run_id = preview["data"]["run_id"].as_str().unwrap().to_string();
+    let route = format!("/api/execution-context/preview/{run_id}");
+
+    let (_, revealed) = post_json(
+        build_router_with_auth(state.clone(), false),
+        &format!("{route}/reveal"),
+        serde_json::json!({ "variable": "token" }),
+    )
+    .await;
+    assert_eq!(revealed["data"], "preview-only-secret");
+
+    let (_, refused_extension) = post_json(
+        build_router_with_auth(state.clone(), false),
+        &format!("{route}/extend"),
+        serde_json::json!({ "days": 30 }),
+    )
+    .await;
+    assert_eq!(refused_extension["success"], false);
+
+    let (retention_days, reveal_audits): (u32, i64) = state
+        .db
+        .with_conn(move |connection| {
+            connection.query_row(
+                "SELECT s.retention_days,
+                        (SELECT COUNT(*) FROM execution_variable_reveal_audit a WHERE a.snapshot_id=s.id)
+                 FROM execution_variable_snapshots s
+                 WHERE s.run_kind='preview' AND s.run_id=?1",
+                [&run_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(Into::into)
+        })
+        .await
+        .unwrap();
+    assert_eq!(retention_days, 0);
+    assert_eq!(reveal_audits, 1);
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // Workflows endpoint tests
 // ═══════════════════════════════════════════════════════════════════════════════
