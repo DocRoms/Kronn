@@ -1256,7 +1256,7 @@ async fn make_agent_stream_inner(
         let config = state.config.read().await;
         crate::agents::agent_auth_status(&agent_type, &config)
     };
-    if !auth_status.ready {
+    if auth_status.ready == Some(false) {
         let persisted_error =
             auth_required_system_message(&agent_type, &disc.language, auth_status.setup_command);
         let safe_error = persisted_error.content.clone();

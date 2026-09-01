@@ -217,11 +217,13 @@ async fn delete_manual_removes_the_opencode_entry() {
 
 /// DoD 1/6: end-to-end through `/api/agents` — OpenCode must surface as its
 /// own identity (never dropped, never merged into `Custom`) with a real,
-/// actionable auth hint rather than a generic always-ready default. The
+/// actionable setup hint rather than a generic always-ready default. The
 /// `installed` flag itself depends on the host running this test (a dev
 /// machine may have `opencode` on PATH), so it is deliberately not asserted
-/// here — the deterministic "no auth file → not ready" case is covered at
-/// the unit level (`agents::tests::opencode_without_auth_file_reports_setup_requirement`).
+/// here — the auth-signal cases (missing/invalid file stays "unknown, not
+/// blocked"; a real auth file is confirmed ready) are covered at the unit
+/// level (`agents::tests::opencode_missing_auth_file_is_unknown_not_blocked`,
+/// `agents::tests::opencode_with_auth_file_is_confirmed_ready`).
 #[tokio::test]
 async fn agents_endpoint_reports_opencode_with_a_real_auth_hint() {
     let app = test_app();
