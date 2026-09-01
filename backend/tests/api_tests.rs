@@ -3,7 +3,7 @@
 //! These tests exercise the full HTTP layer (router + handlers + DB)
 //! using `tower::ServiceExt::oneshot` with an in-memory SQLite database.
 
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use axum::{
     body::Body,
@@ -4174,6 +4174,103 @@ async fn project_docker_routes_return_a_safe_empty_state_without_compose() {
     assert!(action["error"]
         .as_str()
         .is_some_and(|error| error.contains("Compose")));
+}
+
+#[tokio::test]
+async fn execution_context_http_routes_keep_values_masked_reveal_on_demand_and_audit_extension() {
+    let state = test_state();
+    let secret = kronn::core::crypto::generate_secret();
+    state.config.write().await.encryption_secret = Some(secret.clone());
+    let key = kronn::core::crypto::parse_secret(&secret).unwrap();
+    let now = chrono::Utc::now();
+    let values = HashMap::from([("token".to_string(), "http-secret-value".to_string())]);
+    let provenance = vec![kronn::core::execution_variables::VariableProvenance {
+        name: "token".into(),
+        source: kronn::models::PromptVariableSource::ProjectEnv,
+        source_ref: Some("<env.API_TOKEN>".into()),
+        effective_source_ref: "mcp:test".into(),
+        overridden: false,
+    }];
+    let snapshot_id = state
+        .db
+        .with_conn(move |connection| {
+            kronn::db::execution_variable_snapshots::insert(
+                connection,
+                kronn::db::execution_variable_snapshots::NewSnapshot {
+                    run_kind: "quick_exec",
+                    run_id: "qe-http-run",
+                    project_id: None,
+                    environment_ref: "project_mcp_configs",
+                    resolved_at: now,
+                    retention_days: 30,
+                    expires_at: Some(now + chrono::Duration::days(30)),
+                    values: &values,
+                    provenance: &provenance,
+                },
+                &key,
+            )
+        })
+        .await
+        .unwrap();
+    let route = "/api/execution-context/quick_exec/qe-http-run";
+
+    let (status, metadata) = get_json(build_router_with_auth(state.clone(), false), route).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(metadata["success"], true, "{metadata}");
+    assert_eq!(metadata["data"]["id"], snapshot_id);
+    assert_eq!(metadata["data"]["purged"], false);
+    assert_eq!(metadata["data"]["provenance"][0]["name"], "token");
+    assert!(
+        !metadata.to_string().contains("http-secret-value"),
+        "metadata leaked the encrypted value: {metadata}"
+    );
+
+    let (status, revealed) = post_json(
+        build_router_with_auth(state.clone(), false),
+        &format!("{route}/reveal"),
+        serde_json::json!({ "variable": "token" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(revealed["success"], true, "{revealed}");
+    assert_eq!(revealed["data"], "http-secret-value");
+
+    let (status, extended) = post_json(
+        build_router_with_auth(state.clone(), false),
+        &format!("{route}/extend"),
+        serde_json::json!({ "days": 45 }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(extended["success"], true, "{extended}");
+
+    let (reveal_audits, retention_audits): (i64, i64) = state
+        .db
+        .with_conn(move |connection| {
+            Ok((
+                connection.query_row(
+                    "SELECT COUNT(*) FROM execution_variable_reveal_audit WHERE snapshot_id=?1 AND variable_name='token'",
+                    [&snapshot_id],
+                    |row| row.get(0),
+                )?,
+                connection.query_row(
+                    "SELECT COUNT(*) FROM execution_variable_retention_audit WHERE snapshot_id=?1",
+                    [&snapshot_id],
+                    |row| row.get(0),
+                )?,
+            ))
+        })
+        .await
+        .unwrap();
+    assert_eq!(reveal_audits, 1);
+    assert_eq!(retention_audits, 1);
+
+    let (_, missing) = get_json(
+        build_router_with_auth(state, false),
+        "/api/execution-context/quick_exec/unknown-run",
+    )
+    .await;
+    assert_eq!(missing["success"], false, "{missing}");
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
