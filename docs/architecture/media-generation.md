@@ -22,11 +22,30 @@ client cannot bill a model the operator did not configure.
 The slots themselves are selected from the shared capability-bearing model
 catalog after a successful connection test. OpenRouter is queried through its
 three real catalog routes: chat (`/v1/models`), image
-(`/v1/images/models`) and video (`/v1/videos/models`). The Image picker only
-shows records confirmed with `image`; Video only records confirmed with
-`video`. A formerly saved id that is no longer detected stays visible as
-unavailable, but is neither presented nor persisted as a detected capability.
-NVIDIA model records follow the same output-capability parsing contract.
+(`/v1/images/models`) and video (`/v1/videos/models`), and its `/v1/models`
+entries carry `architecture.output_modalities` — real per-model evidence. The
+Image picker only shows records confirmed with `image`; Video only records
+confirmed with `video`. A formerly saved id that is no longer detected stays
+visible as unavailable, but is neither presented nor persisted as a detected
+capability.
+
+NVIDIA's `/v1/models` carries none of that: every entry — image and video
+models included — comes back shaped exactly like a chat model. Treating an
+undeclared modality as "not media-capable" hid every real NVIDIA image/video
+model behind a filter that was always empty (KT-531). The picker instead
+reads catalog evidence per connection — `image_capability_known` /
+`video_capability_known` on the test response, true only when
+`output_modalities` was actually seen or a dedicated capability endpoint
+answered — and renders one of three states, never a name/vendor/id-prefix
+guess:
+
+* **known** — filter strictly to the declared capability (OpenRouter, and any
+  future provider whose catalog does the same);
+* **unknown** — no modality evidence at all: show the full catalog behind an
+  explicit warning, keep search and free-text entry, never touch a saved
+  value;
+* **unsupported** — the catalog does declare capabilities and none match: the
+  slot has no compatible model, stated plainly instead of an empty dropdown.
 
 ## Not OpenAI-compatible
 

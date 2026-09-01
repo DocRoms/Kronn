@@ -7,6 +7,9 @@ export interface SearchableSelectOption {
   keywords?: string;
   description?: string;
   disabled?: boolean;
+  /** Synthetic "use what I typed" entry added by `allowCustomValue`, not a
+   *  catalogue result. Callers can target it (styling, tests) via this flag. */
+  custom?: boolean;
 }
 
 interface SearchableSelectProps {
@@ -23,6 +26,12 @@ interface SearchableSelectProps {
   className?: string;
   dataModelTierAgent?: string;
   dataModelTier?: string;
+  /** Offer the typed query itself as a selectable entry when it matches no
+   *  option. For a catalogue that cannot prove or disprove compatibility
+   *  (KT-531), the operator must still be able to name an exact model id the
+   *  list does not carry — never just a fixed set of detected values. */
+  allowCustomValue?: boolean;
+  customValueHint?: string;
 }
 
 export function SearchableSelect({
@@ -39,6 +48,8 @@ export function SearchableSelect({
   className,
   dataModelTierAgent,
   dataModelTier,
+  allowCustomValue = false,
+  customValueHint,
 }: SearchableSelectProps) {
   const listId = useId();
   const rootRef = useRef<HTMLDivElement>(null);
@@ -55,11 +66,24 @@ export function SearchableSelect({
       || option.keywords?.toLocaleLowerCase().includes(normalizedQuery)
     ));
   }, [normalizedQuery, options]);
-  const displayedOptions = useMemo(() => (
-    clearLabel && !normalizedQuery
+  const trimmedQuery = query.trim();
+  const displayedOptions = useMemo(() => {
+    const base = clearLabel && !normalizedQuery
       ? [{ value: '', label: clearLabel } satisfies SearchableSelectOption, ...filtered]
-      : filtered
-  ), [clearLabel, filtered, normalizedQuery]);
+      : filtered;
+    const hasExactMatch = options.some(option => (
+      option.value.toLocaleLowerCase() === normalizedQuery
+      || option.label.toLocaleLowerCase() === normalizedQuery
+    ));
+    if (!allowCustomValue || !trimmedQuery || hasExactMatch) return base;
+    const customOption: SearchableSelectOption = {
+      value: trimmedQuery,
+      label: trimmedQuery,
+      description: customValueHint,
+      custom: true,
+    };
+    return [...base, customOption];
+  }, [allowCustomValue, clearLabel, customValueHint, filtered, normalizedQuery, options, trimmedQuery]);
 
   const firstEnabledIndex = displayedOptions.findIndex(option => !option.disabled);
   const resolvedActiveIndex = displayedOptions[activeIndex] && !displayedOptions[activeIndex].disabled
@@ -180,7 +204,7 @@ export function SearchableSelect({
               id={`${listId}-${index}`}
               type="button"
               role="option"
-              aria-label={option.label}
+              aria-label={option.custom && option.description ? `${option.label} — ${option.description}` : option.label}
               aria-selected={option.value === value}
               aria-disabled={option.disabled || undefined}
               disabled={option.disabled}
@@ -188,6 +212,7 @@ export function SearchableSelect({
               data-active={index === resolvedActiveIndex}
               data-disabled={option.disabled || undefined}
               data-value={option.value}
+              data-custom={option.custom || undefined}
               onMouseEnter={() => { if (!option.disabled) setActiveIndex(index); }}
               onMouseDown={event => event.preventDefault()}
               onClick={() => choose(option)}
