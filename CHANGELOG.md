@@ -48,6 +48,21 @@ Release notes for 0.9.3 and earlier are available in the
   CLI session without reusing it across projects. See
   `docs/operations/acp-adapters.md`.
 
+- A dedicated `http_transport` module now owns the seam between LiteLLM,
+  NVIDIA and named Custom connections and the shared OpenAI-compatible chat
+  codec, kept deliberately separate from the ACP boundary (`docs/design/
+  adr-004-http-transport.md`). The OpenAI Chat codec selection is an explicit,
+  single decision point; a model the catalog marks image/video-only is now
+  refused before dispatch with a diagnostic, never sent to the wrong endpoint.
+  Discussions persist a sticky named connection (`discussions.connection_id`)
+  so an ordinary reply with no explicit `@mention` keeps resolving through the
+  same connection instead of losing it — previously only the very first
+  message of a Custom-connection discussion reliably carried its target.
+  Compare's AI judge/prompt-improver launch and multi-agent orchestration
+  debates can now address a specific named connection instead of only a bare
+  agent type, with the same connection-mismatch validation Quick Prompts
+  already apply. See `docs/operations/http-transport.md`.
+
 ### Fixed
 
 - A Page's inline Kronn action CTAs (`data-kronn-action`) now work from the

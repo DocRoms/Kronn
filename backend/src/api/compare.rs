@@ -573,6 +573,9 @@ pub async fn start_judge(
         reply_to_message_id: None,
     };
     let discussion = Discussion {
+        // KT-545 — the judge discussion's sticky connection, so a follow-up
+        // turn (if any) keeps dispatching through the same named connection.
+        connection_id: connection_id.clone(),
         awaiting_agent: false,
         agent_running: false,
         id: judge_discussion_id.clone(),
@@ -759,6 +762,8 @@ pub async fn start_improvement(
         .map(|discussion| discussion.language.clone())
         .unwrap_or_else(|| "fr".into());
     let discussion = Discussion {
+        // KT-545 — see the judge discussion above.
+        connection_id: connection_id.clone(),
         awaiting_agent: false,
         agent_running: false,
         id: discussion_id.clone(),

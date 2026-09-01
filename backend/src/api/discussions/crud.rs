@@ -272,6 +272,18 @@ pub async fn create(
         }
     }
 
+    // KT-545 — validate the sticky connection before it is persisted, so a
+    // discussion is never created pointing at a mismatched/missing connection.
+    if let Err(error) = crate::http_transport::validate_connection_target(
+        &state,
+        &req.agent,
+        req.connection_id.as_deref(),
+    )
+    .await
+    {
+        return Json(ApiResponse::err(error));
+    }
+
     // Validate project exists (if specified)
     if let Some(ref pid) = req.project_id {
         let pid = pid.clone();
@@ -361,6 +373,7 @@ pub async fn create(
         project_id: req.project_id,
         title: req.title,
         agent: req.agent.clone(),
+        connection_id: req.connection_id.clone(),
         language,
         participants: initial_participants,
         messages: vec![initial_message.clone()],
@@ -530,6 +543,7 @@ pub async fn update(
     let project_id = req.project_id;
     let tier = req.tier;
     let new_agent = req.agent;
+    let new_connection_id = req.connection_id;
     let summary_strategy = req.summary_strategy;
     let no_agent = req.no_agent;
     let agent_handoffs_disabled = req.agent_handoffs_disabled;
@@ -550,6 +564,39 @@ pub async fn update(
                     pairs.join(", ")
                 )));
             }
+        }
+    }
+
+    // KT-545 — validate a newly-set connection against the effective agent
+    // (the request's own `agent` when switching both together, otherwise the
+    // discussion's current agent) before anything is persisted.
+    if let Some(Some(ref requested_connection_id)) = new_connection_id {
+        let effective_agent = match new_agent.clone() {
+            Some(agent) => Some(agent),
+            None => {
+                let lookup_id = id.clone();
+                state
+                    .db
+                    .with_read_conn(move |conn| {
+                        crate::db::discussions::get_discussion(conn, &lookup_id)
+                    })
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|disc| disc.agent)
+            }
+        };
+        let Some(effective_agent) = effective_agent else {
+            return Json(ApiResponse::err("Discussion not found"));
+        };
+        if let Err(error) = crate::http_transport::validate_connection_target(
+            &state,
+            &effective_agent,
+            Some(requested_connection_id.as_str()),
+        )
+        .await
+        {
+            return Json(ApiResponse::err(error));
         }
     }
 
@@ -598,6 +645,21 @@ pub async fn update(
                     crate::db::discussions::update_discussion_agent(conn, &id, agent)? || updated;
                 // Invalidate summary — new agent has different budget/context
                 crate::db::discussions::invalidate_summary_cache(conn, &id)?;
+                // KT-545 — an agent switch away from Custom with no explicit
+                // connection_id in the same request must not leave a stale
+                // connection pointing at the previous agent.
+                if new_connection_id.is_none() && *agent != AgentType::Custom {
+                    updated =
+                        crate::db::discussions::update_discussion_connection(conn, &id, None)?
+                            || updated;
+                }
+            }
+            if let Some(ref connection_id) = new_connection_id {
+                updated = crate::db::discussions::update_discussion_connection(
+                    conn,
+                    &id,
+                    connection_id.as_deref(),
+                )? || updated;
             }
             if let Some(disabled) = no_agent {
                 updated =

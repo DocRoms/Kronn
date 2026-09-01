@@ -2046,10 +2046,18 @@ export function DiscussionsPage({
   const handleCreateDiscussion = async (config: NewDiscConfig) => {
     let disc;
     try {
+      // KT-545 — the discussion's sticky connection (persisted on the
+      // `discussions` row) comes from whichever initial target is the
+      // primary discussion agent, so ordinary replies with no explicit
+      // @mention keep resolving through the same named connection.
+      const primaryConnectionId = config.initialTargets?.find(
+        target => target.kind === 'discussion_agent' && target.agent_type === config.agent,
+      )?.connection_id ?? null;
       disc = await discussionsApi.create({
         project_id: config.projectId,
         title: config.title,
         agent: config.agent,
+        connection_id: primaryConnectionId,
         language: configLanguage ?? 'fr',
         initial_prompt: config.prompt,
         initial_targets: config.initialTargets ?? config.targetAgents.map(agent => ({

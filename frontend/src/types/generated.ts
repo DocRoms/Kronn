@@ -1226,7 +1226,13 @@ export type CreateAdHocCompareResponse = { run_id: string, };
 
 export type CreateDirectiveRequest = { name: string, description: string, icon: string, category: DirectiveCategory, content: string, conflicts?: Array<string>, };
 
-export type CreateDiscussionRequest = { project_id?: string | null, title: string, agent: AgentType, language?: string, initial_prompt: string,
+export type CreateDiscussionRequest = { project_id?: string | null, title: string, agent: AgentType,
+/**
+ * Named connection backing `agent` (KT-545) — persisted as the
+ * discussion's sticky target so ordinary replies with no explicit
+ * @mention keep dispatching through the same connection.
+ */
+connection_id?: string | null, language?: string, initial_prompt: string,
 /**
  * Explicit recipients of the initial message, including per-agent tier
  * overrides selected from the new-discussion composer.
@@ -1697,7 +1703,15 @@ export type DiscUnlinkRequest = { disc_id: string,
  */
 source_agent?: string | null, source_session_id?: string | null, };
 
-export type Discussion = { id: string, project_id: string | null, title: string, agent: AgentType, language: string, participants: Array<AgentType>, messages: Array<DiscussionMessage>, message_count: number,
+export type Discussion = { id: string, project_id: string | null, title: string, agent: AgentType,
+/**
+ * Named HTTP connection backing `agent` when it is `Custom` (or an
+ * explicit LiteLLM/NVIDIA connection). This is the durable "sticky"
+ * target an ordinary reply with no explicit @mention resolves to —
+ * without it, `canonical_targets`'s implicit discussion-agent routing
+ * has no connection to dispatch through (KT-545 DoD #4).
+ */
+connection_id?: string | null, language: string, participants: Array<AgentType>, messages: Array<DiscussionMessage>, message_count: number,
 /**
  * Subset of `message_count` excluding `MessageRole::System` rows. The
  * streaming layer persists every tool call + every cached-summary
@@ -1825,7 +1839,15 @@ message_targets: { [key in string]: Array<MessageTarget> },
  * message yet. Lets a reconnect render saved text instead of an empty
  * loader while boot recovery/re-dispatch is settling.
  */
-partial_response?: InFlightAgentResponse, id: string, project_id: string | null, title: string, agent: AgentType, language: string, participants: Array<AgentType>, messages: Array<DiscussionMessage>, message_count: number,
+partial_response?: InFlightAgentResponse, id: string, project_id: string | null, title: string, agent: AgentType,
+/**
+ * Named HTTP connection backing `agent` when it is `Custom` (or an
+ * explicit LiteLLM/NVIDIA connection). This is the durable "sticky"
+ * target an ordinary reply with no explicit @mention resolves to —
+ * without it, `canonical_targets`'s implicit discussion-agent routing
+ * has no connection to dispatch through (KT-545 DoD #4).
+ */
+connection_id?: string | null, language: string, participants: Array<AgentType>, messages: Array<DiscussionMessage>, message_count: number,
 /**
  * Subset of `message_count` excluding `MessageRole::System` rows. The
  * streaming layer persists every tool call + every cached-summary
@@ -6066,6 +6088,13 @@ tier?: ModelTier | null,
  * Switch the primary agent for this discussion.
  */
 agent?: AgentType | null,
+/**
+ * Change the sticky named connection (KT-545). `Some(Some("id"))` = set,
+ * `Some(None)` = clear, absent = no change — same convention as
+ * `project_id`. Validated against `agent` (post-update if both are
+ * present in the same request).
+ */
+connection_id?: string | null | null,
 /**
  * Change the auto-summary policy. Persists in `discussions.summary_strategy`.
  */

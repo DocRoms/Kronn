@@ -299,6 +299,7 @@ async fn create_media_discussion(
         reply_to_message_id: None,
     };
     let discussion = Discussion {
+        connection_id: None,
         awaiting_agent: false,
         agent_running: false,
         id: id.clone(),

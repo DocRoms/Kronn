@@ -4938,6 +4938,10 @@ fn worker_target_from_execution(execution: &TaskExecution) -> Result<MessageTarg
 fn build_sub_discussion(prepared: &Prepared, worker: &MessageTarget) -> Discussion {
     let now = chrono::Utc::now();
     Discussion {
+        // KT-545 — the delegated worker's own resolved connection, so a
+        // sub-discussion routed to a named HTTP connection keeps resolving
+        // through it on any turn beyond the initial brief.
+        connection_id: worker.connection_id.clone(),
         awaiting_agent: false,
         agent_running: false,
         id: Uuid::new_v4().to_string(),
@@ -10351,6 +10355,7 @@ mod tests {
     fn plain_discussion(id: &str, project_id: &str) -> Discussion {
         let now = chrono::Utc::now();
         Discussion {
+            connection_id: None,
             awaiting_agent: false,
             agent_running: false,
             id: id.into(),

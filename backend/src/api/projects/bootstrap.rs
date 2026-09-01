@@ -261,6 +261,7 @@ pub async fn bootstrap(
     };
 
     let discussion = Discussion {
+        connection_id: None,
         awaiting_agent: false,
         agent_running: false,
         id: discussion_id.clone(),
