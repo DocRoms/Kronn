@@ -999,6 +999,20 @@ display_alias?: string | null, provenance: ModelProvenance, availability: ModelA
  */
 tier_assignment?: ModelTier | null,
 /**
+ * Coarse cost classification. `None` means neither reconciliation nor an
+ * operator has assessed it — the UI must render this as "unknown", never
+ * as free or paid. Overlay field: survives reconciliation like
+ * `display_alias`/`tier_assignment`.
+ */
+cost_hint?: ModelCostHint | null,
+/**
+ * Free-text confidentiality note (e.g. "routed through a third-party
+ * gateway"). Structural/provider-level, never per-model boilerplate
+ * invented for a specific name. Overlay field, same survival rule as
+ * `cost_hint`.
+ */
+privacy_note?: string | null,
+/**
  * True when this identity was ever created as a manual entry (even if
  * its provenance has since been promoted to `Live` by reconciliation).
  * Kept for the audit trail required by KT-531.
@@ -3360,6 +3374,16 @@ live_refresh_ok: boolean,
  * `Cached`/`Migrated` entries as a current discovery when this is true.
  */
 stale: boolean, last_live_success_at?: string | null, last_attempt_at?: string | null, last_error_reason?: ModelUnavailableReason | null, last_error_detail?: string | null, };
+
+/**
+ * Coarse, catalog-driven cost classification. Never inferred from a
+ * hardcoded model name: `Free`/`Paid` are only set when a discovery or
+ * reconciliation step has an actual structural signal (see
+ * `db::model_catalog::reconcile_live`'s gateway overlay), and an operator can
+ * always override via the manual catalog entry. `Unknown` — not `Paid` — is
+ * the honest default when no such signal exists (KT-543: OpenCode Zen).
+ */
+export type ModelCostHint = "free" | "paid" | "unknown";
 
 export type ModelProvenance = "live" | "cached" | "manual" | "migrated";
 
@@ -6134,7 +6158,17 @@ suggested_skills: Array<string>, };
  * identity, so a caller who wants a different `model_id` must delete and
  * recreate the entry.
  */
-export type UpsertManualModelRequest = { runtime_target_id: string, agent_type: AgentType, model_id: string, display_name: string, capabilities?: Array<string>, reasoning_modes?: Array<string>, default_reasoning_mode?: string | null, tier_assignment?: ModelTier | null, };
+export type UpsertManualModelRequest = { runtime_target_id: string, agent_type: AgentType, model_id: string, display_name: string, capabilities?: Array<string>, reasoning_modes?: Array<string>, default_reasoning_mode?: string | null, tier_assignment?: ModelTier | null,
+/**
+ * Operator override/correction. Unlike `tier_assignment`, `None` here
+ * preserves whatever value already exists (manually set or
+ * auto-derived by reconciliation) instead of clearing it — an unrelated
+ * edit (e.g. renaming the model) must not silently wipe an
+ * auto-detected OpenCode Zen cost/privacy overlay just because the
+ * caller's form doesn't know about this field yet. Send `Some(..)` to
+ * set or correct it.
+ */
+cost_hint?: ModelCostHint | null, privacy_note?: string | null, };
 
 /**
  * A ranked usage entry (for top N lists)

@@ -64,6 +64,24 @@ pub enum ModelUnavailableReason {
     Unsupported,
 }
 
+/// Coarse, catalog-driven cost classification. Never inferred from a
+/// hardcoded model name: `Free`/`Paid` are only set when a discovery or
+/// reconciliation step has an actual structural signal (see
+/// `db::model_catalog::reconcile_live`'s gateway overlay), and an operator can
+/// always override via the manual catalog entry. `Unknown` — not `Paid` — is
+/// the honest default when no such signal exists (KT-543: OpenCode Zen).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum ModelCostHint {
+    /// Currently free to use, including a vendor-flagged temporary
+    /// promotion — the catalog does not distinguish "permanently free" from
+    /// "free for now" because the underlying source usually can't either.
+    Free,
+    Paid,
+    Unknown,
+}
+
 /// One model as Kronn's shared contract sees it. `id` is an opaque encoding
 /// of `(runtime_target_id, model_id)` — stable across reconciliation, free of
 /// delimiter ambiguity and never derived from `display_name`.
@@ -104,6 +122,18 @@ pub struct CatalogModelEntry {
     /// reconciliation the same way `display_alias` does.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tier_assignment: Option<ModelTier>,
+    /// Coarse cost classification. `None` means neither reconciliation nor an
+    /// operator has assessed it — the UI must render this as "unknown", never
+    /// as free or paid. Overlay field: survives reconciliation like
+    /// `display_alias`/`tier_assignment`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_hint: Option<ModelCostHint>,
+    /// Free-text confidentiality note (e.g. "routed through a third-party
+    /// gateway"). Structural/provider-level, never per-model boilerplate
+    /// invented for a specific name. Overlay field, same survival rule as
+    /// `cost_hint`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub privacy_note: Option<String>,
     /// True when this identity was ever created as a manual entry (even if
     /// its provenance has since been promoted to `Live` by reconciliation).
     /// Kept for the audit trail required by KT-531.
@@ -141,6 +171,17 @@ pub struct UpsertManualModelRequest {
     pub default_reasoning_mode: Option<String>,
     #[serde(default)]
     pub tier_assignment: Option<ModelTier>,
+    /// Operator override/correction. Unlike `tier_assignment`, `None` here
+    /// preserves whatever value already exists (manually set or
+    /// auto-derived by reconciliation) instead of clearing it — an unrelated
+    /// edit (e.g. renaming the model) must not silently wipe an
+    /// auto-detected OpenCode Zen cost/privacy overlay just because the
+    /// caller's form doesn't know about this field yet. Send `Some(..)` to
+    /// set or correct it.
+    #[serde(default)]
+    pub cost_hint: Option<ModelCostHint>,
+    #[serde(default)]
+    pub privacy_note: Option<String>,
 }
 
 /// Response for one runtime target — the resolved list plus

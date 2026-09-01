@@ -46,6 +46,20 @@ const snapshot = {
       }],
       live_refresh_ok: false, stale: true,
     },
+    {
+      runtime_target_id: 'agent:opencode',
+      target_label: 'OpenCode',
+      agent_type: 'OpenCode',
+      models: [{
+        id: 'agent:opencode:zen', runtime_target_id: 'agent:opencode', agent_type: 'OpenCode',
+        model_id: 'opencode/big-pickle', display_name: 'Big Pickle', provenance: 'live', availability: 'available',
+        capabilities: ['chat'], reasoning_modes: [], manual_origin: false,
+        cost_hint: 'unknown', privacy_note: 'Routed through OpenCode Zen, a third-party gateway.',
+        first_seen_at: '2026-09-01T00:00:00Z', last_seen_at: '2026-09-01T00:00:00Z',
+        last_checked_at: '2026-09-01T00:00:00Z', created_at: '2026-09-01T00:00:00Z', updated_at: '2026-09-01T00:00:00Z',
+      }],
+      live_refresh_ok: true, stale: false,
+    },
   ],
 };
 
@@ -78,6 +92,37 @@ describe('ModelCatalogSection', () => {
       runtime_target_id: 'http:two',
       agent_type: 'Custom',
       model_id: 'new-model',
+    })));
+  });
+
+  it('shows the catalog-driven cost hint and privacy note for an OpenCode Zen model, never a hardcoded name (KT-543)', async () => {
+    render(<ModelCatalogSection />);
+    const badge = await screen.findByText('modelCatalog.costHint.unknown');
+    expect(badge.getAttribute('data-cost-hint')).toBe('unknown');
+    expect(badge.getAttribute('title')).toBe('Routed through OpenCode Zen, a third-party gateway.');
+    expect(screen.getByText('opencode/big-pickle', { exact: false })).toBeInTheDocument();
+  });
+
+  it('does not render a cost badge for a model with no cost_hint', async () => {
+    render(<ModelCatalogSection />);
+    await screen.findByText('Router one');
+    expect(screen.queryByText('modelCatalog.costHint.free')).toBeNull();
+    expect(screen.queryByText('modelCatalog.costHint.paid')).toBeNull();
+  });
+
+  it('sends the operator-chosen cost hint and privacy note when creating a manual model', async () => {
+    render(<ModelCatalogSection />);
+    await screen.findByText('Router one');
+    fireEvent.click(screen.getByText('modelCatalog.add'));
+    fireEvent.change(screen.getByLabelText('modelCatalog.modelId'), { target: { value: 'new-model' } });
+    fireEvent.change(screen.getByLabelText('modelCatalog.displayName'), { target: { value: 'New model' } });
+    fireEvent.change(screen.getByLabelText('modelCatalog.costHintField'), { target: { value: 'paid' } });
+    fireEvent.change(screen.getByLabelText('modelCatalog.privacyNoteField'), { target: { value: 'Billed per token.' } });
+    fireEvent.click(screen.getByText('common.save'));
+
+    await waitFor(() => expect(createMock).toHaveBeenCalledWith(expect.objectContaining({
+      cost_hint: 'paid',
+      privacy_note: 'Billed per token.',
     })));
   });
 });

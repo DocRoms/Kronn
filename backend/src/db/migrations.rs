@@ -614,6 +614,11 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "162_model_catalog",
         include_str!("sql/162_model_catalog.sql"),
     ),
+    (
+        // 163 reserved for a concurrent KT-368 lot on the integration branch.
+        "164_model_catalog_cost_privacy",
+        include_str!("sql/164_model_catalog_cost_privacy.sql"),
+    ),
 ];
 
 /// Apply one migration inside the caller-owned transaction.
@@ -954,6 +959,44 @@ mod tests {
         let receipt: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM _migrations WHERE name = '162_model_catalog'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(receipt, 1);
+    }
+
+    #[test]
+    fn model_catalog_cost_privacy_upgrades_from_162_model_catalog() {
+        let conn = Connection::open_in_memory().unwrap();
+        let index = MIGRATIONS
+            .iter()
+            .position(|(name, _)| *name == "164_model_catalog_cost_privacy")
+            .expect("cost/privacy overlay migration is registered");
+        let predecessor = MIGRATIONS
+            .get(index.saturating_sub(1))
+            .expect("cost/privacy overlay migration has a predecessor")
+            .0;
+        assert_eq!(predecessor, "162_model_catalog");
+        run_through(&conn, predecessor).unwrap();
+        let column_exists = |name: &str| -> bool {
+            conn.query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('model_catalog_entries') WHERE name = ?1",
+                [name],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        assert!(!column_exists("cost_hint"));
+        assert!(!column_exists("privacy_note"));
+
+        run(&conn).unwrap();
+
+        assert!(column_exists("cost_hint"));
+        assert!(column_exists("privacy_note"));
+        let receipt: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM _migrations WHERE name = '164_model_catalog_cost_privacy'",
                 [],
                 |row| row.get(0),
             )
