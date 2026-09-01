@@ -114,7 +114,8 @@ statistics or infer timings from a different runner class.
 | Review warmup with conditional cleanup/staging | [GitHub Actions run 33416135756](https://github.com/DocRoms/Kronn/actions/runs/33416135756) | Timed out; cache post-step skipped | `test-backend`: 30m21s; cleanup 6m48s, `cargo test` 21m54s, staging cancelled after 1m13s; no hot cache seeded | Unavailable | Unavailable | 0 (warmup, excluded) |
 | Review cold measurement | [GitHub Actions run 33416622439](https://github.com/DocRoms/Kronn/actions/runs/33416622439) | Green | `test-backend`: 16m54s; cleanup 1m16s, `cargo test` 15m22s; compiled artifacts intentionally neither restored nor saved | Unavailable (single sample) | Unavailable (single sample) | 0 (cold, excluded) |
 | Direct bounded v2 cache — first warmup | [GitHub Actions run 33434235499](https://github.com/DocRoms/Kronn/actions/runs/33434235499) | Timed out while uploading the bounded cache | `cargo test` passed in 27m55s and the marker was written; the post-cache upload was cancelled after 1m41s by the former 30-minute job ceiling, so no hot cache was seeded | Unavailable | Unavailable | 0 (warmup, excluded) |
-| Direct bounded v2 cache — warmup/hot after seed-budget fix | Pending protected-branch runs after this change | Required before accepting the corrected SLO evidence | No runner-toolchain cleanup and no debug-tree copy in `test-backend`; warmup validates in-place artifacts, then `actions/cache` gets a bounded 35-minute job budget to finish its one-time save | Unavailable | Unavailable | Unavailable |
+| Direct bounded v2 cache — successful warmup after seed-budget fix | [GitHub Actions run 33438929531](https://github.com/DocRoms/Kronn/actions/runs/33438929531) | Backend green; explicit warmup miss; bounded cache marker and post-job save completed (the aggregate failed only on the subsequently fixed frontend warning budget) | `test-backend`: **24m 25s total**; `cargo test` 21m 22s; bounded cache upload 2m 38s; no runner-toolchain cleanup and no debug-tree copy | Unavailable | Unavailable | 0 (warmup, excluded) |
+| Direct bounded v2 cache — verified hot hit | [GitHub Actions run 33441299481](https://github.com/DocRoms/Kronn/actions/runs/33441299481) | **Green**; explicit compiled-cache hit; every functional, quality, coverage, E2E and portability gate passed | `test-backend`: **13m 16s total**; cache restore 1m 16s; `cargo fmt` 6s; `cargo test` 11m 46s; post-cache step 1s — **1m 44s below the 15-minute SLO** | 13m 16s (1 sample) | 13m 16s (1 sample) | 0 |
 
 The populated rows above are real Actions evidence from this task. The
 17m 32s hot cache-hit run with clippy already moved out still breached the
@@ -123,8 +124,10 @@ unconditionally even though a cache hit needs less headroom) and post-test
 cache staging that re-copies artifacts `actions/cache` will not re-save on an
 exact-key hit. The subsequent review warmup then proved that both costs also
 prevent the first cache from ever being seeded. The v2 layout removes them
-from the measured job in every mode and now needs one warmup followed by a
-true hit to establish the final median and p95 sample.
+from the measured job in every mode. Runs 33438929531 and 33441299481 now prove
+the complete sequence: the bounded warmup survives its post-job save, the next
+run records a verified compiled-cache hit, and the measured backend job falls
+to 13m 16s without removing any blocking functional or quality gate.
 [src: user: 2026-08-31: review reports GitHub Actions runs 33354549462 and 33354667035]
 [src: user: 2026-08-31: reassignment reports GitHub Actions runs 33358154793, 33358156450 and 33368662050]
 [src: user: 2026-08-31: escalation reports GitHub Actions runs 33378197164 and 33378199511 with cargo test 11m58, pre-test overhead 4m13, post-test staging 1m17]
