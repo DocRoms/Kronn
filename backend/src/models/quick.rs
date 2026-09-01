@@ -26,6 +26,32 @@ pub enum PromptVariableSource {
     ProjectEnv,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct PromptVariableOption {
+    /// Stable execution value. Renaming the label never changes run payloads.
+    pub value: String,
+    pub label: String,
+    /// Disabled options remain in version history but cannot be selected by a
+    /// new run.
+    #[serde(default = "default_variable_option_enabled")]
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum PromptVariableControl {
+    Text,
+    Textarea,
+    Select {
+        options: Vec<PromptVariableOption>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        default_value: Option<String>,
+    },
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct PromptVariable {
@@ -62,6 +88,11 @@ pub struct PromptVariable {
     /// explicitly allows an audited launch-time override.
     #[serde(default)]
     pub allow_manual_override: bool,
+    /// Presentation and bounded-value contract. Missing legacy values are
+    /// regular single-line text inputs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub control: Option<PromptVariableControl>,
 }
 
 impl PromptVariable {
@@ -102,6 +133,69 @@ impl PromptVariable {
             }
         }
     }
+
+    pub fn default_input_value(&self) -> Option<&str> {
+        match self.control.as_ref() {
+            Some(PromptVariableControl::Select { default_value, .. }) => default_value.as_deref(),
+            _ => None,
+        }
+    }
+
+    pub fn accepts_value(&self, value: &str) -> bool {
+        match self.control.as_ref() {
+            Some(PromptVariableControl::Select { options, .. }) => options
+                .iter()
+                .any(|option| option.enabled && option.value == value),
+            _ => true,
+        }
+    }
+
+    fn validate_control(&self) -> Result<(), String> {
+        let Some(PromptVariableControl::Select {
+            options,
+            default_value,
+        }) = self.control.as_ref()
+        else {
+            return Ok(());
+        };
+        if options.is_empty() {
+            return Err(format!(
+                "Select variable `{}` must declare at least one option",
+                self.name
+            ));
+        }
+        let mut values = std::collections::HashSet::new();
+        let mut labels = std::collections::HashSet::new();
+        for option in options {
+            if option.value.trim().is_empty()
+                || option.label.trim().is_empty()
+                || !values.insert(option.value.as_str())
+                || !labels.insert(option.label.as_str())
+            {
+                return Err(format!(
+                    "Select variable `{}` requires unique non-empty option values and labels",
+                    self.name
+                ));
+            }
+        }
+        if !options.iter().any(|option| option.enabled) {
+            return Err(format!(
+                "Select variable `{}` must keep at least one active option",
+                self.name
+            ));
+        }
+        if default_value.as_ref().is_some_and(|default| {
+            !options
+                .iter()
+                .any(|option| option.enabled && option.value == *default)
+        }) {
+            return Err(format!(
+                "Select variable `{}` default must reference an active option",
+                self.name
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// A source declaration has no room for a literal.  Keep the accepted syntax
@@ -129,11 +223,16 @@ pub fn validate_prompt_variables(variables: &[PromptVariable]) -> Result<(), Str
             return Err("Variable names must be non-empty and unique".into());
         }
         variable.validate_source()?;
+        variable.validate_control()?;
     }
     Ok(())
 }
 
 fn default_variable_required() -> bool {
+    true
+}
+
+fn default_variable_option_enabled() -> bool {
     true
 }
 
@@ -594,6 +693,7 @@ mod tests {
             source: Some(source),
             source_ref: source_ref.map(str::to_owned),
             allow_manual_override: false,
+            control: None,
         }
     }
 
@@ -635,5 +735,46 @@ mod tests {
         assert!(validate_prompt_variables(&[first.clone(), second]).is_err());
         first.source_ref = Some("<env.123bad>".into());
         assert!(validate_prompt_variables(&[first]).is_err());
+    }
+
+    #[test]
+    fn legacy_variables_default_to_text_and_selects_validate_their_contract() {
+        let legacy: PromptVariable = serde_json::from_value(serde_json::json!({
+            "name": "topic",
+            "label": "Topic",
+            "placeholder": "",
+            "required": true,
+            "source": "user_input",
+            "allow_manual_override": false
+        }))
+        .unwrap();
+        assert!(legacy.control.is_none());
+        assert!(legacy.accepts_value("anything"));
+
+        let mut select = variable(PromptVariableSource::UserInput, None);
+        select.control = Some(PromptVariableControl::Select {
+            options: vec![
+                PromptVariableOption {
+                    value: "fr".into(),
+                    label: "Français".into(),
+                    enabled: true,
+                },
+                PromptVariableOption {
+                    value: "en".into(),
+                    label: "English".into(),
+                    enabled: false,
+                },
+            ],
+            default_value: Some("fr".into()),
+        });
+        assert!(validate_prompt_variables(&[select.clone()]).is_ok());
+        assert!(select.accepts_value("fr"));
+        assert!(!select.accepts_value("en"));
+        assert_eq!(select.default_input_value(), Some("fr"));
+
+        if let Some(PromptVariableControl::Select { default_value, .. }) = select.control.as_mut() {
+            *default_value = Some("en".into());
+        }
+        assert!(validate_prompt_variables(&[select]).is_err());
     }
 }

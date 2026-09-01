@@ -4392,6 +4392,7 @@ mod tests {
                 source: Default::default(),
                 source_ref: None,
                 allow_manual_override: false,
+                control: None,
             }],
             agent: AgentType::ClaudeCode,
             connection_id: None,
@@ -4763,11 +4764,38 @@ mod tests {
     async fn insert_wf_and_run(state: &crate::AppState, wf: &Workflow, run: &WorkflowRun) {
         let wf_db = wf.clone();
         let run_db = run.clone();
+        let run_id = run.id.clone();
+        let project_id = wf.project_id.clone();
+        let secret = state
+            .config
+            .read()
+            .await
+            .encryption_secret
+            .clone()
+            .expect("test encryption secret");
         state
             .db
             .with_conn(move |conn| {
                 crate::db::workflows::insert_workflow(conn, &wf_db)?;
                 crate::db::workflows::insert_run(conn, &run_db)?;
+                let key = crate::core::crypto::parse_secret(&secret).map_err(anyhow::Error::msg)?;
+                let values = std::collections::HashMap::new();
+                let provenance = Vec::new();
+                crate::db::execution_variable_snapshots::insert(
+                    conn,
+                    crate::db::execution_variable_snapshots::NewSnapshot {
+                        run_kind: "workflow",
+                        run_id: &run_id,
+                        project_id: project_id.as_deref(),
+                        environment_ref: "project_mcp_configs",
+                        resolved_at: chrono::Utc::now(),
+                        retention_days: 30,
+                        expires_at: Some(chrono::Utc::now() + chrono::Duration::days(30)),
+                        values: &values,
+                        provenance: &provenance,
+                    },
+                    &key,
+                )?;
                 Ok(())
             })
             .await

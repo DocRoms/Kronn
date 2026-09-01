@@ -280,7 +280,15 @@ pub(crate) fn validate_launch_variables(
         } else {
             &d.label
         };
-        let val = provided.get(&d.name).map(|s| s.trim()).unwrap_or("");
+        let raw = provided.get(&d.name).map(|s| s.trim());
+        let val = raw
+            .filter(|value| !value.is_empty())
+            .or_else(|| {
+                (raw.is_none() || d.required)
+                    .then(|| d.default_input_value())
+                    .flatten()
+            })
+            .unwrap_or("");
         if d.required && val.is_empty() {
             return Err(format!(
                 "Variable « {label} » est obligatoire pour lancer ce workflow."
@@ -288,6 +296,11 @@ pub(crate) fn validate_launch_variables(
         }
         if val.is_empty() {
             continue; // optional + empty → nothing to shape-check
+        }
+        if !d.accepts_value(val) {
+            return Err(format!(
+                "Variable « {label} » utilise une option inactive ou inconnue."
+            ));
         }
         if let Some(pat) = d.pattern.as_deref().filter(|p| !p.trim().is_empty()) {
             match regex_lite::Regex::new(&format!("^(?:{pat})$")) {
@@ -4869,6 +4882,7 @@ mod tests {
             source: Default::default(),
             source_ref: None,
             allow_manual_override: false,
+            control: None,
         }
     }
 
@@ -4909,6 +4923,37 @@ mod tests {
         let mut provided = std::collections::HashMap::new();
         provided.insert("k".to_string(), "anything".to_string());
         assert!(validate_launch_variables(&declared, &provided).is_ok());
+    }
+
+    #[test]
+    fn launch_vars_select_uses_default_and_rejects_inactive_or_unknown_values() {
+        use crate::models::{PromptVariableControl, PromptVariableOption};
+
+        let mut choice = var("target", true, None);
+        choice.control = Some(PromptVariableControl::Select {
+            options: vec![
+                PromptVariableOption {
+                    value: "stable".into(),
+                    label: "Stable".into(),
+                    enabled: true,
+                },
+                PromptVariableOption {
+                    value: "retired".into(),
+                    label: "Retired".into(),
+                    enabled: false,
+                },
+            ],
+            default_value: Some("stable".into()),
+        });
+
+        assert!(validate_launch_variables(&[choice.clone()], &Default::default()).is_ok());
+
+        for rejected in ["retired", "unknown"] {
+            let provided =
+                std::collections::HashMap::from([("target".to_string(), rejected.to_string())]);
+            let error = validate_launch_variables(&[choice.clone()], &provided).unwrap_err();
+            assert!(error.contains("inactive ou inconnue"), "got: {error}");
+        }
     }
 
     #[test]
@@ -5772,6 +5817,7 @@ mod tests {
                 source: Default::default(),
                 source_ref: None,
                 allow_manual_override: false,
+                control: None,
             }],
             agent: AgentType::ClaudeCode,
             connection_id: None,

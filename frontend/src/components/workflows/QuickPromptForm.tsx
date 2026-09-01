@@ -5,6 +5,7 @@ import { config as configApi, ollama as ollamaApi } from '../../lib/api';
 import { AgentSwitchPicker } from '../AgentSwitchPicker';
 import type { AgentSwitchTarget } from '../AgentSwitchPicker';
 import { SearchableSelect } from '../SearchableSelect';
+import { PromptVariableControlEditor } from './PromptVariableControlEditor';
 import type {
   QuickPrompt,
   PromptVariable,
@@ -439,6 +440,10 @@ export function QuickPromptForm({
                 onChange={e => setVariables(prev => prev.map((pv, j) => j === i ? { ...pv, description: e.target.value || null } : pv))}
                 placeholder={t('qp.varDescriptionPlaceholder')}
                 style={{ fontSize: 12, opacity: 0.85 }}
+              />
+              <PromptVariableControlEditor
+                variable={v}
+                onChange={variable => setVariables(previous => previous.map((item, index) => index === i ? variable : item))}
               />
             </div>
           ))}
