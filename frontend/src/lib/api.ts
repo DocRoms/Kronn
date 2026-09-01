@@ -40,6 +40,8 @@ import type {
   DiscussionNativeAgentMode,
   DiscussionAgentHandoffMode,
   DiscussionExecutionVariableRetention,
+  DiscussionAction,
+  LaunchDiscussionActionRequest,
   DiscussionMeta,
   DiscussionSession,
   DiscussionWorkspace,
@@ -1883,6 +1885,20 @@ export const discussions = {
 
     done();
   },
+};
+
+/** Durable, human-gated actions proposed by an agent inside a discussion.
+ * The backend validates and persists the typed action when the source message
+ * is inserted; the frontend only reads this registry and launches by id. */
+export const discussionActions = {
+  list: (discussionId: string) =>
+    api<DiscussionAction[]>('GET', `/discussions/${encodeURIComponent(discussionId)}/actions`),
+  get: (actionId: string) =>
+    api<DiscussionAction>('GET', `/discussion-actions/${encodeURIComponent(actionId)}`),
+  cancel: (actionId: string) =>
+    api<DiscussionAction>('POST', `/discussion-actions/${encodeURIComponent(actionId)}/cancel`, {}),
+  launch: (actionId: string, request: LaunchDiscussionActionRequest) =>
+    api<DiscussionAction>('POST', `/discussion-actions/${encodeURIComponent(actionId)}/launch`, request),
 };
 
 export interface PlanningTaskListFilters {

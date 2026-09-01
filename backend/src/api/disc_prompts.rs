@@ -457,6 +457,16 @@ pub fn build_agent_prompt(
         )
     };
 
+    let automation_action_notice = if agent_speaks_mcp || agent_has_native_planning {
+        match disc.language.as_str() {
+            "fr" => "Actions Automatisation — si une action QP, QA, QE ou Workflow existante serait une suite utile, résous d'abord son vrai id et son contrat de variables avec les outils de catalogue/get. Propose-la sans l'exécuter avec exactement un bloc `kronn-action` : `{\"kind\":\"quick_prompt|quick_api|quick_exec|workflow\",\"target_id\":\"<id réel>\",\"project_id\":\"<id optionnel>\",\"values\":[{\"name\":\"<variable déclarée>\",\"value\":\"<suggestion éditable>\",\"provenance\":\"agent_suggestion\",\"suggested_by\":\"<ton alias>\"}]}`. Kronn valide et persiste la proposition ; seul le clic humain la lance. N'invente jamais d'id ou de variable et n'inclus jamais une valeur secrète/résolue.\n\n",
+            "es" => "Acciones de Automatización — si un QP, QA, QE o Workflow existente sería un siguiente paso útil, resuelve primero su id real y su contrato de variables con las herramientas de catálogo/get. Propónlo sin ejecutarlo en un único bloque `kronn-action`: `{\"kind\":\"quick_prompt|quick_api|quick_exec|workflow\",\"target_id\":\"<id real>\",\"project_id\":\"<id opcional>\",\"values\":[{\"name\":\"<variable declarada>\",\"value\":\"<sugerencia editable>\",\"provenance\":\"agent_suggestion\",\"suggested_by\":\"<tu alias>\"}]}`. Kronn valida y persiste la propuesta; solo el clic humano la inicia. Nunca inventes ids o variables ni incluyas valores secretos/resueltos.\n\n",
+            _ => "Automation actions — when an existing QP, QA, QE or Workflow would be a useful next step, first resolve its real id and variable contract through the catalogue/get tools. Propose it without executing it in exactly one `kronn-action` fence: `{\"kind\":\"quick_prompt|quick_api|quick_exec|workflow\",\"target_id\":\"<real id>\",\"project_id\":\"<optional id>\",\"values\":[{\"name\":\"<declared variable>\",\"value\":\"<editable suggestion>\",\"provenance\":\"agent_suggestion\",\"suggested_by\":\"<your alias>\"}]}`. Kronn validates and persists the proposal; only the human click launches it. Never invent ids or variables, and never include a secret/resolved value.\n\n",
+        }
+    } else {
+        ""
+    };
+
     let has_task_execution_tools = agent_speaks_mcp || agent_has_native_planning;
     let task_execution_notice = if has_task_execution_tools {
         match disc.language.as_str() {
@@ -563,10 +573,11 @@ pub fn build_agent_prompt(
         // Language instruction at end only — LLMs weight recent text more heavily,
         // and MCP context is injected via --append-system-prompt (separate from prompt).
         return format!(
-            "{}{}{}{}{}{}{}\n\n{}",
+            "{}{}{}{}{}{}{}{}\n\n{}",
             title_ctx,
             worktree_notice,
             planning_notice,
+            automation_action_notice,
             task_execution_notice,
             continuation_notice,
             rich_output_notice,
@@ -629,10 +640,11 @@ pub fn build_agent_prompt(
         ""
     };
     let header = format!(
-        "{}{}{}{}{}{}{}{}{}",
+        "{}{}{}{}{}{}{}{}{}{}",
         title_ctx,
         worktree_notice,
         planning_notice,
+        automation_action_notice,
         task_execution_notice,
         continuation_notice,
         rich_output_notice,
@@ -1025,6 +1037,18 @@ mod tests {
         assert!(prompt.contains("cannot call Planning tools directly"));
         assert!(prompt.contains("`kronn-plan-action`"));
         assert!(prompt.contains("human validation"));
+    }
+
+    #[test]
+    fn capable_agent_gets_the_typed_human_gated_automation_action_contract() {
+        let disc = disc_with_messages(vec![user_msg("Suggest the next automation")], "en");
+        let prompt = build_agent_prompt(&disc, &AgentType::ClaudeCode, 0);
+
+        assert!(prompt.contains("`kronn-action`"));
+        assert!(prompt.contains("quick_prompt|quick_api|quick_exec|workflow"));
+        assert!(prompt.contains("agent_suggestion"));
+        assert!(prompt.contains("only the human click launches it"));
+        assert!(prompt.contains("Never invent ids or variables"));
     }
 
     #[test]

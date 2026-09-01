@@ -1707,6 +1707,22 @@ test_mode_restore_branch?: string | null,
  */
 test_mode_stash_ref?: string | null, created_at: string, updated_at: string, };
 
+export type DiscussionAction = { id: string, discussion_id: string, source_message_id: string, fence_index: number, kind: DiscussionActionKind, target_id: string, target_name: string, project_id: string | null, state: DiscussionActionState, values: Array<DiscussionActionValue>, shared_run_id: string | null, result_discussion_id: string | null, deep_link: string | null, diagnostic: string | null, launched_at: string | null, finished_at: string | null, created_at: string, updated_at: string, };
+
+export type DiscussionActionKind = "quick_prompt" | "quick_api" | "quick_exec" | "workflow" | "invalid";
+
+export type DiscussionActionState = "proposed" | "launching" | "running" | "succeeded" | "failed" | "cancelled" | "preflight_failed";
+
+export type DiscussionActionValue = { name: string, label: string, placeholder: string, description: string | null, required: boolean, control?: PromptVariableControl,
+/**
+ * Mirrors `PromptVariable::allow_manual_override` from the target's own
+ * declaration: whether a `project_env`/`kronn_context` value may be
+ * optionally overridden at launch instead of always being read-only.
+ */
+allow_manual_override: boolean, provenance: DiscussionActionValueProvenance, value?: string, source_ref?: string, suggested_by?: string, suggested_value?: string, };
+
+export type DiscussionActionValueProvenance = "user_input" | "agent_suggestion" | "kronn_context" | "project_env";
+
 export type DiscussionAgentHandoffMode = { global_enabled: boolean, disabled: boolean, unlimited_override: boolean, effective_enabled: boolean,
 /**
  * `None` means no financial quota; structural loop guards still apply.
@@ -2687,6 +2703,8 @@ custom_prompt?: string | null,
  * oversize, and no way to graft a checkpoint onto the wrong pipeline.
  */
 resume_run_id?: string | null, };
+
+export type LaunchDiscussionActionRequest = { variables?: Record<string, string>, };
 
 /**
  * The versioned, backward-compatible wire response for a single-task launch —

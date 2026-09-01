@@ -339,6 +339,7 @@ pub async fn run_qa(
     Path(id): Path<String>,
     Json(req): Json<RunQuickApiRequest>,
 ) -> Json<ApiResponse<RunQuickApiResponse>> {
+    let launch = req.launch.clone().unwrap_or_default();
     let run_id = Uuid::new_v4().to_string();
     let created_at = Utc::now();
     let queued = crate::models::SharedRun {
@@ -346,7 +347,7 @@ pub async fn run_qa(
         kind: crate::models::SharedRunKind::QuickApi,
         source_id: id.clone(),
         project_id: None,
-        discussion_id: None,
+        discussion_id: launch.discussion_id.clone(),
         status: crate::models::SharedRunStatus::Queued,
         started_at: None,
         finished_at: None,
@@ -378,6 +379,7 @@ pub async fn run_qa(
                 &state,
                 &id,
                 None,
+                launch.discussion_id.clone(),
                 created_at,
                 &response,
                 crate::models::SharedRunStatus::PreflightFailed,
@@ -390,7 +392,12 @@ pub async fn run_qa(
         }
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
     };
-    let shared_project_id = qa.project_id.clone();
+    // A GLOBAL Quick API launched from a project-scoped discussion resolves
+    // that project's environment/broker config exactly like one declared on
+    // the project directly (KT-476 LaunchContext).
+    let shared_project_id = launch
+        .effective_project_id(qa.project_id.as_deref())
+        .map(str::to_owned);
 
     let (secret, retention_days) = {
         let config = state.config.read().await;
@@ -406,6 +413,7 @@ pub async fn run_qa(
                 &state,
                 &id,
                 shared_project_id.clone(),
+                launch.discussion_id.clone(),
                 created_at,
                 &response,
                 crate::models::SharedRunStatus::PreflightFailed,
@@ -417,7 +425,9 @@ pub async fn run_qa(
     };
     let declarations = qa.variables.clone();
     let supplied = req.variables.clone();
-    let project_id = qa.project_id.clone();
+    let project_id = shared_project_id.clone();
+    let launch_context = launch.context.clone();
+    let launch_discussion_id = launch.discussion_id.clone();
     let snapshot_run_id = req
         .workflow_run_id
         .clone()
@@ -437,9 +447,9 @@ pub async fn run_qa(
                 crate::core::execution_variables::PrepareRequest {
                     declarations: &declarations,
                     supplied: &supplied,
-                    context: &std::collections::HashMap::new(),
+                    context: &launch_context,
                     project_id: project_id.as_deref(),
-                    discussion_id: None,
+                    discussion_id: launch_discussion_id.as_deref(),
                     environment_ref: "project_mcp_configs",
                     run_kind: snapshot_run_kind,
                     run_id: &prepared_snapshot_run_id,
@@ -466,6 +476,7 @@ pub async fn run_qa(
                 &state,
                 &id,
                 shared_project_id.clone(),
+                launch.discussion_id.clone(),
                 created_at,
                 &response,
                 crate::models::SharedRunStatus::PreflightFailed,
@@ -571,7 +582,7 @@ pub async fn run_qa(
         kind: crate::models::SharedRunKind::QuickApi,
         source_id: id.clone(),
         project_id: shared_project_id.clone(),
-        discussion_id: None,
+        discussion_id: launch.discussion_id.clone(),
         status: crate::models::SharedRunStatus::Running,
         started_at: Some(running_at),
         finished_at: None,
@@ -586,7 +597,7 @@ pub async fn run_qa(
     }
     let outcome = crate::workflows::api_call_executor::execute_api_call_step_with_db_as(
         &step,
-        qa.project_id.as_deref(),
+        shared_project_id.as_deref(),
         &state,
         &ctx,
         crate::workflows::api_call_executor::SecurityPolicy::production(),
@@ -662,6 +673,7 @@ pub async fn run_qa(
         &state,
         &id,
         shared_project_id,
+        launch.discussion_id.clone(),
         created_at,
         &response,
         terminal_status,
@@ -677,6 +689,7 @@ async fn persist_quick_api_terminal(
     state: &AppState,
     source_id: &str,
     project_id: Option<String>,
+    discussion_id: Option<String>,
     created_at: chrono::DateTime<Utc>,
     response: &RunQuickApiResponse,
     status: crate::models::SharedRunStatus,
@@ -687,7 +700,7 @@ async fn persist_quick_api_terminal(
         kind: crate::models::SharedRunKind::QuickApi,
         source_id: source_id.into(),
         project_id,
-        discussion_id: None,
+        discussion_id,
         status,
         started_at: (response.duration_ms > 0)
             .then_some(now - chrono::Duration::milliseconds(response.duration_ms as i64)),

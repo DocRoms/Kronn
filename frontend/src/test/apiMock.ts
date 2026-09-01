@@ -40,6 +40,7 @@ export const API_NAMESPACES = [
   'agents',
   'mcps',
   'discussions',
+  'discussionActions',
   'planning',
   'workflows',
   'pages',
@@ -99,6 +100,7 @@ interface DefaultMock {
   agents: Record<string, AnyFn>;
   mcps: Record<string, AnyFn>;
   discussions: Record<string, AnyFn>;
+  discussionActions: Record<string, AnyFn>;
   planning: Record<string, AnyFn>;
   workflows: Record<string, AnyFn>;
   pages: Record<string, AnyFn>;
@@ -731,6 +733,12 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
     // coverage figure, and "no sessions" is the honest neutral state.
     telemetry: {
       coverage: resolve([]),
+    },
+    discussionActions: {
+      list: resolve([]),
+      get: resolve(null),
+      cancel: resolve(null),
+      launch: resolve(null),
     },
     // KT-243 — empty by default: a card with no runId/model mounts clean.
     runsApi: {

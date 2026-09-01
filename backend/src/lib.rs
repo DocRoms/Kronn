@@ -1541,6 +1541,22 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route("/api/runs", get(api::shared_runs::list))
         .route("/api/runs/{id}", get(api::shared_runs::get))
         .route(
+            "/api/discussions/{id}/actions",
+            get(api::discussion_actions::list_for_discussion),
+        )
+        .route(
+            "/api/discussion-actions/{id}",
+            get(api::discussion_actions::get),
+        )
+        .route(
+            "/api/discussion-actions/{id}/cancel",
+            post(api::discussion_actions::cancel),
+        )
+        .route(
+            "/api/discussion-actions/{id}/launch",
+            post(api::discussion_actions::launch),
+        )
+        .route(
             "/api/quick-execs/{id}/export",
             get(api::quick_execs::export),
         )

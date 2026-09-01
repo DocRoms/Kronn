@@ -616,7 +616,47 @@ These shape engine behavior across the whole run.
 | `artifacts` | object | `Record<artifact_name, { path, format? }>`. Declares files agents may persist via `---ARTIFACT:name---...---END_ARTIFACT---` in their output. Path is workspace-relative (no absolute, no `..`) |
 | `on_failure` | array of WorkflowStep | Rollback chain. **Fires only on `Failed`** (not Cancelled, not StoppedByGuard, not Gate reject). `Gate` is forbidden inside (deadlock). Each rollback step sees `{{failed_step.name}}` and `{{failed_step.output}}` |
 | `exec_allowlist` | array of string | Binaries that `Exec` steps may invoke for this workflow. Empty = Exec disabled (the safe default). Match is exact on the bare binary name (no path, no glob, no shell metas) |
-| `variables` | array of PromptVariable | Manual launch variables (mirrors Quick Prompts). When trigger is Manual + this is non-empty, the launch UI shows a form. Values become `{{var_name}}` in step prompts |
+| `variables` | array of PromptVariable | Run inputs shared by Workflow/QP/QA/QE. Each declaration chooses `user_input`, `project_env`, or `kronn_context`; values become `{{var_name}}` in step prompts |
+
+### PromptVariable sources — references, never captured values
+
+Every variable uses this declarative shape:
+
+```json
+{
+  "name": "api_token",
+  "label": "API token",
+  "placeholder": "",
+  "description": "Credential used by the project API",
+  "required": true,
+  "source": "project_env",
+  "source_ref": "<env.API_TOKEN>",
+  "allow_manual_override": false,
+  "control": { "type": "text" }
+}
+```
+
+- `user_input` (the backward-compatible default): the operator fills the value
+  for this launch. `source_ref` is omitted.
+- `project_env`: Kronn reads `<env.NAME>` from exactly one encrypted MCP
+  configuration active for the workflow project. The Workflow/QP/QA/QE must be
+  project-bound. Inspect `mcp_list.configs[].project_ids`, `env_keys`, and
+  `secrets_broken` before proposing the reference; never guess a key.
+- `kronn_context`: Kronn reads an allowlisted scalar such as
+  `<context.issue_key>` from the execution context. Never use it as an arbitrary
+  object or secret store.
+
+Definitions, versions and exports retain only `source_ref`. Kronn resolves the
+current value again immediately before every new run, then encrypts one immutable
+snapshot for that run so Gate/resume and later steps stay deterministic. Therefore
+never paste a real, masked, or previously observed value into the workflow JSON.
+When a key changed since the workflow was authored, the next run intentionally
+uses the new value. Missing project scope, absent/ambiguous keys, broken secrets,
+and unavailable context fail preflight before any step executes.
+
+`allow_manual_override` is opt-in and audited. Leave it false for credentials.
+The optional `control` is `{ "type": "text" }`, `{ "type": "textarea" }`, or
+`{ "type": "select", "options": [{"value":"stable","label":"Human", "enabled":true}], "default_value":"stable" }`.
 
 ### Template variables (any step's `prompt_template` / `notify_config.body` / `api_*` / `exec_args` / `gate_message`)
 
@@ -632,7 +672,7 @@ These shape engine behavior across the whole run.
 - `{{iter.<step_name>}}` — per-step revisit counter (1, 2, 3…). Useful in Goto loops (e.g. "iteration {{iter.implement}} of 5")
 - `{{artifacts.<name>}}` — content of an artifact declared in `Workflow.artifacts` and emitted via `---ARTIFACT:<name>---...---END_ARTIFACT---`. Pre-seeded as empty string before round 1 so referencing it on the first iteration renders cleanly
 - `{{failed_step.name}}` / `{{failed_step.output}}` — **only valid inside `on_failure` steps**. The runner injects them when firing the rollback chain
-- `{{<launch_var>}}` — any name declared in `Workflow.variables` resolves at launch time from the operator's input
+- `{{<launch_var>}}` — any name declared in `Workflow.variables` resolves at launch time from its declared source (`user_input`, current project `<env.NAME>`, or allowlisted `<context.key>`)
 - `{{issue.title}}` / `{{issue.body}}` / `{{issue.number}}` / `{{issue.url}}` / `{{issue.labels}}` — populated only when trigger is Tracker
 - `{{time.now}}` — one timestamp captured at run start and reused by every step/source, including after a Gate/restart resume. `{{now}}` is a shorthand unless a declared/static variable named `now` exists. Compose vendor-neutral filters: `shift:+1d|-24h|-7d` (fixed durations; units `s,m,h,d,w`), `tz:Europe/Paris` (IANA; UTC default), `floor:minute|hour|day`, and `fmt:rfc3339|local_iso_ms|date|unix|unix_ms`. Example: `{{time.now|shift:-24h|tz:Europe/Paris|floor:hour|fmt:local_iso_ms}}`. Shorthand `{{now-24h|floor:hour}}` also works. Never invent plugin formats such as `fmt:adobe`; Adobe's no-zone local ISO shape is the generic `local_iso_ms` preset.
 
@@ -728,7 +768,7 @@ Apply these rules to every workflow you design:
 14. **Use `BatchApiCall` over an Agent loop for bulk creation/updates** — when the user wants to create N tickets, post N comments, ping N hosts: that's one HTTP call per item. Never burn tokens to "have an Agent loop and call MCP N times" — `BatchApiCall` does it in parallel, deterministic, with full per-item result reporting. Pattern: an Agent plans a `sub_tasks: [...]` array → `BatchApiCall` fans out POSTs → an Agent reads `{{steps.create.data.items}}` to set blocking links / cross-references. The Feature Planner preset is the canonical example.
 15. **Reuse `QuickApi` references** — when the same API call appears in 3+ workflows (or you want to test it from the Quick APIs page standalone), define a `QuickApi` once and reference it via `quick_api_id` on the `BatchApiCall` step. Updates to the QuickApi propagate automatically to every workflow that references it. Per-field overrides on the step still work for one-off tweaks (e.g. different `api_extract` path per workflow).
 16. **Add an `on_failure` rollback chain on ops-grade pipelines** — workflows that touch prod or external systems should declare `Workflow.on_failure: [...]` to notify ops + revert state when something blows up. Fires **only on `Failed`** AND only when no `on_result` rule on the failed step matched (a Goto/Skip overrides the rollback). Never fires on user `Cancelled` / guard-stop / Gate `reject` — those are intentional stops.
-17. **Declare `variables` for parameterized manual launches** — instead of writing 5 versions of "audit feature X" workflow, declare a `feature_name` variable and let the operator type the value at launch time. Mirrors Quick Prompts.
+17. **Declare `variables` for parameterized runs** — instead of writing 5 versions of "audit feature X", declare `feature_name` as `user_input`. For a project-owned value, use `project_env` + `<env.NAME>` only after `mcp_list` proves the key exists uniquely for that project. Kronn resolves it anew per run; never capture the value in generated JSON.
 18. **Set sensible `guards` on every workflow you ship** — `timeout_seconds: 1800` (30 min), `max_llm_calls: 50`, `loop_detection_max_revisits: 10`. These cost nothing and prevent runaway runs from emptying the wallet. (Guards are enforced **tree-wide** via the shared budget — a sub-workflow can't escape them.)
 19. **Extract reusable self-correcting loops into a `SubWorkflow`** — when the same `implement → run_tests → review` (or any multi-step loop) appears in several pipelines, save it once and reference it via `sub_workflow_id` rather than copy-pasting 3 steps into every parent. The parent stays readable (`fetch → analyze → gate → [sub-workflow] → gate → pr`), the loop is maintained in one place, and the child's internal Gotos (`run_tests ERROR → implement`, `review NEEDS_CHANGES → implement`) live entirely inside the child. Keep every `Gate` in the **parent** (Gates are forbidden inside a child) and remember a "request changes" gate must target the **SubWorkflow step**, not a step inside the child.
 

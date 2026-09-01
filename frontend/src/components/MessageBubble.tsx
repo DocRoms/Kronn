@@ -17,12 +17,13 @@ import { MatrixText } from './MatrixText';
 import { DocPreview } from './DocPreview';
 import { DocDataExport } from './DocDataExport';
 import { PlanningActionCard } from './PlanningActionCard';
+import { DiscussionActionCard } from './DiscussionActionCard';
 import { parsePlanningProposal } from '../lib/planningProposal';
 import { MermaidDiagram } from './MermaidDiagram';
 import remarkGfm from 'remark-gfm';
 import remarkEmoji from 'remark-emoji';
 import '../pages/DiscussionsPage.css';
-import type { DiscussionMessage, AgentType, QuickPrompt, ContextFile, MessageTarget } from '../types/generated';
+import type { DiscussionMessage, AgentType, QuickPrompt, ContextFile, MessageTarget, DiscussionAction } from '../types/generated';
 import { MessageAttachments } from './MessageAttachments';
 import { AGENT_LABELS, AGENT_MENTIONS, MODEL_TIER_ICONS, USER_MENTION_TRIGGER, agentColor, agentTextColor } from '../lib/constants';
 import { gravatarUrl } from '../lib/gravatar';
@@ -45,6 +46,13 @@ import {
 const RE_AUTH_ERROR = /api.?key|invalid.*key|key.*not.*config|authenticat|unauthori|login|sign.?in/i;
 const RE_PARTIAL_RESPONSE = /Réponse partielle.*interrompu|Timeout d'inactivité/i;
 const EDIT_TEXTAREA_MAX_HEIGHT = 160;
+
+/** Hide the transport envelope while keeping the durable server-side card.
+ * This removes presentation syntax only; validation and execution always use
+ * the action registry created when the Agent message was inserted. */
+function stripKronnActionFences(content: string): string {
+  return content.replace(/```kronn-action\s*\n[\s\S]*?```/gi, '').trim();
+}
 
 interface ExecutionContextCard {
   run_kind: string;
@@ -265,6 +273,10 @@ export interface MessageBubbleProps {
   chainableQPs?: QuickPrompt[];
   /** Fires the referenced QP in this discussion (sends its prompt). */
   onLaunchQp?: (qp: QuickPrompt) => void;
+  /** Typed, durable action proposals attached to this exact Agent message. */
+  actions?: DiscussionAction[];
+  onActionChanged?: (action: DiscussionAction) => void;
+  onOpenActionDiscussion?: (discussionId: string) => void;
   /** 0.8.8 — files the user attached to THIS message (pinned at send).
    * Rendered as a strip under the content: image thumbnails (fetched as
    * auth'd blobs) and filename chips for non-images. Empty for most msgs. */
@@ -293,7 +305,7 @@ export interface MessageBubbleProps {
 export const MessageBubble = memo(function MessageBubble(props: MessageBubbleProps) {
   const { msg, isLastUser, isLastAgent, isEditing, isCopied, isTtsActive, ttsState: tts, isExpandedSummary,
     prevUserTs, defaultAgent, defaultAgentAlias, targetConnectionAliases = {}, summaryCache, language, sending, editingText, hasFullAccess,
-    onCopy, onTts, onEditStart, onEditCancel, onEditSubmit, onEditTextChange, onRetry, onRetryAgentDispatch, onExpandSummary, onNavigate, discussionId, projectId, chainableQPs, onLaunchQp, attachments, discussionMedia, pendingAttachment, isSearchMatch, isSearchCurrent, replyTarget, replies = [], onReply, onReplyNavigate, onDelete, isDeleting = false, targets = [], t } = props;
+    onCopy, onTts, onEditStart, onEditCancel, onEditSubmit, onEditTextChange, onRetry, onRetryAgentDispatch, onExpandSummary, onNavigate, discussionId, projectId, chainableQPs, onLaunchQp, actions = [], onActionChanged, onOpenActionDiscussion, attachments, discussionMedia, pendingAttachment, isSearchMatch, isSearchCurrent, replyTarget, replies = [], onReply, onReplyNavigate, onDelete, isDeleting = false, targets = [], t } = props;
   const editTextareaRef = useRef<HTMLTextAreaElement>(null);
   useLayoutEffect(() => {
     if (isEditing && editTextareaRef.current) {
@@ -327,9 +339,12 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
       retried: false,
     };
   }, [msg.role, msg.content, msg.agent_type, msg.model, msg.model_tier, t]);
-  const visibleContent = isUser
+  const rawVisibleContent = isUser
     ? stripAgentHandoff(msg.content)
     : modelError?.summary ?? msg.content;
+  const visibleContent = msg.role === 'Agent'
+    ? stripKronnActionFences(rawVisibleContent)
+    : rawVisibleContent;
   const retryDispatchId = modelError?.retry_dispatch_id ?? null;
   const errorAgentType = msg.agent_type ?? defaultAgent;
   const agentType = msg.agent_type ?? defaultAgent;
@@ -1038,6 +1053,14 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
             📎 {t('disc.attachmentDownloading')}
           </div>
         )}
+        {msg.role === 'Agent' && onActionChanged && onOpenActionDiscussion && actions.map(action => (
+          <DiscussionActionCard
+            key={action.id}
+            action={action}
+            onChanged={onActionChanged}
+            onOpenDiscussion={onOpenActionDiscussion}
+          />
+        ))}
         {msg.role === 'Agent' && (
           <button
             className="disc-tts-btn"
