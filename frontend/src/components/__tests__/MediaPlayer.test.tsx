@@ -2,9 +2,9 @@
  * KT-540 — media player contract.
  *
  * The properties that matter are the ones a user would notice going wrong:
- * a discussion that starts playing on its own, megabytes pulled for a clip
- * nobody opened, and a clip stretched because the provider ignored the
- * requested geometry.
+ * autoplay only inside the deliberately opened viewer, megabytes pulled for
+ * a clip nobody opened, and a clip stretched because the provider ignored
+ * the requested geometry.
  */
 import { describe, it, expect, afterEach } from 'vitest';
 import { render, screen, cleanup } from '@testing-library/react';
@@ -16,11 +16,12 @@ const t = (key: string, ...args: (string | number)[]) =>
   args.length ? `${key}|${args.join('|')}` : key;
 
 describe('MediaPlayer', () => {
-  it('never autoplays', () => {
+  it('autoplays muted once the viewer deliberately mounts the clip', () => {
     render(<MediaPlayer src="blob:x" filename="clip.mp4" t={t} />);
     const video = screen.getByTestId('media-player-video') as HTMLVideoElement;
-    expect(video.hasAttribute('autoplay')).toBe(false);
-    expect(video.autoplay).toBe(false);
+    expect(video.hasAttribute('autoplay')).toBe(true);
+    expect(video.autoplay).toBe(true);
+    expect(video.muted).toBe(true);
   });
 
   it('preloads metadata only, not the whole clip', () => {

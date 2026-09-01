@@ -5,8 +5,10 @@
 // component means that change stays local instead of spreading through the
 // carousel and the message bubble.
 //
-// No autoplay, ever. A discussion that starts making noise because a job
-// finished is worse than one extra click.
+// Autoplay is scoped to this player: it is mounted only after the human opens
+// the media viewer or navigates to a clip. Keep it muted initially so autoplay
+// remains reliable across browser policies; native controls let the viewer
+// enable sound immediately.
 import { useCallback, useRef, useState } from 'react';
 import './MediaPlayer.css';
 
@@ -67,6 +69,8 @@ export function MediaPlayer({
         data-testid="media-player-video"
         src={src}
         controls
+        autoPlay
+        muted
         // Metadata only: a generated clip weighs megabytes, and a card that is
         // merely on screen must not pull them.
         preload="metadata"
