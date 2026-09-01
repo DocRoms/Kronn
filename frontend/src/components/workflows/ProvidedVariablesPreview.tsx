@@ -3,6 +3,7 @@ import { AlertTriangle, Eye, EyeOff, Loader2 } from 'lucide-react';
 import { executionVariables } from '../../lib/api';
 import { useT } from '../../lib/I18nContext';
 import type { PromptVariable } from '../../types/generated';
+import { PromptVariableInput } from './PromptVariableInput';
 
 interface Props {
   variables: PromptVariable[];
@@ -115,12 +116,14 @@ export function ProvidedVariablesPreview({
           <div key={variable.name} className="qp-launch-field">
             <label className="qp-launch-label">{label}</label>
             {overridden ? (
-              <input
-                className="wf-input flex-1"
-                value={values[variable.name] ?? ''}
-                onChange={event => onValueChange(variable.name, event.target.value)}
-                placeholder={t('wf.launchOverridePlaceholder')}
-                aria-label={t('wf.launchOverrideAria', label)}
+              <PromptVariableInput
+                variable={{
+                  ...variable,
+                  label: t('wf.launchOverrideAria', label),
+                  placeholder: t('wf.launchOverridePlaceholder'),
+                }}
+                value={values[variable.name]}
+                onChange={value => onValueChange(variable.name, value)}
                 disabled={disabled}
               />
             ) : (

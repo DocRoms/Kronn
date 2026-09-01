@@ -27,6 +27,8 @@ import { QuickPromptForm } from '../components/workflows/QuickPromptForm';
 import { QuickApiForm } from '../components/workflows/QuickApiForm';
 import { QuickExecForm } from '../components/workflows/QuickExecForm';
 import { ProvidedVariablesPreview } from '../components/workflows/ProvidedVariablesPreview';
+import { PromptVariableInput } from '../components/workflows/PromptVariableInput';
+import { promptVariableEffectiveValue } from '../lib/promptVariableControl';
 import { RunStatusCard } from '../components/RunStatusCard';
 import type { RunStatusCardModel } from '../lib/runStatusCardModel';
 import QPHistoryDrawer from '../components/QPHistoryDrawer';
@@ -1343,7 +1345,8 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
   const collectMissingRequiredVars = (qp: QuickPrompt, vars: Record<string, string>): string[] => {
     return qp.variables
       // `required` defaults to true (legacy QPs); only explicitly false skips validation.
-      .filter(v => (v.source ?? 'user_input') === 'user_input' && v.required !== false && !(vars[v.name] ?? '').trim())
+      .filter(v => (v.source ?? 'user_input') === 'user_input' && v.required !== false
+        && !promptVariableEffectiveValue(v, vars[v.name])?.trim())
       .map(v => v.label || v.name);
   };
 
@@ -2985,14 +2988,12 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                           {qp.variables.filter(v => (v.source ?? 'user_input') === 'user_input').map(v => (
                             <div key={v.name} className="qp-launch-field">
                               <label className="qp-launch-label">{v.label || v.name}</label>
-                              <input
-                                className="wf-input flex-1"
-                                value={launchVars[v.name] ?? ''}
-                                onChange={e => setLaunchVars(prev => ({ ...prev, [v.name]: e.target.value }))}
-                                placeholder={v.placeholder}
+                              <PromptVariableInput
+                                variable={v}
+                                value={launchVars[v.name]}
+                                onChange={value => setLaunchVars(prev => ({ ...prev, [v.name]: value }))}
                                 autoFocus={qp.variables.indexOf(v) === 0}
-                                onKeyDown={e => {
-                                  if (e.key !== 'Enter') return;
+                                onEnter={() => {
                                   if (qpLaunchMode === 'compare') handleCompareAgents(qp);
                                   else handleLaunchQP(qp);
                                 }}
@@ -3613,13 +3614,12 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                                 {v.label || v.name}
                                 {(v.required ?? true) && <span className="wf-required"> *</span>}
                               </label>
-                              <input
-                                className="wf-input flex-1"
-                                value={launchVarsQA[v.name] ?? ''}
-                                onChange={e => setLaunchVarsQA(prev => ({ ...prev, [v.name]: e.target.value }))}
-                                placeholder={v.placeholder}
+                              <PromptVariableInput
+                                variable={v}
+                                value={launchVarsQA[v.name]}
+                                onChange={value => setLaunchVarsQA(prev => ({ ...prev, [v.name]: value }))}
                                 autoFocus={qa.variables.indexOf(v) === 0}
-                                onKeyDown={e => { if (e.key === 'Enter') handleLaunchQA(qa); }}
+                                onEnter={() => handleLaunchQA(qa)}
                               />
                             </div>
                           ))}
@@ -3639,7 +3639,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                           <button
                             className="qp-launch-go-btn"
                             onClick={() => handleLaunchQA(qa)}
-                            disabled={launchingQARun || qa.variables.some(v => (v.source ?? 'user_input') === 'user_input' && (v.required ?? true) && !(launchVarsQA[v.name] ?? '').trim())}
+                            disabled={launchingQARun || qa.variables.some(v => (v.source ?? 'user_input') === 'user_input' && (v.required ?? true) && !promptVariableEffectiveValue(v, launchVarsQA[v.name]).trim())}
                           >
                             {launchingQARun ? <Loader2 size={14} className="spin" /> : <Play size={14} />}
                             {launchingQARun ? '...' : t('qa.runGo')}
@@ -3804,11 +3804,10 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                               <label className="qp-launch-label">
                                 {variable.label || variable.name}{variable.required && ' *'}
                               </label>
-                              <input
-                                className="wf-input flex-1"
-                                value={runVarsQE[variable.name] ?? ''}
-                                placeholder={variable.placeholder}
-                                onChange={event => setRunVarsQE(current => ({ ...current, [variable.name]: event.target.value }))}
+                              <PromptVariableInput
+                                variable={variable}
+                                value={runVarsQE[variable.name]}
+                                onChange={value => setRunVarsQE(current => ({ ...current, [variable.name]: value }))}
                               />
                             </div>
                           ))}
@@ -3828,7 +3827,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                           {quickExec.variables.length > 0 && (
                             <button
                               className="qp-launch-go-btn"
-                              disabled={runQEState.busy || quickExec.variables.some(variable => (variable.source ?? 'user_input') === 'user_input' && variable.required && !(runVarsQE[variable.name] ?? '').trim())}
+                              disabled={runQEState.busy || quickExec.variables.some(variable => (variable.source ?? 'user_input') === 'user_input' && variable.required && !promptVariableEffectiveValue(variable, runVarsQE[variable.name]).trim())}
                               onClick={() => void handleRunQE(quickExec)}
                             >
                               {runQEState.busy ? <Loader2 size={14} className="spin" /> : <Play size={14} />}
@@ -3909,21 +3908,19 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                     {v.label || v.name}
                     {required && <span className="text-error" style={{ marginLeft: 4 }}>*</span>}
                   </label>
-                  <input
-                    className="wf-input flex-1"
-                    value={launchingWorkflow.values[v.name] ?? ''}
-                    onChange={e => setLaunchingWorkflow(prev => prev ? {
+                  <PromptVariableInput
+                    variable={v}
+                    value={launchingWorkflow.values[v.name]}
+                    onChange={value => setLaunchingWorkflow(prev => prev ? {
                       ...prev,
-                      values: { ...prev.values, [v.name]: e.target.value },
+                      values: { ...prev.values, [v.name]: value },
                       error: null,
                     } : prev)}
-                    placeholder={v.placeholder}
                     autoFocus={idx === 0}
                     disabled={launchingWorkflow.submitting}
-                    onKeyDown={e => {
-                      if (e.key === 'Enter' && !e.shiftKey && !launchingWorkflow.submitting) {
-                        e.preventDefault();
-                        const submitBtn = (e.currentTarget.closest('.wf-import-modal') as HTMLElement | null)?.querySelector('.wf-launch-submit-btn') as HTMLButtonElement | null;
+                    onEnter={() => {
+                      if (!launchingWorkflow.submitting) {
+                        const submitBtn = document.querySelector<HTMLButtonElement>('.wf-import-modal .wf-launch-submit-btn');
                         submitBtn?.click();
                       }
                     }}
@@ -3969,7 +3966,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                   const vars = launchingWorkflow.workflow.variables ?? [];
                   const missing = vars
                     .filter(v => (v.source ?? 'user_input') === 'user_input'
-                      && (v.required ?? true) && !(launchingWorkflow.values[v.name] ?? '').trim())
+                      && (v.required ?? true) && !promptVariableEffectiveValue(v, launchingWorkflow.values[v.name]).trim())
                     .map(v => v.label || v.name);
                   if (missing.length > 0) {
                     setLaunchingWorkflow(prev => prev ? {
@@ -3985,7 +3982,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                   // or a huge value could freeze the UI — past these sizes we
                   // skip the local check and let the backend be the authority.
                   const badPattern = vars.find(v => {
-                    const val = (launchingWorkflow.values[v.name] ?? '').trim();
+                    const val = promptVariableEffectiveValue(v, launchingWorkflow.values[v.name]).trim();
                     if (!v.pattern || !val) return false;
                     if (v.pattern.length > 200 || val.length > 512) return false;
                     try { return !new RegExp(`^(?:${v.pattern})$`).test(val); }

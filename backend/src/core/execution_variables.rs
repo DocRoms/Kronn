@@ -80,6 +80,11 @@ pub fn resolve(
             match source {
                 PromptVariableSource::UserInput => supplied_value
                     .cloned()
+                    .or_else(|| {
+                        (!supplied.contains_key(&variable.name) || variable.required)
+                            .then(|| variable.default_input_value().map(str::to_owned))
+                            .flatten()
+                    })
                     .map(|v| (v, "user_input".to_string(), false)),
                 PromptVariableSource::KronnContext => variable
                     .source_ref
@@ -98,6 +103,15 @@ pub fn resolve(
             }
         };
         match resolved {
+            Some((value, _, _)) if !variable.accepts_value(&value) => {
+                failures.push(VariablePreflightFailure {
+                    name: variable.name.clone(),
+                    source_ref: variable.source_ref.clone(),
+                    project_id: project_id.map(str::to_owned),
+                    environment_ref: environment_ref.to_string(),
+                    cause: "invalid_option".to_string(),
+                })
+            }
             Some((value, effective_source_ref, overridden))
                 if !variable.required || !value.trim().is_empty() =>
             {
@@ -303,6 +317,7 @@ mod tests {
             source: Some(PromptVariableSource::ProjectEnv),
             source_ref: Some("<env.TOKEN>".into()),
             allow_manual_override: false,
+            control: None,
         }
     }
 
@@ -559,6 +574,49 @@ mod tests {
         .unwrap();
         assert_eq!(context_override.values["token"], "context-override");
         assert!(context_override.provenance[0].overridden);
+    }
+
+    #[test]
+    fn select_defaults_and_active_options_are_enforced_server_side() {
+        let mut declaration = env_var();
+        declaration.source = Some(PromptVariableSource::UserInput);
+        declaration.source_ref = None;
+        declaration.control = Some(crate::models::PromptVariableControl::Select {
+            options: vec![
+                crate::models::PromptVariableOption {
+                    value: "fr".into(),
+                    label: "Français".into(),
+                    enabled: true,
+                },
+                crate::models::PromptVariableOption {
+                    value: "en".into(),
+                    label: "English".into(),
+                    enabled: false,
+                },
+            ],
+            default_value: Some("fr".into()),
+        });
+        let defaulted = resolve(
+            &[declaration.clone()],
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            None,
+            "manual",
+        )
+        .unwrap();
+        assert_eq!(defaulted.values["token"], "fr");
+
+        let disabled = resolve(
+            &[declaration],
+            &HashMap::from([("token".into(), "en".into())]),
+            &HashMap::new(),
+            &HashMap::new(),
+            None,
+            "manual",
+        )
+        .unwrap_err();
+        assert_eq!(disabled[0].cause, "invalid_option");
     }
 
     #[test]

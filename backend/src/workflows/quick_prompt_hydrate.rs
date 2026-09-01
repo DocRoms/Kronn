@@ -158,6 +158,7 @@ mod tests {
                 source: Default::default(),
                 source_ref: None,
                 allow_manual_override: false,
+                control: None,
             }],
             agent: AgentType::ClaudeCode,
             connection_id: None,

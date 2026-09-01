@@ -33,6 +33,7 @@ import {
 } from 'lucide-react';
 import { scanUndeclaredVars } from '../../lib/scanUndeclaredVars';
 import { userError } from '../../lib/userError';
+import { PromptVariableControlEditor } from './PromptVariableControlEditor';
 import '../../pages/WorkflowsPage.css';
 
 const checkAgentRestricted = isAgentRestricted;
@@ -4772,6 +4773,10 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                   placeholder={t('qp.varDescriptionPlaceholder')}
                   style={{ opacity: 0.85 }}
                   aria-label={t('qp.varDescriptionPlaceholder')}
+                />
+                <PromptVariableControlEditor
+                  variable={v}
+                  onChange={variable => setWfVariables(previous => previous.map((item, index) => index === idx ? variable : item))}
                 />
               </div>
             ))}
