@@ -77,7 +77,7 @@ async function discoverInstalledAgents(request: APIRequestContext): Promise<stri
 // Agents that *do* speak MCP and *should* be able to call
 // `kronn-internal`. Mirrors `agentSupportsIntrospection()` on the
 // frontend — keep in sync.
-const INTROSPECTION_AGENTS = ['ClaudeCode', 'Codex', 'Kiro', 'GeminiCli', 'CopilotCli'] as const;
+const INTROSPECTION_AGENTS = ['ClaudeCode', 'Codex', 'OpenCode', 'Kiro', 'GeminiCli', 'CopilotCli'] as const;
 
 // Tests share one Playwright worker (cf. `playwright.config.ts`,
 // fullyParallel: false). We DO NOT use `mode: 'serial'` here because
@@ -105,6 +105,7 @@ async function probeAgentBailout(agent: string): Promise<string | null> {
   const cmd = ({
     ClaudeCode: 'timeout 10 claude --print "test" 2>&1 | head -3',
     Codex: 'echo "test" | timeout 10 codex 2>&1 | head -3',
+    OpenCode: 'timeout 10 opencode --version 2>&1 | head -3',
     Kiro: 'timeout 10 kiro-cli chat --no-interactive --trust-all-tools "ok" 2>&1 | head -8',
     GeminiCli: 'KEY=$(python3 -c "import json; print(json.load(open(\\"/home/kronn/.gemini/settings.json\\"))[\\"apiKey\\"])" 2>/dev/null); GEMINI_API_KEY=$KEY timeout 10 gemini -p "test" 2>&1 | head -3',
     CopilotCli: 'timeout 10 copilot --version 2>&1 | head -3',

@@ -222,6 +222,7 @@ export function isAgentRestricted(agentAccess: AgentsConfig | undefined, agentTy
   const map: Record<string, boolean | undefined> = {
     ClaudeCode: agentAccess.claude_code?.full_access,
     Codex: agentAccess.codex?.full_access,
+    OpenCode: agentAccess.open_code?.full_access,
     GeminiCli: agentAccess.gemini_cli?.full_access,
     Vibe: agentAccess.vibe?.full_access,
     Kiro: undefined,
@@ -280,6 +281,7 @@ export function hasAgentFullAccess(agentAccess: AgentsConfig | undefined, agentT
   const map: Record<string, boolean | undefined> = {
     ClaudeCode: agentAccess.claude_code?.full_access,
     Codex: agentAccess.codex?.full_access,
+    OpenCode: agentAccess.open_code?.full_access,
     GeminiCli: agentAccess.gemini_cli?.full_access,
     Vibe: agentAccess.vibe?.full_access,
     Kiro: undefined,
