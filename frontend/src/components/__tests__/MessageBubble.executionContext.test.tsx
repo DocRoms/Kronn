@@ -42,7 +42,10 @@ const props = {
   language: 'en', sending: false, editingText: '', hasFullAccess: false,
   onCopy: vi.fn(), onTts: vi.fn(), onEditStart: vi.fn(), onEditCancel: vi.fn(),
   onEditSubmit: vi.fn(), onEditTextChange: vi.fn(), onRetry: vi.fn(),
-  onExpandSummary: vi.fn(), onNavigate: vi.fn(), t: (key: string) => key,
+  onExpandSummary: vi.fn(), onNavigate: vi.fn(), t: (key: string, ...args: Array<string | number>) => ({
+    'executionVariables.revealTemporarily': `Reveal ${args[0]} temporarily`,
+    'executionVariables.remask': `Remask ${args[0]}`,
+  }[key] ?? key),
 };
 
 describe('MessageBubble execution context', () => {

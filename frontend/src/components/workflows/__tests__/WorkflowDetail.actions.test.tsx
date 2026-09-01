@@ -321,7 +321,7 @@ describe('WorkflowDetail — runs list', () => {
     // #6 — terminal runs render collapsed; expand to reach the RunDetail body
     // where the secured execution-variable inspector lives.
     fireEvent.click(screen.getByRole('button', { name: /Success/ }));
-    expect(screen.getByRole('button', { name: 'Inspect variables' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'executionVariables.inspect' })).toBeInTheDocument();
   });
 
   it('collapses the runs list when the chevron toggle is clicked', () => {

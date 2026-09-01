@@ -69,31 +69,33 @@ pub fn resolve(
         let supplied_value = supplied
             .get(&variable.name)
             .filter(|v| !v.trim().is_empty());
-        let resolved = match source {
-            PromptVariableSource::UserInput => supplied_value
+        let resolved = if source != PromptVariableSource::UserInput
+            && variable.allow_manual_override
+            && supplied_value.is_some()
+        {
+            supplied_value
                 .cloned()
-                .map(|v| (v, "user_input".to_string(), false)),
-            PromptVariableSource::KronnContext => variable
-                .source_ref
-                .as_deref()
-                .and_then(reference_name)
-                .and_then(|key| context.get(key))
-                .cloned()
-                .map(|v| (v, variable.source_ref.clone().unwrap_or_default(), false)),
-            PromptVariableSource::ProjectEnv
-                if variable.allow_manual_override && supplied_value.is_some() =>
-            {
-                supplied_value
+                .map(|v| (v, "manual_override".to_string(), true))
+        } else {
+            match source {
+                PromptVariableSource::UserInput => supplied_value
                     .cloned()
-                    .map(|v| (v, "manual_override".to_string(), true))
+                    .map(|v| (v, "user_input".to_string(), false)),
+                PromptVariableSource::KronnContext => variable
+                    .source_ref
+                    .as_deref()
+                    .and_then(reference_name)
+                    .and_then(|key| context.get(key))
+                    .cloned()
+                    .map(|v| (v, variable.source_ref.clone().unwrap_or_default(), false)),
+                PromptVariableSource::ProjectEnv => variable
+                    .source_ref
+                    .as_deref()
+                    .and_then(reference_name)
+                    .and_then(|key| environment.get(key))
+                    .and_then(|matches| (matches.len() == 1).then(|| matches[0].clone()))
+                    .map(|(source_ref, value)| (value, source_ref, false)),
             }
-            PromptVariableSource::ProjectEnv => variable
-                .source_ref
-                .as_deref()
-                .and_then(reference_name)
-                .and_then(|key| environment.get(key))
-                .and_then(|matches| (matches.len() == 1).then(|| matches[0].clone()))
-                .map(|(source_ref, value)| (value, source_ref, false)),
         };
         match resolved {
             Some((value, effective_source_ref, overridden))
@@ -404,6 +406,22 @@ mod tests {
             expiry(resolved.resolved_at, 30).unwrap(),
             resolved.resolved_at + Duration::days(30)
         );
+
+        let mut context_declaration = env_var();
+        context_declaration.source = Some(PromptVariableSource::KronnContext);
+        context_declaration.source_ref = Some("<context.TOKEN>".into());
+        context_declaration.allow_manual_override = true;
+        let context_override = resolve(
+            &[context_declaration],
+            &HashMap::from([("token".into(), "context-override".into())]),
+            &HashMap::from([("TOKEN".into(), "context-default".into())]),
+            &HashMap::new(),
+            Some("p"),
+            "project",
+        )
+        .unwrap();
+        assert_eq!(context_override.values["token"], "context-override");
+        assert!(context_override.provenance[0].overridden);
     }
 
     #[test]

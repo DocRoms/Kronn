@@ -28,6 +28,7 @@ import '../../pages/WorkflowsPage.css';
 const checkAgentRestricted = isAgentRestricted;
 
 function ExecutionVariablesInspector({ runId }: { runId: string }) {
+  const { t } = useT();
   const [metadata, setMetadata] = useState<ExecutionVariableMetadata | null>(null);
   const [open, setOpen] = useState(false);
   const [revealed, setRevealed] = useState<Record<string, string>>({});
@@ -60,17 +61,17 @@ function ExecutionVariablesInspector({ runId }: { runId: string }) {
 
   return <div className="wf-execution-variables">
     <button type="button" className="wf-small-btn" onClick={() => void inspect()} aria-expanded={open}>
-      <Eye size={12} /> Inspect variables
+      <Eye size={12} /> {t('executionVariables.inspect')}
     </button>
-    {open && metadata && <div className="wf-run-group-body" role="region" aria-label="Execution variables">
-      <p className="text-2xs text-ghost">Resolved {new Date(metadata.resolved_at).toLocaleString()} · snapshot {metadata.id}</p>
+    {open && metadata && <div className="wf-run-group-body" role="region" aria-label={t('executionVariables.regionAria')}>
+      <p className="text-2xs text-ghost">{t('executionVariables.resolvedAt')} {new Date(metadata.resolved_at).toLocaleString()} · {t('executionVariables.snapshot')} {metadata.id}</p>
       {metadata.provenance.map(item => <div className="qp-launch-field" key={item.name}>
         <label className="qp-launch-label">{item.name}</label>
-        <input className="wf-input flex-1" readOnly value={revealed[item.name] ?? '••••••'} aria-label={`${item.name} ${revealed[item.name] === undefined ? 'masked' : 'temporarily revealed'}`} />
-        <button type="button" className="wf-icon-btn" disabled={metadata.purged} onClick={() => void toggleReveal(item.name)} aria-label={`${revealed[item.name] === undefined ? 'Reveal' : 'Remask'} ${item.name}`}>
+        <input className="wf-input flex-1" readOnly value={revealed[item.name] ?? '••••••'} aria-label={revealed[item.name] === undefined ? t('executionVariables.masked', item.name) : t('executionVariables.revealed', item.name)} />
+        <button type="button" className="wf-icon-btn" disabled={metadata.purged} onClick={() => void toggleReveal(item.name)} aria-label={revealed[item.name] === undefined ? t('executionVariables.reveal', item.name) : t('executionVariables.remask', item.name)}>
           <Eye size={12} />
         </button>
-        <p className="text-2xs text-ghost">{item.effective_source_ref}{item.overridden ? ' · manual override' : ''}</p>
+        <p className="text-2xs text-ghost">{item.effective_source_ref}{item.overridden ? ` · ${t('executionVariables.manualOverride')}` : ''}</p>
       </div>)}
     </div>}
   </div>;
