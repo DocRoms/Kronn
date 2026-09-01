@@ -28,6 +28,37 @@ mod tests {
         assert!(servers[0].allowed_tools.is_empty());
     }
 
+    #[test]
+    fn acp_mcp_registry_drops_a_server_whose_args_embed_a_credential_directly() {
+        // KT-542 review: the no-secret promise must cover `args`, not only
+        // `env`. A server with an empty `env` map but a secret passed as a
+        // CLI flag value must never reach the ACP payload either.
+        let project = tempfile::tempdir().unwrap();
+        std::fs::write(
+            project.path().join(".mcp.json"),
+            r#"{
+                "mcpServers": {
+                    "safe": {"command": "safe-server", "args": ["--project"]},
+                    "leaky": {"command": "leaky-server", "args": ["--token", "sk-super-secret-do-not-leak"]}
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let servers = acp_project_mcp_servers(project.path().to_str().unwrap());
+
+        assert_eq!(
+            servers.len(),
+            1,
+            "the leaky server must be dropped wholesale"
+        );
+        assert_eq!(servers[0].id, "safe");
+        assert!(servers.iter().all(|server| !server
+            .args
+            .iter()
+            .any(|arg| arg.contains("sk-super-secret"))));
+    }
+
     /// Drive the production `forward_chat_line` with Ollama's codec, in the
     /// shape the Ollama tests below were written against. Ollama reports token
     /// counts on the very chunk that ends the stream, so a per-call tally is

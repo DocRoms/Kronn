@@ -24,7 +24,7 @@ mod permission_broker;
 pub use claude_adapter::ClaudeAcpAdapter;
 pub use codex_adapter::CodexAcpAdapter;
 pub use permission_broker::{
-    AcpAuditEntry, AcpPermissionBroker, AcpPermissionVerdict, AcpSessionPolicy,
+    AcpAuditEntry, AcpPermissionBroker, AcpPermissionVerdict, AcpSessionPolicy, AcpSessionScope,
 };
 
 /// Shared by the Claude/Codex adapter test modules.
@@ -105,6 +105,19 @@ pub fn production_route(agent: &AgentType) -> AcpProductionRoute {
     }
 }
 
+/// Strict boolean parse for a `KRONN_ACP_ADAPTER_*` toggle. Only `1`/`true`
+/// (case-insensitive, surrounding whitespace ignored) activate the adapter;
+/// unset, empty, `0`, `false`, or any other value all mean "off" and keep the
+/// conservative direct-CLI default. Presence-only parsing (`.is_ok()`) used to
+/// activate the adapter for ANY value including `"0"`/`"false"` — an operator
+/// clearing the toggle by setting it to a falsy string instead of unsetting it
+/// would silently keep routing through the ACP adapter (KT-542 review fix).
+fn env_flag_enabled(var: &str) -> bool {
+    std::env::var(var)
+        .map(|value| matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true"))
+        .unwrap_or(false)
+}
+
 /// Per-agent, explicit, environment-driven opt-in for the Codex/Claude ACP
 /// adapters. Off by default: direct-CLI migration stays the production
 /// default for both agents until an operator turns the adapter on for that
@@ -113,8 +126,8 @@ pub fn production_route(agent: &AgentType) -> AcpProductionRoute {
 /// `kronn doctor`/logs can report the exact variable an operator would set.
 pub fn acp_adapter_enabled(agent: &AgentType) -> bool {
     match agent {
-        AgentType::Codex => std::env::var("KRONN_ACP_ADAPTER_CODEX").is_ok(),
-        AgentType::ClaudeCode => std::env::var("KRONN_ACP_ADAPTER_CLAUDE").is_ok(),
+        AgentType::Codex => env_flag_enabled("KRONN_ACP_ADAPTER_CODEX"),
+        AgentType::ClaudeCode => env_flag_enabled("KRONN_ACP_ADAPTER_CLAUDE"),
         _ => false,
     }
 }
@@ -320,6 +333,10 @@ fn parse_config_options(result: &Value) -> Vec<AcpConfigOption> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AcpSessionEvent {
+    /// Runtime-owned conversation identifier discovered after session
+    /// creation. This is control metadata consumed by the runner, never text
+    /// forwarded to the discussion or an agent-visible event payload.
+    NativeSessionId(String),
     TextDelta(String),
     ToolCall {
         name: String,
@@ -422,19 +439,33 @@ impl AcpJsonRpcTransport {
         agent: AcpAgent,
         cwd: &str,
         full_access: bool,
+        discussion_id: Option<&str>,
+        scope: AcpSessionScope,
     ) -> Result<Self, AcpError> {
         let (program, args) = native_acp_command(agent).ok_or_else(|| {
             AcpError::Transport(format!("no verified production ACP command for {agent:?}"))
         })?;
         let mut command = crate::core::cmd::async_cmd(program);
         command.args(args).current_dir(cwd);
-        Self::spawn(agent, command, full_access).await
+        if let Some(discussion_id) = discussion_id {
+            command.env("KRONN_DISCUSSION_ID", discussion_id);
+        }
+        Self::spawn_scoped(agent, command, full_access, Some(scope)).await
     }
 
     pub async fn spawn(
         agent: AcpAgent,
+        command: tokio::process::Command,
+        full_access: bool,
+    ) -> Result<Self, AcpError> {
+        Self::spawn_scoped(agent, command, full_access, None).await
+    }
+
+    async fn spawn_scoped(
+        agent: AcpAgent,
         mut command: tokio::process::Command,
         full_access: bool,
+        scope: Option<AcpSessionScope>,
     ) -> Result<Self, AcpError> {
         command
             .stdin(std::process::Stdio::piped())
@@ -457,7 +488,10 @@ impl AcpJsonRpcTransport {
             oneshot::Sender<Result<Value, AcpError>>,
         >::new()));
         let (notifications, _) = broadcast::channel(256);
-        let broker = Arc::new(AcpPermissionBroker::new(full_access));
+        let broker = Arc::new(match scope {
+            Some(scope) => AcpPermissionBroker::scoped(full_access, scope),
+            None => AcpPermissionBroker::new(full_access),
+        });
         Self::start_dispatcher(
             BufReader::new(stdout),
             stdin.clone(),
@@ -737,12 +771,13 @@ impl AcpTransport for AcpJsonRpcTransport {
         &self,
         request: AcpInitialize,
     ) -> Result<AcpNegotiatedCapabilities, AcpError> {
-        let servers: Vec<Value> = request
-            .mcp_servers
+        let servers: Vec<Value> = self
+            .broker
+            .authorize_mcp_servers(request.mcp_servers)
             .into_iter()
             .map(|server| {
                 json!({
-                    "name": server.id, "command": server.command, "args": server.args,
+                    "name": server.id, "command": server.command, "args": server.args, "env": [],
                 })
             })
             .collect();
@@ -791,7 +826,11 @@ impl AcpTransport for AcpJsonRpcTransport {
             )
             .await?;
         *self.config_options.lock().await = parse_config_options(&result);
-        AcpSessionTarget::new(self.agent, session_id(&result)?)
+        let id = session_id(&result)?;
+        self.broker
+            .bind_protocol_session(&id)
+            .map_err(AcpError::Transport)?;
+        AcpSessionTarget::new(self.agent, id)
     }
 
     async fn config_options(&self) -> Vec<AcpConfigOption> {
@@ -832,6 +871,9 @@ impl AcpTransport for AcpJsonRpcTransport {
     }
 
     async fn resume_session(&self, target: &AcpSessionTarget) -> Result<(), AcpError> {
+        self.broker
+            .bind_protocol_session(&target.session_id)
+            .map_err(AcpError::Transport)?;
         // ACP session-resume must restate the workspace scope (`cwd` +
         // `mcpServers`), not only the opaque session id, so the resumed session
         // keeps Kronn's project MCP registry and working directory.
@@ -1408,6 +1450,37 @@ mod tests {
             "Codex's route must stay unaffected by Claude's toggle"
         );
         std::env::remove_var("KRONN_ACP_ADAPTER_CLAUDE");
+    }
+
+    #[test]
+    #[serial_test::serial(acp_adapter_env_toggle)]
+    fn only_1_or_true_activate_the_adapter_toggle_every_other_value_stays_direct_cli() {
+        // Regression: `.is_ok()` used to activate the adapter for ANY
+        // present value, including the exact strings an operator would type
+        // to mean "off" (`"0"`, `"false"`) without realizing only unsetting
+        // the variable actually disables it.
+        for falsy in ["0", "false", "False", "FALSE", "no", "off", "", "  ", "2"] {
+            std::env::set_var("KRONN_ACP_ADAPTER_CODEX", falsy);
+            assert_eq!(
+                resolve_acp_route(&AgentType::Codex),
+                AcpProductionRoute::DirectCliMigration,
+                "KRONN_ACP_ADAPTER_CODEX={falsy:?} must NOT activate the adapter"
+            );
+        }
+        for truthy in ["1", "true", "True", "TRUE", " 1 ", " true "] {
+            std::env::set_var("KRONN_ACP_ADAPTER_CODEX", truthy);
+            assert_eq!(
+                resolve_acp_route(&AgentType::Codex),
+                AcpProductionRoute::AdaptedAcp,
+                "KRONN_ACP_ADAPTER_CODEX={truthy:?} must activate the adapter"
+            );
+        }
+        std::env::remove_var("KRONN_ACP_ADAPTER_CODEX");
+        assert_eq!(
+            resolve_acp_route(&AgentType::Codex),
+            AcpProductionRoute::DirectCliMigration,
+            "unset must stay direct-CLI"
+        );
     }
 
     #[test]

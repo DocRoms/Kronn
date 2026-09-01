@@ -2353,6 +2353,10 @@ async fn make_agent_stream_inner(
             // Forward to the agent process env so the kronn-internal MCP
             // bridge knows which discussion to introspect when called.
             discussion_id: Some(&discussion_id),
+            acp_session_store: Some(runner::AcpSessionStore::new(
+                state.db.clone(),
+                discussion_id.clone(),
+            )),
             task_worker_context: cli_task_worker_context.as_ref(),
             // Only HTTP agents consume this: CLI agents already reach the same
             // primitives through the stdio bridge, and handing them a second

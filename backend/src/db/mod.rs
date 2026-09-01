@@ -1,3 +1,4 @@
+pub mod acp_runtime_sessions;
 pub mod agent_decisions;
 pub mod agent_dispatch;
 pub mod agent_jobs;

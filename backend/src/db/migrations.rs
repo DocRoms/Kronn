@@ -605,6 +605,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "160_live_page_actions",
         include_str!("sql/160_live_page_actions.sql"),
     ),
+    (
+        "161_acp_runtime_sessions",
+        include_str!("sql/161_acp_runtime_sessions.sql"),
+    ),
 ];
 
 /// Apply one migration inside the caller-owned transaction.
@@ -878,6 +882,43 @@ pub(crate) fn run_through(conn: &Connection, stop_after: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn migration_161_installs_the_durable_acp_runtime_session_store() {
+        let conn = Connection::open_in_memory().unwrap();
+        let migration_index = MIGRATIONS
+            .iter()
+            .position(|(name, _)| *name == "161_acp_runtime_sessions")
+            .unwrap();
+        let previous_migration = MIGRATIONS[migration_index - 1].0;
+        assert_eq!(previous_migration, "160_live_page_actions");
+        run_through(&conn, previous_migration).unwrap();
+        let table_before_161: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'acp_runtime_sessions')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!table_before_161);
+        run(&conn).unwrap();
+        let table_exists: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'acp_runtime_sessions')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let receipt_exists: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM _migrations WHERE name = '161_acp_runtime_sessions')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(table_exists);
+        assert!(receipt_exists);
+    }
 
     #[test]
     fn run_with_backup_creates_backup_file() {
