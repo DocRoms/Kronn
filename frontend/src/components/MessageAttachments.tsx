@@ -307,7 +307,7 @@ export function MessageAttachments({
                   type="button"
                   className="disc-image-lightbox-nav previous"
                   onClick={() => moveSelection(-1)}
-                  aria-label={t('disc.attachmentPrevious')}
+                  aria-label={t('disc.media.carouselPrevious')}
                 >
                   <ChevronLeft size={28} />
                 </button>
@@ -332,7 +332,7 @@ export function MessageAttachments({
                   type="button"
                   className="disc-image-lightbox-nav next"
                   onClick={() => moveSelection(1)}
-                  aria-label={t('disc.attachmentNext')}
+                  aria-label={t('disc.media.carouselNext')}
                 >
                   <ChevronRight size={28} />
                 </button>

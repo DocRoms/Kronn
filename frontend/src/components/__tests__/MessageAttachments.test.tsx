@@ -124,7 +124,7 @@ describe('MessageAttachments', () => {
     expect(external).toHaveAttribute('href', 'blob:fake-url');
     expect(external).toHaveAttribute('target', '_blank');
 
-    fireEvent.click(screen.getByRole('button', { name: 'disc.attachmentNext' }));
+    fireEvent.click(screen.getByRole('button', { name: 'disc.media.carouselNext' }));
     expect(dialog).toHaveTextContent('3 / 3');
     expect(within(dialog).getByRole('img', { name: 'c.png' })).toBeInTheDocument();
 
@@ -175,7 +175,7 @@ describe('MessageAttachments', () => {
     // video in with the images.
     const dialog = screen.getByRole('dialog', { name: 'disc.attachmentGallery' });
     expect(dialog).toHaveTextContent('2 / 3');
-    fireEvent.click(screen.getByRole('button', { name: 'disc.attachmentNext' }));
+    fireEvent.click(screen.getByRole('button', { name: 'disc.media.carouselNext' }));
     expect(dialog).toHaveTextContent('3 / 3');
     expect(within(dialog).getByRole('img', { name: 'later.png' })).toBeInTheDocument();
     fireEvent.keyDown(document, { key: 'ArrowRight' });

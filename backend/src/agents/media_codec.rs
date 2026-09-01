@@ -97,6 +97,16 @@ fn trimmed_base(base: &str) -> &str {
     base.trim_end_matches('/')
 }
 
+/// Base for a provider whose media routes live under `/v1`.
+///
+/// Operators legitimately store either `https://openrouter.ai/api` or
+/// `.../api/v1` as the connection endpoint — both work for chat. Appending
+/// `/v1/images` to the second one would POST to `/api/v1/v1/images` and fail
+/// with a 404 that looks like a provider outage.
+fn base_without_v1(base: &str) -> &str {
+    trimmed_base(base).trim_end_matches("/v1")
+}
+
 /// Bounds a provider error so a raw payload never reaches storage or the UI.
 fn bounded(message: &str) -> String {
     const MAX: usize = 300;
@@ -115,21 +125,21 @@ impl MediaCodec for OpenRouterMediaCodec {
     }
 
     fn image_url(&self, base: &str) -> String {
-        format!("{}/v1/images", trimmed_base(base))
+        format!("{}/v1/images", base_without_v1(base))
     }
 
     fn video_submit_url(&self, base: &str) -> String {
-        format!("{}/v1/videos", trimmed_base(base))
+        format!("{}/v1/videos", base_without_v1(base))
     }
 
     fn video_poll_url(&self, base: &str, provider_job_id: &str) -> String {
-        format!("{}/v1/videos/{}", trimmed_base(base), provider_job_id)
+        format!("{}/v1/videos/{}", base_without_v1(base), provider_job_id)
     }
 
     fn video_content_url(&self, base: &str, provider_job_id: &str, index: u32) -> String {
         format!(
             "{}/v1/videos/{}/content?index={}",
-            trimmed_base(base),
+            base_without_v1(base),
             provider_job_id,
             index
         )
@@ -430,6 +440,28 @@ mod tests {
 
     fn codec() -> OpenRouterMediaCodec {
         OpenRouterMediaCodec
+    }
+
+    #[test]
+    fn both_endpoint_shapes_an_operator_stores_reach_the_same_route() {
+        // Kronn's own OpenRouter connection stores `.../api`; the docs show
+        // `.../api/v1`. Chat works with either, so media must too.
+        for base in [
+            "https://openrouter.ai/api",
+            "https://openrouter.ai/api/",
+            "https://openrouter.ai/api/v1",
+            "https://openrouter.ai/api/v1/",
+        ] {
+            assert_eq!(
+                OpenRouterMediaCodec.image_url(base),
+                "https://openrouter.ai/api/v1/images",
+                "base {base} must not double the version segment"
+            );
+            assert_eq!(
+                OpenRouterMediaCodec.video_submit_url(base),
+                "https://openrouter.ai/api/v1/videos"
+            );
+        }
     }
 
     #[test]
