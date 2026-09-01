@@ -360,13 +360,16 @@ describe('_streamSSE — malformed SSE data', () => {
     expect(onChunk).not.toHaveBeenCalled();
   });
 
-  it('handles completely empty stream gracefully', async () => {
+  it('reports a completely empty stream as interrupted', async () => {
     const { onChunk, onDone, onError } = await callStreamSSE([]);
 
-    // Stream ends immediately — onDone is called, nothing else
+    // A backend restart can close the socket before any terminal event. Treating
+    // that as success would discard the durable partial response placeholder.
     expect(onChunk).not.toHaveBeenCalled();
-    expect(onError).not.toHaveBeenCalled();
-    expect(onDone).toHaveBeenCalledOnce();
+    expect(onError).toHaveBeenCalledWith(
+      'SSE stream closed before a terminal event; the operation closed before completion.',
+    );
+    expect(onDone).not.toHaveBeenCalled();
   });
 });
 
