@@ -3656,18 +3656,31 @@ pub fn context_file_exists(conn: &Connection, file_id: &str) -> rusqlite::Result
     )
 }
 
+// AI provenance is joined from the completed media job that actually produced
+// the file. The scalar id lookup intentionally selects at most one job even if
+// a damaged database contains duplicate references, so a context file can
+// never be duplicated in list responses.
+const CONTEXT_FILE_SELECT: &str =
+    "SELECT cf.id, cf.discussion_id, cf.filename, cf.mime_type, cf.original_size,
+            cf.extracted_size, cf.disk_path, cf.message_id, cf.created_at,
+            mj.model, mj.prompt
+     FROM context_files cf
+     LEFT JOIN media_jobs mj ON mj.id = (
+         SELECT source.id FROM media_jobs source
+         WHERE source.context_file_id = cf.id AND source.status = 'completed'
+         ORDER BY source.completed_at DESC, source.created_at DESC, source.id DESC
+         LIMIT 1
+     )";
+
 /// Fetch a single context file by id (incl. `disk_path`). Used by the F8
 /// `fetch-file` endpoint to stream a federated attachment's bytes to a peer.
 pub fn get_context_file(
     conn: &Connection,
     file_id: &str,
 ) -> rusqlite::Result<Option<crate::models::ContextFile>> {
-    conn.query_row(
-        "SELECT id, discussion_id, filename, mime_type, original_size, extracted_size, disk_path, message_id, created_at
-         FROM context_files WHERE id = ?1",
-        rusqlite::params![file_id],
-        map_context_file_row,
-    ).optional()
+    let sql = format!("{CONTEXT_FILE_SELECT} WHERE cf.id = ?1");
+    conn.query_row(&sql, rusqlite::params![file_id], map_context_file_row)
+        .optional()
 }
 
 /// Insert a context file received from a peer (F8), pinned to a specific
@@ -3697,10 +3710,8 @@ pub fn list_context_files(
     conn: &Connection,
     discussion_id: &str,
 ) -> rusqlite::Result<Vec<crate::models::ContextFile>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, discussion_id, filename, mime_type, original_size, extracted_size, disk_path, message_id, created_at
-         FROM context_files WHERE discussion_id = ?1 ORDER BY created_at"
-    )?;
+    let sql = format!("{CONTEXT_FILE_SELECT} WHERE cf.discussion_id = ?1 ORDER BY cf.created_at");
+    let mut stmt = conn.prepare(&sql)?;
     let rows = stmt
         .query_map(rusqlite::params![discussion_id], map_context_file_row)?
         .filter_map(|r| r.ok())
@@ -3709,8 +3720,10 @@ pub fn list_context_files(
 }
 
 /// Row → ContextFile mapper shared by the disc-wide and per-message list queries.
-/// Both SELECT the same column order: ... disk_path, message_id, created_at.
+/// All SELECT the same column order: context file fields, then AI provenance.
 fn map_context_file_row(row: &rusqlite::Row) -> rusqlite::Result<crate::models::ContextFile> {
+    let ai_model: Option<String> = row.get(9)?;
+    let ai_prompt: Option<String> = row.get(10)?;
     Ok(crate::models::ContextFile {
         id: row.get(0)?,
         discussion_id: row.get(1)?,
@@ -3728,6 +3741,9 @@ fn map_context_file_row(row: &rusqlite::Row) -> rusqlite::Result<crate::models::
                     .and_utc()
             })
             .unwrap_or_else(|_| Utc::now()),
+        ai_generation: ai_model
+            .zip(ai_prompt)
+            .map(|(model, prompt)| crate::models::ContextFileAiGeneration { model, prompt }),
     })
 }
 
@@ -3738,10 +3754,8 @@ pub fn list_context_files_for_message(
     conn: &Connection,
     message_id: &str,
 ) -> rusqlite::Result<Vec<crate::models::ContextFile>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, discussion_id, filename, mime_type, original_size, extracted_size, disk_path, message_id, created_at
-         FROM context_files WHERE message_id = ?1 ORDER BY created_at"
-    )?;
+    let sql = format!("{CONTEXT_FILE_SELECT} WHERE cf.message_id = ?1 ORDER BY cf.created_at");
+    let mut stmt = conn.prepare(&sql)?;
     let rows = stmt
         .query_map(rusqlite::params![message_id], map_context_file_row)?
         .filter_map(|r| r.ok())

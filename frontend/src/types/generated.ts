@@ -1136,7 +1136,21 @@ export type ContextFile = { id: string, discussion_id: string, filename: string,
  * the composer) or a legacy disc-wide file. Always serialized (even when
  * null) so the frontend can split pending-vs-attached without ambiguity.
  */
-message_id: string | null, created_at: string, };
+message_id: string | null,
+/**
+ * Present only when this file is the recorded output of a completed AI
+ * media job. `None` means "no attested AI provenance", never "probably
+ * human" based on a filename or MIME-type heuristic.
+ */
+ai_generation: ContextFileAiGeneration | null, created_at: string, };
+
+/**
+ * Provenance recorded by Kronn for an asset produced by an AI media job.
+ *
+ * Its presence is the attestation used by clients to label an asset as AI
+ * generated. Ordinary uploads never receive inferred provenance.
+ */
+export type ContextFileAiGeneration = { model: string, prompt: string, };
 
 export type CreateAdHocCompareRequest = { discussion_ids: Array<string>, };
 
