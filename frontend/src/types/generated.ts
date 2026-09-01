@@ -3999,7 +3999,25 @@ source_ref?: string | null,
  * Project environment variables are read-only unless the template author
  * explicitly allows an audited launch-time override.
  */
-allow_manual_override: boolean, };
+allow_manual_override: boolean,
+/**
+ * Presentation and bounded-value contract. Missing legacy values are
+ * regular single-line text inputs.
+ */
+control?: PromptVariableControl, };
+
+export type PromptVariableControl = { "type": "text" } | { "type": "textarea" } | { "type": "select", options: Array<PromptVariableOption>, default_value?: string, };
+
+export type PromptVariableOption = {
+/**
+ * Stable execution value. Renaming the label never changes run payloads.
+ */
+value: string, label: string,
+/**
+ * Disabled options remain in version history but cannot be selected by a
+ * new run.
+ */
+enabled: boolean, };
 
 /**
  * Where a declared template variable obtains its value at execution time.

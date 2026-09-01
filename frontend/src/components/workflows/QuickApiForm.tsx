@@ -20,6 +20,7 @@ import type {
   JsonValue,
 } from '../../types/generated';
 import { ApiCallStepCard, type ApiPluginOption } from './ApiCallStepCard';
+import { PromptVariableControlEditor } from './PromptVariableControlEditor';
 
 interface Props {
   editApi?: QuickApi;
@@ -350,6 +351,10 @@ export function QuickApiForm({
                 onChange={e => setVariables(prev => prev.map((pv, j) => j === i ? { ...pv, description: e.target.value || null } : pv))}
                 placeholder={t('qa.varDescriptionPlaceholder')}
                 style={{ fontSize: 12, opacity: 0.85 }}
+              />
+              <PromptVariableControlEditor
+                variable={v}
+                onChange={variable => setVariables(previous => previous.map((item, index) => index === i ? variable : item))}
               />
             </div>
           ))}

@@ -1799,6 +1799,7 @@ mod tests {
                 source: Default::default(),
                 source_ref: None,
                 allow_manual_override: false,
+                control: None,
             }],
             agent: AgentType::ClaudeCode,
             connection_id: None,
@@ -1877,11 +1878,38 @@ mod tests {
             parent_workflow_name: None,
             parent_run_started_at: None,
         };
+        let snapshot_run_id = run_id.clone();
+        let snapshot_secret = state
+            .config
+            .read()
+            .await
+            .encryption_secret
+            .clone()
+            .expect("test encryption secret");
         state
             .db
             .with_conn(move |conn| -> anyhow::Result<()> {
                 crate::db::workflows::insert_workflow(conn, &workflow)?;
                 crate::db::workflows::insert_run(conn, &parent_run)?;
+                let key = crate::core::crypto::parse_secret(&snapshot_secret)
+                    .map_err(anyhow::Error::msg)?;
+                let values = std::collections::HashMap::new();
+                let provenance = Vec::new();
+                crate::db::execution_variable_snapshots::insert(
+                    conn,
+                    crate::db::execution_variable_snapshots::NewSnapshot {
+                        run_kind: "workflow",
+                        run_id: &snapshot_run_id,
+                        project_id: None,
+                        environment_ref: "project_mcp_configs",
+                        resolved_at: Utc::now(),
+                        retention_days: 30,
+                        expires_at: Some(Utc::now() + chrono::Duration::days(30)),
+                        values: &values,
+                        provenance: &provenance,
+                    },
+                    &key,
+                )?;
                 Ok(())
             })
             .await
@@ -1989,7 +2017,8 @@ mod tests {
         assert_eq!(
             outcome.result.status,
             RunStatus::Success,
-            "fire-and-forget should always return Success once the spawn loop fires"
+            "fire-and-forget should always return Success once the spawn loop fires: {}",
+            outcome.result.output
         );
         let envelope = parse_envelope_for_test(&outcome.result.output);
         assert_eq!(
@@ -2094,7 +2123,11 @@ mod tests {
         .await;
 
         assert_eq!(outcome.result.status, RunStatus::Failed);
-        assert!(outcome.result.output.contains("LATENCY_BUDGET_EXCEEDED"));
+        assert!(
+            outcome.result.output.contains("LATENCY_BUDGET_EXCEEDED"),
+            "unexpected failure: {}",
+            outcome.result.output
+        );
 
         let parent = parent_run_id.clone();
         state
