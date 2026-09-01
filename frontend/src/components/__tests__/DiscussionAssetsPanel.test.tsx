@@ -226,4 +226,22 @@ describe('DiscussionAssetsPanel', () => {
     expect(screen.queryByText('clip.mp4')).toBeNull();
     expect(screen.queryByText('shot.png')).toBeNull();
   });
+  it('offers the generation entry even before any media model is configured', async () => {
+    // Hiding the entry made the feature undiscoverable: nothing told the
+    // operator a media slot has to be filled first, so nobody looked.
+    render(
+      <DiscussionAssetsPanel
+        discussionId="disc-1"
+        files={[file(1)]}
+        connections={[]}
+        onClose={vi.fn()}
+        onNavigateMessage={vi.fn()}
+        t={t}
+      />,
+    );
+
+    expect(screen.getByTestId('assets-generate-toggle')).toBeInTheDocument();
+    // And the reason is on screen without a click.
+    expect(screen.getByTestId('assets-generate-hint')).toHaveTextContent('disc.media.noSlot');
+  });
 });

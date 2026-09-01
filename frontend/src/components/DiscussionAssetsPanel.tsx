@@ -83,9 +83,10 @@ export function DiscussionAssetsPanel({
     () => [...files].sort((left, right) => right.created_at.localeCompare(left.created_at)),
     [files],
   );
-  // The launcher only appears when some connection can actually serve a
-  // modality: an always-visible button that only ever refuses is worse than
-  // no button.
+  // Whether any connection can actually serve a modality. It gates the FORM,
+  // not the entry point: hiding the whole block made the feature invisible and
+  // left no clue that a media slot has to be configured first — the same
+  // mistake as a disabled selector that explains nothing.
   const canGenerate = connections.some(
     connection =>
       (connection.image_model && connection.image_model.trim())
@@ -117,26 +118,32 @@ export function DiscussionAssetsPanel({
         </button>
       </header>
 
-      {canGenerate && (
-        <div className="disc-assets-generate">
-          <button
-            type="button"
-            className="btn btn-sm"
-            onClick={() => setShowGenerate(open => !open)}
-            aria-expanded={showGenerate}
-          >
-            <Sparkles size={13} aria-hidden="true" />
-            <span>{showGenerate ? t('disc.media.closeForm') : t('disc.media.newAsset')}</span>
-          </button>
-          {showGenerate && (
-            <MediaGenerateForm
-              discussionId={discussionId}
-              connections={connections}
-              t={t}
-            />
-          )}
-        </div>
-      )}
+      <div className="disc-assets-generate">
+        <button
+          type="button"
+          className="btn btn-sm"
+          onClick={() => setShowGenerate(open => !open)}
+          aria-expanded={showGenerate}
+          data-testid="assets-generate-toggle"
+        >
+          <Sparkles size={13} aria-hidden="true" />
+          <span>{showGenerate ? t('disc.media.closeForm') : t('disc.media.newAsset')}</span>
+        </button>
+        {!canGenerate && (
+          // Stated without a click: the reason it cannot run yet, and where to
+          // fix it. Discovering that through an empty form would be worse.
+          <p className="disc-assets-generate-hint" data-testid="assets-generate-hint">
+            {t('disc.media.noSlot')}
+          </p>
+        )}
+        {showGenerate && (
+          <MediaGenerateForm
+            discussionId={discussionId}
+            connections={connections}
+            t={t}
+          />
+        )}
+      </div>
 
       <div className="disc-assets-panel-tools">
         <label className="disc-assets-search">
