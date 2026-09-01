@@ -2842,6 +2842,7 @@ pub async fn test_step(
     let full_access = match req.step.agent {
         AgentType::ClaudeCode => agents.claude_code.full_access,
         AgentType::Codex => agents.codex.full_access,
+        AgentType::OpenCode => agents.open_code.full_access,
         AgentType::GeminiCli => agents.gemini_cli.full_access,
         AgentType::Kiro => agents.kiro.full_access,
         AgentType::Vibe => agents.vibe.full_access,

@@ -74,6 +74,7 @@ fn rtk_args_for(agent_type: &AgentType) -> Option<Vec<&'static str>> {
     match agent_type {
         AgentType::ClaudeCode => Some(vec!["init", "-g", "--auto-patch", "--hook-only"]),
         AgentType::Codex => Some(vec!["init", "-g", "--codex"]),
+        AgentType::OpenCode => None,
         AgentType::GeminiCli => Some(vec!["init", "-g", "--gemini", "--auto-patch"]),
         // RTK's `--copilot` targets VS Code Copilot Chat (writes to the
         // editor's settings.json), not the @github/copilot standalone
@@ -99,6 +100,7 @@ fn rtk_uninstall_args_for(agent_type: &AgentType) -> Option<Vec<&'static str>> {
     match agent_type {
         AgentType::ClaudeCode => Some(vec!["init", "-g", "--auto-patch", "--uninstall"]),
         AgentType::Codex => Some(vec!["init", "-g", "--codex", "--uninstall"]),
+        AgentType::OpenCode => None,
         // `--auto-patch` mirrors install: avoids the settings.json prompt
         // that would otherwise leave the entry orphaned in the file.
         AgentType::GeminiCli => Some(vec![

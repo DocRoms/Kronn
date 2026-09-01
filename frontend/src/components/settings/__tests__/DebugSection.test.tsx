@@ -25,6 +25,7 @@ const { agentsApi, configApi, debugApi, fetchHealth } = vi.hoisted(() => ({
   },
   configApi: {
     setServerConfig: vi.fn(),
+    getServerConfig: vi.fn(),
   },
   debugApi: {
     getLogs: vi.fn(),
@@ -54,6 +55,7 @@ beforeEach(() => {
   debugApi.getLogs.mockReset();
   debugApi.clearLogs.mockReset();
   configApi.setServerConfig.mockReset();
+  configApi.getServerConfig.mockReset();
   agentsApi.detect.mockReset();
   fetchHealth.mockReset();
 
@@ -64,6 +66,9 @@ beforeEach(() => {
   });
   debugApi.clearLogs.mockResolvedValue(undefined);
   configApi.setServerConfig.mockResolvedValue(undefined);
+  configApi.getServerConfig.mockResolvedValue({
+    discussion_weight: { enabled: true, amber_bytes: 25 * 1024 * 1024, red_bytes: 100 * 1024 * 1024 },
+  });
   agentsApi.detect.mockResolvedValue([]);
   fetchHealth.mockResolvedValue({ ok: true, version: '0.8.7', host_os: 'linux' });
 });
@@ -318,5 +323,66 @@ describe('DebugSection — bug report', () => {
     // Should still open the URL with at-least the user-agent / logs filled.
     await waitFor(() => expect(open).toHaveBeenCalled());
     vi.unstubAllGlobals();
+  });
+});
+
+describe('DebugSection — discussion weight indicator', () => {
+  it('reflects the persisted configuration in MiB', async () => {
+    renderCard();
+    await waitFor(() => expect(screen.getByTestId('disc-weight-settings')).toBeTruthy());
+
+    expect((screen.getByTestId('disc-weight-amber') as HTMLInputElement).value).toBe('25');
+    expect((screen.getByTestId('disc-weight-red') as HTMLInputElement).value).toBe('100');
+    expect(screen.getByTestId('disc-weight-toggle').getAttribute('aria-checked')).toBe('true');
+  });
+
+  it('persists the toggle and the pair together, in bytes', async () => {
+    renderCard();
+    await waitFor(() => expect(screen.getByTestId('disc-weight-toggle')).toBeTruthy());
+
+    fireEvent.click(screen.getByTestId('disc-weight-toggle'));
+    await waitFor(() => expect(configApi.setServerConfig).toHaveBeenCalled());
+
+    const payload = configApi.setServerConfig.mock.calls.at(-1)?.[0];
+    // The whole section travels as one: a toggle must not be saved without
+    // the pair it grades with.
+    expect(payload.discussion_weight).toEqual({
+      enabled: false,
+      amber_bytes: 25 * 1024 * 1024,
+      red_bytes: 100 * 1024 * 1024,
+    });
+  });
+
+  it('refuses an inverted pair locally and sends nothing', async () => {
+    renderCard();
+    await waitFor(() => expect(screen.getByTestId('disc-weight-red')).toBeTruthy());
+
+    fireEvent.change(screen.getByTestId('disc-weight-amber'), { target: { value: '900' } });
+    fireEvent.change(screen.getByTestId('disc-weight-red'), { target: { value: '100' } });
+    fireEvent.click(screen.getByTestId('disc-weight-save'));
+
+    await waitFor(() => expect(screen.getByTestId('disc-weight-error')).toBeTruthy());
+    expect(configApi.setServerConfig).not.toHaveBeenCalled();
+  });
+
+  it('rolls the toggle back when the save fails', async () => {
+    configApi.setServerConfig.mockRejectedValueOnce(new Error('nope'));
+    renderCard();
+    await waitFor(() => expect(screen.getByTestId('disc-weight-toggle')).toBeTruthy());
+
+    fireEvent.click(screen.getByTestId('disc-weight-toggle'));
+    // The optimistic flip must not survive a rejected write.
+    await waitFor(() =>
+      expect(screen.getByTestId('disc-weight-toggle').getAttribute('aria-checked')).toBe('true'),
+    );
+  });
+
+  it('hides the whole section when the configuration cannot be read', async () => {
+    configApi.getServerConfig.mockRejectedValueOnce(new Error('offline'));
+    renderCard();
+    await waitFor(() => expect(configApi.getServerConfig).toHaveBeenCalled());
+    // Showing guessed values the user could then save over the real ones
+    // would be worse than showing nothing.
+    expect(screen.queryByTestId('disc-weight-settings')).toBeNull();
   });
 });

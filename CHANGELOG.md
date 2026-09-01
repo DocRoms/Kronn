@@ -11,6 +11,17 @@ Release notes for 0.9.3 and earlier are available in the
 
 ## [Unreleased]
 
+### Added
+
+- Discussions now report their storage weight, split by what a cleanup could
+  actually reclaim: attachment bytes held on disk, extracted document text, and
+  message content. The sidebar shows a green / amber / red indicator whose
+  detail panel breaks the three masses down and states how much is reclaimable
+  without losing any conversation. The indicator is configurable from Settings
+  (`[server.discussion_weight]`: `enabled`, `amber_bytes`, `red_bytes`) and
+  disabling it removes the queries entirely, not just the badge. Weights are
+  served by a bounded batch endpoint — it never scans every discussion.
+
 ## [0.12.0] - 2026-08-30
 
 ### Added

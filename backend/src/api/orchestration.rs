@@ -7724,6 +7724,7 @@ fn worker_label(agent: &AgentType) -> &'static str {
     match agent {
         AgentType::ClaudeCode => "Claude Code",
         AgentType::Codex => "Codex",
+        AgentType::OpenCode => "OpenCode",
         AgentType::Vibe => "Vibe",
         AgentType::GeminiCli => "Gemini CLI",
         AgentType::Kiro => "Kiro",
@@ -8013,12 +8014,13 @@ async fn bounded_cli_worker_preflight(
 /// KT-515 — native/HTTP providers eligible for the `agent_list` catalogue.
 /// Kept in one place so the quota-exhaustion query below and
 /// `build_task_worker_catalogue`'s `native_agents` list can never drift apart.
-const CATALOGUED_PROVIDERS: [AgentType; 9] = [
+const CATALOGUED_PROVIDERS: [AgentType; 10] = [
     AgentType::Ollama,
     AgentType::LiteLlm,
     AgentType::Nvidia,
     AgentType::ClaudeCode,
     AgentType::Codex,
+    AgentType::OpenCode,
     AgentType::GeminiCli,
     AgentType::Kiro,
     AgentType::CopilotCli,
@@ -16608,13 +16610,16 @@ mod tests {
         let (first, second) = tokio::join!(first, second);
         let first = first.unwrap().0;
         let second = second.unwrap().0;
-        assert!(
-            first.success || second.success,
-            "one approval must be accepted"
-        );
-        assert!(
-            first.success || second.error_code.as_deref() == Some("conflict"),
-            "the competing retry must either win or observe the durable claim"
+        let outcomes = [&first, &second];
+        let accepted = outcomes.iter().filter(|response| response.success).count();
+        let conflicts = outcomes
+            .iter()
+            .filter(|response| response.error_code.as_deref() == Some("conflict"))
+            .count();
+        assert_eq!(accepted, 1, "exactly one approval must be accepted");
+        assert_eq!(
+            conflicts, 1,
+            "the competing retry must observe the durable claim"
         );
 
         let terminal = wait_for_execution_status(&db, &exec_id, TaskExecutionStatus::Done).await;

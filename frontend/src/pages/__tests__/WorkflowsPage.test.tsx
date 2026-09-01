@@ -118,6 +118,7 @@ vi.mock('../../lib/api', () => ({
 const defaultModelTiers = {
   claude_code: { economy: null, reasoning: null },
   codex: { economy: null, reasoning: null },
+  open_code: { economy: null, reasoning: null },
   gemini_cli: { economy: null, reasoning: null },
   kiro: { economy: null, reasoning: null },
   vibe: { economy: null, reasoning: null },
@@ -130,6 +131,7 @@ const defaultModelTiers = {
 const restrictedConfig: AgentsConfig = {
   claude_code: { path: null, installed: true, version: null, full_access: false },
   codex: { path: null, installed: true, version: null, full_access: false },
+  open_code: { path: null, installed: false, version: null, full_access: false },
   gemini_cli: { path: null, installed: true, version: null, full_access: false },
   kiro: { path: null, installed: false, version: null, full_access: false },
   vibe: { path: null, installed: false, version: null, full_access: false },
@@ -143,6 +145,7 @@ const restrictedConfig: AgentsConfig = {
 const fullConfig: AgentsConfig = {
   claude_code: { path: null, installed: true, version: null, full_access: true },
   codex: { path: null, installed: true, version: null, full_access: true },
+  open_code: { path: null, installed: false, version: null, full_access: true },
   gemini_cli: { path: null, installed: true, version: null, full_access: true },
   kiro: { path: null, installed: false, version: null, full_access: true },
   vibe: { path: null, installed: false, version: null, full_access: true },

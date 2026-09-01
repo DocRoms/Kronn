@@ -1394,6 +1394,10 @@ pub struct AgentProcess {
     agent_type: AgentType,
     rx: mpsc::Receiver<String>,
     pub stderr_capture: Arc<Mutex<Vec<String>>>,
+    /// Usage emitted by structured transports such as ACP. This is process
+    /// telemetry, not a log scrape, so callers can attribute a completed run
+    /// even when the transport has no stderr token marker.
+    usage: Arc<Mutex<AgentUsage>>,
     stderr_task: Option<tokio::task::JoinHandle<()>>,
     /// HTTP agents run their provider/tool loop in a Tokio task rather than in
     /// `child`. Killing the lifeline process alone therefore does not stop the
@@ -1403,6 +1407,12 @@ pub struct AgentProcess {
     /// On Unix, the process group ID of the spawned agent, used to terminate
     /// the entire process tree on cancellation. None on Windows.
     pgid: Option<i32>,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct AgentUsage {
+    input_tokens: u64,
+    output_tokens: u64,
 }
 
 impl AgentProcess {
@@ -1444,6 +1454,12 @@ impl AgentProcess {
     /// Note: may be incomplete if called before process exit. Prefer `captured_stderr_flushed`.
     pub fn captured_stderr(&self) -> Vec<String> {
         self.stderr_capture.lock().unwrap().clone()
+    }
+
+    pub fn reported_token_usage(&self) -> Option<u64> {
+        let usage = *self.usage.lock().unwrap();
+        let total = usage.input_tokens.saturating_add(usage.output_tokens);
+        (total > 0).then_some(total)
     }
 
     /// Fix file ownership after agent execution.
@@ -1551,6 +1567,11 @@ pub trait AgentIo: Send {
     fn raw_token_stream(&self) -> bool {
         false
     }
+    /// Provider-reported token totals, when a structured transport supplies
+    /// them. `None` preserves the stderr/output parsing fallback for CLIs.
+    fn reported_token_usage(&self) -> Option<u64> {
+        None
+    }
     /// Best-effort kill of the underlying process.
     async fn kill(&mut self);
     /// Await process exit. `None` when nothing real backs it (scripted).
@@ -1577,6 +1598,9 @@ impl AgentIo for AgentProcess {
     }
     fn raw_token_stream(&self) -> bool {
         AgentProcess::raw_token_stream(self)
+    }
+    fn reported_token_usage(&self) -> Option<u64> {
+        AgentProcess::reported_token_usage(self)
     }
     async fn kill(&mut self) {
         self.rx.close();
@@ -2239,6 +2263,7 @@ pub(crate) fn is_local_agent(agent: &AgentType) -> bool {
         agent,
         AgentType::ClaudeCode
             | AgentType::Codex
+            | AgentType::OpenCode
             | AgentType::GeminiCli
             | AgentType::Kiro
             | AgentType::Vibe
@@ -2251,9 +2276,10 @@ pub(crate) fn agent_concurrency_limits(
     cfg: &crate::models::setup::AgentsConfig,
     local_global_limit: usize,
 ) -> String {
-    const LOCAL: [AgentType; 7] = [
+    const LOCAL: [AgentType; 8] = [
         AgentType::ClaudeCode,
         AgentType::Codex,
+        AgentType::OpenCode,
         AgentType::GeminiCli,
         AgentType::Kiro,
         AgentType::Vibe,
@@ -2265,6 +2291,7 @@ pub(crate) fn agent_concurrency_limits(
     let per_agent = |agent: &AgentType| match agent {
         AgentType::ClaudeCode => &cfg.claude_code,
         AgentType::Codex => &cfg.codex,
+        AgentType::OpenCode => &cfg.open_code,
         AgentType::GeminiCli => &cfg.gemini_cli,
         AgentType::Kiro => &cfg.kiro,
         AgentType::Vibe => &cfg.vibe,
@@ -2351,6 +2378,7 @@ pub(crate) fn resolve_model_flag(
         let agent_cfg = match agent_type {
             AgentType::ClaudeCode => &cfg.claude_code,
             AgentType::Codex => &cfg.codex,
+            AgentType::OpenCode => &cfg.open_code,
             AgentType::GeminiCli => &cfg.gemini_cli,
             AgentType::Kiro => &cfg.kiro,
             AgentType::Vibe => &cfg.vibe,
@@ -2403,6 +2431,9 @@ pub(crate) fn resolve_model_flag(
         (AgentType::Codex, ModelTier::Economy) => Some("gpt-5.6-luna".into()),
         (AgentType::Codex, ModelTier::Default) => None, // Codex default is fine
         (AgentType::Codex, ModelTier::Reasoning) => Some("gpt-5.6-sol".into()),
+        // OpenCode provides its selected model and modes from ACP during
+        // initialization; no static model name is authoritative here.
+        (AgentType::OpenCode, _) => None,
         (AgentType::GeminiCli, ModelTier::Economy) => Some("gemini-2.5-flash".into()),
         (AgentType::GeminiCli, ModelTier::Default) => None, // Gemini default is fine
         (AgentType::GeminiCli, ModelTier::Reasoning) => Some("gemini-3.1-pro-preview".into()),
@@ -2874,6 +2905,28 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
             p
         }
     };
+    // OpenCode is an ACP-native CLI. It must never enter the generic text
+    // runner: `opencode acp` speaks bidirectional JSON-RPC, not line-oriented
+    // model output. The ACP host owns initialize/session/prompt/cancel and
+    // forwards only normalized text updates to the existing stream consumer.
+    if crate::acp::production_route(config.agent_type) == crate::acp::AcpProductionRoute::NativeAcp
+    {
+        // Kiro ships as a host binary; the Linux container needs its own copy
+        // before the ACP subprocess can start.
+        if matches!(config.agent_type, AgentType::Kiro) {
+            ensure_kiro_cli_available().await?;
+        }
+        return start_native_acp(
+            config.agent_type,
+            &work_dir,
+            config.prompt,
+            &extra_context,
+            config.project_path,
+            model_flag.as_deref(),
+            config.cancel_token.as_ref(),
+        )
+        .await;
+    }
     let (binary, npx_pkg, mut args, env_key, stderr_mode, output_mode) =
         agent_command_with_task_worker_policy(
             config.agent_type,
@@ -2913,12 +2966,6 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
 
     // API key is optional — agents use their own local auth by default
     let api_key = get_api_key(env_key, config.tokens);
-
-    // On macOS hosts, host-mounted kiro-cli is not runnable in Linux containers.
-    // Ensure a Linux kiro-cli exists locally before spawning Kiro.
-    if matches!(config.agent_type, AgentType::Kiro) {
-        ensure_kiro_cli_available().await?;
-    }
 
     // Claude Code accepts the positional prompt argument OR reads it from
     // stdin when absent. Writing large prompts to stdin side-steps the
@@ -3084,10 +3131,203 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
         agent_type: config.agent_type.clone(),
         rx,
         stderr_capture,
+        usage: Arc::new(Mutex::new(AgentUsage::default())),
         stderr_task: stderr_handle,
         http_cancel: None,
         pgid,
     })
+}
+
+async fn start_native_acp(
+    agent_type: &AgentType,
+    work_dir: &Path,
+    prompt: &str,
+    system_context: &str,
+    project_path: &str,
+    model_flag: Option<&str>,
+    parent_cancel: Option<&tokio_util::sync::CancellationToken>,
+) -> Result<AgentProcess, String> {
+    use crate::acp::{
+        acp_agent, AcpCapability, AcpHost, AcpInitialize, AcpJsonRpcTransport, AcpSessionEvent,
+    };
+    use tokio::io::AsyncWriteExt;
+
+    let acp_agent =
+        acp_agent(agent_type).ok_or_else(|| format!("{agent_type:?} is not an ACP agent"))?;
+    let transport = Arc::new(
+        AcpJsonRpcTransport::spawn_native(acp_agent, &work_dir.to_string_lossy())
+            .await
+            .map_err(|error| format!("{agent_type:?} ACP spawn failed: {error}"))?,
+    );
+    let mut host = AcpHost::new(1, transport);
+    let mcp_servers = acp_project_mcp_servers(project_path);
+    host.negotiate(AcpInitialize {
+        protocol_version: 1,
+        cwd: work_dir.to_string_lossy().into_owned(),
+        mcp_servers: mcp_servers.clone(),
+    })
+    .await
+    .map_err(|error| format!("{agent_type:?} ACP initialize failed: {error}"))?;
+    if !mcp_servers.is_empty() {
+        host.require_capability(AcpCapability::McpInjection)
+            .map_err(|error| {
+                format!("{agent_type:?} ACP cannot start with the project MCP registry: {error}")
+            })?;
+    }
+    let session = host
+        .create_session()
+        .await
+        .map_err(|error| format!("{agent_type:?} ACP session creation failed: {error}"))?;
+    // Apply the resolved tier/model against the options the session actually
+    // returned (ACP session-config-options). The host applies it via
+    // `session/set_config_option` only when a matching option value exists;
+    // otherwise the choice is a deliberate no-op so a catalogue-less agent keeps
+    // its own default instead of receiving a bad flag.
+    if let Some(model) = model_flag {
+        match host.select_model(&session, model).await {
+            Ok(true) => tracing::debug!(agent = ?agent_type, model, "ACP model selection applied"),
+            Ok(false) => tracing::debug!(
+                agent = ?agent_type,
+                model,
+                "ACP session exposes no matching model option; keeping its default"
+            ),
+            Err(error) => {
+                return Err(format!(
+                    "{agent_type:?} ACP model selection failed: {error}"
+                ))
+            }
+        }
+    }
+
+    let full_prompt = if system_context.is_empty() {
+        prompt.to_owned()
+    } else {
+        format!("{system_context}\n\n{prompt}")
+    };
+    let (tx, rx) = mpsc::channel::<String>(256);
+    let stderr_capture = Arc::new(Mutex::new(Vec::new()));
+    let usage = Arc::new(Mutex::new(AgentUsage::default()));
+    let cancel = parent_cancel
+        .map(tokio_util::sync::CancellationToken::child_token)
+        .unwrap_or_default();
+    let task_cancel = cancel.clone();
+    let task_usage = usage.clone();
+    let process_agent_type = agent_type.clone();
+    let event_agent_label = format!("{agent_type:?}");
+
+    // Match the async agent task to the AgentProcess lifecycle without treating
+    // the ACP child itself as a line-producing text process.
+    let mut lifeline = async_cmd("sh")
+        .args(["-c", r#"read -r s; exit "${s:-1}""#])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| format!("OpenCode ACP lifeline spawn failed: {error}"))?;
+    let lifeline_stdin = lifeline.stdin.take();
+
+    tokio::spawn(async move {
+        let mut lifeline_stdin = lifeline_stdin;
+        // Forward normalized ACP events to the existing text stream as they
+        // arrive, so the UI streams live during the prompt turn instead of
+        // receiving one batch after the response.
+        let (event_tx, mut event_rx) = mpsc::channel::<AcpSessionEvent>(256);
+        let forward_label = event_agent_label.clone();
+        let forwarder = tokio::spawn(async move {
+            while let Some(event) = event_rx.recv().await {
+                match event {
+                    AcpSessionEvent::TextDelta(text) => {
+                        if tx.send(text).await.is_err() {
+                            break;
+                        }
+                    }
+                    AcpSessionEvent::ToolCall { name } => {
+                        if tx
+                            .send(format!("[{forward_label} tool: {name}]"))
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    AcpSessionEvent::Usage {
+                        input_tokens,
+                        output_tokens,
+                    } => {
+                        *task_usage.lock().unwrap() = AgentUsage {
+                            input_tokens,
+                            output_tokens,
+                        };
+                    }
+                    AcpSessionEvent::Completed => {}
+                }
+            }
+        });
+
+        // On cancellation the prompt future is dropped, which drops its event
+        // sender and lets the forwarder finish draining before we report.
+        let (result, cancelled) = tokio::select! {
+            _ = task_cancel.cancelled() => (host.cancel(&session).await, true),
+            result = host.prompt(&session, &full_prompt, event_tx) => (result, false),
+        };
+        let _ = forwarder.await;
+        let ok = match &result {
+            Ok(()) if !cancelled => true,
+            Ok(()) => false,
+            Err(error) => {
+                tracing::warn!(agent = %event_agent_label, "ACP session failed: {error}");
+                false
+            }
+        };
+        let _ = host.shutdown().await;
+        if let Some(mut stdin) = lifeline_stdin.take() {
+            let _ = stdin.write_all(if ok { b"0\n" } else { b"1\n" }).await;
+            let _ = stdin.shutdown().await;
+        }
+    });
+
+    Ok(AgentProcess {
+        child: lifeline,
+        output_mode: OutputMode::Text,
+        work_dir: work_dir.to_path_buf(),
+        agent_type: process_agent_type,
+        rx,
+        stderr_capture,
+        usage,
+        stderr_task: None,
+        http_cancel: Some(cancel),
+        pgid: None,
+    })
+}
+
+/// ACP receives only command-only MCP declarations from Kronn's canonical
+/// project registry. Values from an MCP `env` map can be credentials; keeping
+/// those entries out of the ACP payload preserves the server-side secret
+/// boundary until the broker can inject scoped credentials directly.
+fn acp_project_mcp_servers(project_path: &str) -> Vec<crate::acp::AcpMcpServer> {
+    if project_path.is_empty() {
+        return Vec::new();
+    }
+    let Some(file) = crate::core::mcp_scanner::read_mcp_json(project_path) else {
+        return Vec::new();
+    };
+    let mut servers: Vec<_> = file
+        .mcp_servers
+        .into_iter()
+        .filter_map(|(id, entry)| {
+            let command = entry.command?;
+            (!command.trim().is_empty() && entry.env.is_empty()).then_some(
+                crate::acp::AcpMcpServer {
+                    id,
+                    command,
+                    args: entry.args.unwrap_or_default(),
+                    allowed_tools: Vec::new(),
+                },
+            )
+        })
+        .collect();
+    servers.sort_by(|left, right| left.id.cmp(&right.id));
+    servers
 }
 
 /// Ensure kiro-cli is available inside the container.
@@ -7046,6 +7286,7 @@ async fn start_ollama_http(
         agent_type: agent_type.clone(),
         rx,
         stderr_capture,
+        usage: Arc::new(Mutex::new(AgentUsage::default())),
         stderr_task: None,
         http_cancel: Some(http_cancel),
         pgid: None,
@@ -7690,6 +7931,28 @@ fn agent_command_with_task_worker_policy(
                 Some("@openai/codex"),
                 args,
                 "OPENAI_API_KEY",
+                StderrMode::StdoutOnly,
+                OutputMode::Text,
+            )
+        }
+        AgentType::OpenCode => {
+            // Production ACP sessions are created by `AcpJsonRpcTransport`.
+            // This command builder is retained only for the explicit direct
+            // CLI migration path and deliberately does not parse ACP as a
+            // Claude stream.
+            let _ = (
+                prompt,
+                full_access,
+                mcp_context,
+                model_flag,
+                task_worker,
+                task_work_dir,
+            );
+            (
+                "opencode",
+                Some("opencode-ai"),
+                vec!["acp".into()],
+                "NONE",
                 StderrMode::StdoutOnly,
                 OutputMode::Text,
             )

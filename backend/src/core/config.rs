@@ -388,6 +388,7 @@ pub fn default_config() -> AppConfig {
             agent_handoff_paid_limit: 1,
             agent_handoff_paid_unlimited: false,
             agent_handoff_blocked_agents: vec![],
+            discussion_weight: crate::models::DiscussionWeightConfig::default(),
         },
         tokens: TokensConfig {
             anthropic: None,
@@ -440,6 +441,7 @@ pub fn default_config() -> AppConfig {
                 mention_color: None,
                 base_url: None,
             },
+            open_code: AgentConfig::default(),
             gemini_cli: AgentConfig::default(),
             kiro: AgentConfig::default(),
             vibe: AgentConfig::default(),

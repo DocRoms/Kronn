@@ -68,6 +68,8 @@ export const API_NAMESPACES = [
   'health',
   // KT-190 — joined-CLI token telemetry coverage.
   'telemetry',
+  // KT-243 — shared RunStatusCard/SharedRun read model.
+  'runsApi',
 ] as const;
 
 /** Flat top-level helpers (non-namespace exports). */
@@ -123,6 +125,7 @@ interface DefaultMock {
   orchestration: Record<string, AnyFn>;
   learnings: Record<string, AnyFn>;
   telemetry: Record<string, AnyFn>;
+  runsApi: Record<string, AnyFn>;
   measuredRatio: AnyFn;
 }
 
@@ -714,6 +717,11 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
     // coverage figure, and "no sessions" is the honest neutral state.
     telemetry: {
       coverage: resolve([]),
+    },
+    // KT-243 — empty by default: a card with no runId/model mounts clean.
+    runsApi: {
+      list: resolve([]),
+      get: resolve(null),
     },
     measuredRatio: vi.fn(() => null),
   };

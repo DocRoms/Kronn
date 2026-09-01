@@ -149,6 +149,11 @@ vi.mock('../../lib/api', () => ({
   orchestration: {
     discussionLinks: vi.fn().mockResolvedValue([]),
   },
+  // KT-243 — DiscussionAttachedRuns polls attached SharedRuns per discussion.
+  runsApi: {
+    list: vi.fn().mockResolvedValue([]),
+    get: vi.fn(),
+  },
   config: {
     getUiLanguage: vi.fn().mockResolvedValue('fr'),
     saveUiLanguage: vi.fn().mockResolvedValue(undefined),

@@ -3084,6 +3084,29 @@ button.disc-contact-open {
   animation: spin 1s linear infinite;
 }
 
+.disc-attached-runs {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--kr-border);
+  background: var(--kr-bg-surface);
+}
+
+.disc-attached-runs-heading {
+  font-size: var(--kr-fs-xs);
+  font-family: var(--kr-font-mono);
+  color: var(--kr-text-ghost);
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+
+.disc-attached-runs-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
 .disc-messages-git-row {
   display: flex;
   flex: 1;

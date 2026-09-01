@@ -44,6 +44,7 @@ pub fn latest_known_agent_version(agent_type: &AgentType) -> Option<&'static str
         AgentType::ClaudeCode => Some("2.1.251"),
         // @openai/codex on npm
         AgentType::Codex => Some("0.151.0"),
+        AgentType::OpenCode => None,
         // mistral-vibe on PyPI
         AgentType::Vibe => Some("2.24.5"),
         // @google/gemini-cli on npm

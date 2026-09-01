@@ -3356,6 +3356,7 @@ pub(crate) fn parse_agent_type(s: &str) -> AgentType {
     match s {
         "ClaudeCode" => AgentType::ClaudeCode,
         "Codex" => AgentType::Codex,
+        "OpenCode" => AgentType::OpenCode,
         "Vibe" => AgentType::Vibe,
         "GeminiCli" => AgentType::GeminiCli,
         "Kiro" => AgentType::Kiro,
@@ -3371,6 +3372,7 @@ fn format_agent_type(a: &AgentType) -> String {
     match a {
         AgentType::ClaudeCode => "ClaudeCode".into(),
         AgentType::Codex => "Codex".into(),
+        AgentType::OpenCode => "OpenCode".into(),
         AgentType::Vibe => "Vibe".into(),
         AgentType::GeminiCli => "GeminiCli".into(),
         AgentType::Kiro => "Kiro".into(),

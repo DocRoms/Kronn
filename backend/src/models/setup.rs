@@ -251,6 +251,10 @@ pub struct ServerConfig {
     /// generated reply. Empty keeps the historical allow-all behaviour.
     #[serde(default)]
     pub agent_handoff_blocked_agents: Vec<AgentType>,
+    /// Sidebar storage-weight indicator. Validation and fallback live in
+    /// `models::discussion_weight`; this is only the persisted field.
+    #[serde(default)]
+    pub discussion_weight: crate::models::DiscussionWeightConfig,
 }
 
 /// Serde default for [`ServerConfig::default_summary_strategy`].
@@ -434,6 +438,8 @@ pub struct AgentsConfig {
     pub claude_code: AgentConfig,
     pub codex: AgentConfig,
     #[serde(default)]
+    pub open_code: AgentConfig,
+    #[serde(default)]
     pub gemini_cli: AgentConfig,
     #[serde(default)]
     pub kiro: AgentConfig,
@@ -492,6 +498,7 @@ impl HttpEndpoints {
             AgentType::Ollama
             | AgentType::ClaudeCode
             | AgentType::Codex
+            | AgentType::OpenCode
             | AgentType::Vibe
             | AgentType::GeminiCli
             | AgentType::Kiro
@@ -507,6 +514,7 @@ impl AgentsConfig {
         match agent {
             AgentType::ClaudeCode => self.claude_code.full_access,
             AgentType::Codex => self.codex.full_access,
+            AgentType::OpenCode => self.open_code.full_access,
             AgentType::GeminiCli => self.gemini_cli.full_access,
             AgentType::Kiro => self.kiro.full_access,
             AgentType::Vibe => self.vibe.full_access,
@@ -521,6 +529,7 @@ impl AgentsConfig {
     pub fn any_full_access(&self) -> bool {
         self.claude_code.full_access
             || self.codex.full_access
+            || self.open_code.full_access
             || self.gemini_cli.full_access
             || self.kiro.full_access
             || self.vibe.full_access
@@ -534,6 +543,7 @@ impl AgentsConfig {
     pub fn any_installed(&self) -> bool {
         self.claude_code.installed
             || self.codex.installed
+            || self.open_code.installed
             || self.gemini_cli.installed
             || self.kiro.installed
             || self.vibe.installed
@@ -614,6 +624,8 @@ pub struct ModelTiersConfig {
     pub claude_code: ModelTierConfig,
     #[serde(default)]
     pub codex: ModelTierConfig,
+    #[serde(default)]
+    pub open_code: ModelTierConfig,
     #[serde(default)]
     pub gemini_cli: ModelTierConfig,
     #[serde(default)]
@@ -727,6 +739,9 @@ pub enum AgentType {
     #[default]
     ClaudeCode,
     Codex,
+    /// OpenCode uses the ACP transport; it is a CLI identity, never the
+    /// generic `Custom` HTTP connection bucket.
+    OpenCode,
     Vibe,
     GeminiCli,
     Kiro,
@@ -813,6 +828,9 @@ pub struct ServerConfigPublic {
     pub agent_handoff_paid_limit: u32,
     pub agent_handoff_paid_unlimited: bool,
     pub agent_handoff_blocked_agents: Vec<AgentType>,
+    /// Sidebar storage-weight indicator: lets the frontend skip the batch
+    /// call entirely when disabled, and grade colours without a round-trip.
+    pub discussion_weight: crate::models::DiscussionWeightConfig,
 }
 
 #[derive(Debug, Deserialize)]
@@ -845,4 +863,7 @@ pub struct UpdateServerConfigRequest {
     pub agent_handoff_paid_unlimited: Option<bool>,
     #[serde(default)]
     pub agent_handoff_blocked_agents: Option<Vec<AgentType>>,
+    /// Whole section at once: the toggle and the pair are persisted together
+    /// so a rejected pair can never leave a half-applied state.
+    pub discussion_weight: Option<crate::models::DiscussionWeightConfig>,
 }
