@@ -6,7 +6,7 @@
 // isolation from the heavy MessageBubble.
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { ChevronLeft, ChevronRight, Download, ExternalLink, FileText, Image as ImageIcon, Loader2, MessageSquare, X } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Download, ExternalLink, FileText, Image as ImageIcon, Loader2, MessageSquare, Sparkles, X } from 'lucide-react';
 import type { ContextFile } from '../types/generated';
 import { discussions as discussionsApi } from '../lib/api';
 import { triggerDownload } from '../lib/downloadBlob';
@@ -17,6 +17,42 @@ type T = (key: string, ...args: (string | number)[]) => string;
 
 function formatKb(bytes: number): string {
   return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+}
+
+function AiGeneratedBadge({ t }: { t: T }) {
+  return (
+    <span className="disc-ai-generated-badge" data-testid="ai-generated-badge">
+      <Sparkles size={10} aria-hidden="true" />
+      {t('disc.assets.aiGenerated')}
+    </span>
+  );
+}
+
+function AiGenerationDetails({ file, t }: { file: ContextFile; t: T }) {
+  if (!file.ai_generation) return null;
+  return (
+    <div
+      className="disc-ai-generation-details"
+      role="note"
+      aria-label={t('disc.assets.aiGenerated')}
+      data-testid="ai-generation-details"
+    >
+      <div className="disc-ai-generation-heading">
+        <span className="disc-ai-generation-label">
+          <Sparkles size={13} aria-hidden="true" />
+          {t('disc.assets.aiGenerated')}
+        </span>
+        <span className="disc-ai-generation-model">
+          <span>{t('disc.assets.aiModel')}</span>
+          <code>{file.ai_generation.model}</code>
+        </span>
+      </div>
+      <p className="disc-ai-generation-prompt">
+        <strong>{t('disc.assets.aiPrompt')}</strong>
+        <span>{file.ai_generation.prompt}</span>
+      </p>
+    </div>
+  );
 }
 
 function AttachmentThumb({ file, url, failed, t, onOpen, onPrepareVideo, variant, onNavigateMessage }: {
@@ -70,7 +106,7 @@ function AttachmentThumb({ file, url, failed, t, onOpen, onPrepareVideo, variant
     }
   };
 
-  const preview = isImage && !failed ? (
+  const previewContent = isImage && !failed ? (
       <button
         type="button"
         className="disc-attach-thumb"
@@ -123,6 +159,12 @@ function AttachmentThumb({ file, url, failed, t, onOpen, onPrepareVideo, variant
       <span className="disc-attach-chip-name">{file.filename}</span>
     </span>
   );
+  const preview = file.ai_generation && (isImage || isVideo) ? (
+    <span className="disc-attach-generated">
+      {previewContent}
+      <AiGeneratedBadge t={t} />
+    </span>
+  ) : previewContent;
 
   if (variant === 'message') return preview;
 
@@ -386,21 +428,26 @@ export function MessageAttachments({
                   <ChevronLeft size={28} />
                 </button>
               )}
-              {isVideoFile(selectedFile)
-                ? urls[selectedFile.id]
-                  ? <MediaPlayer
-                      src={urls[selectedFile.id]}
-                      filename={selectedFile.filename}
-                      t={t}
-                    />
-                  : failedIds.has(selectedFile.id)
-                    ? <span className="disc-image-lightbox-empty">{t('disc.attachmentImage', selectedFile.filename)}</span>
-                    // Fetched on selection, so a brief placeholder is expected
-                    // rather than an empty frame.
-                    : <span className="disc-image-lightbox-empty" data-testid="lightbox-loading">
-                        <Loader2 size={20} />
-                      </span>
-                : <img src={urls[selectedFile.id]} alt={selectedFile.filename} />}
+              <div className="disc-image-lightbox-asset">
+                <div className="disc-image-lightbox-media-frame">
+                  {isVideoFile(selectedFile)
+                    ? urls[selectedFile.id]
+                      ? <MediaPlayer
+                          src={urls[selectedFile.id]}
+                          filename={selectedFile.filename}
+                          t={t}
+                        />
+                      : failedIds.has(selectedFile.id)
+                        ? <span className="disc-image-lightbox-empty">{t('disc.attachmentImage', selectedFile.filename)}</span>
+                        // Fetched on selection, so a brief placeholder is expected
+                        // rather than an empty frame.
+                        : <span className="disc-image-lightbox-empty" data-testid="lightbox-loading">
+                            <Loader2 size={20} />
+                          </span>
+                    : <img src={urls[selectedFile.id]} alt={selectedFile.filename} />}
+                </div>
+                <AiGenerationDetails file={selectedFile} t={t} />
+              </div>
               {carouselFiles.length > 1 && (
                 <button
                   type="button"

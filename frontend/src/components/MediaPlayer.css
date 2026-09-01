@@ -59,6 +59,39 @@
   font-size: 10px;
 }
 
+.disc-attach-generated {
+  position: relative;
+  display: inline-flex;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.disc-ai-generated-badge {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  max-width: calc(100% - 12px);
+  padding: 3px 6px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  border-radius: var(--kr-r-pill, 999px);
+  color: #fff;
+  background: rgba(7, 12, 21, 0.76);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+  font-size: 8px;
+  font-weight: 700;
+  line-height: 1;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
+  pointer-events: none;
+  backdrop-filter: blur(5px);
+}
+
 .disc-attach-video-poster {
   position: absolute;
   inset: 0;

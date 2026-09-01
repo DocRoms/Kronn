@@ -228,6 +228,17 @@ fn default_per_page() -> u32 {
 
 // ─── Context Files (uploaded file context for discussions) ────────────────
 
+/// Provenance recorded by Kronn for an asset produced by an AI media job.
+///
+/// Its presence is the attestation used by clients to label an asset as AI
+/// generated. Ordinary uploads never receive inferred provenance.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ContextFileAiGeneration {
+    pub model: String,
+    pub prompt: String,
+}
+
 /// A file uploaded as context for a discussion.
 /// Content is extracted to text at upload time and stored in DB.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -245,6 +256,10 @@ pub struct ContextFile {
     /// the composer) or a legacy disc-wide file. Always serialized (even when
     /// null) so the frontend can split pending-vs-attached without ambiguity.
     pub message_id: Option<String>,
+    /// Present only when this file is the recorded output of a completed AI
+    /// media job. `None` means "no attested AI provenance", never "probably
+    /// human" based on a filename or MIME-type heuristic.
+    pub ai_generation: Option<ContextFileAiGeneration>,
     pub created_at: DateTime<Utc>,
 }
 

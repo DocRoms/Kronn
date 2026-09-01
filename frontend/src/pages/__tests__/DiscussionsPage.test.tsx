@@ -1118,6 +1118,7 @@ describe('DiscussionsPage', () => {
         extracted_size: 128,
         disk_path: null,
         message_id: 'm-agent',
+        ai_generation: null,
         created_at: '2026-01-01T00:00:01Z',
       }]);
 
@@ -1177,6 +1178,7 @@ describe('DiscussionsPage', () => {
       extracted_size: 256,
       disk_path: null,
       message_id: 'm-first',
+      ai_generation: null,
       created_at: '2026-01-01T00:01:00Z',
     };
     vi.mocked(discussionsApi.get).mockImplementation(async id => id === 'd1' ? first : second);
@@ -1234,6 +1236,7 @@ describe('DiscussionsPage', () => {
       extracted_size: 128,
       disk_path: null,
       message_id: 'm-asset',
+      ai_generation: null,
       created_at: '2026-01-01T00:01:00Z',
     }]);
     const scrollIntoView = vi.fn();

@@ -25,6 +25,7 @@ function file(index: number, overrides: Partial<ContextFile> = {}): ContextFile 
     extracted_size: 512,
     disk_path: null,
     message_id: `message-${index}`,
+    ai_generation: null,
     created_at: `2026-08-${String((index % 28) + 1).padStart(2, '0')}T10:00:00Z`,
     ...overrides,
   };

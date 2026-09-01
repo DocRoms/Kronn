@@ -33,7 +33,13 @@ const FILES = [
   file('i1', 'a.png', 'image/png'),
   file('i2', 'b.png', 'image/png'),
   file('i3', 'c.png', 'image/png'),
-  file('v1', 'clip.mp4', 'video/mp4'),
+  {
+    ...file('v1', 'clip.mp4', 'video/mp4'),
+    ai_generation: {
+      model: 'provider/video-model-v3',
+      prompt: 'Slow aerial movement above a green valley',
+    },
+  },
   file('i4', 'd.png', 'image/png'),
   file('i5', 'e.png', 'image/png'),
 ];
@@ -100,6 +106,16 @@ describe('MessageAttachments — mixed carousel', () => {
     expect(video.autoplay).toBe(true);
     expect(video.muted).toBe(true);
     expect(video.getAttribute('preload')).toBe('metadata');
+  });
+
+  it('shows the generated-video model and prompt directly below its player', async () => {
+    render(<MessageAttachments files={FILES} discussionId="d1" t={t} variant="library" />);
+    fireEvent.click(screen.getByTestId('attach-video-thumb'));
+
+    await waitFor(() => expect(screen.getByTestId('media-player-video')).toBeTruthy());
+    const details = screen.getByTestId('ai-generation-details');
+    expect(details).toHaveTextContent('provider/video-model-v3');
+    expect(details).toHaveTextContent('Slow aerial movement above a green valley');
   });
 
   it('loads a real thumbnail for a visible library clip and reuses its blob in the player', async () => {

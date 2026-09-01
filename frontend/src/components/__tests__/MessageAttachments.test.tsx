@@ -25,6 +25,7 @@ function mkFile(over: Partial<ContextFile> = {}): ContextFile {
     extracted_size: 0,
     disk_path: '/tmp/shot.png',
     message_id: 'm1',
+    ai_generation: null,
     created_at: '2026-06-17T10:00:00Z',
     ...over,
   };
@@ -56,6 +57,41 @@ describe('MessageAttachments', () => {
       expect(img.closest('button')).toHaveAttribute('aria-label', 'disc.attachmentImage:shot.png');
     });
     expect(discussionsApi.contextFileBlob).toHaveBeenCalledWith('d1', 'cf1');
+  });
+
+  it('labels generated media and exposes its attested model and prompt in the viewer', async () => {
+    discussionsApi.contextFileBlob.mockResolvedValue(new Blob(['x'], { type: 'image/png' }));
+    const generated = mkFile({
+      ai_generation: {
+        model: 'provider/image-model-v2',
+        prompt: 'A lighthouse above a calm sea at dawn',
+      },
+    });
+    render(
+      <MessageAttachments files={[generated]} discussionId="d1" t={t} variant="library" />,
+    );
+
+    expect(screen.getByTestId('ai-generated-badge')).toHaveTextContent(
+      'disc.assets.aiGenerated',
+    );
+    const thumb = await screen.findByRole('button', { name: 'disc.attachmentImage:shot.png' });
+    await waitFor(() => expect(thumb).not.toBeDisabled());
+    fireEvent.click(thumb);
+
+    const provenance = screen.getByTestId('ai-generation-details');
+    expect(provenance).toHaveTextContent('provider/image-model-v2');
+    expect(provenance).toHaveTextContent('A lighthouse above a calm sea at dawn');
+    expect(provenance).toHaveTextContent('disc.assets.aiModel');
+    expect(provenance).toHaveTextContent('disc.assets.aiPrompt');
+  });
+
+  it('never infers AI provenance for an ordinary upload', async () => {
+    discussionsApi.contextFileBlob.mockResolvedValue(new Blob(['x'], { type: 'image/png' }));
+    render(<MessageAttachments files={[mkFile()]} discussionId="d1" t={t} variant="library" />);
+
+    await screen.findByRole('img');
+    expect(screen.queryByTestId('ai-generated-badge')).toBeNull();
+    expect(screen.queryByTestId('ai-generation-details')).toBeNull();
   });
 
   it('renders a filename chip (no fetch) for a non-image file', async () => {
