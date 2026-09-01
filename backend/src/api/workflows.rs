@@ -2309,46 +2309,43 @@ pub async fn import_workflow(
 /// (the existing `inject_trigger_context` already handles that path).
 /// Legacy callers that send no body still work — `Option<Json<...>>` ➜
 /// `None` → no variables → exactly the previous behaviour.
-pub async fn trigger(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-    body: Option<Json<TriggerWorkflowRequest>>,
-) -> Sse<SseStream> {
-    let wf_id = id.clone();
-    let wf = match state
+pub(crate) async fn start_manual_run(
+    state: &AppState,
+    workflow_id: &str,
+    provided_vars: std::collections::HashMap<String, String>,
+    event_sender: Option<tokio::sync::mpsc::Sender<crate::workflows::runner::RunEvent>>,
+    launch: crate::core::launch_context::LaunchContext,
+) -> Result<WorkflowRun, String> {
+    let lookup_id = workflow_id.to_string();
+    let mut wf = state
         .db
-        .with_conn(move |conn| crate::db::workflows::get_workflow(conn, &wf_id))
+        .with_conn(move |conn| crate::db::workflows::get_workflow(conn, &lookup_id))
         .await
-    {
-        Ok(Some(wf)) => wf,
-        Ok(None) => {
-            return sse_error("Workflow not found");
-        }
-        Err(e) => {
-            return sse_error(format!("DB error: {}", e));
-        }
-    };
-
+        .map_err(|error| format!("DB error: {error}"))?
+        .ok_or_else(|| "Workflow not found".to_string())?;
     if !wf.enabled {
-        return sse_error("Workflow is disabled");
+        return Err("Workflow is disabled".into());
     }
-
-    // 0.6.0 UX pass — validate and merge user-entered variables.
-    // - Required variable missing/empty → reject with explicit message.
-    // - Unknown variables (sent but not declared) → silently dropped
-    //   (defensive: don't let a stale form smuggle data in).
-    let provided_vars = body.map(|Json(b)| b.variables).unwrap_or_default();
+    // A GLOBAL workflow launched from a project-scoped discussion resolves
+    // that project's environment/worktree exactly like one declared on the
+    // project directly (KT-476 LaunchContext). A workflow's own declared
+    // project always wins.
+    if wf.project_id.is_none() {
+        wf.project_id = launch.project_id.clone();
+    }
     let (secret, retention_days) = {
         let config = state.config.read().await;
-        let Some(secret) = config.encryption_secret.clone() else {
-            return sse_error("Variable preflight unavailable: encryption key missing");
-        };
+        let secret = config
+            .encryption_secret
+            .clone()
+            .ok_or_else(|| "Variable preflight unavailable: encryption key missing".to_string())?;
         (secret, config.server.execution_variable_retention_days)
     };
     let run_id = Uuid::new_v4().to_string();
     let declarations = wf.variables.clone();
-    let supplied = provided_vars;
     let project_id = wf.project_id.clone();
+    let launch_context = launch.context.clone();
+    let launch_discussion_id = launch.discussion_id.clone();
     let snapshot_run_id = run_id.clone();
     let prepared = state
         .db
@@ -2357,10 +2354,10 @@ pub async fn trigger(
                 conn,
                 crate::core::execution_variables::PrepareRequest {
                     declarations: &declarations,
-                    supplied: &supplied,
-                    context: &std::collections::HashMap::new(),
+                    supplied: &provided_vars,
+                    context: &launch_context,
                     project_id: project_id.as_deref(),
-                    discussion_id: None,
+                    discussion_id: launch_discussion_id.as_deref(),
                     environment_ref: "project_mcp_configs",
                     run_kind: "workflow",
                     run_id: &snapshot_run_id,
@@ -2369,23 +2366,16 @@ pub async fn trigger(
                 },
             )
         })
-        .await;
-    let prepared = match prepared {
-        Ok(Ok(prepared)) => prepared,
-        Ok(Err(failures)) => {
-            return sse_error(format!(
+        .await
+        .map_err(|error| format!("Variable preflight failed: {error}"))?
+        .map_err(|failures| {
+            format!(
                 "preflight_failed:{}",
                 serde_json::to_string(&failures).unwrap_or_default()
-            ))
-        }
-        Err(error) => return sse_error(format!("Variable preflight failed: {error}")),
-    };
-    // Persist metadata only. Secret and user-entered execution values live in
-    // the encrypted snapshot and are hydrated in-memory by the runner.
+            )
+        })?;
     let trigger_obj =
         build_secure_execution_trigger_obj(prepared.snapshot_id, prepared.resolved.resolved_at);
-
-    // Atomic concurrency check + insert in a single transaction (avoids TOCTOU race)
     let now = Utc::now();
     let run = WorkflowRun {
         id: run_id,
@@ -2397,7 +2387,6 @@ pub async fn trigger(
         workspace_path: None,
         started_at: now,
         finished_at: None,
-        // Legacy linear runs — batch fields stay at their defaults.
         run_type: "linear".into(),
         batch_total: 0,
         batch_completed: 0,
@@ -2411,65 +2400,69 @@ pub async fn trigger(
         parent_workflow_name: None,
         parent_run_started_at: None,
     };
-
-    let r = run.clone();
+    let persisted = run.clone();
     let limit = wf.concurrency_limit;
-    let wf_id_check = wf.id.clone();
-    match state
+    let workflow_id = wf.id.clone();
+    state
         .db
         .with_conn(move |conn| {
-            // Single transaction: check + insert atomically
             if let Some(max) = limit {
-                let active = crate::db::workflows::count_active_runs(conn, &wf_id_check)?;
+                let active = crate::db::workflows::count_active_runs(conn, &workflow_id)?;
                 if active >= max {
-                    anyhow::bail!("CONCURRENCY_LIMIT:{}/{}", active, max);
+                    anyhow::bail!("Concurrency limit reached ({active}/{max})");
                 }
             }
-            crate::db::workflows::insert_run(conn, &r)?;
-            Ok(())
+            crate::db::workflows::insert_run(conn, &persisted)
         })
         .await
-    {
-        Ok(()) => {}
-        Err(e) => {
-            let msg = e.to_string();
-            if let Some(rest) = msg.strip_prefix("CONCURRENCY_LIMIT:") {
-                return sse_error(format!("Concurrency limit reached ({})", rest));
-            }
-            return sse_error(format!("DB error: {}", msg));
-        }
-    }
+        .map_err(|error| format!("DB error: {error}"))?;
 
-    tracing::info!("Workflow run created: {} for workflow {}", run.id, wf.name);
-
-    // Create event channel for real-time streaming
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::workflows::runner::RunEvent>(32);
-
-    // Dispatch execution in background with the sender
     let state_for_run = state.clone();
-    let config = state.config.clone();
     let mut run_exec = run.clone();
     tokio::spawn(async move {
-        let cfg = config.read().await;
-        let tokens = cfg.tokens.clone();
-        let agents = cfg.agents.clone();
-        drop(cfg);
-
-        if let Err(e) = crate::workflows::runner::execute_run(
+        let config = state_for_run.config.read().await;
+        let tokens = config.tokens.clone();
+        let agents = config.agents.clone();
+        drop(config);
+        if let Err(error) = crate::workflows::runner::execute_run(
             state_for_run,
             &wf,
             &mut run_exec,
             &tokens,
             &agents,
-            Some(tx),
+            event_sender,
             None,
             None,
         )
         .await
         {
-            tracing::error!("Workflow run {} failed: {}", run_exec.id, e);
+            tracing::error!(run_id = %run_exec.id, error = %error, "workflow action run failed");
         }
     });
+    Ok(run)
+}
+
+pub async fn trigger(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    body: Option<Json<TriggerWorkflowRequest>>,
+) -> Sse<SseStream> {
+    let provided_vars = body.map(|Json(b)| b.variables).unwrap_or_default();
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::workflows::runner::RunEvent>(32);
+    let run = match start_manual_run(
+        &state,
+        &id,
+        provided_vars,
+        Some(tx),
+        crate::core::launch_context::LaunchContext::default(),
+    )
+    .await
+    {
+        Ok(run) => run,
+        Err(error) => return sse_error(error),
+    };
+
+    tracing::info!("Workflow run created: {} for workflow {}", run.id, id);
 
     // Stream events as SSE
     let run_id = run.id.clone();

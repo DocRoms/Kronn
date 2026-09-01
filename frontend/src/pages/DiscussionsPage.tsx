@@ -8,7 +8,7 @@ import { MessageDateSeparator } from '../components/MessageDateSeparator';
 import { groupMessagesWithToolFold } from '../lib/discussionMessageGrouping';
 import { localCalendarDayKey } from '../lib/discussionDates';
 import { ChatInput } from '../components/ChatInput';
-import { discussions as discussionsApi, projects as projectsApi, skills as skillsApi, profiles as profilesApi, directives as directivesApi, contacts as contactsApi, workflows as workflowsApi, quickPrompts as quickPromptsApi, planning as planningApi, orchestration as orchestrationApi, externalApi as externalApiConnections } from '../lib/api';
+import { discussions as discussionsApi, discussionActions as discussionActionsApi, projects as projectsApi, skills as skillsApi, profiles as profilesApi, directives as directivesApi, contacts as contactsApi, workflows as workflowsApi, quickPrompts as quickPromptsApi, planning as planningApi, orchestration as orchestrationApi, externalApi as externalApiConnections } from '../lib/api';
 import type { ExternalApiConnectionView } from '../lib/api';
 import { GitPanel } from '../components/GitPanel';
 import { TerminalPanel } from '../components/TerminalPanel';
@@ -30,7 +30,7 @@ import { parseAgentQuestions } from '../lib/agent-question-parse';
 import { userError } from '../lib/userError';
 import { getDeployedVersion, setDeployedVersion } from '../lib/qp-improver-banner';
 import { sanitizeQpImproverPayload } from '../lib/qp-improver-sanitize';
-import type { Project, AgentDetection, Discussion, DiscussionDetail, DiscussionMessage, MessageChannel, AgentType, AgentsConfig, Skill, AgentProfile, Directive, McpConfigDisplay, McpIncompatibility, Contact, WsMessage, ContextFile, BatchRunSummary, DiscussionPlan, ProposalListResponse, ExecutionDiscussionLink, MessageSearchHit, MessageTarget, ParticipantView } from '../types/generated';
+import type { Project, AgentDetection, Discussion, DiscussionDetail, DiscussionMessage, MessageChannel, AgentType, AgentsConfig, Skill, AgentProfile, Directive, McpConfigDisplay, McpIncompatibility, Contact, WsMessage, ContextFile, BatchRunSummary, DiscussionPlan, ProposalListResponse, ExecutionDiscussionLink, MessageSearchHit, MessageTarget, ParticipantView, DiscussionAction } from '../types/generated';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { useQpChain } from '../hooks/useQpChain';
 import { useMessageQueue, type QueuedMessage } from '../hooks/useMessageQueue';
@@ -440,7 +440,21 @@ export function DiscussionsPage({
   const [discussionPlan, setDiscussionPlan] = useState<DiscussionPlan | null>(null);
   const [proposalInbox, setProposalInbox] = useState<ProposalListResponse | null>(null);
   const [proposalInboxDiscussionId, setProposalInboxDiscussionId] = useState<string | null>(null);
+  const [discussionActions, setDiscussionActions] = useState<DiscussionAction[]>([]);
   const [executionDiscussionLinks, setExecutionDiscussionLinks] = useState<ExecutionDiscussionLink[]>([]);
+  const discussionActionsByMessageId = useMemo(() => {
+    const byMessage = new Map<string, DiscussionAction[]>();
+    discussionActions.forEach(action => {
+      const current = byMessage.get(action.source_message_id) ?? [];
+      current.push(action);
+      byMessage.set(action.source_message_id, current);
+    });
+    return byMessage;
+  }, [discussionActions]);
+  const handleDiscussionActionChanged = useCallback((changed: DiscussionAction) => {
+    setDiscussionActions(current => current.map(action =>
+      action.id === changed.id ? changed : action));
+  }, []);
 
   const refreshExecutionDiscussionLinks = useCallback(() => {
     orchestrationApi.discussionLinks()
@@ -1029,6 +1043,18 @@ export function DiscussionsPage({
           setProposalInboxDiscussionId(activeDiscussionId);
         }
       });
+    return () => { cancelled = true; };
+  }, [activeDiscussionId, activeDiscussion?.message_count]);
+
+  useEffect(() => {
+    if (!activeDiscussionId) {
+      setDiscussionActions([]);
+      return;
+    }
+    let cancelled = false;
+    discussionActionsApi.list(activeDiscussionId)
+      .then(actions => { if (!cancelled) setDiscussionActions(actions); })
+      .catch(() => { if (!cancelled) setDiscussionActions([]); });
     return () => { cancelled = true; };
   }, [activeDiscussionId, activeDiscussion?.message_count]);
 
@@ -3912,6 +3938,12 @@ export function DiscussionsPage({
                         projectId={activeDiscussion.project_id ?? null}
                         chainableQPs={chainableQPs}
                         onLaunchQp={qp => handleSendMessage(qp.prompt_template)}
+                        actions={discussionActionsByMessageId.get(msg.id) ?? []}
+                        onActionChanged={handleDiscussionActionChanged}
+                        onOpenActionDiscussion={discussionId => {
+                          setActiveDiscussionId(discussionId);
+                          ensureDiscussionVisible(discussionId);
+                        }}
                         isSearchMatch={messageSearchMatches.some(match => match.messageId === msg.id)}
                         isSearchCurrent={
                           messageSearchMatches[messageSearchIndex]?.messageId === msg.id

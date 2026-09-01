@@ -22,6 +22,7 @@ pub mod disc_prompts;
 pub mod disc_source;
 pub mod disc_workspace;
 pub mod discover;
+pub mod discussion_actions;
 pub mod discussion_weight;
 pub mod discussions;
 pub mod docs;
