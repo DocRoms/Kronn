@@ -48,6 +48,19 @@ Release notes for 0.9.3 and earlier are available in the
   CLI session without reusing it across projects. See
   `docs/operations/acp-adapters.md`.
 
+### Fixed
+
+- A Page's inline Kronn action CTAs (`data-kronn-action`) now work from the
+  standalone tab and every mosaic tile, not only the embedded viewer: clicking
+  one opened only a same-origin link relay with no action handler, so the
+  click was silently intercepted and lost. The three surfaces now share one
+  `useLivePageActions` hook and the native `LivePageActionCard`, loading and
+  validating each Page's own action list, failing closed on a removed
+  `action_ref`, and keeping every mosaic tile's action state fully isolated
+  from its siblings. A terminal action's "open discussion" jump opens a fresh
+  same-origin tab since these surfaces have no Dashboard shell to navigate
+  within.
+
 ## [0.12.0] - 2026-08-30
 
 ### Added

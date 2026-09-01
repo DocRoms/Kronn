@@ -6,6 +6,9 @@ import {
   createLivePageOpenLinkRelay,
   runtimeData,
 } from '../lib/live-page-sandbox';
+import { openStandaloneDiscussion } from '../lib/live-page-navigation';
+import { useLivePageActions } from '../hooks/useLivePageActions';
+import { LivePageActionOverlay } from '../components/LivePageActionOverlay';
 import { useT } from '../lib/I18nContext';
 import { userError } from '../lib/userError';
 import './StandaloneLivePage.css';
@@ -18,13 +21,21 @@ export function StandaloneLivePage({ pageId }: { pageId: string }) {
   const { t } = useT();
   const [detail, setDetail] = useState<LivePageDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [actionUnavailable, setActionUnavailable] = useState(false);
   const [bridgeChannel] = useState(channelId);
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const linkRelayRef = useRef<ReturnType<typeof createLivePageOpenLinkRelay> | null>(null);
+  const {
+    activeAction: pageActiveAction,
+    selectedAction: pageSelectedAction,
+    handleIntent: handlePageActionIntent,
+    handleChanged: handlePageActionChanged,
+    reload: reloadPageActions,
+  } = useLivePageActions(() => setActionUnavailable(true));
 
   useEffect(() => {
     let active = true;
-    pagesApi.get(pageId).then(page => {
+    Promise.all([pagesApi.get(pageId), reloadPageActions(pageId)]).then(([page]) => {
       if (!active) return;
       setDetail(page);
       setError(null);
@@ -33,7 +44,7 @@ export function StandaloneLivePage({ pageId }: { pageId: string }) {
       setError(userError(cause));
     });
     return () => { active = false; };
-  }, [pageId]);
+  }, [pageId, reloadPageActions]);
 
   useEffect(() => {
     if (!detail) return undefined;
@@ -59,13 +70,16 @@ export function StandaloneLivePage({ pageId }: { pageId: string }) {
     }, '*');
   }, [bridgeChannel, detail]);
   useEffect(() => {
-    const relay = createLivePageOpenLinkRelay(bridgeChannel);
+    const relay = createLivePageOpenLinkRelay(bridgeChannel, undefined, intent => {
+      setActionUnavailable(false);
+      handlePageActionIntent(intent);
+    });
     linkRelayRef.current = relay;
     return () => {
       if (linkRelayRef.current === relay) linkRelayRef.current = null;
       relay.dispose();
     };
-  }, [bridgeChannel]);
+  }, [bridgeChannel, handlePageActionIntent]);
   useEffect(() => { publishToFrame(); }, [publishToFrame]);
 
   if (error) {
@@ -77,14 +91,27 @@ export function StandaloneLivePage({ pageId }: { pageId: string }) {
 
   return (
     <main className="standalone-live-page" data-testid="standalone-live-page">
-      <iframe
-        ref={iframeRef}
-        title={detail.title}
-        sandbox="allow-scripts"
-        srcDoc={sandboxDocument}
-        onLoad={publishToFrame}
-        data-testid="standalone-live-page-frame"
-      />
+      <div className="standalone-live-page-frame-shell">
+        {actionUnavailable && (
+          <p className="standalone-live-page-action-error" role="alert">
+            {t('disc.action.unavailablePageAction')}
+          </p>
+        )}
+        <iframe
+          ref={iframeRef}
+          title={detail.title}
+          sandbox="allow-scripts"
+          srcDoc={sandboxDocument}
+          onLoad={publishToFrame}
+          data-testid="standalone-live-page-frame"
+        />
+        <LivePageActionOverlay
+          active={pageActiveAction}
+          action={pageSelectedAction}
+          onChanged={handlePageActionChanged}
+          onOpenDiscussion={openStandaloneDiscussion}
+        />
+      </div>
     </main>
   );
 }

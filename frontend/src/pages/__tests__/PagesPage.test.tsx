@@ -150,6 +150,20 @@ describe('PagesPage', () => {
     expect(screen.getByRole('button', { name: /Refresh report/ })).toHaveAttribute('aria-expanded', 'true');
   });
 
+  it('fails closed on an action removed from the current Page revision', async () => {
+    vi.mocked(pagesApi.actions).mockResolvedValue([]);
+    render(<PagesPage />);
+    await screen.findByTestId('live-page-frame');
+
+    act(() => actionRelay.onAction?.({
+      actionRef: 'ghost', bindings: {},
+      anchor: { left: 24, top: 40, width: 120, height: 32 },
+    }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('disc.action.unavailablePageAction');
+    expect(screen.queryByTestId(/^live-page-action-/)).not.toBeInTheDocument();
+  });
+
   it('keeps the historical responsive sidebar classes on the shared shell', async () => {
     render(<PagesPage />);
     await screen.findByTestId('live-page-frame');
