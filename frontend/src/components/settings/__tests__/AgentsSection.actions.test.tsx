@@ -416,6 +416,30 @@ describe('AgentsSection — full-access switch', () => {
     expect(screen.queryByText('--full-auto')).toBeNull();
   });
 
+  it('shows the ACP permission description for OpenCode instead of a fabricated CLI flag (KT-543)', () => {
+    const { container } = renderSection({
+      agents: [makeAgent({ name: 'AgentOpenCode', agent_type: 'OpenCode', installed: true, enabled: true })],
+      agentAccess: accessConfig(),
+    });
+    const panel = container.querySelector('[data-agent-type="OpenCode"] .set-agent-panel-access');
+    expect(panel).toBeTruthy();
+    expect(screen.getByText('config.fullAccessAcp')).toBeTruthy();
+    expect(panel?.querySelector('code')).toBeNull();
+  });
+
+  it('toggles OpenCode full_access via open_code, not a missing agentAccess key', async () => {
+    const { refetchAgentAccess } = renderSection({
+      agents: [makeAgent({ name: 'AgentOpenCode', agent_type: 'OpenCode', installed: true, enabled: true })],
+      agentAccess: accessConfig(),
+    });
+    expect(screen.getByRole('switch').getAttribute('aria-checked')).toBe('false');
+    fireEvent.click(screen.getByRole('switch'));
+    await waitFor(() =>
+      expect(setAgentAccessMock).toHaveBeenCalledWith({ agent: 'OpenCode', full_access: true }),
+    );
+    await waitFor(() => expect(refetchAgentAccess).toHaveBeenCalled());
+  });
+
   it('calls configApi.setAgentAccess + refetchAgentAccess on click (toggles the flag)', async () => {
     const { refetchAgentAccess } = renderSection({
       agents: [makeAgent({ name: 'AgentClaude', agent_type: 'ClaudeCode', installed: true, enabled: true })],

@@ -4,6 +4,7 @@ import type { AgentDetection } from '../types/generated';
 const AUDIT_AGENT_TYPES = new Set<AgentDetection['agent_type']>([
   'ClaudeCode',
   'Codex',
+  'OpenCode',
   'GeminiCli',
   'Kiro',
   'CopilotCli',

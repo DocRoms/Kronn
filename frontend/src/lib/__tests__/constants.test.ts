@@ -226,6 +226,16 @@ describe('constants', () => {
       expect(hasAgentFullAccess(access, 'ClaudeCode')).toBe(false);
     });
 
+    it('reads OpenCode full_access from open_code, not a missing key (regression, KT-543)', () => {
+      const withOpenCode = { open_code: { full_access: true } } as never;
+      expect(hasAgentFullAccess(withOpenCode, 'OpenCode')).toBe(true);
+      expect(isAgentRestricted(withOpenCode, 'OpenCode')).toBe(false);
+
+      const restricted = { open_code: { full_access: false } } as never;
+      expect(hasAgentFullAccess(restricted, 'OpenCode')).toBe(false);
+      expect(isAgentRestricted(restricted, 'OpenCode')).toBe(true);
+    });
+
     it.each(['Ollama', 'LiteLlm', 'Nvidia'] as const)(
       'does not advertise an impossible full-access setting for %s',
       agentType => {
