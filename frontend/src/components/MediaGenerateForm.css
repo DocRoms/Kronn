@@ -12,9 +12,9 @@
   flex-direction: column;
   gap: 8px;
   padding: 10px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--bg-secondary);
+  border: 1px solid var(--kr-border);
+  border-radius: var(--kr-r-md);
+  background: var(--kr-bg-card);
 }
 
 .media-generate-modalities {
@@ -27,17 +27,17 @@
   align-items: center;
   gap: 4px;
   padding: 4px 8px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
+  border: 1px solid var(--kr-border);
+  border-radius: var(--kr-r-sm);
   background: transparent;
-  color: var(--text-secondary);
+  color: var(--kr-text-muted);
   font-size: 11px;
   cursor: pointer;
 }
 
 .media-generate-modalities button[data-active='true'] {
-  border-color: var(--accent);
-  color: var(--text-primary);
+  border-color: var(--kr-accent);
+  color: var(--kr-text-primary);
 }
 
 .media-generate-field {
@@ -45,17 +45,17 @@
   flex-direction: column;
   gap: 3px;
   font-size: 11px;
-  color: var(--text-secondary);
+  color: var(--kr-text-muted);
 }
 
 .media-generate-field select,
 .media-generate-field textarea {
   width: 100%;
   padding: 5px 6px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--bg-primary);
-  color: var(--text-primary);
+  border: 1px solid var(--kr-border);
+  border-radius: var(--kr-r-sm);
+  background: var(--kr-bg-input);
+  color: var(--kr-text-primary);
   font-size: 12px;
   font-family: inherit;
   resize: vertical;
@@ -76,17 +76,17 @@
 .media-generate-empty {
   margin: 0;
   font-size: 11px;
-  color: var(--text-tertiary, var(--text-secondary));
+  color: var(--kr-text-dim);
 }
 
 .media-generate-error {
   margin: 0;
   font-size: 11px;
-  color: var(--danger, #d9534f);
+  color: var(--kr-danger);
 }
 
 .media-generate-launched {
   margin: 0;
   font-size: 11px;
-  color: var(--success, #2f9e44);
+  color: var(--kr-success);
 }

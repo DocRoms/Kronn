@@ -61,6 +61,10 @@ pub struct GenerateMediaResponse {
     /// Model resolved from the connection, echoed so the caller can see what
     /// will actually be billed.
     pub model: String,
+    /// Discussion the asset will land in — including the one this call just
+    /// created. Without it a caller that passed no discussion cannot tell
+    /// where its own generation went.
+    pub discussion_id: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -69,6 +73,9 @@ pub struct MediaJobView {
     pub modality: MediaModality,
     pub status: MediaJobStatus,
     pub model: String,
+    pub discussion_id: Option<String>,
+    /// Message the finished asset hangs from.
+    pub message_id: Option<String>,
     pub context_file_id: Option<String>,
     pub width: Option<u32>,
     pub height: Option<u32>,
@@ -239,6 +246,7 @@ pub async fn generate(
         job_id,
         status: MediaJobStatus::Pending,
         model,
+        discussion_id,
     }))
 }
 
@@ -355,6 +363,8 @@ pub async fn get_job(
             id: job.id,
             modality: job.modality,
             status: job.status,
+            discussion_id: job.discussion_id,
+            message_id: job.message_id,
             model: job.model,
             context_file_id: job.context_file_id,
             width: job.rendered.width,

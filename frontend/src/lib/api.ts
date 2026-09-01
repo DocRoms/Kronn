@@ -2736,6 +2736,8 @@ export interface GeneratedMediaJob {
   status: string;
   /** Model the connection resolved, echoed so the caller sees what is billed. */
   model: string;
+  /** Discussion the asset will land in — including one this call created. */
+  discussion_id: string;
 }
 
 export interface MediaJobView {
@@ -2743,14 +2745,18 @@ export interface MediaJobView {
   modality: MediaModality;
   status: string;
   model: string;
+  discussion_id: string | null;
+  /** Message the finished asset hangs from. */
+  message_id: string | null;
   context_file_id: string | null;
   width: number | null;
   height: number | null;
   duration_ms: number | null;
-  discussion_id: string | null;
-  cost_usd: number;
-  is_byok: boolean;
-  completed_at: string | null;
+  /** Absent while the job is still running — never shown as a zero cost. */
+  cost_usd: number | null;
+  is_byok: boolean | null;
+  last_error: string | null;
+  attempts: number;
 }
 
 export interface MediaEstimate {

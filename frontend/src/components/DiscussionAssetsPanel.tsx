@@ -1,18 +1,25 @@
 import { useEffect, useMemo, useState } from 'react';
-import { FileText, Images, Search, Sparkles, X } from 'lucide-react';
+import { Clapperboard, FileText, Images, Search, Sparkles, X } from 'lucide-react';
 import type { ContextFile } from '../types/generated';
 import type { ExternalApiConnectionView } from '../lib/api';
 import { MessageAttachments } from './MessageAttachments';
 import { MediaGenerateForm } from './MediaGenerateForm';
+import { mediaKind } from '../lib/mediaKind';
 
 type T = (key: string, ...args: (string | number)[]) => string;
-type AssetFilter = 'all' | 'images' | 'files' | 'pending';
+type AssetFilter = 'all' | 'images' | 'videos' | 'files' | 'pending';
 
 const PAGE_SIZE = 40;
-const IMAGE_FILENAME = /\.(?:png|jpe?g|gif|webp|svg|bmp|tiff?|ico)$/i;
 
+// Kind detection is shared with the carousel, so the inventory and the viewer
+// never disagree about what a file is. A generated clip used to land under
+// "Fichiers" next to a CSV.
 function isImage(file: ContextFile): boolean {
-  return file.mime_type.startsWith('image/') || IMAGE_FILENAME.test(file.filename);
+  return mediaKind(file) === 'image';
+}
+
+function isVideo(file: ContextFile): boolean {
+  return mediaKind(file) === 'video';
 }
 
 export function DiscussionAssetsPanel({
@@ -49,7 +56,8 @@ export function DiscussionAssetsPanel({
   const counts = useMemo(() => ({
     all: files.length,
     images: files.filter(isImage).length,
-    files: files.filter(file => !isImage(file)).length,
+    videos: files.filter(isVideo).length,
+    files: files.filter(file => !isImage(file) && !isVideo(file)).length,
     pending: files.filter(file => !file.message_id).length,
   }), [files]);
 
@@ -59,7 +67,8 @@ export function DiscussionAssetsPanel({
       .sort((left, right) => right.created_at.localeCompare(left.created_at))
       .filter(file => {
         if (filter === 'images' && !isImage(file)) return false;
-        if (filter === 'files' && isImage(file)) return false;
+        if (filter === 'videos' && !isVideo(file)) return false;
+        if (filter === 'files' && (isImage(file) || isVideo(file))) return false;
         if (filter === 'pending' && file.message_id) return false;
         return !needle || file.filename.toLocaleLowerCase().includes(needle);
       });
@@ -85,6 +94,7 @@ export function DiscussionAssetsPanel({
   const filters: Array<{ id: AssetFilter; label: string; icon?: typeof Images }> = [
     { id: 'all', label: t('disc.assets.filterAll') },
     { id: 'images', label: t('disc.assets.filterImages'), icon: Images },
+    { id: 'videos', label: t('disc.assets.filterVideos'), icon: Clapperboard },
     { id: 'files', label: t('disc.assets.filterFiles'), icon: FileText },
     { id: 'pending', label: t('disc.assets.filterPending') },
   ];

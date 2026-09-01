@@ -150,7 +150,7 @@ describe('DiscussionAssetsPanel', () => {
     const dialog = screen.getByRole('dialog', { name: 'disc.attachmentGallery' });
     expect(dialog).toHaveTextContent('2 / 2');
     expect(within(dialog).getByRole('img', { name: 'one.png' })).toBeInTheDocument();
-    fireEvent.click(within(dialog).getByRole('button', { name: 'disc.attachmentNext' }));
+    fireEvent.click(within(dialog).getByRole('button', { name: 'disc.media.carouselNext' }));
     expect(dialog).toHaveTextContent('1 / 2');
     expect(within(dialog).getByRole('img', { name: 'two.png' })).toBeInTheDocument();
   });
@@ -182,12 +182,47 @@ describe('DiscussionAssetsPanel', () => {
     const dialog = screen.getByRole('dialog', { name: 'disc.attachmentGallery' });
     // Two media in the discussion, the clip included, even under the filter.
     expect(dialog).toHaveTextContent('2 / 2');
-    fireEvent.click(within(dialog).getByRole('button', { name: 'disc.attachmentNext' }));
+    fireEvent.click(within(dialog).getByRole('button', { name: 'disc.media.carouselNext' }));
     await waitFor(() =>
       expect(within(dialog).getByTestId('media-player-video')).toHaveAttribute(
         'aria-label',
         'disc.media.playerLabel:clip.mp4',
       ),
     );
+  });
+  it('counts a generated clip as a video, not as a plain file', async () => {
+    // Before the media work, "Fichiers" held the clip next to a CSV: the
+    // filters only knew about images, so a generated video read as a document.
+    render(
+      <DiscussionAssetsPanel
+        discussionId="disc-1"
+        files={[
+          file(3, { filename: 'clip.mp4', mime_type: 'video/mp4', disk_path: '/tmp/clip.mp4' }),
+          file(2, { filename: 'shot.png', mime_type: 'image/png', disk_path: '/tmp/shot.png' }),
+          file(1, { filename: 'notes.csv', mime_type: 'text/csv' }),
+        ]}
+        onClose={vi.fn()}
+        onNavigateMessage={vi.fn()}
+        t={t}
+      />,
+    );
+
+    const countFor = (label: RegExp) =>
+      screen.getByRole('button', { name: label }).querySelector('.disc-assets-filter-count')
+        ?.textContent;
+    expect(countFor(/disc\.assets\.filterVideos/)).toBe('1');
+    expect(countFor(/disc\.assets\.filterImages/)).toBe('1');
+    // The CSV, and only the CSV.
+    expect(countFor(/disc\.assets\.filterFiles/)).toBe('1');
+
+    fireEvent.click(screen.getByRole('button', { name: /disc\.assets\.filterVideos/ }));
+    await waitFor(() => expect(screen.getAllByTestId('discussion-asset-card')).toHaveLength(1));
+    expect(screen.getByText('clip.mp4')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /disc\.assets\.filterFiles/ }));
+    await waitFor(() => expect(screen.getAllByTestId('discussion-asset-card')).toHaveLength(1));
+    // Neither media is left in the documents bucket.
+    expect(screen.queryByText('clip.mp4')).toBeNull();
+    expect(screen.queryByText('shot.png')).toBeNull();
   });
 });
