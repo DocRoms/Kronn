@@ -9,9 +9,10 @@
 
 use crate::models::{AgentType, TokensConfig};
 
-const AGENT_ALIASES: [(&str, AgentType); 9] = [
+const AGENT_ALIASES: [(&str, AgentType); 10] = [
     ("@claude", AgentType::ClaudeCode),
     ("@codex", AgentType::Codex),
+    ("@opencode", AgentType::OpenCode),
     ("@vibe", AgentType::Vibe),
     ("@gemini", AgentType::GeminiCli),
     ("@kiro", AgentType::Kiro),
@@ -395,6 +396,22 @@ mod tests {
         assert_eq!(agent_display_name(&AgentType::ClaudeCode), "Claude Code");
         assert_eq!(agent_display_name(&AgentType::GeminiCli), "Gemini CLI");
         assert_eq!(agent_display_name(&AgentType::CopilotCli), "GitHub Copilot");
+    }
+
+    #[test]
+    fn opencode_has_a_canonical_alias_like_every_other_agent() {
+        // Regression (KT-543): @opencode was missing from AGENT_ALIASES,
+        // silently excluding OpenCode from mention parsing and from every
+        // handoff target that filters on `agent_alias(...).is_some()`.
+        assert_eq!(agent_alias(&AgentType::OpenCode), Some("@opencode"));
+        assert_eq!(
+            agent_mentions_in_prose("@opencode, prends le relais."),
+            vec![AgentType::OpenCode]
+        );
+        let (cleaned, agents) =
+            extract_agent_handoff_markers("Fait.\n<!-- kronn:handoff @opencode -->");
+        assert_eq!(agents, vec![AgentType::OpenCode]);
+        assert_eq!(cleaned.trim(), "Fait.");
     }
 
     #[test]

@@ -610,6 +610,31 @@ fn gemini_config_and_auth_ready(
     }
 }
 
+/// `opencode auth login` persists one JSON object keyed by provider id at
+/// `~/.local/share/opencode/auth.json` (verified against `opencode auth
+/// login --help`/`opencode auth list`, which reads the same file). Ready
+/// means at least one provider is configured; a missing file or an
+/// unparsable/empty object means the operator still needs to run
+/// `opencode auth login`.
+fn opencode_auth_file_ready(path: &std::path::Path) -> bool {
+    match std::fs::read_to_string(path) {
+        Ok(raw) => serde_json::from_str::<serde_json::Value>(&raw)
+            .ok()
+            .and_then(|value| value.as_object().map(|map| !map.is_empty()))
+            .unwrap_or(false),
+        Err(_) => false,
+    }
+}
+
+fn opencode_auth_ready() -> bool {
+    let home = std::env::var_os("KRONN_HOST_HOME")
+        .or_else(|| std::env::var_os("HOME"))
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(std::path::PathBuf::from);
+    let Some(home) = home else { return false };
+    opencode_auth_file_ready(&home.join(".local/share/opencode/auth.json"))
+}
+
 fn gemini_auth_ready(config: &AppConfig) -> bool {
     let home = std::env::var_os("KRONN_HOST_HOME")
         .or_else(|| std::env::var_os("HOME"))
@@ -635,6 +660,10 @@ pub fn agent_auth_status(agent_type: &AgentType, config: &AppConfig) -> AgentAut
         AgentType::GeminiCli => AgentAuthStatus {
             ready: gemini_auth_ready(config),
             setup_command: Some("gemini"),
+        },
+        AgentType::OpenCode => AgentAuthStatus {
+            ready: opencode_auth_ready(),
+            setup_command: Some("opencode auth login"),
         },
         AgentType::Vibe => AgentAuthStatus {
             ready: true,
@@ -1183,6 +1212,71 @@ mod tests {
 
         assert!(!status.ready);
         assert_eq!(status.setup_command, Some("gemini"));
+    }
+
+    #[test]
+    fn opencode_auth_file_ready_true_when_any_provider_configured() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("auth.json");
+        std::fs::write(&path, r#"{"anthropic":{"type":"api","key":"sk-x"}}"#).unwrap();
+        assert!(opencode_auth_file_ready(&path));
+    }
+
+    #[test]
+    fn opencode_auth_file_ready_false_when_missing_empty_or_invalid() {
+        let temp = tempfile::tempdir().unwrap();
+        assert!(!opencode_auth_file_ready(&temp.path().join("missing.json")));
+
+        let empty = temp.path().join("empty.json");
+        std::fs::write(&empty, "{}").unwrap();
+        assert!(!opencode_auth_file_ready(&empty));
+
+        let invalid = temp.path().join("invalid.json");
+        std::fs::write(&invalid, "not json").unwrap();
+        assert!(!opencode_auth_file_ready(&invalid));
+    }
+
+    #[test]
+    #[serial]
+    fn opencode_without_auth_file_reports_setup_requirement() {
+        let temp = tempfile::tempdir().unwrap();
+        let original_home = std::env::var_os("KRONN_HOST_HOME");
+        std::env::set_var("KRONN_HOST_HOME", temp.path());
+
+        let config = crate::core::config::default_config();
+        let status = agent_auth_status(&AgentType::OpenCode, &config);
+
+        match original_home {
+            Some(value) => std::env::set_var("KRONN_HOST_HOME", value),
+            None => std::env::remove_var("KRONN_HOST_HOME"),
+        }
+
+        assert!(!status.ready);
+        assert_eq!(status.setup_command, Some("opencode auth login"));
+    }
+
+    #[test]
+    #[serial]
+    fn opencode_with_auth_file_is_ready() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join(".local/share/opencode")).unwrap();
+        std::fs::write(
+            temp.path().join(".local/share/opencode/auth.json"),
+            r#"{"opencode":{"type":"api","key":"sk-zen"}}"#,
+        )
+        .unwrap();
+        let original_home = std::env::var_os("KRONN_HOST_HOME");
+        std::env::set_var("KRONN_HOST_HOME", temp.path());
+
+        let config = crate::core::config::default_config();
+        let status = agent_auth_status(&AgentType::OpenCode, &config);
+
+        match original_home {
+            Some(value) => std::env::set_var("KRONN_HOST_HOME", value),
+            None => std::env::remove_var("KRONN_HOST_HOME"),
+        }
+
+        assert!(status.ready);
     }
 
     #[test]
