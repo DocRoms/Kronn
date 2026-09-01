@@ -140,6 +140,43 @@ The browser's local storage is never a source of truth for Page content or
 datasets. This keeps refresh, export/import and transfer to another Kronn
 instance deterministic.
 
+### Inline Kronn actions
+
+A Page revision may pair a visible CTA with one inert action data island:
+
+```html
+<button data-kronn-action="frame-ticket"
+        data-kronn-bindings='{"ticket":"KT-538"}'>Frame ticket</button>
+<script type="application/kronn-action" data-action-id="frame-ticket">
+{"kind":"quick_prompt","target_id":"<existing QP id>","values":[{"name":"ticket","provenance":"dynamic_binding","source_ref":"<page.dataset.tickets.find(key).id>"}]}
+</script>
+```
+
+The action block is parsed and validated in the same transaction as its HTML
+revision. The sandbox cannot launch it: a user-activated click sends only the
+stable action reference, row selectors and anchor geometry through the private
+parent bridge. The authenticated parent then opens the shared native action
+card. A second explicit human click performs the server-side preflight and
+atomic launch claim. Action references use at most 256 URL-safe unreserved
+characters (`A-Z`, `a-z`, `0-9`, `.`, `_`, `~`, `-`); malformed script types,
+prefixed lookalike attributes and stale proposals removed from the current
+revision fail closed.
+
+`dynamic_binding` references may resolve `page.id`, `page.slug`, `page.title`,
+a snapshot field, or a collection row selected with `find(<field>)`. The click
+supplies only the selector; Kronn rereads the current dataset value server-side.
+Project environment and Kronn context references use the common execution
+variable resolver and are never copied into Page HTML or the action row.
+
+The durable `(page_id, action_ref)` identity survives refreshes. Proposed
+actions follow a republished definition, while launched actions stay attached
+to the exact source revision and become explicitly stale when the Page moves
+on. Active and terminal execution rendering delegates to the common
+`RunStatusCard` contract used by Discussions. A Quick Prompt result records
+both the action's result-discussion anchor and the existing Page-to-discussion
+relationship in one transaction, so either side remains traceable after a
+reload or backend restart.
+
 Workflow export bundle v2 includes each statically referenced Page's current
 HTML template and dataset contract, then remaps every `PublishPageData.page_id`
 on import. Retained values and publication/run history are excluded to avoid

@@ -42,6 +42,8 @@ import type {
   DiscussionExecutionVariableRetention,
   DiscussionAction,
   LaunchDiscussionActionRequest,
+  LaunchLivePageActionRequest,
+  LivePageAction,
   DiscussionMeta,
   DiscussionSession,
   DiscussionWorkspace,
@@ -2306,6 +2308,14 @@ export const pages = {
     api<LivePageRevision>('PUT', `/pages/${encodeURIComponent(id)}/html`, request),
   publish: (id: string, request: PublishLivePageRequest) =>
     api<PublishLivePageResult>('POST', `/pages/${encodeURIComponent(id)}/publish`, request),
+  actions: (id: string) =>
+    api<LivePageAction[]>('GET', `/pages/${encodeURIComponent(id)}/actions`),
+  getAction: (actionId: string) =>
+    api<LivePageAction>('GET', `/live-page-actions/${encodeURIComponent(actionId)}`),
+  cancelAction: (actionId: string) =>
+    api<LivePageAction>('POST', `/live-page-actions/${encodeURIComponent(actionId)}/cancel`, {}),
+  launchAction: (actionId: string, request: LaunchLivePageActionRequest) =>
+    api<LivePageAction>('POST', `/live-page-actions/${encodeURIComponent(actionId)}/launch`, request),
 };
 
 // ─── Quick Prompts ─────────────────────────────────────────────────────────

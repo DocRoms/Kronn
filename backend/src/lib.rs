@@ -662,6 +662,23 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             post(api::live_pages::add_dataset),
         )
         .route("/api/pages/{id}/publish", post(api::live_pages::publish))
+        // ── Live Page inline Kronn actions (KT-538) ──
+        .route(
+            "/api/pages/{id}/actions",
+            get(api::live_page_actions::list_for_live_page),
+        )
+        .route(
+            "/api/live-page-actions/{id}",
+            get(api::live_page_actions::get),
+        )
+        .route(
+            "/api/live-page-actions/{id}/cancel",
+            post(api::live_page_actions::cancel),
+        )
+        .route(
+            "/api/live-page-actions/{id}/launch",
+            post(api::live_page_actions::launch),
+        )
         // ── OpenAPI / Swagger UI ──
         // Spec served at `/api/openapi.json` by SwaggerUi (its `.url()`
         // mounts the spec route automatically). Interactive UI at

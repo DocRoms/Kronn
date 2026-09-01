@@ -62,11 +62,14 @@ function action(overrides: Partial<DiscussionAction> = {}): DiscussionAction {
 describe('DiscussionActionCard', () => {
   beforeEach(() => vi.clearAllMocks());
 
+  const expand = () => fireEvent.click(screen.getByRole('button', { name: /Translate issue/ }));
+
   it('keeps launch human-gated and synchronously prevents a double click', async () => {
     let resolveLaunch!: (value: DiscussionAction) => void;
     mocks.launch.mockReturnValue(new Promise(resolve => { resolveLaunch = resolve; }));
     const onChanged = vi.fn();
     render(<DiscussionActionCard action={action()} onChanged={onChanged} onOpenDiscussion={vi.fn()} />);
+    expand();
 
     const launch = screen.getByRole('button', { name: /disc\.action\.launch/ });
     expect(launch).toBeDisabled();
@@ -97,6 +100,7 @@ describe('DiscussionActionCard', () => {
         onOpenDiscussion={vi.fn()}
       />,
     );
+    expand();
     const input = screen.getByRole('textbox', { name: 'Language' });
     expect(input).toHaveValue('fr');
     expect(screen.getByText('disc.action.suggestedBy:@claude-cli')).toBeInTheDocument();
@@ -116,12 +120,14 @@ describe('DiscussionActionCard', () => {
         onOpenDiscussion={vi.fn()}
       />,
     );
+    expand();
     expect(screen.getByDisplayValue('disc.action.resolvedAtLaunch')).toBeDisabled();
     expect(screen.getByText(/PROJECT_TOKEN/)).toBeInTheDocument();
   });
 
   it('lets an operator override an allow_manual_override environment value, and never requires it', async () => {
     mocks.launch.mockResolvedValue(action({ state: 'launching' }));
+    const onChanged = vi.fn();
     render(
       <DiscussionActionCard
         action={action({ values: [variable({
@@ -132,10 +138,11 @@ describe('DiscussionActionCard', () => {
           allow_manual_override: true,
           required: true,
         })] })}
-        onChanged={vi.fn()}
+        onChanged={onChanged}
         onOpenDiscussion={vi.fn()}
       />,
     );
+    expand();
     const input = screen.getByRole('textbox', { name: 'Token' });
     expect(input).not.toBeDisabled();
     // An override-eligible env value is never a blocking requirement — Kronn
@@ -147,7 +154,7 @@ describe('DiscussionActionCard', () => {
     fireEvent.change(input, { target: { value: 'operator-override' } });
     fireEvent.click(launch);
     expect(mocks.launch).toHaveBeenCalledWith('action:msg-1:0', { variables: { token: 'operator-override' } });
-    await waitFor(() => expect(screen.getByText('disc.action.state.launching')).toBeInTheDocument());
+    await waitFor(() => expect(onChanged).toHaveBeenCalledWith(expect.objectContaining({ state: 'launching' })));
   });
 
   it('cancels an untouched proposal and opens the durable result discussion', async () => {
@@ -158,6 +165,7 @@ describe('DiscussionActionCard', () => {
     const view = render(
       <DiscussionActionCard action={action()} onChanged={onChanged} onOpenDiscussion={onOpenDiscussion} />,
     );
+    expand();
     fireEvent.click(screen.getByRole('button', { name: 'common.cancel' }));
     await waitFor(() => expect(mocks.cancel).toHaveBeenCalledWith('action:msg-1:0'));
 
@@ -180,6 +188,8 @@ describe('DiscussionActionCard', () => {
         onOpenDiscussion={vi.fn()}
       />,
     );
+    expect(screen.queryByTestId('run-card')).not.toBeInTheDocument();
+    expand();
     expect(screen.getByTestId('run-card')).toHaveTextContent('run-42');
   });
 });

@@ -1,6 +1,6 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { LivePage, LivePageDetail, LivePagePublication } from '../../types/generated';
+import type { LivePage, LivePageAction, LivePageDetail, LivePagePublication } from '../../types/generated';
 
 const page: LivePage = {
   id: 'page-1', project_id: null, title: 'Adobe Signals', slug: 'adobe-signals',
@@ -34,11 +34,18 @@ const publications: LivePagePublication[] = [3, 2, 1].map(dataRevision => ({
   published_at: `2026-08-13T0${dataRevision}:00:00Z`,
 }));
 const linkRelay = vi.hoisted(() => ({ connect: vi.fn(), dispose: vi.fn() }));
+const actionRelay = vi.hoisted(() => ({ onAction: null as ((intent: {
+  actionRef: string;
+  bindings: Record<string, string>;
+  anchor: { left: number; top: number; width: number; height: number };
+}) => void) | null }));
 
 vi.mock('../../lib/api', () => ({
+  discussionActions: { get: vi.fn(), cancel: vi.fn(), launch: vi.fn() },
   docs: { generatePdf: vi.fn(), generateDocx: vi.fn(), generateCsv: vi.fn() },
   pages: {
     list: vi.fn(), get: vi.fn(), revisions: vi.fn(), workflows: vi.fn(), publications: vi.fn(), discussions: vi.fn(),
+    actions: vi.fn(), getAction: vi.fn(), cancelAction: vi.fn(), launchAction: vi.fn(),
     update: vi.fn(), delete: vi.fn(), updateHtml: vi.fn(),
   },
   workflows: { triggerStream: vi.fn() },
@@ -51,7 +58,10 @@ vi.mock('../../lib/I18nContext', () => ({
 }));
 vi.mock('../../lib/live-page-sandbox', async importOriginal => ({
   ...await importOriginal<Record<string, unknown>>(),
-  createLivePageOpenLinkRelay: vi.fn(() => linkRelay),
+  createLivePageOpenLinkRelay: vi.fn((_channel, _open, onAction) => {
+    actionRelay.onAction = onAction;
+    return linkRelay;
+  }),
   requestRenderedPageHtml: vi.fn(),
 }));
 
@@ -70,6 +80,7 @@ beforeEach(() => {
   localStorage.removeItem('kronn:pageCollapsedSections');
   linkRelay.connect.mockClear();
   linkRelay.dispose.mockClear();
+  actionRelay.onAction = null;
   vi.mocked(pagesApi.list).mockResolvedValue([page]);
   vi.mocked(pagesApi.get).mockResolvedValue(detail);
   vi.mocked(pagesApi.revisions).mockResolvedValue([
@@ -79,6 +90,7 @@ beforeEach(() => {
   vi.mocked(pagesApi.workflows).mockResolvedValue([{ id: 'wf-1', name: 'Adobe cron', enabled: true, step_names: ['publish'] }]);
   vi.mocked(pagesApi.publications).mockResolvedValue(publications);
   vi.mocked(pagesApi.discussions).mockResolvedValue([]);
+  vi.mocked(pagesApi.actions).mockResolvedValue([]);
   vi.mocked(pagesApi.update).mockImplementation(async (_id, request) => ({
     ...detail,
     title: request.title ?? detail.title,
@@ -106,6 +118,38 @@ afterEach(() => {
 });
 
 describe('PagesPage', () => {
+  it('opens the shared native action card from a sandbox intention', async () => {
+    const pageAction: LivePageAction = {
+      id: 'page-action:page-1:refresh', live_page_id: 'page-1', live_page_revision_id: 'rev-2',
+      action_ref: 'refresh', kind: 'workflow', target_id: 'wf-1', target_name: 'Refresh report',
+      project_id: null, state: 'proposed', values: [], shared_run_id: null,
+      result_discussion_id: null, deep_link: null, diagnostic: null, launched_at: null,
+      finished_at: null, created_at: page.created_at, updated_at: page.updated_at, stale_source: false,
+    };
+    vi.mocked(pagesApi.actions).mockResolvedValue([pageAction]);
+    render(<PagesPage />);
+    await screen.findByTestId('live-page-frame');
+
+    act(() => actionRelay.onAction?.({
+      actionRef: 'refresh', bindings: {},
+      anchor: { left: 24, top: 40, width: 120, height: 32 },
+    }));
+
+    expect(await screen.findByTestId(`live-page-action-${pageAction.id}`)).toBeInTheDocument();
+    const toggle = screen.getByRole('button', { name: /Refresh report/ });
+    expect(toggle).toHaveAttribute('aria-expanded', 'true');
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute('aria-expanded', 'false');
+
+    // The same CTA is an explicit new intention: remount its local form so a
+    // previously collapsed/stale instance cannot leak into the next click.
+    act(() => actionRelay.onAction?.({
+      actionRef: 'refresh', bindings: {},
+      anchor: { left: 24, top: 40, width: 120, height: 32 },
+    }));
+    expect(screen.getByRole('button', { name: /Refresh report/ })).toHaveAttribute('aria-expanded', 'true');
+  });
+
   it('keeps the historical responsive sidebar classes on the shared shell', async () => {
     render(<PagesPage />);
     await screen.findByTestId('live-page-frame');

@@ -1721,7 +1721,7 @@ export type DiscussionActionValue = { name: string, label: string, placeholder: 
  */
 allow_manual_override: boolean, provenance: DiscussionActionValueProvenance, value?: string, source_ref?: string, suggested_by?: string, suggested_value?: string, };
 
-export type DiscussionActionValueProvenance = "user_input" | "agent_suggestion" | "kronn_context" | "project_env";
+export type DiscussionActionValueProvenance = "user_input" | "agent_suggestion" | "kronn_context" | "project_env" | "dynamic_binding";
 
 export type DiscussionAgentHandoffMode = { global_enabled: boolean, disabled: boolean, unlimited_override: boolean, effective_enabled: boolean,
 /**
@@ -2706,6 +2706,17 @@ resume_run_id?: string | null, };
 
 export type LaunchDiscussionActionRequest = { variables?: Record<string, string>, };
 
+export type LaunchLivePageActionRequest = { variables?: Record<string, string>,
+/**
+ * Row/card SELECTOR for `dynamic_binding` fields, keyed by variable
+ * name — never a resolved value. For example the clicked collection
+ * item's key-field value. The real field value is always looked up
+ * server-side from the live dataset/page row (`resolve_dynamic_binding`)
+ * — a caller can choose which existing row to bind to, never inject an
+ * arbitrary resolved value.
+ */
+bindings?: Record<string, string>, };
+
 /**
  * The versioned, backward-compatible wire response for a single-task launch —
  * the V1 contract KT-318's endpoint will return (no endpoint is wired in
@@ -2890,6 +2901,16 @@ pinned: boolean,
  * Archived Pages remain addressable by workflows and can be restored.
  */
 archived: boolean, };
+
+export type LivePageAction = { id: string, live_page_id: string, live_page_revision_id: string, action_ref: string, kind: DiscussionActionKind, target_id: string, target_name: string, project_id: string | null, state: DiscussionActionState, values: Array<DiscussionActionValue>, shared_run_id: string | null, result_discussion_id: string | null, deep_link: string | null, diagnostic: string | null, launched_at: string | null, finished_at: string | null, created_at: string, updated_at: string,
+/**
+ * True when `live_page_revision_id` no longer matches the Page's live
+ * `current_revision_id`. The `(live_page_id, action_ref)` anchor itself
+ * always survives a refresh or a content update — this flag exists so
+ * the human sees an explicit explanation instead of silently trusting
+ * values that may no longer reflect the currently displayed Page.
+ */
+stale_source: boolean, };
 
 export type LivePageDataset = { id: string, page_id: string, name: string, kind: LivePageDatasetKind, current: any, schema: any, max_points: number, max_age_days: number | null, updated_at: string, };
 
