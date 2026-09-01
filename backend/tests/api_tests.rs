@@ -482,6 +482,523 @@ async fn quick_exec_crud_and_csv_run_round_trip() {
     assert!(empty["data"].as_array().unwrap().is_empty());
 }
 
+async fn wait_for_terminal_action(app: Router, action_id: &str) -> Value {
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let (_, action) =
+                get_json(app.clone(), &format!("/api/discussion-actions/{action_id}")).await;
+            let state = action["data"]["state"].as_str().unwrap_or_default();
+            if matches!(
+                state,
+                "succeeded" | "failed" | "cancelled" | "preflight_failed"
+            ) {
+                break action;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("action did not publish a terminal state")
+}
+
+#[tokio::test]
+async fn discussion_action_http_contract_is_durable_and_idempotent() {
+    let state = test_state();
+    let app = build_router_with_auth(state.clone(), false);
+    let (_, created) = post_json(
+        app.clone(),
+        "/api/quick-execs",
+        serde_json::json!({
+            "name": "Inline collector",
+            "command": "echo",
+            "args": ["{\"ok\":true}"],
+            "timeout_secs": 10,
+            "output_format": "json",
+            "variables": []
+        }),
+    )
+    .await;
+    assert_eq!(created["success"], true, "{created}");
+    let target_id = created["data"]["id"].as_str().unwrap().to_string();
+
+    state
+        .db
+        .with_conn(move |connection| {
+            let now = chrono::Utc::now().to_rfc3339();
+            connection.execute(
+                "INSERT INTO discussions (id, title, created_at, updated_at)
+                 VALUES ('disc-actions', 'Inline actions', ?1, ?1)",
+                [&now],
+            )?;
+            for message_id in ["msg-launch", "msg-cancel"] {
+                let content = format!(
+                    "```kronn-action\n{{\"kind\":\"quick_exec\",\"target_id\":\"{target_id}\"}}\n```"
+                );
+                // Real production transaction: message row + `kronn-action`
+                // ingestion commit or roll back together (see
+                // `db::discussions::insert_message`'s SAVEPOINT), instead of a
+                // raw `INSERT INTO messages` plus a hand-rolled ingest call.
+                let msg = agent_action_message(message_id, &content);
+                kronn::db::discussions::insert_message(connection, "disc-actions", &msg)?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    let (_, listed) = get_json(app.clone(), "/api/discussions/disc-actions/actions").await;
+    assert_eq!(listed["success"], true, "{listed}");
+    assert_eq!(listed["data"].as_array().unwrap().len(), 2);
+
+    let launch_id = "action:msg-launch:0";
+    let (_, fetched) = get_json(app.clone(), &format!("/api/discussion-actions/{launch_id}")).await;
+    assert_eq!(fetched["data"]["state"], "proposed", "{fetched}");
+
+    let (_, launched) = post_json(
+        app.clone(),
+        &format!("/api/discussion-actions/{launch_id}/launch"),
+        serde_json::json!({"variables": {}}),
+    )
+    .await;
+    assert_eq!(launched["success"], true, "{launched}");
+    assert_eq!(launched["data"]["state"], "launching", "{launched}");
+
+    let (_, duplicate) = post_json(
+        app.clone(),
+        &format!("/api/discussion-actions/{launch_id}/launch"),
+        serde_json::json!({"variables": {}}),
+    )
+    .await;
+    assert_eq!(duplicate["success"], true, "{duplicate}");
+    assert_ne!(duplicate["data"]["state"], "proposed", "{duplicate}");
+
+    let completed = wait_for_terminal_action(app.clone(), launch_id).await;
+    assert_eq!(completed["data"]["state"], "succeeded", "{completed}");
+    assert!(
+        completed["data"]["shared_run_id"].is_string(),
+        "{completed}"
+    );
+    assert!(completed["data"]["deep_link"].is_string(), "{completed}");
+
+    let cancel_id = "action:msg-cancel:0";
+    let (_, cancelled) = post_json(
+        app.clone(),
+        &format!("/api/discussion-actions/{cancel_id}/cancel"),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(cancelled["data"]["state"], "cancelled", "{cancelled}");
+    let (_, cancelled_again) = post_json(
+        app,
+        &format!("/api/discussion-actions/{cancel_id}/cancel"),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(cancelled_again["data"]["state"], "cancelled");
+}
+
+/// KT-476 review — the four target families must ingest through the SAME
+/// production message-insertion transaction used by real agent turns, not a
+/// bespoke test-only path.
+#[tokio::test]
+async fn discussion_action_ingests_all_four_target_families_through_the_real_message_transaction() {
+    let state = test_state();
+    let app = build_router_with_auth(state.clone(), false);
+    let (_, qp) = post_json(
+        app.clone(),
+        "/api/quick-prompts",
+        serde_json::json!({
+            "name": "Frame issue", "prompt_template": "Frame this",
+            "variables": [],
+        }),
+    )
+    .await;
+    assert_eq!(qp["success"], true, "{qp}");
+    let (_, qa) = post_json(
+        app.clone(),
+        "/api/quick-apis",
+        serde_json::json!({
+            "name": "Read ticket", "api_plugin_slug": "tracker", "api_config_id": "config",
+            "api_endpoint_path": "/ticket", "variables": [],
+        }),
+    )
+    .await;
+    assert_eq!(qa["success"], true, "{qa}");
+    let (_, qe) = post_json(
+        app.clone(),
+        "/api/quick-execs",
+        serde_json::json!({
+            "name": "Collect logs", "command": "printf", "args": [], "timeout_secs": 10,
+            "output_format": "json", "variables": [],
+        }),
+    )
+    .await;
+    assert_eq!(qe["success"], true, "{qe}");
+    let (_, wf) = post_json(
+        app.clone(),
+        "/api/workflows",
+        serde_json::json!({
+            "name": "Publish report",
+            "trigger": {"type": "Manual"},
+            "steps": [{"name": "s1", "agent": "ClaudeCode", "prompt_template": "test", "mode": {"type": "Normal"}}],
+            "actions": [],
+        }),
+    )
+    .await;
+    assert_eq!(wf["success"], true, "{wf}");
+
+    let content = format!(
+        "```kronn-action\n{{\"kind\":\"quick_prompt\",\"target_id\":\"{}\"}}\n```\n\
+         ```kronn-action\n{{\"kind\":\"quick_api\",\"target_id\":\"{}\"}}\n```\n\
+         ```kronn-action\n{{\"kind\":\"quick_exec\",\"target_id\":\"{}\"}}\n```\n\
+         ```kronn-action\n{{\"kind\":\"workflow\",\"target_id\":\"{}\"}}\n```",
+        qp["data"]["id"].as_str().unwrap(),
+        qa["data"]["id"].as_str().unwrap(),
+        qe["data"]["id"].as_str().unwrap(),
+        wf["data"]["id"].as_str().unwrap(),
+    );
+    state
+        .db
+        .with_conn(move |connection| {
+            let now = chrono::Utc::now().to_rfc3339();
+            connection.execute(
+                "INSERT INTO discussions (id, title, created_at, updated_at)
+                 VALUES ('disc-all-kinds', 'All kinds', ?1, ?1)",
+                [&now],
+            )?;
+            let msg = agent_action_message("msg-all-kinds", &content);
+            kronn::db::discussions::insert_message(connection, "disc-all-kinds", &msg)
+        })
+        .await
+        .unwrap();
+
+    let (_, listed) = get_json(app, "/api/discussions/disc-all-kinds/actions").await;
+    let kinds: Vec<&str> = listed["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|action| action["kind"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        kinds,
+        vec!["quick_prompt", "quick_api", "quick_exec", "workflow"],
+        "{listed}"
+    );
+    assert!(
+        listed["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|action| action["state"] == "proposed"),
+        "{listed}"
+    );
+}
+
+/// KT-476 review — a GLOBAL Quick Exec launched from a project-scoped
+/// discussion must resolve THAT project's environment exactly like a target
+/// declared on the project directly (the LaunchContext contract).
+#[tokio::test]
+async fn discussion_action_launch_context_resolves_project_env_for_a_global_target() {
+    let state = test_state();
+    let secret = kronn::core::crypto::generate_secret();
+    state.config.write().await.encryption_secret = Some(secret.clone());
+    let app = build_router_with_auth(state.clone(), false);
+
+    // A real, existing directory — the exec step validates `work_dir` exists
+    // on disk before spawning, and a global target now resolves the
+    // discussion's project as its worktree (KT-476 LaunchContext).
+    let project_path = std::env::temp_dir().to_string_lossy().into_owned();
+    state
+        .db
+        .with_conn({
+            let secret = secret.clone();
+            move |connection| {
+                let now = chrono::Utc::now().to_rfc3339();
+                connection.execute(
+                    "INSERT INTO projects (id,name,path,created_at,updated_at)
+                     VALUES ('launch-ctx-project','Launch ctx',?2,?1,?1)",
+                    rusqlite::params![now, project_path],
+                )?;
+                kronn::db::mcps::upsert_server(
+                    connection,
+                    &kronn::models::McpServer {
+                        id: "launch-ctx-server".into(),
+                        name: "Server".into(),
+                        description: String::new(),
+                        transport: kronn::models::McpTransport::Stdio {
+                            command: "server".into(),
+                            args: vec![],
+                        },
+                        source: kronn::models::McpSource::Registry,
+                        api_spec: None,
+                    },
+                )?;
+                let values =
+                    HashMap::from([("TOKEN".to_string(), "project-env-value".to_string())]);
+                kronn::db::mcps::insert_config(
+                    connection,
+                    &kronn::models::McpConfig {
+                        id: "launch-ctx-config".into(),
+                        server_id: "launch-ctx-server".into(),
+                        label: "Config".into(),
+                        env_keys: vec!["TOKEN".into()],
+                        env_encrypted: kronn::db::mcps::encrypt_env(&values, &secret).unwrap(),
+                        args_override: None,
+                        is_global: false,
+                        include_general: false,
+                        config_hash: "hash".into(),
+                        project_ids: vec!["launch-ctx-project".into()],
+                        host_sync: kronn::models::HostSyncMode::None,
+                    },
+                )?;
+                connection.execute(
+                    "INSERT INTO discussions (id, title, project_id, created_at, updated_at)
+                     VALUES ('disc-launch-ctx', 'Launch ctx', 'launch-ctx-project', ?1, ?1)",
+                    [&now],
+                )?;
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+
+    // A GLOBAL Quick Exec: no project_id of its own.
+    let (_, qe) = post_json(
+        app.clone(),
+        "/api/quick-execs",
+        serde_json::json!({
+            "name": "Push status", "command": "echo", "args": ["{\"ok\":true}"], "timeout_secs": 10,
+            "output_format": "json",
+            "variables": [{
+                "name": "token", "label": "Token", "placeholder": "", "required": true,
+                "source": "project_env", "source_ref": "<env.TOKEN>",
+                "allow_manual_override": false,
+            }],
+        }),
+    )
+    .await;
+    assert_eq!(qe["success"], true, "{qe}");
+    let target_id = qe["data"]["id"].as_str().unwrap().to_string();
+    assert!(
+        qe["data"]["project_id"].is_null(),
+        "target must stay global"
+    );
+
+    let content =
+        format!("```kronn-action\n{{\"kind\":\"quick_exec\",\"target_id\":\"{target_id}\"}}\n```");
+    state
+        .db
+        .with_conn(move |connection| {
+            let msg = agent_action_message("msg-launch-ctx", &content);
+            kronn::db::discussions::insert_message(connection, "disc-launch-ctx", &msg)
+        })
+        .await
+        .unwrap();
+
+    let action_id = "action:msg-launch-ctx:0";
+    let (_, proposed) =
+        get_json(app.clone(), &format!("/api/discussion-actions/{action_id}")).await;
+    assert_eq!(
+        proposed["data"]["project_id"], "launch-ctx-project",
+        "the proposal inherits the discussion's project: {proposed}"
+    );
+
+    let (_, launched) = post_json(
+        app.clone(),
+        &format!("/api/discussion-actions/{action_id}/launch"),
+        serde_json::json!({"variables": {}}),
+    )
+    .await;
+    assert_eq!(launched["success"], true, "{launched}");
+
+    let completed = wait_for_terminal_action(app, action_id).await;
+    assert_eq!(completed["data"]["state"], "succeeded", "{completed}");
+    let run_id = completed["data"]["shared_run_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // The execution-variable snapshot is the durable, auditable proof of
+    // which project's environment actually resolved this run.
+    let snapshot_project_id: Option<String> = state
+        .db
+        .with_conn(move |connection| {
+            Ok(connection.query_row(
+                "SELECT project_id FROM execution_variable_snapshots
+                 WHERE run_kind = 'quick_exec' AND run_id = ?1",
+                [&run_id],
+                |row| row.get(0),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        snapshot_project_id.as_deref(),
+        Some("launch-ctx-project"),
+        "a global target launched from a project-scoped discussion must resolve THAT project's environment"
+    );
+}
+
+/// KT-476 review — an `allow_manual_override` value can be overridden at
+/// launch, but the operator's plaintext value must never be persisted in
+/// `discussion_actions.values_json` or replayed by a later GET.
+#[tokio::test]
+async fn discussion_action_allow_manual_override_never_leaks_plaintext_through_the_api() {
+    let state = test_state();
+    let secret = kronn::core::crypto::generate_secret();
+    state.config.write().await.encryption_secret = Some(secret.clone());
+    let app = build_router_with_auth(state.clone(), false);
+
+    state
+        .db
+        .with_conn(|connection| {
+            let now = chrono::Utc::now().to_rfc3339();
+            Ok(connection.execute(
+                "INSERT INTO discussions (id, title, created_at, updated_at)
+                 VALUES ('disc-override', 'Override', ?1, ?1)",
+                [&now],
+            )?)
+        })
+        .await
+        .unwrap();
+
+    let (_, qe) = post_json(
+        app.clone(),
+        "/api/quick-execs",
+        serde_json::json!({
+            "name": "Push status", "command": "echo", "args": ["{\"ok\":true}"], "timeout_secs": 10,
+            "output_format": "json",
+            "variables": [{
+                "name": "token", "label": "Token", "placeholder": "", "required": true,
+                "source": "project_env", "source_ref": "<env.TOKEN>",
+                "allow_manual_override": true,
+            }],
+        }),
+    )
+    .await;
+    let target_id = qe["data"]["id"].as_str().unwrap().to_string();
+
+    let content =
+        format!("```kronn-action\n{{\"kind\":\"quick_exec\",\"target_id\":\"{target_id}\"}}\n```");
+    state
+        .db
+        .with_conn(move |connection| {
+            let msg = agent_action_message("msg-override", &content);
+            kronn::db::discussions::insert_message(connection, "disc-override", &msg)
+        })
+        .await
+        .unwrap();
+
+    let action_id = "action:msg-override:0";
+    let (_, proposed) =
+        get_json(app.clone(), &format!("/api/discussion-actions/{action_id}")).await;
+    assert_eq!(proposed["data"]["values"][0]["allow_manual_override"], true);
+    assert_eq!(proposed["data"]["values"][0]["provenance"], "project_env");
+    assert!(proposed["data"]["values"][0]["value"].is_null());
+
+    let (_, launched) = post_json(
+        app.clone(),
+        &format!("/api/discussion-actions/{action_id}/launch"),
+        serde_json::json!({"variables": {"token": "operator-typed-secret"}}),
+    )
+    .await;
+    assert_eq!(launched["success"], true, "{launched}");
+    assert!(
+        !launched.to_string().contains("operator-typed-secret"),
+        "the launch response must never echo the manually supplied value: {launched}"
+    );
+
+    let completed = wait_for_terminal_action(app.clone(), action_id).await;
+    assert_eq!(completed["data"]["state"], "succeeded", "{completed}");
+    assert!(
+        !completed.to_string().contains("operator-typed-secret"),
+        "a later GET must never replay the manually supplied plaintext value: {completed}"
+    );
+
+    // The value DID reach the executor — proven through the one durable,
+    // encrypted place it may live: the execution-variable snapshot.
+    let run_id = completed["data"]["shared_run_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let key = kronn::core::crypto::parse_secret(&secret).unwrap();
+    let values = state
+        .db
+        .with_conn(move |connection| {
+            kronn::db::execution_variable_snapshots::load_values(
+                connection,
+                "quick_exec",
+                &run_id,
+                &key,
+                chrono::Utc::now(),
+            )
+        })
+        .await
+        .unwrap()
+        .expect("snapshot must still be live");
+    assert_eq!(values["token"], "operator-typed-secret");
+}
+
+/// KT-476 review — invalid JSON and an empty `target_id` must surface as a
+/// readable, actionable `preflight_failed` card through the SAME production
+/// message-insertion boundary, never a silently dropped fence.
+#[tokio::test]
+async fn discussion_action_invalid_proposals_are_actionable_through_the_real_message_transaction() {
+    let state = test_state();
+    let app = build_router_with_auth(state.clone(), false);
+    state
+        .db
+        .with_conn(|connection| {
+            let now = chrono::Utc::now().to_rfc3339();
+            Ok(connection.execute(
+                "INSERT INTO discussions (id, title, created_at, updated_at)
+                 VALUES ('disc-invalid', 'Invalid', ?1, ?1)",
+                [&now],
+            )?)
+        })
+        .await
+        .unwrap();
+
+    let bad_json = "```kronn-action\n{not valid json\n```";
+    let empty_target = "```kronn-action\n{\"kind\":\"workflow\",\"target_id\":\"\"}\n```";
+    state
+        .db
+        .with_conn(move |connection| {
+            kronn::db::discussions::insert_message(
+                connection,
+                "disc-invalid",
+                &agent_action_message("msg-bad-json", bad_json),
+            )?;
+            kronn::db::discussions::insert_message(
+                connection,
+                "disc-invalid",
+                &agent_action_message("msg-empty-target", empty_target),
+            )
+        })
+        .await
+        .unwrap();
+
+    let (_, listed) = get_json(app, "/api/discussions/disc-invalid/actions").await;
+    let actions = listed["data"].as_array().unwrap();
+    assert_eq!(actions.len(), 2, "{listed}");
+    assert!(
+        actions
+            .iter()
+            .all(|action| action["state"] == "preflight_failed"),
+        "{listed}"
+    );
+    assert!(actions.iter().any(|action| action["kind"] == "invalid"
+        && action["diagnostic"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("JSON invalide")));
+    assert!(actions.iter().any(|action| action["kind"] == "workflow"
+        && action["diagnostic"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("aucune cible")));
+}
+
 #[tokio::test]
 async fn automation_quick_items_share_a_persistent_favorite_patch() {
     let app = test_app();
@@ -1428,6 +1945,36 @@ async fn planning_api_rejects_dependency_cycles_and_identifies_agent_events() {
         retried["data"]["events"].as_array().unwrap().len(),
         removed["data"]["events"].as_array().unwrap().len(),
     );
+}
+
+/// An Agent/main-channel message built for `kronn::db::discussions::insert_message`
+/// — the real production transaction (message row + `kronn-action` ingestion in
+/// the same SAVEPOINT), never a raw `INSERT INTO messages` plus a manual
+/// `ingest_message_actions` call.
+fn agent_action_message(id: &str, content: &str) -> kronn::models::DiscussionMessage {
+    kronn::models::DiscussionMessage {
+        recovered_partial: false,
+        session_tokens_at_message: None,
+        author_cli_ordinal: None,
+        model: None,
+        lint_report: None,
+        id: id.into(),
+        role: kronn::models::MessageRole::Agent,
+        channel: kronn::models::MessageChannel::Main,
+        content: content.into(),
+        agent_type: Some(kronn::models::AgentType::ClaudeCode),
+        timestamp: chrono::Utc::now(),
+        tokens_used: 0,
+        auth_mode: None,
+        model_tier: None,
+        cost_usd: None,
+        author_pseudo: None,
+        author_avatar_email: None,
+        source_msg_id: None,
+        duration_ms: None,
+        target_agent: None,
+        reply_to_message_id: None,
+    }
 }
 
 fn test_state() -> AppState {

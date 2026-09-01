@@ -588,6 +588,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         include_str!("sql/154_execution_variable_snapshots.sql"),
     ),
     ("155_shared_runs", include_str!("sql/155_shared_runs.sql")),
+    (
+        "159_discussion_actions",
+        include_str!("sql/159_discussion_actions.sql"),
+    ),
 ];
 
 /// Apply one migration inside the caller-owned transaction.
