@@ -78,6 +78,24 @@ describe('sanitizeMermaidSource', () => {
     expect(sanitizeMermaidSource(flow)).toBe(flow);
   });
 
+  it('heals clock labels in timeline periods without touching event prose', () => {
+    const src = [
+      'timeline',
+      '    title Incident du 2026-09-01 (heure de Paris)',
+      '    19:00 : Bruit de fond normal à 19:00',
+      '    19:30 - 19:45 : Vague 1',
+      '    20:50 - 20:55 : Extinction quasi totale',
+    ].join('\n');
+
+    expect(sanitizeMermaidSource(src)).toBe([
+      'timeline',
+      '    title Incident du 2026-09-01 (heure de Paris)',
+      '    19h00 : Bruit de fond normal à 19:00',
+      '    19h30 - 19h45 : Vague 1',
+      '    20h50 - 20h55 : Extinction quasi totale',
+    ].join('\n'));
+  });
+
   it('handles multiple colliding aliases and avoids name clashes', () => {
     const src = [
       'sequenceDiagram',

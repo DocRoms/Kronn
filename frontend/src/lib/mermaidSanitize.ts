@@ -40,6 +40,22 @@ function escapeRegExp(s: string): string {
  */
 export function sanitizeMermaidSource(source: string): string {
   const firstToken = source.trimStart().split(/[\s\n]/, 1)[0] ?? '';
+  if (firstToken === 'timeline') {
+    return source.split('\n').map(line => {
+      // Mermaid uses a whitespace-surrounded colon as the period/event
+      // separator. A natural clock label (`19:00 : incident`) makes its lexer
+      // consume the first colon as syntax and reject the whole diagram. Heal
+      // clock values only in the period portion; event prose stays byte-for-
+      // byte identical and the original source remains available in the UI.
+      const entry = /^(\s*)(.*?)(\s+:\s+)(.*)$/.exec(line);
+      if (!entry || /^(?:title|section)\b/.test(entry[2].trimStart())) return line;
+      const period = entry[2].replace(
+        /\b([01]?\d|2[0-3]):([0-5]\d)\b/g,
+        '$1h$2',
+      );
+      return entry[1] + period + entry[3] + entry[4];
+    }).join('\n');
+  }
   if (firstToken !== 'sequenceDiagram') return source;
 
   const lines = source.split('\n');
