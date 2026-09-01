@@ -215,13 +215,14 @@
 .kronn-mermaid-error {
   padding: 8px;
   border-left: 3px solid var(--kr-warning);
-  background: var(--kr-bg-base);
+  background: var(--kr-bg-elevated);
+  color: var(--kr-text-primary);
 }
 
 .kronn-mermaid-error p {
   margin: 0 0 8px;
   font-size: var(--kr-fs-sm);
-  color: var(--kr-warning);
+  color: var(--kr-warning-soft, var(--kr-warning));
   display: inline-flex;
   align-items: center;
   gap: 4px;
@@ -229,7 +230,7 @@
 
 .kronn-mermaid-error details {
   font-size: 11px;
-  color: var(--kr-text-faint);
+  color: var(--kr-text-secondary);
 }
 
 .kronn-mermaid-error details summary {
@@ -240,7 +241,9 @@
   margin: 6px 0 0;
   padding: 6px;
   font-size: 11px;
-  background: var(--kr-bg-elevated);
+  background: var(--kr-bg-raised);
+  color: var(--kr-text-primary);
+  border: 1px solid var(--kr-border-soft);
   border-radius: 4px;
   overflow-x: auto;
 }
@@ -248,7 +251,9 @@
 .kronn-mermaid-source-fallback {
   margin: 8px 0 0;
   padding: 8px;
-  background: var(--kr-bg-elevated);
+  background: var(--kr-bg-raised);
+  color: var(--kr-text-primary);
+  border: 1px solid var(--kr-border-soft);
   border-radius: 4px;
   font-size: 11px;
   white-space: pre;
