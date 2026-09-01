@@ -62,7 +62,14 @@ import {
 import { externalConnectionForDiscussion } from '../lib/externalAgentIdentity';
 
 type LoadedDiscussion = Discussion
-  & Partial<Pick<DiscussionDetail, 'active_agent_dispatches' | 'message_targets'>>;
+  & Partial<Pick<DiscussionDetail, 'active_agent_dispatches' | 'message_targets' | 'partial_response'>>;
+
+type InterruptedStreamState = {
+  text: string;
+  triggerMessageId: string | null;
+  agent: AgentType;
+  responseMessageId?: string;
+};
 
 function newClientMessageId(): string {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
@@ -143,6 +150,9 @@ function StreamingAgentReplyBubble({
   onToggleLogs,
   stopping,
   onStop,
+  recovering,
+  recoveryLabel,
+  agentLabel,
 }: {
   agent: AgentType;
   triggerMessageId: string;
@@ -153,8 +163,12 @@ function StreamingAgentReplyBubble({
   onToggleLogs: () => void;
   stopping: boolean;
   onStop: () => void;
+  recovering: boolean;
+  recoveryLabel: string | null;
+  agentLabel?: string;
 }) {
   const { t } = useT();
+  const displayAgent = agentLabel ?? AGENT_LABELS[agent] ?? agent;
   return (
     <div
       className="disc-msg-row"
@@ -166,8 +180,10 @@ function StreamingAgentReplyBubble({
       <div className="disc-msg-bubble" data-role="agent">
         <div className="disc-msg-agent-label" style={{ color: agentTextColor(agent), justifyContent: 'space-between' }}>
           <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-            <Cpu size={10} /> {AGENT_LABELS[agent] ?? agent}
-            <Loader2 size={10} style={{ animation: 'spin 1s linear infinite', marginLeft: 4 }} />
+            <Cpu size={10} /> {displayAgent}
+            {recovering
+              ? <AlertTriangle size={10} style={{ marginLeft: 4 }} />
+              : <Loader2 size={10} style={{ animation: 'spin 1s linear infinite', marginLeft: 4 }} />}
           </span>
           <span className="disc-pending-agent-actions">
             <span className="disc-streaming-elapsed">
@@ -180,8 +196,8 @@ function StreamingAgentReplyBubble({
               className="disc-pending-agent-stop"
               onClick={onStop}
               disabled={stopping}
-              aria-label={t('disc.stopThisReply', AGENT_LABELS[agent] ?? agent)}
-              title={t('disc.stopThisReply', AGENT_LABELS[agent] ?? agent)}
+              aria-label={t('disc.stopThisReply', displayAgent)}
+              title={t('disc.stopThisReply', displayAgent)}
             >
               {stopping
                 ? <Loader2 size={11} style={{ animation: 'spin 1s linear infinite' }} />
@@ -190,6 +206,12 @@ function StreamingAgentReplyBubble({
             </button>
           </span>
         </div>
+        {recoveryLabel && (
+          <div className="disc-stream-recovery" role="status">
+            <AlertTriangle size={12} />
+            <span>{recoveryLabel}</span>
+          </div>
+        )}
         {text ? (
           <div className="disc-streaming-md">
             <MarkdownContent content={text} />
@@ -603,6 +625,18 @@ export function DiscussionsPage({
     blockingMessageId?: string;
   } | null>(null);
   const [partialForcing, setPartialForcing] = useState(false);
+  const [interruptedStreams, setInterruptedStreams] = useState<Record<string, InterruptedStreamState>>({});
+  // Cache of fully-loaded discussions (with messages and runtime detail).
+  const [loadedDiscussions, setLoadedDiscussions] = useState<Record<string, LoadedDiscussion>>({});
+  // Stream callbacks outlive the render that started the request. Read the
+  // lifted buffers through refs so a late completion/error sees the latest
+  // chunks and provenance instead of the empty snapshot captured on send.
+  const streamingMapRef = useRef(streamingMap);
+  const streamingTargetMapRef = useRef(streamingTargetMap);
+  const streamingTurnMapRef = useRef(streamingTurnMap);
+  streamingMapRef.current = streamingMap;
+  streamingTargetMapRef.current = streamingTargetMap;
+  streamingTurnMapRef.current = streamingTurnMap;
   const partialForcingRef = useRef(false);
   // Mirrors `partialPending` for the WebSocket handler, which reads it from a
   // closure created before the refusal happened.
@@ -652,11 +686,44 @@ export function DiscussionsPage({
         console.warn('Failed to load batch run summaries:', e);
       });
   }, []);
+  const reconcileLoadedDiscussion = useCallback((disc: LoadedDiscussion) => {
+    setLoadedDiscussions(prev => ({ ...prev, [disc.id]: disc }));
+    setInterruptedStreams(previous => {
+      const held = previous[disc.id];
+      if (!held) return previous;
+      const durable = disc.partial_response;
+      if (durable?.content) {
+        const text = durable.content.length >= held.text.length ? durable.content : held.text;
+        if (text === held.text && held.responseMessageId === durable.message_id) return previous;
+        return {
+          ...previous,
+          [disc.id]: { ...held, text, responseMessageId: durable.message_id },
+        };
+      }
+      const hasSettledReply = disc.messages.some(message => (
+        message.role === 'Agent'
+        && (
+          (held.responseMessageId && message.id === held.responseMessageId)
+          || (held.triggerMessageId && message.reply_to_message_id === held.triggerMessageId)
+        )
+      ));
+      if (!hasSettledReply) return previous;
+      const { [disc.id]: _settled, ...rest } = previous;
+      return rest;
+    });
+  }, []);
+
   const reloadDiscussion = useCallback((discId: string) => {
     discussionsApi.get(discId).then(disc => {
-      if (disc) setLoadedDiscussions(prev => ({ ...prev, [disc.id]: disc }));
+      if (!disc) return;
+      reconcileLoadedDiscussion(disc);
+      /*
+       * A stream interrupted by a backend reload keeps its local text until
+       * this detail fetch proves either a newer durable checkpoint or a
+       * settled Agent message. Network failure deliberately changes nothing.
+       */
     }).catch(() => {});
-  }, []);
+  }, [reconcileLoadedDiscussion]);
   const openBatchReview = useCallback(async (runId: string, label: string, discIds: string[]) => {
     setBatchReview({ runId, label, discIds });
     setBatchReviewDiscs([]);
@@ -785,9 +852,19 @@ export function DiscussionsPage({
   const appendStreamChunk = useRafBatchedStream(
     buildStreamingFlush(setStreamingMap, noteStreamTick),
   );
-
-  // Cache of fully-loaded discussions (with messages)
-  const [loadedDiscussions, setLoadedDiscussions] = useState<Record<string, LoadedDiscussion>>({});
+  // rAF batching deliberately delays the lifted state update. Keep a raw
+  // synchronous copy too, otherwise a disconnect in the same frame as the
+  // last chunk can still observe an empty `streamingMap`.
+  const receivedStreamTextRef = useRef<Record<string, string>>({});
+  const appendRememberedStreamChunk = useCallback((discId: string, text: string) => {
+    receivedStreamTextRef.current[discId] = (receivedStreamTextRef.current[discId] ?? '') + text;
+    appendStreamChunk(discId, text);
+  }, [appendStreamChunk]);
+  const latestStreamText = useCallback((discId: string) => (
+    [streamingMapRef.current[discId], receivedStreamTextRef.current[discId]]
+      .filter((value): value is string => !!value)
+      .reduce((longest, value) => value.length > longest.length ? value : longest, '')
+  ), []);
 
   // Fetch full discussion (with messages) when active discussion changes
   // or when sending finishes (to pick up the agent's response).
@@ -804,14 +881,14 @@ export function DiscussionsPage({
     const fetchActive = () => {
       discussionsApi.get(activeDiscussionId).then(disc => {
         if (!cancelled && disc) {
-          setLoadedDiscussions(prev => ({ ...prev, [disc.id]: disc }));
+          reconcileLoadedDiscussion(disc);
         }
       }).catch(() => { /* ignore fetch errors */ });
     };
     fetchActive();
     const id = setInterval(fetchActive, 5000);
     return () => { cancelled = true; clearInterval(id); };
-  }, [activeDiscussionId, activeSending]);
+  }, [activeDiscussionId, activeSending, reconcileLoadedDiscussion]);
 
   // Clear worktree error when switching discussions
   useEffect(() => { setWorktreeError(null); }, [activeDiscussionId]);
@@ -1091,39 +1168,74 @@ export function DiscussionsPage({
   const activeDiscussionUnseenBasis = activeDiscussion ? unseenBasis(activeDiscussion) : 0;
 
   const sending = activeDiscussionId ? !!sendingMap[activeDiscussionId] : false;
+  const interruptedStream = activeDiscussionId ? interruptedStreams[activeDiscussionId] : undefined;
+  const durablePartial = activeDiscussion?.partial_response;
   const pendingReplySlots = useMemo(() => {
-    if (!activeDiscussion || (!sending && !activeDiscussion.awaiting_agent)) return [];
+    if (!activeDiscussion || (
+      !sending
+      && !activeDiscussion.awaiting_agent
+      && !activeDiscussion.partial_response
+      && !interruptedStream
+    )) return [];
     const durable = pendingAgentReplies(activeDiscussion);
-    const triggerMessageId = streamingTurnMap[activeDiscussion.id];
-    const streamingAgent = streamingTargetMap[activeDiscussion.id] ?? activeDiscussion.agent;
-    if (!sending || !triggerMessageId || durable.some(reply => (
+    const checkpoint = activeDiscussion.partial_response;
+    const fallbackUserMessageId = [...activeDiscussion.messages]
+      .reverse()
+      .find(message => message.role === 'User')?.id;
+    const triggerMessageId = streamingTurnMap[activeDiscussion.id]
+      ?? checkpoint?.trigger_message_id
+      ?? interruptedStream?.triggerMessageId
+      ?? fallbackUserMessageId;
+    const streamingAgent = streamingTargetMap[activeDiscussion.id]
+      ?? checkpoint?.agent_type
+      ?? interruptedStream?.agent
+      ?? activeDiscussion.agent;
+    if ((!sending && !interruptedStream) || !triggerMessageId || durable.some(reply => (
       reply.triggerMessageId === triggerMessageId && reply.agent === streamingAgent
     ))) {
       return durable;
     }
     return [...durable, {
-      id: `optimistic:${triggerMessageId}:${streamingAgent}`,
+      id: checkpoint?.message_id ?? `optimistic:${triggerMessageId}:${streamingAgent}`,
       triggerMessageId,
       agent: streamingAgent,
-      status: 'Running',
+      status: sending ? 'Running' : 'Pending',
     }];
-  }, [activeDiscussion, sending, streamingTargetMap, streamingTurnMap]);
-  const visibleStreamingReply = activeDiscussion && sending
+  }, [activeDiscussion, interruptedStream, sending, streamingTargetMap, streamingTurnMap]);
+  const streamingText = activeDiscussionId ? (streamingMap[activeDiscussionId] ?? '') : '';
+  const resilientStreamingText = [streamingText, interruptedStream?.text, durablePartial?.content]
+    .filter((value): value is string => !!value)
+    .reduce((longest, value) => value.length > longest.length ? value : longest, '');
+  const recoveryDispatchId = durablePartial?.dispatch?.id;
+  const recoveryConnectionId = durablePartial?.dispatch?.connection_id
+    ?? durablePartial?.connection_id;
+  const recoveryAgentLabel = recoveryConnectionId
+    ? externalConnections.find(connection => connection.id === recoveryConnectionId)?.display_name
+    : undefined;
+  const recoveryTriggerId = durablePartial?.dispatch?.trigger_message_id
+    ?? durablePartial?.trigger_message_id
+    ?? interruptedStream?.triggerMessageId
+    ?? undefined;
+  const visibleStreamingReply = activeDiscussion && (sending || resilientStreamingText)
     ? pendingReplySlots.find(reply => (
-        reply.triggerMessageId === streamingTurnMap[activeDiscussion.id]
-        && reply.agent === (streamingTargetMap[activeDiscussion.id] ?? activeDiscussion.agent)
+        recoveryDispatchId
+          ? reply.id === recoveryDispatchId
+          : reply.triggerMessageId === (streamingTurnMap[activeDiscussion.id] ?? recoveryTriggerId)
+            && reply.agent === (streamingTargetMap[activeDiscussion.id]
+              ?? durablePartial?.agent_type
+              ?? interruptedStream?.agent
+              ?? activeDiscussion.agent)
       ))
       ?? pendingReplySlots.find(reply => reply.status === 'Running')
       ?? pendingReplySlots[0]
     : undefined;
-  const streamingText = activeDiscussionId ? (streamingMap[activeDiscussionId] ?? '') : '';
   // Deferred value for markdown rendering — every SSE chunk pushes a new
   // streamingText, and ReactMarkdown re-parses the whole buffer each time.
   // For long responses (5000+ chars), each parse takes 5-20 ms × 30 fps =
   // saturated main thread. useDeferredValue lets the input/scroll handlers
   // run first; the markdown re-parse happens at lower priority and may be
   // interrupted if a new chunk arrives. Visible lag is ~1 frame at worst.
-  const deferredStreamingText = useDeferredValue(streamingText);
+  const deferredStreamingText = useDeferredValue(resilientStreamingText);
 
   // Auto-read new agent responses when TTS is enabled
   const prevMsgCountRef = useRef(-1);
@@ -1662,7 +1774,7 @@ export function DiscussionsPage({
 
   // ─── Callbacks ───────────────────────────────────────────────────────────
 
-  const cleanupStream = useCallback((discId: string) => {
+  const cleanupStream = useCallback((discId: string, promoteToMessage = true) => {
     // Reported scroll-jump bug: when the SSE stream finishes, the
     // streaming bubble unmounts (driven by `sending=false`) BEFORE the
     // refetch lands the persisted agent message. The DOM briefly loses
@@ -1679,10 +1791,10 @@ export function DiscussionsPage({
     // The async refetch arrives shortly after and REPLACES the
     // optimistic with the persisted message (matching content), so the
     // final state converges and no duplicate is left behind.
-    const streamedText = streamingMap[discId];
-    const targetAgent = streamingTargetMap[discId];
-    const triggerMessageId = streamingTurnMap[discId];
-    if (streamedText && streamedText.length > 0) {
+    const streamedText = latestStreamText(discId);
+    const targetAgent = streamingTargetMapRef.current[discId];
+    const triggerMessageId = streamingTurnMapRef.current[discId];
+    if (promoteToMessage && streamedText.length > 0) {
       setLoadedDiscussions(prev => {
         const disc = prev[discId];
         if (!disc) return prev;
@@ -1726,7 +1838,8 @@ export function DiscussionsPage({
       const { [discId]: _drop, ...rest } = prev;
       return rest;
     });
-  }, [cleanupStreamBase, refetchDiscussions, refetchProjects, reloadDiscussion, streamingMap, streamingTargetMap, streamingTurnMap]);
+    delete receivedStreamTextRef.current[discId];
+  }, [cleanupStreamBase, latestStreamText, refetchDiscussions, refetchProjects, reloadDiscussion]);
 
   // Called by ChatHeader after any inline API update (title, skills, profiles, etc.)
   const handleDiscussionUpdated = useCallback(() => {
@@ -1823,7 +1936,7 @@ export function DiscussionsPage({
       if (controller.signal.aborted) return;
       await discussionsApi.runAgent(
         discId,
-        (text) => appendStreamChunk(discId, text),
+        (text) => appendRememberedStreamChunk(discId, text),
         () => cleanupStream(discId),
         (error) => { console.error('Agent error:', error); const e = userError(error); if (e.includes('checked out') || e.includes('worktree')) { setWorktreeError(e); } else { toast(e, 'error'); } cleanupStream(discId); },
         controller.signal,
@@ -1991,7 +2104,7 @@ export function DiscussionsPage({
     resetAgentLogs();
     await discussionsApi.runAgent(
       discId,
-      (text) => appendStreamChunk(discId, text),
+      (text) => appendRememberedStreamChunk(discId, text),
       () => cleanupStream(discId),
       (error) => { console.error('Agent error:', error); const e = userError(error); if (e.includes('checked out') || e.includes('worktree')) { setWorktreeError(e); } else { toast(e, 'error'); } cleanupStream(discId); },
       controller.signal,
@@ -2277,7 +2390,22 @@ export function DiscussionsPage({
       } else {
         toast(errStr, 'error');
       }
-      cleanupStream(discId);
+      // A post-acceptance transport failure (backend rebuild, network cut,
+      // laptop sleep) is not proof that the durable run failed. Preserve the
+      // visible text locally while the five-second detail poll reconnects and
+      // reconciles it with `partial_response` or the terminal Agent message.
+      const visiblePartial = latestStreamText(discId);
+      if (acceptedReceipt && visiblePartial?.trim()) {
+        setInterruptedStreams(previous => ({
+          ...previous,
+          [discId]: {
+            text: visiblePartial,
+            triggerMessageId: clientMessageId,
+            agent: primaryTarget ?? activeDiscussion?.agent ?? 'ClaudeCode',
+          },
+        }));
+      }
+      cleanupStream(discId, false);
     };
     try {
       await discussionsApi.sendMessageStream(
@@ -2293,7 +2421,7 @@ export function DiscussionsPage({
           client_message_id: clientMessageId,
           reply_to_message_id: replyTargetId,
         },
-        (text) => appendStreamChunk(discId, text),
+        (text) => appendRememberedStreamChunk(discId, text),
         () => {
           // A cleanly closed stream without an acceptance receipt must not
           // consume the draft. This is a protocol failure, equivalent to a
@@ -2612,7 +2740,7 @@ export function DiscussionsPage({
     resetAgentLogs();
     await discussionsApi.runAgent(
       discId,
-      (text) => appendStreamChunk(discId, text),
+      (text) => appendRememberedStreamChunk(discId, text),
       () => cleanupStream(discId),
       (error) => {
         console.error('Agent error:', error);
@@ -2969,7 +3097,7 @@ export function DiscussionsPage({
           target_agent: targetAgent,
           target_agents: targets.map(target => target.agent_type),
         },
-        (text) => appendStreamChunk(discId, text),
+        (text) => appendRememberedStreamChunk(discId, text),
         () => cleanupStream(discId),
         (error) => {
           console.error('Agent error:', error);
@@ -3794,7 +3922,7 @@ export function DiscussionsPage({
                   if (orchState[activeDiscussion.id]?.active) return null;
                   const replies = messageIds.flatMap(messageId => pendingByAnchor.get(messageId) ?? []);
                   return replies.map(reply => (
-                    sending && reply.id === visibleStreamingReply?.id
+                    reply.id === visibleStreamingReply?.id && (sending || !!resilientStreamingText)
                       ? (
                           <StreamingAgentReplyBubble
                             key={reply.id}
@@ -3807,7 +3935,16 @@ export function DiscussionsPage({
                             onToggleLogs={() => setShowLogs(value => !value)}
                             stopping={stoppingDispatchIds.has(reply.id)}
                             onStop={() => { void handleStopDispatch(reply.id); }}
-                          />
+                            recovering={!sending || durablePartial?.dispatch?.last_error === 'backend_restarted'}
+                            recoveryLabel={
+                              durablePartial?.dispatch?.last_error === 'backend_restarted'
+                                ? t('disc.streamRestartSaved', durablePartial.dispatch.attempts ?? 1)
+                                : !sending
+                                  ? t('disc.streamDisconnectedSaved')
+                                  : null
+                            }
+                            agentLabel={recoveryAgentLabel}
+                            />
                         )
                       : (
                           <PendingAgentReplyBubble

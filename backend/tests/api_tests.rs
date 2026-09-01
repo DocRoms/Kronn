@@ -3713,6 +3713,97 @@ async fn discussions_create_and_list() {
 }
 
 #[tokio::test]
+async fn discussion_detail_keeps_checkpointed_text_visible_during_restart_recovery() {
+    let state = test_state();
+    let app = build_router_with_auth(state.clone(), false);
+    let (status, created) = post_json(
+        app.clone(),
+        "/api/discussions",
+        serde_json::json!({
+            "title": "Restart recovery",
+            "agent": "ClaudeCode",
+            "language": "fr",
+            "initial_prompt": "Analyse ceci",
+            "no_agent": true,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let discussion_id = created["data"]["id"].as_str().unwrap().to_string();
+    let trigger_message_id = created["data"]["messages"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let did = discussion_id.clone();
+    let trigger = trigger_message_id.clone();
+    state
+        .db
+        .with_conn(move |conn| {
+            kronn::db::agent_dispatch::enqueue(
+                conn,
+                kronn::db::agent_dispatch::NewAgentDispatchJob {
+                    id: "job-restart-http",
+                    discussion_id: &did,
+                    trigger_message_id: &trigger,
+                    trigger_sort_order: 0,
+                    dedupe_key: "restart-http",
+                    agent_override: Some(&kronn::models::AgentType::ClaudeCode),
+                    chain_prompt_ids: &[],
+                    batch_item: None,
+                    group_id: None,
+                    group_concurrency_limit: None,
+                },
+            )?;
+            conn.execute(
+                "UPDATE agent_dispatch_jobs
+                    SET attempts = 2, last_error = 'backend_restarted'
+                  WHERE id = 'job-restart-http'",
+                [],
+            )?;
+            kronn::db::discussions::set_partial_response_for_dispatch(
+                conn,
+                &did,
+                "Début d'analyse conservé.",
+                (&kronn::models::AgentType::ClaudeCode, Some("sonnet-test")),
+                "job-restart-http",
+                &trigger,
+                None,
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    let (status, detail) = get_json(app, &format!("/api/discussions/{discussion_id}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        detail["data"]["partial_response"]["content"],
+        "Début d'analyse conservé."
+    );
+    assert_eq!(
+        detail["data"]["partial_response"]["dispatch"]["id"],
+        "job-restart-http"
+    );
+    assert_eq!(
+        detail["data"]["partial_response"]["dispatch"]["trigger_message_id"],
+        trigger_message_id
+    );
+    assert_eq!(
+        detail["data"]["partial_response"]["trigger_message_id"],
+        trigger_message_id
+    );
+    assert_eq!(
+        detail["data"]["partial_response"]["dispatch"]["last_error"],
+        "backend_restarted"
+    );
+    assert_eq!(
+        detail["data"]["partial_response"]["dispatch"]["attempts"],
+        2
+    );
+}
+
+#[tokio::test]
 async fn discussions_delete_message_keeps_an_explicit_timeline_marker() {
     let state = test_state();
     let app = build_router_with_auth(state, false);

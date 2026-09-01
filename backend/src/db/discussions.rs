@@ -55,7 +55,10 @@ pub fn set_partial_response(
                      partial_response_agent_type = ?4, \
                      partial_response_model = ?5, \
                      partial_response_message_id = \
-                         COALESCE(partial_response_message_id, ?6) \
+                         COALESCE(partial_response_message_id, ?6), \
+                     partial_response_dispatch_id = NULL, \
+                     partial_response_trigger_message_id = NULL, \
+                     partial_response_connection_id = NULL \
                  WHERE id = ?1",
                 params![
                     disc_id,
@@ -72,13 +75,80 @@ pub fn set_partial_response(
                 "UPDATE discussions \
                  SET partial_response = NULL, partial_response_started_at = NULL, \
                      partial_response_agent_type = NULL, partial_response_model = NULL, \
-                     partial_response_message_id = NULL \
+                     partial_response_message_id = NULL, \
+                     partial_response_dispatch_id = NULL, \
+                     partial_response_trigger_message_id = NULL, \
+                     partial_response_connection_id = NULL \
                  WHERE id = ?1",
                 params![disc_id],
             )?;
         }
     }
     Ok(())
+}
+
+/// Checkpoint text for one exact durable dispatch.
+///
+/// The first writer owns the discussion's legacy single checkpoint slot until
+/// it completes or boot recovery clears it. A newer queued follow-up therefore
+/// cannot silently relabel a response that is already streaming.
+pub fn set_partial_response_for_dispatch(
+    conn: &Connection,
+    disc_id: &str,
+    partial: &str,
+    provenance: (&AgentType, Option<&str>),
+    dispatch_id: &str,
+    trigger_message_id: &str,
+    connection_id: Option<&str>,
+) -> Result<bool> {
+    let agent_type = format_agent_type(provenance.0);
+    let changed = conn.execute(
+        "UPDATE discussions
+            SET partial_response = ?2,
+                partial_response_started_at = COALESCE(partial_response_started_at, ?3),
+                partial_response_agent_type = ?4,
+                partial_response_model = ?5,
+                partial_response_message_id = COALESCE(partial_response_message_id, ?6),
+                partial_response_dispatch_id = ?7,
+                partial_response_trigger_message_id = ?8,
+                partial_response_connection_id = ?9
+          WHERE id = ?1
+            AND (partial_response_dispatch_id IS NULL OR partial_response_dispatch_id = ?7)",
+        params![
+            disc_id,
+            partial,
+            Utc::now().to_rfc3339(),
+            agent_type,
+            provenance.1,
+            uuid::Uuid::new_v4().to_string(),
+            dispatch_id,
+            trigger_message_id,
+            connection_id,
+        ],
+    )?;
+    Ok(changed > 0)
+}
+
+/// Clear only the checkpoint owned by `dispatch_id`.
+///
+/// This prevents a late terminal callback from deleting a newer run's draft.
+pub fn clear_partial_response_for_dispatch(
+    conn: &Connection,
+    disc_id: &str,
+    dispatch_id: &str,
+) -> Result<bool> {
+    let changed = conn.execute(
+        "UPDATE discussions
+            SET partial_response = NULL, partial_response_started_at = NULL,
+                partial_response_agent_type = NULL, partial_response_model = NULL,
+                partial_response_message_id = NULL,
+                partial_response_dispatch_id = NULL,
+                partial_response_trigger_message_id = NULL,
+                partial_response_connection_id = NULL
+          WHERE id = ?1 AND partial_response_dispatch_id = ?2",
+        params![disc_id, dispatch_id],
+    )?;
+    Ok(changed > 0)
 }
 
 /// Recover any in-flight agent responses that were checkpointed but never
@@ -224,12 +294,15 @@ pub fn recover_partial_responses(conn: &Connection) -> Result<Vec<String>> {
         Option<String>,
         Option<String>,
         Option<String>,
+        Option<String>,
+        Option<String>,
     );
     let triples: Vec<PartialRow> = {
         let mut stmt = conn.prepare(
             "SELECT id, partial_response, partial_response_started_at, \
                     partial_response_agent_type, partial_response_model, \
-                    partial_response_message_id \
+                    partial_response_message_id, partial_response_trigger_message_id, \
+                    partial_response_dispatch_id \
              FROM discussions WHERE partial_response IS NOT NULL",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -240,6 +313,8 @@ pub fn recover_partial_responses(conn: &Connection) -> Result<Vec<String>> {
                 row.get::<_, Option<String>>(3)?,
                 row.get::<_, Option<String>>(4)?,
                 row.get::<_, Option<String>>(5)?,
+                row.get::<_, Option<String>>(6)?,
+                row.get::<_, Option<String>>(7)?,
             ))
         })?;
         rows.filter_map(|r| r.ok()).collect()
@@ -253,7 +328,17 @@ pub fn recover_partial_responses(conn: &Connection) -> Result<Vec<String>> {
         Voici ce qu'il avait écrit jusque-là. Relancez la discussion pour reprendre.";
 
     let mut recovered = Vec::with_capacity(triples.len());
-    for (disc_id, partial, started_at_str, agent_type_str, model, checkpoint_id) in triples {
+    for (
+        disc_id,
+        partial,
+        started_at_str,
+        agent_type_str,
+        model,
+        checkpoint_id,
+        trigger_message_id,
+        dispatch_id,
+    ) in triples
+    {
         let content = format!("{}{}", partial.trim_end(), FOOTER);
         // Restore the checkpoint's provenance (KT-37). Legacy pre-089
         // checkpoints have NULL agent/model → the recovered bubble stays
@@ -292,15 +377,17 @@ pub fn recover_partial_responses(conn: &Connection) -> Result<Vec<String>> {
             source_msg_id: None,
             duration_ms: None,
             target_agent: None,
-            reply_to_message_id: None,
+            reply_to_message_id: trigger_message_id,
             author_cli_ordinal: None,
         };
         let recovery_result = (|| -> Result<()> {
             let transaction = conn.unchecked_transaction()?;
             insert_message(&transaction, &disc_id, &msg)?;
             transaction.execute(
-                "UPDATE messages SET recovered_partial = 1 WHERE id = ?1",
-                [&msg.id],
+                "UPDATE messages
+                 SET recovered_partial = 1, agent_dispatch_job_id = ?2
+                 WHERE id = ?1",
+                params![&msg.id, dispatch_id],
             )?;
             set_partial_response(&transaction, &disc_id, None, None)?;
             transaction.commit()?;
@@ -330,6 +417,73 @@ pub fn has_pending_partial(conn: &Connection, disc_id: &str) -> Result<bool> {
         |row| row.get(0),
     )?;
     Ok(count > 0)
+}
+
+/// Return the checkpointed response currently attached to one discussion.
+/// This is a read-only projection: recovery remains the only path that turns
+/// the snapshot into a durable transcript message.
+pub fn get_in_flight_agent_response(
+    conn: &Connection,
+    disc_id: &str,
+    default_agent: &AgentType,
+) -> Result<Option<InFlightAgentResponse>> {
+    conn.query_row(
+        "SELECT d.partial_response_message_id, d.partial_response,
+                d.partial_response_started_at, d.partial_response_agent_type,
+                d.partial_response_model, d.partial_response_trigger_message_id,
+                d.partial_response_connection_id,
+                j.id, j.trigger_message_id, j.agent_override_json, j.status,
+                j.attempts, j.last_error, j.connection_id
+           FROM discussions d
+           LEFT JOIN agent_dispatch_jobs j ON j.id = d.partial_response_dispatch_id
+          WHERE d.id = ?1 AND d.partial_response IS NOT NULL",
+        [disc_id],
+        |row| {
+            let checkpoint_agent = row
+                .get::<_, Option<String>>(3)?
+                .as_deref()
+                .map(parse_agent_type);
+            let dispatch_id = row.get::<_, Option<String>>(7)?;
+            let dispatch = if let Some(id) = dispatch_id {
+                let override_json = row.get::<_, Option<String>>(9)?;
+                let agent_type = override_json
+                    .as_deref()
+                    .and_then(|value| serde_json::from_str(value).ok())
+                    .or_else(|| checkpoint_agent.clone())
+                    .unwrap_or_else(|| default_agent.clone());
+                Some(ActiveAgentDispatch {
+                    id,
+                    trigger_message_id: row.get(8)?,
+                    agent_type,
+                    status: row.get(10)?,
+                    attempts: Some(row.get::<_, i64>(11)?.max(0) as u32),
+                    last_error: row.get(12)?,
+                    connection_id: row.get::<_, Option<String>>(13)?.or(row.get(6)?),
+                })
+            } else {
+                None
+            };
+            let started_at = row
+                .get::<_, Option<String>>(2)?
+                .as_deref()
+                .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+                .map(|value| value.with_timezone(&Utc));
+            Ok(InFlightAgentResponse {
+                message_id: row
+                    .get::<_, Option<String>>(0)?
+                    .unwrap_or_else(|| format!("partial:{disc_id}")),
+                content: row.get(1)?,
+                started_at,
+                agent_type: checkpoint_agent,
+                model: row.get(4)?,
+                trigger_message_id: row.get(5)?,
+                connection_id: row.get(6)?,
+                dispatch,
+            })
+        },
+    )
+    .optional()
+    .map_err(Into::into)
 }
 
 /// Column list shared by every `SELECT ... FROM discussions d` that maps rows
