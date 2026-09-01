@@ -1494,6 +1494,8 @@ const en: TranslationDict = {
   'disc.hideSummary': 'Hide',
   'disc.thinking': '{0} is thinking...',
   'disc.running': 'Agent running...',
+  'disc.streamRestartSaved': 'Backend restarted — draft saved. Durable recovery in progress (attempt {0}).',
+  'disc.streamDisconnectedSaved': 'Stream connection interrupted — received text stays visible while reconnecting.',
   'disc.debateLaunching': 'Debate booting up… (agent CLIs can take 5-30s to start, especially Codex on cold-start)',
   'disc.debateAgentEmpty': '{0} finished without producing any content — CLI may have crashed or hit a rate limit. Re-launch the debate to retry.',
   'disc.newContent': 'New content',

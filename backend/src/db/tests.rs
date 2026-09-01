@@ -3943,6 +3943,76 @@ fn partial_response_recovery_idempotent_when_nothing_to_recover() {
 }
 
 #[test]
+fn partial_response_dispatch_owner_blocks_stale_writes_and_clears() {
+    let conn = test_db();
+    crate::db::discussions::insert_discussion(
+        &conn,
+        &sample_discussion("disc-owned-checkpoint", None),
+    )
+    .unwrap();
+
+    let first = crate::db::discussions::set_partial_response_for_dispatch(
+        &conn,
+        "disc-owned-checkpoint",
+        "premier fragment",
+        (&AgentType::Custom, Some("openrouter/model-a")),
+        "job-a",
+        "user-a",
+        Some("openrouter-connection"),
+    )
+    .unwrap();
+    assert!(first);
+    let competing = crate::db::discussions::set_partial_response_for_dispatch(
+        &conn,
+        "disc-owned-checkpoint",
+        "mauvais fragment plus récent",
+        (&AgentType::ClaudeCode, Some("sonnet")),
+        "job-b",
+        "user-b",
+        None,
+    )
+    .unwrap();
+    assert!(
+        !competing,
+        "a queued follow-up must not steal the checkpoint slot"
+    );
+    assert!(
+        !crate::db::discussions::clear_partial_response_for_dispatch(
+            &conn,
+            "disc-owned-checkpoint",
+            "job-b",
+        )
+        .unwrap()
+    );
+
+    let snapshot = crate::db::discussions::get_in_flight_agent_response(
+        &conn,
+        "disc-owned-checkpoint",
+        &AgentType::ClaudeCode,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(snapshot.content, "premier fragment");
+    assert_eq!(snapshot.trigger_message_id.as_deref(), Some("user-a"));
+    assert_eq!(
+        snapshot.connection_id.as_deref(),
+        Some("openrouter-connection")
+    );
+    assert!(
+        snapshot.dispatch.is_none(),
+        "missing job rows degrade honestly"
+    );
+
+    assert!(crate::db::discussions::clear_partial_response_for_dispatch(
+        &conn,
+        "disc-owned-checkpoint",
+        "job-a",
+    )
+    .unwrap());
+    assert!(!crate::db::discussions::has_pending_partial(&conn, "disc-owned-checkpoint").unwrap());
+}
+
+#[test]
 fn partial_response_preserves_started_at_across_checkpoints() {
     // Regression for the 2026-04-13 double-response bug: the recovered
     // Agent message must inherit the start time of the in-flight run, so

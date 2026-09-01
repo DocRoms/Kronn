@@ -2973,6 +2973,25 @@ button.disc-contact-open {
   line-height: 1.5;
 }
 
+.disc-stream-recovery {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-3);
+  margin: 0 0 var(--kr-sp-4);
+  padding: var(--kr-sp-3) var(--kr-sp-4);
+  border: 1px solid rgba(var(--kr-warning-rgb), 0.3);
+  border-radius: var(--kr-r-md);
+  background: rgba(var(--kr-warning-rgb), 0.08);
+  color: var(--kr-text-secondary);
+  font-size: var(--kr-fs-xs);
+  line-height: 1.4;
+}
+
+.disc-stream-recovery svg {
+  flex-shrink: 0;
+  color: var(--kr-warning);
+}
+
 /* Floating jump-to-bottom pill shown when the user has scrolled up while
    new content is arriving. Positioned over the messages container, just
    above the ChatInput. */

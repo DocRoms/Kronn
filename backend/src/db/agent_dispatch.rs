@@ -150,7 +150,8 @@ pub fn list_active_for_discussion(
     default_agent: &AgentType,
 ) -> Result<Vec<ActiveAgentDispatch>> {
     let mut stmt = conn.prepare(
-        "SELECT id, trigger_message_id, agent_override_json, status
+        "SELECT id, trigger_message_id, agent_override_json, status, attempts, last_error,
+                connection_id
          FROM agent_dispatch_jobs
          WHERE discussion_id = ?1 AND status IN ('Pending', 'Running')
          ORDER BY trigger_sort_order ASC, created_at ASC",
@@ -166,6 +167,9 @@ pub fn list_active_for_discussion(
             trigger_message_id: row.get(1)?,
             agent_type,
             status: row.get(3)?,
+            attempts: Some(row.get::<_, i64>(4)?.max(0) as u32),
+            last_error: row.get(5)?,
+            connection_id: row.get(6)?,
         })
     })?;
     rows.collect::<rusqlite::Result<Vec<_>>>()
@@ -1205,6 +1209,51 @@ mod tests {
         let fresh = get(&connection, "fresh-job").unwrap().unwrap();
         assert_eq!(fresh.status, DispatchStatus::Pending);
         assert_eq!(fresh.last_error.as_deref(), Some("backend_restarted"));
+    }
+
+    #[test]
+    fn restart_requeues_the_job_and_preserves_its_checkpoint_as_agent_history() {
+        let connection = connection();
+        let job = enqueue_default(&connection, "checkpoint-job", "turn-1");
+        claim(&connection, &job.id).unwrap().unwrap();
+        mark_agent_started(&connection, &job.id).unwrap();
+        crate::db::discussions::set_partial_response_for_dispatch(
+            &connection,
+            "d1",
+            "analyse sauvegardée avant le reboot",
+            (&AgentType::ClaudeCode, Some("sonnet-test")),
+            "checkpoint-job",
+            &job.trigger_message_id,
+            None,
+        )
+        .unwrap();
+
+        // This is the exact main.rs order: dispatches become retryable before
+        // checkpoints are materialised into transcript history.
+        let dispatch_recovery = recover_after_restart(&connection).unwrap();
+        let recovered_discussions =
+            crate::db::discussions::recover_partial_responses(&connection).unwrap();
+
+        assert_eq!(dispatch_recovery.requeued, 1);
+        assert_eq!(recovered_discussions, vec!["d1"]);
+        let resumed = get(&connection, "checkpoint-job").unwrap().unwrap();
+        assert_eq!(resumed.status, DispatchStatus::Pending);
+        assert_eq!(resumed.last_error.as_deref(), Some("backend_restarted"));
+        let recovered: (String, i64, Option<String>, Option<String>) = connection
+            .query_row(
+                "SELECT content, recovered_partial, reply_to_message_id,
+                        agent_dispatch_job_id
+                 FROM messages
+                  WHERE discussion_id = 'd1' AND role = 'Agent'
+                  ORDER BY sort_order DESC LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert!(recovered.0.contains("analyse sauvegardée avant le reboot"));
+        assert_eq!(recovered.1, 1);
+        assert_eq!(recovered.2.as_deref(), Some("u1"));
+        assert_eq!(recovered.3.as_deref(), Some("checkpoint-job"));
     }
 
     #[test]
