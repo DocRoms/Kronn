@@ -388,6 +388,143 @@ mod tests {
     }
 
     #[test]
+    fn every_launcher_resolves_fresh_project_values_after_a_restart() {
+        let directory = tempfile::tempdir().unwrap();
+        let db_path = directory.path().join("variables.db");
+        let secret = crate::core::crypto::generate_secret();
+        let declarations = vec![env_var()];
+        let supplied = HashMap::new();
+        let context = HashMap::new();
+
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+        let now = Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO projects (id,name,path,created_at,updated_at) VALUES ('p','Project','/tmp/project',?1,?1)",
+            [&now],
+        )
+        .unwrap();
+        crate::db::mcps::upsert_server(
+            &conn,
+            &crate::models::McpServer {
+                id: "server".into(),
+                name: "Server".into(),
+                description: String::new(),
+                transport: crate::models::McpTransport::Stdio {
+                    command: "server".into(),
+                    args: vec![],
+                },
+                source: crate::models::McpSource::Registry,
+                api_spec: None,
+            },
+        )
+        .unwrap();
+        let initial_env = HashMap::from([("TOKEN".to_string(), "fresh-one".to_string())]);
+        crate::db::mcps::insert_config(
+            &conn,
+            &crate::models::McpConfig {
+                id: "config".into(),
+                server_id: "server".into(),
+                label: "Project variables".into(),
+                env_keys: vec!["TOKEN".into()],
+                env_encrypted: crate::db::mcps::encrypt_env(&initial_env, &secret).unwrap(),
+                args_override: None,
+                is_global: false,
+                include_general: false,
+                config_hash: "initial".into(),
+                project_ids: vec!["p".into()],
+                host_sync: crate::models::HostSyncMode::None,
+            },
+        )
+        .unwrap();
+
+        for (index, run_kind) in ["quick_prompt", "quick_api", "quick_exec", "workflow"]
+            .into_iter()
+            .enumerate()
+        {
+            let run_id = format!("first-{index}");
+            let prepared = prepare(
+                &conn,
+                PrepareRequest {
+                    declarations: &declarations,
+                    supplied: &supplied,
+                    context: &context,
+                    project_id: Some("p"),
+                    discussion_id: None,
+                    environment_ref: "project_mcp_configs",
+                    run_kind,
+                    run_id: &run_id,
+                    encryption_secret: &secret,
+                    retention_days: 30,
+                },
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(prepared.resolved.values["token"], "fresh-one");
+        }
+
+        let changed_env = HashMap::from([("TOKEN".to_string(), "fresh-two".to_string())]);
+        let changed_encrypted = crate::db::mcps::encrypt_env(&changed_env, &secret).unwrap();
+        assert!(crate::db::mcps::update_config(
+            &conn,
+            "config",
+            None,
+            Some(&changed_encrypted),
+            None,
+            None,
+            None,
+            Some("changed"),
+            None,
+            None,
+            None,
+        )
+        .unwrap());
+        drop(conn);
+
+        // Reopening the database models a Kronn restart. New executions must
+        // consult the current encrypted project source instead of reusing any
+        // value from a prior run or from template state.
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+        for (index, run_kind) in ["quick_prompt", "quick_api", "quick_exec", "workflow"]
+            .into_iter()
+            .enumerate()
+        {
+            let run_id = format!("second-{index}");
+            let prepared = prepare(
+                &conn,
+                PrepareRequest {
+                    declarations: &declarations,
+                    supplied: &supplied,
+                    context: &context,
+                    project_id: Some("p"),
+                    discussion_id: None,
+                    environment_ref: "project_mcp_configs",
+                    run_kind,
+                    run_id: &run_id,
+                    encryption_secret: &secret,
+                    retention_days: 30,
+                },
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(prepared.resolved.values["token"], "fresh-two");
+        }
+
+        let encrypted_payloads: Vec<String> = conn
+            .prepare("SELECT values_encrypted FROM execution_variable_snapshots")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(encrypted_payloads.len(), 8);
+        assert!(encrypted_payloads
+            .iter()
+            .all(|payload| !payload.contains("fresh-one") && !payload.contains("fresh-two")));
+    }
+
+    #[test]
     fn override_is_explicit_and_zero_retention_has_no_expiry() {
         let mut declaration = env_var();
         declaration.allow_manual_override = true;
