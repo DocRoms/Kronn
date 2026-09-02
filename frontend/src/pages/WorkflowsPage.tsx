@@ -125,6 +125,9 @@ interface AutomationResourceRowProps {
   rowProps?: { className: string; 'aria-current'?: 'true'; onClick: () => void };
   /** Present only in selection mode: a row that cannot be picked shows no box. */
   selection?: { checked: boolean; onToggle: () => void; label: string };
+  /** Deletes this one from the row's own menu, where the eye already looks —
+   *  the per-card control sits at the bottom of a card in a grid. */
+  onDelete?: () => Promise<void>;
 }
 
 function AutomationResourceRow({
@@ -141,6 +144,7 @@ function AutomationResourceRow({
   onTogglePinned,
   rowProps,
   selection,
+  onDelete,
 }: AutomationResourceRowProps) {
   const { t } = useT();
   return (
@@ -178,6 +182,13 @@ function AutomationResourceRow({
           menuLabel={t('collection.moreActions')}
           copyId={resourceId}
           copyLabel={t('disc.copyId')}
+          actions={onDelete ? [{
+            id: 'delete',
+            label: t('disc.delete'),
+            icon: <Trash2 size={12} />,
+            danger: true,
+            onSelect: onDelete,
+          }] : []}
         />
       </div>
     </div>
@@ -2039,6 +2050,22 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
               const resource = visibleItems.find(item => item.kind === kind && item.resourceId === resourceId);
               return resource ? getRowProps(resource) : undefined;
             };
+            const deleteFor = (kind: AutomationTab, resourceId: string) => async () => {
+              const resource = visibleItems.find(item => item.kind === kind && item.resourceId === resourceId);
+              if (!resource) return;
+              try {
+                await deleteAutomationResource(resource);
+              } catch (e) {
+                // Reported where the operator is looking; the row stays until
+                // the server actually removed it.
+                toastProp?.(userError(e), 'error');
+                return;
+              }
+              refetch();
+              refetchQP();
+              refetchQA();
+              refetchQE();
+            };
             const selectionFor = (kind: AutomationTab, resourceId: string) => {
               if (!canMultiSelect) return undefined;
               const resource = visibleItems.find(item => item.kind === kind && item.resourceId === resourceId);
@@ -2078,6 +2105,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                   onTogglePinned={() => { void handleTogglePin(workflow); }}
                   rowProps={rowProps('workflows', workflow.id)}
                   selection={selectionFor('workflows', workflow.id)}
+                  onDelete={deleteFor('workflows', workflow.id)}
                 />
               ))}
               {!isAutomationSectionCollapsed('favorites') && sidebarQuickApis.filter(item => item.pinned).map(quickApi => (
@@ -2096,6 +2124,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                   onTogglePinned={() => { void toggleQuickFavorite('quickApis', quickApi.id, quickApi.pinned, quickApisApi.setPinned, refetchQA); }}
                   rowProps={rowProps('quickApis', quickApi.id)}
                   selection={selectionFor('quickApis', quickApi.id)}
+                  onDelete={deleteFor('quickApis', quickApi.id)}
                 />
               ))}
               {!isAutomationSectionCollapsed('favorites') && sidebarQuickPrompts.filter(item => item.pinned).map(quickPrompt => (
@@ -2114,6 +2143,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                   onTogglePinned={() => { void toggleQuickFavorite('quickPrompts', quickPrompt.id, quickPrompt.pinned, quickPromptsApi.setPinned, refetchQP); }}
                   rowProps={rowProps('quickPrompts', quickPrompt.id)}
                   selection={selectionFor('quickPrompts', quickPrompt.id)}
+                  onDelete={deleteFor('quickPrompts', quickPrompt.id)}
                 />
               ))}
               {!isAutomationSectionCollapsed('favorites') && sidebarQuickExecs.filter(item => item.pinned).map(quickExec => (
@@ -2132,6 +2162,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                   onTogglePinned={() => { void toggleQuickFavorite('quickExecs', quickExec.id, quickExec.pinned, quickExecsApi.setPinned, refetchQE); }}
                   rowProps={rowProps('quickExecs', quickExec.id)}
                   selection={selectionFor('quickExecs', quickExec.id)}
+                  onDelete={deleteFor('quickExecs', quickExec.id)}
                 />
               ))}
             </div>
@@ -2167,6 +2198,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                 onTogglePinned={() => { void handleTogglePin(workflow); }}
                 rowProps={rowProps('workflows', workflow.id)}
                   selection={selectionFor('workflows', workflow.id)}
+                  onDelete={deleteFor('workflows', workflow.id)}
               />
             ))}
           </div>
@@ -2201,6 +2233,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                 onTogglePinned={() => { void toggleQuickFavorite('quickApis', quickApi.id, quickApi.pinned, quickApisApi.setPinned, refetchQA); }}
                 rowProps={rowProps('quickApis', quickApi.id)}
                   selection={selectionFor('quickApis', quickApi.id)}
+                  onDelete={deleteFor('quickApis', quickApi.id)}
               />
             ))}
           </div>
@@ -2235,6 +2268,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                 onTogglePinned={() => { void toggleQuickFavorite('quickPrompts', quickPrompt.id, quickPrompt.pinned, quickPromptsApi.setPinned, refetchQP); }}
                 rowProps={rowProps('quickPrompts', quickPrompt.id)}
                   selection={selectionFor('quickPrompts', quickPrompt.id)}
+                  onDelete={deleteFor('quickPrompts', quickPrompt.id)}
               />
             ))}
           </div>
@@ -2269,6 +2303,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                 onTogglePinned={() => { void toggleQuickFavorite('quickExecs', quickExec.id, quickExec.pinned, quickExecsApi.setPinned, refetchQE); }}
                 rowProps={rowProps('quickExecs', quickExec.id)}
                   selection={selectionFor('quickExecs', quickExec.id)}
+                  onDelete={deleteFor('quickExecs', quickExec.id)}
               />
             ))}
           </div>

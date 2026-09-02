@@ -1118,6 +1118,41 @@ describe('WorkflowsPage', () => {
     expect(mockWorkflowsApi.delete).toHaveBeenCalledWith('wf-del');
   });
 
+  it('deletes one automation straight from its own row menu', async () => {
+    // KT-561 — the eye goes to the row, not to the bottom of a card in a grid.
+    // Same control as a discussion row, so the gesture is already known.
+    const summary: WorkflowSummary = {
+      id: 'wf-row',
+      name: 'RowOne',
+      project_id: null,
+      project_name: null,
+      trigger_type: 'manual',
+      step_count: 1,
+      misconfigured_step_count: 0,
+      enabled: true,
+      pinned: false,
+      last_run: null,
+      created_at: '2026-01-01T00:00:00Z',
+    };
+    mockWorkflowsApi.list.mockResolvedValue([summary]);
+    mockWorkflowsApi.delete.mockClear();
+    mockWorkflowsApi.delete.mockResolvedValue(undefined);
+
+    await wrap(
+      <WorkflowsPage projects={[]} installedAgentTypes={['ClaudeCode']} agentAccess={fullConfig} />
+    );
+
+    // The trigger names the row it belongs to, so the right menu opens.
+    await act(async () => {
+      fireEvent.click(screen.getByLabelText('Plus d’actions · RowOne'));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('menuitem', { name: /Supprimer/ }));
+    });
+
+    expect(mockWorkflowsApi.delete).toHaveBeenCalledWith('wf-row');
+  });
+
   it('deletes several automations at once from the sidebar', async () => {
     // KT-561 — the per-card trash sits at the bottom of a card, which is where
     // nobody found it. The sidebar offers the same power as Discussions: pick
