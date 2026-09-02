@@ -41,6 +41,10 @@ Release notes for 0.9.3 and earlier are available in the
   start from — or end on — an image the discussion already holds, picked in the
   form or named by an agent through MCP. That image is referenced by id and
   travels inline: no local path, URL or credential ever leaves Kronn.
+  An asset can finally be deleted, from the viewer, in two steps — the control
+  removes bytes from disk and sits next to "close", so it arms before it acts,
+  the viewer closes rather than silently landing on the neighbouring media, and
+  a server refusal leaves the file exactly where it was.
 
 - Discussions now report their storage weight, split by what a cleanup could
   actually reclaim: attachment bytes held on disk, extracted document text, and

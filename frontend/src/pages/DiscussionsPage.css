@@ -7878,3 +7878,19 @@ button.disc-contact-open {
   text-decoration: underline;
   cursor: pointer;
 }
+
+/* Deleting removes bytes from disk, so the second step says so in colour. */
+.disc-image-lightbox-danger {
+  width: auto;
+  padding: 0 10px;
+  border-color: var(--kr-error);
+  color: var(--kr-error);
+  font-size: var(--kr-fs-xs);
+  font-weight: 700;
+  white-space: nowrap;
+}
+.disc-image-lightbox-error {
+  margin: 6px 0 0;
+  color: var(--kr-error);
+  font-size: var(--kr-fs-xs);
+}

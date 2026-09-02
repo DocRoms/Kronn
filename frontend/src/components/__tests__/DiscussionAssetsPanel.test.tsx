@@ -3,7 +3,7 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/rea
 import type { ContextFile } from '../../types/generated';
 
 const { discussionsApi, triggerDownload } = vi.hoisted(() => ({
-  discussionsApi: { contextFileBlob: vi.fn() },
+  discussionsApi: { contextFileBlob: vi.fn(), deleteContextFile: vi.fn() },
   triggerDownload: vi.fn(),
 }));
 
@@ -37,6 +37,7 @@ describe('DiscussionAssetsPanel', () => {
     globalThis.URL.createObjectURL = vi.fn(({ type }: Blob) => `blob:${type}`);
     globalThis.URL.revokeObjectURL = vi.fn();
     discussionsApi.contextFileBlob.mockResolvedValue(new Blob(['image'], { type: 'image/png' }));
+    discussionsApi.deleteContextFile.mockResolvedValue(undefined);
   });
 
   it('searches and filters every discussion asset without scanning messages', async () => {
@@ -325,4 +326,81 @@ describe('DiscussionAssetsPanel', () => {
     // And the reason is on screen without a click.
     expect(screen.getByTestId('assets-generate-hint')).toHaveTextContent('disc.media.noSlot');
   });
+
+  /// KT-554 — deleting an asset removes bytes from disk, so it takes two steps
+  /// and never happens on screen before the server confirmed it.
+  it('deletes an asset only after a confirmation, and closes the viewer', async () => {
+    const onAssetDeleted = vi.fn();
+    const files = [
+      file(1, { filename: 'dashboard.png', mime_type: 'image/png', disk_path: '/tmp/dashboard.png' }),
+      file(2, { filename: 'other.png', mime_type: 'image/png', disk_path: '/tmp/other.png' }),
+    ];
+    render(
+      <DiscussionAssetsPanel
+        discussionId="disc-1"
+        files={files}
+        onClose={vi.fn()}
+        onNavigateMessage={vi.fn()}
+        onAssetDeleted={onAssetDeleted}
+        openAssetRequest={{ assetId: 'file-1', nonce: 1 }}
+        t={t}
+      />,
+    );
+
+    const viewer = await screen.findByRole('dialog');
+
+    // First click only arms it: one click away from the close button must not
+    // destroy a file.
+    fireEvent.click(within(viewer).getByTestId('attachment-delete'));
+    expect(discussionsApi.deleteContextFile).not.toHaveBeenCalled();
+
+    fireEvent.click(within(viewer).getByTestId('attachment-delete-confirm'));
+    await waitFor(() => expect(discussionsApi.deleteContextFile).toHaveBeenCalledWith('disc-1', 'file-1'));
+    expect(onAssetDeleted).toHaveBeenCalledWith('file-1');
+    // Closed rather than advanced: landing silently on the neighbouring image
+    // would read as having deleted the wrong one.
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  });
+
+  it('keeps an asset on screen when the server refuses to delete it', async () => {
+    discussionsApi.deleteContextFile.mockRejectedValue(new Error('file is still in use'));
+    const onAssetDeleted = vi.fn();
+    render(
+      <DiscussionAssetsPanel
+        discussionId="disc-1"
+        files={[file(1, { filename: 'dashboard.png', mime_type: 'image/png', disk_path: '/tmp/dashboard.png' })]}
+        onClose={vi.fn()}
+        onNavigateMessage={vi.fn()}
+        onAssetDeleted={onAssetDeleted}
+        openAssetRequest={{ assetId: 'file-1', nonce: 1 }}
+        t={t}
+      />,
+    );
+
+    const viewer = await screen.findByRole('dialog');
+    fireEvent.click(within(viewer).getByTestId('attachment-delete'));
+    fireEvent.click(within(viewer).getByTestId('attachment-delete-confirm'));
+
+    expect(await screen.findByTestId('attachment-delete-error')).toHaveTextContent('file is still in use');
+    // Nothing was removed anywhere: the asset must never vanish from the UI
+    // without having been deleted on the server.
+    expect(onAssetDeleted).not.toHaveBeenCalled();
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
+  });
+
+  it('offers no deletion on a surface that cannot refresh its list', async () => {
+    render(
+      <DiscussionAssetsPanel
+        discussionId="disc-1"
+        files={[file(1, { filename: 'dashboard.png', mime_type: 'image/png', disk_path: '/tmp/dashboard.png' })]}
+        onClose={vi.fn()}
+        onNavigateMessage={vi.fn()}
+        openAssetRequest={{ assetId: 'file-1', nonce: 1 }}
+        t={t}
+      />,
+    );
+    const viewer = await screen.findByRole('dialog');
+    expect(within(viewer).queryByTestId('attachment-delete')).toBeNull();
+  });
+
 });

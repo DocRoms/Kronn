@@ -1011,6 +1011,8 @@ const fr: TranslationDict = {
   'disc.attachmentGallery': 'Visionneuse des médias joints',
   'disc.attachmentOpenNewTab': 'Ouvrir dans un nouvel onglet',
   'disc.attachmentClose': 'Fermer la visionneuse',
+  'disc.attachmentDelete': 'Supprimer cet asset',
+  'disc.attachmentDeleteConfirm': 'Supprimer définitivement',
   // ── Poids de discussion (KT-541) ──
   'disc.weight.loading': 'Calcul du poids…',
   'disc.weight.unavailable': 'Poids indisponible',

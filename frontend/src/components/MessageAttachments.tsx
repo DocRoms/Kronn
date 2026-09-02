@@ -6,7 +6,7 @@
 // isolation from the heavy MessageBubble.
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { ChevronLeft, ChevronRight, Download, ExternalLink, FileText, Image as ImageIcon, Loader2, MessageSquare, Sparkles, X } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Download, ExternalLink, FileText, Image as ImageIcon, Loader2, MessageSquare, Sparkles, Trash2, X } from 'lucide-react';
 import type { ContextFile } from '../types/generated';
 import { discussions as discussionsApi } from '../lib/api';
 import { triggerDownload } from '../lib/downloadBlob';
@@ -220,11 +220,15 @@ export function MessageAttachments({
   onNavigateMessage,
   carouselScope,
   openRequest,
+  onDeleted,
 }: {
   files: ContextFile[];
   discussionId: string;
   t: T;
   variant?: 'message' | 'library';
+  /** Enables deletion. Absent, no delete control is shown at all: a surface
+   *  that cannot refresh its own list must not offer to shorten it. */
+  onDeleted?: (fileId: string) => void;
   onNavigateMessage?: (messageId: string) => void;
   /// Full sequence to browse once one thumbnail is opened. The grid still
   /// shows `files`; this is what the arrows walk through, so opening an image
@@ -249,6 +253,12 @@ export function MessageAttachments({
   const [urls, setUrls] = useState<Record<string, string>>({});
   const [failedIds, setFailedIds] = useState<Set<string>>(() => new Set());
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  // Two steps on purpose: this removes bytes from disk, and the control sits
+  // next to "close". `error` is kept apart from the confirmation so a failure
+  // stays on screen instead of being wiped by the next render.
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const objectUrlsRef = useRef<Map<string, string>>(new Map());
   const inFlightRef = useRef<Set<string>>(new Set());
   const generationRef = useRef(0);
@@ -327,6 +337,13 @@ export function MessageAttachments({
       loadMediaUrl(file);
     }
   }, [imageFiles, loadMediaUrl]);
+
+  // A confirmation belongs to one asset. Walking to the next one with a live
+  // confirmation would delete a file the reader never asked about.
+  useEffect(() => {
+    setConfirmingDelete(false);
+    setDeleteError(null);
+  }, [selectedId]);
 
   const selectedIndex = selectedId
     ? carouselFiles.findIndex(file => file.id === selectedId)
@@ -420,6 +437,47 @@ export function MessageAttachments({
               >
                 <ExternalLink size={17} />
               </a>
+              {onDeleted && (confirmingDelete ? (
+                <button
+                  type="button"
+                  className="disc-image-lightbox-action disc-image-lightbox-danger"
+                  disabled={deleting}
+                  onClick={() => {
+                    const fileId = selectedFile.id;
+                    setDeleting(true);
+                    setDeleteError(null);
+                    discussionsApi.deleteContextFile(discussionId, fileId)
+                      .then(() => {
+                        // Closed rather than advanced: silently landing on the
+                        // neighbouring media would look like the wrong file
+                        // was deleted.
+                        setSelectedId(null);
+                        setConfirmingDelete(false);
+                        onDeleted(fileId);
+                      })
+                      // The asset stays on screen: it must never disappear
+                      // from the UI without having been deleted on the server.
+                      .catch((e: unknown) => setDeleteError(e instanceof Error ? e.message : String(e)))
+                      .finally(() => setDeleting(false));
+                  }}
+                  aria-label={t('disc.attachmentDeleteConfirm')}
+                  title={t('disc.attachmentDeleteConfirm')}
+                  data-testid="attachment-delete-confirm"
+                >
+                  {t('disc.attachmentDeleteConfirm')}
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className="disc-image-lightbox-action"
+                  onClick={() => { setConfirmingDelete(true); setDeleteError(null); }}
+                  aria-label={t('disc.attachmentDelete')}
+                  title={t('disc.attachmentDelete')}
+                  data-testid="attachment-delete"
+                >
+                  <Trash2 size={18} />
+                </button>
+              ))}
               <button
                 type="button"
                 className="disc-image-lightbox-action"
@@ -430,6 +488,11 @@ export function MessageAttachments({
                 <X size={20} />
               </button>
             </div>
+            {deleteError && (
+              <p className="disc-image-lightbox-error" role="alert" data-testid="attachment-delete-error">
+                {deleteError}
+              </p>
+            )}
             <div className="disc-image-lightbox-content">
               {carouselFiles.length > 1 && (
                 <button

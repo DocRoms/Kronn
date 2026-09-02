@@ -1001,6 +1001,8 @@ const es: TranslationDict = {
   'disc.attachmentGallery': 'Visor de medios adjuntos',
   'disc.attachmentOpenNewTab': 'Abrir en una pestaña nueva',
   'disc.attachmentClose': 'Cerrar el visor de imágenes',
+  'disc.attachmentDelete': 'Eliminar este archivo',
+  'disc.attachmentDeleteConfirm': 'Eliminar definitivamente',
   // ── Peso de la discusión (KT-541) ──
   'disc.weight.loading': 'Calculando el peso…',
   'disc.weight.unavailable': 'Peso no disponible',

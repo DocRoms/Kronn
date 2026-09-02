@@ -986,6 +986,8 @@ const zh: TranslationDict = {
   "disc.attachmentGallery": "附件媒体查看器",
   "disc.attachmentOpenNewTab": "在新标签页中打开",
   "disc.attachmentClose": "关闭图片查看器",
+  "disc.attachmentDelete": "删除此素材",
+  "disc.attachmentDeleteConfirm": "永久删除",
   // ── 讨论大小 (KT-541) ──
   "disc.weight.loading": "正在计算大小…",
   "disc.weight.unavailable": "大小不可用",

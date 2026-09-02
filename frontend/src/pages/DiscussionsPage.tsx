@@ -5125,6 +5125,16 @@ export function DiscussionsPage({
                   reloadDiscussion(activeDiscussion.id);
                 }}
                 openAssetRequest={assetOpenRequest}
+                onAssetDeleted={(fileId) => {
+                  // Dropped from the discussion's own inventory, which every
+                  // surface reads: the grid, the counters, the carousel and a
+                  // message's attachments all follow from this one map.
+                  const discId = activeDiscussion.id;
+                  setContextFilesMap(current => ({
+                    ...current,
+                    [discId]: (current[discId] ?? []).filter(file => file.id !== fileId),
+                  }));
+                }}
                 onNavigateMessage={(messageId) => {
                   setShowAssetsPanel(false);
                   setStickToBottom(false);

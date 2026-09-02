@@ -31,6 +31,7 @@ export function DiscussionAssetsPanel({
   connections = [],
   onMediaLaunched,
   openAssetRequest,
+  onAssetDeleted,
 }: {
   discussionId: string;
   files: ContextFile[];
@@ -46,6 +47,9 @@ export function DiscussionAssetsPanel({
   /** One-shot request from a transcript media bubble. The nonce lets the same
    * asset be deliberately opened again after the viewer was closed. */
   openAssetRequest?: { assetId: string; nonce: number } | null;
+  /// Fired once the server confirmed a deletion, so the discussion drops the
+  /// file from its own inventory. Absent, the panel offers no deletion.
+  onAssetDeleted?: (fileId: string) => void;
 }) {
   const [query, setQuery] = useState('');
   const [filter, setFilter] = useState<AssetFilter>('all');
@@ -216,6 +220,7 @@ export function DiscussionAssetsPanel({
               onNavigateMessage={onNavigateMessage}
               carouselScope={carouselScope}
               openRequest={openAssetRequest}
+              onDeleted={onAssetDeleted}
             />
             {shownCount < filteredFiles.length && (
               <button

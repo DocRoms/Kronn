@@ -1001,6 +1001,8 @@ const en: TranslationDict = {
   'disc.attachmentGallery': 'Attached media viewer',
   'disc.attachmentOpenNewTab': 'Open in a new tab',
   'disc.attachmentClose': 'Close image viewer',
+  'disc.attachmentDelete': 'Delete this asset',
+  'disc.attachmentDeleteConfirm': 'Delete for good',
   // ── Discussion weight (KT-541) ──
   'disc.weight.loading': 'Computing weight…',
   'disc.weight.unavailable': 'Weight unavailable',
