@@ -685,14 +685,55 @@ pub fn list_live_page_bindings(
     Ok(Some(bindings))
 }
 
+/// Typed failure surface for [`upsert_live_page_binding`]. Replaces the previous
+/// `anyhow!`/`bail!` message-text contract that the API boundary recovered by
+/// substring-matching — a reword there silently downgraded the response to 500.
+/// The mapping to `ApiErrorCode` at the boundary is now total and refactor-safe.
+#[derive(Debug)]
+pub enum UpsertBindingError {
+    /// No live page matches the supplied id/slug (→ 404).
+    PageNotFound,
+    /// The referenced workflow does not exist (→ 404). Carries the id for the
+    /// message.
+    WorkflowNotFound(String),
+    /// The dataset name failed validation (→ 400). Carries the reason.
+    InvalidDataset(String),
+    /// A DB / serialization failure (→ 500). Carries the underlying message.
+    Db(String),
+}
+
+impl std::fmt::Display for UpsertBindingError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            UpsertBindingError::PageNotFound => write!(f, "Page not found"),
+            UpsertBindingError::WorkflowNotFound(id) => write!(f, "Workflow not found: {id}"),
+            UpsertBindingError::InvalidDataset(msg) => write!(f, "{msg}"),
+            UpsertBindingError::Db(msg) => write!(f, "{msg}"),
+        }
+    }
+}
+
+impl From<rusqlite::Error> for UpsertBindingError {
+    fn from(e: rusqlite::Error) -> Self {
+        UpsertBindingError::Db(e.to_string())
+    }
+}
+
+impl From<serde_json::Error> for UpsertBindingError {
+    fn from(e: serde_json::Error) -> Self {
+        UpsertBindingError::Db(e.to_string())
+    }
+}
+
 /// Create or replace the binding for `(page, dataset)`. Idempotent on that pair:
 /// re-upserting the same dataset updates it in place and preserves `created_at`.
 pub fn upsert_live_page_binding(
     conn: &Connection,
     page_id: &str,
     req: &UpsertLivePageBindingRequest,
-) -> Result<LivePageWorkflowBinding> {
-    validate_dataset_name(&req.dataset)?;
+) -> std::result::Result<LivePageWorkflowBinding, UpsertBindingError> {
+    validate_dataset_name(&req.dataset)
+        .map_err(|e| UpsertBindingError::InvalidDataset(e.to_string()))?;
 
     let tx = conn.unchecked_transaction()?;
     let canonical_page_id: String = tx
@@ -702,7 +743,7 @@ pub fn upsert_live_page_binding(
             |row| row.get(0),
         )
         .optional()?
-        .ok_or_else(|| anyhow!("Page not found"))?;
+        .ok_or(UpsertBindingError::PageNotFound)?;
 
     let workflow_exists: bool = tx
         .query_row(
@@ -713,7 +754,7 @@ pub fn upsert_live_page_binding(
         .optional()?
         .unwrap_or(false);
     if !workflow_exists {
-        bail!("Workflow not found: {}", req.workflow_id);
+        return Err(UpsertBindingError::WorkflowNotFound(req.workflow_id.clone()));
     }
 
     let selector = req.run_selector.unwrap_or(LivePageRunSelector::Latest);

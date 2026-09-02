@@ -92,11 +92,16 @@ export function buildSandboxDocument(html: string, channelId: string): string {
     const pending=Object.create(null);
     let actionSeq=0;
     Object.defineProperty(window,'KronnPageData',{configurable:false,get:()=>latest});
+    const ACTION_TIMEOUT_MS=30000;
     const callAction=(action,payload)=>{
       if(!actionPort)return Promise.reject(new Error('Kronn actions unavailable'));
       if(userActivation&&!userActivation.isActive)return Promise.reject(new Error('A user gesture is required'));
       const id=++actionSeq;
-      return new Promise((resolve,reject)=>{pending[id]={resolve:resolve,reject:reject};portPost.call(actionPort,{type:'kronn:page-action',version:1,channel_id:channel,id:id,action:action,payload:payload});});
+      return new Promise((resolve,reject)=>{
+        const timer=setTimeout(()=>{const p=pending[id];if(!p)return;delete pending[id];reject(new Error('Action timed out'));},ACTION_TIMEOUT_MS);
+        pending[id]={resolve:resolve,reject:reject,timer:timer};
+        portPost.call(actionPort,{type:'kronn:page-action',version:1,channel_id:channel,id:id,action:action,payload:payload});
+      });
     };
     Object.defineProperty(window,'KronnPageActions',{configurable:false,value:Object.freeze({
       decideGate:(opts)=>callAction('gate.decide',{dataset:opts&&opts.dataset,run_id:opts&&(opts.runId||opts.run_id),decision:opts&&opts.decision,comment:(opts&&opts.comment)||null}),
@@ -163,7 +168,7 @@ export function buildSandboxDocument(html: string, channelId: string): string {
         if(event.ports.length!==1)return;
         stopImmediate.call(event);
         actionPort=event.ports[0];
-        actionPort.onmessage=ev=>{const m=ev.data;if(!m||m.type!=='kronn:page-action-result'||m.channel_id!==channel)return;const p=pending[m.id];if(!p)return;delete pending[m.id];if(m.ok)p.resolve(m.data);else p.reject(new Error(m.error||'Action failed'));};
+        actionPort.onmessage=ev=>{const m=ev.data;if(!m||m.type!=='kronn:page-action-result'||m.channel_id!==channel)return;const p=pending[m.id];if(!p)return;delete pending[m.id];if(p.timer)clearTimeout(p.timer);if(m.ok)p.resolve(m.data);else p.reject(new Error(m.error||'Action failed'));};
         portStart.call(actionPort);
         return;
       }

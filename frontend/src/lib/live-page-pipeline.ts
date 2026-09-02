@@ -1,4 +1,6 @@
 import type { RunStatus, StepResult, WorkflowRun } from '../types/generated';
+import { formatDurationCompact } from './kronnToolParser';
+import { TERMINAL_RUN } from './live-page-run-status';
 
 /**
  * Client-side reshape of a workflow run into the `pipeline` shape a Live Page
@@ -45,9 +47,14 @@ export interface PhaseMapEntry {
  */
 export type MetaMap = Record<string, string>;
 
-const TERMINAL_FAILURE: ReadonlySet<RunStatus> = new Set<RunStatus>([
-  'Failed', 'Cancelled', 'StoppedByGuard', 'Interrupted',
-]);
+/**
+ * Terminal statuses that represent a failure — everything terminal that isn't a
+ * success/partial. Derived from the canonical TERMINAL_RUN so the two stay in
+ * lockstep and a new terminal status is only ever added in one place.
+ */
+const TERMINAL_FAILURE: ReadonlySet<RunStatus> = new Set<RunStatus>(
+  [...TERMINAL_RUN].filter(status => status !== 'Success' && status !== 'Partial'),
+);
 
 export function mapStepStatus(status: RunStatus): PipelineStepStatus {
   if (status === 'Success' || status === 'Partial') return 'done';
@@ -111,18 +118,6 @@ function clock(iso: string | null | undefined): string | undefined {
   return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
 }
 
-/** Human duration: `3s`, `8m`, `1h12`. Undefined for non-positive input. */
-function duration(ms: number | null | undefined): string | undefined {
-  if (!ms || ms <= 0) return undefined;
-  const totalSeconds = Math.round(ms / 1000);
-  if (totalSeconds < 60) return `${totalSeconds}s`;
-  const minutes = Math.floor(totalSeconds / 60);
-  if (minutes < 60) return `${minutes}m`;
-  const hours = Math.floor(minutes / 60);
-  const restMinutes = minutes % 60;
-  return restMinutes ? `${hours}h${String(restMinutes).padStart(2, '0')}` : `${hours}h`;
-}
-
 /** Extract the JSON envelope a step wraps in `---STEP_OUTPUT---` … `---END…`. */
 function stepOutputJson(output: string | undefined): unknown {
   if (!output) return undefined;
@@ -141,6 +136,35 @@ function stepOutputJson(output: string | undefined): unknown {
   }
   try {
     return JSON.parse(body);
+  } catch {
+    return undefined;
+  }
+}
+
+/** Longest binding-supplied regex pattern we will compile. */
+const MAX_META_REGEX_PATTERN = 200;
+/** Longest input we will run a binding-supplied regex against. */
+const MAX_META_REGEX_INPUT = 100_000;
+
+/**
+ * Run a binding-config-supplied `re:<pattern>` against a step's output. The
+ * pattern is untrusted, so compilation is wrapped (an invalid pattern yields
+ * `undefined`, never a throw) and both the pattern length and the input length
+ * are capped to blunt catastrophic-backtracking (ReDoS) inputs. Returns capture
+ * group 1 when present, else the whole match, else `undefined`.
+ */
+function matchStepRegex(output: string | undefined, pattern: string): string | undefined {
+  if (!output || pattern.length > MAX_META_REGEX_PATTERN) return undefined;
+  let re: RegExp;
+  try {
+    re = new RegExp(pattern);
+  } catch {
+    return undefined;
+  }
+  const input = output.length > MAX_META_REGEX_INPUT ? output.slice(0, MAX_META_REGEX_INPUT) : output;
+  try {
+    const match = input.match(re);
+    return match ? (match[1] ?? match[0]) : undefined;
   } catch {
     return undefined;
   }
@@ -194,12 +218,7 @@ function resolveMeta(
       return dig(stepOutputJson(result.output), selector.slice('json:'.length));
     }
     if (selector.startsWith('re:')) {
-      try {
-        const match = result.output?.match(new RegExp(selector.slice('re:'.length)));
-        return match ? (match[1] ?? match[0]) : undefined;
-      } catch {
-        return undefined;
-      }
+      return matchStepRegex(result.output, selector.slice('re:'.length));
     }
     return undefined;
   }
@@ -228,10 +247,22 @@ export function runToPipeline(
   const origin = options.origin
     ?? (typeof window !== 'undefined' ? window.location.origin : '');
   const byName = new Map<string, StepResult>();
-  for (const result of run.step_results) byName.set(result.step_name, result);
+  // Older/partial run payloads may omit step_results entirely; treat a missing
+  // list as empty so a valid-but-empty run renders as all-pending, and a
+  // best-effort caller never sees this throw (which would blank the dataset).
+  for (const result of run.step_results ?? []) byName.set(result.step_name, result);
 
   const running = run.status === 'Running';
-  let currentAssigned = false;
+  // Pass 1: does any *recorded* mapped step already resolve to 'current' (a
+  // Running step present in step_results)? If so, we must NOT also promote the
+  // first unrecorded step — regardless of phase-map order or parallel steps —
+  // or the page would show two live steps. Only when none does may an unrecorded
+  // step of a Running run be surfaced as 'current'.
+  const hasRecordedCurrent = phaseMap.some(phase => phase.steps.some(mapped => {
+    const result = byName.get(mapped.step);
+    return result != null && mapStepStatus(result.status) === 'current';
+  }));
+  let currentPromoted = false;
 
   const phases: PipelinePhase[] = phaseMap.map(phase => ({
     name: phase.name,
@@ -241,12 +272,9 @@ export function runToPipeline(
       let s: PipelineStepStatus;
       if (result) {
         s = mapStepStatus(result.status);
-        // A step recorded as Running already claims "current"; don't also hand
-        // it to the first unrecorded step, or the page shows two live steps.
-        if (s === 'current') currentAssigned = true;
-      } else if (running && !currentAssigned) {
+      } else if (running && !hasRecordedCurrent && !currentPromoted) {
         s = 'current';
-        currentAssigned = true;
+        currentPromoted = true;
       } else {
         s = 'pending';
       }
@@ -260,7 +288,7 @@ export function runToPipeline(
       if (mapped.tag) step.tag = mapped.tag;
       const at = clock(result?.started_at);
       if (at) step.at = at;
-      const dur = duration(result?.duration_ms);
+      const dur = formatDurationCompact(result?.duration_ms, { hours: true, undefinedOnNonPositive: true });
       if (dur) step.dur = dur;
       // Static link from the phase map wins; otherwise surface the first URL the
       // step printed (e.g. a GitHub Actions run or a release) as a clickable link.

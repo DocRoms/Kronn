@@ -2262,25 +2262,19 @@ pub async fn import_workflow(
     }
 }
 
-/// Create and dispatch a manual run **without** an SSE stream, returning its id.
-///
-/// This is the fire-and-forget sibling of [`trigger`]: same launch-variable
-/// validation, same atomic concurrency-check-then-insert, same detached
-/// `execute_run`, but no event channel — the caller doesn't watch the run, it
-/// just needs the run id (e.g. a Live Page trigger button, where the Page's own
-/// auto-refresh/mirror surfaces progress). The workflow must already be loaded
-/// and its `enabled` flag checked by the caller. Errors are returned as plain
-/// strings so each HTTP surface can map them to its own coded response.
-pub(crate) async fn spawn_detached_run(
-    state: &AppState,
-    wf: crate::models::Workflow,
-    provided_vars: std::collections::HashMap<String, String>,
-) -> Result<String, String> {
-    validate_launch_variables(&wf.variables, &provided_vars)?;
-    let trigger_obj = build_manual_trigger_obj(&provided_vars, Utc::now());
-
+/// Build the canonical `WorkflowRun` shape for a MANUAL launch (linear run,
+/// Pending, batch fields at defaults, trigger_context carrying the provided
+/// variables). Single source of truth for the ~20-field struct literal so
+/// [`trigger`] and [`spawn_detached_run`] can never drift apart. Infallible —
+/// launch-variable validation is the caller's job (its error surface differs:
+/// SSE vs. a plain string).
+pub(crate) fn build_manual_run(
+    wf: &crate::models::Workflow,
+    provided_vars: &std::collections::HashMap<String, String>,
+) -> WorkflowRun {
     let now = Utc::now();
-    let run = WorkflowRun {
+    let trigger_obj = build_manual_trigger_obj(provided_vars, now);
+    WorkflowRun {
         id: Uuid::new_v4().to_string(),
         workflow_id: wf.id.clone(),
         status: RunStatus::Pending,
@@ -2290,6 +2284,7 @@ pub(crate) async fn spawn_detached_run(
         workspace_path: None,
         started_at: now,
         finished_at: None,
+        // Legacy linear runs — batch fields stay at their defaults.
         run_type: "linear".into(),
         batch_total: 0,
         batch_completed: 0,
@@ -2302,9 +2297,19 @@ pub(crate) async fn spawn_detached_run(
         parent_workflow_id: None,
         parent_workflow_name: None,
         parent_run_started_at: None,
-    };
+    }
+}
 
-    // Single transaction: concurrency check + insert atomically (avoids TOCTOU).
+/// Atomically enforce the workflow's concurrency limit and insert `run` in a
+/// SINGLE transaction (avoids the check-then-insert TOCTOU). Single source of
+/// truth for that transaction, shared by [`trigger`] and [`spawn_detached_run`].
+/// Returns the human-facing error string both surfaces already used:
+/// `"Concurrency limit reached (a/b)"` or `"DB error: …"`.
+async fn insert_run_with_concurrency_check(
+    state: &AppState,
+    wf: &crate::models::Workflow,
+    run: &WorkflowRun,
+) -> Result<(), String> {
     let r = run.clone();
     let limit = wf.concurrency_limit;
     let wf_id_check = wf.id.clone();
@@ -2327,7 +2332,27 @@ pub(crate) async fn spawn_detached_run(
                 Some(rest) => format!("Concurrency limit reached ({rest})"),
                 None => format!("DB error: {msg}"),
             }
-        })?;
+        })
+}
+
+/// Create and dispatch a manual run **without** an SSE stream, returning its id.
+///
+/// This is the fire-and-forget sibling of [`trigger`]: same launch-variable
+/// validation, same atomic concurrency-check-then-insert, same detached
+/// `execute_run`, but no event channel — the caller doesn't watch the run, it
+/// just needs the run id (e.g. a Live Page trigger button, where the Page's own
+/// auto-refresh/mirror surfaces progress). The workflow must already be loaded
+/// and its `enabled` flag checked by the caller. Errors are returned as plain
+/// strings so each HTTP surface can map them to its own coded response.
+pub(crate) async fn spawn_detached_run(
+    state: &AppState,
+    wf: crate::models::Workflow,
+    provided_vars: std::collections::HashMap<String, String>,
+) -> Result<String, String> {
+    validate_launch_variables(&wf.variables, &provided_vars)?;
+
+    let run = build_manual_run(&wf, &provided_vars);
+    insert_run_with_concurrency_check(state, &wf, &run).await?;
 
     tracing::info!("Workflow run created (detached): {} for {}", run.id, wf.name);
 
@@ -2399,61 +2424,13 @@ pub async fn trigger(
     if let Err(msg) = validate_launch_variables(&wf.variables, &provided_vars) {
         return sse_error(msg);
     }
-    let trigger_obj = build_manual_trigger_obj(&provided_vars, Utc::now());
 
-    // Atomic concurrency check + insert in a single transaction (avoids TOCTOU race)
-    let now = Utc::now();
-    let run = WorkflowRun {
-        id: Uuid::new_v4().to_string(),
-        workflow_id: wf.id.clone(),
-        status: RunStatus::Pending,
-        trigger_context: Some(serde_json::Value::Object(trigger_obj)),
-        step_results: vec![],
-        tokens_used: 0,
-        workspace_path: None,
-        started_at: now,
-        finished_at: None,
-        // Legacy linear runs — batch fields stay at their defaults.
-        run_type: "linear".into(),
-        batch_total: 0,
-        batch_completed: 0,
-        batch_failed: 0,
-        batch_no_response: 0,
-        batch_name: None,
-        parent_run_id: None,
-        state: ::std::collections::HashMap::new(),
-        produced_branches: vec![],
-        parent_workflow_id: None,
-        parent_workflow_name: None,
-        parent_run_started_at: None,
-    };
-
-    let r = run.clone();
-    let limit = wf.concurrency_limit;
-    let wf_id_check = wf.id.clone();
-    match state
-        .db
-        .with_conn(move |conn| {
-            // Single transaction: check + insert atomically
-            if let Some(max) = limit {
-                let active = crate::db::workflows::count_active_runs(conn, &wf_id_check)?;
-                if active >= max {
-                    anyhow::bail!("CONCURRENCY_LIMIT:{}/{}", active, max);
-                }
-            }
-            crate::db::workflows::insert_run(conn, &r)?;
-            Ok(())
-        })
-        .await
-    {
-        Ok(()) => {}
-        Err(e) => {
-            let msg = e.to_string();
-            if let Some(rest) = msg.strip_prefix("CONCURRENCY_LIMIT:") {
-                return sse_error(format!("Concurrency limit reached ({})", rest));
-            }
-            return sse_error(format!("DB error: {}", msg));
-        }
+    // Same run shape + atomic concurrency-check-then-insert as `spawn_detached_run`
+    // (shared helpers); the only differences are the SSE channel below and this
+    // error surface (sse_error vs. a returned string).
+    let run = build_manual_run(&wf, &provided_vars);
+    if let Err(msg) = insert_run_with_concurrency_check(&state, &wf, &run).await {
+        return sse_error(msg);
     }
 
     tracing::info!("Workflow run created: {} for workflow {}", run.id, wf.name);
@@ -3174,12 +3151,26 @@ pub(crate) fn parse_gate_decision(
 /// the given decision. Shared by the workflow-UI (`decide_run`) and the Live
 /// Page (`crate::api::live_pages::decide_gate`) entry points so the audited
 /// TOCTOU-safe claim + background spawn lives in exactly one place.
+/// Error surface of [`resume_with_decision`], split so callers map the two
+/// cases to distinct HTTP statuses. Losing the atomic claim race (another caller
+/// already decided the run) is a 409 Conflict; a DB/internal failure is a 500 —
+/// blanket-mapping both to Conflict (the old behaviour) masked real errors as if
+/// they were routine double-clicks.
+pub(crate) enum ResumeDecisionError {
+    /// The conditional `WaitingApproval → …` claim matched no row: a concurrent
+    /// decision (double-click, auto-approve timer, page vs workflow-UI) won the
+    /// race. Expected and benign — surface as Conflict.
+    LostRace,
+    /// A genuine DB/internal error while claiming the run — surface as Internal.
+    Internal(String),
+}
+
 pub(crate) async fn resume_with_decision(
     state: &AppState,
     run: WorkflowRun,
     workflow: Workflow,
     decision: crate::workflows::runner::GateDecision,
-) -> Result<DecideRunResponse, String> {
+) -> Result<DecideRunResponse, ResumeDecisionError> {
     use crate::workflows::runner::GateDecision;
 
     let new_status = match &decision {
@@ -3201,13 +3192,12 @@ pub(crate) async fn resume_with_decision(
         .await
     {
         Ok(true) => {}
-        Ok(false) => {
-            return Err(
-                "Run was just decided by another caller — decision ignored (no double-resume)"
-                    .to_string(),
-            )
+        Ok(false) => return Err(ResumeDecisionError::LostRace),
+        Err(e) => {
+            return Err(ResumeDecisionError::Internal(format!(
+                "DB error claiming run: {e}"
+            )))
         }
-        Err(e) => return Err(format!("DB error claiming run: {e}")),
     }
 
     // Resume in the background — long-running; the caller just gets the new
@@ -3315,7 +3305,15 @@ pub async fn decide_run(
 
     match resume_with_decision(&state, run, workflow, decision).await {
         Ok(resp) => Json(ApiResponse::ok(resp)),
-        Err(e) => Json(ApiResponse::err(e)),
+        // Lost the atomic claim race → a concurrent caller already decided: 409.
+        Err(ResumeDecisionError::LostRace) => Json(ApiResponse::err_coded(
+            ApiErrorCode::Conflict,
+            "Run was just decided by another caller — decision ignored (no double-resume)",
+        )),
+        // A genuine DB/internal failure must not masquerade as a routine race.
+        Err(ResumeDecisionError::Internal(msg)) => {
+            Json(ApiResponse::err_coded(ApiErrorCode::Internal, msg))
+        }
     }
 }
 

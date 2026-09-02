@@ -1,4 +1,3 @@
-import type { RunStatus } from '../types/generated';
 import { pages as pagesApi, workflows as workflowsApi } from './api';
 import {
   runToPipeline,
@@ -6,10 +5,7 @@ import {
   type PhaseMapEntry,
   type Pipeline,
 } from './live-page-pipeline';
-
-const TERMINAL_RUN: ReadonlySet<RunStatus> = new Set<RunStatus>([
-  'Success', 'Partial', 'Failed', 'Cancelled', 'StoppedByGuard', 'Interrupted',
-]);
+import { TERMINAL_RUN } from './live-page-run-status';
 
 /**
  * Normalize a binding's `phase_map`/`meta_map`. The backend stores them as a

@@ -475,36 +475,35 @@ pub async fn upsert_binding(
     Path(id): Path<String>,
     Json(req): Json<UpsertLivePageBindingRequest>,
 ) -> Json<ApiResponse<LivePageWorkflowBinding>> {
+    use crate::db::live_pages::UpsertBindingError;
+    // The db layer returns a typed `UpsertBindingError` (not message text), so
+    // the mapping below is total and survives any reword of the error strings.
+    // `with_conn` needs an `anyhow::Result`, so the typed result rides INSIDE the
+    // Ok — the outer Err is reserved for infra/panic failures.
     match state
         .db
-        .with_conn(move |conn| crate::db::live_pages::upsert_live_page_binding(conn, &id, &req))
+        .with_conn(move |conn| Ok(crate::db::live_pages::upsert_live_page_binding(conn, &id, &req)))
         .await
     {
-        Ok(binding) => Json(ApiResponse::ok(binding)),
-        // The db layer signals these via `anyhow!`/`bail!` messages, so the HTTP
-        // code is recovered by matching the message. Keep these substrings in sync
-        // with the exact `bail!` strings in `db::live_pages::upsert_live_page_binding`
-        // (`"Page not found"`, `"Workflow not found"`) and
-        // `validate_dataset_name` (`"Dataset names …"`) — rewording a bail there
-        // silently downgrades the response to a 500.
-        Err(error) if error.to_string().contains("Page not found") => Json(ApiResponse::err_coded(
+        Ok(Ok(binding)) => Json(ApiResponse::ok(binding)),
+        Ok(Err(UpsertBindingError::PageNotFound)) => Json(ApiResponse::err_coded(
             ApiErrorCode::NotFound,
             "Page not found",
         )),
-        Err(error) => {
-            let message = error.to_string();
-            let code = if message.contains("Workflow not found") {
-                ApiErrorCode::NotFound
-            } else if message.contains("Dataset names") {
-                ApiErrorCode::Validation
-            } else {
-                ApiErrorCode::Internal
-            };
-            Json(ApiResponse::err_coded(
-                code,
-                format!("Unable to save binding: {error}"),
-            ))
+        Ok(Err(UpsertBindingError::WorkflowNotFound(workflow_id))) => Json(
+            ApiResponse::err_coded(ApiErrorCode::NotFound, format!("Workflow not found: {workflow_id}")),
+        ),
+        Ok(Err(UpsertBindingError::InvalidDataset(message))) => {
+            Json(ApiResponse::err_coded(ApiErrorCode::Validation, message))
         }
+        Ok(Err(UpsertBindingError::Db(message))) => Json(ApiResponse::err_coded(
+            ApiErrorCode::Internal,
+            format!("Unable to save binding: {message}"),
+        )),
+        Err(error) => Json(ApiResponse::err_coded(
+            ApiErrorCode::Internal,
+            format!("Unable to save binding: {error}"),
+        )),
     }
 }
 
@@ -593,6 +592,48 @@ pub async fn decide_gate(
             "Run does not belong to the workflow bound to this page",
         ));
     }
+
+    // Belonging to the bound workflow is not enough: the page displays exactly
+    // ONE run — the one its `run_selector` resolves to — so a decision must be
+    // for THAT run, not for any other WaitingApproval run of the same workflow.
+    // Resolve the mirrored run server-side and require the supplied run_id to
+    // equal it (`latest` → most recent run; `latest_active` → most recent
+    // non-terminal run, falling back to the latest run when none is active).
+    let wf_for_selector = binding.workflow_id.clone();
+    let selector = binding.run_selector;
+    let mirrored = match state
+        .db
+        .with_conn(move |conn| {
+            let resolved = match selector {
+                crate::models::LivePageRunSelector::Latest => {
+                    crate::db::workflows::get_last_run(conn, &wf_for_selector)?
+                }
+                crate::models::LivePageRunSelector::LatestActive => {
+                    match crate::db::workflows::get_latest_active_run(conn, &wf_for_selector)? {
+                        Some(active) => Some(active),
+                        None => crate::db::workflows::get_last_run(conn, &wf_for_selector)?,
+                    }
+                }
+            };
+            Ok(resolved)
+        })
+        .await
+    {
+        Ok(mirrored) => mirrored,
+        Err(error) => {
+            return Json(ApiResponse::err_coded(
+                ApiErrorCode::Internal,
+                format!("DB error: {error}"),
+            ))
+        }
+    };
+    if mirrored.as_ref().map(|m| m.id.as_str()) != Some(run.id.as_str()) {
+        return Json(ApiResponse::err_coded(
+            ApiErrorCode::Validation,
+            "Run is not the one mirrored by this page",
+        ));
+    }
+
     if run.status != RunStatus::WaitingApproval {
         return Json(ApiResponse::err_coded(
             ApiErrorCode::Conflict,
@@ -653,11 +694,17 @@ pub async fn decide_gate(
         };
     match crate::api::workflows::resume_with_decision(&state, run, workflow, decision).await {
         Ok(response) => Json(ApiResponse::ok(response)),
-        // The run was validated as `WaitingApproval` just above, so the only way
-        // the shared claim fails here is a concurrent decision winning the race
-        // (page vs workflow-UI, double-click) — surface it as a Conflict, in line
-        // with the coded errors the rest of this handler returns.
-        Err(error) => Json(ApiResponse::err_coded(ApiErrorCode::Conflict, error)),
+        // A concurrent decision (page vs workflow-UI, double-click) winning the
+        // atomic claim is a benign race → Conflict…
+        Err(crate::api::workflows::ResumeDecisionError::LostRace) => Json(ApiResponse::err_coded(
+            ApiErrorCode::Conflict,
+            "Run was just decided by another caller — decision ignored (no double-resume)",
+        )),
+        // …but a genuine DB/internal failure must surface as Internal, not be
+        // masked as a routine race.
+        Err(crate::api::workflows::ResumeDecisionError::Internal(msg)) => {
+            Json(ApiResponse::err_coded(ApiErrorCode::Internal, msg))
+        }
     }
 }
 
