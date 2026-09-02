@@ -46,7 +46,12 @@ function once(target: EventTarget, event: string, timeoutMs: number, failure: La
 
 /** True when every pixel carries the same value: a decode that produced a
  *  uniform rectangle is indistinguishable from one that produced nothing, and
- *  shipping it as "the last frame" is exactly the failure this guards. */
+ *  shipping it as "the last frame" is exactly the failure this guards.
+ *
+ *  A clip that genuinely ends on a fade to black is refused too. That is the
+ *  deliberate side of the trade: a visible refusal costs a retry, while a
+ *  black rectangle passed off as the last frame is paid for as the starting
+ *  picture of the next generation. */
 function isBlank(data: Uint8ClampedArray): boolean {
   if (data.length < 4) return true;
   for (let i = 4; i < data.length; i += 4) {
