@@ -235,6 +235,12 @@ export function Dashboard({ onReset }: DashboardProps) {
     }
   }, [activeDiscussionId, discussionList]);
 
+  // The session checkpoint is filtered against the loaded list: it points at
+  // wherever the previous visit left off, which may since have been deleted.
+  // A `#discussion-<id>` address is NOT filtered — the list loads
+  // asynchronously and is paginated, so filtering it would refuse to open a
+  // discussion that is merely absent from the first page, or one created a
+  // second ago. The page fetches the target by id anyway.
   const restorableDiscussionId = useMemo(() => {
     if (!activeDiscussionId || !discussionList) return null;
     return discussionList.some(discussion => discussion.id === activeDiscussionId)
@@ -1532,7 +1538,7 @@ export function Dashboard({ onReset }: DashboardProps) {
             markDiscussionSeen={markDiscussionSeen}
             markAllDiscussionsSeen={markAllDiscussionsSeen}
             onActiveDiscussionChange={setActiveDiscussionId}
-            initialActiveDiscussionId={openDiscussionId ?? restorableDiscussionId}
+            initialActiveDiscussionId={openDiscussionId ?? deepLinkedDiscussionId ?? restorableDiscussionId}
             lastSeenMsgCount={lastSeenMsgCount}
             mcpConfigs={mcpOverview.configs}
             mcpIncompatibilities={mcpOverview.incompatibilities}

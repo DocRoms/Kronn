@@ -165,6 +165,21 @@ describe('Dashboard reload/HMR navigation restoration', () => {
     expect(discussionsApi.sendMessageStream).not.toHaveBeenCalled();
   });
 
+  it('opens a discussion named by the address even when the list has not loaded it', async () => {
+    // KT-552 — the checkpoint is filtered against the loaded list, because it
+    // may point at a discussion since deleted. An ADDRESS must not be: the
+    // list is paginated and loads asynchronously, so filtering it refused to
+    // open a discussion merely absent from the first page — or created a
+    // second ago. The page fetches the target by id anyway.
+    window.location.hash = '#discussion-disc-deep';
+    vi.mocked(discussionsApi.list).mockResolvedValue([]);
+
+    await renderDashboard();
+
+    expect(await screen.findByTestId('discussion-page')).toHaveTextContent('disc-deep');
+    window.location.hash = '';
+  });
+
   it('drops a stale discussion id and keeps the safe list view', async () => {
     sessionStorage.setItem('kronn:navigation:page', 'discussions');
     sessionStorage.setItem('kronn:navigation:discussion', 'deleted-disc');
