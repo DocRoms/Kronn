@@ -5,7 +5,7 @@
 // made the card disappear on success. The root stays stable for every state;
 // the completed asset opens through the canonical Assets viewer.
 import { useEffect, useState } from 'react';
-import { ExternalLink, Sparkles } from 'lucide-react';
+import { ExternalLink, Image as ImageIcon, Sparkles } from 'lucide-react';
 import { RunStatusCard } from './RunStatusCard';
 import { useT } from '../lib/I18nContext';
 import { mediaRunDetails } from '../lib/mediaRunResult';
@@ -30,6 +30,9 @@ export function InlineMediaJob({
   const details = mediaRunDetails(run.result);
   const assetId = details?.assetId;
   const modality = details?.modality;
+  const source = details?.referenceAssetId && details.referenceMode
+    ? { assetId: details.referenceAssetId, mode: details.referenceMode }
+    : null;
   const model = sharedRunStatusCardModel(run, 'live');
   // The produced file, shown where it was asked for. `<img src>` cannot carry
   // the auth header, so the bytes come through the API and live as an object
@@ -72,6 +75,22 @@ export function InlineMediaJob({
         {/* The bubble's own button opens the asset; the card's generic link
             would point at the run page, which answers nothing here. */}
         <RunStatusCard model={model} runId={run.id} hideRunLink />
+        {source && (
+          // What the clip was built on, said where the clip is. The id is
+          // resolved through the discussion's own files: no path reaches here.
+          <p className="disc-media-msg-source" data-testid="media-bubble-source">
+            <ImageIcon size={13} aria-hidden="true" />
+            <span>{t(`disc.media.startedFrom.${source.mode}`)}</span>
+            <button
+              type="button"
+              className="disc-media-msg-source-open"
+              onClick={() => onOpenAsset(source.assetId)}
+              data-testid="media-bubble-source-open"
+            >
+              {t('disc.media.openSourceImage')}
+            </button>
+          </p>
+        )}
         {previewUrl && (
           <div className="disc-media-msg-preview" data-testid="media-bubble-preview">
             {modality === 'video'

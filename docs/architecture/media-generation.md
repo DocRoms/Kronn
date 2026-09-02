@@ -177,6 +177,12 @@ The image travels to the provider as a `data:` payload. Kronn listens on
 hand a private file to the internet. OpenRouter's documented shape is
 `frame_images: [{type, image_url: {url}, frame_type}]`.
 
+The finished clip states what it was built on: the run projection echoes the
+source id and the mode, and the bubble shows a line — "starts on an image of
+this discussion" — whose link opens that picture in the viewer. An id, resolved
+through the discussion's own files; a mode the reader cannot name is dropped
+rather than labelled with an invented word.
+
 Two deliberate refusals. A visual reference on a video is refused rather than
 submitted as a frame: no video model advertises `reference` under
 `supported_frame_images`, and passing it as a frame would have the model

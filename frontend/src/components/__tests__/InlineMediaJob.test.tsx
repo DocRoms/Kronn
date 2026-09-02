@@ -178,6 +178,41 @@ describe('InlineMediaJob', () => {
     expect(screen.queryByTestId('media-bubble-preview')).toBeNull();
   });
 
+  it('says what the clip was built on, and opens that picture too', async () => {
+    const onOpenAsset = vi.fn();
+    renderJob(mediaRun({
+      status: 'success',
+      result: {
+        schema_version: 1,
+        modality: 'video',
+        phase: 'completed',
+        asset_id: 'asset-clip',
+        reference_asset_id: 'asset-frame',
+        reference_mode: 'first_frame',
+      },
+    }), onOpenAsset);
+
+    const source = await screen.findByTestId('media-bubble-source');
+    expect(source.textContent).toContain('disc.media.startedFrom.first_frame');
+    fireEvent.click(screen.getByTestId('media-bubble-source-open'));
+    // The source picture, not the clip: two different assets, two destinations.
+    expect(onOpenAsset).toHaveBeenCalledWith('asset-frame');
+  });
+
+  it('says nothing about a source image a run does not name', () => {
+    // A mode we cannot name would describe the generation wrongly, so an
+    // unknown value is dropped rather than labelled.
+    renderJob(mediaRun({
+      status: 'success',
+      result: {
+        schema_version: 1, modality: 'video', phase: 'completed',
+        asset_id: 'asset-clip', reference_asset_id: 'asset-frame',
+        reference_mode: 'middle_frame',
+      },
+    }));
+    expect(screen.queryByTestId('media-bubble-source')).toBeNull();
+  });
+
   it('keeps a completed bubble visible while the asset link is still finalising', () => {
     renderJob(mediaRun({ status: 'success' }));
     expect(screen.getByTestId('run-status-card')).toHaveAttribute('data-status', 'success');

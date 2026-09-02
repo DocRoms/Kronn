@@ -7859,3 +7859,22 @@ button.disc-contact-open {
   color: var(--kr-text-dim);
   user-select: all;
 }
+
+/* What a clip was built on, stated where the clip is. */
+.disc-media-msg-source {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 8px 0 0;
+  color: var(--kr-text-muted);
+  font-size: var(--kr-fs-xs);
+}
+.disc-media-msg-source-open {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--kr-accent);
+  font-size: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}

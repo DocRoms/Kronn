@@ -21,6 +21,9 @@ export type MediaRunDetails = {
   height?: number;
   durationMs?: number;
   assetId?: string;
+  /** The picture this generation started from, when it did. */
+  referenceAssetId?: string;
+  referenceMode?: 'first_frame' | 'last_frame' | 'reference';
 };
 
 function positive(value: unknown): number | undefined {
@@ -46,5 +49,17 @@ export function mediaRunDetails(result: unknown): MediaRunDetails | null {
     height: positive(raw.height),
     durationMs: positive(raw.media_duration_ms),
     assetId: typeof raw.asset_id === 'string' && raw.asset_id ? raw.asset_id : undefined,
+    referenceAssetId:
+      typeof raw.reference_asset_id === 'string' && raw.reference_asset_id
+        ? raw.reference_asset_id
+        : undefined,
+    // An unknown mode is dropped rather than shown: a label invented for a
+    // value we cannot name would describe the generation wrongly.
+    referenceMode:
+      raw.reference_mode === 'first_frame'
+        || raw.reference_mode === 'last_frame'
+        || raw.reference_mode === 'reference'
+        ? raw.reference_mode
+        : undefined,
   };
 }

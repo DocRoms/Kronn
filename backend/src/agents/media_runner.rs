@@ -762,6 +762,108 @@ mod tests {
         db
     }
 
+    /// KT-551 — the source image is re-read on every attempt, from the id the
+    /// job stored, so a restart resumes with the same picture and a file that
+    /// left the room fails the job instead of reaching the provider.
+    #[tokio::test]
+    async fn a_source_image_is_re_read_from_its_id_at_each_attempt() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("frame.png");
+        tokio::fs::write(&path, b"first-bytes").await.expect("write");
+
+        let db = Database::open_in_memory().expect("in-memory db");
+        let disk_path = path.to_string_lossy().to_string();
+        db.with_conn({
+            let disk_path = disk_path.clone();
+            move |conn| {
+                let now = Utc::now().to_rfc3339();
+                conn.execute(
+                    "INSERT INTO discussions (id, title, created_at, updated_at)
+                     VALUES ('disc-1', 'Room', ?1, ?1)",
+                    [&now],
+                )?;
+                conn.execute(
+                    "INSERT INTO context_files
+                        (id, discussion_id, filename, mime_type, original_size,
+                         extracted_size, extracted_text, disk_path, created_at)
+                     VALUES ('asset-1', 'disc-1', 'frame.png', 'image/png', 11, 0, '', ?1, ?2)",
+                    rusqlite::params![disk_path, now],
+                )?;
+                Ok(())
+            }
+        })
+        .await
+        .expect("seed");
+
+        let params = MediaParams {
+            reference_asset_id: Some("asset-1".into()),
+            reference_mode: Some(crate::models::MediaReferenceMode::FirstFrame),
+            ..MediaParams::default()
+        };
+        let scheduled = at("2026-09-02T04:00:00Z");
+        let job_id = "job-ref";
+        db.with_conn({
+            let params = params.clone();
+            move |conn| {
+                media_jobs::insert(
+                    conn,
+                    NewMediaJob {
+                        id: job_id,
+                        modality: MediaModality::Video,
+                        connection_id: "conn-1",
+                        model: "m",
+                        prompt: "un renard",
+                        params: &params,
+                        discussion_id: Some("disc-1"),
+                        message_id: None,
+                        project_id: None,
+                        scheduled_at: scheduled,
+                        deadline_at: scheduled + ChronoDuration::minutes(20),
+                    },
+                    scheduled,
+                )
+            }
+        })
+        .await
+        .expect("insert");
+        let job = db
+            .with_read_conn(move |conn| media_jobs::get(conn, job_id))
+            .await
+            .expect("read")
+            .expect("job");
+
+        let first = load_reference(&db, &job)
+            .await
+            .expect("readable")
+            .expect("a source image");
+        assert_eq!(first.bytes, b"first-bytes");
+        assert_eq!(first.mime_type, "image/png");
+
+        // The bytes are read now, not at launch: replacing the file changes
+        // what the next attempt submits, which is what makes a restart resume
+        // with the real current picture.
+        tokio::fs::write(&path, b"second").await.expect("rewrite");
+        let second = load_reference(&db, &job).await.expect("readable").unwrap();
+        assert_eq!(second.bytes, b"second");
+
+        // A file that disappeared fails the job with a sentence instead of
+        // submitting a generation silently stripped of its source image.
+        tokio::fs::remove_file(&path).await.expect("remove");
+        let error = load_reference(&db, &job).await.unwrap_err().to_string();
+        assert!(error.contains("could not be read"), "got {error}");
+    }
+
+    #[tokio::test]
+    async fn a_job_without_a_source_image_reads_nothing() {
+        let db = db_with_job("job-plain", None, at("2026-09-02T04:00:00Z")).await;
+        let job = db
+            .with_read_conn(|conn| media_jobs::get(conn, "job-plain"))
+            .await
+            .expect("read")
+            .expect("job");
+        assert!(load_reference(&db, &job).await.expect("ok").is_none());
+    }
+
     /// One-request HTTP server, returning the address and the raw request head
     /// it received. Asserting on that head is the only way to know what
     /// actually left the process — a unit test on the policy cannot.

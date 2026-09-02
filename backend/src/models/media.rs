@@ -230,6 +230,13 @@ pub struct MediaRunResult {
     pub height: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub media_duration_ms: Option<u64>,
+    /// The picture this generation started from, so a viewer can see what a
+    /// clip was built on without reading the job's parameters. An id, like
+    /// everywhere else: the projection reaches a browser.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference_asset_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference_mode: Option<MediaReferenceMode>,
 }
 
 pub const MEDIA_RUN_RESULT_SCHEMA_VERSION: u32 = 1;
@@ -249,6 +256,8 @@ impl MediaRunResult {
             width: None,
             height: None,
             media_duration_ms: None,
+            reference_asset_id: None,
+            reference_mode: None,
         }
     }
 }

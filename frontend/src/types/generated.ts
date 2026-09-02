@@ -3351,7 +3351,13 @@ export type MediaRendered = { width?: number | null, height?: number | null, dur
  * the provider actually measures it — an invented percentage is worse than
  * none, because it looks authoritative.
  */
-export type MediaRunResult = { schema_version: number, modality: MediaModality, phase: MediaPhase, progress?: number | null, generation_id?: string | null, asset_id?: string | null, message_id?: string | null, cost_usd?: number | null, is_byok?: boolean | null, width?: number | null, height?: number | null, media_duration_ms?: number | null, };
+export type MediaRunResult = { schema_version: number, modality: MediaModality, phase: MediaPhase, progress?: number | null, generation_id?: string | null, asset_id?: string | null, message_id?: string | null, cost_usd?: number | null, is_byok?: boolean | null, width?: number | null, height?: number | null, media_duration_ms?: number | null,
+/**
+ * The picture this generation started from, so a viewer can see what a
+ * clip was built on without reading the job's parameters. An id, like
+ * everywhere else: the projection reaches a browser.
+ */
+reference_asset_id?: string | null, reference_mode?: MediaReferenceMode | null, };
 
 /**
  * Lean attachment descriptor surfaced to agents via `disc_get_message`. The
