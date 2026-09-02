@@ -196,3 +196,14 @@
 .media-generate-ratio-shape[data-ratio='4:3']  { width: 21px; height: 16px; }
 .media-generate-ratio-shape[data-ratio='1:1']  { width: 16px; height: 16px; }
 .media-generate-ratio-shape[data-ratio='9:16'] { width: 9px;  height: 16px; }
+
+.media-generate-check {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: var(--kr-fs-xs);
+  color: var(--kr-text-secondary);
+  cursor: pointer;
+}
+
+.media-generate-check input { accent-color: var(--kr-accent); cursor: pointer; }

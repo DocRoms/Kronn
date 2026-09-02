@@ -10558,5 +10558,51 @@ class TaskAckTests(unittest.TestCase):
             self.assertIn("_task_ack", source, f"{name} still returns the whole task")
 
 
+class MediaGenerateAudioTests(unittest.TestCase):
+    """KT-553 — the soundtrack is a decision, never a provider default.
+
+    Omitting `generate_audio` used to let the provider add a soundtrack on its
+    own. That is how a clip got refused for audio copyright with nothing in the
+    request to explain it, so the tool now states the value it means.
+    """
+
+    def setUp(self):
+        self.mod = _load_module()
+        self.fake_http = mock.MagicMock(return_value={
+            "success": True,
+            "data": {"job_id": "job-1", "status": "pending", "model": "m"},
+        })
+        patch = mock.patch.object(self.mod, "_http", self.fake_http)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def _body(self, args):
+        self.mod.call_media_generate({
+            "connection_id": "conn-1",
+            "prompt": "un renard en origami",
+            "discussion_id": "disc-1",
+            **args,
+        })
+        return self.fake_http.call_args.args[2]
+
+    def test_video_carries_audio_true_when_the_caller_says_nothing(self):
+        body = self._body({"modality": "video"})
+        self.assertIs(body["generate_audio"], True)
+
+    def test_an_agent_can_ask_for_a_silent_clip(self):
+        self.assertIs(self._body({"modality": "video", "generate_audio": False})["generate_audio"], False)
+
+    def test_an_image_is_never_asked_for_a_soundtrack(self):
+        self.assertNotIn("generate_audio", self._body({"modality": "image"}))
+
+    def test_the_schema_states_the_real_default(self):
+        """An agent reads the description, not our source: if the default is
+        not written there, `false` is never passed and the option is dead."""
+        tool = next(t for t in self.mod.TOOLS if t["name"] == "media_generate")
+        described = tool["inputSchema"]["properties"]["generate_audio"]["description"]
+        self.assertIn("DEFAULTS TO TRUE", described)
+        self.assertIn("copyright", described.lower())
+
+
 if __name__ == "__main__":
     unittest.main()

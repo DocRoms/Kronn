@@ -66,6 +66,11 @@ export function MediaGenerateForm({
   const [durationSecs, setDurationSecs] = useState(5);
   const [resolution, setResolution] = useState('480p');
   const [aspectRatio, setAspectRatio] = useState<string>('16:9');
+  // Checked by default because that is what the providers already do when
+  // nothing is sent. The box makes an existing behaviour visible and
+  // switchable — a soundtrack nobody asked for is what got a generation
+  // rejected for copyright, with no clue in the request that it existed.
+  const [generateAudio, setGenerateAudio] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [launched, setLaunched] = useState<{ model: string } | null>(null);
@@ -123,6 +128,7 @@ export function MediaGenerateForm({
       aspectRatio,
       durationSecs: selected.modality === 'video' ? durationSecs : null,
       resolution: selected.modality === 'video' ? resolution : null,
+      generateAudio: selected.modality === 'video' ? generateAudio : null,
     });
     if (pendingLaunchRef.current?.signature !== signature) {
       pendingLaunchRef.current = { signature, key: crypto.randomUUID() };
@@ -138,7 +144,10 @@ export function MediaGenerateForm({
         discussion_id: discussionId,
         aspect_ratio: aspectRatio,
         ...(selected.modality === 'video'
-          ? { duration_secs: durationSecs, resolution }
+          // Sent explicitly, including the default: an absent field leaves the
+          // provider's own default in charge, which is exactly the silence
+          // this box exists to remove.
+          ? { duration_secs: durationSecs, resolution, generate_audio: generateAudio }
           : {}),
       });
       setLaunched({ model: job.model });
@@ -150,7 +159,7 @@ export function MediaGenerateForm({
     } finally {
       setBusy(false);
     }
-  }, [aspectRatio, busy, discussionId, durationSecs, onLaunched, prompt, resolution, selected]);
+  }, [aspectRatio, busy, discussionId, durationSecs, generateAudio, onLaunched, prompt, resolution, selected]);
 
   if (slots.length === 0) {
     return (
@@ -226,6 +235,18 @@ export function MediaGenerateForm({
             </select>
           </label>
         </div>
+      )}
+
+      {isVideo && (
+        <label className="media-generate-check">
+          <input
+            type="checkbox"
+            checked={generateAudio}
+            onChange={event => setGenerateAudio(event.target.checked)}
+            data-testid="media-generate-audio"
+          />
+          <span>{t('disc.media.generateAudio')}</span>
+        </label>
       )}
 
       {/* Each ratio carries a box in its own proportions — the same trick the

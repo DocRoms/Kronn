@@ -71,6 +71,9 @@ describe('MediaGenerateForm', () => {
       prompt: 'un chat en origami',
       discussion_id: 'd-1',
       duration_secs: 5,
+      // Sent explicitly even at its default value: an absent field leaves the
+      // provider free to add a soundtrack nobody asked for.
+      generate_audio: true,
     });
     // The slot decides the model: a caller-supplied one would let the UI bill
     // something the operator never configured.
@@ -141,6 +144,44 @@ describe('MediaGenerateForm', () => {
     // Let the asynchronous estimate settle inside the test so React does not
     // report a state update after the assertion phase has already ended.
     expect(await screen.findByText('disc.media.estimate:0.0709,3')).toBeInTheDocument();
+  });
+
+  it('offers the soundtrack as a visible, checked-by-default choice', async () => {
+    render(
+      <MediaGenerateForm discussionId="d-1" connections={[connection()]} t={t} />,
+    );
+
+    // Sound is a video question only; an image slot must not ask it.
+    expect(screen.queryByTestId('media-generate-audio')).toBeNull();
+    fireEvent.click(screen.getByTestId('media-slot-conn-1:video'));
+    const audio = await screen.findByTestId('media-generate-audio');
+    // Checked by default: the box makes the current provider behaviour
+    // visible, it does not change it.
+    expect(audio).toBeChecked();
+
+    fireEvent.click(audio);
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'un plan muet' } });
+    fireEvent.click(screen.getByRole('button', { name: /disc\.media\.generate/ }));
+
+    await waitFor(() => expect(mediaApi.generate).toHaveBeenCalledTimes(1));
+    expect(mediaApi.generate.mock.calls[0][0]).toMatchObject({ generate_audio: false });
+  });
+
+  it('never asks for a soundtrack on an image', async () => {
+    render(
+      <MediaGenerateForm
+        discussionId="d-1"
+        connections={[connection({ video_model: null })]}
+        t={t}
+      />,
+    );
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'un chat en origami' } });
+    fireEvent.click(screen.getByRole('button', { name: /disc\.media\.generate/ }));
+
+    await waitFor(() => expect(mediaApi.generate).toHaveBeenCalledTimes(1));
+    // A picture has no soundtrack: sending the field would be noise the
+    // backend has to ignore.
+    expect(mediaApi.generate.mock.calls[0][0]).not.toHaveProperty('generate_audio');
   });
 
   it('explains itself when no connection has a media model', () => {

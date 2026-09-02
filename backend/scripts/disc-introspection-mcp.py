@@ -2304,20 +2304,18 @@ TOOLS = [
             "Generate an image or a video on a configured HTTP connection "
             "(OpenRouter, NVIDIA). Returns `{job_id, status, model}`.\n\n"
             "**You do NOT choose the model.** It comes from the connection's "
-            "configured image/video slot, so a generation cannot be billed on "
-            "a model the human did not select. A modality with no configured "
-            "slot is refused, naming what to configure.\n\n"
+            "configured image/video slot, so nothing can be billed on a model "
+            "the human did not pick. A modality with no slot is refused, "
+            "naming what to configure.\n\n"
             "**Cost is real.** Video is billed per second (~0.07 USD for 5 s "
-            "at 480p) and image per picture. Duration and resolution are "
-            "capped server-side. Ask for the shortest clip that answers the "
-            "need.\n\n"
-            "**`wait` defaults to false**, which is almost always right: a "
-            "video takes ~100 s and the asset lands in the discussion on its "
-            "own, so you can keep working and it will be there. Pass "
-            "`wait: true` ONLY when you must use the media inside the answer "
-            "you are currently writing.\n\n"
-            "The finished asset is attached to the discussion as a context "
-            "file, visible to every agent in it."
+            "at 480p) and image per picture; a soundtrack, generated unless "
+            "you pass `generate_audio: false`, raises that rate. Duration and "
+            "resolution are capped server-side. Ask for the shortest clip "
+            "that answers the need.\n\n"
+            "**`wait` defaults to false** and should stay there: a video "
+            "takes ~100 s and lands in the discussion on its own, as a context "
+            "file every agent can see. Pass `wait: true` only when the media "
+            "must appear in the answer you are writing now."
         ),
         "inputSchema": {
             "type": "object",
@@ -2329,7 +2327,7 @@ TOOLS = [
                 "modality": {
                     "type": "string",
                     "enum": ["image", "video"],
-                    "description": "What to produce. The model is taken from the matching configured slot.",
+                    "description": "What to produce; the model comes from the matching slot.",
                 },
                 "prompt": {"type": "string", "description": "What to generate."},
                 "discussion_id": {
@@ -2338,16 +2336,21 @@ TOOLS = [
                 },
                 "duration_secs": {
                     "type": "integer",
-                    "description": "Video only. Server-capped; prefer the shortest clip that works.",
+                    "description": "Video only. Server-capped; prefer the shortest clip.",
                 },
                 "resolution": {
                     "type": "string",
-                    "description": "480p | 720p | 1080p. Higher costs more per second.",
+                    "description": "480p | 720p | 1080p. Higher costs more.",
                 },
-                "aspect_ratio": {"type": "string", "description": "e.g. 16:9, 9:16, 1:1."},
+                "aspect_ratio": {"type": "string", "description": "16:9, 9:16, 1:1…"},
                 "generate_audio": {
                     "type": "boolean",
-                    "description": "Video only. Audio raises the per-second price.",
+                    "description": (
+                        "Video only, DEFAULTS TO TRUE even when omitted. A "
+                        "generated soundtrack costs more per second and can "
+                        "get the clip refused for audio copyright while the "
+                        "picture was fine. Pass `false` unless sound is wanted."
+                    ),
                 },
                 "wait": {
                     "type": "boolean",
@@ -2363,11 +2366,11 @@ TOOLS = [
             "State of one media generation: `{id, modality, status, model, "
             "context_file_id?, width?, height?, duration_ms?, cost_usd?, "
             "is_byok?, last_error?, attempts}`.\n\n"
-            "Absent fields mean NOT MEASURED YET, never zero: a job still "
-            "running has no cost and no dimensions because nothing has been "
-            "billed or produced, not because they are null.\n\n"
-            "Dimensions are read from the produced file, not from the "
-            "request — providers do not honour the requested geometry."
+            "Absent fields mean NOT MEASURED YET, never zero: a running job "
+            "has no cost and no dimensions because nothing was billed or "
+            "produced.\n\n"
+            "Dimensions come from the produced file, not the request — "
+            "providers do not honour the requested geometry."
         ),
         "inputSchema": {
             "type": "object",
@@ -8066,9 +8069,17 @@ def call_media_generate(args):
         "prompt": args["prompt"],
         "discussion_id": discussion_id,
     }
-    for key in ("duration_secs", "resolution", "aspect_ratio", "generate_audio"):
+    for key in ("duration_secs", "resolution", "aspect_ratio"):
         if args.get(key) is not None:
             body[key] = args[key]
+    # Sent for every video, default included. Omitting it hands the decision to
+    # the provider, whose default is a soundtrack — the same silence that had a
+    # clip rejected on audio copyright with nothing in the request to explain
+    # it. An explicit value also lands in the stored params, so a past
+    # generation can be read back for what it actually asked for.
+    if modality == "video":
+        audio = args.get("generate_audio")
+        body["generate_audio"] = True if audio is None else bool(audio)
 
     queued = _unwrap(_http("POST", "/api/media/generate", body))
     if not args.get("wait"):
