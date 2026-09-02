@@ -97,10 +97,22 @@ generations started from one prompt therefore keep distinct transcript
 positions and run identities.
 
 The anchor is rendered as one media bubble whose state changes in place from
-pending/running to success or failure. On success, its action opens the
-canonical Assets panel and selects that exact persisted asset in the media
-viewer. The Assets entry remains available when a discussion has no file yet,
-because it is also the entry point for the first generation.
+pending/running to success or failure. On success it shows the media itself,
+fetched through the authenticated context-file endpoint as an object URL, and
+offers a single action — opening that exact persisted asset in the canonical
+Assets viewer. The shared run card's generic "open the run" link is suppressed
+here: the card rebuilds its own model on every rehydration, so the suppression
+is a prop of the card (`hideRunLink`), never an `href: null` the next
+rehydration would overwrite. The Assets entry remains available when a
+discussion has no file yet, because it is also the entry point for the first
+generation.
+
+The bubble shows what a reader asked for and nothing else: the raw job JSON is
+folded behind a "Details" toggle, the price sits at the bottom right once
+billed, and the only duration on screen is the length of a produced clip — a
+picture has none, and an elapsed run time there read as "this media lasts 8s".
+Every one of these rules is scoped to `kind === 'media'`; workflow and
+quick-prompt cards keep their existing rendering.
 
 Completion emits `ContextFilesChanged`, so an open discussion shows the asset
 without a reload.
@@ -111,11 +123,21 @@ without a reload.
   `POST /api/media/jobs/{id}/cancel`, `GET /api/media/costs`,
   `GET /api/media/estimate`.
 * UI: the discussion's **Assets** tab has a launcher (modality, connection,
-  prompt, duration / resolution / ratio, estimated price).
+  prompt, duration / resolution / ratio, soundtrack, estimated price).
 * Agents: MCP `media_generate` and `media_job_status`.
 * Publication goes through the single point
   `api::shared_runs::publish_media_job` — persisting the run and broadcasting
   it are inseparable, so a 100 s generation is visible while it runs.
+
+## The soundtrack is a decision, never a default
+
+Providers add audio to a video unless told otherwise. `generate_audio` reaches
+them through `MediaParams`, but an absent field left that decision to the
+provider — which is how a clip came back refused for audio copyright with
+nothing in the request to explain it. Both callers now state the value they
+mean: the form sends it for every video, and `media_generate` fills in `true`
+when the agent says nothing, with the default written in the tool description
+so an agent knows it can ask for silence. An image is never asked the question.
 
 Media spend is its own counter: a generation is billed per image or per second
 and its usage payload carries no token count at all, so folding it into the

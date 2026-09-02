@@ -28,6 +28,14 @@ Release notes for 0.9.3 and earlier are available in the
   generation from the provider's billed figure, never recomputed from a
   published rate. The estimate shown before sending comes from past billed
   generations, and reads as unknown — never as free — when there is none.
+  A finished generation shows the media itself inside its bubble, with the
+  price in the corner and a single way out — the asset in the carousel; the raw
+  job JSON folds away behind a "Details" toggle, and the only duration on
+  screen is the one of a produced clip. A video's soundtrack is now a stated
+  choice on both surfaces — a checkbox in the form and `generate_audio` on the
+  MCP tool, checked/true by default, which is what the providers were already
+  doing silently. That silence had a clip refused for audio copyright with
+  nothing in the request to explain it.
 
 - Discussions now report their storage weight, split by what a cleanup could
   actually reclaim: attachment bytes held on disk, extracted document text, and
