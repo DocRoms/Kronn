@@ -593,47 +593,13 @@ pub async fn decide_gate(
         ));
     }
 
-    // Belonging to the bound workflow is not enough: the page displays exactly
-    // ONE run — the one its `run_selector` resolves to — so a decision must be
-    // for THAT run, not for any other WaitingApproval run of the same workflow.
-    // Resolve the mirrored run server-side and require the supplied run_id to
-    // equal it (`latest` → most recent run; `latest_active` → most recent
-    // non-terminal run, falling back to the latest run when none is active).
-    let wf_for_selector = binding.workflow_id.clone();
-    let selector = binding.run_selector;
-    let mirrored = match state
-        .db
-        .with_conn(move |conn| {
-            let resolved = match selector {
-                crate::models::LivePageRunSelector::Latest => {
-                    crate::db::workflows::get_last_run(conn, &wf_for_selector)?
-                }
-                crate::models::LivePageRunSelector::LatestActive => {
-                    match crate::db::workflows::get_latest_active_run(conn, &wf_for_selector)? {
-                        Some(active) => Some(active),
-                        None => crate::db::workflows::get_last_run(conn, &wf_for_selector)?,
-                    }
-                }
-            };
-            Ok(resolved)
-        })
-        .await
-    {
-        Ok(mirrored) => mirrored,
-        Err(error) => {
-            return Json(ApiResponse::err_coded(
-                ApiErrorCode::Internal,
-                format!("DB error: {error}"),
-            ))
-        }
-    };
-    if mirrored.as_ref().map(|m| m.id.as_str()) != Some(run.id.as_str()) {
-        return Json(ApiResponse::err_coded(
-            ApiErrorCode::Validation,
-            "Run is not the one mirrored by this page",
-        ));
-    }
-
+    // The client sends the run_id it actually rendered, so trusting it (rather
+    // than re-resolving "the mirrored run" server-side at click time) is what the
+    // page's real use case needs: a concurrent second run of the same workflow —
+    // routine for a "mise en prod" — must not flip the resolution and reject the
+    // human's in-flight approval of the run they saw. Authorization is still
+    // bounded below: the run must belong to the bound workflow, be
+    // `WaitingApproval`, and its waiting gate must be in `allowed_gate_steps`.
     if run.status != RunStatus::WaitingApproval {
         return Json(ApiResponse::err_coded(
             ApiErrorCode::Conflict,

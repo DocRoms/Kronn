@@ -1844,24 +1844,6 @@ pub fn get_last_run(conn: &Connection, workflow_id: &str) -> Result<Option<Workf
     Ok(run)
 }
 
-/// Most recent NON-TERMINAL run (Pending / Running / WaitingApproval) for a
-/// workflow — the run a `latest_active` Live Page binding mirrors. `None` when
-/// the workflow has no active run; the caller falls back to [`get_last_run`].
-/// Keep the status set in sync with `RunStatus::is_terminal` (the inverse set).
-pub fn get_latest_active_run(conn: &Connection, workflow_id: &str) -> Result<Option<WorkflowRun>> {
-    let sql = format!(
-        "SELECT {} FROM workflow_runs \
-         WHERE workflow_id = ?1 AND status IN ('Pending', 'Running', 'WaitingApproval') \
-         ORDER BY started_at DESC LIMIT 1",
-        WORKFLOW_RUN_COLS
-    );
-    let mut stmt = conn.prepare(&sql)?;
-    let run = stmt
-        .query_row(params![workflow_id], |row| Ok(row_to_run(row)))
-        .optional()?;
-    Ok(run)
-}
-
 /// Count active runs for a workflow (for concurrency limiting).
 pub fn count_active_runs(conn: &Connection, workflow_id: &str) -> Result<u32> {
     let count: u32 = conn.query_row(

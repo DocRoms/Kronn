@@ -17,9 +17,29 @@ import { userError } from './userError';
 const ACTIVE_REFRESH_MS = 4_000;
 const IDLE_REFRESH_MS = 30_000;
 const QUIET_POLLS_BEFORE_IDLE = 3;
+// A single poll must never hang forever: fetch has no built-in timeout, so a
+// stalled request would leave the in-flight guard (`ticking`) stuck true and
+// freeze the loop with no recovery (a hidden/focused tab can't restart it).
+// Cap each tick so it always reaches `finally` → resets the guard → reschedules.
+const POLL_TIMEOUT_MS = 20_000;
 
 function isDocumentHidden(): boolean {
   return typeof document !== 'undefined' && document.visibilityState === 'hidden';
+}
+
+/**
+ * Reject `p` if it hasn't settled within `ms`. A rejection handler is attached
+ * to `p` itself, so a late settle after the timeout never surfaces as an
+ * unhandled rejection.
+ */
+function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('Live mirror poll timed out')), ms);
+    p.then(
+      value => { clearTimeout(timer); resolve(value); },
+      cause => { clearTimeout(timer); reject(cause); },
+    );
+  });
 }
 
 export interface UseLivePageMirrorParams {
@@ -113,17 +133,17 @@ export function useLivePageMirror({
           // Independent requests run concurrently. A mirror failure must NOT
           // fail the page fetch, so its rejection is isolated to keep the last
           // good mirror rather than blanking the pipeline.
-          const [page, mirrorResult] = await Promise.all([
+          const [page, mirrorResult] = await withTimeout(Promise.all([
             pagesApi.get(id),
             resolveBindingPipelines(id).catch(() => null),
-          ]);
+          ]), POLL_TIMEOUT_MS);
           if (!active) return;
           mirror = mirrorResult;
           revision = page.data_revision;
           setOwnedDetail(page);
           setError(null);
         } else {
-          mirror = await resolveBindingPipelines(id);
+          mirror = await withTimeout(resolveBindingPipelines(id), POLL_TIMEOUT_MS);
           if (!active) return;
           revision = externalDetailRef.current?.data_revision ?? null;
         }
