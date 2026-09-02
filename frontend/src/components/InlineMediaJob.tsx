@@ -30,8 +30,8 @@ export function InlineMediaJob({
   const details = mediaRunDetails(run.result);
   const assetId = details?.assetId;
   const modality = details?.modality;
-  const source = details?.referenceAssetId && details.referenceMode
-    ? { assetId: details.referenceAssetId, mode: details.referenceMode }
+  const source = details?.referenceAssetIds.length && details.referenceMode
+    ? { assetIds: details.referenceAssetIds, mode: details.referenceMode }
     : null;
   const model = sharedRunStatusCardModel(run, 'live');
   // The produced file, shown where it was asked for. `<img src>` cannot carry
@@ -81,14 +81,19 @@ export function InlineMediaJob({
           <p className="disc-media-msg-source" data-testid="media-bubble-source">
             <ImageIcon size={13} aria-hidden="true" />
             <span>{t(`disc.media.startedFrom.${source.mode}`)}</span>
-            <button
-              type="button"
-              className="disc-media-msg-source-open"
-              onClick={() => onOpenAsset(source.assetId)}
-              data-testid="media-bubble-source-open"
-            >
-              {t('disc.media.openSourceImage')}
-            </button>
+            {source.assetIds.map((assetId, index) => (
+              <button
+                key={assetId}
+                type="button"
+                className="disc-media-msg-source-open"
+                onClick={() => onOpenAsset(assetId)}
+                data-testid={source.assetIds.length > 1 ? `media-bubble-source-open-${index}` : 'media-bubble-source-open'}
+              >
+                {source.assetIds.length > 1
+                  ? t('disc.media.openSourceImageAt', index + 1)
+                  : t('disc.media.openSourceImage')}
+              </button>
+            ))}
           </p>
         )}
         {previewUrl && (

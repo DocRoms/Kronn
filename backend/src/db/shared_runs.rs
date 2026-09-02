@@ -266,10 +266,11 @@ pub fn media_run(job: &crate::db::media_jobs::MediaJob) -> SharedRun {
     result.width = job.rendered.width;
     result.height = job.rendered.height;
     result.media_duration_ms = job.rendered.duration_ms;
-    // Echoed from the request so the bubble can show what the clip was built
-    // on. The id alone: a viewer resolves it through the discussion's own
-    // files, and no path ever leaves the backend.
-    result.reference_asset_id = job.params.reference_asset_id.clone();
+    // Echoed from the request so the bubble can show what the result was built
+    // on. The ids alone: a viewer resolves them through the discussion's own
+    // files, and no path ever leaves the backend. Read through `reference_ids`
+    // so a job recorded with the single-image field still projects its source.
+    result.reference_asset_ids = job.params.reference_ids();
     result.reference_mode = job.params.reference_mode;
 
     let now = Utc::now();

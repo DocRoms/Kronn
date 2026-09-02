@@ -3314,15 +3314,20 @@ generate_audio: boolean | null, };
  */
 export type MediaParams = { duration_secs?: number | null, resolution?: string | null, aspect_ratio?: string | null, generate_audio?: boolean | null,
 /**
- * Context file of the SAME discussion used as the visual source. Only the
- * id is stored: the bytes are read at execution time, so a job resumed
- * after a restart re-reads the same file instead of carrying a copy of it
- * — and no local path or private URL is ever persisted, sent to a browser
- * or handed to an agent.
+ * Context files of the SAME discussion used as visual sources. Only ids
+ * are stored: the bytes are read at execution time, so a job resumed
+ * after a restart re-reads the same files instead of carrying a copy of
+ * them — and no local path or private URL is ever persisted, sent to a
+ * browser or handed to an agent.
+ */
+reference_asset_ids?: Array<string>,
+/**
+ * Single-image form written before several references existed. Read, and
+ * never written again: jobs recorded then must keep running unchanged.
  */
 reference_asset_id?: string | null,
 /**
- * What that image is for. Meaningless — and refused — without an asset.
+ * What those images are for. Meaningless — and refused — without an asset.
  */
 reference_mode?: MediaReferenceMode | null, };
 
@@ -3353,9 +3358,14 @@ export type MediaRendered = { width?: number | null, height?: number | null, dur
  */
 export type MediaRunResult = { schema_version: number, modality: MediaModality, phase: MediaPhase, progress?: number | null, generation_id?: string | null, asset_id?: string | null, message_id?: string | null, cost_usd?: number | null, is_byok?: boolean | null, width?: number | null, height?: number | null, media_duration_ms?: number | null,
 /**
- * The picture this generation started from, so a viewer can see what a
- * clip was built on without reading the job's parameters. An id, like
+ * The pictures this generation started from, so a viewer can see what a
+ * result was built on without reading the job's parameters. Ids, like
  * everywhere else: the projection reaches a browser.
+ */
+reference_asset_ids?: Array<string>,
+/**
+ * Single-image form of the field above, kept readable for runs published
+ * before a generation could start from several pictures.
  */
 reference_asset_id?: string | null, reference_mode?: MediaReferenceMode | null, };
 

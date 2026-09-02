@@ -94,7 +94,27 @@ async fn submit(
         // record and nothing to resume.
         MediaModality::Image => {
             let url = ctx.codec.image_url(ctx.base);
-            let body = ctx.codec.image_body(&job.model, &job.prompt, &job.params);
+            // Same rule as video: read at execution time from the ids the job
+            // stored, so a restart resumes with the same pictures.
+            let references = match load_references(db, job).await {
+                Ok(references) => references,
+                Err(e) => {
+                    settle_failure(db, &job.id, MediaJobStatus::Failed, &e.to_string(), now)
+                        .await?;
+                    return Ok(MediaJobStatus::Failed);
+                }
+            };
+            let body = match ctx
+                .codec
+                .image_body(&job.model, &job.prompt, &job.params, &references)
+            {
+                Ok(body) => body,
+                Err(e) => {
+                    settle_failure(db, &job.id, MediaJobStatus::Failed, &e.to_string(), now)
+                        .await?;
+                    return Ok(MediaJobStatus::Failed);
+                }
+            };
             // Stamped BEFORE the billable request leaves, and committed, so a
             // crash in flight cannot look like "never submitted".
             mark_attempt(db, &job.id, now).await?;
@@ -131,7 +151,11 @@ async fn submit(
             // Read at execution time from the id the job stored, so a restart
             // resumes with the same source picture instead of a copy that
             // could have been taken before the file was even final.
-            let reference = match load_reference(db, job).await {
+            let reference = match load_references(db, job).await.map(|mut r| {
+                // Every video model advertises a single frame; sending more
+                // would silently drop all but one.
+                (!r.is_empty()).then(|| r.remove(0))
+            }) {
                 Ok(reference) => reference,
                 Err(e) => {
                     settle_failure(db, &job.id, MediaJobStatus::Failed, &e.to_string(), now)
@@ -678,42 +702,44 @@ async fn advance_claimed(
 /// every attempt, so a retry after a restart uses the same picture, and a file
 /// that disappeared fails with a sentence instead of submitting a generation
 /// silently stripped of what made it the requested one.
-async fn load_reference(
+async fn load_references(
     db: &Database,
     job: &MediaJob,
-) -> Result<Option<crate::agents::media_codec::MediaReferenceImage>> {
-    let (Some(asset_id), Some(mode)) = (
-        job.params.reference_asset_id.clone(),
-        job.params.reference_mode,
-    ) else {
-        return Ok(None);
+) -> Result<Vec<crate::agents::media_codec::MediaReferenceImage>> {
+    let asset_ids = job.params.reference_ids();
+    let Some(mode) = job.params.reference_mode else {
+        return Ok(Vec::new());
     };
-    let lookup = asset_id.clone();
-    let file = db
-        .with_read_conn(move |conn| Ok(crate::db::discussions::get_context_file(conn, &lookup)?))
-        .await?
-        .ok_or_else(|| anyhow!("the source image of this generation no longer exists"))?;
-    // Re-checked here and not only at request time: the file could have been
-    // replaced or unlinked between the launch and this attempt, and a job must
-    // never read something outside the discussion it belongs to.
-    if job
-        .discussion_id
-        .as_deref()
-        .is_some_and(|discussion| discussion != file.discussion_id)
-    {
-        bail!("the source image no longer belongs to this discussion");
+    let mut loaded = Vec::with_capacity(asset_ids.len());
+    for asset_id in asset_ids {
+        let lookup = asset_id.clone();
+        let file = db
+            .with_read_conn(move |conn| Ok(crate::db::discussions::get_context_file(conn, &lookup)?))
+            .await?
+            .ok_or_else(|| anyhow!("a source image of this generation no longer exists"))?;
+        // Re-checked here and not only at request time: the file could have
+        // been replaced or unlinked between the launch and this attempt, and a
+        // job must never read something outside the discussion it belongs to.
+        if job
+            .discussion_id
+            .as_deref()
+            .is_some_and(|discussion| discussion != file.discussion_id)
+        {
+            bail!("a source image no longer belongs to this discussion");
+        }
+        let path = file
+            .disk_path
+            .ok_or_else(|| anyhow!("a source image has no stored file"))?;
+        let bytes = tokio::fs::read(&path)
+            .await
+            .map_err(|e| anyhow!("a source image could not be read: {e}"))?;
+        loaded.push(crate::agents::media_codec::MediaReferenceImage {
+            mode,
+            mime_type: file.mime_type,
+            bytes,
+        });
     }
-    let path = file
-        .disk_path
-        .ok_or_else(|| anyhow!("the source image has no stored file"))?;
-    let bytes = tokio::fs::read(&path)
-        .await
-        .map_err(|e| anyhow!("the source image could not be read: {e}"))?;
-    Ok(Some(crate::agents::media_codec::MediaReferenceImage {
-        mode,
-        mime_type: file.mime_type,
-        bytes,
-    }))
+    Ok(loaded)
 }
 
 #[cfg(test)]
@@ -832,10 +858,8 @@ mod tests {
             .expect("read")
             .expect("job");
 
-        let first = load_reference(&db, &job)
-            .await
-            .expect("readable")
-            .expect("a source image");
+        let loaded = load_references(&db, &job).await.expect("readable");
+        let first = loaded.first().expect("a source image");
         assert_eq!(first.bytes, b"first-bytes");
         assert_eq!(first.mime_type, "image/png");
 
@@ -843,13 +867,13 @@ mod tests {
         // what the next attempt submits, which is what makes a restart resume
         // with the real current picture.
         tokio::fs::write(&path, b"second").await.expect("rewrite");
-        let second = load_reference(&db, &job).await.expect("readable").unwrap();
-        assert_eq!(second.bytes, b"second");
+        let second = load_references(&db, &job).await.expect("readable");
+        assert_eq!(second[0].bytes, b"second");
 
         // A file that disappeared fails the job with a sentence instead of
         // submitting a generation silently stripped of its source image.
         tokio::fs::remove_file(&path).await.expect("remove");
-        let error = load_reference(&db, &job).await.unwrap_err().to_string();
+        let error = load_references(&db, &job).await.unwrap_err().to_string();
         assert!(error.contains("could not be read"), "got {error}");
     }
 
@@ -861,7 +885,7 @@ mod tests {
             .await
             .expect("read")
             .expect("job");
-        assert!(load_reference(&db, &job).await.expect("ok").is_none());
+        assert!(load_references(&db, &job).await.expect("ok").is_empty());
     }
 
     /// One-request HTTP server, returning the address and the raw request head

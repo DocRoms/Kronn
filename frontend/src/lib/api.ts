@@ -217,6 +217,7 @@ import type {
   CatalogModelEntry,
   DeleteManualModelRequest,
   MediaFramePosition,
+  MediaReferenceMode,
   MediaModelCapabilities,
   ModelCatalogSnapshot,
   ModelCatalogView,
@@ -2791,7 +2792,7 @@ export interface MediaJobView {
   attempts: number;
 }
 
-export type { MediaFramePosition, MediaModelCapabilities };
+export type { MediaFramePosition, MediaReferenceMode, MediaModelCapabilities };
 
 export interface MediaModelCapabilitiesResponse {
   model: string;

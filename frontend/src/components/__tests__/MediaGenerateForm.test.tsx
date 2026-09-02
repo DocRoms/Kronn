@@ -271,6 +271,22 @@ describe('MediaGenerateForm', () => {
     },
   });
 
+  /** What an IMAGE model advertises: a ceiling on reference images, and no
+   *  frames at all — a picture has no first or last one. */
+  const imageCapabilities = (maxReferences: number | null) => ({
+    model: 'google/gemini-3-pro-image',
+    capabilities: {
+      model: 'google/gemini-3-pro-image',
+      modality: 'image',
+      durations_secs: [],
+      resolutions: ['1K'],
+      aspect_ratios: ['1:1'],
+      frame_positions: [],
+      max_input_references: maxReferences,
+      generate_audio: null,
+    },
+  });
+
   const image = (id: string, filename: string) => ({
     id,
     discussion_id: 'd-1',
@@ -304,7 +320,7 @@ describe('MediaGenerateForm', () => {
 
     await waitFor(() => expect(mediaApi.generate).toHaveBeenCalledTimes(1));
     const body = mediaApi.generate.mock.calls[0][0];
-    expect(body).toMatchObject({ reference_asset_id: 'asset-1', reference_mode: 'last_frame' });
+    expect(body).toMatchObject({ reference_asset_ids: ['asset-1'], reference_mode: 'last_frame' });
     // The browser sends an id. A path would tell it where the file lives and
     // let it point a generation outside this room.
     expect(JSON.stringify(body)).not.toContain('/tmp/');
@@ -359,6 +375,102 @@ describe('MediaGenerateForm', () => {
     fireEvent.change(screen.getByRole('textbox'), { target: { value: 'un renard' } });
     fireEvent.click(screen.getByRole('button', { name: /disc\.media\.generate/ }));
     await waitFor(() => expect(mediaApi.generate).toHaveBeenCalledTimes(1));
+  });
+
+  it('sends several reference images for an image, in the order they were picked', async () => {
+    // Measured on the public catalogue: `google/gemini-3-pro-image` advertises
+    // up to 14. Providers weigh references by position, so the order the
+    // operator chose is the order that must leave.
+    mediaApi.capabilities.mockResolvedValue(imageCapabilities(3));
+    render(
+      <MediaGenerateForm
+        discussionId="d-1"
+        connections={[connection()]}
+        images={[image('asset-1', 'origami.png'), image('asset-2', 'renard.png')] as never}
+        t={t}
+      />,
+    );
+    fireEvent.click(screen.getByTestId('media-slot-conn-1:image'));
+    await waitFor(() => expect(screen.getByTestId('media-reference-picker')).toBeInTheDocument());
+
+    fireEvent.click(screen.getByTestId('media-reference-pick-asset-2'));
+    fireEvent.click(await screen.findByTestId('media-reference-pick-asset-1'));
+    // A frame is a video notion: nothing about one may appear here.
+    expect(screen.queryByTestId('media-reference-mode-first_frame')).toBeNull();
+
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'un renard origami' } });
+    fireEvent.click(screen.getByRole('button', { name: /disc\.media\.generate/ }));
+
+    await waitFor(() => expect(mediaApi.generate).toHaveBeenCalledTimes(1));
+    expect(mediaApi.generate.mock.calls[0][0]).toMatchObject({
+      reference_asset_ids: ['asset-2', 'asset-1'],
+      reference_mode: 'reference',
+    });
+  });
+
+  it('stops at the ceiling the model advertises, and says so', async () => {
+    // `microsoft/mai-image-2.5-pro` and the krea models advertise exactly one.
+    // A picker that simply stopped responding would read as broken.
+    mediaApi.capabilities.mockResolvedValue(imageCapabilities(1));
+    render(
+      <MediaGenerateForm
+        discussionId="d-1"
+        connections={[connection()]}
+        images={[image('asset-1', 'origami.png'), image('asset-2', 'renard.png')] as never}
+        t={t}
+      />,
+    );
+    fireEvent.click(screen.getByTestId('media-slot-conn-1:image'));
+    await waitFor(() => expect(screen.getByTestId('media-reference-picker')).toBeInTheDocument());
+    fireEvent.click(screen.getByTestId('media-reference-pick-asset-1'));
+
+    expect(await screen.findByTestId('media-reference-limit'))
+      .toHaveTextContent('disc.media.referenceLimitReached:1');
+    expect(screen.queryByTestId('media-reference-pick-asset-2')).toBeNull();
+  });
+
+  it('offers no reference at all when the image model advertises none', async () => {
+    mediaApi.capabilities.mockResolvedValue(imageCapabilities(null));
+    render(
+      <MediaGenerateForm
+        discussionId="d-1"
+        connections={[connection()]}
+        images={[image('asset-1', 'origami.png')] as never}
+        t={t}
+      />,
+    );
+    fireEvent.click(screen.getByTestId('media-slot-conn-1:image'));
+    await waitFor(() => expect(screen.getByTestId('media-generate-form')).toBeInTheDocument());
+    expect(screen.queryByTestId('media-reference-picker')).toBeNull();
+  });
+
+  it('trims the pictures a newly selected model cannot take', async () => {
+    // Trimmed, not dropped: what the narrower model still accepts survives the
+    // switch, and only the excess goes. Two image connections, two ceilings.
+    mediaApi.capabilities.mockImplementation(async (connectionId: string) =>
+      connectionId === 'conn-1' ? imageCapabilities(3) : imageCapabilities(1));
+    render(
+      <MediaGenerateForm
+        discussionId="d-1"
+        connections={[
+          connection({ video_model: null }),
+          connection({ id: 'conn-2', display_name: 'Krea', video_model: null, image_model: 'krea/krea-2-large' }),
+        ]}
+        images={[image('asset-1', 'a.png'), image('asset-2', 'b.png')] as never}
+        t={t}
+      />,
+    );
+    fireEvent.click(screen.getByTestId('media-slot-conn-1:image'));
+    await waitFor(() => expect(screen.getByTestId('media-reference-picker')).toBeInTheDocument());
+    fireEvent.click(screen.getByTestId('media-reference-pick-asset-1'));
+    fireEvent.click(await screen.findByTestId('media-reference-pick-asset-2'));
+    expect(await screen.findByTestId('media-reference-drop-asset-2')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId('media-slot-conn-2:image'));
+
+    await waitFor(() => expect(screen.queryByTestId('media-reference-drop-asset-2')).toBeNull());
+    // The first picture stays: the new model still takes one.
+    expect(screen.getByTestId('media-reference-drop-asset-1')).toBeInTheDocument();
   });
 
   it('offers no source image when the model takes none', async () => {

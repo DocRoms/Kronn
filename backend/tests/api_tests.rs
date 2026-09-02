@@ -16730,7 +16730,7 @@ async fn media_generate_refuses_a_source_image_it_cannot_vouch_for() {
         (
             "a mode with no image describes nothing",
             serde_json::json!({ "reference_mode": "first_frame" }),
-            "requires reference_asset_id",
+            "requires at least one reference asset",
         ),
         (
             "an image with no mode would silently become a plain text-to-video",
@@ -16757,6 +16757,23 @@ async fn media_generate_refuses_a_source_image_it_cannot_vouch_for() {
             serde_json::json!({ "reference_asset_id": "asset-ghost", "reference_mode": "reference" }),
             "unknown reference asset",
         ),
+        (
+            // KT-555 — a frame is one exact picture at one end of a clip.
+            // Several would be silently reduced to one, after billing.
+            "two images for a single frame",
+            serde_json::json!({
+                "reference_asset_ids": ["asset-no-file", "asset-not-image"],
+                "reference_mode": "last_frame"
+            }),
+            "takes a single image",
+        ),
+        (
+            "an unknown id inside a list is caught like a lone one",
+            serde_json::json!({
+                "reference_asset_ids": ["asset-ghost"], "reference_mode": "reference"
+            }),
+            "unknown reference asset",
+        ),
     ] {
         let mut body = serde_json::json!({
             "connection_id": "conn-media", "modality": "video",
@@ -16773,6 +16790,49 @@ async fn media_generate_refuses_a_source_image_it_cannot_vouch_for() {
             "{label}: expected a message naming '{expected}', got '{error}'"
         );
     }
+}
+
+/// KT-555 — several reference images reach the job, in the order chosen.
+#[tokio::test]
+async fn media_generate_records_every_reference_image_for_an_image() {
+    let state = test_state();
+    seed_media_connection(&state, Some("google/gemini-3-pro-image"), None).await;
+    seed_reference_image(&state, "asset-a", "disc-media", "image/png", Some("/tmp/a.png")).await;
+    seed_reference_image(&state, "asset-b", "disc-media", "image/jpeg", Some("/tmp/b.jpg")).await;
+    let app = build_router_with_auth(state.clone(), false);
+
+    let (status, body) = post_json(
+        app.clone(),
+        "/api/media/generate",
+        serde_json::json!({
+            "connection_id": "conn-media", "modality": "image",
+            "prompt": "un renard origami", "discussion_id": "disc-media",
+            "reference_asset_ids": ["asset-a", "asset-b"],
+            "reference_mode": "reference"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["success"], true, "got {body}");
+    let job_id = body["data"]["job_id"].as_str().unwrap().to_string();
+
+    let stored = state
+        .db
+        .with_read_conn(move |connection| {
+            kronn::db::media_jobs::get(connection, &job_id)
+        })
+        .await
+        .unwrap()
+        .expect("the job was written");
+    // Providers weigh references by position, so the order the caller chose is
+    // the order the job keeps.
+    assert_eq!(
+        stored.params.reference_ids(),
+        vec!["asset-a".to_string(), "asset-b".to_string()]
+    );
+    // The plural list is the contract now; the single-image field is only ever
+    // read, never written again.
+    assert!(stored.params.reference_asset_id.is_none());
 }
 
 #[tokio::test]

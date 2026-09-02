@@ -248,6 +248,25 @@
   border-radius: var(--kr-r-sm);
   background: var(--kr-bg-subtle);
 }
+/* One line per picked picture, numbered: providers weigh references by
+   position, so the order has to be readable. */
+.media-generate-reference-list {
+  flex-basis: 100%;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.media-generate-reference-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  font-size: var(--kr-fs-xs);
+  color: var(--kr-text-secondary);
+}
 .media-generate-reference-modes { display: flex; gap: 4px; }
 .media-generate-reference-mode {
   padding: 4px 8px;

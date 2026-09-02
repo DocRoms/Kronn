@@ -156,16 +156,31 @@ pub struct MediaParams {
     pub aspect_ratio: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generate_audio: Option<bool>,
-    /// Context file of the SAME discussion used as the visual source. Only the
-    /// id is stored: the bytes are read at execution time, so a job resumed
-    /// after a restart re-reads the same file instead of carrying a copy of it
-    /// — and no local path or private URL is ever persisted, sent to a browser
-    /// or handed to an agent.
+    /// Context files of the SAME discussion used as visual sources. Only ids
+    /// are stored: the bytes are read at execution time, so a job resumed
+    /// after a restart re-reads the same files instead of carrying a copy of
+    /// them — and no local path or private URL is ever persisted, sent to a
+    /// browser or handed to an agent.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reference_asset_ids: Vec<String>,
+    /// Single-image form written before several references existed. Read, and
+    /// never written again: jobs recorded then must keep running unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reference_asset_id: Option<String>,
-    /// What that image is for. Meaningless — and refused — without an asset.
+    /// What those images are for. Meaningless — and refused — without an asset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reference_mode: Option<MediaReferenceMode>,
+}
+
+impl MediaParams {
+    /// The source images of this job, whichever form recorded them. One list,
+    /// so no caller has to remember that an older job wrote a single id.
+    pub fn reference_ids(&self) -> Vec<String> {
+        if !self.reference_asset_ids.is_empty() {
+            return self.reference_asset_ids.clone();
+        }
+        self.reference_asset_id.clone().into_iter().collect()
+    }
 }
 
 /// Cost of one generation, as the provider declared it.
@@ -230,9 +245,13 @@ pub struct MediaRunResult {
     pub height: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub media_duration_ms: Option<u64>,
-    /// The picture this generation started from, so a viewer can see what a
-    /// clip was built on without reading the job's parameters. An id, like
+    /// The pictures this generation started from, so a viewer can see what a
+    /// result was built on without reading the job's parameters. Ids, like
     /// everywhere else: the projection reaches a browser.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reference_asset_ids: Vec<String>,
+    /// Single-image form of the field above, kept readable for runs published
+    /// before a generation could start from several pictures.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reference_asset_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -256,6 +275,7 @@ impl MediaRunResult {
             width: None,
             height: None,
             media_duration_ms: None,
+            reference_asset_ids: Vec::new(),
             reference_asset_id: None,
             reference_mode: None,
         }
@@ -265,6 +285,27 @@ impl MediaRunResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_job_recorded_with_a_single_image_still_names_its_source() {
+        // Jobs written before a generation could start from several pictures
+        // must keep running: the runner asks for one list and gets it.
+        let old = MediaParams {
+            reference_asset_id: Some("asset-1".into()),
+            reference_mode: Some(MediaReferenceMode::FirstFrame),
+            ..MediaParams::default()
+        };
+        assert_eq!(old.reference_ids(), vec!["asset-1".to_string()]);
+
+        let new = MediaParams {
+            reference_asset_ids: vec!["a".into(), "b".into()],
+            reference_mode: Some(MediaReferenceMode::Reference),
+            ..MediaParams::default()
+        };
+        assert_eq!(new.reference_ids(), vec!["a".to_string(), "b".to_string()]);
+
+        assert!(MediaParams::default().reference_ids().is_empty());
+    }
 
     #[test]
     fn statuses_round_trip_through_their_db_form() {

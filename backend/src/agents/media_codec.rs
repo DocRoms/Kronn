@@ -91,7 +91,17 @@ pub trait MediaCodec: Send + Sync {
     fn video_poll_url(&self, base: &str, provider_job_id: &str) -> String;
     fn video_content_url(&self, base: &str, provider_job_id: &str, index: u32) -> String;
 
-    fn image_body(&self, model: &str, prompt: &str, params: &MediaParams) -> Value;
+    /// `references` are the source images the caller pinned, in the order they
+    /// were chosen. A codec whose provider takes none must refuse rather than
+    /// drop them: an illustration built on nothing, billed in place of the one
+    /// that was asked for, is a charge for something nobody wanted.
+    fn image_body(
+        &self,
+        model: &str,
+        prompt: &str,
+        params: &MediaParams,
+        references: &[MediaReferenceImage],
+    ) -> Result<Value>;
     /// `reference` is the source image the caller pinned, when there is one.
     /// A codec whose provider cannot take one must refuse rather than drop it
     /// silently: a text-to-video billed in place of the requested
@@ -180,7 +190,13 @@ impl MediaCodec for OpenRouterMediaCodec {
         )
     }
 
-    fn image_body(&self, model: &str, prompt: &str, params: &MediaParams) -> Value {
+    fn image_body(
+        &self,
+        model: &str,
+        prompt: &str,
+        params: &MediaParams,
+        references: &[MediaReferenceImage],
+    ) -> Result<Value> {
         let mut body = json!({ "model": model, "prompt": prompt });
         if let Some(resolution) = &params.resolution {
             body["resolution"] = json!(resolution);
@@ -188,7 +204,27 @@ impl MediaCodec for OpenRouterMediaCodec {
         if let Some(ratio) = &params.aspect_ratio {
             body["aspect_ratio"] = json!(ratio);
         }
-        body
+        if !references.is_empty() {
+            // `input_references` is the documented shape of the images route:
+            // the same object as a video's `frame_images`, minus `frame_type`.
+            // A frame is a picture the clip must reproduce at one end, which
+            // an illustration has no equivalent of — so asking for one here is
+            // refused rather than quietly turned into a plain reference.
+            if let Some(frame) = references.iter().find(|r| r.mode.frame_capability().is_some()) {
+                bail!(
+                    "an image generation takes reference images, not a '{}'",
+                    frame.mode.as_str()
+                );
+            }
+            body["input_references"] = json!(references
+                .iter()
+                .map(|reference| json!({
+                    "type": "image_url",
+                    "image_url": { "url": reference.data_url() },
+                }))
+                .collect::<Vec<_>>());
+        }
+        Ok(body)
     }
 
     fn video_body(
@@ -395,12 +431,24 @@ impl MediaCodec for NvidiaMediaCodec {
         )
     }
 
-    fn image_body(&self, model: &str, prompt: &str, params: &MediaParams) -> Value {
+    fn image_body(
+        &self,
+        model: &str,
+        prompt: &str,
+        params: &MediaParams,
+        references: &[MediaReferenceImage],
+    ) -> Result<Value> {
+        // Same reason as the video route below: nobody here has an NVIDIA
+        // image slot to measure the reference contract against, and a guessed
+        // payload would be submitted and billed on a supposition.
+        if !references.is_empty() {
+            bail!("generating from reference images is not supported on this NVIDIA connection yet");
+        }
         let mut body = json!({ "model": model, "prompt": prompt });
         if let Some(resolution) = &params.resolution {
             body["size"] = json!(resolution);
         }
-        body
+        Ok(body)
     }
 
     fn video_body(
@@ -808,6 +856,95 @@ mod tests {
         let url = frames[0]["image_url"]["url"].as_str().unwrap();
         assert!(url.starts_with("data:image/png;base64,"), "got {url}");
         assert!(!url.contains("http"), "no address of ours may leave: {url}");
+    }
+
+    #[test]
+    fn several_reference_images_travel_inline_in_the_order_they_were_chosen() {
+        // Measured shape of `POST /v1/images`: the same object as a video's
+        // `frame_images`, minus `frame_type`. Documented as accepting base64
+        // data URLs, which is the only form Kronn can send — it listens on
+        // 127.0.0.1, so there is no address a provider could fetch.
+        let first = MediaReferenceImage {
+            mode: MediaReferenceMode::Reference,
+            mime_type: "image/png".into(),
+            bytes: vec![0x01],
+        };
+        let second = MediaReferenceImage {
+            mode: MediaReferenceMode::Reference,
+            mime_type: "image/jpeg".into(),
+            bytes: vec![0x02],
+        };
+        let body = OpenRouterMediaCodec
+            .image_body(
+                "google/gemini-3-pro-image",
+                "un renard",
+                &MediaParams::default(),
+                &[first, second],
+            )
+            .unwrap();
+        let references = body["input_references"]
+            .as_array()
+            .expect("two reference images");
+        assert_eq!(references.len(), 2);
+        assert_eq!(references[0]["type"], "image_url");
+        // Order is what the caller chose, and providers weigh references by
+        // position — reordering them would change the result silently.
+        assert!(references[0]["image_url"]["url"]
+            .as_str()
+            .unwrap()
+            .starts_with("data:image/png;base64,"));
+        assert!(references[1]["image_url"]["url"]
+            .as_str()
+            .unwrap()
+            .starts_with("data:image/jpeg;base64,"));
+        // A frame is a video notion; nothing of it may leak into this body.
+        assert!(body.get("frame_images").is_none());
+        assert!(!body.to_string().contains("frame_type"));
+    }
+
+    #[test]
+    fn an_image_without_references_says_nothing_about_them() {
+        let body = OpenRouterMediaCodec
+            .image_body("m", "p", &MediaParams::default(), &[])
+            .unwrap();
+        assert!(body.get("input_references").is_none());
+        assert_eq!(body["model"], "m");
+    }
+
+    #[test]
+    fn a_frame_is_refused_by_the_image_route_rather_than_turned_into_a_reference() {
+        // An illustration has no first or last frame. Silently demoting the
+        // request to a plain reference would bill a generation nobody asked
+        // for, and the difference would only show in the result.
+        let error = OpenRouterMediaCodec
+            .image_body(
+                "google/gemini-3-pro-image",
+                "p",
+                &MediaParams::default(),
+                &[reference(MediaReferenceMode::FirstFrame)],
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("first_frame"), "got {error}");
+    }
+
+    #[test]
+    fn nvidia_refuses_reference_images_instead_of_guessing_their_shape() {
+        // Nobody here has an NVIDIA image slot to measure the contract
+        // against, and a guessed payload would be submitted and billed.
+        let error = NvidiaMediaCodec
+            .image_body(
+                "m",
+                "p",
+                &MediaParams::default(),
+                &[reference(MediaReferenceMode::Reference)],
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("not supported"), "got {error}");
+        assert!(NvidiaMediaCodec
+            .image_body("m", "p", &MediaParams::default(), &[])
+            .is_ok());
     }
 
     #[test]

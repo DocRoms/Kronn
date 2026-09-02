@@ -62,12 +62,17 @@ pub struct GenerateMediaRequest {
     pub aspect_ratio: Option<String>,
     #[serde(default)]
     pub generate_audio: Option<bool>,
-    /// Image of THIS discussion to generate from. An id, never a path or a
-    /// URL: the caller — browser or agent — never learns where the file lives,
-    /// and cannot point the generation at anything outside the room.
+    /// Images of THIS discussion to generate from, in the order they should
+    /// reach the provider. Ids, never paths or URLs: the caller — browser or
+    /// agent — never learns where a file lives, and cannot point the
+    /// generation at anything outside the room.
+    #[serde(default)]
+    pub reference_asset_ids: Option<Vec<String>>,
+    /// Single-image form. Accepted so a caller written against the earlier
+    /// contract keeps working; equivalent to a one-element list.
     #[serde(default)]
     pub reference_asset_id: Option<String>,
-    /// What that image is for: `first_frame`, `last_frame` or `reference`.
+    /// What those images are for: `first_frame`, `last_frame` or `reference`.
     #[serde(default)]
     pub reference_mode: Option<MediaReferenceMode>,
 }
@@ -167,7 +172,7 @@ pub async fn generate(
     // its mode must be one the chosen model actually advertises. Every one of
     // those failures costs nothing here and would cost a billed submission
     // there.
-    let reference = match resolve_reference(
+    let references = match resolve_references(
         &state,
         &req,
         &connection,
@@ -175,7 +180,7 @@ pub async fn generate(
     )
     .await
     {
-        Ok(reference) => reference,
+        Ok(references) => references,
         Err(message) => return Json(ApiResponse::err(message)),
     };
 
@@ -205,8 +210,13 @@ pub async fn generate(
         resolution: req.resolution.clone(),
         aspect_ratio: req.aspect_ratio.clone(),
         generate_audio: req.generate_audio,
-        reference_asset_id: reference.as_ref().map(|(id, _)| id.clone()),
-        reference_mode: reference.as_ref().map(|(_, mode)| *mode),
+        reference_asset_ids: references
+            .as_ref()
+            .map(|(ids, _)| ids.clone())
+            .unwrap_or_default(),
+        // Never written again: the plural list above is the contract now.
+        reference_asset_id: None,
+        reference_mode: references.as_ref().map(|(_, mode)| *mode),
     };
     if idempotency_key.is_some() {
         let existing_lookup = job_id.clone();
@@ -1164,30 +1174,52 @@ async fn fetch_model_capabilities(
 /// caller can act on: an agent that picked an asset from another discussion, a
 /// browser that sent a mode the model does not support, a file that is not an
 /// image. None of them reaches the provider.
-async fn resolve_reference(
+async fn resolve_references(
     state: &AppState,
     req: &GenerateMediaRequest,
     connection: &crate::models::ExternalApiConnection,
     model: &str,
-) -> Result<Option<(String, MediaReferenceMode)>, String> {
-    let asset_id = match req.reference_asset_id.as_deref().map(str::trim) {
-        Some(id) if !id.is_empty() => id.to_string(),
-        _ => {
-            // A mode without an image describes nothing, and silently dropping
-            // it would produce a plain text-to-video the caller did not ask
-            // for — and would still be billed for.
-            return match req.reference_mode {
-                Some(_) => Err("reference_mode requires reference_asset_id".to_string()),
-                None => Ok(None),
-            };
+) -> Result<Option<(Vec<String>, MediaReferenceMode)>, String> {
+    // Both forms describe the same thing, so they are merged into one list
+    // rather than made to compete: a caller sending both gets what it named,
+    // in the order it named it, with no duplicate reaching the provider.
+    let mut asset_ids: Vec<String> = Vec::new();
+    for candidate in req
+        .reference_asset_id
+        .iter()
+        .chain(req.reference_asset_ids.iter().flatten())
+    {
+        let id = candidate.trim();
+        if !id.is_empty() && !asset_ids.iter().any(|kept| kept == id) {
+            asset_ids.push(id.to_string());
         }
-    };
+    }
+    if asset_ids.is_empty() {
+        // A mode without an image describes nothing, and silently dropping
+        // it would produce a plain text-to-media the caller did not ask
+        // for — and would still be billed for.
+        return match req.reference_mode {
+            Some(_) => Err("reference_mode requires at least one reference asset".to_string()),
+            None => Ok(None),
+        };
+    }
     let Some(mode) = req.reference_mode else {
         return Err(
-            "reference_mode is required with reference_asset_id: first_frame, last_frame or reference"
+            "reference_mode is required with a reference asset: first_frame, last_frame or reference"
                 .to_string(),
         );
     };
+    // A frame is one exact picture at one end of a clip; there is no such
+    // thing as several. This holds with or without a catalogue, so it is
+    // checked before anything is fetched — sending more would silently drop
+    // all but one, after billing.
+    if mode.frame_capability().is_some() && asset_ids.len() > 1 {
+        return Err(format!(
+            "'{}' takes a single image, {} were sent",
+            mode.as_str(),
+            asset_ids.len()
+        ));
+    }
     let Some(discussion_id) = req.discussion_id.as_deref().map(str::trim).filter(|id| !id.is_empty())
     else {
         // Without a room there is nothing to check membership against, and a
@@ -1197,41 +1229,43 @@ async fn resolve_reference(
     };
     let discussion_id = discussion_id.to_string();
 
-    let lookup = asset_id.clone();
-    let file = state
-        .db
-        .with_read_conn(move |conn| {
-            Ok(crate::db::discussions::get_context_file(conn, &lookup)?)
-        })
-        .await
-        .map_err(|e| format!("failed to read the source image: {e}"))?
-        .ok_or_else(|| format!("unknown reference asset: {asset_id}"))?;
+    for asset_id in &asset_ids {
+        let lookup = asset_id.clone();
+        let file = state
+            .db
+            .with_read_conn(move |conn| {
+                Ok(crate::db::discussions::get_context_file(conn, &lookup)?)
+            })
+            .await
+            .map_err(|e| format!("failed to read the source image: {e}"))?
+            .ok_or_else(|| format!("unknown reference asset: {asset_id}"))?;
 
-    // Membership is the security boundary: an id is guessable, a room is not
-    // shared. Same message for "absent" and "elsewhere" would leak which ids
-    // exist, so both say what the caller can act on without confirming the
-    // existence of another room's file.
-    if file.discussion_id != discussion_id {
-        return Err("the reference asset does not belong to this discussion".to_string());
-    }
-    if file.disk_path.is_none() {
-        return Err(
-            "the reference asset has no stored file — only an uploaded image can be used"
-                .to_string(),
-        );
-    }
-    if !file.mime_type.starts_with("image/") {
-        return Err(format!(
-            "the reference asset is not an image ({})",
-            file.mime_type
-        ));
-    }
-    if file.original_size > MAX_REFERENCE_BYTES {
-        return Err(format!(
-            "the reference image is too large ({} MB); the ceiling is {} MB",
-            file.original_size / (1024 * 1024),
-            MAX_REFERENCE_BYTES / (1024 * 1024)
-        ));
+        // Membership is the security boundary: an id is guessable, a room is
+        // not shared. Same message for "absent" and "elsewhere" would leak
+        // which ids exist, so both say what the caller can act on without
+        // confirming the existence of another room's file.
+        if file.discussion_id != discussion_id {
+            return Err("the reference asset does not belong to this discussion".to_string());
+        }
+        if file.disk_path.is_none() {
+            return Err(
+                "the reference asset has no stored file — only an uploaded image can be used"
+                    .to_string(),
+            );
+        }
+        if !file.mime_type.starts_with("image/") {
+            return Err(format!(
+                "the reference asset is not an image ({})",
+                file.mime_type
+            ));
+        }
+        if file.original_size > MAX_REFERENCE_BYTES {
+            return Err(format!(
+                "the reference image is too large ({} MB); the ceiling is {} MB",
+                file.original_size / (1024 * 1024),
+                MAX_REFERENCE_BYTES / (1024 * 1024)
+            ));
+        }
     }
 
     // Capability preflight. An unreachable catalogue answers nothing, and a
@@ -1265,7 +1299,21 @@ async fn resolve_reference(
                 mode.as_str()
             ));
         }
+        // The ceiling is per model, and it ranges from 1 to 16 across the
+        // catalogue: a fixed one would be wrong for nearly every provider.
+        // A catalogue that advertises nothing stays silent — the submission is
+        // what tells — but a stated maximum is enforced before it is billed.
+        if let (MediaReferenceMode::Reference, Some(maximum)) =
+            (mode, capabilities.max_input_references)
+        {
+            if asset_ids.len() as u32 > maximum {
+                return Err(format!(
+                    "model '{model}' takes at most {maximum} reference image(s), {} were sent",
+                    asset_ids.len()
+                ));
+            }
+        }
     }
 
-    Ok(Some((asset_id, mode)))
+    Ok(Some((asset_ids, mode)))
 }

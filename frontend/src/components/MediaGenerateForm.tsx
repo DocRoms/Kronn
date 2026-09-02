@@ -13,6 +13,7 @@ import type {
   MediaModality,
   MediaFramePosition,
   MediaModelCapabilities,
+  MediaReferenceMode,
 } from '../lib/api';
 import type { ContextFile } from '../types/generated';
 import './MediaGenerateForm.css';
@@ -97,10 +98,12 @@ export function MediaGenerateForm({
   // rejected for copyright, with no clue in the request that it existed.
   const [generateAudio, setGenerateAudio] = useState(true);
   const [capabilities, setCapabilities] = useState<MediaModelCapabilities | null>(null);
-  // The picture this clip starts (or ends) on, chosen among the room's own
-  // assets. An id, never a path: the browser never learns where the file
-  // lives, and the backend re-checks that it belongs to this discussion.
-  const [reference, setReference] = useState<{ assetId: string; mode: MediaFramePosition } | null>(null);
+  // The pictures this generation starts from, chosen among the room's own
+  // assets. Ids, never paths: the browser never learns where a file lives, and
+  // the backend re-checks that each one belongs to this discussion. A clip
+  // takes exactly one — a frame is one end of it; an illustration takes as
+  // many references as its model advertises.
+  const [reference, setReference] = useState<{ assetIds: string[]; mode: MediaReferenceMode } | null>(null);
   const [referenceUrl, setReferenceUrl] = useState<string | null>(null);
   /// Width of the chosen picture, or null while unknown. A picture that could
   /// not be measured never blocks: refusing on an unknown would hide a source
@@ -160,28 +163,45 @@ export function MediaGenerateForm({
   // first and a last frame, 9 only a first, and 4 none at all — so an empty
   // list means the picker does not appear, not that it defaults to something.
   const framePositions = isVideo ? (capabilities?.frame_positions ?? []) : [];
-  const canReference = framePositions.length > 0 && images.length > 0;
+  // How many pictures an IMAGE model takes as references. The catalogue states
+  // it per model and it ranges from 1 to 16, so a fixed number would be wrong
+  // for nearly every provider. Absent means the model advertises none.
+  const maxReferences = isVideo ? 0 : (capabilities?.max_input_references ?? 0);
+  const referenceLimit = isVideo ? 1 : maxReferences;
+  const canReference =
+    (isVideo ? framePositions.length > 0 : maxReferences > 0) && images.length > 0;
+  const pickedIds = reference?.assetIds ?? [];
+  const canPickMore = pickedIds.length < referenceLimit;
 
   // A source image the newly selected model cannot take must be dropped, not
   // carried into a submission it would fail.
   useEffect(() => {
     setReference(current => {
       if (!current) return null;
-      return framePositions.includes(current.mode) ? current : null;
+      if (!canReference) return null;
+      if (isVideo) return framePositions.includes(current.mode as MediaFramePosition) ? current : null;
+      if (current.mode !== 'reference') return null;
+      // Trimmed rather than dropped: the pictures already chosen stay, and
+      // only what the new model cannot take goes.
+      return current.assetIds.length > referenceLimit
+        ? { ...current, assetIds: current.assetIds.slice(0, referenceLimit) }
+        : current;
     });
-  }, [framePositions]);
+    // `framePositions` is rebuilt on every render, so it cannot gate this.
+  }, [canReference, isVideo, referenceLimit, capabilities]);
 
   // Thumbnail of the chosen picture: what the operator picked must be visible
   // before paying for a clip built on it.
   useEffect(() => {
-    if (!reference) {
+    const firstAssetId = reference?.assetIds[0];
+    if (!firstAssetId) {
       setReferenceUrl(null);
       setReferenceWidth(null);
       return;
     }
     let objectUrl: string | null = null;
     let cancelled = false;
-    discussionsApi.contextFileBlob(discussionId, reference.assetId)
+    discussionsApi.contextFileBlob(discussionId, firstAssetId)
       .then(async (blob: Blob) => {
         if (cancelled) return;
         objectUrl = URL.createObjectURL(blob);
@@ -204,6 +224,24 @@ export function MediaGenerateForm({
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
   }, [discussionId, reference]);
+
+  const pickImage = useCallback((assetId: string) => {
+    setReference(current => {
+      const mode: MediaReferenceMode = isVideo ? framePositions[0] : 'reference';
+      if (!current) return { assetIds: [assetId], mode };
+      if (current.assetIds.includes(assetId)) return current;
+      if (current.assetIds.length >= referenceLimit) return current;
+      return { ...current, assetIds: [...current.assetIds, assetId] };
+    });
+  }, [framePositions, isVideo, referenceLimit]);
+
+  const dropImage = useCallback((assetId: string) => {
+    setReference(current => {
+      if (!current) return null;
+      const assetIds = current.assetIds.filter(id => id !== assetId);
+      return assetIds.length ? { ...current, assetIds } : null;
+    });
+  }, []);
 
   // A choice the provider does not accept must not survive a model change: it
   // would be submitted as-is and refused after billing started.
@@ -257,7 +295,7 @@ export function MediaGenerateForm({
       durationSecs: selected.modality === 'video' ? durationSecs : null,
       resolution: selected.modality === 'video' ? resolution : null,
       generateAudio: selected.modality === 'video' ? generateAudio : null,
-      reference: reference ? `${reference.assetId}:${reference.mode}` : null,
+      reference: reference ? `${reference.assetIds.join(',')}:${reference.mode}` : null,
     });
     if (pendingLaunchRef.current?.signature !== signature) {
       pendingLaunchRef.current = { signature, key: crypto.randomUUID() };
@@ -278,8 +316,8 @@ export function MediaGenerateForm({
           // this box exists to remove.
           ? { duration_secs: durationSecs, resolution, generate_audio: generateAudio }
           : {}),
-        ...(reference && selected.modality === 'video'
-          ? { reference_asset_id: reference.assetId, reference_mode: reference.mode }
+        ...(reference
+          ? { reference_asset_ids: reference.assetIds, reference_mode: reference.mode }
           : {}),
       });
       setLaunched({ model: job.model });
@@ -384,26 +422,48 @@ export function MediaGenerateForm({
 
       {canReference && (
         <fieldset className="media-generate-reference" data-testid="media-reference-picker">
-          <legend>{t('disc.media.sourceImage')}</legend>
-          {reference ? (
+          <legend>{isVideo ? t('disc.media.sourceImage') : t('disc.media.referenceImages')}</legend>
+          {reference && (
             <div className="media-generate-reference-picked">
               {referenceUrl && <img src={referenceUrl} alt="" />}
-              <div className="media-generate-reference-modes" role="radiogroup">
-                {framePositions.map(position => (
-                  <button
-                    key={position}
-                    type="button"
-                    role="radio"
-                    aria-checked={reference.mode === position}
-                    data-active={reference.mode === position}
-                    className="media-generate-reference-mode"
-                    onClick={() => setReference({ ...reference, mode: position })}
-                    data-testid={`media-reference-mode-${position}`}
-                  >
-                    {t(`disc.media.frame.${position}`)}
-                  </button>
-                ))}
-              </div>
+              {isVideo && (
+                <div className="media-generate-reference-modes" role="radiogroup">
+                  {framePositions.map(position => (
+                    <button
+                      key={position}
+                      type="button"
+                      role="radio"
+                      aria-checked={reference.mode === position}
+                      data-active={reference.mode === position}
+                      className="media-generate-reference-mode"
+                      onClick={() => setReference({ ...reference, mode: position })}
+                      data-testid={`media-reference-mode-${position}`}
+                    >
+                      {t(`disc.media.frame.${position}`)}
+                    </button>
+                  ))}
+                </div>
+              )}
+              {!isVideo && (
+                // Named one by one: which pictures were chosen, and in which
+                // order — providers weigh references by position.
+                <ul className="media-generate-reference-list">
+                  {reference.assetIds.map((assetId, index) => (
+                    <li key={assetId}>
+                      <span>{index + 1}. {images.find(image => image.id === assetId)?.filename ?? assetId}</span>
+                      <button
+                        type="button"
+                        className="btn btn-sm btn-ghost"
+                        onClick={() => dropImage(assetId)}
+                        aria-label={t('disc.media.clearSourceImage')}
+                        data-testid={`media-reference-drop-${assetId}`}
+                      >
+                        <X size={12} aria-hidden="true" />
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
               <button
                 type="button"
                 className="btn btn-sm btn-ghost"
@@ -419,21 +479,32 @@ export function MediaGenerateForm({
                 </p>
               )}
             </div>
-          ) : (
+          )}
+          {canPickMore ? (
             <div className="media-generate-reference-choices">
-              {images.map(image => (
-                <button
-                  key={image.id}
-                  type="button"
-                  className="media-generate-reference-choice"
-                  onClick={() => setReference({ assetId: image.id, mode: framePositions[0] })}
-                  data-testid={`media-reference-pick-${image.id}`}
-                  title={image.filename}
-                >
-                  {image.filename}
-                </button>
-              ))}
+              {images
+                .filter(image => !pickedIds.includes(image.id))
+                .map(image => (
+                  <button
+                    key={image.id}
+                    type="button"
+                    className="media-generate-reference-choice"
+                    onClick={() => pickImage(image.id)}
+                    data-testid={`media-reference-pick-${image.id}`}
+                    title={image.filename}
+                  >
+                    {image.filename}
+                  </button>
+                ))}
             </div>
+          ) : (
+            // The ceiling is the model's own, said out loud: a picker that
+            // simply stopped responding would read as broken.
+            !isVideo && (
+              <p className="set-hint" data-testid="media-reference-limit">
+                {t('disc.media.referenceLimitReached', referenceLimit)}
+              </p>
+            )
           )}
         </fieldset>
       )}
