@@ -10604,5 +10604,58 @@ class MediaGenerateAudioTests(unittest.TestCase):
         self.assertIn("copyright", described.lower())
 
 
+class MediaGenerateReferenceTests(unittest.TestCase):
+    """KT-551 — a source image is an id in the room, never a path or a URL."""
+
+    def setUp(self):
+        self.mod = _load_module()
+        self.fake_http = mock.MagicMock(return_value={
+            "success": True,
+            "data": {"job_id": "job-1", "status": "pending", "model": "m"},
+        })
+        patch = mock.patch.object(self.mod, "_http", self.fake_http)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def _call(self, **extra):
+        self.mod.call_media_generate({
+            "connection_id": "conn-1",
+            "modality": "video",
+            "prompt": "un renard",
+            "discussion_id": "disc-1",
+            **extra,
+        })
+        return self.fake_http.call_args.args[2]
+
+    def test_the_pair_travels_to_the_backend(self):
+        body = self._call(reference_asset_id="asset-7", reference_mode="first_frame")
+        self.assertEqual(body["reference_asset_id"], "asset-7")
+        self.assertEqual(body["reference_mode"], "first_frame")
+
+    def test_half_a_pair_is_refused_before_any_http(self):
+        # Sent alone, the id would be read as a plain text-to-video and billed
+        # as one — the generation would succeed and be the wrong thing.
+        for extra in ({"reference_asset_id": "asset-7"}, {"reference_mode": "last_frame"}):
+            with self.assertRaises(RuntimeError):
+                self._call(**extra)
+            self.fake_http.assert_not_called()
+
+    def test_an_image_generation_is_never_given_a_frame(self):
+        with self.assertRaises(RuntimeError):
+            self.mod.call_media_generate({
+                "connection_id": "conn-1", "modality": "image", "prompt": "p",
+                "discussion_id": "disc-1",
+                "reference_asset_id": "asset-7", "reference_mode": "first_frame",
+            })
+        self.fake_http.assert_not_called()
+
+    def test_the_schema_tells_an_agent_where_the_image_comes_from(self):
+        tool = next(t for t in self.mod.TOOLS if t["name"] == "media_generate")
+        described = tool["inputSchema"]["properties"]["reference_asset_id"]["description"]
+        self.assertIn("THIS DISCUSSION", described)
+        self.assertIn("never a path or URL", described)
+        self.assertIn("reference_mode", described)
+
+
 if __name__ == "__main__":
     unittest.main()

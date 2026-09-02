@@ -2301,56 +2301,68 @@ TOOLS = [
     {
         "name": "media_generate",
         "description": (
-            "Generate an image or a video on a configured HTTP connection "
-            "(OpenRouter, NVIDIA). Returns `{job_id, status, model}`.\n\n"
-            "**You do NOT choose the model.** It comes from the connection's "
-            "configured image/video slot, so nothing can be billed on a model "
-            "the human did not pick. A modality with no slot is refused, "
-            "naming what to configure.\n\n"
+            "Generate an image or video on a configured HTTP connection. "
+            "Returns `{job_id, status, model}`.\n\n"
+            "**You do NOT choose the model**: it comes from the connection's "
+            "configured slot, so nothing can be billed on a model the human "
+            "did not pick. A modality with no slot is refused, naming what to "
+            "configure.\n\n"
             "**Cost is real.** Video is billed per second (~0.07 USD for 5 s "
-            "at 480p) and image per picture; a soundtrack, generated unless "
-            "you pass `generate_audio: false`, raises that rate. Duration and "
-            "resolution are capped server-side. Ask for the shortest clip "
-            "that answers the need.\n\n"
-            "**`wait` defaults to false** and should stay there: a video "
-            "takes ~100 s and lands in the discussion on its own, as a context "
-            "file every agent can see. Pass `wait: true` only when the media "
-            "must appear in the answer you are writing now."
+            "at 480p), image per picture; a soundtrack — on unless you pass "
+            "`generate_audio: false` — raises that rate. Ask for the shortest "
+            "clip that works.\n\n"
+            "**`wait` defaults to false** and should stay there: a video takes "
+            "~100 s and lands in the discussion by itself, as a context file "
+            "every agent sees. Pass `true` only when the media must appear in "
+            "the answer you are writing now."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "connection_id": {
                     "type": "string",
-                    "description": "External API connection id (from `mcp_list` or the settings UI).",
+                    "description": "Connection id (`mcp_list` or settings).",
                 },
                 "modality": {
                     "type": "string",
                     "enum": ["image", "video"],
-                    "description": "What to produce; the model comes from the matching slot.",
+                    "description": "What to produce.",
                 },
                 "prompt": {"type": "string", "description": "What to generate."},
                 "discussion_id": {
                     "type": "string",
-                    "description": "Discussion the asset is attached to. Defaults to the bound discussion.",
+                    "description": "Asset's discussion. Defaults to the bound one.",
                 },
                 "duration_secs": {
                     "type": "integer",
-                    "description": "Video only. Server-capped; prefer the shortest clip.",
+                    "description": "Video only, server-capped.",
                 },
                 "resolution": {
                     "type": "string",
-                    "description": "480p | 720p | 1080p. Higher costs more.",
+                    "description": "480p | 720p | 1080p.",
                 },
                 "aspect_ratio": {"type": "string", "description": "16:9, 9:16, 1:1…"},
                 "generate_audio": {
                     "type": "boolean",
                     "description": (
                         "Video only, DEFAULTS TO TRUE even when omitted. A "
-                        "generated soundtrack costs more per second and can "
-                        "get the clip refused for audio copyright while the "
-                        "picture was fine. Pass `false` unless sound is wanted."
+                        "soundtrack costs more per second and can get the clip "
+                        "refused for audio copyright. Pass `false` unless "
+                        "sound is wanted."
                     ),
+                },
+                "reference_asset_id": {
+                    "type": "string",
+                    "description": (
+                        "Video only. Id of an image ALREADY IN THIS DISCUSSION "
+                        "to generate from — never a path or URL. Needs "
+                        "`reference_mode`."
+                    ),
+                },
+                "reference_mode": {
+                    "type": "string",
+                    "enum": ["first_frame", "last_frame", "reference"],
+                    "description": "Use of that image. Only what the model advertises is accepted.",
                 },
                 "wait": {
                     "type": "boolean",
@@ -2368,9 +2380,8 @@ TOOLS = [
             "is_byok?, last_error?, attempts}`.\n\n"
             "Absent fields mean NOT MEASURED YET, never zero: a running job "
             "has no cost and no dimensions because nothing was billed or "
-            "produced.\n\n"
-            "Dimensions come from the produced file, not the request — "
-            "providers do not honour the requested geometry."
+            "produced. Dimensions come from the produced file, not the "
+            "request — providers do not honour the requested geometry."
         ),
         "inputSchema": {
             "type": "object",
@@ -8072,6 +8083,20 @@ def call_media_generate(args):
     for key in ("duration_secs", "resolution", "aspect_ratio"):
         if args.get(key) is not None:
             body[key] = args[key]
+    # An id inside the bound discussion, checked server-side. Sending one
+    # without a mode would be read as a plain text-to-video and billed as such,
+    # so the pair is refused here rather than half-honoured there.
+    asset = args.get("reference_asset_id")
+    mode = args.get("reference_mode")
+    if asset and not mode:
+        raise RuntimeError("media_generate: reference_asset_id requires reference_mode")
+    if mode and not asset:
+        raise RuntimeError("media_generate: reference_mode requires reference_asset_id")
+    if asset:
+        if modality != "video":
+            raise RuntimeError("media_generate: a source image applies to video only")
+        body["reference_asset_id"] = asset
+        body["reference_mode"] = mode
     # Sent for every video, default included. Omitting it hands the decision to
     # the provider, whose default is a soundtrack — the same silence that had a
     # clip rejected on audio copyright with nothing in the request to explain

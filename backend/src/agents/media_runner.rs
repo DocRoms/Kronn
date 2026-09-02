@@ -128,7 +128,32 @@ async fn submit(
         }
         MediaModality::Video => {
             let url = ctx.codec.video_submit_url(ctx.base);
-            let body = ctx.codec.video_body(&job.model, &job.prompt, &job.params);
+            // Read at execution time from the id the job stored, so a restart
+            // resumes with the same source picture instead of a copy that
+            // could have been taken before the file was even final.
+            let reference = match load_reference(db, job).await {
+                Ok(reference) => reference,
+                Err(e) => {
+                    settle_failure(db, &job.id, MediaJobStatus::Failed, &e.to_string(), now)
+                        .await?;
+                    return Ok(MediaJobStatus::Failed);
+                }
+            };
+            let body = match ctx
+                .codec
+                .video_body(&job.model, &job.prompt, &job.params, reference.as_ref())
+            {
+                Ok(body) => body,
+                // A provider that cannot take this source image must fail
+                // BEFORE the submission: a text-to-video billed in place of
+                // the requested image-to-video is a charge for something
+                // nobody asked for.
+                Err(e) => {
+                    settle_failure(db, &job.id, MediaJobStatus::Failed, &e.to_string(), now)
+                        .await?;
+                    return Ok(MediaJobStatus::Failed);
+                }
+            };
             mark_attempt(db, &job.id, now).await?;
             let text = send_json(ctx.client, &url, ctx.api_key, &body).await?;
             let ack = match ctx.codec.parse_submit_response(&text) {
@@ -645,6 +670,50 @@ async fn advance_claimed(
     tracing::debug!(job = %job.id, status = ?status, "media job advanced");
 
     Ok(())
+}
+
+/// Reads the source image a job named, at the moment it is needed.
+///
+/// The job stores an id, never bytes and never a path: the file is re-read on
+/// every attempt, so a retry after a restart uses the same picture, and a file
+/// that disappeared fails with a sentence instead of submitting a generation
+/// silently stripped of what made it the requested one.
+async fn load_reference(
+    db: &Database,
+    job: &MediaJob,
+) -> Result<Option<crate::agents::media_codec::MediaReferenceImage>> {
+    let (Some(asset_id), Some(mode)) = (
+        job.params.reference_asset_id.clone(),
+        job.params.reference_mode,
+    ) else {
+        return Ok(None);
+    };
+    let lookup = asset_id.clone();
+    let file = db
+        .with_read_conn(move |conn| Ok(crate::db::discussions::get_context_file(conn, &lookup)?))
+        .await?
+        .ok_or_else(|| anyhow!("the source image of this generation no longer exists"))?;
+    // Re-checked here and not only at request time: the file could have been
+    // replaced or unlinked between the launch and this attempt, and a job must
+    // never read something outside the discussion it belongs to.
+    if job
+        .discussion_id
+        .as_deref()
+        .is_some_and(|discussion| discussion != file.discussion_id)
+    {
+        bail!("the source image no longer belongs to this discussion");
+    }
+    let path = file
+        .disk_path
+        .ok_or_else(|| anyhow!("the source image has no stored file"))?;
+    let bytes = tokio::fs::read(&path)
+        .await
+        .map_err(|e| anyhow!("the source image could not be read: {e}"))?;
+    Ok(Some(crate::agents::media_codec::MediaReferenceImage {
+        mode,
+        mime_type: file.mime_type,
+        bytes,
+    }))
 }
 
 #[cfg(test)]

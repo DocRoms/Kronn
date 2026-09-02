@@ -17,7 +17,32 @@ use anyhow::{anyhow, bail, Result};
 use serde_json::{json, Value};
 
 use crate::agents::media_asset_url::AssetHostPolicy;
-use crate::models::{MediaCost, MediaModality, MediaParams};
+use crate::models::{MediaCost, MediaModality, MediaParams, MediaReferenceMode};
+
+/// A source image, already read from disk by the worker.
+///
+/// Bytes rather than a path or a URL: Kronn runs on `127.0.0.1`, so there is no
+/// address a provider could fetch, and publishing one would hand a private file
+/// to the internet. The codec decides how its provider wants those bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MediaReferenceImage {
+    pub mode: MediaReferenceMode,
+    pub mime_type: String,
+    pub bytes: Vec<u8>,
+}
+
+impl MediaReferenceImage {
+    /// `data:` form, which is what an inline image looks like on every
+    /// OpenAI-shaped route.
+    pub fn data_url(&self) -> String {
+        use base64::Engine as _;
+        format!(
+            "data:{};base64,{}",
+            self.mime_type,
+            base64::engine::general_purpose::STANDARD.encode(&self.bytes)
+        )
+    }
+}
 
 /// Acknowledgement of an asynchronous submission.
 #[derive(Debug, Clone, PartialEq)]
@@ -67,7 +92,17 @@ pub trait MediaCodec: Send + Sync {
     fn video_content_url(&self, base: &str, provider_job_id: &str, index: u32) -> String;
 
     fn image_body(&self, model: &str, prompt: &str, params: &MediaParams) -> Value;
-    fn video_body(&self, model: &str, prompt: &str, params: &MediaParams) -> Value;
+    /// `reference` is the source image the caller pinned, when there is one.
+    /// A codec whose provider cannot take one must refuse rather than drop it
+    /// silently: a text-to-video billed in place of the requested
+    /// image-to-video is a charge for something nobody asked for.
+    fn video_body(
+        &self,
+        model: &str,
+        prompt: &str,
+        params: &MediaParams,
+        reference: Option<&MediaReferenceImage>,
+    ) -> Result<Value>;
 
     /// Payloads and billed cost of a synchronous image response.
     fn parse_image_response(&self, body: &str) -> Result<MediaImageResponse>;
@@ -156,7 +191,13 @@ impl MediaCodec for OpenRouterMediaCodec {
         body
     }
 
-    fn video_body(&self, model: &str, prompt: &str, params: &MediaParams) -> Value {
+    fn video_body(
+        &self,
+        model: &str,
+        prompt: &str,
+        params: &MediaParams,
+        reference: Option<&MediaReferenceImage>,
+    ) -> Result<Value> {
         let mut body = json!({ "model": model, "prompt": prompt });
         if let Some(duration) = params.duration_secs {
             body["duration"] = json!(duration);
@@ -170,7 +211,25 @@ impl MediaCodec for OpenRouterMediaCodec {
         if let Some(audio) = params.generate_audio {
             body["generate_audio"] = json!(audio);
         }
-        body
+        if let Some(reference) = reference {
+            // `frame_images` is the documented shape, and `frame_type` is what
+            // separates a first frame from a last one. A visual reference is
+            // NOT a frame: no video model advertises it, so it is refused
+            // here rather than submitted as a frame the model would honour
+            // differently from what was asked.
+            let Some(frame_type) = reference.mode.frame_capability() else {
+                bail!(
+                    "this provider takes a first or last frame, not a '{}'",
+                    reference.mode.as_str()
+                );
+            };
+            body["frame_images"] = json!([{
+                "type": "image_url",
+                "image_url": { "url": reference.data_url() },
+                "frame_type": frame_type,
+            }]);
+        }
+        Ok(body)
     }
 
     fn parse_image_response(&self, body: &str) -> Result<MediaImageResponse> {
@@ -344,7 +403,20 @@ impl MediaCodec for NvidiaMediaCodec {
         body
     }
 
-    fn video_body(&self, model: &str, prompt: &str, params: &MediaParams) -> Value {
+    fn video_body(
+        &self,
+        model: &str,
+        prompt: &str,
+        params: &MediaParams,
+        reference: Option<&MediaReferenceImage>,
+    ) -> Result<Value> {
+        // NVIDIA's image-to-video contract is not the OpenAI-shaped one, and
+        // nobody here has an NVIDIA video slot to measure it against. Guessing
+        // a payload would submit — and bill — a request built on a supposition.
+        // Refusing names what is missing instead.
+        if reference.is_some() {
+            bail!("generating from a source image is not supported on this NVIDIA connection yet");
+        }
         let mut body = json!({ "model": model, "prompt": prompt });
         if let Some(duration) = params.duration_secs {
             body["duration"] = json!(duration);
@@ -352,7 +424,7 @@ impl MediaCodec for NvidiaMediaCodec {
         if let Some(resolution) = &params.resolution {
             body["size"] = json!(resolution);
         }
-        body
+        Ok(body)
     }
 
     fn parse_image_response(&self, body: &str) -> Result<MediaImageResponse> {
@@ -689,15 +761,103 @@ mod tests {
             generate_audio: Some(false),
             ..MediaParams::default()
         };
-        let body = c.video_body("bytedance/seedance-2.0-mini", "un chat", &params);
+        let body = c
+            .video_body("bytedance/seedance-2.0-mini", "un chat", &params, None)
+            .unwrap();
         assert_eq!(body["duration"], 5);
         assert_eq!(body["generate_audio"], false);
+        // No source image was pinned, so the body must not mention one.
+        assert!(body.get("frame_images").is_none());
 
         // An empty params set must not invent defaults the provider would
         // then bill differently from what the user saw.
-        let bare = c.video_body("m", "p", &MediaParams::default());
+        let bare = c
+            .video_body("m", "p", &MediaParams::default(), None)
+            .unwrap();
         assert!(bare.get("duration").is_none());
         assert!(bare.get("generate_audio").is_none());
         assert_eq!(bare["model"], "m");
+    }
+
+    fn reference(mode: MediaReferenceMode) -> MediaReferenceImage {
+        MediaReferenceImage {
+            mode,
+            mime_type: "image/png".into(),
+            // Two bytes are enough: what matters is the envelope, not the
+            // picture.
+            bytes: vec![0x89, 0x50],
+        }
+    }
+
+    #[test]
+    fn a_source_image_travels_inline_never_as_an_address() {
+        // Kronn listens on 127.0.0.1: there is no URL a provider could fetch,
+        // and publishing one would hand a private file to the internet.
+        let body = OpenRouterMediaCodec
+            .video_body(
+                "bytedance/seedance-2.0-mini",
+                "un renard",
+                &MediaParams::default(),
+                Some(&reference(MediaReferenceMode::FirstFrame)),
+            )
+            .unwrap();
+        let frames = body["frame_images"].as_array().expect("one frame image");
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0]["frame_type"], "first_frame");
+        assert_eq!(frames[0]["type"], "image_url");
+        let url = frames[0]["image_url"]["url"].as_str().unwrap();
+        assert!(url.starts_with("data:image/png;base64,"), "got {url}");
+        assert!(!url.contains("http"), "no address of ours may leave: {url}");
+    }
+
+    #[test]
+    fn the_last_frame_is_pinned_as_the_last_one() {
+        let body = OpenRouterMediaCodec
+            .video_body(
+                "m",
+                "p",
+                &MediaParams::default(),
+                Some(&reference(MediaReferenceMode::LastFrame)),
+            )
+            .unwrap();
+        assert_eq!(body["frame_images"][0]["frame_type"], "last_frame");
+    }
+
+    #[test]
+    fn a_visual_reference_is_refused_rather_than_passed_off_as_a_frame() {
+        // No video model advertises "reference" under `supported_frame_images`.
+        // Submitting it as a frame would have the model reproduce a picture the
+        // caller only meant as inspiration — and bill for it.
+        let error = OpenRouterMediaCodec
+            .video_body(
+                "m",
+                "p",
+                &MediaParams::default(),
+                Some(&reference(MediaReferenceMode::Reference)),
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("first or last frame"), "got {error}");
+    }
+
+    #[test]
+    fn nvidia_names_what_it_cannot_do_instead_of_guessing_a_payload() {
+        // Nobody here has an NVIDIA video slot to measure its image-to-video
+        // contract against, and an invented payload would be submitted, and
+        // billed, on a supposition.
+        let error = NvidiaMediaCodec
+            .video_body(
+                "m",
+                "p",
+                &MediaParams::default(),
+                Some(&reference(MediaReferenceMode::FirstFrame)),
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("not supported"), "got {error}");
+        // Without a source image it keeps working exactly as before.
+        assert!(NvidiaMediaCodec
+            .video_body("m", "p", &MediaParams::default(), None)
+            .is_ok());
     }
 }
