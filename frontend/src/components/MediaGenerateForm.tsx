@@ -6,9 +6,15 @@
 // question the configuration already answers — and offering a modality nobody
 // had configured.
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Clapperboard, Image as ImageIcon, Loader2, Sparkles } from 'lucide-react';
-import { media } from '../lib/api';
-import type { ExternalApiConnectionView, MediaModality, MediaModelCapabilities } from '../lib/api';
+import { Clapperboard, Image as ImageIcon, Loader2, Sparkles, X } from 'lucide-react';
+import { media, discussions as discussionsApi } from '../lib/api';
+import type {
+  ExternalApiConnectionView,
+  MediaModality,
+  MediaFramePosition,
+  MediaModelCapabilities,
+} from '../lib/api';
+import type { ContextFile } from '../types/generated';
 import './MediaGenerateForm.css';
 
 type T = (key: string, ...args: (string | number)[]) => string;
@@ -59,11 +65,14 @@ function slotsOf(connections: ExternalApiConnectionView[]): Slot[] {
 export function MediaGenerateForm({
   discussionId,
   connections,
+  images = [],
   t,
   onLaunched,
 }: {
   discussionId: string;
   connections: ExternalApiConnectionView[];
+  /** Images of THIS discussion, the only ones a generation may start from. */
+  images?: ContextFile[];
   t: T;
   /** Fired once the backend accepted the job — after this, the form is
    *  already reset and reusable, so the caller can rely on it purely as a
@@ -82,6 +91,11 @@ export function MediaGenerateForm({
   // rejected for copyright, with no clue in the request that it existed.
   const [generateAudio, setGenerateAudio] = useState(true);
   const [capabilities, setCapabilities] = useState<MediaModelCapabilities | null>(null);
+  // The picture this clip starts (or ends) on, chosen among the room's own
+  // assets. An id, never a path: the browser never learns where the file
+  // lives, and the backend re-checks that it belongs to this discussion.
+  const [reference, setReference] = useState<{ assetId: string; mode: MediaFramePosition } | null>(null);
+  const [referenceUrl, setReferenceUrl] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [launched, setLaunched] = useState<{ model: string } | null>(null);
@@ -131,6 +145,44 @@ export function MediaGenerateForm({
   // capabilities keep the box for a video, which is the pre-catalogue
   // behaviour and stays truthful: the provider does generate audio.
   const offersAudio = isVideo && capabilities?.generate_audio !== false;
+
+  // Only what this model advertises. 15 of the 28 video models take both a
+  // first and a last frame, 9 only a first, and 4 none at all — so an empty
+  // list means the picker does not appear, not that it defaults to something.
+  const framePositions = isVideo ? (capabilities?.frame_positions ?? []) : [];
+  const canReference = framePositions.length > 0 && images.length > 0;
+
+  // A source image the newly selected model cannot take must be dropped, not
+  // carried into a submission it would fail.
+  useEffect(() => {
+    setReference(current => {
+      if (!current) return null;
+      return framePositions.includes(current.mode) ? current : null;
+    });
+  }, [framePositions]);
+
+  // Thumbnail of the chosen picture: what the operator picked must be visible
+  // before paying for a clip built on it.
+  useEffect(() => {
+    if (!reference) {
+      setReferenceUrl(null);
+      return;
+    }
+    let objectUrl: string | null = null;
+    let cancelled = false;
+    discussionsApi.contextFileBlob(discussionId, reference.assetId)
+      .then((blob: Blob) => {
+        if (cancelled) return;
+        objectUrl = URL.createObjectURL(blob);
+        setReferenceUrl(objectUrl);
+      })
+      .catch(() => { if (!cancelled) setReferenceUrl(null); });
+    return () => {
+      cancelled = true;
+      setReferenceUrl(null);
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [discussionId, reference]);
 
   // A choice the provider does not accept must not survive a model change: it
   // would be submitted as-is and refused after billing started.
@@ -182,6 +234,7 @@ export function MediaGenerateForm({
       durationSecs: selected.modality === 'video' ? durationSecs : null,
       resolution: selected.modality === 'video' ? resolution : null,
       generateAudio: selected.modality === 'video' ? generateAudio : null,
+      reference: reference ? `${reference.assetId}:${reference.mode}` : null,
     });
     if (pendingLaunchRef.current?.signature !== signature) {
       pendingLaunchRef.current = { signature, key: crypto.randomUUID() };
@@ -202,9 +255,13 @@ export function MediaGenerateForm({
           // this box exists to remove.
           ? { duration_secs: durationSecs, resolution, generate_audio: generateAudio }
           : {}),
+        ...(reference && selected.modality === 'video'
+          ? { reference_asset_id: reference.assetId, reference_mode: reference.mode }
+          : {}),
       });
       setLaunched({ model: job.model });
       setPrompt('');
+      setReference(null);
       pendingLaunchRef.current = null;
       onLaunched?.(job.job_id, job.message_id);
     } catch (e) {
@@ -212,7 +269,7 @@ export function MediaGenerateForm({
     } finally {
       setBusy(false);
     }
-  }, [aspectRatio, busy, discussionId, durationSecs, generateAudio, onLaunched, prompt, resolution, selected]);
+  }, [aspectRatio, busy, discussionId, durationSecs, generateAudio, onLaunched, prompt, reference, resolution, selected]);
 
   if (slots.length === 0) {
     return (
@@ -300,6 +357,57 @@ export function MediaGenerateForm({
           />
           <span>{t('disc.media.generateAudio')}</span>
         </label>
+      )}
+
+      {canReference && (
+        <fieldset className="media-generate-reference" data-testid="media-reference-picker">
+          <legend>{t('disc.media.sourceImage')}</legend>
+          {reference ? (
+            <div className="media-generate-reference-picked">
+              {referenceUrl && <img src={referenceUrl} alt="" />}
+              <div className="media-generate-reference-modes" role="radiogroup">
+                {framePositions.map(position => (
+                  <button
+                    key={position}
+                    type="button"
+                    role="radio"
+                    aria-checked={reference.mode === position}
+                    data-active={reference.mode === position}
+                    className="media-generate-reference-mode"
+                    onClick={() => setReference({ ...reference, mode: position })}
+                    data-testid={`media-reference-mode-${position}`}
+                  >
+                    {t(`disc.media.frame.${position}`)}
+                  </button>
+                ))}
+              </div>
+              <button
+                type="button"
+                className="btn btn-sm btn-ghost"
+                onClick={() => setReference(null)}
+                aria-label={t('disc.media.clearSourceImage')}
+                data-testid="media-reference-clear"
+              >
+                <X size={13} aria-hidden="true" />
+              </button>
+            </div>
+          ) : (
+            <div className="media-generate-reference-choices">
+              {images.map(image => (
+                <button
+                  key={image.id}
+                  type="button"
+                  className="media-generate-reference-choice"
+                  onClick={() => setReference({ assetId: image.id, mode: framePositions[0] })}
+                  data-testid={`media-reference-pick-${image.id}`}
+                  title={image.filename}
+                >
+                  {image.filename}
+                </button>
+              ))}
+            </div>
+          )}
+        </fieldset>
       )}
 
       {/* Each ratio carries a box in its own proportions — the same trick the

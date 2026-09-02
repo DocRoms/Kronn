@@ -129,6 +129,62 @@ without a reload.
   `api::shared_runs::publish_media_job` — persisting the run and broadcasting
   it are inseparable, so a 100 s generation is visible while it runs.
 
+## What a model accepts, read rather than assumed
+
+`GET /api/media/models?connection_id&modality` reads the provider's own
+catalogue for the model configured on that connection, and the launcher offers
+exactly what it names. The launcher used to offer 3 s and 1080p against
+`bytedance/seedance-2.0-mini`, which accepts 4..15 s and 480p/720p only — two
+billable clicks that could only come back rejected — while hiding three of the
+seven ratios it does accept.
+
+The two OpenRouter catalogues have different shapes: the video route is flat
+(`supported_durations`, `supported_resolutions`, `supported_aspect_ratios`,
+`supported_frame_images`, `generate_audio`), the image route nests typed
+entries under `supported_parameters` (`aspect_ratio` as an enum,
+`input_references` as a range). An unadvertised field stays empty and an empty
+field means "do not offer it". A provider with no media catalogue at all
+(NVIDIA serves none) leaves the launcher on its configured fallbacks rather
+than emptying it. Answers are cached in memory for ten minutes.
+
+Deliberately NOT stored in `model_catalog_entries` (KT-531): that table is a
+catalogue of AGENT models, with provenance and tier assignment. These envelopes
+are per provider model and volatile — a max duration changes without notice —
+and persisting them would make a stale row authoritative over the provider.
+
+## Generating from an image already in the room
+
+A video may start from — or end on — a picture the discussion already holds.
+The request names it by context-file id plus a mode (`first_frame`,
+`last_frame`, `reference`); it never carries a path or a URL, so neither a
+browser nor an agent learns where the file lives or can point a generation
+outside the room.
+
+Everything is checked before anything durable is written and long before the
+provider is paid: the asset exists, belongs to THIS discussion, is an image
+with stored bytes, is under the size ceiling, and its mode is one the model
+advertises. A refused request leaves no anchor message and no job. A catalogue
+that cannot be reached does not become a refusal — the provider stays the
+authority — but a mode it explicitly does not list is refused here.
+
+Only the id is persisted, in `media_jobs.params_json`. The worker re-reads the
+file on each attempt, so a job resumed after a restart uses the same picture
+and one that left the discussion in between fails the job instead of reaching
+the provider stripped of what made it the requested generation.
+
+The image travels to the provider as a `data:` payload. Kronn listens on
+127.0.0.1: there is no URL a provider could fetch, and publishing one would
+hand a private file to the internet. OpenRouter's documented shape is
+`frame_images: [{type, image_url: {url}, frame_type}]`.
+
+Two deliberate refusals. A visual reference on a video is refused rather than
+submitted as a frame: no video model advertises `reference` under
+`supported_frame_images`, and passing it as a frame would have the model
+reproduce a picture that was only an inspiration — and bill for it. NVIDIA
+refuses a source image naming what is missing, because its image-to-video
+contract has not been measured here and an invented payload would be billed on
+a supposition.
+
 ## The soundtrack is a decision, never a default
 
 Providers add audio to a video unless told otherwise. `generate_audio` reaches

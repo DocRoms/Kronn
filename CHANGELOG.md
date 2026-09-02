@@ -35,7 +35,12 @@ Release notes for 0.9.3 and earlier are available in the
   choice on both surfaces — a checkbox in the form and `generate_audio` on the
   MCP tool, checked/true by default, which is what the providers were already
   doing silently. That silence had a clip refused for audio copyright with
-  nothing in the request to explain it.
+  nothing in the request to explain it. The launcher's durations, resolutions,
+  ratios and audio switch now come from the provider's own catalogue instead of
+  a hard-coded list that offered choices the model rejects, and a video can
+  start from — or end on — an image the discussion already holds, picked in the
+  form or named by an agent through MCP. That image is referenced by id and
+  travels inline: no local path, URL or credential ever leaves Kronn.
 
 - Discussions now report their storage weight, split by what a cleanup could
   actually reclaim: attachment bytes held on disk, extracted document text, and

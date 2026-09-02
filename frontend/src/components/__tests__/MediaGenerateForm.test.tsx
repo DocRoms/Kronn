@@ -6,7 +6,11 @@ const { mediaApi } = vi.hoisted(() => ({
   mediaApi: { generate: vi.fn(), estimate: vi.fn(), capabilities: vi.fn() },
 }));
 
-vi.mock('../../lib/api', () => ({ media: mediaApi }));
+const contextFileBlob = vi.fn();
+vi.mock('../../lib/api', () => ({
+  media: mediaApi,
+  discussions: { contextFileBlob: (...a: unknown[]) => contextFileBlob(...a) },
+}));
 
 import { MediaGenerateForm } from '../MediaGenerateForm';
 
@@ -40,6 +44,9 @@ describe('MediaGenerateForm', () => {
     // Default: a provider that advertises nothing, so the form keeps its
     // fallback lists. Tests that care about the catalogue override this.
     mediaApi.capabilities.mockResolvedValue({ model: 'x', capabilities: null });
+    contextFileBlob.mockResolvedValue(new Blob(['x']));
+    URL.createObjectURL = vi.fn(() => 'blob:thumb');
+    URL.revokeObjectURL = vi.fn();
     mediaApi.generate.mockResolvedValue({
       job_id: 'job-1',
       status: 'pending',
@@ -246,6 +253,108 @@ describe('MediaGenerateForm', () => {
     // This model names no soundtrack switch, so the box is not shown — and
     // nothing is asserted about audio it never offered.
     expect(screen.queryByTestId('media-generate-audio')).toBeNull();
+  });
+
+  const videoCapabilities = (frames: string[]) => ({
+    model: 'bytedance/seedance-2.0-mini',
+    capabilities: {
+      model: 'bytedance/seedance-2.0-mini',
+      modality: 'video',
+      durations_secs: [4, 5],
+      resolutions: ['480p'],
+      aspect_ratios: ['16:9'],
+      frame_positions: frames,
+      max_input_references: null,
+      generate_audio: true,
+    },
+  });
+
+  const image = (id: string, filename: string) => ({
+    id,
+    discussion_id: 'd-1',
+    filename,
+    mime_type: 'image/png',
+    original_size: 2048,
+    extracted_size: 0,
+    disk_path: `/tmp/${id}.png`,
+    message_id: null,
+    ai_generation: null,
+    created_at: '2026-09-01T10:00:00Z',
+  });
+
+  it('starts a clip from an image of this room, by id and never by path', async () => {
+    mediaApi.capabilities.mockResolvedValue(videoCapabilities(['first_frame', 'last_frame']));
+    render(
+      <MediaGenerateForm
+        discussionId="d-1"
+        connections={[connection()]}
+        images={[image('asset-1', 'origami.png')] as never}
+        t={t}
+      />,
+    );
+    fireEvent.click(screen.getByTestId('media-slot-conn-1:video'));
+    await waitFor(() => expect(screen.getByTestId('media-reference-picker')).toBeInTheDocument());
+
+    fireEvent.click(screen.getByTestId('media-reference-pick-asset-1'));
+    fireEvent.click(await screen.findByTestId('media-reference-mode-last_frame'));
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'un renard' } });
+    fireEvent.click(screen.getByRole('button', { name: /disc\.media\.generate/ }));
+
+    await waitFor(() => expect(mediaApi.generate).toHaveBeenCalledTimes(1));
+    const body = mediaApi.generate.mock.calls[0][0];
+    expect(body).toMatchObject({ reference_asset_id: 'asset-1', reference_mode: 'last_frame' });
+    // The browser sends an id. A path would tell it where the file lives and
+    // let it point a generation outside this room.
+    expect(JSON.stringify(body)).not.toContain('/tmp/');
+  });
+
+  it('offers no source image when the model takes none', async () => {
+    // Four of the 28 video models advertise no frame at all; offering the
+    // picker there would promise a mode the provider refuses.
+    mediaApi.capabilities.mockResolvedValue(videoCapabilities([]));
+    render(
+      <MediaGenerateForm
+        discussionId="d-1"
+        connections={[connection()]}
+        images={[image('asset-1', 'origami.png')] as never}
+        t={t}
+      />,
+    );
+    fireEvent.click(screen.getByTestId('media-slot-conn-1:video'));
+    await waitFor(() => expect(screen.getByTestId('media-ratio-16:9')).toBeInTheDocument());
+    expect(screen.queryByTestId('media-reference-picker')).toBeNull();
+  });
+
+  it('drops a picked image the newly selected model cannot take', async () => {
+    mediaApi.capabilities.mockResolvedValue(videoCapabilities(['first_frame', 'last_frame']));
+    const { rerender } = render(
+      <MediaGenerateForm
+        discussionId="d-1"
+        connections={[connection()]}
+        images={[image('asset-1', 'origami.png')] as never}
+        t={t}
+      />,
+    );
+    fireEvent.click(screen.getByTestId('media-slot-conn-1:video'));
+    await waitFor(() => expect(screen.getByTestId('media-reference-picker')).toBeInTheDocument());
+    fireEvent.click(screen.getByTestId('media-reference-pick-asset-1'));
+    fireEvent.click(await screen.findByTestId('media-reference-mode-last_frame'));
+
+    // The operator switches to a model that only takes a first frame: the
+    // stored choice would be submitted as-is and refused after billing.
+    mediaApi.capabilities.mockResolvedValue(videoCapabilities(['first_frame']));
+    rerender(
+      <MediaGenerateForm
+        discussionId="d-1"
+        connections={[connection({ video_model: 'alibaba/wan-3.0' })]}
+        images={[image('asset-1', 'origami.png')] as never}
+        t={t}
+      />,
+    );
+    // The picker briefly disappears while the new envelope is being read, so
+    // the choice has to be awaited rather than read on the next tick.
+    expect(await screen.findByTestId('media-reference-pick-asset-1')).toBeInTheDocument();
+    expect(screen.queryByTestId('media-reference-mode-last_frame')).toBeNull();
   });
 
   it('explains itself when no connection has a media model', () => {

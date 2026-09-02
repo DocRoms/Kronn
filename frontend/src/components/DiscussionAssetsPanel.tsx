@@ -165,6 +165,10 @@ export function DiscussionAssetsPanel({
           <MediaGenerateForm
             discussionId={discussionId}
             connections={connections}
+            /* The images already in this room are the only ones a generation
+               may start from, so the launcher gets the inventory it stands in
+               rather than a separate picker of its own. */
+            images={files.filter(isImage)}
             t={t}
             onLaunched={onMediaLaunched}
           />
