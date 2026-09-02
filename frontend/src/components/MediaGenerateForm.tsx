@@ -6,7 +6,7 @@
 // question the configuration already answers — and offering a modality nobody
 // had configured.
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Clapperboard, Image as ImageIcon, Loader2, Sparkles, X } from 'lucide-react';
+import { Clapperboard, Image as ImageIcon, Loader2, Paperclip, Sparkles, X } from 'lucide-react';
 import { media, discussions as discussionsApi } from '../lib/api';
 import type {
   ExternalApiConnectionView,
@@ -42,6 +42,10 @@ const MIN_REFERENCE_WIDTH_PX = 300;
 /// it, so the operator must be able to pick it.
 const RATIO_SHAPES = new Set(['16:9', '4:3', '1:1', '9:16', '3:4', '21:9', '9:21', '2:3', '3:2', '4:5', '5:4']);
 
+/// Below this, the whole list fits on screen and a search field is one more
+/// control for nothing.
+const SEARCHABLE_FROM = 5;
+
 /** One configured media model: what the operator actually chooses. */
 type Slot = {
   key: string;
@@ -75,6 +79,7 @@ export function MediaGenerateForm({
   images = [],
   t,
   onLaunched,
+  onImageAttached,
 }: {
   discussionId: string;
   connections: ExternalApiConnectionView[];
@@ -85,6 +90,10 @@ export function MediaGenerateForm({
    *  already reset and reusable, so the caller can rely on it purely as a
    *  signal to reveal the new anchor message (not as a "busy" gate). */
   onLaunched?: (jobId: string, messageId: string) => void;
+  /// Fired once the server accepted a picture attached from here, so the
+  /// discussion adds it to its own inventory. Absent, the launcher offers no
+  /// attachment: a surface that cannot show the new file must not create it.
+  onImageAttached?: (file: ContextFile) => void;
 }) {
   const slots = useMemo(() => slotsOf(connections), [connections]);
   const [selectedKey, setSelectedKey] = useState<string>('');
@@ -111,6 +120,10 @@ export function MediaGenerateForm({
   const [referenceWidth, setReferenceWidth] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /// Narrows the pictures offered. A room with fifty assets makes the right
+  /// one unreachable by scrolling alone.
+  const [imageQuery, setImageQuery] = useState('');
+  const [attaching, setAttaching] = useState(false);
   const [launched, setLaunched] = useState<{ model: string } | null>(null);
   const [estimate, setEstimate] = useState<{ usd: number | null; samples: number } | null>(null);
   // A transport failure is ambiguous: the backend may have committed the job
@@ -168,10 +181,22 @@ export function MediaGenerateForm({
   // for nearly every provider. Absent means the model advertises none.
   const maxReferences = isVideo ? 0 : (capabilities?.max_input_references ?? 0);
   const referenceLimit = isVideo ? 1 : maxReferences;
+  // An empty room still shows the picker when a picture can be attached from
+  // here: hiding it made attaching the FIRST one impossible, which is exactly
+  // the case a fresh discussion is in.
   const canReference =
-    (isVideo ? framePositions.length > 0 : maxReferences > 0) && images.length > 0;
+    (isVideo ? framePositions.length > 0 : maxReferences > 0)
+    && (images.length > 0 || !!onImageAttached);
   const pickedIds = reference?.assetIds ?? [];
   const canPickMore = pickedIds.length < referenceLimit;
+  const offeredImages = useMemo(() => {
+    const needle = imageQuery.trim().toLocaleLowerCase();
+    return images.filter(
+      image =>
+        !pickedIds.includes(image.id)
+        && (!needle || image.filename.toLocaleLowerCase().includes(needle)),
+    );
+  }, [images, imageQuery, pickedIds]);
 
   // A source image the newly selected model cannot take must be dropped, not
   // carried into a submission it would fail.
@@ -234,6 +259,23 @@ export function MediaGenerateForm({
       return { ...current, assetIds: [...current.assetIds, assetId] };
     });
   }, [framePositions, isVideo, referenceLimit]);
+
+  const attachImage = useCallback(async (file: File) => {
+    setAttaching(true);
+    setError(null);
+    try {
+      const uploaded = await discussionsApi.uploadContextFile(discussionId, file);
+      onImageAttached?.(uploaded.file);
+      // Picked right away: attaching one here is asking to use it, and making
+      // the operator find it again in the list would be the extra step this
+      // control exists to remove.
+      pickImage(uploaded.file.id);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setAttaching(false);
+    }
+  }, [discussionId, onImageAttached, pickImage]);
 
   const dropImage = useCallback((assetId: string) => {
     setReference(current => {
@@ -481,10 +523,40 @@ export function MediaGenerateForm({
             </div>
           )}
           {canPickMore ? (
-            <div className="media-generate-reference-choices">
-              {images
-                .filter(image => !pickedIds.includes(image.id))
-                .map(image => (
+            <>
+              <div className="media-generate-reference-tools">
+                {images.length > SEARCHABLE_FROM && (
+                  <input
+                    type="search"
+                    value={imageQuery}
+                    onChange={event => setImageQuery(event.target.value)}
+                    placeholder={t('disc.media.searchSourceImage')}
+                    aria-label={t('disc.media.searchSourceImage')}
+                    data-testid="media-reference-search"
+                  />
+                )}
+                {onImageAttached && (
+                  <label className="btn btn-sm btn-ghost" data-testid="media-reference-attach">
+                    <Paperclip size={13} aria-hidden="true" />
+                    <span>{attaching ? t('disc.media.attaching') : t('disc.media.attachImage')}</span>
+                    <input
+                      type="file"
+                      accept="image/*"
+                      hidden
+                      disabled={attaching}
+                      onChange={event => {
+                        const file = event.target.files?.[0];
+                        // Cleared before the upload: the same picture must be
+                        // attachable twice in a row.
+                        event.target.value = '';
+                        if (file) void attachImage(file);
+                      }}
+                    />
+                  </label>
+                )}
+              </div>
+              <div className="media-generate-reference-choices">
+                {offeredImages.map(image => (
                   <button
                     key={image.id}
                     type="button"
@@ -496,7 +568,13 @@ export function MediaGenerateForm({
                     {image.filename}
                   </button>
                 ))}
-            </div>
+                {offeredImages.length === 0 && imageQuery.trim() && (
+                  <span className="set-hint" data-testid="media-reference-no-match">
+                    {t('disc.media.noSourceImageMatch')}
+                  </span>
+                )}
+              </div>
+            </>
           ) : (
             // The ceiling is the model's own, said out loud: a picker that
             // simply stopped responding would read as broken.

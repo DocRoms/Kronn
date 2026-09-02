@@ -51,9 +51,10 @@ export function DiscussionAssetsPanel({
   /// Fired once the server confirmed a deletion, so the discussion drops the
   /// file from its own inventory. Absent, the panel offers no deletion.
   onAssetDeleted?: (fileId: string) => void;
-  /// Fired once a frame extracted from a clip was accepted by the server, so
-  /// the new image joins the inventory and can be picked as a starting point
-  /// right away. Absent, the panel offers no extraction.
+  /// Fired once an image the server accepted joins this discussion — a frame
+  /// extracted from a clip, or a picture attached from the launcher — so it
+  /// enters the inventory and can be picked as a starting point right away.
+  /// Absent, the panel offers neither extraction nor attachment.
   onAssetExtracted?: (file: ContextFile) => void;
 }) {
   const [query, setQuery] = useState('');
@@ -180,6 +181,7 @@ export function DiscussionAssetsPanel({
             images={files.filter(isImage)}
             t={t}
             onLaunched={onMediaLaunched}
+            onImageAttached={onAssetExtracted}
           />
         )}
       </div>

@@ -7,9 +7,13 @@ const { mediaApi } = vi.hoisted(() => ({
 }));
 
 const contextFileBlob = vi.fn();
+const uploadContextFile = vi.fn();
 vi.mock('../../lib/api', () => ({
   media: mediaApi,
-  discussions: { contextFileBlob: (...a: unknown[]) => contextFileBlob(...a) },
+  discussions: {
+    contextFileBlob: (...a: unknown[]) => contextFileBlob(...a),
+    uploadContextFile: (...a: unknown[]) => uploadContextFile(...a),
+  },
 }));
 
 import { MediaGenerateForm } from '../MediaGenerateForm';
@@ -471,6 +475,91 @@ describe('MediaGenerateForm', () => {
     await waitFor(() => expect(screen.queryByTestId('media-reference-drop-asset-2')).toBeNull());
     // The first picture stays: the new model still takes one.
     expect(screen.getByTestId('media-reference-drop-asset-1')).toBeInTheDocument();
+  });
+
+  it('narrows a long list of pictures instead of asking to scroll it', async () => {
+    mediaApi.capabilities.mockResolvedValue(videoCapabilities(['first_frame']));
+    const many = ['renard.png', 'origami.png', 'chat.png', 'ville.png', 'foret.png', 'mer.png']
+      .map((filename, index) => image(`asset-${index}`, filename));
+    render(
+      <MediaGenerateForm
+        discussionId="d-1"
+        connections={[connection()]}
+        images={many as never}
+        t={t}
+      />,
+    );
+    fireEvent.click(screen.getByTestId('media-slot-conn-1:video'));
+    await waitFor(() => expect(screen.getByTestId('media-reference-picker')).toBeInTheDocument());
+
+    fireEvent.change(screen.getByTestId('media-reference-search'), { target: { value: 'ori' } });
+    expect(screen.getByTestId('media-reference-pick-asset-1')).toBeInTheDocument();
+    expect(screen.queryByTestId('media-reference-pick-asset-0')).toBeNull();
+
+    // A search that matches nothing says so: an empty row reads as a broken
+    // picker.
+    fireEvent.change(screen.getByTestId('media-reference-search'), { target: { value: 'zzz' } });
+    expect(screen.getByTestId('media-reference-no-match')).toBeInTheDocument();
+  });
+
+  it('attaches a new picture and picks it without a second step', async () => {
+    const attached = { ...image('asset-new', 'nouvelle.png'), mime_type: 'image/png' };
+    uploadContextFile.mockResolvedValue({ file: attached });
+    const onImageAttached = vi.fn();
+    mediaApi.capabilities.mockResolvedValue(videoCapabilities(['first_frame']));
+    render(
+      <MediaGenerateForm
+        discussionId="d-1"
+        connections={[connection()]}
+        images={[image('asset-1', 'origami.png')] as never}
+        t={t}
+        onImageAttached={onImageAttached}
+      />,
+    );
+    fireEvent.click(screen.getByTestId('media-slot-conn-1:video'));
+    await waitFor(() => expect(screen.getByTestId('media-reference-picker')).toBeInTheDocument());
+
+    const input = screen.getByTestId('media-reference-attach').querySelector('input')!;
+    const file = new File(['png'], 'nouvelle.png', { type: 'image/png' });
+    fireEvent.change(input, { target: { files: [file] } });
+
+    await waitFor(() => expect(uploadContextFile).toHaveBeenCalledWith('d-1', file));
+    expect(onImageAttached).toHaveBeenCalledWith(attached);
+    // Attaching one here IS asking to use it; finding it again in the list
+    // would be the extra step this control removes.
+    expect(await screen.findByTestId('media-reference-mode-first_frame')).toBeInTheDocument();
+  });
+
+  it('still offers to attach the first picture in a room that holds none', async () => {
+    // Hiding the picker on an empty room made attaching the FIRST picture
+    // impossible — which is exactly the state a fresh discussion is in.
+    mediaApi.capabilities.mockResolvedValue(videoCapabilities(['first_frame']));
+    render(
+      <MediaGenerateForm
+        discussionId="d-1"
+        connections={[connection()]}
+        images={[] as never}
+        t={t}
+        onImageAttached={vi.fn()}
+      />,
+    );
+    fireEvent.click(screen.getByTestId('media-slot-conn-1:video'));
+    expect(await screen.findByTestId('media-reference-attach')).toBeInTheDocument();
+  });
+
+  it('offers no attachment on a surface that cannot show the new file', async () => {
+    mediaApi.capabilities.mockResolvedValue(videoCapabilities(['first_frame']));
+    render(
+      <MediaGenerateForm
+        discussionId="d-1"
+        connections={[connection()]}
+        images={[image('asset-1', 'origami.png')] as never}
+        t={t}
+      />,
+    );
+    fireEvent.click(screen.getByTestId('media-slot-conn-1:video'));
+    await waitFor(() => expect(screen.getByTestId('media-reference-picker')).toBeInTheDocument());
+    expect(screen.queryByTestId('media-reference-attach')).toBeNull();
   });
 
   it('offers no source image when the model takes none', async () => {
