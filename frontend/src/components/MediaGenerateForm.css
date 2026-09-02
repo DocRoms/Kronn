@@ -229,16 +229,6 @@
   padding-left: var(--kr-sp-3);
   padding-right: var(--kr-sp-3);
 }
-.media-generate-reference-tools input[type='search'] {
-  flex: 1;
-  min-width: 0;
-  padding: 4px 8px;
-  border: 1px solid var(--kr-border-light);
-  border-radius: var(--kr-r-sm);
-  background: var(--kr-bg-subtle);
-  color: var(--kr-text-primary);
-  font-size: var(--kr-fs-xs);
-}
 .media-generate-reference-choices { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
 .media-generate-reference-choice {
   max-width: 100%;

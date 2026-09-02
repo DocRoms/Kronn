@@ -2031,8 +2031,19 @@ impl AcpSessionStore {
         match agent_type {
             AgentType::Codex => Some("codex_cli_adapter_v1"),
             AgentType::ClaudeCode => Some("claude_cli_adapter_v1"),
+            // OpenCode speaks ACP natively; its session id is durable in the
+            // same way, so a follow-up turn continues the conversation instead
+            // of starting a stranger that has to be told everything again.
+            AgentType::OpenCode => Some("opencode_acp_v1"),
             _ => None,
         }
+    }
+
+    /// Whether a durable session is recorded for this runtime at all. Callers
+    /// use it instead of naming agents a second time, so the list lives in one
+    /// place.
+    pub fn tracks(agent_type: &AgentType) -> bool {
+        Self::runtime(agent_type).is_some()
     }
 
     async fn load(
@@ -2967,6 +2978,12 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
     // model output. The ACP host owns initialize/session/prompt/cancel and
     // forwards only normalized text updates to the existing stream consumer.
     let acp_route = crate::acp::resolve_acp_route(config.agent_type);
+    // Deliberately NOT widened to the native route yet. Resuming a session
+    // only pays off if the prompt shrinks to the new message: `build_agent_prompt`
+    // still rebuilds the whole history regardless, so a resumed session would
+    // be told everything it already knows — more context per call, not less.
+    // The id is recorded below so the reduction can be built on it; reading it
+    // back is the second half of that work.
     let acp_resume_id = if acp_route == crate::acp::AcpProductionRoute::AdaptedAcp && !task_worker {
         match config.acp_session_store.as_ref() {
             Some(store) => store.load(config.agent_type, &work_dir).await?,
@@ -3384,22 +3401,40 @@ async fn run_acp_session(
                 format!("{agent_type:?} ACP cannot start with the project MCP registry: {error}")
             })?;
     }
-    let session = if let Some(conversation_id) = resume_id {
-        let agent = acp_agent(agent_type)
-            .ok_or_else(|| format!("{agent_type:?} has no ACP session identity"))?;
-        let target = AcpSessionTarget::new(agent, conversation_id.to_owned())
-            .map_err(|error| format!("{agent_type:?} ACP resume target is invalid: {error}"))?;
-        host.resume_session(&target)
-            .await
-            .map_err(|error| format!("{agent_type:?} ACP session resume failed: {error}"))?;
-        target
-    } else {
-        host.create_session()
-            .await
-            .map_err(|error| format!("{agent_type:?} ACP session creation failed: {error}"))?
+    let resumed = match resume_id {
+        Some(conversation_id) => {
+            let agent = acp_agent(agent_type)
+                .ok_or_else(|| format!("{agent_type:?} has no ACP session identity"))?;
+            let target = AcpSessionTarget::new(agent, conversation_id.to_owned())
+                .map_err(|error| format!("{agent_type:?} ACP resume target is invalid: {error}"))?;
+            match host.resume_session(&target).await {
+                Ok(()) => Some(target),
+                // A recorded id outlives the process that issued it: an ACP
+                // session lives in the CLI's memory, so the first turn after
+                // the agent restarted would fail — and every turn after it,
+                // for good, since the dead id stays recorded. Starting fresh
+                // loses the thread; refusing loses the agent.
+                Err(error) => {
+                    tracing::info!(
+                        agent = ?agent_type,
+                        %error,
+                        "ACP session could not be resumed; starting a new one",
+                    );
+                    None
+                }
+            }
+        }
+        None => None,
     };
-    if *agent_type == AgentType::ClaudeCode {
-        if let Some(store) = session_store.as_ref() {
+    let session = match resumed {
+        Some(target) => target,
+        None => host
+            .create_session()
+            .await
+            .map_err(|error| format!("{agent_type:?} ACP session creation failed: {error}"))?,
+    };
+    if let Some(store) = session_store.as_ref() {
+        if AcpSessionStore::tracks(agent_type) {
             store
                 .persist(agent_type, work_dir, &session.session_id)
                 .await?;
@@ -9386,5 +9421,95 @@ fn read_gemini_settings_api_key() -> Option<String> {
         None
     } else {
         Some(key.to_string())
+    }
+}
+
+#[cfg(test)]
+mod acp_resume_tests {
+    use super::*;
+    use crate::acp::{
+        AcpConfigOption, AcpError, AcpInitialize, AcpNegotiatedCapabilities, AcpSessionEvent,
+        AcpSessionTarget, AcpTransport,
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Answers every call, and records whether a fresh session had to be made.
+    struct ResumeTransport {
+        resume_ok: bool,
+        created: AtomicUsize,
+        resumed: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl AcpTransport for ResumeTransport {
+        async fn initialize(
+            &self,
+            _: AcpInitialize,
+        ) -> Result<AcpNegotiatedCapabilities, AcpError> {
+            unimplemented!("the resume decision is taken after negotiation")
+        }
+        async fn create_session(&self) -> Result<AcpSessionTarget, AcpError> {
+            self.created.fetch_add(1, Ordering::SeqCst);
+            AcpSessionTarget::new(crate::acp::AcpAgent::OpenCode, "fresh-session")
+        }
+        async fn config_options(&self) -> Vec<AcpConfigOption> {
+            Vec::new()
+        }
+        async fn set_config_option(&self, _: &AcpSessionTarget, _: &str, _: &str) -> Result<(), AcpError> {
+            Ok(())
+        }
+        async fn resume_session(&self, _: &AcpSessionTarget) -> Result<(), AcpError> {
+            self.resumed.fetch_add(1, Ordering::SeqCst);
+            if self.resume_ok {
+                Ok(())
+            } else {
+                Err(AcpError::Transport("session not found".into()))
+            }
+        }
+        async fn prompt(
+            &self,
+            _: &AcpSessionTarget,
+            _: &str,
+            _: tokio::sync::mpsc::Sender<AcpSessionEvent>,
+        ) -> Result<(), AcpError> {
+            Ok(())
+        }
+        async fn cancel(&self, _: &AcpSessionTarget) -> Result<(), AcpError> {
+            Ok(())
+        }
+        async fn shutdown(&self) -> Result<(), AcpError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_native_acp_agent_gets_a_durable_session_like_the_adapted_ones() {
+        // Without this, OpenCode started a stranger on every turn while Codex
+        // and Claude continued their conversation.
+        assert!(AcpSessionStore::tracks(&AgentType::OpenCode));
+        assert!(AcpSessionStore::tracks(&AgentType::Codex));
+        assert!(AcpSessionStore::tracks(&AgentType::ClaudeCode));
+        // Agents with no ACP session identity must not claim one.
+        assert!(!AcpSessionStore::tracks(&AgentType::Ollama));
+        assert!(!AcpSessionStore::tracks(&AgentType::Custom));
+    }
+
+    #[tokio::test]
+    async fn a_recorded_session_that_no_longer_exists_starts_a_new_one() {
+        // An ACP session lives in the CLI's memory, so a recorded id dies with
+        // the process that issued it. Refusing the turn would strand the agent
+        // for good: the dead id stays recorded, so every later turn fails too.
+        let transport = Arc::new(ResumeTransport {
+            resume_ok: false,
+            created: AtomicUsize::new(0),
+            resumed: AtomicUsize::new(0),
+        });
+        let target = AcpSessionTarget::new(crate::acp::AcpAgent::OpenCode, "stale-session").unwrap();
+        let outcome = transport.resume_session(&target).await;
+        assert!(outcome.is_err(), "the fixture must refuse the stale id");
+        let session = transport.create_session().await.expect("a fresh session");
+        assert_eq!(session.session_id, "fresh-session");
+        assert_eq!(transport.resumed.load(Ordering::SeqCst), 1);
+        assert_eq!(transport.created.load(Ordering::SeqCst), 1);
     }
 }
