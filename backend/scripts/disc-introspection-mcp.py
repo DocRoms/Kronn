@@ -1160,30 +1160,14 @@ TOOLS = [
     {
         "name": "disc_join",
         "description": (
-            "Join a Kronn shared discussion using an invite token "
-            "(the `kr-join-…` string the disc owner gave you). On "
-            "success, binds THIS bridge process to the resolved "
-            "disc so every subsequent `disc_meta`, `disc_append`, "
-            "`disc_load_other`, `disc_wait_for_peer`, etc. operates "
-            "on it. ⚠ AFTER JOINING : you are now in a MULTI-AGENT "
-            "ROOM. Other CLI agents (Claude, Codex, Gemini, Vibe, …) "
-            "are listening. To talk to them you MUST call "
-            "`disc_append({content: \"...\"})` — anything you reply "
-            "only in your own terminal is INVISIBLE to peers. "
-            "⚠ JOINING IS NOT THE TASK : joining then going quiet "
-            "reads to the human as having left. You are expected to "
-            "STAY and FOLLOW the room — loop on "
-            "`disc_wait_for_peer` and answer what arrives, and when "
-            "the room is quiet pick up the next task from the shared "
-            "plan (`plan_get` / `task_list`) instead of idling. You "
-            "may read AND update those tasks. BEFORE your first "
-            "substantive action, announce the task / scope / next "
-            "action in the room with `disc_append`; peers must know "
-            "what you are taking before you edit or execute it. The "
-            "response includes a `next_steps` field with the full "
-            "protocol; READ AND "
-            "FOLLOW IT before doing anything else. Tokens are "
-            "single-use and expire after 10 min."
+            "Join a Kronn shared discussion with an invite token (`kr-join-…`). "
+            "Binds THIS bridge to that disc, so every later `disc_meta`, "
+            "`disc_append`, `disc_wait_for_peer` operates on it.\n\n"
+            "⚠ You are then in a MULTI-AGENT ROOM: to reach peers you MUST "
+            "call `disc_append` — a reply in your own terminal is INVISIBLE "
+            "to them. Joining is not the task: stay and follow the room.\n\n"
+            "The response carries the full protocol in `next_steps` — read it "
+            "before acting. Tokens are single-use, 10 min."
         ),
         "inputSchema": {
             "type": "object",
@@ -1227,31 +1211,12 @@ TOOLS = [
     {
         "name": "disc_create_room",
         "description": (
-            "One-shot bootstrap of a multi-agent room from the MCP "
-            "surface : creates a fresh discussion AND mints an invite "
-            "token in a single call. Returns `{disc_id, title, token, "
-            "instruction_text, expires_at, next_step}`.\n\n"
-            "The room has no native Kronn principal by default: messages "
-            "posted by joined MCP peers do NOT auto-launch the discussion's "
-            "placeholder agent. Only the explicitly joined peers answer.\n\n"
-            "⚠ IMPORTANT — this tool does NOT switch your current "
-            "bridge binding. Your existing disc (the one you are "
-            "currently talking in) stays the active one. The new room "
-            "is created server-side and the token lets a peer join "
-            "it, but YOU stay where you were. This is intentional : "
-            "silent context-switch would risk losing the thread of "
-            "the conversation that asked for the room.\n\n"
-            "After this call, decide explicitly :\n"
-            "  (a) Stay in the current disc → share `instruction_text` "
-            "with the user (paste it in another CLI to bring it in).\n"
-            "  (b) Switch your own bridge to the new room → call "
-            "`disc_join({token})` with the returned token. Your "
-            "previous disc binding is replaced ; calling `disc_leave` "
-            "first is cleanest if you want to formally leave.\n\n"
-            "The `next_step` field in the response is a plain-text "
-            "hint about what makes sense given the current context — "
-            "follow it OR explicitly diverge with a one-line rationale "
-            "so the user knows what's happening."
+            "One-shot bootstrap of a multi-agent room: creates a fresh "
+            "discussion AND mints an invite token. Returns `{disc_id, title, "
+            "token, instruction_text, expires_at, next_step}`.\n\n"
+            "⚠ This does NOT switch your own bridge binding — you stay in "
+            "your current disc. Follow `next_step`, or diverge with a "
+            "one-line rationale. Details: `tool_manual({tool: \"disc_create_room\"})`."
         ),
         "inputSchema": {
             "type": "object",
@@ -1594,22 +1559,13 @@ TOOLS = [
     {
         "name": "convention_get",
         "description": (
-            "Fetch the canonical Kronn documentation convention. The "
-            "convention defines how to author `docs/AGENTS.md` (and other "
-            "agent-context files) — the `<!-- kronn:section name/curated/"
-            "audit -->` markers, the 9-type `[src: …]` provenance grammar "
-            "(file / url / user / commit / api / code-comment / inferred / "
-            "hypothesis / training-data), and the `curated=\"ai\"` vs "
-            "`curated=\"human\"` ownership rules.\n\n"
-            "**Call this BEFORE writing to a `curated=\"ai\"` section of "
-            "any `docs/AGENTS.md`** — the embedded spec is the source of "
-            "truth (the GitHub `main` copy may have moved on; this tool "
-            "returns the convention THIS Kronn installation actually "
-            "implements + lints against).\n\n"
-            "Returns the markdown spec verbatim. `name` defaults to "
-            "`agents-md-format`, `version` to `v1` (only shipped today). "
-            "Future conventions will use the same tool with different "
-            "names."
+            "Fetch the canonical Kronn documentation convention — how to "
+            "author `docs/AGENTS.md`: the `kronn:section` markers, the "
+            "`[src: …]` provenance grammar, and the curated ownership rules. "
+            "Returns the markdown spec verbatim.\n\n"
+            "⚠ Call this BEFORE writing to a `curated=\"ai\"` section: the "
+            "embedded spec is the source of truth for THIS installation, "
+            "which is what it lints against."
         ),
         "inputSchema": {
             "type": "object",
@@ -2117,26 +2073,26 @@ TOOLS = [
         "inputSchema": {
             "type": "object",
             "properties": {
-                "name": {"type": "string", "description": "QA name (1-200 chars, displayed on the QA card)."},
+                "name": {"type": "string", "description": "QA name, 1-200 chars."},
                 "api_plugin_slug": {"type": "string", "description": "Plugin slug from `mcp_list` (e.g. `mcp-atlassian`, `api-resend`, `api-custom-foo`)."},
-                "api_config_id": {"type": "string", "description": "Plugin config id from `mcp_list.configs[].config_id`. Pin the QA to a specific config (per-project or global)."},
-                "api_endpoint_path": {"type": "string", "description": "Endpoint path matching one of the plugin's declared endpoints (e.g. `/rest/api/3/issue/{ticket_id}`). May contain `{{var}}` placeholders OR `{path_param}` segments."},
-                "api_method": {"type": "string", "description": "HTTP method override : `GET | POST | PUT | PATCH | DELETE`. Defaults to the plugin endpoint's declared method when omitted."},
-                "api_query": {"type": "object", "description": "Query-string parameters as key→value map. Values may contain `{{var}}` placeholders or vendor-neutral `{{time.now|...}}` expressions."},
-                "api_path_params": {"type": "object", "description": "Path-segment substitutions for `{name}` segments in the endpoint path."},
-                "api_headers": {"type": "object", "description": "Extra request headers. NEVER pass auth — Kronn injects per the plugin spec."},
-                "api_body": {"description": "JSON body for POST/PUT/PATCH (object/array). String leaves can contain `{{var}}` placeholders."},
-                "api_extract": {"type": "object", "description": "Optional JSONPath extract spec: `{path: \"$.items\", fail_on_empty: false}`."},
-                "api_pagination": {"type": "object", "description": "Optional pagination spec (Auto | Offset | Cursor | Page | LinkHeader); shape in tool_manual."},
-                "api_timeout_ms": {"type": "integer", "description": "Optional per-call timeout in ms. Defaults to plugin default."},
-                "api_max_retries": {"type": "integer", "description": "Optional retry count on transient HTTP errors."},
+                "api_config_id": {"type": "string", "description": "Plugin config id from `mcp_list.configs[].config_id`."},
+                "api_endpoint_path": {"type": "string", "description": "Declared endpoint path; may carry `{{var}}` or `{path_param}` segments."},
+                "api_method": {"type": "string", "description": "Method override; defaults to the endpoint's declared one."},
+                "api_query": {"type": "object", "description": "Query parameters; values may carry `{{var}}` or `{{time.now|…}}`."},
+                "api_path_params": {"type": "object", "description": "Substitutions for `{name}` segments of the path."},
+                "api_headers": {"type": "object", "description": "Extra headers. NEVER pass auth — Kronn injects it."},
+                "api_body": {"description": "JSON body; string leaves may carry `{{var}}`."},
+                "api_extract": {"type": "object", "description": "JSONPath extract spec; shape in tool_manual."},
+                "api_pagination": {"type": "object", "description": "Pagination spec; shape in tool_manual."},
+                "api_timeout_ms": {"type": "integer", "description": "Per-call timeout in ms."},
+                "api_max_retries": {"type": "integer", "description": "Retries on transient HTTP errors."},
                 "variables": {
                     "type": "array",
-                    "description": "PromptVariable declarations; tool_manual documents user_input/project_env/kronn_context sources. Store references, never values.",
+                    "description": "PromptVariable declarations; sources in tool_manual. Store references, never values.",
                 },
-                "description": {"type": "string", "description": "Optional one-line description shown on the QA card."},
-                "icon": {"type": "string", "description": "Optional single-emoji prefix (e.g. `🎫` / `📧` / `🔍`)."},
-                "project_id": {"type": "string", "description": "Optional Kronn project id to bind the QA to (auto-inherited from current disc when absent)."},
+                "description": {"type": "string", "description": "One-line description for the QA card."},
+                "icon": {"type": "string", "description": "Single-emoji prefix."},
+                "project_id": {"type": "string", "description": "Project id to bind to; inherited from the disc when absent."},
                 "profile_ids": {"type": "array", "items": {"type": "string"}, "description": "Optional profile bindings (used when QA result feeds an agent)."},
                 "directive_ids": {"type": "array", "items": {"type": "string"}, "description": "Optional directive bindings."},
             },
@@ -2403,27 +2359,16 @@ TOOLS = [
     {
         "name": "workflow_trigger",
         "description": (
-            "Launch a Kronn workflow run from MCP — same effect as the "
-            "UI's Trigger button, but JSON-only (no SSE). Returns "
-            "`{run_id, workflow_id, workflow_name, status, started_at, "
-            "expected_duration_ms?, samples, next_check}`.\n\n"
-            "**Workflow discovery first** : call `workflow_list` to "
-            "find the right `workflow_id`. The workflow MUST be enabled "
-            "(`enabled: true`) — disabled drafts are refused with a "
-            "clear error.\n\n"
-            "**`next_check`** — a hint of the form `{wait_seconds, "
-            "reason, confidence}`. After the trigger, wait that many "
-            "seconds then call `workflow_run_status({run_id})`. The "
-            "first wait is always at least 30s (sanity check that the "
-            "run actually started). Honour it — naïve 10s polling on a "
-            "2-min workflow burns ~13× more tokens than this hint "
-            "schedules. `confidence: baseline` ⇒ the average is "
-            "reliable. `confidence: no_baseline` ⇒ first time we run "
-            "this workflow, just check every 60s.\n\n"
-            "**Variables** : when the workflow declares manual launch "
-            "variables, pass them as `variables: {name: value, ...}`. "
-            "Required ones must be non-empty — same validation as the "
-            "UI form."
+            "Launch a Kronn workflow run from MCP — same effect as the UI's "
+            "Trigger button, JSON-only. Returns `{run_id, workflow_id, "
+            "workflow_name, status, started_at, expected_duration_ms?, "
+            "samples, next_check}`. Find the id with `workflow_list`; the "
+            "workflow must be enabled.\n\n"
+            "⚠ Honour `next_check.wait_seconds` before calling "
+            "`workflow_run_status`: naive 10s polling on a 2-min workflow "
+            "burns ~13× more tokens than this hint schedules.\n\n"
+            "Variables and confidence levels: "
+            "`tool_manual({tool: \"workflow_trigger\"})`."
         ),
         "inputSchema": {
             "type": "object",
@@ -2443,27 +2388,17 @@ TOOLS = [
     {
         "name": "workflow_run_status",
         "description": (
-            "Read the current state of a workflow run launched via "
-            "`workflow_trigger` (or via the UI). Returns "
-            "`{run_id, workflow_id, status, started_at, finished_at?, "
-            "elapsed_ms, current_step?, step_count, tokens_used, "
-            "steps[], expected_duration_ms?, samples, next_check?}`. "
-            "`steps[]` has each step's name + status + started_at + duration_ms + "
-            "tokens_used (number or null) + tokens_status when measurement is "
-            "in progress/partial/unavailable + 200-char output excerpt + step_type. "
-            "Never interpret a null token count as zero.\n\n"
-            "**Terminal vs in-flight** : when `status` is one of "
-            "`Success`, `Failed`, `Cancelled`, `StoppedByGuard`, "
-            "`next_check` is `null` — no further polling needed. "
-            "Otherwise, wait `next_check.wait_seconds` then call again. "
-            "The hint adapts : projection-anchored while within the "
-            "average duration, fixed backoff after overshoot.\n\n"
-            "**For batch workflows** : individual child discussions are "
-            "not listed here — call `workflow_run_discussions({run_id})` "
-            "to get the child `disc_id`s, then `disc_load_other` each. "
-            "For linear workflows the `steps[]` array is enough.\n\n"
-            "**Prefer `workflow_wait_for_completion`** for short runs when "
-            "you just want the final verdict in a single call."
+            "Read the current state of a workflow run. Returns `{run_id, "
+            "workflow_id, status, started_at, finished_at?, elapsed_ms, "
+            "current_step?, step_count, tokens_used, steps[], "
+            "expected_duration_ms?, samples, next_check?}`.\n\n"
+            "⚠ Never read a null token count as zero — it means not measured.\n"
+            "⚠ `next_check: null` means terminal (`Success`, `Failed`, "
+            "`Cancelled`, `StoppedByGuard`): stop polling. Otherwise wait "
+            "`next_check.wait_seconds` and call again.\n\n"
+            "Batch children, step fields and when to prefer "
+            "`workflow_wait_for_completion`: "
+            "`tool_manual({tool: \"workflow_run_status\"})`."
         ),
         "inputSchema": {
             "type": "object",
@@ -2567,23 +2502,14 @@ TOOLS = [
     {
         "name": "workflow_wait_for_completion",
         "description": (
-            "Block (long-poll) until a run reaches a terminal status or "
-            "`timeout_s` elapses — saves the back-and-forth of repeated "
-            "`workflow_run_status` calls on short runs. Returns `{run_id, "
-            "workflow_id, status, finished_at?, elapsed_ms, tokens_used, "
-            "timed_out, next_check?}`.\n\n"
-            "**timeout_s** : how long to hold the connection (default 60, "
-            "clamped to [1, 60]). If the run finishes first you get the "
-            "terminal status immediately with `timed_out: false` and "
-            "`next_check: null`. If the timeout wins, `timed_out: true` + a "
-            "`next_check` hint tells you when to call again.\n\n"
-            "**When to use** : short/medium runs where you want the verdict "
-            "in one call. For long runs (multi-minute), prefer "
-            "`workflow_run_status` + honour `next_check` so you don't hold "
-            "a connection open. Terminal statuses : `Success | Failed | "
-            "Cancelled | StoppedByGuard` (and the run pauses on "
-            "`WaitingApproval` — that's NOT terminal, so a Gate'd workflow "
-            "will time out here, by design)."
+            "Long-poll until a run reaches a terminal status or `timeout_s` "
+            "elapses — saves repeated `workflow_run_status` calls on short "
+            "runs. Returns `{run_id, workflow_id, status, finished_at?, "
+            "elapsed_ms, tokens_used, timed_out, next_check?}`. `timeout_s` "
+            "defaults to 60, clamped to [1, 60].\n\n"
+            "⚠ `WaitingApproval` is NOT terminal, so a Gate'd workflow times "
+            "out here by design. For multi-minute runs prefer "
+            "`workflow_run_status` so you do not hold a connection open."
         ),
         "inputSchema": {
             "type": "object",
@@ -2784,20 +2710,13 @@ TOOLS = [
     {
         "name": "audit_status",
         "description": (
-            "0.8.12 — Consolidated audit state for a project, three layers "
-            "kept SEPARATE (never merged):\n"
-            "· `bridge_stream` — what THIS bridge's reader thread saw "
-            "(running / done / error / launch_timeout / bridge_timeout / "
-            "stream_closed / protocol_error, plus discussion_id + "
-            "audit_run_id once done);\n"
-            "· `live` — the backend's in-memory progress tracker. "
-            "⚠️ `live: null` means 'no LIVE state known' — NOT 'finished': "
-            "a backend restart wipes the tracker while an agent may still "
-            "be working;\n"
-            "· `latest` / `resumable` — DB history, fetched when `live` is "
-            "null: the last completed run (with run_id) and the last "
-            "Interrupted-but-resumable run. Statuses are exposed verbatim "
-            "(Running/Completed/Interrupted/Failed)."
+            "Consolidated audit state for a project, three layers kept "
+            "SEPARATE and never merged: `bridge_stream` (what this bridge's "
+            "reader saw), `live` (the backend's in-memory tracker), and "
+            "`latest`/`resumable` (DB history, read when `live` is null).\n\n"
+            "⚠ `live: null` means 'no live state known', NOT 'finished': a "
+            "backend restart wipes the tracker while an agent may still be "
+            "working. Statuses are exposed verbatim."
         ),
         "inputSchema": {
             "type": "object",
@@ -9732,6 +9651,18 @@ TOOL_MANUALS = {
 
 # Launch deliberately shares the prepare guide: both calls form one typed,
 # preflight-bound contract and duplicating the text would invite drift.
+TOOL_MANUALS["disc_create_room"] = (
+    "The room has no native Kronn principal by default: messages posted by joined MCP peers do NOT auto-launch the discussion's placeholder agent. Only the explicitly joined peers answer.\n\nThis tool never switches your current bridge binding, on purpose — a silent context switch would risk losing the thread of the conversation that asked for the room. After the call, decide explicitly:\n  (a) stay where you are → share `instruction_text` with the user, who pastes it in another CLI to bring that agent in;\n  (b) move your own bridge to the new room → `disc_join({token})` with the returned token. Your previous binding is replaced; `disc_leave` first is cleanest if you want to leave formally.\n\n`next_step` is a plain-text hint about what makes sense given the current context. Follow it, or diverge explicitly with a one-line rationale so the user knows what is happening."
+)
+TOOL_MANUALS["disc_join"] = (
+    "Joining is not the task. Joining then going quiet reads to the human as having left: you are expected to STAY and FOLLOW the room — loop on `disc_wait_for_peer` and answer what arrives. When the room is quiet, pick up the next task from the shared plan (`plan_get` / `task_list`) instead of idling; you may read AND update those tasks.\n\nBefore your first substantive action, announce the task, its scope and your next action with `disc_append`. Peers must know what you are taking before you edit or execute it — that announcement is what prevents two agents doing the same work.\n\nOther CLI agents (Claude, Codex, Gemini, Vibe, …) are listening on the same room. Anything you say only in your own terminal is invisible to them.\n\nThe join response's `next_steps` field carries the full ordered protocol; it is authoritative and more current than this manual."
+)
+TOOL_MANUALS["workflow_run_status"] = (
+    "`steps[]` carries, per step: name, status, started_at, duration_ms, tokens_used (number or null), tokens_status when measurement is in progress/partial/unavailable, a 200-char output excerpt, and step_type. A null token count means not measured — never zero.\n\nThe `next_check` hint adapts: projection-anchored while the run is within its average duration, fixed backoff after it overshoots.\n\nFor BATCH workflows the individual child discussions are not listed here. Call `workflow_run_discussions({run_id})` for the child `disc_id`s, then `disc_load_other` on each. For linear workflows `steps[]` is enough.\n\nFor short runs, `workflow_wait_for_completion` gets the final verdict in a single call instead of a poll loop."
+)
+TOOL_MANUALS["workflow_trigger"] = (
+    "Discovery first: `workflow_list` gives the `workflow_id`. The workflow must be enabled — a disabled draft is refused with a clear error.\n\n`next_check` has the form `{wait_seconds, reason, confidence}`. The first wait is always at least 30s, a sanity check that the run actually started. `confidence: baseline` means the average duration is reliable; `confidence: no_baseline` means this workflow has never run, so check every 60s.\n\nWhen the workflow declares manual launch variables, pass them as `variables: {name: value, …}`. Required ones must be non-empty — the same validation the UI form applies."
+)
 TOOL_MANUALS["task_exec_launch"] = TOOL_MANUALS["task_exec_prepare"]
 
 

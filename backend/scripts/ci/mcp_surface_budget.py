@@ -36,7 +36,7 @@ BRIDGE = "backend/scripts/disc-introspection-mcp.py"
 # Ollama worker policy.
 # It carries no slack: lower it whenever the catalogue shrinks, never raise it
 # to make a build pass.
-CATALOGUE_MAX_BYTES = 87_762
+CATALOGUE_MAX_BYTES = 87_297
 
 # Per-declaration ceiling. The five heaviest tools were 29% of the catalogue for
 # 6% of the tools; their descriptions had grown into manuals. A per-tool cap is
@@ -45,7 +45,7 @@ CATALOGUE_MAX_BYTES = 87_762
 # Also corrected: this used to add raw `description` bytes to a separately
 # serialised schema, which counted neither the JSON envelope nor the escaping. It
 # now measures the whole declaration exactly as sent.
-DECLARATION_MAX_BYTES = 3_259
+DECLARATION_MAX_BYTES = 2_757
 
 # Tools allowed above DECLARATION_MAX_BYTES, with the reason. An entry here is a
 # debt acknowledged in writing, not an exemption to forget: shrink the tool and
