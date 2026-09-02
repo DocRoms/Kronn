@@ -3663,7 +3663,7 @@ pub fn context_file_exists(conn: &Connection, file_id: &str) -> rusqlite::Result
 const CONTEXT_FILE_SELECT: &str =
     "SELECT cf.id, cf.discussion_id, cf.filename, cf.mime_type, cf.original_size,
             cf.extracted_size, cf.disk_path, cf.message_id, cf.created_at,
-            mj.model, mj.prompt
+            mj.model, mj.prompt, cf.extracted_from_asset_id
      FROM context_files cf
      LEFT JOIN media_jobs mj ON mj.id = (
          SELECT source.id FROM media_jobs source
@@ -3744,6 +3744,7 @@ fn map_context_file_row(row: &rusqlite::Row) -> rusqlite::Result<crate::models::
         ai_generation: ai_model
             .zip(ai_prompt)
             .map(|(model, prompt)| crate::models::ContextFileAiGeneration { model, prompt }),
+        extracted_from_asset_id: row.get(11)?,
     })
 }
 

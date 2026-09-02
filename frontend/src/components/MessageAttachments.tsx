@@ -56,6 +56,49 @@ function AiGenerationDetails({ file, t }: { file: ContextFile; t: T }) {
   );
 }
 
+/// Where a picture came from when it was not generated: a frame decoded out of
+/// a clip of this discussion. Said plainly, and never as "AI generated" — that
+/// badge is an attestation, and nothing was produced here.
+function ExtractedFromDetails({ file, source, t, onOpenSource }: {
+  file: ContextFile;
+  source: ContextFile | null;
+  t: T;
+  onOpenSource?: (assetId: string) => void;
+}) {
+  const sourceId = file.extracted_from_asset_id;
+  if (!sourceId) return null;
+  return (
+    <div
+      className="disc-ai-generation-details"
+      role="note"
+      aria-label={t('disc.assets.extractedFrom')}
+      data-testid="extracted-from-details"
+    >
+      <div className="disc-ai-generation-heading">
+        <span className="disc-ai-generation-label">
+          <Scissors size={13} aria-hidden="true" />
+          {t('disc.assets.extractedFrom')}
+        </span>
+      </div>
+      <p className="disc-ai-generation-prompt">
+        <span>{t('disc.assets.extractedFromExplained')}</span>
+        {onOpenSource && (
+          // The clip is one click away: a provenance nobody can follow is a
+          // sentence, not a link back to the thing it names.
+          <button
+            type="button"
+            className="disc-media-msg-source-open"
+            onClick={() => onOpenSource(sourceId)}
+            data-testid="extracted-from-open-source"
+          >
+            {source ? source.filename : t('disc.assets.openSourceVideo')}
+          </button>
+        )}
+      </p>
+    </div>
+  );
+}
+
 function AttachmentThumb({ file, url, failed, t, onOpen, onPrepareVideo, variant, onNavigateMessage }: {
   file: ContextFile;
   url?: string;
@@ -363,7 +406,10 @@ export function MessageAttachments({
     try {
       const frame = await extractLastFrame(src);
       const image = new File([frame.blob], lastFrameFilename(file.filename), { type: 'image/png' });
-      const uploaded = await discussionsApi.uploadContextFile(file.discussion_id, image);
+      // Named as coming from this clip: the server gives it its own message,
+      // so it is never a pending attachment waiting on the next send — and
+      // deleting an unrelated message can no longer take it away.
+      const uploaded = await discussionsApi.uploadContextFile(file.discussion_id, image, file.id);
       onExtracted?.(uploaded.file);
       // Landing on the fresh image is the answer to "did it work": the reader
       // sees the frame instead of a message claiming one exists.
@@ -578,6 +624,16 @@ export function MessageAttachments({
                     : <img src={urls[selectedFile.id]} alt={selectedFile.filename} />}
                 </div>
                 <AiGenerationDetails file={selectedFile} t={t} />
+                <ExtractedFromDetails
+                  file={selectedFile}
+                  source={carouselFiles.find(item => item.id === selectedFile.extracted_from_asset_id) ?? null}
+                  t={t}
+                  onOpenSource={assetId => {
+                    // Walking to the clip inside the same viewer: it is part
+                    // of this sequence, so nothing has to be reopened.
+                    if (carouselFiles.some(item => item.id === assetId)) setSelectedId(assetId);
+                  }}
+                />
               </div>
               {carouselFiles.length > 1 && (
                 <button

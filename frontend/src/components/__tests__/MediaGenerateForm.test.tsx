@@ -21,6 +21,37 @@ import { MediaGenerateForm } from '../MediaGenerateForm';
 const t = (key: string, ...args: (string | number)[]) =>
   args.length ? `${key}:${args.join(',')}` : key;
 
+/** Pick a picture through the searchable list: focus opens it, the row carries
+ *  the asset id. */
+function pickPicture(assetId: string) {
+  fireEvent.focus(screen.getByTestId('media-reference-select'));
+  const option = document.querySelector(`.searchable-select-option[data-value="${assetId}"]`);
+  if (!option) throw new Error(`no option for ${assetId}`);
+  fireEvent.click(option);
+}
+
+/** The rows currently on screen, by asset id. Does not touch focus — focusing
+ *  the field clears its query, which would erase what a search test just typed. */
+function visiblePictures(): string[] {
+  return Array.from(
+    document.querySelectorAll('.searchable-select-option[data-value]'),
+    node => node.getAttribute('data-value') ?? '',
+  ).filter(Boolean);
+}
+
+/** Same, opening the list first. */
+function offeredPictures(): string[] {
+  fireEvent.focus(screen.getByTestId('media-reference-select'));
+  return visiblePictures();
+}
+
+/** Open the ratio list and return the option node for one ratio. */
+function ratioOption(ratio: string): HTMLElement | null {
+  const trigger = screen.getByTestId('media-ratio-select');
+  if (trigger.getAttribute('aria-expanded') !== 'true') fireEvent.click(trigger);
+  return screen.queryByTestId(`media-ratio-select-option-${ratio}`);
+}
+
 function connection(over: Partial<ExternalApiConnectionView> = {}): ExternalApiConnectionView {
   return {
     id: 'conn-1',
@@ -150,13 +181,13 @@ describe('MediaGenerateForm', () => {
     // A proportional box per ratio: `4:3` is unreadable to most people until
     // they see it.
     for (const ratio of ['16:9', '4:3', '1:1', '9:16']) {
-      const choice = screen.getByTestId(`media-ratio-${ratio}`);
-      expect(choice.querySelector('.media-generate-ratio-shape')).toHaveAttribute(
+      const choice = ratioOption(ratio);
+      expect(choice?.querySelector('.media-generate-ratio-shape')).toHaveAttribute(
         'data-ratio',
         ratio,
       );
     }
-    expect(screen.getByTestId('media-ratio-16:9')).toHaveAttribute('aria-checked', 'true');
+    expect(ratioOption('16:9')).toHaveAttribute('aria-selected', 'true');
     // Let the asynchronous estimate settle inside the test so React does not
     // report a state update after the assertion phase has already ended.
     expect(await screen.findByText('disc.media.estimate:0.0709,3')).toBeInTheDocument();
@@ -220,7 +251,7 @@ describe('MediaGenerateForm', () => {
     render(<MediaGenerateForm discussionId="d-1" connections={[connection()]} t={t} />);
     fireEvent.click(screen.getByTestId('media-slot-conn-1:video'));
 
-    await waitFor(() => expect(screen.getByTestId('media-ratio-21:9')).toBeInTheDocument());
+    await waitFor(() => expect(ratioOption('21:9')).toBeInTheDocument());
     const durations = screen.getByLabelText('disc.media.duration') as HTMLSelectElement;
     expect([...durations.options].map(option => option.value)).toEqual(['4', '5', '6', '7', '8']);
     const resolutions = screen.getByLabelText('disc.media.resolution') as HTMLSelectElement;
@@ -246,7 +277,7 @@ describe('MediaGenerateForm', () => {
     });
     render(<MediaGenerateForm discussionId="d-1" connections={[connection()]} t={t} />);
     fireEvent.click(screen.getByTestId('media-slot-conn-1:video'));
-    await waitFor(() => expect(screen.getByTestId('media-ratio-9:16')).toBeInTheDocument());
+    await waitFor(() => expect(ratioOption('9:16')).toBeInTheDocument());
 
     fireEvent.change(screen.getByRole('textbox'), { target: { value: 'un plan strict' } });
     fireEvent.click(screen.getByRole('button', { name: /disc\.media\.generate/ }));
@@ -317,7 +348,7 @@ describe('MediaGenerateForm', () => {
     fireEvent.click(screen.getByTestId('media-slot-conn-1:video'));
     await waitFor(() => expect(screen.getByTestId('media-reference-picker')).toBeInTheDocument());
 
-    fireEvent.click(screen.getByTestId('media-reference-pick-asset-1'));
+    pickPicture('asset-1');
     fireEvent.click(await screen.findByTestId('media-reference-mode-last_frame'));
     fireEvent.change(screen.getByRole('textbox'), { target: { value: 'un renard' } });
     fireEvent.click(screen.getByRole('button', { name: /disc\.media\.generate/ }));
@@ -346,7 +377,7 @@ describe('MediaGenerateForm', () => {
     );
     fireEvent.click(screen.getByTestId('media-slot-conn-1:video'));
     await waitFor(() => expect(screen.getByTestId('media-reference-picker')).toBeInTheDocument());
-    fireEvent.click(screen.getByTestId('media-reference-pick-asset-1'));
+    pickPicture('asset-1');
 
     expect(await screen.findByTestId('media-reference-too-narrow'))
       .toHaveTextContent('disc.media.referenceTooNarrow:128,300');
@@ -372,7 +403,7 @@ describe('MediaGenerateForm', () => {
     );
     fireEvent.click(screen.getByTestId('media-slot-conn-1:video'));
     await waitFor(() => expect(screen.getByTestId('media-reference-picker')).toBeInTheDocument());
-    fireEvent.click(screen.getByTestId('media-reference-pick-asset-1'));
+    pickPicture('asset-1');
     await screen.findByTestId('media-reference-mode-first_frame');
     expect(screen.queryByTestId('media-reference-too-narrow')).toBeNull();
 
@@ -397,8 +428,8 @@ describe('MediaGenerateForm', () => {
     fireEvent.click(screen.getByTestId('media-slot-conn-1:image'));
     await waitFor(() => expect(screen.getByTestId('media-reference-picker')).toBeInTheDocument());
 
-    fireEvent.click(screen.getByTestId('media-reference-pick-asset-2'));
-    fireEvent.click(await screen.findByTestId('media-reference-pick-asset-1'));
+    pickPicture('asset-2');
+    pickPicture('asset-1');
     // A frame is a video notion: nothing about one may appear here.
     expect(screen.queryByTestId('media-reference-mode-first_frame')).toBeNull();
 
@@ -426,11 +457,12 @@ describe('MediaGenerateForm', () => {
     );
     fireEvent.click(screen.getByTestId('media-slot-conn-1:image'));
     await waitFor(() => expect(screen.getByTestId('media-reference-picker')).toBeInTheDocument());
-    fireEvent.click(screen.getByTestId('media-reference-pick-asset-1'));
+    pickPicture('asset-1');
 
     expect(await screen.findByTestId('media-reference-limit'))
       .toHaveTextContent('disc.media.referenceLimitReached:1');
-    expect(screen.queryByTestId('media-reference-pick-asset-2')).toBeNull();
+    // The list is gone with it: nothing more can be added.
+    expect(screen.queryByTestId('media-reference-select')).toBeNull();
   });
 
   it('offers no reference at all when the image model advertises none', async () => {
@@ -466,8 +498,8 @@ describe('MediaGenerateForm', () => {
     );
     fireEvent.click(screen.getByTestId('media-slot-conn-1:image'));
     await waitFor(() => expect(screen.getByTestId('media-reference-picker')).toBeInTheDocument());
-    fireEvent.click(screen.getByTestId('media-reference-pick-asset-1'));
-    fireEvent.click(await screen.findByTestId('media-reference-pick-asset-2'));
+    pickPicture('asset-1');
+    pickPicture('asset-2');
     expect(await screen.findByTestId('media-reference-drop-asset-2')).toBeInTheDocument();
 
     fireEvent.click(screen.getByTestId('media-slot-conn-2:image'));
@@ -492,14 +524,15 @@ describe('MediaGenerateForm', () => {
     fireEvent.click(screen.getByTestId('media-slot-conn-1:video'));
     await waitFor(() => expect(screen.getByTestId('media-reference-picker')).toBeInTheDocument());
 
-    fireEvent.change(screen.getByTestId('media-reference-search'), { target: { value: 'ori' } });
-    expect(screen.getByTestId('media-reference-pick-asset-1')).toBeInTheDocument();
-    expect(screen.queryByTestId('media-reference-pick-asset-0')).toBeNull();
+    const search = screen.getByTestId('media-reference-select');
+    fireEvent.focus(search);
+    fireEvent.change(search, { target: { value: 'ori' } });
+    expect(visiblePictures()).toEqual(['asset-1']);
 
     // A search that matches nothing says so: an empty row reads as a broken
     // picker.
-    fireEvent.change(screen.getByTestId('media-reference-search'), { target: { value: 'zzz' } });
-    expect(screen.getByTestId('media-reference-no-match')).toBeInTheDocument();
+    fireEvent.change(search, { target: { value: 'zzz' } });
+    expect(screen.getByText('disc.media.noSourceImageMatch')).toBeInTheDocument();
   });
 
   it('attaches a new picture and picks it without a second step', async () => {
@@ -575,7 +608,7 @@ describe('MediaGenerateForm', () => {
       />,
     );
     fireEvent.click(screen.getByTestId('media-slot-conn-1:video'));
-    await waitFor(() => expect(screen.getByTestId('media-ratio-16:9')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByTestId('media-ratio-select')).toBeInTheDocument());
     expect(screen.queryByTestId('media-reference-picker')).toBeNull();
   });
 
@@ -591,7 +624,7 @@ describe('MediaGenerateForm', () => {
     );
     fireEvent.click(screen.getByTestId('media-slot-conn-1:video'));
     await waitFor(() => expect(screen.getByTestId('media-reference-picker')).toBeInTheDocument());
-    fireEvent.click(screen.getByTestId('media-reference-pick-asset-1'));
+    pickPicture('asset-1');
     fireEvent.click(await screen.findByTestId('media-reference-mode-last_frame'));
 
     // The operator switches to a model that only takes a first frame: the
@@ -607,7 +640,7 @@ describe('MediaGenerateForm', () => {
     );
     // The picker briefly disappears while the new envelope is being read, so
     // the choice has to be awaited rather than read on the next tick.
-    expect(await screen.findByTestId('media-reference-pick-asset-1')).toBeInTheDocument();
+    await waitFor(() => expect(offeredPictures()).toContain('asset-1'));
     expect(screen.queryByTestId('media-reference-mode-last_frame')).toBeNull();
   });
 

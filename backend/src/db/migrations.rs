@@ -619,6 +619,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "164_model_catalog_cost_privacy",
         include_str!("sql/164_model_catalog_cost_privacy.sql"),
     ),
+    (
+        "165_context_file_extracted_from",
+        include_str!("sql/165_context_file_extracted_from.sql"),
+    ),
 ];
 
 /// Apply one migration inside the caller-owned transaction.
@@ -964,6 +968,61 @@ mod tests {
             )
             .unwrap();
         assert_eq!(receipt, 1);
+    }
+
+    #[test]
+    fn extracted_from_upgrades_a_base_that_already_holds_context_files() {
+        // The column carries provenance for pictures taken out of a clip. An
+        // existing base must gain it without losing a row: every file recorded
+        // before simply has no source, which is the truth about it.
+        let conn = Connection::open_in_memory().unwrap();
+        let index = MIGRATIONS
+            .iter()
+            .position(|(name, _)| *name == "165_context_file_extracted_from")
+            .expect("extracted-from migration is registered");
+        let predecessor = MIGRATIONS
+            .get(index.saturating_sub(1))
+            .expect("extracted-from migration has a predecessor")
+            .0;
+        run_through(&conn, predecessor).unwrap();
+        conn.execute(
+            "INSERT INTO discussions (id, title, created_at, updated_at)
+             VALUES ('d-1', 'x', '2026-09-02 10:00:00', '2026-09-02 10:00:00')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO context_files
+                (id, discussion_id, filename, mime_type, original_size,
+                 extracted_size, extracted_text, disk_path, created_at)
+             VALUES ('cf-1', 'd-1', 'a.png', 'image/png', 10, 0, '', '/tmp/a.png',
+                     '2026-09-02 10:00:00')",
+            [],
+        )
+        .unwrap();
+        let column_exists = || -> bool {
+            conn.query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('context_files')
+                 WHERE name = 'extracted_from_asset_id'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        assert!(!column_exists());
+
+        run(&conn).unwrap();
+
+        assert!(column_exists());
+        let (kept, source): (i64, Option<String>) = conn
+            .query_row(
+                "SELECT COUNT(*), MAX(extracted_from_asset_id) FROM context_files",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(kept, 1, "the existing file survives the upgrade");
+        assert_eq!(source, None, "a file recorded before has no source");
     }
 
     #[test]

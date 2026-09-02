@@ -436,13 +436,50 @@ describe('DiscussionAssetsPanel', () => {
     fireEvent.click(await within(viewer).findByTestId('attachment-last-frame'));
 
     await waitFor(() => expect(discussionsApi.uploadContextFile).toHaveBeenCalledTimes(1));
-    const [discussionId, uploaded] = discussionsApi.uploadContextFile.mock.calls[0];
+    const [discussionId, uploaded, extractedFrom] = discussionsApi.uploadContextFile.mock.calls[0];
     expect(discussionId).toBe('disc-1');
+    // Named as coming from this clip: the server then gives it its OWN
+    // message. Without this it stayed a pending attachment, waiting to be
+    // pinned to whatever the user sent next — and deleting THAT message took
+    // the picture with it.
+    expect(extractedFrom).toBe('file-1');
     // Named after the clip it came from, and a PNG: the launcher filters its
     // starting pictures on the MIME type.
     expect(uploaded.name).toBe('seedance-clip-last-frame.png');
     expect(uploaded.type).toBe('image/png');
     expect(onAssetExtracted).toHaveBeenCalledWith(extracted);
+  });
+
+  it('shows where an extracted picture came from, and opens the clip', async () => {
+    const clipFile = clip();
+    const extracted = file(2, {
+      filename: 'seedance-clip-last-frame.png',
+      mime_type: 'image/png',
+      disk_path: '/tmp/frame.png',
+      extracted_from_asset_id: clipFile.id,
+    });
+    render(
+      <DiscussionAssetsPanel
+        discussionId="disc-1"
+        files={[clipFile, extracted]}
+        onClose={vi.fn()}
+        onNavigateMessage={vi.fn()}
+        openAssetRequest={{ assetId: extracted.id, nonce: 1 }}
+        t={t}
+      />,
+    );
+
+    const viewer = await screen.findByRole('dialog');
+    const provenance = await within(viewer).findByTestId('extracted-from-details');
+    expect(provenance).toHaveTextContent('disc.assets.extractedFromExplained');
+    // Never the AI badge: that one is an attestation, and nothing was
+    // generated — a picture was cut out of a clip.
+    expect(within(viewer).queryByTestId('ai-generation-details')).toBeNull();
+
+    // The clip is one click away, inside the same viewer.
+    fireEvent.click(within(viewer).getByTestId('extracted-from-open-source'));
+    await waitFor(() =>
+      expect(screen.getByRole('dialog')).toHaveAttribute('data-asset-id', clipFile.id));
   });
 
   it('says nothing was decoded instead of attaching a black picture', async () => {

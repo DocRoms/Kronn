@@ -262,6 +262,11 @@ pub struct ContextFile {
     /// media job. `None` means "no attested AI provenance", never "probably
     /// human" based on a filename or MIME-type heuristic.
     pub ai_generation: Option<ContextFileAiGeneration>,
+    /// The asset this picture was taken OUT of — a frame decoded from a clip
+    /// of the same discussion. It is not an AI generation and must never be
+    /// labelled as one: nothing was produced, a picture was extracted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extracted_from_asset_id: Option<String>,
     pub created_at: DateTime<Utc>,
 }
 

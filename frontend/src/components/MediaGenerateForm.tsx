@@ -8,6 +8,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Clapperboard, Image as ImageIcon, Loader2, Paperclip, Sparkles, X } from 'lucide-react';
 import { media, discussions as discussionsApi } from '../lib/api';
+import { Dropdown, type DropdownOption } from './Dropdown';
+import { SearchableSelect, type SearchableSelectOption } from './SearchableSelect';
 import type {
   ExternalApiConnectionView,
   MediaModality,
@@ -30,6 +32,8 @@ const FALLBACK_RESOLUTIONS = ['480p', '720p', '1080p'];
 /// Ratios shown with a proportional preview, like the live-page mosaic layouts:
 /// `4:3` means nothing to most people until they see the shape.
 const FALLBACK_RATIOS = ['16:9', '4:3', '1:1', '9:16'];
+/// Preferred whenever the model accepts it.
+const DEFAULT_RATIO = '16:9';
 
 /// Measured against OpenRouter on 02/09: a 8x8 source came back
 /// `400 InvalidParameter — expected the width to be at least 300px`. The
@@ -41,10 +45,6 @@ const MIN_REFERENCE_WIDTH_PX = 300;
 /// one is listed without a preview rather than dropped: the provider accepts
 /// it, so the operator must be able to pick it.
 const RATIO_SHAPES = new Set(['16:9', '4:3', '1:1', '9:16', '3:4', '21:9', '9:21', '2:3', '3:2', '4:5', '5:4']);
-
-/// Below this, the whole list fits on screen and a search field is one more
-/// control for nothing.
-const SEARCHABLE_FROM = 5;
 
 /** One configured media model: what the operator actually chooses. */
 type Slot = {
@@ -120,9 +120,6 @@ export function MediaGenerateForm({
   const [referenceWidth, setReferenceWidth] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  /// Narrows the pictures offered. A room with fifty assets makes the right
-  /// one unreachable by scrolling alone.
-  const [imageQuery, setImageQuery] = useState('');
   const [attaching, setAttaching] = useState(false);
   const [launched, setLaunched] = useState<{ model: string } | null>(null);
   const [estimate, setEstimate] = useState<{ usd: number | null; samples: number } | null>(null);
@@ -189,14 +186,10 @@ export function MediaGenerateForm({
     && (images.length > 0 || !!onImageAttached);
   const pickedIds = reference?.assetIds ?? [];
   const canPickMore = pickedIds.length < referenceLimit;
-  const offeredImages = useMemo(() => {
-    const needle = imageQuery.trim().toLocaleLowerCase();
-    return images.filter(
-      image =>
-        !pickedIds.includes(image.id)
-        && (!needle || image.filename.toLocaleLowerCase().includes(needle)),
-    );
-  }, [images, imageQuery, pickedIds]);
+  const offeredImages = useMemo(
+    () => images.filter(image => !pickedIds.includes(image.id)),
+    [images, pickedIds],
+  );
 
   // A source image the newly selected model cannot take must be dropped, not
   // carried into a submission it would fail.
@@ -250,6 +243,60 @@ export function MediaGenerateForm({
     };
   }, [discussionId, reference]);
 
+  // Thumbnails of the room's pictures, so the list shows what each name means.
+  // Loaded once per set of images and revoked together: a name alone makes the
+  // reader open every entry to find the one they meant.
+  const [thumbnails, setThumbnails] = useState<Record<string, string>>({});
+  useEffect(() => {
+    if (!canReference || images.length === 0) return;
+    let cancelled = false;
+    const created: string[] = [];
+    Promise.all(
+      images.map(image =>
+        discussionsApi.contextFileBlob(discussionId, image.id)
+          .then((blob: Blob) => {
+            if (cancelled) return null;
+            const url = URL.createObjectURL(blob);
+            created.push(url);
+            return [image.id, url] as const;
+          })
+          // A thumbnail that failed to load costs a picture in the list, never
+          // the entry itself: the name still selects it.
+          .catch(() => null),
+      ),
+    ).then(entries => {
+      if (cancelled) return;
+      setThumbnails(Object.fromEntries(entries.filter(Boolean) as (readonly [string, string])[]));
+    });
+    return () => {
+      cancelled = true;
+      setThumbnails({});
+      created.forEach(url => URL.revokeObjectURL(url));
+    };
+  }, [canReference, discussionId, images]);
+
+  const imageOptions: SearchableSelectOption[] = useMemo(
+    () => offeredImages.map(image => ({
+      value: image.id,
+      label: image.filename,
+      visual: thumbnails[image.id]
+        ? <img src={thumbnails[image.id]} alt="" />
+        : undefined,
+    })),
+    [offeredImages, thumbnails],
+  );
+
+  const ratioOptions: DropdownOption[] = useMemo(
+    () => ratios.map(ratio => ({
+      value: ratio,
+      label: ratio,
+      visual: RATIO_SHAPES.has(ratio)
+        ? <i className="media-generate-ratio-shape" data-ratio={ratio} />
+        : undefined,
+    })),
+    [ratios],
+  );
+
   const pickImage = useCallback((assetId: string) => {
     setReference(current => {
       const mode: MediaReferenceMode = isVideo ? framePositions[0] : 'reference';
@@ -294,7 +341,12 @@ export function MediaGenerateForm({
     if (!resolutions.includes(resolution)) setResolution(resolutions[0]);
   }, [resolution, resolutions]);
   useEffect(() => {
-    if (!ratios.includes(aspectRatio)) setAspectRatio(ratios[0]);
+    // 16:9 when the model takes it — it is what most clips are wanted in, and
+    // falling back to whatever the catalogue happens to list first produced a
+    // portrait default nobody asked for.
+    if (!ratios.includes(aspectRatio)) {
+      setAspectRatio(ratios.includes(DEFAULT_RATIO) ? DEFAULT_RATIO : ratios[0]);
+    }
   }, [aspectRatio, ratios]);
 
   // Price of the click, derived from what this model was actually billed
@@ -523,58 +575,41 @@ export function MediaGenerateForm({
             </div>
           )}
           {canPickMore ? (
-            <>
-              <div className="media-generate-reference-tools">
-                {images.length > SEARCHABLE_FROM && (
+            <div className="media-generate-reference-tools">
+              {/* One row instead of a carpet of buttons: the list shows each
+                  picture before its name, so the right one is recognised
+                  rather than guessed from a filename. */}
+              <SearchableSelect
+                value=""
+                options={imageOptions}
+                onChange={pickImage}
+                label={t('disc.media.sourceImage')}
+                placeholder={t('disc.media.pickSourceImage')}
+                emptyLabel={t('disc.media.noSourceImageMatch')}
+                clearable={false}
+                className="media-generate-reference-select"
+                testId="media-reference-select"
+              />
+              {onImageAttached && (
+                <label className="btn btn-sm btn-ghost" data-testid="media-reference-attach">
+                  <Paperclip size={13} aria-hidden="true" />
+                  <span>{attaching ? t('disc.media.attaching') : t('disc.media.attachImage')}</span>
                   <input
-                    type="search"
-                    value={imageQuery}
-                    onChange={event => setImageQuery(event.target.value)}
-                    placeholder={t('disc.media.searchSourceImage')}
-                    aria-label={t('disc.media.searchSourceImage')}
-                    data-testid="media-reference-search"
+                    type="file"
+                    accept="image/*"
+                    hidden
+                    disabled={attaching}
+                    onChange={event => {
+                      const file = event.target.files?.[0];
+                      // Cleared before the upload: the same picture must be
+                      // attachable twice in a row.
+                      event.target.value = '';
+                      if (file) void attachImage(file);
+                    }}
                   />
-                )}
-                {onImageAttached && (
-                  <label className="btn btn-sm btn-ghost" data-testid="media-reference-attach">
-                    <Paperclip size={13} aria-hidden="true" />
-                    <span>{attaching ? t('disc.media.attaching') : t('disc.media.attachImage')}</span>
-                    <input
-                      type="file"
-                      accept="image/*"
-                      hidden
-                      disabled={attaching}
-                      onChange={event => {
-                        const file = event.target.files?.[0];
-                        // Cleared before the upload: the same picture must be
-                        // attachable twice in a row.
-                        event.target.value = '';
-                        if (file) void attachImage(file);
-                      }}
-                    />
-                  </label>
-                )}
-              </div>
-              <div className="media-generate-reference-choices">
-                {offeredImages.map(image => (
-                  <button
-                    key={image.id}
-                    type="button"
-                    className="media-generate-reference-choice"
-                    onClick={() => pickImage(image.id)}
-                    data-testid={`media-reference-pick-${image.id}`}
-                    title={image.filename}
-                  >
-                    {image.filename}
-                  </button>
-                ))}
-                {offeredImages.length === 0 && imageQuery.trim() && (
-                  <span className="set-hint" data-testid="media-reference-no-match">
-                    {t('disc.media.noSourceImageMatch')}
-                  </span>
-                )}
-              </div>
-            </>
+                </label>
+              )}
+            </div>
           ) : (
             // The ceiling is the model's own, said out loud: a picker that
             // simply stopped responding would read as broken.
@@ -589,29 +624,19 @@ export function MediaGenerateForm({
 
       {/* Each ratio carries a box in its own proportions — the same trick the
           live-page mosaic uses for layouts. */}
-      <fieldset className="media-generate-ratios">
-        <legend>{t('disc.media.aspectRatio')}</legend>
-        <div className="media-generate-ratio-choices">
-          {ratios.map(ratio => (
-            <button
-              key={ratio}
-              type="button"
-              role="radio"
-              aria-checked={ratio === aspectRatio}
-              aria-label={ratio}
-              data-active={ratio === aspectRatio}
-              className="media-generate-ratio"
-              onClick={() => setAspectRatio(ratio)}
-              data-testid={`media-ratio-${ratio}`}
-            >
-              {RATIO_SHAPES.has(ratio) && (
-                <i className="media-generate-ratio-shape" data-ratio={ratio} aria-hidden="true" />
-              )}
-              <span>{ratio}</span>
-            </button>
-          ))}
-        </div>
-      </fieldset>
+      <label className="media-generate-field">
+        <span>{t('disc.media.aspectRatio')}</span>
+        {/* Each entry carries its own proportions, so a shape is recognised
+            rather than decoded from `4:3`. */}
+        <Dropdown
+          value={aspectRatio}
+          options={ratioOptions}
+          onChange={setAspectRatio}
+          ariaLabel={t('disc.media.aspectRatio')}
+          className="media-generate-ratio-select"
+          testId="media-ratio-select"
+        />
+      </label>
 
       <p className="media-generate-estimate">
         {estimate && estimate.usd !== null && estimate.samples > 0

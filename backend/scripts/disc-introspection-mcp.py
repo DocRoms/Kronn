@@ -2339,9 +2339,9 @@ TOOLS = [
                 },
                 "resolution": {
                     "type": "string",
-                    "description": "480p | 720p | 1080p.",
+                    "description": "What the model's catalogue lists.",
                 },
-                "aspect_ratio": {"type": "string", "description": "16:9, 9:16, 1:1…"},
+                "aspect_ratio": {"type": "string", "description": "Same, per model."},
                 "generate_audio": {
                     "type": "boolean",
                     "description": (
@@ -2351,18 +2351,29 @@ TOOLS = [
                         "sound is wanted."
                     ),
                 },
+                "reference_asset_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Ids of images ALREADY IN THIS DISCUSSION to generate "
+                        "from — never paths or URLs. Order matters: providers "
+                        "weigh references by position. A video takes one; an "
+                        "image takes as many as the model advertises (1-16). "
+                        "Needs `reference_mode`."
+                    ),
+                },
                 "reference_asset_id": {
                     "type": "string",
-                    "description": (
-                        "Video only. Id of an image ALREADY IN THIS DISCUSSION "
-                        "to generate from — never a path or URL. Needs "
-                        "`reference_mode`."
-                    ),
+                    "description": "Single-image form of `reference_asset_ids`.",
                 },
                 "reference_mode": {
                     "type": "string",
                     "enum": ["first_frame", "last_frame", "reference"],
-                    "description": "Use of that image. Only what the model advertises is accepted.",
+                    "description": (
+                        "Use of those images. A first/last frame is video-only "
+                        "and takes ONE picture; `reference` is what an image "
+                        "uses. Only what the model advertises is accepted."
+                    ),
                 },
                 "wait": {
                     "type": "boolean",
@@ -8083,19 +8094,35 @@ def call_media_generate(args):
     for key in ("duration_secs", "resolution", "aspect_ratio"):
         if args.get(key) is not None:
             body[key] = args[key]
-    # An id inside the bound discussion, checked server-side. Sending one
-    # without a mode would be read as a plain text-to-video and billed as such,
-    # so the pair is refused here rather than half-honoured there.
-    asset = args.get("reference_asset_id")
+    # Ids inside the bound discussion, checked server-side. Sending one without
+    # a mode would be read as a plain text-to-media and billed as such, so the
+    # pair is refused here rather than half-honoured there.
+    assets = args.get("reference_asset_ids") or []
+    if isinstance(assets, str):
+        assets = [assets]
+    single = args.get("reference_asset_id")
+    if single and single not in assets:
+        assets = [single, *assets]
     mode = args.get("reference_mode")
-    if asset and not mode:
-        raise RuntimeError("media_generate: reference_asset_id requires reference_mode")
-    if mode and not asset:
-        raise RuntimeError("media_generate: reference_mode requires reference_asset_id")
-    if asset:
-        if modality != "video":
-            raise RuntimeError("media_generate: a source image applies to video only")
-        body["reference_asset_id"] = asset
+    if assets and not mode:
+        raise RuntimeError("media_generate: a reference asset requires reference_mode")
+    if mode and not assets:
+        raise RuntimeError("media_generate: reference_mode requires a reference asset")
+    if assets:
+        # A frame is one exact picture at one end of a CLIP; an illustration
+        # has none. Refusing here names the mismatch before the request is
+        # billed for something else.
+        if mode in ("first_frame", "last_frame"):
+            if modality != "video":
+                raise RuntimeError(
+                    "media_generate: a first/last frame applies to video only; "
+                    "an image takes reference_mode 'reference'"
+                )
+            if len(assets) > 1:
+                raise RuntimeError(
+                    f"media_generate: '{mode}' takes a single image, {len(assets)} were given"
+                )
+        body["reference_asset_ids"] = assets
         body["reference_mode"] = mode
     # Sent for every video, default included. Omitting it hands the decision to
     # the provider, whose default is a soundtrack — the same silence that had a

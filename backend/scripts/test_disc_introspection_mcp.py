@@ -10629,8 +10629,39 @@ class MediaGenerateReferenceTests(unittest.TestCase):
 
     def test_the_pair_travels_to_the_backend(self):
         body = self._call(reference_asset_id="asset-7", reference_mode="first_frame")
-        self.assertEqual(body["reference_asset_id"], "asset-7")
+        # The plural list is the contract; a single id is folded into it.
+        self.assertEqual(body["reference_asset_ids"], ["asset-7"])
         self.assertEqual(body["reference_mode"], "first_frame")
+
+    def test_an_image_takes_several_references_in_the_order_given(self):
+        # KT-555 — providers weigh references by position, so the order the
+        # agent chose is the order that leaves.
+        self.mod.call_media_generate({
+            "connection_id": "conn-1", "modality": "image", "prompt": "p",
+            "discussion_id": "disc-1",
+            "reference_asset_ids": ["asset-a", "asset-b"],
+            "reference_mode": "reference",
+        })
+        body = self.fake_http.call_args.args[2]
+        self.assertEqual(body["reference_asset_ids"], ["asset-a", "asset-b"])
+
+    def test_a_frame_takes_one_picture_and_says_so(self):
+        # Keeping one of them silently would bill the generation for something
+        # else, and only the result would show it.
+        with self.assertRaises(RuntimeError):
+            self._call(
+                reference_asset_ids=["asset-a", "asset-b"],
+                reference_mode="last_frame",
+            )
+        self.fake_http.assert_not_called()
+
+    def test_both_forms_together_never_send_the_same_id_twice(self):
+        body = self._call(
+            reference_asset_id="asset-a",
+            reference_asset_ids=["asset-a"],
+            reference_mode="first_frame",
+        )
+        self.assertEqual(body["reference_asset_ids"], ["asset-a"])
 
     def test_half_a_pair_is_refused_before_any_http(self):
         # Sent alone, the id would be read as a plain text-to-video and billed
@@ -10649,12 +10680,14 @@ class MediaGenerateReferenceTests(unittest.TestCase):
             })
         self.fake_http.assert_not_called()
 
-    def test_the_schema_tells_an_agent_where_the_image_comes_from(self):
+    def test_the_schema_tells_an_agent_where_the_images_come_from(self):
         tool = next(t for t in self.mod.TOOLS if t["name"] == "media_generate")
-        described = tool["inputSchema"]["properties"]["reference_asset_id"]["description"]
+        described = tool["inputSchema"]["properties"]["reference_asset_ids"]["description"]
         self.assertIn("THIS DISCUSSION", described)
-        self.assertIn("never a path or URL", described)
+        self.assertIn("never paths or URLs", described)
         self.assertIn("reference_mode", described)
+        # An agent must know the ceiling is the model's, not a constant.
+        self.assertIn("advertises", described)
 
 
 if __name__ == "__main__":

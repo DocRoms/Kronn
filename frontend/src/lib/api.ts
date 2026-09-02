@@ -1706,9 +1706,17 @@ export const discussions = {
     if (!res.ok) throw new Error(`Failed to load attachment (${res.status})`);
     return res.blob();
   },
-  uploadContextFile: async (id: string, file: File): Promise<UploadContextFileResponse> => {
+  /** `extractedFromAssetId` marks a frame decoded out of a clip of the same
+   *  discussion: the server then gives it its OWN transcript message, so it
+   *  never waits to be pinned to the next thing the user sends. */
+  uploadContextFile: async (
+    id: string,
+    file: File,
+    extractedFromAssetId?: string,
+  ): Promise<UploadContextFileResponse> => {
     const form = new FormData();
     form.append('file', file);
+    if (extractedFromAssetId) form.append('extracted_from_asset_id', extractedFromAssetId);
     const res = await fetch(`${_apiBase}/api/discussions/${id}/context-files`, {
       method: 'POST',
       headers: { ...authHeaders() },

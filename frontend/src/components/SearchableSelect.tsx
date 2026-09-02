@@ -1,4 +1,4 @@
-import { useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Check, ChevronDown, Search, X } from 'lucide-react';
 
 export interface SearchableSelectOption {
@@ -7,6 +7,9 @@ export interface SearchableSelectOption {
   keywords?: string;
   description?: string;
   disabled?: boolean;
+  /** Shown before the label: a thumbnail of what this entry IS. A filename
+   *  alone makes the reader open every entry to find the one they meant. */
+  visual?: ReactNode;
 }
 
 interface SearchableSelectProps {
@@ -192,6 +195,9 @@ export function SearchableSelect({
               onMouseDown={event => event.preventDefault()}
               onClick={() => choose(option)}
             >
+              {option.visual && (
+                <span className="searchable-select-visual" aria-hidden="true">{option.visual}</span>
+              )}
               <span>
                 <strong>{option.label}</strong>
                 {option.description && <small>{option.description}</small>}

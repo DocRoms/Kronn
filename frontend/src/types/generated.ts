@@ -1224,7 +1224,13 @@ message_id: string | null,
  * media job. `None` means "no attested AI provenance", never "probably
  * human" based on a filename or MIME-type heuristic.
  */
-ai_generation: ContextFileAiGeneration | null, created_at: string, };
+ai_generation: ContextFileAiGeneration | null,
+/**
+ * The asset this picture was taken OUT of — a frame decoded from a clip
+ * of the same discussion. It is not an AI generation and must never be
+ * labelled as one: nothing was produced, a picture was extracted.
+ */
+extracted_from_asset_id?: string | null, created_at: string, };
 
 /**
  * Provenance recorded by Kronn for an asset produced by an AI media job.

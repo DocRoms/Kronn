@@ -163,6 +163,22 @@
   cursor: pointer;
 }
 
+/* Fixed box so rows stay aligned whatever the picture's proportions. */
+.searchable-select-visual {
+  display: inline-flex;
+  flex: 0 0 auto;
+  width: 26px;
+  height: 26px;
+}
+
+.searchable-select-visual img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: var(--kr-r-sm);
+  background: var(--kr-bg-subtle);
+}
+
 .searchable-select-option[data-active='true'],
 .searchable-select-option:hover:not(:disabled) {
   background: var(--kr-bg-hover);
