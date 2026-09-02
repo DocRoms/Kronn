@@ -45,6 +45,18 @@ Release notes for 0.9.3 and earlier are available in the
   removes bytes from disk and sits next to "close", so it arms before it acts,
   the viewer closes rather than silently landing on the neighbouring media, and
   a server refusal leaves the file exactly where it was.
+  An image generation can now be drawn from SEVERAL pictures of the discussion,
+  up to the number each model advertises — from 1 to 16 across the catalogue,
+  so nothing is assumed — and the bubble opens every one of them. Asking for a
+  frame on an image, or for several images on one frame, is refused instead of
+  being quietly reduced to something else and billed for it.
+  A clip's last picture can be kept as a file of the discussion in one click,
+  and reused straight away as the starting image of the next generation — no
+  download, no re-upload, no dependency to install. It is decoded by the
+  viewer's own player, which reads these clips where the backend cannot, and an
+  extraction that decoded nothing says so rather than attaching a black
+  rectangle. A picture too narrow for the provider blocks the launch before it
+  is billed.
 
 - Discussions now report their storage weight, split by what a cleanup could
   actually reclaim: attachment bytes held on disk, extracted document text, and

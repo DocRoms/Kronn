@@ -152,13 +152,15 @@ catalogue of AGENT models, with provenance and tier assignment. These envelopes
 are per provider model and volatile — a max duration changes without notice —
 and persisting them would make a stale row authoritative over the provider.
 
-## Generating from an image already in the room
+## Generating from images already in the room
 
-A video may start from — or end on — a picture the discussion already holds.
-The request names it by context-file id plus a mode (`first_frame`,
+A video may start from — or end on — a picture the discussion already holds,
+and an image may be drawn from several of them. The request names them by
+context-file id (`reference_asset_ids`) plus a mode (`first_frame`,
 `last_frame`, `reference`); it never carries a path or a URL, so neither a
-browser nor an agent learns where the file lives or can point a generation
-outside the room.
+browser nor an agent learns where a file lives or can point a generation
+outside the room. The single-id form is still accepted and still read on jobs
+recorded before several pictures were possible; it is never written again.
 
 Everything is checked before anything durable is written and long before the
 provider is paid: the asset exists, belongs to THIS discussion, is an image
@@ -172,24 +174,53 @@ file on each attempt, so a job resumed after a restart uses the same picture
 and one that left the discussion in between fails the job instead of reaching
 the provider stripped of what made it the requested generation.
 
-The image travels to the provider as a `data:` payload. Kronn listens on
+The images travel to the provider as `data:` payloads. Kronn listens on
 127.0.0.1: there is no URL a provider could fetch, and publishing one would
-hand a private file to the internet. OpenRouter's documented shape is
-`frame_images: [{type, image_url: {url}, frame_type}]`.
+hand a private file to the internet. The documented shapes are
+`frame_images: [{type, image_url: {url}, frame_type}]` on the video route and
+`input_references: [{type, image_url: {url}}]` on the image one — the same
+object without the frame. Order is preserved: providers weigh references by
+position.
 
-The finished clip states what it was built on: the run projection echoes the
-source id and the mode, and the bubble shows a line — "starts on an image of
-this discussion" — whose link opens that picture in the viewer. An id, resolved
+How many references an image model takes is its own: the catalogue states it
+as a range and it runs from 1 to 16 across the models, so the form offers what
+each one advertises and the request is refused above a stated maximum. A
+catalogue that advertises nothing stays silent and lets the submission tell.
+
+The finished result states what it was built on: the run projection echoes the
+source ids and the mode, and the bubble shows a line — "starts on an image of
+this discussion" — whose links open those pictures in the viewer. Ids, resolved
 through the discussion's own files; a mode the reader cannot name is dropped
 rather than labelled with an invented word.
 
-Two deliberate refusals. A visual reference on a video is refused rather than
+## Taking the last frame of a clip
+
+A clip's last picture is extracted in the BROWSER, from the viewer's own
+player, and uploaded as a context file of the discussion — from there it is a
+starting picture like any other. The backend cannot do this: the clips these
+providers return are H.264 profile 100, which the pure-Rust decoder reads for 9
+frames out of 97, and ffmpeg is on neither the machine nor the repo. The
+browser decodes them, and the action only ever runs from a click in the viewer,
+so the element that already succeeds does the work — with no dependency and no
+divergence between Docker, Tauri, macOS, Linux, Windows and WSL.
+
+The extraction proves it decoded something — non-zero dimensions and a
+non-uniform canvas — and fails with a sentence otherwise. A clip that genuinely
+ends on a fade to black is refused too: a visible refusal costs a retry, while
+a black rectangle passed off as the last frame is paid for as the starting
+picture of the next generation.
+
+Four deliberate refusals. A visual reference on a video is refused rather than
 submitted as a frame: no video model advertises `reference` under
 `supported_frame_images`, and passing it as a frame would have the model
-reproduce a picture that was only an inspiration — and bill for it. NVIDIA
-refuses a source image naming what is missing, because its image-to-video
-contract has not been measured here and an invented payload would be billed on
-a supposition.
+reproduce a picture that was only an inspiration — and bill for it. A frame on
+the image route is refused symmetrically: an illustration has no first or last
+one, and demoting the request to a plain reference would bill a generation
+nobody asked for. Several images for one frame are refused whether or not a
+catalogue answered, since keeping one of them silently is the same charge for
+something else. NVIDIA refuses source images naming what is missing, because
+neither its image-to-video nor its reference contract has been measured here
+and an invented payload would be billed on a supposition.
 
 ## The soundtrack is a decision, never a default
 
