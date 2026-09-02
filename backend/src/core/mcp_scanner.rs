@@ -503,6 +503,7 @@ fn merge_mcp_json_file(
     }
 
     let mut now_owned = BTreeSet::new();
+    let mut collisions: Vec<String> = Vec::new();
     for (name, wanted) in desired {
         match existing.get(&name) {
             Some(current) if previously_owned.contains(&name) || current == &wanted => {
@@ -510,17 +511,28 @@ fn merge_mcp_json_file(
                 now_owned.insert(name);
             }
             Some(_) => {
-                tracing::warn!(
-                    "MCP config collision in {} for '{}': preserving user-owned entry",
-                    file.display(),
-                    name
-                );
+                // Collected, not logged one by one. A sync walks every project
+                // × every agent config file, so a handful of standing
+                // collisions became 12 436 identical warnings in one report —
+                // enough to bury the 712 real errors underneath them. One line
+                // per file keeps the signal and drops the repetition.
+                collisions.push(name.clone());
             }
             None => {
                 existing.insert(name.clone(), wanted);
                 now_owned.insert(name);
             }
         }
+    }
+
+    if !collisions.is_empty() {
+        tracing::warn!(
+            "MCP config: {} user-owned entr{} preserved in {} ({})",
+            collisions.len(),
+            if collisions.len() == 1 { "y" } else { "ies" },
+            file.display(),
+            collisions.join(", ")
+        );
     }
 
     if existed {
