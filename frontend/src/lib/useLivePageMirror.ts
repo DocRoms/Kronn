@@ -94,7 +94,7 @@ export function useLivePageMirror({
   // in external mode the loop reads its data_revision to notice movement even
   // though a same-id revision bump doesn't re-run the effect.
   const externalDetailRef = useRef(externalDetail);
-  externalDetailRef.current = externalDetail;
+  useEffect(() => { externalDetailRef.current = externalDetail; }, [externalDetail]);
 
   useEffect(() => {
     // Reset per-page so one page's mirror never briefly overlays the next.
