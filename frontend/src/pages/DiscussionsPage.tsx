@@ -159,6 +159,7 @@ function StreamingAgentReplyBubble({
   recovering,
   recoveryLabel,
   agentLabel,
+  waitingUpstream,
 }: {
   agent: AgentType;
   triggerMessageId: string;
@@ -172,6 +173,8 @@ function StreamingAgentReplyBubble({
   recovering: boolean;
   recoveryLabel: string | null;
   agentLabel?: string;
+  /** Queued behind another run rather than working — worth saying so. */
+  waitingUpstream: boolean;
 }) {
   const { t } = useT();
   const displayAgent = agentLabel ?? AGENT_LABELS[agent] ?? agent;
@@ -225,7 +228,7 @@ function StreamingAgentReplyBubble({
         ) : (
           <div className="disc-streaming-waiting" aria-live="assertive">
             <span className="disc-pulse-dot" />
-            {t('disc.running')}
+            {waitingUpstream ? t('disc.waitingForSlot') : t('disc.running')}
             {logs.length > 0 && (
               <span className="disc-streaming-log-hint">— {logs.at(-1)?.slice(0, 60)}</span>
             )}
@@ -4074,6 +4077,7 @@ export function DiscussionsPage({
                             elapsed={sendingElapsed}
                             text={deferredStreamingText}
                             logs={agentLogs}
+                            waitingUpstream={durablePartial?.dispatch?.progress_phase === 'upstream_wait'}
                             showLogs={showLogs}
                             onToggleLogs={() => setShowLogs(value => !value)}
                             stopping={stoppingDispatchIds.has(reply.id)}

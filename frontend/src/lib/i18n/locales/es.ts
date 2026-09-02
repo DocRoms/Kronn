@@ -1586,6 +1586,7 @@ const es: TranslationDict = {
   'disc.hideSummary': 'Ocultar',
   'disc.thinking': '{0} está pensando...',
   'disc.running': 'Agente en ejecución...',
+  'disc.waitingForSlot': 'Esperando un turno de agente...',
   'disc.streamRestartSaved': 'Backend reiniciado — borrador guardado. Recuperación duradera en curso (intento {0}).',
   'disc.streamDisconnectedSaved': 'Conexión del flujo interrumpida — el texto recibido sigue visible durante la reconexión.',
   'disc.debateLaunching': 'Debate iniciando… (las CLI agents pueden tardar 5-30s en arrancar, especialmente Codex en cold-start)',

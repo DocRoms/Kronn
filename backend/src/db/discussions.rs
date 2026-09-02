@@ -433,7 +433,7 @@ pub fn get_in_flight_agent_response(
                 d.partial_response_model, d.partial_response_trigger_message_id,
                 d.partial_response_connection_id,
                 j.id, j.trigger_message_id, j.agent_override_json, j.status,
-                j.attempts, j.last_error, j.connection_id
+                j.attempts, j.last_error, j.connection_id, j.progress_phase
            FROM discussions d
            LEFT JOIN agent_dispatch_jobs j ON j.id = d.partial_response_dispatch_id
           WHERE d.id = ?1 AND d.partial_response IS NOT NULL",
@@ -459,6 +459,7 @@ pub fn get_in_flight_agent_response(
                     attempts: Some(row.get::<_, i64>(11)?.max(0) as u32),
                     last_error: row.get(12)?,
                     connection_id: row.get::<_, Option<String>>(13)?.or(row.get(6)?),
+                    progress_phase: row.get(14)?,
                 })
             } else {
                 None

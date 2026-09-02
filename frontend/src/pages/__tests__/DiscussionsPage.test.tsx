@@ -793,6 +793,64 @@ describe('DiscussionsPage', () => {
     expect(response).not.toHaveTextContent("Agent en cours d'exécution...");
   });
 
+  it('says a turn is queued behind another run instead of showing a bare spinner', async () => {
+    // Issue 202 clocked 54 s and 2 min 37 of waiting behind a neighbouring
+    // run, indistinguishable from a stalled turn. The phase was recorded
+    // durably all along; it just never reached the screen.
+    const queuedDispatch = {
+      id: 'job-queued',
+      trigger_message_id: 'u-queued',
+      agent_type: 'ClaudeCode' as const,
+      status: 'Running',
+      attempts: 1,
+      progress_phase: 'upstream_wait',
+    };
+    const fullDisc = {
+      ...makeListDiscussion('d-queued', 1),
+      agent: 'ClaudeCode' as const,
+      participants: ['ClaudeCode' as const],
+      awaiting_agent: true,
+      messages: [{
+        id: 'u-queued', role: 'User' as const, channel: 'main' as const,
+        content: 'Une question courte', agent_type: null,
+        timestamp: '2026-09-02T09:45:13Z', tokens_used: 0, auth_mode: null,
+      }],
+      active_agent_dispatches: [queuedDispatch],
+      partial_response: {
+        message_id: 'partial-queued',
+        content: '',
+        started_at: '2026-09-02T09:46:40Z',
+        agent_type: 'ClaudeCode' as const,
+        trigger_message_id: 'u-queued',
+        dispatch: queuedDispatch,
+      },
+    };
+    vi.mocked(discussionsApi.get).mockResolvedValue(fullDisc);
+
+    await wrap(
+      <DiscussionsPage
+        projects={[]}
+        agents={[]}
+        allDiscussions={[fullDisc]}
+        configLanguage="fr"
+        agentAccess={null}
+        refetchDiscussions={noop}
+        refetchProjects={noop}
+        onNavigate={noop}
+        toast={toastFn}
+        initialActiveDiscussionId="d-queued"
+        {...liftedProps()}
+        // The turn is in flight: the user has sent, nothing has come back yet.
+        sendingMap={{ 'd-queued': true }}
+      />,
+    );
+
+    const response = await screen.findByTestId('streaming-agent-ClaudeCode');
+    expect(response).toHaveTextContent("En attente d'un créneau d'agent...");
+    // The generic wording would hide the distinction the phase exists to make.
+    expect(response).not.toHaveTextContent("Agent en cours d'exécution...");
+  });
+
   it('keeps the latest local chunks visible when an accepted stream disconnects', async () => {
     const fullDisc = {
       ...makeListDiscussion('d-stream-disconnect', 1),

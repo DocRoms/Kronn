@@ -1596,6 +1596,7 @@ const fr: TranslationDict = {
   'disc.hideSummary': 'Masquer',
   'disc.thinking': '{0} réfléchit...',
   'disc.running': "Agent en cours d'exécution...",
+  'disc.waitingForSlot': "En attente d'un créneau d'agent...",
   'disc.streamRestartSaved': 'Backend redémarré — brouillon sauvegardé. Reprise durable en cours (tentative {0}).',
   'disc.streamDisconnectedSaved': 'Connexion au flux interrompue — le texte déjà reçu reste affiché pendant la reconnexion.',
   'disc.debateLaunching': 'Débat en cours de démarrage… (les CLI agents peuvent mettre 5-30s à booter, surtout Codex au cold-start)',

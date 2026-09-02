@@ -1565,6 +1565,7 @@ const zh: TranslationDict = {
   "disc.hideSummary": "隐藏",
   "disc.thinking": "{0} 正在思考…",
   "disc.running": "代理运行中…",
+  "disc.waitingForSlot": "正在等待代理空位…",
   "disc.streamRestartSaved": "后端已重启 — 草稿已保存。正在进行持久恢复（第 {0} 次尝试）。",
   "disc.streamDisconnectedSaved": "流连接已中断 — 重新连接期间仍会显示已接收的文本。",
   "disc.debateLaunching": "辩论启动中…（代理 CLI 可能需要 5-30 秒启动，尤其是 Codex 冷启动时）",

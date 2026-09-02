@@ -21,7 +21,15 @@ last_error?: string,
  * example OpenRouter). The generic agent type alone is not enough to
  * render or resume that provider honestly.
  */
-connection_id?: string, };
+connection_id?: string,
+/**
+ * What this dispatch is doing right now — `upstream_wait` while it queues
+ * behind another run, `tool_activity` while a tool is executing. Recorded
+ * durably since 0.9.x but never surfaced, so a turn queued behind a
+ * neighbour looked identical to one that had simply stalled: issue 202
+ * clocked 54 s and 2 min 37 of invisible waiting.
+ */
+progress_phase?: string, };
 
 /**
  * Result of adding a contact, with optional diagnostic hint for unreachable peers.

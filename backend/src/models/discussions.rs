@@ -33,6 +33,14 @@ pub struct ActiveAgentDispatch {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub connection_id: Option<String>,
+    /// What this dispatch is doing right now — `upstream_wait` while it queues
+    /// behind another run, `tool_activity` while a tool is executing. Recorded
+    /// durably since 0.9.x but never surfaced, so a turn queued behind a
+    /// neighbour looked identical to one that had simply stalled: issue 202
+    /// clocked 54 s and 2 min 37 of invisible waiting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub progress_phase: Option<String>,
 }
 
 /// Durable snapshot of the text already emitted by an in-flight agent.
