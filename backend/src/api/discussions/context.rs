@@ -396,6 +396,7 @@ pub async fn delete_context_file(
     // Get disk_path before deleting (to clean up image files)
     let fid = file_id.clone();
     let did = discussion_id.clone();
+    let deleted_file_id = file_id.clone();
     let disk_path: Option<String> = state
         .db
         .with_conn(move |conn| {
@@ -422,9 +423,49 @@ pub async fn delete_context_file(
             if let Some(path) = disk_path {
                 crate::core::context_files::delete_image_from_disk(&path);
             }
+            // A media job still points at the file it produced. Left alone,
+            // its bubble keeps offering "open the media" on bytes that no
+            // longer exist — a promise the click cannot keep. Cleared here so
+            // the answer survives a reload, rather than patched in the UI.
+            forget_deleted_media_asset(&state, &deleted_file_id).await;
             Json(ApiResponse::<()>::ok(()))
         }
         Ok(false) => Json(ApiResponse::<()>::err("Context file not found".to_string())),
         Err(e) => Json(ApiResponse::<()>::err(format!("DB error: {e}"))),
+    }
+}
+
+/// Detaches a deleted asset from the media job that produced it, and republishes
+/// the run so open discussions stop offering it.
+///
+/// Best effort on purpose: the file IS gone, and failing the deletion because a
+/// projection could not be refreshed would be the wrong trade. The next relist
+/// still reads the cleared row.
+async fn forget_deleted_media_asset(state: &AppState, file_id: &str) {
+    let lookup = file_id.to_string();
+    let job_id = state
+        .db
+        .with_conn(move |conn| {
+            use rusqlite::OptionalExtension as _;
+            let job_id: Option<String> = conn
+                .query_row(
+                    "SELECT id FROM media_jobs WHERE context_file_id = ?1",
+                    rusqlite::params![lookup],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|e| anyhow::anyhow!(e))?;
+            if let Some(job_id) = job_id.as_deref() {
+                conn.execute(
+                    "UPDATE media_jobs SET context_file_id = NULL WHERE id = ?1",
+                    rusqlite::params![job_id],
+                )
+                .map_err(|e| anyhow::anyhow!(e))?;
+            }
+            Ok(job_id)
+        })
+        .await;
+    if let Ok(Some(job_id)) = job_id {
+        let _ = crate::api::shared_runs::publish_media_job(state, &job_id).await;
     }
 }

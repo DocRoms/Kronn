@@ -16813,6 +16813,60 @@ async fn media_generate_refuses_a_source_image_before_creating_anything() {
 }
 
 #[tokio::test]
+async fn deleting_a_generated_asset_stops_its_bubble_offering_it() {
+    // KT-554 — the file is gone; a run still pointing at it would have the
+    // bubble promise "open the media" on bytes that no longer exist, and the
+    // click could only fail. Cleared server-side so the answer survives a
+    // reload rather than being patched in the UI.
+    let state = test_state();
+    seed_media_connection(&state, Some("meta/muse-image"), None).await;
+    seed_reference_image(&state, "asset-produced", "disc-media", "image/png", Some("/tmp/out.png")).await;
+    state
+        .db
+        .with_conn(|connection| {
+            let now = chrono::Utc::now().to_rfc3339();
+            connection.execute(
+                "INSERT INTO media_jobs
+                    (id, modality, status, connection_id, model, prompt, params_json,
+                     discussion_id, context_file_id, attempts, created_at, updated_at,
+                     scheduled_at, deadline_at)
+                 VALUES ('job-done', 'image', 'completed', 'conn-media', 'meta/muse-image',
+                         'un chat', '{}', 'disc-media', 'asset-produced', 1, ?1, ?1, ?1, ?1)",
+                [&now],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    let app = build_router_with_auth(state.clone(), false);
+    let response = app
+        .oneshot(
+            axum::http::Request::builder()
+                .method("DELETE")
+                .uri("/api/discussions/disc-media/context-files/asset-produced")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+
+    let linked: Option<String> = state
+        .db
+        .with_read_conn(|connection| {
+            Ok(connection.query_row(
+                "SELECT context_file_id FROM media_jobs WHERE id = 'job-done'",
+                [],
+                |row| row.get(0),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(linked, None, "the job must no longer point at a deleted file");
+}
+
+#[tokio::test]
 async fn media_generate_refuses_an_unknown_discussion() {
     let state = test_state();
     seed_media_connection(&state, None, Some("bytedance/seedance-2.0-mini")).await;
