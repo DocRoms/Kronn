@@ -247,6 +247,7 @@ export function MediaGenerateForm({
   // Loaded once per set of images and revoked together: a name alone makes the
   // reader open every entry to find the one they meant.
   const [thumbnails, setThumbnails] = useState<Record<string, string>>({});
+  const imageKey = images.map(image => image.id).join(',');
   useEffect(() => {
     if (!canReference || images.length === 0) return;
     let cancelled = false;
@@ -273,7 +274,11 @@ export function MediaGenerateForm({
       setThumbnails({});
       created.forEach(url => URL.revokeObjectURL(url));
     };
-  }, [canReference, discussionId, images]);
+    // Keyed on the ids, never on the array: the parent rebuilds
+    // `files.filter(isImage)` on every render, so depending on the reference
+    // re-ran this effect in a loop — revoking and recreating every object URL,
+    // which is what made the open list flicker every few hundred milliseconds.
+  }, [canReference, discussionId, imageKey]);
 
   const imageOptions: SearchableSelectOption[] = useMemo(
     () => offeredImages.map(image => ({
@@ -591,9 +596,15 @@ export function MediaGenerateForm({
                 testId="media-reference-select"
               />
               {onImageAttached && (
-                <label className="btn btn-sm btn-ghost" data-testid="media-reference-attach">
-                  <Paperclip size={13} aria-hidden="true" />
-                  <span>{attaching ? t('disc.media.attaching') : t('disc.media.attachImage')}</span>
+                <label
+                  className="btn btn-sm btn-ghost media-generate-attach"
+                  data-testid="media-reference-attach"
+                  title={attaching ? t('disc.media.attaching') : t('disc.media.attachImage')}
+                  aria-label={attaching ? t('disc.media.attaching') : t('disc.media.attachImage')}
+                >
+                  {attaching
+                    ? <Loader2 size={14} aria-hidden="true" className="spin" />
+                    : <Paperclip size={14} aria-hidden="true" />}
                   <input
                     type="file"
                     accept="image/*"

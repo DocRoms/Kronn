@@ -288,8 +288,27 @@ fn anchor_extracted_frame(
     if source.discussion_id != discussion_id {
         anyhow::bail!("the source clip does not belong to this discussion");
     }
-    if !source.mime_type.starts_with("video/") {
-        anyhow::bail!("a frame can only be taken out of a video ({})", source.mime_type);
+    // The recorded type is not always the truth: every clip stored before
+    // `mime_from_extension` knew about video sits in the database as
+    // `text/plain`, so a check on the type alone refused the very files this
+    // feature exists for. The extension is the same fallback the viewer uses.
+    let looks_like_video = source.mime_type.starts_with("video/")
+        || matches!(
+            source
+                .filename
+                .rsplit('.')
+                .next()
+                .unwrap_or_default()
+                .to_ascii_lowercase()
+                .as_str(),
+            "mp4" | "m4v" | "webm" | "mov" | "ogv"
+        );
+    if !looks_like_video {
+        anyhow::bail!(
+            "a frame can only be taken out of a video ({}, {})",
+            source.filename,
+            source.mime_type
+        );
     }
 
     let now = chrono::Utc::now();
@@ -642,6 +661,33 @@ mod tests {
             .expect_err("refused")
             .to_string();
         assert!(error.contains("does not belong"), "got {error}");
+    }
+
+    #[tokio::test]
+    async fn a_clip_recorded_before_video_mimes_existed_is_still_a_clip() {
+        // Every clip stored before `mime_from_extension` knew about video sits
+        // in the database as `text/plain`. Refusing those refused the very
+        // files this feature exists for — reported from a real discussion.
+        let db = seeded().await;
+        db.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO context_files
+                    (id, discussion_id, filename, mime_type, original_size,
+                     extracted_size, extracted_text, disk_path, created_at)
+                 VALUES ('legacy-clip', 'd-1', 'seedance.mp4', 'text/plain', 10, 0, '',
+                         '/tmp/legacy.mp4', '2026-09-02 10:00:00')",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .expect("seed");
+
+        let (_, source_id) = db
+            .with_conn(|conn| anchor_extracted_frame(conn, "d-1", "legacy-clip", "f.png"))
+            .await
+            .expect("a legacy clip is still a clip");
+        assert_eq!(source_id, "legacy-clip");
     }
 
     #[tokio::test]

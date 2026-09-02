@@ -1064,7 +1064,7 @@ const en: TranslationDict = {
   'disc.media.startedFrom.reference': 'Based on an image of this discussion',
   'disc.media.startedFrom.last_frame': 'Ends on an image of this discussion',
   'disc.media.startedFrom.first_frame': 'Starts on an image of this discussion',
-  'disc.media.lastFrame.action': 'Keep the last frame',
+  'disc.media.lastFrame.action': 'Extract the video’s last frame',
   'disc.media.referenceImages': 'Reference images',
   'disc.media.pickSourceImage': 'Pick a picture…',
   'disc.media.searchSourceImage': 'Search for a picture',

@@ -1049,7 +1049,7 @@ const zh: TranslationDict = {
   "disc.media.startedFrom.reference": "参考本讨论中的一张图像",
   "disc.media.startedFrom.last_frame": "以本讨论中的一张图像结束",
   "disc.media.startedFrom.first_frame": "以本讨论中的一张图像开始",
-  "disc.media.lastFrame.action": "保存最后一帧",
+  "disc.media.lastFrame.action": "提取视频的最后一帧",
   "disc.media.referenceImages": "参考图片",
   "disc.media.pickSourceImage": "选择一张图片…",
   "disc.media.searchSourceImage": "搜索图片",

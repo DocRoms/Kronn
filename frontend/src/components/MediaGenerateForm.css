@@ -220,6 +220,15 @@
 .media-generate-reference { border: 0; margin: 0; padding: 0; }
 .media-generate-reference > legend { padding: 0; font-size: var(--kr-fs-xs); color: var(--kr-text-muted); }
 .media-generate-reference-tools { display: flex; align-items: center; gap: 6px; margin-top: 6px; }
+/* The list takes the row; the paperclip keeps only what an icon needs. Sharing
+   the width with a labelled button left the field too narrow to read a
+   filename in. */
+.media-generate-reference-select { flex: 1; min-width: 0; }
+.media-generate-attach {
+  flex: 0 0 auto;
+  padding-left: var(--kr-sp-3);
+  padding-right: var(--kr-sp-3);
+}
 .media-generate-reference-tools input[type='search'] {
   flex: 1;
   min-width: 0;

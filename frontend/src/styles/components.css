@@ -225,6 +225,18 @@
   font-size: var(--kr-fs-xs);
 }
 
+/* The icon keeps its full size while the text shrinks, so the compact variant
+   needs its own inset — otherwise the placeholder starts under the magnifier. */
+.searchable-select--compact .searchable-select-control > svg:first-child {
+  left: 8px;
+  width: 12px;
+  height: 12px;
+}
+
+.searchable-select--compact .searchable-select-control input {
+  padding-left: 26px;
+}
+
 /* ── Cards ──────────────────────────────────────────────────────────────── */
 .card {
   background: var(--kr-bg-surface);
