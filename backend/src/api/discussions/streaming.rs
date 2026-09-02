@@ -2696,6 +2696,18 @@ async fn make_agent_stream_inner(
                                         tracing::warn!(dispatch_job_id = %job_id, "Unable to persist tool progress: {error}");
                                     }
                                 }
+                                // Tell the client a tool STARTED, not only that
+                                // one finished. A single Bash can run 80 s
+                                // (issue 202's worst case), and until now that
+                                // whole time was a frozen placeholder while
+                                // Kronn already knew what was running.
+                                if !client_gone {
+                                    let _ = tx
+                                        .send(AgentStreamEvent::Log {
+                                            text: format!("→ {name}"),
+                                        })
+                                        .await;
+                                }
                                 current_tool = Some(name);
                                 current_tool_input.clear();
                             }
@@ -4011,6 +4023,14 @@ pub(super) async fn run_agent_streaming(
                                     stream_json_failure = Some(failure);
                                 }
                                 runner::StreamJsonEvent::ToolStart(name) => {
+                                    // Same reason as the discussion loop: a
+                                    // debate round showed a frozen "thinking"
+                                    // line for the whole of a long tool call.
+                                    if !tx.is_closed() {
+                                        let _ = tx.send(AgentStreamEvent::Log {
+                                            text: format!("→ {name}"),
+                                        }).await;
+                                    }
                                     current_tool = Some(name);
                                     tool_input.clear();
                                 }
@@ -4848,9 +4868,13 @@ mod run_agent_streaming_tests {
 
     #[tokio::test]
     async fn tool_call_emits_a_log_event() {
-        // ToolStart → ToolInputDelta → ToolEnd must produce exactly one Log
-        // event (the human-readable tool-call breadcrumb), not pollute the
-        // response text.
+        // ToolStart → ToolInputDelta → ToolEnd produces TWO Log events — the
+        // tool starting, then the human-readable breadcrumb once it is done —
+        // and neither pollutes the response text.
+        //
+        // The start event was added deliberately: emitting only on ToolEnd
+        // left the UI frozen for the entire duration of a call (80 s at worst
+        // in issue 202) while Kronn already knew which tool was running.
         let (tx, rx) = tokio::sync::mpsc::channel(100);
         let proc = ScriptedProcess::stream_json([
             text_delta("Reading file. "),
@@ -4876,11 +4900,21 @@ mod run_agent_streaming_tests {
             .collect();
         assert_eq!(
             logs.len(),
-            1,
-            "exactly one Log event for the Read tool call"
+            2,
+            "one Log when the Read tool starts, one when it completes"
         );
         if let AgentStreamEvent::Log { text } = &logs[0] {
+            assert_eq!(
+                text, "→ Read",
+                "the start event announces the tool and nothing else yet"
+            );
+        }
+        if let AgentStreamEvent::Log { text } = &logs[1] {
             assert!(text.contains("Read"), "log should name the tool: {text}");
+            assert_ne!(
+                text, "→ Read",
+                "the completion event must be the breadcrumb, not a repeat of the start"
+            );
         }
     }
 
