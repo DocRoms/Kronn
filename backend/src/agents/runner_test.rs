@@ -389,6 +389,29 @@ mod tests {
     }
 
     #[test]
+    fn the_init_line_yields_the_conversation_id() {
+        // Shape captured from a real `claude -p --output-format stream-json`
+        // run: the id is on the FIRST line, before any work, which is why a
+        // turn cut short still leaves something resumable.
+        let line = r#"{"type":"system","subtype":"init","cwd":"/tmp/x","session_id":"2c19fd03-fde4-4c0d-a893-adae1d816df2","tools":["Bash"]}"#;
+        match parse_claude_stream_line(line) {
+            StreamJsonEvent::SessionId(id) => {
+                assert_eq!(id, "2c19fd03-fde4-4c0d-a893-adae1d816df2")
+            }
+            other => panic!("expected SessionId, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_system_line_without_an_id_is_skipped() {
+        let line = r#"{"type":"system","subtype":"something_else"}"#;
+        assert!(matches!(
+            parse_claude_stream_line(line),
+            StreamJsonEvent::Skip
+        ));
+    }
+
+    #[test]
     fn parse_stream_text_delta() {
         let line = r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}}"#;
         match parse_claude_stream_line(line) {

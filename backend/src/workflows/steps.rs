@@ -981,7 +981,8 @@ async fn drive_agent_to_output(
                             }
                             current_tool_input.clear();
                         }
-                        StreamJsonEvent::Skip => {}
+                        // A workflow step shares no thread with the next one.
+                        StreamJsonEvent::SessionId(_) | StreamJsonEvent::Skip => {}
                     }
                 } else {
                     let chunk = if raw_stream || output.is_empty() {

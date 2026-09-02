@@ -1336,6 +1336,12 @@ pub enum StreamJsonEvent {
     ToolInputDelta(String),
     /// Content block finished (tool input complete)
     ToolEnd,
+    /// The CLI's own conversation id, carried by its `system`/`init` line — the
+    /// first line of the stream, before any work happens. Persisting it lets the
+    /// next turn resume with `--resume` instead of re-narrating the whole
+    /// history. Taken from `init` rather than the final `result` on purpose: a
+    /// turn that dies mid-way still leaves a resumable conversation behind.
+    SessionId(String),
     /// Nothing useful (metadata, start/stop events, etc.)
     Skip,
 }
@@ -2095,6 +2101,75 @@ impl AcpSessionStore {
             })
             .await
             .map_err(|error| format!("persist ACP conversation id: {error}"))
+    }
+
+    /// The `--print` CLI's own conversation, kept under its own runtime key.
+    ///
+    /// Deliberately distinct from the adapter keys above: an id minted by
+    /// `claude --print` is not interchangeable with one minted by the ACP
+    /// adapter, and handing either to the wrong runtime would fail the resume
+    /// — or worse, resume a stranger's thread. The shared `runtime` column is
+    /// what makes both coexist for the same discussion and agent.
+    const CLI_PRINT_RUNTIME: &'static str = "claude_cli_print_v1";
+
+    /// Whether this agent's `--print` runtime keeps a resumable conversation.
+    /// Only Claude Code so far: it is the one whose `--resume` is verified to
+    /// carry the previous turn while receiving only the new message.
+    pub fn tracks_cli_print(agent_type: &AgentType) -> bool {
+        matches!(agent_type, AgentType::ClaudeCode)
+    }
+
+    pub async fn persist_cli_print(
+        &self,
+        agent_type: &AgentType,
+        project_scope: &Path,
+        conversation_id: &str,
+    ) -> Result<(), String> {
+        if !Self::tracks_cli_print(agent_type) {
+            return Ok(());
+        }
+        let discussion_id = self.discussion_id.clone();
+        let agent_type = format!("{agent_type:?}");
+        let project_scope = project_scope.to_string_lossy().into_owned();
+        let conversation_id = conversation_id.to_owned();
+        self.db
+            .with_conn(move |conn| {
+                crate::db::acp_runtime_sessions::upsert(
+                    conn,
+                    &discussion_id,
+                    &agent_type,
+                    Self::CLI_PRINT_RUNTIME,
+                    &project_scope,
+                    &conversation_id,
+                )
+            })
+            .await
+            .map_err(|error| format!("persist CLI conversation id: {error}"))
+    }
+
+    pub async fn load_cli_print(
+        &self,
+        agent_type: &AgentType,
+        project_scope: &Path,
+    ) -> Result<Option<String>, String> {
+        if !Self::tracks_cli_print(agent_type) {
+            return Ok(None);
+        }
+        let discussion_id = self.discussion_id.clone();
+        let agent_type = format!("{agent_type:?}");
+        let project_scope = project_scope.to_string_lossy().into_owned();
+        self.db
+            .with_conn(move |conn| {
+                crate::db::acp_runtime_sessions::get(
+                    conn,
+                    &discussion_id,
+                    &agent_type,
+                    Self::CLI_PRINT_RUNTIME,
+                    &project_scope,
+                )
+            })
+            .await
+            .map_err(|error| format!("load CLI conversation id: {error}"))
     }
 }
 
@@ -9210,7 +9285,15 @@ pub fn parse_claude_stream_line(line: &str) -> StreamJsonEvent {
         // duplicating text already received via stream_event deltas.
         "assistant" => StreamJsonEvent::Skip,
 
-        // Everything else (system, init, etc.)
+        // The `init` line opens the stream and names the conversation. Reading
+        // it here — rather than the final `result` — means an interrupted turn
+        // still leaves an id its successor can resume from.
+        "system" => json
+            .get("session_id")
+            .and_then(|value| value.as_str())
+            .map(|id| StreamJsonEvent::SessionId(id.to_string()))
+            .unwrap_or(StreamJsonEvent::Skip),
+
         _ => StreamJsonEvent::Skip,
     }
 }

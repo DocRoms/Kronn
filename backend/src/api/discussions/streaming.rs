@@ -2403,6 +2403,12 @@ async fn make_agent_stream_inner(
                 let mut stream_json_cost: Option<f64> = None;
                 let mut stream_json_failure: Option<runner::StreamJsonFailure> = None;
                 let is_stream_json = process.output_mode == runner::OutputMode::StreamJson;
+                // Scope a resumable conversation to the directory it ran in: a
+                // moved or regenerated worktree must not resume a thread that
+                // knew another tree. Captured here because the borrow of
+                // `process` below outlives the read.
+                let session_scope = process.work_dir.clone();
+                let mut cli_session_persisted = false;
                 // Track current tool for rich log messages
                 let mut current_tool: Option<String> = None;
                 let mut current_tool_input = String::new();
@@ -2757,6 +2763,32 @@ async fn make_agent_stream_inner(
                                         .await
                                     {
                                         tracing::warn!(dispatch_job_id = %job_id, "Unable to persist post-tool progress: {error}");
+                                    }
+                                }
+                            }
+                            runner::StreamJsonEvent::SessionId(session_id) => {
+                                // The `init` line, so this lands before any work.
+                                // Recorded once per turn: the id never changes
+                                // mid-stream, and a turn cut short still leaves
+                                // a conversation its successor can resume.
+                                if !cli_session_persisted
+                                    && runner::AcpSessionStore::tracks_cli_print(&agent_type)
+                                {
+                                    cli_session_persisted = true;
+                                    let store = runner::AcpSessionStore::new(
+                                        state.db.clone(),
+                                        discussion_id.clone(),
+                                    );
+                                    if let Err(error) = store
+                                        .persist_cli_print(&agent_type, &session_scope, &session_id)
+                                        .await
+                                    {
+                                        // Losing the id costs a full-history
+                                        // turn next time, never correctness.
+                                        tracing::warn!(
+                                            disc_id = %discussion_id,
+                                            "Unable to persist the CLI conversation id: {error}"
+                                        );
                                     }
                                 }
                             }
@@ -4032,7 +4064,10 @@ pub(super) async fn run_agent_streaming(
                                     current_tool = None;
                                     tool_input.clear();
                                 }
-                                runner::StreamJsonEvent::Skip => {}
+                                // A debate round is scored on its own; rounds do
+                                // not resume one another's conversation.
+                                runner::StreamJsonEvent::SessionId(_)
+                                | runner::StreamJsonEvent::Skip => {}
                             }
                         } else {
                             let nl = if raw_stream || full_response.is_empty() { "" } else { "\n" };

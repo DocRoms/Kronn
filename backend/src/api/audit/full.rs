@@ -1183,10 +1183,12 @@ pub async fn full_audit(
                                         }).to_string()
                                     );
                                 }
+                                // An audit is a one-shot run: nothing to resume.
                                 runner::StreamJsonEvent::Text(_)
                                 | runner::StreamJsonEvent::TerminalError(_)
                                 | runner::StreamJsonEvent::ToolInputDelta(_)
                                 | runner::StreamJsonEvent::ToolEnd
+                                | runner::StreamJsonEvent::SessionId(_)
                                 | runner::StreamJsonEvent::Skip => {}
                             }
                         }
