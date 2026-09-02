@@ -16670,6 +16670,148 @@ async fn media_transitions_broadcast_a_shared_run_updated_event() {
     }
 }
 
+/// Inserts an image asset into a discussion, so a generation can name it.
+async fn seed_reference_image(
+    state: &kronn::AppState,
+    id: &str,
+    discussion_id: &str,
+    mime_type: &str,
+    disk_path: Option<&str>,
+) {
+    let id = id.to_string();
+    let discussion_id = discussion_id.to_string();
+    let mime_type = mime_type.to_string();
+    let disk_path = disk_path.map(str::to_string);
+    state
+        .db
+        .with_conn(move |connection| {
+            let now = chrono::Utc::now().to_rfc3339();
+            connection.execute(
+                "INSERT INTO context_files
+                    (id, discussion_id, filename, mime_type, original_size,
+                     extracted_size, extracted_text, disk_path, created_at)
+                 VALUES (?1, ?2, 'frame.png', ?3, 2048, 0, '', ?4, ?5)",
+                rusqlite::params![id, discussion_id, mime_type, disk_path, now],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
+/// KT-551 — a source image is an id inside the room, never a path.
+///
+/// Each of these is refused before anything durable is written and long before
+/// the provider is paid. The catalogue is never consulted on this path: every
+/// case fails on the request itself, so the assertions hold with no network.
+#[tokio::test]
+async fn media_generate_refuses_a_source_image_it_cannot_vouch_for() {
+    let state = test_state();
+    seed_media_connection(&state, None, Some("bytedance/seedance-2.0-mini")).await;
+    state
+        .db
+        .with_conn(|connection| {
+            let now = chrono::Utc::now().to_rfc3339();
+            connection.execute(
+                "INSERT INTO discussions (id, title, created_at, updated_at)
+                 VALUES ('disc-other', 'Another room', ?1, ?1)",
+                [&now],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    seed_reference_image(&state, "asset-elsewhere", "disc-other", "image/png", Some("/tmp/x.png")).await;
+    seed_reference_image(&state, "asset-not-image", "disc-media", "text/csv", Some("/tmp/x.csv")).await;
+    seed_reference_image(&state, "asset-no-file", "disc-media", "image/png", None).await;
+    let app = build_router_with_auth(state, false);
+
+    for (label, extra, expected) in [
+        (
+            "a mode with no image describes nothing",
+            serde_json::json!({ "reference_mode": "first_frame" }),
+            "requires reference_asset_id",
+        ),
+        (
+            "an image with no mode would silently become a plain text-to-video",
+            serde_json::json!({ "reference_asset_id": "asset-no-file" }),
+            "reference_mode is required",
+        ),
+        (
+            "an asset of another discussion",
+            serde_json::json!({ "reference_asset_id": "asset-elsewhere", "reference_mode": "first_frame" }),
+            "does not belong to this discussion",
+        ),
+        (
+            "an asset that is not an image",
+            serde_json::json!({ "reference_asset_id": "asset-not-image", "reference_mode": "first_frame" }),
+            "is not an image",
+        ),
+        (
+            "an asset whose bytes were never stored",
+            serde_json::json!({ "reference_asset_id": "asset-no-file", "reference_mode": "first_frame" }),
+            "has no stored file",
+        ),
+        (
+            "an asset that does not exist",
+            serde_json::json!({ "reference_asset_id": "asset-ghost", "reference_mode": "reference" }),
+            "unknown reference asset",
+        ),
+    ] {
+        let mut body = serde_json::json!({
+            "connection_id": "conn-media", "modality": "video",
+            "prompt": "un renard", "discussion_id": "disc-media"
+        });
+        for (key, value) in extra.as_object().unwrap() {
+            body[key] = value.clone();
+        }
+        let (_, answer) = post_json(app.clone(), "/api/media/generate", body).await;
+        assert_eq!(answer["success"], false, "{label} must be refused");
+        let error = answer["error"].as_str().unwrap_or_default();
+        assert!(
+            error.contains(expected),
+            "{label}: expected a message naming '{expected}', got '{error}'"
+        );
+    }
+}
+
+#[tokio::test]
+async fn media_generate_refuses_a_source_image_before_creating_anything() {
+    // The refusal must leave no trace: an orphan anchor message would show a
+    // generation nobody launched, at a position no job will ever fill.
+    let state = test_state();
+    seed_media_connection(&state, None, Some("bytedance/seedance-2.0-mini")).await;
+    let app = build_router_with_auth(state.clone(), false);
+
+    let (_, answer) = post_json(
+        app,
+        "/api/media/generate",
+        serde_json::json!({
+            "connection_id": "conn-media", "modality": "video",
+            "prompt": "un renard", "discussion_id": "disc-media",
+            "reference_asset_id": "asset-ghost", "reference_mode": "first_frame"
+        }),
+    )
+    .await;
+    assert_eq!(answer["success"], false);
+
+    let counts = state
+        .db
+        .with_read_conn(|connection| {
+            let messages: i64 = connection.query_row(
+                "SELECT COUNT(*) FROM messages WHERE discussion_id = 'disc-media'",
+                [],
+                |row| row.get(0),
+            )?;
+            let jobs: i64 =
+                connection.query_row("SELECT COUNT(*) FROM media_jobs", [], |row| row.get(0))?;
+            Ok((messages, jobs))
+        })
+        .await
+        .unwrap();
+    assert_eq!(counts, (0, 0), "a refused request must write nothing");
+}
+
 #[tokio::test]
 async fn media_generate_refuses_an_unknown_discussion() {
     let state = test_state();

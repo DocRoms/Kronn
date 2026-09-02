@@ -216,6 +216,8 @@ import type {
 import type {
   CatalogModelEntry,
   DeleteManualModelRequest,
+  MediaFramePosition,
+  MediaModelCapabilities,
   ModelCatalogSnapshot,
   ModelCatalogView,
   RefreshModelCatalogRequest,
@@ -2789,6 +2791,13 @@ export interface MediaJobView {
   attempts: number;
 }
 
+export type { MediaFramePosition, MediaModelCapabilities };
+
+export interface MediaModelCapabilitiesResponse {
+  model: string;
+  capabilities: MediaModelCapabilities | null;
+}
+
 export interface MediaEstimate {
   model: string;
   /** Absent when nothing comparable was billed yet — an unknown price is shown
@@ -2824,6 +2833,13 @@ export const media = {
     const params = new URLSearchParams({ connection_id: connectionId, modality });
     if (durationSecs !== undefined) params.set('duration_secs', String(durationSecs));
     return api<MediaEstimate>('GET', `/media/estimate?${params.toString()}`);
+  },
+  /** What the provider says the configured model accepts. `capabilities` is
+   *  null when nothing is advertised (NVIDIA serves no media catalogue), and
+   *  the caller must then keep its own defaults rather than emptying the form. */
+  capabilities: (connectionId: string, modality: MediaModality) => {
+    const params = new URLSearchParams({ connection_id: connectionId, modality });
+    return api<MediaModelCapabilitiesResponse>('GET', `/media/models?${params.toString()}`);
   },
 };
 

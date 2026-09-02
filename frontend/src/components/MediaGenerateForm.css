@@ -196,6 +196,15 @@
 .media-generate-ratio-shape[data-ratio='4:3']  { width: 21px; height: 16px; }
 .media-generate-ratio-shape[data-ratio='1:1']  { width: 16px; height: 16px; }
 .media-generate-ratio-shape[data-ratio='9:16'] { width: 9px;  height: 16px; }
+/* The rest of what the catalogues actually advertise — seedance alone names
+   seven ratios, of which the four above were the only ones ever drawn. */
+.media-generate-ratio-shape[data-ratio='3:4']  { width: 12px; height: 16px; }
+.media-generate-ratio-shape[data-ratio='21:9'] { width: 37px; height: 16px; }
+.media-generate-ratio-shape[data-ratio='9:21'] { width: 7px;  height: 16px; }
+.media-generate-ratio-shape[data-ratio='2:3']  { width: 11px; height: 16px; }
+.media-generate-ratio-shape[data-ratio='3:2']  { width: 24px; height: 16px; }
+.media-generate-ratio-shape[data-ratio='4:5']  { width: 13px; height: 16px; }
+.media-generate-ratio-shape[data-ratio='5:4']  { width: 20px; height: 16px; }
 
 .media-generate-check {
   display: flex;

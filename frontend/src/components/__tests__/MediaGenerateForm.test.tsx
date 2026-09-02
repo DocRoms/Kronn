@@ -3,7 +3,7 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import type { ExternalApiConnectionView } from '../../lib/api';
 
 const { mediaApi } = vi.hoisted(() => ({
-  mediaApi: { generate: vi.fn(), estimate: vi.fn() },
+  mediaApi: { generate: vi.fn(), estimate: vi.fn(), capabilities: vi.fn() },
 }));
 
 vi.mock('../../lib/api', () => ({ media: mediaApi }));
@@ -37,6 +37,9 @@ describe('MediaGenerateForm', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mediaApi.estimate.mockResolvedValue({ model: 'x', estimated_usd: 0.0709, samples: 3 });
+    // Default: a provider that advertises nothing, so the form keeps its
+    // fallback lists. Tests that care about the catalogue override this.
+    mediaApi.capabilities.mockResolvedValue({ model: 'x', capabilities: null });
     mediaApi.generate.mockResolvedValue({
       job_id: 'job-1',
       status: 'pending',
@@ -182,6 +185,67 @@ describe('MediaGenerateForm', () => {
     // A picture has no soundtrack: sending the field would be noise the
     // backend has to ignore.
     expect(mediaApi.generate.mock.calls[0][0]).not.toHaveProperty('generate_audio');
+  });
+
+  it('offers what the provider accepts, not a hard-coded list', async () => {
+    // Measured on `bytedance/seedance-2.0-mini`: it refuses 3 s and 1080p,
+    // and accepts seven ratios. The form used to offer the first two and hide
+    // three of the seven — a billable click that could only fail.
+    mediaApi.capabilities.mockResolvedValue({
+      model: 'bytedance/seedance-2.0-mini',
+      capabilities: {
+        model: 'bytedance/seedance-2.0-mini',
+        modality: 'video',
+        durations_secs: [4, 5, 6, 7, 8],
+        resolutions: ['480p', '720p'],
+        aspect_ratios: ['1:1', '3:4', '9:16', '4:3', '16:9', '21:9', '9:21'],
+        frame_positions: ['first_frame', 'last_frame'],
+        max_input_references: null,
+        generate_audio: true,
+      },
+    });
+    render(<MediaGenerateForm discussionId="d-1" connections={[connection()]} t={t} />);
+    fireEvent.click(screen.getByTestId('media-slot-conn-1:video'));
+
+    await waitFor(() => expect(screen.getByTestId('media-ratio-21:9')).toBeInTheDocument());
+    const durations = screen.getByLabelText('disc.media.duration') as HTMLSelectElement;
+    expect([...durations.options].map(option => option.value)).toEqual(['4', '5', '6', '7', '8']);
+    const resolutions = screen.getByLabelText('disc.media.resolution') as HTMLSelectElement;
+    expect([...resolutions.options].map(option => option.value)).toEqual(['480p', '720p']);
+    expect(screen.queryByTestId('media-ratio-2:3')).toBeNull();
+  });
+
+  it('never submits a choice the newly selected model rejects', async () => {
+    // 5 s and 480p are the form's own defaults. A model that accepts neither
+    // must not receive them just because nobody touched the controls.
+    mediaApi.capabilities.mockResolvedValue({
+      model: 'strict/model',
+      capabilities: {
+        model: 'strict/model',
+        modality: 'video',
+        durations_secs: [10, 12],
+        resolutions: ['1080p'],
+        aspect_ratios: ['9:16'],
+        frame_positions: [],
+        max_input_references: null,
+        generate_audio: false,
+      },
+    });
+    render(<MediaGenerateForm discussionId="d-1" connections={[connection()]} t={t} />);
+    fireEvent.click(screen.getByTestId('media-slot-conn-1:video'));
+    await waitFor(() => expect(screen.getByTestId('media-ratio-9:16')).toBeInTheDocument());
+
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'un plan strict' } });
+    fireEvent.click(screen.getByRole('button', { name: /disc\.media\.generate/ }));
+    await waitFor(() => expect(mediaApi.generate).toHaveBeenCalledTimes(1));
+    expect(mediaApi.generate.mock.calls[0][0]).toMatchObject({
+      duration_secs: 10,
+      resolution: '1080p',
+      aspect_ratio: '9:16',
+    });
+    // This model names no soundtrack switch, so the box is not shown — and
+    // nothing is asserted about audio it never offered.
+    expect(screen.queryByTestId('media-generate-audio')).toBeNull();
   });
 
   it('explains itself when no connection has a media model', () => {

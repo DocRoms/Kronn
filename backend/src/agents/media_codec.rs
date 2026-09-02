@@ -687,6 +687,7 @@ mod tests {
             resolution: Some("480p".into()),
             aspect_ratio: Some("16:9".into()),
             generate_audio: Some(false),
+            ..MediaParams::default()
         };
         let body = c.video_body("bytedance/seedance-2.0-mini", "un chat", &params);
         assert_eq!(body["duration"], 5);

@@ -3265,6 +3265,12 @@ cost_usd: number,
  */
 is_byok: boolean, };
 
+/**
+ * Where a still image can be pinned in a generated clip. Only what the model
+ * advertises; nothing is offered by default.
+ */
+export type MediaFramePosition = "first_frame" | "last_frame";
+
 export type MediaJobStatus = "pending" | "running" | "completed" | "failed" | "cancelled" | "timed_out";
 
 /**
@@ -3274,15 +3280,66 @@ export type MediaJobStatus = "pending" | "running" | "completed" | "failed" | "c
 export type MediaModality = "image" | "video";
 
 /**
+ * The advertised envelope of one model, as the launcher must present it.
+ *
+ * Every list is "what the provider named". An empty list is a statement — the
+ * capability is not offered — and the UI must render it as such rather than
+ * falling back to a default that would be rejected at submission time.
+ */
+export type MediaModelCapabilities = { model: string, modality: MediaModality,
+/**
+ * Seconds, exactly as advertised. Video only.
+ */
+durations_secs: Array<number>, resolutions: Array<string>, aspect_ratios: Array<string>,
+/**
+ * Where a source image may be pinned. Empty means this model does not
+ * take an input frame at all.
+ */
+frame_positions: Array<MediaFramePosition>,
+/**
+ * How many reference images the model accepts. `None` means the provider
+ * says nothing, which is not the same as zero — but the UI treats both as
+ * "do not offer it" rather than guessing.
+ */
+max_input_references: number | null,
+/**
+ * Whether the model itself advertises a soundtrack switch. A model that
+ * does not name it must not be shown an audio checkbox (KT-553).
+ */
+generate_audio: boolean | null, };
+
+/**
  * Generation parameters as REQUESTED. The provider may honour them loosely,
  * so nothing downstream may treat these as describing the output.
  */
-export type MediaParams = { duration_secs?: number | null, resolution?: string | null, aspect_ratio?: string | null, generate_audio?: boolean | null, };
+export type MediaParams = { duration_secs?: number | null, resolution?: string | null, aspect_ratio?: string | null, generate_audio?: boolean | null,
+/**
+ * Context file of the SAME discussion used as the visual source. Only the
+ * id is stored: the bytes are read at execution time, so a job resumed
+ * after a restart re-reads the same file instead of carrying a copy of it
+ * — and no local path or private URL is ever persisted, sent to a browser
+ * or handed to an agent.
+ */
+reference_asset_id?: string | null,
+/**
+ * What that image is for. Meaningless — and refused — without an asset.
+ */
+reference_mode?: MediaReferenceMode | null, };
 
 /**
  * Coarse provider phase, for progress reporting.
  */
 export type MediaPhase = "submitting" | "polling" | "downloading" | "persisting";
+
+/**
+ * How a source image is used by a generation.
+ *
+ * Kept apart from the provider's advertised `MediaFramePosition`: this is what
+ * the CALLER asked for and what the job persists, while the capability is what
+ * one model happens to accept today. A model losing `last_frame` tomorrow must
+ * not silently reinterpret a stored job as something else.
+ */
+export type MediaReferenceMode = "first_frame" | "last_frame" | "reference";
 
 /**
  * What actually came back, read from the produced file.

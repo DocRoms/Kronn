@@ -8,16 +8,26 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Clapperboard, Image as ImageIcon, Loader2, Sparkles } from 'lucide-react';
 import { media } from '../lib/api';
-import type { ExternalApiConnectionView, MediaModality } from '../lib/api';
+import type { ExternalApiConnectionView, MediaModality, MediaModelCapabilities } from '../lib/api';
 import './MediaGenerateForm.css';
 
 type T = (key: string, ...args: (string | number)[]) => string;
 
-const DURATIONS = [3, 5, 8];
-const RESOLUTIONS = ['480p', '720p', '1080p'];
+// Fallbacks, used ONLY when the provider advertises nothing — NVIDIA serves no
+// media catalogue at all. Against a provider that does answer, these lists were
+// actively wrong: `seedance-2.0-mini` refuses 3 s and 1080p, and accepts seven
+// ratios of which this list showed four. Offering them meant offering a
+// billable click that could only fail.
+const FALLBACK_DURATIONS = [3, 5, 8];
+const FALLBACK_RESOLUTIONS = ['480p', '720p', '1080p'];
 /// Ratios shown with a proportional preview, like the live-page mosaic layouts:
 /// `4:3` means nothing to most people until they see the shape.
-const RATIOS = ['16:9', '4:3', '1:1', '9:16'] as const;
+const FALLBACK_RATIOS = ['16:9', '4:3', '1:1', '9:16'];
+
+/// Known shapes, so a ratio the provider names can still be drawn. An unknown
+/// one is listed without a preview rather than dropped: the provider accepts
+/// it, so the operator must be able to pick it.
+const RATIO_SHAPES = new Set(['16:9', '4:3', '1:1', '9:16', '3:4', '21:9', '9:21', '2:3', '3:2', '4:5', '5:4']);
 
 /** One configured media model: what the operator actually chooses. */
 type Slot = {
@@ -71,6 +81,7 @@ export function MediaGenerateForm({
   // switchable — a soundtrack nobody asked for is what got a generation
   // rejected for copyright, with no clue in the request that it existed.
   const [generateAudio, setGenerateAudio] = useState(true);
+  const [capabilities, setCapabilities] = useState<MediaModelCapabilities | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [launched, setLaunched] = useState<{ model: string } | null>(null);
@@ -90,6 +101,48 @@ export function MediaGenerateForm({
 
   const selected = slots.find(slot => slot.key === selectedKey) ?? null;
   const isVideo = selected?.modality === 'video';
+
+  // What this exact model accepts. Absent (an unreachable or catalogue-less
+  // provider) keeps the fallback lists: an empty form would be worse than a
+  // slightly wrong one, because it offers nothing at all.
+  useEffect(() => {
+    if (!selected) {
+      setCapabilities(null);
+      return;
+    }
+    let cancelled = false;
+    media
+      .capabilities(selected.connectionId, selected.modality)
+      .then(result => { if (!cancelled) setCapabilities(result.capabilities); })
+      .catch(() => { if (!cancelled) setCapabilities(null); });
+    return () => { cancelled = true; };
+  }, [selected]);
+
+  const durations = capabilities?.durations_secs?.length
+    ? capabilities.durations_secs
+    : FALLBACK_DURATIONS;
+  const resolutions = capabilities?.resolutions?.length
+    ? capabilities.resolutions
+    : FALLBACK_RESOLUTIONS;
+  const ratios = capabilities?.aspect_ratios?.length
+    ? capabilities.aspect_ratios
+    : FALLBACK_RATIOS;
+  // A soundtrack switch only exists for a model that names one. Absent
+  // capabilities keep the box for a video, which is the pre-catalogue
+  // behaviour and stays truthful: the provider does generate audio.
+  const offersAudio = isVideo && capabilities?.generate_audio !== false;
+
+  // A choice the provider does not accept must not survive a model change: it
+  // would be submitted as-is and refused after billing started.
+  useEffect(() => {
+    if (!durations.includes(durationSecs)) setDurationSecs(durations[0]);
+  }, [durationSecs, durations]);
+  useEffect(() => {
+    if (!resolutions.includes(resolution)) setResolution(resolutions[0]);
+  }, [resolution, resolutions]);
+  useEffect(() => {
+    if (!ratios.includes(aspectRatio)) setAspectRatio(ratios[0]);
+  }, [aspectRatio, ratios]);
 
   // Price of the click, derived from what this model was actually billed
   // before. Absent on a first run, and said so rather than shown as free.
@@ -223,7 +276,7 @@ export function MediaGenerateForm({
               value={durationSecs}
               onChange={event => setDurationSecs(Number(event.target.value))}
             >
-              {DURATIONS.map(value => (
+              {durations.map(value => (
                 <option key={value} value={value}>{t('disc.media.seconds', value)}</option>
               ))}
             </select>
@@ -231,13 +284,13 @@ export function MediaGenerateForm({
           <label className="media-generate-field">
             <span>{t('disc.media.resolution')}</span>
             <select value={resolution} onChange={event => setResolution(event.target.value)}>
-              {RESOLUTIONS.map(value => <option key={value} value={value}>{value}</option>)}
+              {resolutions.map(value => <option key={value} value={value}>{value}</option>)}
             </select>
           </label>
         </div>
       )}
 
-      {isVideo && (
+      {offersAudio && (
         <label className="media-generate-check">
           <input
             type="checkbox"
@@ -254,7 +307,7 @@ export function MediaGenerateForm({
       <fieldset className="media-generate-ratios">
         <legend>{t('disc.media.aspectRatio')}</legend>
         <div className="media-generate-ratio-choices">
-          {RATIOS.map(ratio => (
+          {ratios.map(ratio => (
             <button
               key={ratio}
               type="button"
@@ -266,7 +319,9 @@ export function MediaGenerateForm({
               onClick={() => setAspectRatio(ratio)}
               data-testid={`media-ratio-${ratio}`}
             >
-              <i className="media-generate-ratio-shape" data-ratio={ratio} aria-hidden="true" />
+              {RATIO_SHAPES.has(ratio) && (
+                <i className="media-generate-ratio-shape" data-ratio={ratio} aria-hidden="true" />
+              )}
               <span>{ratio}</span>
             </button>
           ))}

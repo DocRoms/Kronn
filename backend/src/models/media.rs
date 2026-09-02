@@ -95,6 +95,54 @@ impl MediaJobStatus {
     }
 }
 
+/// How a source image is used by a generation.
+///
+/// Kept apart from the provider's advertised `MediaFramePosition`: this is what
+/// the CALLER asked for and what the job persists, while the capability is what
+/// one model happens to accept today. A model losing `last_frame` tomorrow must
+/// not silently reinterpret a stored job as something else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum MediaReferenceMode {
+    /// The clip starts on this exact picture.
+    FirstFrame,
+    /// The clip ends on this exact picture.
+    LastFrame,
+    /// A visual reference the model draws from, not a frame it must reproduce.
+    Reference,
+}
+
+impl MediaReferenceMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::FirstFrame => "first_frame",
+            Self::LastFrame => "last_frame",
+            Self::Reference => "reference",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "first_frame" => Some(Self::FirstFrame),
+            "last_frame" => Some(Self::LastFrame),
+            "reference" => Some(Self::Reference),
+            _ => None,
+        }
+    }
+
+    /// The advertised capability this mode requires, when it is a frame at
+    /// all. `Reference` is not a frame: no model advertises it under
+    /// `supported_frame_images`, so it is checked against reference support.
+    pub fn frame_capability(self) -> Option<&'static str> {
+        match self {
+            Self::FirstFrame => Some("first_frame"),
+            Self::LastFrame => Some("last_frame"),
+            Self::Reference => None,
+        }
+    }
+}
+
 /// Generation parameters as REQUESTED. The provider may honour them loosely,
 /// so nothing downstream may treat these as describing the output.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
@@ -108,6 +156,16 @@ pub struct MediaParams {
     pub aspect_ratio: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generate_audio: Option<bool>,
+    /// Context file of the SAME discussion used as the visual source. Only the
+    /// id is stored: the bytes are read at execution time, so a job resumed
+    /// after a restart re-reads the same file instead of carrying a copy of it
+    /// — and no local path or private URL is ever persisted, sent to a browser
+    /// or handed to an agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference_asset_id: Option<String>,
+    /// What that image is for. Meaningless — and refused — without an asset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference_mode: Option<MediaReferenceMode>,
 }
 
 /// Cost of one generation, as the provider declared it.
