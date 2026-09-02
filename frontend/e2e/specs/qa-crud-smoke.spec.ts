@@ -94,8 +94,17 @@ test.describe('Quick APIs — CRUD smoke + run validation', () => {
     });
     expect(runResp.ok(), 'run endpoint always returns 200 with envelope').toBe(true);
     const rj = await runResp.json();
-    expect(rj?.success, 'missing required var must envelope-error, not 500').toBe(false);
-    expect(String(rj?.error ?? '')).toMatch(/Variable obligatoire manquante|ticket/i);
+    // A refused run is still a RECORDED run: it carries a run_id and a
+    // persisted SharedRun, so the transport envelope succeeds and the refusal
+    // lives in the payload. Reading `rj.success` here checked the wrong level
+    // and would have passed on a run that actually fired.
+    expect(rj?.success, 'the transport envelope itself must succeed').toBe(true);
+    expect(rj?.data?.success, 'a missing required var must refuse the run').toBe(false);
+    expect(rj?.data?.run_id, 'a refused run is still recorded').toBeTruthy();
+    // Named by the preflight, per variable, with the cause it can act on.
+    expect(String(rj?.data?.error ?? '')).toMatch(/preflight_failed/);
+    expect(String(rj?.data?.error ?? '')).toMatch(/ticket/);
+    expect(String(rj?.data?.error ?? '')).toMatch(/missing_user_input/);
 
     // 4. Delete.
     const del = await request.delete(`/api/quick-apis/${qaId}`);
