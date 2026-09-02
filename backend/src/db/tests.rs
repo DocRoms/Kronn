@@ -2648,6 +2648,95 @@ fn list_runs_enriches_subworkflow_parent_provenance() {
 }
 
 #[test]
+fn listings_drop_step_outputs_but_keep_the_steps_themselves() {
+    let conn = test_db();
+    crate::db::workflows::insert_workflow(&conn, &sample_workflow("w1")).unwrap();
+
+    let mut run = sample_run("r1", "w1");
+    run.step_results = vec![
+        StepResult {
+            step_name: "build".into(),
+            status: RunStatus::Success,
+            output: "x".repeat(200_000),
+            tokens_used: 42,
+            duration_ms: 1234,
+            started_at: None,
+            condition_result: None,
+            envelope_detected: None,
+            step_kind: Some("Agent".into()),
+            step_agent: None,
+            step_model: None,
+            step_api_plugin_slug: None,
+            step_api_endpoint_path: None,
+            is_rollback: false,
+            child_run_id: None,
+            native_tool_calls: Box::default(),
+        },
+        StepResult {
+            step_name: "deploy".into(),
+            status: RunStatus::Failed,
+            output: "y".repeat(200_000),
+            tokens_used: 7,
+            duration_ms: 99,
+            started_at: None,
+            condition_result: None,
+            envelope_detected: None,
+            step_kind: None,
+            step_agent: None,
+            step_model: None,
+            step_api_plugin_slug: None,
+            step_api_endpoint_path: None,
+            is_rollback: false,
+            child_run_id: None,
+            native_tool_calls: Box::default(),
+        },
+    ];
+    crate::db::workflows::insert_run(&conn, &run).unwrap();
+
+    let listed = crate::db::workflows::list_runs(&conn, "w1").unwrap();
+    assert_eq!(listed.len(), 1);
+    let listed = &listed[0];
+
+    // The steps must survive: the run cards count them and name the current
+    // one. Blanking `output` by removing the key would fail the decode and
+    // hand back an empty vec — silently breaking those counters.
+    assert_eq!(
+        listed.step_results.len(),
+        2,
+        "a listing still carries every step"
+    );
+    assert_eq!(listed.step_results[0].step_name, "build");
+    assert_eq!(listed.step_results[1].status, RunStatus::Failed);
+    assert_eq!(listed.step_results[0].duration_ms, 1234);
+    assert_eq!(listed.step_results[0].tokens_used, 42);
+    assert_eq!(listed.step_results[0].step_kind.as_deref(), Some("Agent"));
+
+    // ...but not their outputs, which are the entire weight of the column.
+    assert!(
+        listed.step_results.iter().all(|s| s.output.is_empty()),
+        "a listing must not carry step outputs"
+    );
+
+    // An opened run still gets everything.
+    let opened = crate::db::workflows::get_run(&conn, "r1").unwrap().unwrap();
+    assert_eq!(opened.step_results[0].output.len(), 200_000);
+    assert_eq!(opened.step_results[1].output.len(), 200_000);
+}
+
+#[test]
+fn listings_tolerate_a_run_with_no_steps() {
+    let conn = test_db();
+    crate::db::workflows::insert_workflow(&conn, &sample_workflow("w1")).unwrap();
+    // `[]` must survive the SQL projection — json_each over an empty array
+    // yields no rows, and the aggregate has to stay a valid empty array.
+    crate::db::workflows::insert_run(&conn, &sample_run("empty", "w1")).unwrap();
+
+    let listed = crate::db::workflows::list_runs(&conn, "w1").unwrap();
+    assert_eq!(listed.len(), 1);
+    assert!(listed[0].step_results.is_empty());
+}
+
+#[test]
 fn list_runs_provenance_none_for_toplevel_run() {
     let conn = test_db();
     crate::db::workflows::insert_workflow(&conn, &sample_workflow("w1")).unwrap();

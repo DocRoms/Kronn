@@ -209,7 +209,7 @@ pub fn ensure_batch_placeholder_workflow(
 pub fn list_batch_run_summaries(conn: &Connection) -> Result<Vec<BatchRunSummary>> {
     let sql = format!(
         "SELECT {} FROM workflow_runs WHERE run_type = 'batch' ORDER BY started_at DESC",
-        WORKFLOW_RUN_COLS
+        workflow_run_cols_without_outputs()
     );
     let mut stmt = conn.prepare(&sql)?;
     let batch_runs: Vec<WorkflowRun> = stmt
@@ -1014,10 +1014,12 @@ pub fn count_runs(conn: &Connection, workflow_id: &str) -> Result<u32> {
 }
 
 /// Safety cap for the unpaginated `list_runs` — a workflow with thousands of
-/// runs (a fast cron) would otherwise load every row WITH its full
-/// `step_results_json` into memory on each page open. The UI folds at 10 and
-/// paginates; 500 recent runs is far more than any view needs. Callers that
-/// truly need everything use `list_runs_paginated` explicitly. (B7, 0.8.11)
+/// runs (a fast cron) would otherwise load every row into memory on each page
+/// open. The UI folds at 10 and paginates; 500 recent runs is far more than any
+/// view needs. Callers that truly need everything use `list_runs_paginated`
+/// explicitly. (B7, 0.8.11)
+/// Since 0.13.0 the listing paths also drop each step's `output`, so this cap
+/// bounds row count rather than payload size.
 pub const MAX_RUNS_UNPAGINATED: u32 = 500;
 
 pub fn list_runs(conn: &Connection, workflow_id: &str) -> Result<Vec<WorkflowRun>> {
@@ -1140,7 +1142,7 @@ pub fn list_runs_paginated(
     let sql = format!(
         "SELECT {} FROM workflow_runs WHERE workflow_id = ?1
          ORDER BY started_at DESC{}",
-        WORKFLOW_RUN_COLS,
+        workflow_run_cols_without_outputs(),
         match (limit, offset) {
             (Some(l), Some(o)) => format!(" LIMIT {} OFFSET {}", l, o),
             (Some(l), None) => format!(" LIMIT {}", l),
@@ -1181,7 +1183,7 @@ pub fn list_runs_page_complete_group(
         "SELECT {} FROM workflow_runs
          WHERE workflow_id = ?1 AND parent_run_id = ?2
          ORDER BY started_at DESC",
-        WORKFLOW_RUN_COLS
+        workflow_run_cols_without_outputs()
     );
     let mut stmt = conn.prepare(&sql)?;
     let tail: Vec<WorkflowRun> = stmt
@@ -1853,8 +1855,14 @@ pub fn get_last_runs_all(
 ) -> Result<std::collections::HashMap<String, WorkflowRun>> {
     // Must alias columns with wr. prefix since we join to `latest` — can't
     // reuse the WORKFLOW_RUN_COLS constant directly. Keep the list in sync.
+    // Callers only build a WorkflowRunSummary from this, so the step outputs
+    // were being decoded just to be dropped.
     let mut stmt = conn.prepare(
-        "SELECT wr.id, wr.workflow_id, wr.status, wr.trigger_context, wr.step_results_json,
+        "SELECT wr.id, wr.workflow_id, wr.status, wr.trigger_context,
+                CASE WHEN json_valid(wr.step_results_json)
+                     THEN (SELECT json_group_array(json_set(value, '$.output', ''))
+                           FROM json_each(wr.step_results_json))
+                     ELSE '[]' END,
                 wr.tokens_used, wr.workspace_path, wr.started_at, wr.finished_at,
                 wr.run_type, wr.batch_total, wr.batch_completed, wr.batch_failed, wr.batch_name,
                 wr.parent_run_id, wr.state
@@ -2079,3 +2087,23 @@ const WORKFLOW_RUN_COLS: &str = "id, workflow_id, status, trigger_context, step_
     tokens_used, workspace_path, started_at, finished_at, \
     run_type, batch_total, batch_completed, batch_failed, batch_name, parent_run_id, state, \
     produced_branches, batch_no_response";
+
+/// Blanks every step's `output` inside SQLite, leaving names, statuses and
+/// timings intact. `output` is the entire weight of the column — measured at
+/// 100% of a 3.9 MB row, all other fields together under 700 bytes — and it is
+/// only ever rendered on an opened run, never in a list.
+///
+/// Emptied rather than removed: `StepResult::output` has no serde default, so a
+/// missing key fails the whole `Vec<StepResult>` decode and `row_to_run` would
+/// silently hand back zero steps — breaking the step counters that listings
+/// actually need. Invalid JSON yields `[]`, matching row_to_run's own fallback.
+const STEP_RESULTS_WITHOUT_OUTPUTS: &str = "CASE WHEN json_valid(step_results_json) \
+    THEN (SELECT json_group_array(json_set(value, '$.output', '')) \
+          FROM json_each(step_results_json)) \
+    ELSE '[]' END";
+
+/// [`WORKFLOW_RUN_COLS`] for the listing paths: same shape and column order, so
+/// `row_to_run` reads it unchanged, minus the step outputs.
+fn workflow_run_cols_without_outputs() -> String {
+    WORKFLOW_RUN_COLS.replacen("step_results_json", STEP_RESULTS_WITHOUT_OUTPUTS, 1)
+}
