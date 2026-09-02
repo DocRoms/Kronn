@@ -687,15 +687,26 @@ pub(crate) enum AgentExecutionOutcome {
 fn agent_start_failure_outcome(agent_type: &AgentType, error: &str) -> AgentExecutionOutcome {
     let non_retryable_http_status = agent_http_status(error)
         .is_some_and(|status| (400..500).contains(&status) && !matches!(status, 408 | 425 | 429));
+    // A NUL byte in the command line is settled before anything runs, so
+    // deferring it is pure repetition: issue 201 logged the same refusal 282
+    // times, once every 30 s, and diagnosed nothing. Both wordings are matched
+    // — Kronn's own pre-spawn check, and the OS message if one slips past it.
+    let deterministic_nul_byte = error.contains("contains a NUL byte")
+        || error.contains("nul byte found in provided data");
     if matches!(
         agent_type,
         AgentType::LiteLlm | AgentType::Nvidia | AgentType::Ollama | AgentType::Custom
     ) || error.starts_with("Project path not found:")
         || error.starts_with("Copilot task worker cannot start:")
         || non_retryable_http_status
+        || deterministic_nul_byte
     {
         AgentExecutionOutcome::PreflightFailed {
-            diagnostic: if error.starts_with("Copilot task worker cannot start:") {
+            diagnostic: if error.starts_with("Copilot task worker cannot start:")
+                || deterministic_nul_byte
+            {
+                // Carries the offending carrier's name, never its value — the
+                // whole point is that the operator can act on it.
                 error.to_string()
             } else {
                 "agent execution preflight failed".into()
@@ -4511,6 +4522,38 @@ mod agent_lifecycle_tests {
             AgentExecutionOutcome::PreflightFailed {
                 diagnostic:
                     "Copilot task worker cannot start: phase=auth; failure_kind=invalid_auth".into()
+            }
+        );
+    }
+
+    #[test]
+    fn a_nul_byte_in_the_command_line_is_a_hard_stop_not_a_deferral() {
+        // Issue 201: this exact refusal was deferred and replayed 282 times,
+        // every 30 s. A NUL byte does not go away by waiting.
+        let kronn_check = "npx cannot start: environment variable ANTHROPIC_API_KEY contains a \
+                           NUL byte, which the operating system refuses in a command line.";
+        assert_eq!(
+            agent_start_failure_outcome(&AgentType::ClaudeCode, kronn_check),
+            AgentExecutionOutcome::PreflightFailed {
+                diagnostic: kronn_check.into()
+            },
+            "the carrier's name must reach the operator, not a generic preflight message"
+        );
+
+        // The OS wording, in case a NUL slips past the pre-spawn check.
+        let os_message = "Spawn failed for npx: nul byte found in provided data";
+        assert_eq!(
+            agent_start_failure_outcome(&AgentType::ClaudeCode, os_message),
+            AgentExecutionOutcome::PreflightFailed {
+                diagnostic: os_message.into()
+            }
+        );
+
+        // And a genuinely transient absence still defers, as before.
+        assert_eq!(
+            agent_start_failure_outcome(&AgentType::ClaudeCode, "Binary 'claude' not found"),
+            AgentExecutionOutcome::RuntimeUnavailable {
+                reason: "Binary 'claude' not found".into()
             }
         );
     }

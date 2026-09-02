@@ -5872,6 +5872,110 @@ Suite de la réponse.";
     }
 
     #[test]
+    fn a_nul_byte_is_named_by_its_carrier_never_by_its_value() {
+        let secret_with_nul = "sk-ant-must-not-leak\0trailing";
+
+        // In an environment variable — the likeliest source: a key decrypted
+        // with a stale material, or a config read as UTF-16.
+        let mut command = crate::core::cmd::async_cmd("claude");
+        command
+            .args(["--print", "hello"])
+            .env("ANTHROPIC_API_KEY", secret_with_nul);
+        let offender =
+            super::super::nul_byte_offender(&command).expect("a NUL byte must be detected");
+        assert!(
+            offender.contains("ANTHROPIC_API_KEY"),
+            "the variable must be named, got: {offender}"
+        );
+        assert!(
+            !offender.contains("must-not-leak"),
+            "the value must never be reported, got: {offender}"
+        );
+
+        // In an argument — identified by the flag it follows, since positions
+        // shift between agents.
+        let mut command = crate::core::cmd::async_cmd("claude");
+        command.args([
+            "--print",
+            "--append-system-prompt",
+            "context with a \0 inside",
+            "hello",
+        ]);
+        let offender =
+            super::super::nul_byte_offender(&command).expect("a NUL byte must be detected");
+        assert!(
+            offender.contains("--append-system-prompt"),
+            "the flag must be named, got: {offender}"
+        );
+        assert!(!offender.contains("context with"));
+
+        // The working directory: Kronn derives it from a project path it did
+        // not necessarily create, and it fails the spawn just the same.
+        let mut command = crate::core::cmd::async_cmd("claude");
+        command.arg("--print").current_dir("/tmp/pro\0ject");
+        let offender =
+            super::super::nul_byte_offender(&command).expect("a NUL byte must be detected");
+        assert!(
+            offender.contains("working directory"),
+            "the working directory must be named, got: {offender}"
+        );
+
+        // The program name.
+        let mut command = crate::core::cmd::async_cmd("cla\0ude");
+        command.arg("--print");
+        let offender =
+            super::super::nul_byte_offender(&command).expect("a NUL byte must be detected");
+        assert!(offender.contains("program name"), "got: {offender}");
+
+        // A clean command must not be refused.
+        let mut command = crate::core::cmd::async_cmd("claude");
+        command
+            .args(["--print", "--append-system-prompt", "clean", "hello"])
+            .env("ANTHROPIC_API_KEY", "sk-ant-clean")
+            .current_dir("/tmp");
+        assert!(
+            super::super::nul_byte_offender(&command).is_none(),
+            "a clean invocation must pass"
+        );
+    }
+
+    /// The argument/program/cwd checks lean on a standard-library placeholder,
+    /// so pin the behaviour they depend on: if a future release stops
+    /// substituting `<string-with-nul>`, this fails instead of the detection
+    /// silently going blind.
+    #[test]
+    fn the_standard_library_still_masks_nul_bearing_values_it_cannot_encode() {
+        let mut command = std::process::Command::new("/bin/echo");
+        command.arg("abc\0def").current_dir("/tm\0p");
+
+        let masked = command
+            .get_args()
+            .next()
+            .expect("one argument")
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(masked, "<string-with-nul>");
+        assert_eq!(
+            command
+                .get_current_dir()
+                .expect("a cwd")
+                .to_string_lossy()
+                .into_owned(),
+            "<string-with-nul>"
+        );
+
+        // Environment values, by contrast, keep their NUL — which is why the
+        // detection needs both a byte scan and the placeholder check.
+        let mut command = std::process::Command::new("/bin/echo");
+        command.env("KRONN_PROBE", "abc\0def");
+        let (_, value) = command.get_envs().next().expect("one variable");
+        assert!(
+            value.expect("a value").to_string_lossy().contains('\0'),
+            "environment values are handed back unmasked"
+        );
+    }
+
+    #[test]
     fn claude_task_worker_allows_exact_status_commit_and_delivery_tools() {
         let (_, _, args, _, _, _) = super::super::agent_command_with_task_worker_policy(
             &AgentType::ClaudeCode,

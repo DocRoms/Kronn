@@ -8573,6 +8573,94 @@ fn command_invocation_size_receipt(
     )
 }
 
+#[cfg(unix)]
+fn os_str_has_nul(value: &std::ffi::OsStr) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    value.as_bytes().contains(&0)
+}
+
+#[cfg(windows)]
+fn os_str_has_nul(value: &std::ffi::OsStr) -> bool {
+    use std::os::windows::ffi::OsStrExt;
+    value.encode_wide().any(|unit| unit == 0)
+}
+
+/// What the standard library substitutes for a program name, argument or
+/// working directory it could not turn into a C string. Measured on 1.8x:
+/// `get_program`, `get_args` and `get_current_dir` all hand back this literal,
+/// while `get_envs` returns the offending value untouched — so both checks are
+/// needed to cover every carrier.
+const NUL_BEARING_PLACEHOLDER: &[u8] = b"<string-with-nul>";
+
+fn os_str_is_nul_bearing(value: &std::ffi::OsStr) -> bool {
+    os_str_has_nul(value) || os_str_bytes_eq(value, NUL_BEARING_PLACEHOLDER)
+}
+
+#[cfg(unix)]
+fn os_str_bytes_eq(value: &std::ffi::OsStr, expected: &[u8]) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    value.as_bytes() == expected
+}
+
+#[cfg(windows)]
+fn os_str_bytes_eq(value: &std::ffi::OsStr, expected: &[u8]) -> bool {
+    value
+        .to_str()
+        .is_some_and(|value| value.as_bytes() == expected)
+}
+
+/// Name the carrier of a `\0` in this invocation, or `None` when it is clean.
+///
+/// `Command::spawn` rejects the whole invocation with "nul byte found in
+/// provided data" and says nothing about which of ~40 arguments and ~60
+/// environment entries is at fault. Issue 201 hit this 282 times in a row with
+/// no way to tell — and a `\0` is valid UTF-8, so `read_to_string` carries one
+/// out of a file without a word.
+///
+/// All four carriers are checked, because all four produce that identical
+/// error: the program name, any argument, any environment entry, and the
+/// working directory — that last one being easy to overlook, since Kronn
+/// derives it from a project path it did not necessarily create.
+///
+/// Returns the CARRIER, never the content: these values hold API keys and
+/// tokens. Same rule as `InvocationSizeReceipt` ("No argument content was
+/// logged"). An argument is identified by the flag it follows when there is
+/// one, since positions shift between agents.
+fn nul_byte_offender(command: &tokio::process::Command) -> Option<String> {
+    let command = command.as_std();
+    if os_str_is_nul_bearing(command.get_program()) {
+        return Some("the program name".to_string());
+    }
+    if command
+        .get_current_dir()
+        .is_some_and(|directory| os_str_is_nul_bearing(directory.as_os_str()))
+    {
+        return Some("the working directory".to_string());
+    }
+
+    let args: Vec<&std::ffi::OsStr> = command.get_args().collect();
+    if let Some(index) = args.iter().position(|arg| os_str_is_nul_bearing(arg)) {
+        let preceding_flag = index
+            .checked_sub(1)
+            .and_then(|previous| args.get(previous))
+            .and_then(|arg| arg.to_str())
+            .filter(|arg| arg.starts_with("--"));
+        return Some(match preceding_flag {
+            Some(flag) => format!("the value of argument {flag} (position {index})"),
+            None => format!("argument at position {index}"),
+        });
+    }
+
+    // Only the overrides this call sets: an inherited variable would already
+    // have broken every other spawn on the host.
+    command
+        .get_envs()
+        .find(|(key, value)| {
+            os_str_is_nul_bearing(key) || value.is_some_and(os_str_is_nul_bearing)
+        })
+        .map(|(key, _)| format!("environment variable {}", key.to_string_lossy()))
+}
+
 fn resolve_agent_invocation(
     binary: &str,
     npx_package: Option<&str>,
@@ -8921,6 +9009,15 @@ fn try_spawn(
             receipt.compact()
         );
         receipt.validate_single_argument_limit()?;
+    }
+
+    // Name the carrier before the OS refuses the whole invocation for it.
+    if let Some(offender) = nul_byte_offender(&cmd) {
+        return Err(format!(
+            "{cmd_name} cannot start: {offender} contains a NUL byte, which the operating system \
+             refuses in a command line. This never resolves on its own — the value must be fixed \
+             at its source. No argument or environment content was logged."
+        ));
     }
 
     let mut child = cmd.spawn().map_err(|error| {
