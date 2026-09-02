@@ -10694,9 +10694,11 @@ async fn batch_run_isolated_without_project_id_fails_early() {
         app,
         &format!("/api/quick-prompts/{}/batch", qp_id),
         serde_json::json!({
+            // The prompt comes from the QP's template; an item only carries
+            // the values rendered into it.
             "items": [
-                { "title": "EW-1", "prompt": "Analyse EW-1" },
-                { "title": "EW-2", "prompt": "Analyse EW-2" },
+                { "title": "EW-1", "variables": { "ticket": "EW-1" } },
+                { "title": "EW-2", "variables": { "ticket": "EW-2" } },
             ],
             "batch_name": "Should-fail batch",
             "workspace_mode": "Isolated",
@@ -10716,6 +10718,54 @@ async fn batch_run_isolated_without_project_id_fails_early() {
         "Error should mention Isolated + project requirement: got {:?}",
         err
     );
+}
+
+/// KT-557 — a batch that cannot run must not leave resolved values behind.
+#[tokio::test]
+async fn batch_run_refused_for_isolated_writes_no_variable_snapshot() {
+    // Preparing the variables WRITES them, so the structural refusal has to
+    // come first. Checked on the storage rather than on the message: an order
+    // that changed back would still return the same error text.
+    let state = test_state();
+    let app = kronn::build_router_with_auth(state.clone(), false);
+
+    let (_, json) = post_json(
+        app.clone(),
+        "/api/quick-prompts",
+        serde_json::json!({
+            "name": "Isolated QP",
+            "prompt_template": "Analyse {{ticket}}",
+            "variables": [{ "name": "ticket", "label": "Ticket", "placeholder": "EW-1" }],
+            "agent": "ClaudeCode",
+        }),
+    )
+    .await;
+    let qp_id = json["data"]["id"].as_str().unwrap().to_string();
+
+    let (_, json) = post_json(
+        app,
+        &format!("/api/quick-prompts/{}/batch", qp_id),
+        serde_json::json!({
+            "items": [{ "title": "EW-1", "variables": { "ticket": "EW-1" } }],
+            "batch_name": "Should-fail batch",
+            "workspace_mode": "Isolated",
+        }),
+    )
+    .await;
+    assert_eq!(json["success"], false, "got {json}");
+
+    let snapshots: i64 = state
+        .db
+        .with_read_conn(|connection| {
+            Ok(connection.query_row(
+                "SELECT COUNT(*) FROM execution_variable_snapshots",
+                [],
+                |row| row.get(0),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(snapshots, 0, "a refused batch must persist nothing");
 }
 
 #[tokio::test]
@@ -10745,7 +10795,7 @@ async fn batch_run_direct_mode_works_without_project_id() {
         app,
         &format!("/api/quick-prompts/{}/batch", qp_id),
         serde_json::json!({
-            "items": [{ "title": "EW-1", "prompt": "Analyse EW-1" }],
+            "items": [{ "title": "EW-1", "variables": { "ticket": "EW-1" } }],
             "batch_name": "Analysis batch",
             // workspace_mode omitted → defaults to Direct on the backend
         }),

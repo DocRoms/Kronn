@@ -2333,7 +2333,9 @@ export const pages = {
 
 export interface BatchItem {
   title: string;
-  prompt: string;
+  /** Values rendered into the Quick Prompt's template. The prompt itself is
+   *  never sent per item — the template owns it, and the substitution happens
+   *  at execution from these values. */
   variables?: Record<string, string>;
 }
 

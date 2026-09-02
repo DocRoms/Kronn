@@ -1633,7 +1633,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     try {
       const items = lines.map(line => {
         const vars: Record<string, string> = { [keyVar.name]: line };
-        return { title: `${qp.name} — ${line}`, prompt: qp.prompt_template, variables: vars };
+        return { title: `${qp.name} — ${line}`, variables: vars };
       });
       const now = new Date();
       const batchName = `${qp.name} — ${now.toLocaleString(configLanguage || 'fr', {
