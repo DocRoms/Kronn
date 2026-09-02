@@ -2,6 +2,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   livePageMosaicLayouts,
   openStandaloneDiscussion,
+  standaloneDiscussionId,
+  standaloneDiscussionUrl,
   standaloneLivePageId,
   standaloneLivePageMosaic,
   standaloneLivePageMosaicUrl,
@@ -54,13 +56,37 @@ describe('standalone Live Page navigation', () => {
     expect(standaloneLivePageMosaic('#pages/mosaic?page=one&layout=auto')).toBeNull();
   });
 
-  it('seeds the Dashboard reload checkpoint and opens it in a fresh same-origin tab', () => {
+  it('opens a shareable address, and needs no back-reference to do it', () => {
     const open = vi.fn();
 
     openStandaloneDiscussion('disc-42', { origin: 'http://localhost:5173', pathname: '/index.html' } as Location, open);
 
+    // Still seeded: a reload of the ORIGINAL tab must keep its place.
     expect(sessionStorage.getItem('kronn:navigation:page')).toBe('discussions');
     expect(sessionStorage.getItem('kronn:navigation:discussion')).toBe('disc-42');
-    expect(open).toHaveBeenCalledWith('http://localhost:5173/index.html', '_blank');
+    // The new tab carries the discussion in its own URL, so nothing has to be
+    // cloned across windows — which is what lets it open with no opener.
+    expect(open).toHaveBeenCalledWith(
+      'http://localhost:5173/index.html#discussion-disc-42',
+      '_blank',
+      'noopener,noreferrer',
+    );
+  });
+
+  it('builds a discussion address that survives a copy-paste, and reads it back', () => {
+    const url = standaloneDiscussionUrl('disc/é 42', {
+      origin: 'http://localhost:5173',
+      pathname: '/index.html',
+    } as Location);
+
+    expect(url).toBe('http://localhost:5173/index.html#discussion-disc%2F%C3%A9%2042');
+    expect(standaloneDiscussionId(new URL(url).hash)).toBe('disc/é 42');
+  });
+
+  it('ignores a hash that names no discussion', () => {
+    expect(standaloneDiscussionId('#page/one')).toBeNull();
+    expect(standaloneDiscussionId('#discussion-')).toBeNull();
+    expect(standaloneDiscussionId('#discussion-%E0%A4%A')).toBeNull();
+    expect(standaloneDiscussionId('')).toBeNull();
   });
 });

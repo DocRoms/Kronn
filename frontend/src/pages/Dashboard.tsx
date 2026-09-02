@@ -17,6 +17,7 @@ import { TourOverlay } from '../components/tour/TourOverlay';
 import { TourHelpButton } from '../components/tour/TourHelpButton';
 import { fetchSttModelId } from '../lib/stt-models';
 import { ErrorBoundary } from '../components/ErrorBoundary';
+import { standaloneDiscussionId } from '../lib/live-page-navigation';
 import {
   readActiveDiscussionId,
   readDashboardPage,
@@ -69,7 +70,12 @@ export function Dashboard({ onReset }: DashboardProps) {
   // can widen the document and push a page sidebar outside the viewport.
   const isMobile = useIsMobile(1100);
   const { toast, ToastContainer } = useToast();
-  const [page, setPage] = useState<Page>(readDashboardPage);
+  // A `#discussion-<id>` address wins over the session checkpoint: it is what
+  // the reader asked for by opening this URL, while the checkpoint only says
+  // where the previous visit left off.
+  const deepLinkedDiscussionId = standaloneDiscussionId(window.location.hash);
+  const [page, setPage] = useState<Page>(() =>
+    deepLinkedDiscussionId ? 'discussions' : readDashboardPage());
   const [mcpSelectedConfigId, setMcpSelectedConfigId] = useState<string | null>(null);
   const [planningSelectedTaskId, setPlanningSelectedTaskId] = useState<string | null>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
@@ -80,7 +86,7 @@ export function Dashboard({ onReset }: DashboardProps) {
     try { return JSON.parse(localStorage.getItem('kronn:lastSeenMsgCount') ?? '{}'); } catch { return {}; }
   });
   const [activeDiscussionId, setActiveDiscussionId] = useState<string | null>(
-    readActiveDiscussionId,
+    () => deepLinkedDiscussionId ?? readActiveDiscussionId(),
   );
   // Auto-run agent on a discussion (after full audit creates validation discussion)
   const [autoRunDiscussionId, setAutoRunDiscussionId] = useState<string | null>(null);

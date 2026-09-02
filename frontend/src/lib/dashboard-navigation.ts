@@ -4,6 +4,11 @@
  * `sessionStorage` is intentional: a full Vite reload in the current tab keeps
  * the user's place, while a genuinely new app/browser session still starts on
  * Projects. This is not a router or a shareable deep-link contract.
+ *
+ * One address IS shareable and does not go through here: `#discussion-<id>`
+ * (`live-page-navigation.ts`) opens that discussion in any tab, and takes
+ * precedence over this checkpoint — it is what the reader asked for, while the
+ * checkpoint only says where the previous visit left off.
  */
 
 export type DashboardPage =
