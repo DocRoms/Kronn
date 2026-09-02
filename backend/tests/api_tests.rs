@@ -4514,7 +4514,15 @@ async fn discussion_agent_switch_waits_for_next_user_message() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let body = resp.into_body().collect().await.unwrap().to_bytes();
-    assert!(String::from_utf8_lossy(&body).contains("skipped_no_agent"));
+    let body_str = String::from_utf8_lossy(&body);
+    assert!(body_str.contains("skipped_no_agent"));
+    // The stream ends on purpose, and says so: a client that treats a silent
+    // close as an interruption must not be told this one was interrupted.
+    let skipped_at = body_str.find("skipped_no_agent").unwrap();
+    let complete_at = body_str
+        .find("event: complete")
+        .expect("an intentional close must end with a terminal event");
+    assert!(complete_at > skipped_at, "the terminal event comes last");
 
     let (content, pending): (String, Option<String>) = state
         .db
@@ -9508,6 +9516,10 @@ async fn send_message_to_no_agent_disc_skips_the_runner() {
     assert!(
         body_str.contains("skipped_no_agent"),
         "no_agent disc must skip the runner, got: {body_str}"
+    );
+    assert!(
+        body_str.contains("event: complete"),
+        "a skipped turn is a finished stream, not an interrupted one: {body_str}"
     );
 
     // Plural explicit targets still persist in text order (deduplicated), even

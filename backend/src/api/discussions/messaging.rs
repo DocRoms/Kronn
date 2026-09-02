@@ -28,7 +28,16 @@ use super::routing::{route_human_turn, DispatchRoute};
 use super::streaming::make_agent_stream;
 use super::{SseStream, MAX_CONTENT_LEN};
 
-fn sse_events(events: Vec<Event>) -> Sse<SseStream> {
+/// A stream that says everything it has to say, then ends.
+///
+/// The frontend treats a stream that closes without a terminal event as an
+/// interruption — a backend restart mid-reply — and that rule is what keeps a
+/// partial answer from being thrown away. These streams end on purpose, so
+/// they say so: `complete` is terminal for the client and read by nothing
+/// else. Without it, every message in a room with joined CLIs, every human-only
+/// room, every duplicate and every revision surfaced as a broken stream.
+fn sse_events(mut events: Vec<Event>) -> Sse<SseStream> {
+    events.push(Event::default().event("complete").data("{}"));
     let stream: SseStream = Box::pin(futures::stream::iter(
         events.into_iter().map(Ok::<_, Infallible>),
     ));

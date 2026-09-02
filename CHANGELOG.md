@@ -97,6 +97,15 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- Sending a message in a room with joined CLI agents, in a human-only
+  discussion, re-sending a duplicate, or revising a message no longer raises
+  "SSE stream closed before a terminal event" on every turn. The frontend had
+  learned on 1 September to read a stream that closes without a terminal event
+  as an interruption — which is what protects a half-written reply across a
+  backend restart — while five backend paths still ended their stream on
+  purpose without saying so. Those paths now close with an explicit `complete`,
+  so the interruption rule stays true and stops firing on finished turns.
+
 - A Page's inline Kronn action CTAs (`data-kronn-action`) now work from the
   standalone tab and every mosaic tile, not only the embedded viewer: clicking
   one opened only a same-origin link relay with no action handler, so the
