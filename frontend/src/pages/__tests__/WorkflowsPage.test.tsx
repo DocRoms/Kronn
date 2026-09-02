@@ -1118,6 +1118,44 @@ describe('WorkflowsPage', () => {
     expect(mockWorkflowsApi.delete).toHaveBeenCalledWith('wf-del');
   });
 
+  it('deletes several automations at once from the sidebar', async () => {
+    // KT-561 — the per-card trash sits at the bottom of a card, which is where
+    // nobody found it. The sidebar offers the same power as Discussions: pick
+    // several, delete them from the top.
+    const summary: WorkflowSummary = {
+      id: 'wf-bulk',
+      name: 'BulkOne',
+      project_id: null,
+      project_name: null,
+      trigger_type: 'manual',
+      step_count: 1,
+      misconfigured_step_count: 0,
+      enabled: true,
+      pinned: false,
+      last_run: null,
+      created_at: '2026-01-01T00:00:00Z',
+    };
+    mockWorkflowsApi.list.mockResolvedValue([summary]);
+    mockWorkflowsApi.delete.mockClear();
+    mockWorkflowsApi.delete.mockResolvedValue(undefined);
+
+    await wrap(
+      <WorkflowsPage projects={[]} installedAgentTypes={['ClaudeCode']} agentAccess={fullConfig} />
+    );
+
+    // Selection mode is one click away, in the sidebar's own menu.
+    await act(async () => { fireEvent.click(screen.getByLabelText('Autres actions')); });
+    await act(async () => { fireEvent.click(screen.getByRole('menuitem', { name: /Sélection multiple/ })); });
+
+    const checkbox = screen.getAllByRole('checkbox')
+      .find(node => node.getAttribute('aria-label')?.includes('BulkOne'));
+    expect(checkbox, 'every row is selectable in selection mode').toBeTruthy();
+    await act(async () => { fireEvent.click(checkbox!); });
+
+    await act(async () => { fireEvent.click(screen.getByLabelText('Supprimer la sélection')); });
+    expect(mockWorkflowsApi.delete).toHaveBeenCalledWith('wf-bulk');
+  });
+
   it('keeps a workflow on screen when the server refuses to delete it', async () => {
     // The old handler swallowed the rejection into a console line, so a
     // refusal was indistinguishable from a click that did nothing.
