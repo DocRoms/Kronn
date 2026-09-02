@@ -7409,6 +7409,39 @@ Suite de la réponse.";
     }
 
     #[test]
+    fn strict_flag_keeps_the_ordering_a_discussion_now_depends_on() {
+        // Since 0.13.0 an ordinary discussion passes strict too, so this is the
+        // real argument shape — not just the task-worker one. Both inserted
+        // flags must still land before --append-system-prompt, which would
+        // otherwise swallow the next positional as its value.
+        let (_, _, mut args, _, _, _) = super::super::agent_command(
+            &AgentType::ClaudeCode,
+            "the prompt",
+            false,
+            "MCP context",
+            None,
+        );
+
+        super::super::insert_claude_mcp_config(&mut args, "/path/to/.mcp.json".into(), true);
+
+        let strict_idx = args
+            .iter()
+            .position(|a| a == "--strict-mcp-config")
+            .expect("strict flag present");
+        let mcp_idx = args.iter().position(|a| a == "--mcp-config").unwrap();
+        let sys_idx = args
+            .iter()
+            .position(|a| a == "--append-system-prompt")
+            .unwrap();
+
+        assert!(strict_idx < sys_idx, "args: {args:?}");
+        assert!(mcp_idx < sys_idx, "args: {args:?}");
+        // The path must follow its own flag, not the strict one.
+        assert_eq!(args[mcp_idx + 1], "/path/to/.mcp.json");
+        assert_eq!(args.last().unwrap(), "the prompt");
+    }
+
+    #[test]
     fn mcp_config_works_without_append_system_prompt() {
         // When there's no MCP context, --append-system-prompt is absent
         let (_, _, mut args, _, _, _) =

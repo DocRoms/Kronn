@@ -3154,7 +3154,18 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
         } else {
             let mcp_json = work_dir.join(".mcp.json");
             if mcp_json.exists() {
-                insert_claude_mcp_config(&mut args, mcp_json.to_string_lossy().to_string(), false);
+                // Strict, so the agent gets exactly the servers Kronn declares
+                // — the ones its own UI lists — and nothing else. Without it
+                // Claude Code merges the host's personal MCP config on top:
+                // measured with an EMPTY `.mcp.json`, it still mounted 155
+                // tools from 3 unrelated servers, worth ~7 000 tokens of cache
+                // creation on every single turn. Issue 202 saw the same thing
+                // as a project-less discussion starting `gcloud` and `uvx`
+                // servers it never asked for, one of them failing to connect.
+                //
+                // `kronn-internal` survives because Kronn injects it into that
+                // file; strict only removes what Kronn did not put there.
+                insert_claude_mcp_config(&mut args, mcp_json.to_string_lossy().to_string(), true);
             }
         }
     }
