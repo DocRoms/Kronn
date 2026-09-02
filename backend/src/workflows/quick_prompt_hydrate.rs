@@ -90,6 +90,7 @@ pub async fn hydrate_step_from_quick_prompt(
     // onto the step when the step doesn't already set one, so a QP-driven step
     // runs on the QP's model (consumed via runner::effective_model_flag).
     let qp_model = qp.agent_settings.as_ref().and_then(|s| s.model.clone());
+    let qp_connection = qp.connection_id.clone();
     match step.agent_settings.as_mut() {
         Some(settings) => {
             if settings.tier.is_none() {
@@ -98,6 +99,11 @@ pub async fn hydrate_step_from_quick_prompt(
             if settings.model.is_none() {
                 settings.model = qp_model;
             }
+            // Same merge rule as the rest: an explicit step choice wins, and a
+            // step that named no connection inherits the QP's.
+            if settings.connection_id.is_none() {
+                settings.connection_id = qp_connection;
+            }
         }
         None => {
             step.agent_settings = Some(crate::models::AgentSettings {
@@ -105,6 +111,7 @@ pub async fn hydrate_step_from_quick_prompt(
                 tier: Some(qp.tier),
                 reasoning_effort: None,
                 max_tokens: None,
+                connection_id: qp_connection,
             });
         }
     }
@@ -340,6 +347,7 @@ mod tests {
             tier: None,
             reasoning_effort: None,
             max_tokens: None,
+            connection_id: None,
         });
         let qp_id = seed_qp(&db, qp).await;
         let mut step = blank_step(Some(qp_id));
@@ -353,6 +361,91 @@ mod tests {
         );
     }
 
+    /// A real connection row, because `quick_prompts.connection_id` is a
+    /// foreign key — the identity has to exist for the QP to persist at all.
+    async fn seed_connection(db: &Database, id: &str) {
+        let owned = id.to_string();
+        db.with_conn(move |conn| {
+            let now = chrono::Utc::now();
+            crate::db::external_api_connections::insert(
+                conn,
+                &crate::models::ExternalApiConnection {
+                    id: owned.clone(),
+                    display_name: owned.clone(),
+                    mention_alias: owned.clone(),
+                    endpoint: Some("https://api.example.test".into()),
+                    credential_slug: format!("credential-{owned}"),
+                    origin_preset: crate::models::ExternalApiConnectionPreset::Other,
+                    economy_model: None,
+                    default_model: Some("model".into()),
+                    reasoning_model: None,
+                    created_at: now,
+                    updated_at: now,
+                    image_model: None,
+                    video_model: None,
+                    media_endpoint: None,
+                },
+            )
+        })
+        .await
+        .expect("seed connection");
+    }
+
+    #[tokio::test]
+    async fn hydrates_the_qp_connection_so_a_custom_step_knows_which_one() {
+        // `AgentType::Custom` is shared by every named HTTP connection, so a
+        // step that inherits a QP without its connection id has no way to say
+        // which provider it meant — and the runner refuses the spawn.
+        let db = Database::open_in_memory().unwrap();
+        seed_connection(&db, "conn-openrouter").await;
+        let mut qp = make_qp("qp-conn", "Ask {{host}}");
+        qp.connection_id = Some("conn-openrouter".to_string());
+        let qp_id = seed_qp(&db, qp).await;
+        let mut step = blank_step(Some(qp_id));
+
+        hydrate_step_from_quick_prompt(&mut step, &db)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            step.agent_settings
+                .as_ref()
+                .and_then(|s| s.connection_id.clone()),
+            Some("conn-openrouter".to_string()),
+            "the QP's connection must reach the step"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_explicit_step_connection_wins_over_the_qp_one() {
+        let db = Database::open_in_memory().unwrap();
+        seed_connection(&db, "conn-from-qp").await;
+        seed_connection(&db, "conn-on-step").await;
+        let mut qp = make_qp("qp-conn2", "x");
+        qp.connection_id = Some("conn-from-qp".to_string());
+        let qp_id = seed_qp(&db, qp).await;
+        let mut step = blank_step(Some(qp_id));
+        step.agent_settings = Some(crate::models::AgentSettings {
+            model: None,
+            tier: None,
+            reasoning_effort: None,
+            max_tokens: None,
+            connection_id: Some("conn-on-step".to_string()),
+        });
+
+        hydrate_step_from_quick_prompt(&mut step, &db)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            step.agent_settings
+                .as_ref()
+                .and_then(|s| s.connection_id.clone()),
+            Some("conn-on-step".to_string()),
+            "an explicit step connection must win, like model and tier already do"
+        );
+    }
+
     #[tokio::test]
     async fn step_model_wins_over_qp_model() {
         let db = Database::open_in_memory().unwrap();
@@ -362,6 +455,7 @@ mod tests {
             tier: None,
             reasoning_effort: None,
             max_tokens: None,
+            connection_id: None,
         });
         let qp_id = seed_qp(&db, qp).await;
         let mut step = blank_step(Some(qp_id));
@@ -370,6 +464,7 @@ mod tests {
             tier: None,
             reasoning_effort: None,
             max_tokens: None,
+            connection_id: None,
         });
         hydrate_step_from_quick_prompt(&mut step, &db)
             .await

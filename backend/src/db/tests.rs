@@ -3558,6 +3558,7 @@ fn create_batch_run_persists_each_compare_target_tier() {
         tier: Some(crate::models::ModelTier::Default),
         reasoning_effort: None,
         max_tokens: None,
+        connection_id: None,
     });
     crate::db::quick_prompts::insert_quick_prompt(&conn, &qp).unwrap();
     let target = |tier: crate::models::ModelTier| crate::db::workflows::BatchAgentOverride {

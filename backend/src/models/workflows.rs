@@ -1057,6 +1057,20 @@ pub struct AgentSettings {
     /// Abstract tier selection. Resolved to a concrete --model flag per agent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tier: Option<ModelTier>,
+    /// Which named external HTTP connection this step talks to.
+    ///
+    /// `AgentType::Custom` is shared by every non-legacy OpenAI-compatible
+    /// connection, so the agent type alone cannot say WHICH one — two
+    /// OpenRouter accounts, or an OpenRouter and a self-hosted LiteLLM, are
+    /// indistinguishable without it. Discussions, Quick Prompts, Compare and
+    /// orchestration all carry this identity already; steps did not, so a step
+    /// pointed at a named connection failed every run with "the selected
+    /// external API connection is unavailable" — advice the step author had no
+    /// way to act on, since there was no selector to re-pick from.
+    ///
+    /// `None` for every other agent type, which resolve from their own config.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

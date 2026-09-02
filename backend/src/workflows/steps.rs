@@ -272,6 +272,14 @@ pub async fn execute_step(
         }
     }
 
+    // Resolve the step's named external connection once, outside the retry
+    // loop. Without this a step pointed at a `Custom` connection failed every
+    // attempt with "the selected external API connection is unavailable" —
+    // accurate but unactionable, since nothing carried WHICH connection the
+    // step meant. Discussions and Quick Prompts already resolve this identity;
+    // steps now do too (KT-545).
+    let external_http = resolve_step_connection(step, catalog_db, tokens_config).await;
+
     for attempt in 0..max_attempts {
         if attempt > 0 {
             // Rate-limit-aware backoff. The empirical failure mode (run-10,
@@ -303,6 +311,7 @@ pub async fn execute_step(
             ollama_context_overrides,
             native_tools.clone(),
             progress_tx.as_ref(),
+            external_http.as_ref(),
         )
         .await
         {
@@ -375,6 +384,7 @@ pub async fn execute_step(
                             ollama_context_overrides,
                             native_tools.clone(),
                             None,
+                            external_http.as_ref(),
                         )
                         .await;
                         if let Err(ref e) = repair_res {
@@ -451,6 +461,7 @@ pub async fn execute_step(
                                 ollama_context_overrides,
                                 native_tools.clone(),
                                 None,
+                                external_http.as_ref(),
                             )
                             .await;
                             if let Err(ref e) = esc_res {
@@ -545,6 +556,7 @@ pub async fn execute_step(
                         ollama_context_overrides,
                         native_tools.clone(),
                         progress_tx.as_ref(),
+                        external_http.as_ref(),
                     ).await {
                         Ok((converged, debate_tokens, debate_tool_calls)) => {
                             total_tokens += debate_tokens;
@@ -797,8 +809,56 @@ fn escalation_step(step: &WorkflowStep) -> WorkflowStep {
         tier: Some(crate::models::ModelTier::Reasoning),
         reasoning_effort: None,
         max_tokens: None,
+        connection_id: None,
     });
     escalated
+}
+
+/// Resolve the named external HTTP connection a step points at.
+///
+/// Returns `None` when the step names none — every non-HTTP agent — and also
+/// when the id no longer resolves or now belongs to a different agent type.
+/// Refusing here rather than substituting another connection is deliberate: a
+/// step silently answered by the wrong provider is worse than one that fails
+/// with the runner's own diagnostic.
+async fn resolve_step_connection(
+    step: &WorkflowStep,
+    catalog_db: Option<&crate::db::Database>,
+    tokens_config: &TokensConfig,
+) -> Option<runner::ExternalHttpRuntime> {
+    let connection_id = step
+        .agent_settings
+        .as_ref()
+        .and_then(|settings| settings.connection_id.clone())?;
+    let db = catalog_db?;
+    let lookup_id = connection_id.clone();
+    let connection = db
+        .with_read_conn(move |conn| crate::db::external_api_connections::get(conn, &lookup_id))
+        .await
+        .ok()
+        .flatten()?;
+
+    if crate::db::external_api_connections::target_for_connection(&connection).agent_type
+        != step.agent
+    {
+        tracing::warn!(
+            step = %step.name,
+            "Step connection {} no longer matches its agent type — running without it",
+            connection_id
+        );
+        return None;
+    }
+
+    let endpoint = connection.endpoint.clone()?;
+    Some(runner::ExternalHttpRuntime {
+        display_name: connection.display_name.clone(),
+        mention_alias: connection.mention_alias.clone(),
+        endpoint,
+        api_key: tokens_config
+            .active_key_for(&connection.credential_slug)
+            .filter(|key| !key.trim().is_empty())
+            .map(str::to_string),
+    })
 }
 
 /// Run an agent with optional stall timeout.
@@ -819,6 +879,7 @@ async fn run_agent_with_timeout(
     ollama_context_overrides: Option<&std::collections::HashMap<String, u64>>,
     native_tools: Option<Arc<dyn crate::agents::tools::ToolExecutor>>,
     progress_tx: Option<&ProgressSender>,
+    external_http: Option<&runner::ExternalHttpRuntime>,
 ) -> Result<AgentOutput> {
     // 30 min default — generous safety net rather than aggressive ceiling.
     // With tool-call streaming (cf. format_tool_input_suffix), an active
@@ -861,6 +922,10 @@ async fn run_agent_with_timeout(
             .agent_settings
             .as_ref()
             .and_then(|s| s.model.as_deref()),
+        // The named connection this step points at. `AgentType::Custom` is
+        // shared by every OpenAI-compatible connection, so without this the
+        // runner refuses the spawn outright.
+        external_http,
         tools: native_tools,
         ..runner::AgentStartConfig::new(&step.agent, project_path, prompt, tokens_config)
     })
@@ -1154,6 +1219,9 @@ async fn run_multi_agent_debate(
     ollama_context_overrides: Option<&std::collections::HashMap<String, u64>>,
     native_tools: Option<Arc<dyn crate::agents::tools::ToolExecutor>>,
     progress_tx: Option<&ProgressSender>,
+    // The step's own connection. It applies to the AUTHOR, which runs on the
+    // step's agent — never to the reviewer, which runs on its own.
+    external_http: Option<&runner::ExternalHttpRuntime>,
 ) -> Result<(String, u64, Vec<NativeToolCallLog>)> {
     let max_rounds = cfg.max_rounds.unwrap_or(3).clamp(1, 5);
     let approved = |t: &str| {
@@ -1184,6 +1252,7 @@ async fn run_multi_agent_debate(
             tier: cfg.reviewer_tier,
             reasoning_effort: None,
             max_tokens: None,
+            connection_id: None,
         });
         s
     };
@@ -1217,6 +1286,10 @@ async fn run_multi_agent_debate(
             ollama_context_overrides,
             native_tools.clone(),
             progress_tx,
+            // The reviewer runs on its own `reviewer_agent`, so the step's
+            // connection does not apply to it. A reviewer pointed at a named
+            // connection is a separate gap, not this one.
+            None,
         )
         .await?;
         tokens += rev.tokens_used;
@@ -1266,6 +1339,7 @@ async fn run_multi_agent_debate(
             ollama_context_overrides,
             native_tools.clone(),
             progress_tx,
+            external_http,
         )
         .await?;
         tokens += auth.tokens_used;
@@ -1500,6 +1574,7 @@ mod tests {
             tier: Some(crate::models::ModelTier::Default),
             reasoning_effort: None,
             max_tokens: None,
+            connection_id: None,
         });
         let esc = escalation_step(&local);
         assert_eq!(
@@ -2227,6 +2302,7 @@ mod http_native_tool_step_tests {
                 tier: None,
                 reasoning_effort: None,
                 max_tokens: None,
+                connection_id: None,
             }),
             ..WorkflowStep::default()
         };
@@ -2317,6 +2393,7 @@ mod http_native_tool_step_tests {
                 tier: None,
                 reasoning_effort: None,
                 max_tokens: None,
+                connection_id: None,
             }),
             ..WorkflowStep::default()
         };

@@ -295,7 +295,22 @@ model?: string | null,
 /**
  * Abstract tier selection. Resolved to a concrete --model flag per agent.
  */
-tier?: ModelTier | null, reasoning_effort?: string | null, max_tokens?: number | null, };
+tier?: ModelTier | null,
+/**
+ * Which named external HTTP connection this step talks to.
+ *
+ * `AgentType::Custom` is shared by every non-legacy OpenAI-compatible
+ * connection, so the agent type alone cannot say WHICH one — two
+ * OpenRouter accounts, or an OpenRouter and a self-hosted LiteLLM, are
+ * indistinguishable without it. Discussions, Quick Prompts, Compare and
+ * orchestration all carry this identity already; steps did not, so a step
+ * pointed at a named connection failed every run with "the selected
+ * external API connection is unavailable" — advice the step author had no
+ * way to act on, since there was no selector to re-pick from.
+ *
+ * `None` for every other agent type, which resolve from their own config.
+ */
+connection_id?: string | null, reasoning_effort?: string | null, max_tokens?: number | null, };
 
 export type AgentType = "ClaudeCode" | "Codex" | "OpenCode" | "Vibe" | "GeminiCli" | "Kiro" | "CopilotCli" | "Ollama" | "LiteLlm" | "Nvidia" | "Custom";
 

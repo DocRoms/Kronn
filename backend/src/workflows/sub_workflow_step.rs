@@ -836,6 +836,7 @@ async fn execute_foreach(
                             tier: Some(tier),
                             reasoning_effort: None,
                             max_tokens: None,
+                            connection_id: None,
                         })
                     }
                     _ => {}
