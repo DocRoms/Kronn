@@ -1785,7 +1785,7 @@ async fn make_agent_stream_inner(
             // plugin block, since
             // `mcp_context_override = Some(...)` short-circuits the
             // disk read in runner.rs.
-            let disk_ctx = crate::core::mcp_scanner::read_all_mcp_contexts(&project_path);
+            let disk_ctx = crate::core::mcp_scanner::build_mcp_server_listing(&project_path);
             let combined = if disk_ctx.is_empty() {
                 plugin_block
             } else {

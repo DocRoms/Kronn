@@ -284,7 +284,7 @@ pub fn estimate_extra_context_len(
     let mcp_len = if let Some(ctx) = mcp_override {
         ctx.len()
     } else if !project_path.is_empty() {
-        crate::core::mcp_scanner::read_all_mcp_contexts(project_path).len()
+        crate::core::mcp_scanner::build_mcp_server_listing(project_path).len()
     } else {
         0
     };

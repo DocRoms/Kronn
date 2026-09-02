@@ -2575,7 +2575,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
     let mcp_context = if let Some(override_ctx) = config.mcp_context_override {
         override_ctx.to_string()
     } else if !config.project_path.is_empty() {
-        crate::core::mcp_scanner::read_all_mcp_contexts(config.project_path)
+        crate::core::mcp_scanner::build_mcp_server_listing(config.project_path)
     } else {
         String::new()
     };

@@ -97,6 +97,19 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Changed
 
+- An agent's prompt no longer carries every MCP server's documentation. It
+  concatenated all of `docs/operations/mcp-servers/*.md` in full on every spawn
+  — 69 557 bytes on the Kronn project, 45 465 of them for `kronn-internal.md`
+  alone — whatever the discussion was about. It now carries the server listing,
+  the `mcp__<server>__<tool>` convention, a pointer to `tool_manual` for the
+  Kronn tools, and where to read a server's own notes if the agent is going to
+  use it: 907 bytes, 77 times smaller, about 17 000 tokens saved per turn. This
+  costs no latency either way — measured at 4.40 s against 4.44 s bare — so it
+  is a cost fix, not a speed one. Only CLI agents ever received this block, and
+  they have a filesystem: pointing at the file loses nothing and defers the
+  reading to the turn that needs it. Discussions without a project already
+  worked this way, and the two paths now agree.
+
 - Automatic conversation summaries are gone. They fired after every reply past a
   per-agent threshold, and had been dead in practice: the global default was
   `Off`, acting as a master kill-switch, so a discussion displaying `Auto` never
