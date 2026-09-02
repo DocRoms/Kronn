@@ -152,7 +152,7 @@ pub async fn start_briefing(
         worktree_branch: None,
         summary_cache: None,
         summary_up_to_msg_idx: None,
-        summary_strategy: crate::models::SummaryStrategy::Auto,
+        summary_strategy: crate::models::SummaryStrategy::OnDemand,
         introspection_call_count: 0,
         shared_id: None,
         shared_with: vec![],

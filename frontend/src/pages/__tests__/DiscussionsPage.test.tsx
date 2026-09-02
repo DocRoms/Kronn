@@ -258,7 +258,7 @@ const makeListDiscussion = (id: string, msgCount: number): Discussion => ({
   messages: [],           // list endpoint returns empty messages
   message_count: msgCount, non_system_message_count: msgCount, // but provides the count
   archived: false, pinned: false, pin_first_message: false,
-  tier: "default" as const, summary_strategy: "Auto" as const, introspection_call_count: 0,
+  tier: "default" as const, summary_strategy: "OnDemand" as const, introspection_call_count: 0,
   workspace_mode: 'Direct',
   created_at: '2026-01-01T00:00:00Z',
   updated_at: '2026-01-01T00:00:00Z',
@@ -1897,7 +1897,7 @@ describe('DiscussionsPage', () => {
     const activeDisc: Discussion = {
       ...makeListDiscussion('d1', 3),
       archived: false, pinned: false, pin_first_message: false,
-  tier: "default" as const, summary_strategy: "Auto" as const, introspection_call_count: 0,
+  tier: "default" as const, summary_strategy: "OnDemand" as const, introspection_call_count: 0,
     };
     const archivedDisc: Discussion = {
       ...makeListDiscussion('d2', 5),
@@ -2281,7 +2281,7 @@ describe('DiscussionsPage', () => {
         ...initialDisc.messages,
         { id: 'persisted-agent', role: 'Agent', channel: 'main', content: 'Streamed agent reply.', agent_type: 'ClaudeCode', timestamp: '2026-01-01T00:00:01Z', tokens_used: 12, auth_mode: null },
       ],
-      message_count: 2, non_system_message_count: 2, tier: "default" as const, summary_strategy: "Auto" as const, introspection_call_count: 0,
+      message_count: 2, non_system_message_count: 2, tier: "default" as const, summary_strategy: "OnDemand" as const, introspection_call_count: 0,
     };
     let getCallCount = 0;
     vi.mocked(discussionsApi.get).mockImplementation(async () => {
@@ -3773,7 +3773,7 @@ describe('DiscussionsPage', () => {
     messages: [
       { id: 'm1', role: 'User', channel: 'main', content: 'Tell me about my project', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
     ],
-    message_count: 1, non_system_message_count: 1, tier: "default" as const, summary_strategy: "Auto" as const, introspection_call_count: 0,
+    message_count: 1, non_system_message_count: 1, tier: "default" as const, summary_strategy: "OnDemand" as const, introspection_call_count: 0,
     archived: false, pinned: false, pin_first_message: false,
     workspace_mode: 'Direct',
     created_at: '2026-01-01T00:00:00Z',

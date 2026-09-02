@@ -644,7 +644,7 @@ pub fn create_batch_run_with_identities(
                 pin_first_message: false,
                 summary_cache: None,
                 summary_up_to_msg_idx: None,
-                summary_strategy: crate::models::SummaryStrategy::Auto,
+                summary_strategy: crate::models::SummaryStrategy::OnDemand,
                 introspection_call_count: 0,
                 shared_id: None,
                 shared_with: vec![],

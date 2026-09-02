@@ -95,6 +95,21 @@ Release notes for 0.9.3 and earlier are available in the
   agent type, with the same connection-mismatch validation Quick Prompts
   already apply. See `docs/operations/http-transport.md`.
 
+### Changed
+
+- Automatic conversation summaries are gone. They fired after every reply past a
+  per-agent threshold, and had been dead in practice: the global default was
+  `Off`, acting as a master kill-switch, so a discussion displaying `Auto` never
+  summarised — a strategy shown in the interface that could not apply. Removed
+  rather than repaired, because every runtime can now read the thread back
+  itself (`disc_read` over MCP or as a declared tool), which is cheaper and more
+  precise than a summary produced in advance for a need nobody expressed. The
+  `Auto` strategy no longer exists; rows written before 0.13.0 read back as
+  `OnDemand`, which keeps `disc_summarize` and the summarise action working for
+  an agent or a human reopening a long room. When history is trimmed, the notice
+  now points the agent at `disc_read` first, and at the user only if the answer
+  is not in the thread.
+
 ### Fixed
 
 - The agent bootstrap (`docs/AGENTS.md`) is back under its context ceiling
@@ -123,6 +138,46 @@ Release notes for 0.9.3 and earlier are available in the
   backend restart — while five backend paths still ended their stream on
   purpose without saying so. Those paths now close with an explicit `complete`,
   so the interruption rule stays true and stops firing on finished turns.
+
+- Listing a workflow's runs no longer carries every step's full output. A run's
+  `step_results_json` averages 470 KB, and `output` is all of it — measured at
+  100% of a 3.9 MB row, every other field together under 700 bytes — yet that
+  column travelled through each listing, decoded and re-encoded, to render rows
+  showing only a step's name and status. One workflow's runs answered with
+  237 MB in 8.7 s, and the run detail's fan-out progress asked for the same page
+  every 8 seconds. Outputs are now blanked inside SQLite on the listing paths:
+  9.3 MB → 28 KB for a page of ten, 241 MB → 1.3 MB for the 500-run cap, and
+  14.6 MB → 33 KB for `/api/workflows`, which had been decoding each workflow's
+  last run in full only to keep five fields of it. Opening a run still serves
+  everything.
+
+- A discussion turn that fails on a saturated provider is retried instead of
+  stopping silently. Two `529 Overloaded` turns simply ended with nothing shown
+  and nothing relaunched; the user waited 18 minutes once and 1 h 27 the other
+  time before restarting by hand. Saturation now retries with a growing delay,
+  and the last attempt keeps the provider's own message in the room rather than
+  going quiet. A hard quota is never retried — it is checked first — and `529`
+  is never matched on its own, since those digits appear in ids, token counts
+  and durations where a false positive would spend a real API call.
+
+- The durable error of a failed turn no longer describes an ordinary room as a
+  task worker. Every unsuccessful turn wrote the same "task-worker
+  startup/completion failed … use `task_exec_reassign`" text, which sent readers
+  looking for a sub-discussion that never existed and overwrote the provider's
+  actual reason. Real task workers keep that guidance; an ordinary room now
+  states the cause it actually hit.
+
+- An agent that cannot start because of a NUL byte in its command line now says
+  what carries it — an environment variable by name, an argument by the flag it
+  follows, the program name, or the working directory — instead of repeating
+  `nul byte found in provided data` every 30 seconds. One report shows the same
+  refusal replayed 282 times without diagnosing anything: the failure is settled
+  before the process runs, so it is now a hard preflight failure, surfaced in
+  the discussion. Values are never logged, only their carrier.
+
+- The stream now says when a tool STARTS, not only when it finishes. A single
+  Bash call can run 80 seconds, and for that whole time the interface sat on a
+  frozen placeholder while Kronn already knew which tool was running.
 
 - A Page's inline Kronn action CTAs (`data-kronn-action`) now work from the
   standalone tab and every mosaic tile, not only the embedded viewer: clicking

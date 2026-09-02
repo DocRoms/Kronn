@@ -166,7 +166,7 @@ export function AgentsSection({
   // switch for existing discussions. Loaded once on mount, written back on
   // every change via setServerConfig PATCH.
   const [defaultTier, setDefaultTier] = useState<'economy' | 'default' | 'reasoning' | null>(null);
-  const [defaultSummaryStrategy, setDefaultSummaryStrategy] = useState<'Auto' | 'OnDemand' | 'Off' | null>(null);
+  const [defaultSummaryStrategy, setDefaultSummaryStrategy] = useState<'OnDemand' | 'Off' | null>(null);
   const [agentHandoffsEnabled, setAgentHandoffsEnabled] = useState<boolean | null>(null);
   const [agentHandoffPaidLimit, setAgentHandoffPaidLimit] = useState(1);
   const [agentHandoffPaidUnlimited, setAgentHandoffPaidUnlimited] = useState(false);
@@ -268,7 +268,7 @@ export function AgentsSection({
     }
   };
 
-  const saveDefaultSummary = async (strategy: 'Auto' | 'OnDemand' | 'Off') => {
+  const saveDefaultSummary = async (strategy: 'OnDemand' | 'Off') => {
     const previous = defaultSummaryStrategy;
     setDefaultSummaryStrategy(strategy);
     try {
@@ -563,10 +563,9 @@ export function AgentsSection({
               </div>
               <p>{t('config.defaultSummaryHint')}</p>
               <div className="set-agent-choice-list" role="radiogroup" aria-label={t('config.defaultSummaryLabel')}>
-                {(['Off', 'Auto', 'OnDemand'] as const).map(strategy => {
+                {(['Off', 'OnDemand'] as const).map(strategy => {
                   const labels = {
                     Off: t('config.summaryOff'),
-                    Auto: t('config.summaryAuto'),
                     OnDemand: t('config.summaryOnDemand'),
                   };
                   const active = defaultSummaryStrategy === strategy;
@@ -580,16 +579,12 @@ export function AgentsSection({
                       data-active={active}
                       data-testid={`default-summary-btn-${strategy.toLowerCase()}`}
                       onClick={() => saveDefaultSummary(strategy)}
-                      disabled={defaultSummaryStrategy === null || strategy === 'OnDemand'}
-                      data-coming-soon={strategy === 'OnDemand'}
+                      disabled={defaultSummaryStrategy === null}
                     >
                       <span className="set-agent-choice-mark" aria-hidden="true" />
                       <span>
                         <strong>
                           {labels[strategy]}
-                          {strategy === 'OnDemand' && (
-                            <span className="set-agent-choice-soon">{t('config.comingSoon')}</span>
-                          )}
                         </strong>
                         <small>{t(`config.defaultSummary.${strategy.toLowerCase()}Hint`)}</small>
                       </span>

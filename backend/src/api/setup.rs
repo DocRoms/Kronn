@@ -3140,46 +3140,43 @@ debug_mode = false
 
     #[test]
     fn default_config_seeds_default_summary_strategy_to_off() {
-        // 0.8.6 phase 4 flipped the out-of-the-box default from `Auto`
-        // (every disc auto-summarises after N msgs) to `Off`. Rationale :
-        // modern agents have large context + MCP access to fetch older
-        // history on demand, so auto-summary just burns Economy tokens.
-        // Critical regression guard — a refactor that re-sets the seed
-        // back to Auto would re-introduce the cost regression on every
-        // new install.
+        // 0.8.6 phase 4 turned the out-of-the-box default off, because
+        // modern agents have large context plus tools to fetch older history
+        // themselves — summarising in advance just burned Economy tokens.
+        // 0.13.0 removed the automatic strategy outright; `Off` still differs
+        // from `OnDemand` and stays the seed: no summary at all unless an
+        // operator opts into keeping the cache warm.
         let cfg = config::default_config();
         assert_eq!(
             cfg.server.default_summary_strategy,
             crate::models::SummaryStrategy::Off,
-            "0.8.6 baseline : auto-summary OFF out of the box. Re-seeding \
-             to Auto regresses token cost on every new install.",
+            "new installs must not summarise unless asked",
         );
     }
 
     #[test]
     fn server_config_default_summary_strategy_round_trips_through_toml() {
         let mut cfg = config::default_config();
-        cfg.server.default_summary_strategy = crate::models::SummaryStrategy::Auto;
+        cfg.server.default_summary_strategy = crate::models::SummaryStrategy::OnDemand;
         let serialised = toml::to_string_pretty(&cfg).unwrap();
         assert!(
-            serialised.contains("default_summary_strategy = \"Auto\""),
+            serialised.contains("default_summary_strategy = \"OnDemand\""),
             "expected serialised summary strategy in TOML, got: {}",
             serialised,
         );
         let parsed: crate::models::AppConfig = toml::from_str(&serialised).unwrap();
         assert_eq!(
             parsed.server.default_summary_strategy,
-            crate::models::SummaryStrategy::Auto
+            crate::models::SummaryStrategy::OnDemand
         );
     }
 
     #[test]
     fn missing_default_summary_strategy_in_toml_falls_back_to_off() {
-        // Backwards-compat with PRE-0.8.6-phase-4 config.toml files.
-        // serde must default to `Off` (new safer default) — NOT `Auto`
-        // (the historical hardcoded value). If we ever silently bump
-        // legacy users back to Auto, they'd suddenly pay for summaries
-        // they didn't opt into. This pins the asymmetry.
+        // Backwards-compat with PRE-0.8.6-phase-4 config.toml files, which
+        // carried no such key. serde must default to `Off`, never to a mode
+        // that writes: a legacy install would otherwise start paying for
+        // summaries nobody opted into. This pins the asymmetry.
         let legacy_server_toml = r#"
 host = "127.0.0.1"
 port = 3140
@@ -3193,7 +3190,7 @@ debug_mode = false
             parsed.default_summary_strategy,
             crate::models::SummaryStrategy::Off,
             "missing default_summary_strategy MUST serde-default to Off — \
-             flipping legacy users to Auto silently would regress cost.",
+             silently enabling summaries on a legacy install would regress cost.",
         );
     }
 

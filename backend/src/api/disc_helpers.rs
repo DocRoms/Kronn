@@ -234,34 +234,6 @@ pub fn smart_truncate(text: &str, max_len: usize) -> String {
     format!("{}…", slice)
 }
 
-/// Minimum non-System message count before a discussion becomes eligible
-/// for summary generation. Tighter for small-budget agents because their
-/// prompt gets full faster.
-pub fn summary_msg_threshold(agent_type: &AgentType) -> u32 {
-    let budget = agent_prompt_budget(agent_type);
-    if budget >= 200_000 {
-        12 // Large context (Claude Code, Kiro, Gemini)
-    } else if budget >= 40_000 {
-        8 // Medium context
-    } else {
-        4 // Small context (Codex, Vibe)
-    }
-}
-
-/// Cooldown: minimum new messages since the last summary before we
-/// re-summarize. Smaller for small-budget agents to keep the summary
-/// fresh.
-pub fn summary_cooldown(agent_type: &AgentType) -> u32 {
-    let budget = agent_prompt_budget(agent_type);
-    if budget >= 200_000 {
-        6
-    } else if budget >= 40_000 {
-        4
-    } else {
-        2
-    }
-}
-
 /// Agents with small context windows that need compact prompts
 /// (strips verbose skill/profile bodies in favour of short bullet form).
 pub fn is_compact_agent(agent_type: &AgentType) -> bool {
@@ -504,26 +476,6 @@ mod tests {
         for len in 1..s.len() {
             let _ = smart_truncate(s, len);
         }
-    }
-
-    #[test]
-    fn summary_threshold_scales_with_budget() {
-        // Tier 1 (>=200K): Claude, Gemini, Codex, Kiro
-        assert_eq!(summary_msg_threshold(&AgentType::GeminiCli), 12);
-        assert_eq!(summary_msg_threshold(&AgentType::ClaudeCode), 12);
-        assert_eq!(summary_msg_threshold(&AgentType::Codex), 12);
-        // Tier 2 (>=40K): Ollama, Vibe, Custom
-        assert_eq!(summary_msg_threshold(&AgentType::Ollama), 8);
-        assert_eq!(summary_msg_threshold(&AgentType::Vibe), 8);
-        assert_eq!(summary_msg_threshold(&AgentType::Custom), 8);
-    }
-
-    #[test]
-    fn summary_cooldown_scales_with_budget() {
-        assert_eq!(summary_cooldown(&AgentType::GeminiCli), 6);
-        assert_eq!(summary_cooldown(&AgentType::ClaudeCode), 6);
-        assert_eq!(summary_cooldown(&AgentType::Ollama), 4);
-        assert_eq!(summary_cooldown(&AgentType::Vibe), 4);
     }
 
     #[test]

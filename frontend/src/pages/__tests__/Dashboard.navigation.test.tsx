@@ -77,7 +77,7 @@ const makeDiscussion = (id: string): Discussion => ({
   pinned: false,
   pin_first_message: false,
   tier: 'default',
-  summary_strategy: 'Auto',
+  summary_strategy: 'OnDemand',
   introspection_call_count: 0,
   workspace_mode: 'Direct',
   created_at: '2026-07-28T10:00:00Z',

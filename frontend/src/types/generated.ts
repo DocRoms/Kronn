@@ -5697,18 +5697,20 @@ export type SummarizeResponse = { summary: string, from_idx: number, to_idx: num
 tokens_used: number, };
 
 /**
- * Per-discussion summary strategy. Pre-fix the auto-summary loop fired
- * after every agent reply once a per-agent threshold was crossed (12/8/4
- * non-system messages). For big-context models or short threads that's
- * often a waste — user feedback on 2026-05-09 asked for an off switch.
+ * Per-discussion summary strategy.
  *
- * `OnDemand` is reserved for the future kronn-internal MCP tool surface
- * (`disc_summarize` callable by the agent itself); for now it behaves
- * like `Off` from the auto-fire perspective and only differs in that we
- * keep the cache mechanism alive so an explicit summarize call updates
- * `summary_cache`.
+ * There is no automatic summary any more. It used to fire after every reply
+ * past a per-agent threshold, and it had been dead in practice for a while:
+ * the global default was `Off`, which acted as a master kill-switch, so a
+ * discussion displaying `Auto` never summarised. Removed in 0.13.0 rather
+ * than repaired — every runtime can now read the thread back itself
+ * (`disc_read` over MCP or as a declared tool), which is cheaper and more
+ * precise than a summary generated in advance for a need nobody expressed.
+ *
+ * `OnDemand` keeps the cache alive so an explicit `disc_summarize` call —
+ * from the agent or from a human reopening a long room — writes into it.
  */
-export type SummaryStrategy = "Auto" | "OnDemand" | "Off";
+export type SummaryStrategy = "OnDemand" | "Off";
 
 /**
  * The durable unit of work (ADR §1, §3, §4bis).

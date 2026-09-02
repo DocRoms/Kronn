@@ -305,74 +305,30 @@ pub struct DiscussionMessage {
     pub author_cli_ordinal: Option<i64>,
 }
 
-/// Per-discussion summary strategy. Pre-fix the auto-summary loop fired
-/// after every agent reply once a per-agent threshold was crossed (12/8/4
-/// non-system messages). For big-context models or short threads that's
-/// often a waste — user feedback on 2026-05-09 asked for an off switch.
+/// Per-discussion summary strategy.
 ///
-/// `OnDemand` is reserved for the future kronn-internal MCP tool surface
-/// (`disc_summarize` callable by the agent itself); for now it behaves
-/// like `Off` from the auto-fire perspective and only differs in that we
-/// keep the cache mechanism alive so an explicit summarize call updates
-/// `summary_cache`.
+/// There is no automatic summary any more. It used to fire after every reply
+/// past a per-agent threshold, and it had been dead in practice for a while:
+/// the global default was `Off`, which acted as a master kill-switch, so a
+/// discussion displaying `Auto` never summarised. Removed in 0.13.0 rather
+/// than repaired — every runtime can now read the thread back itself
+/// (`disc_read` over MCP or as a declared tool), which is cheaper and more
+/// precise than a summary generated in advance for a need nobody expressed.
+///
+/// `OnDemand` keeps the cache alive so an explicit `disc_summarize` call —
+/// from the agent or from a human reopening a long room — writes into it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub enum SummaryStrategy {
-    /// Fire after every reply when the per-agent threshold is crossed.
-    /// Default for backward compatibility.
+    /// Summarise only when asked, through `disc_summarize`. The default:
+    /// rows written as `Auto` before 0.13.0 read back as this.
     #[default]
-    Auto,
-    /// No auto-fire. Reserved for the planned introspection tool surface
-    /// where the agent decides if/when to summarise.
     OnDemand,
     /// Never summarise. The agent receives the raw transcript until its
     /// context window saturates. Suitable for big-context models on
     /// short-to-medium threads, or when token cost matters more than
     /// context completeness.
     Off,
-}
-
-impl SummaryStrategy {
-    /// Whether the background auto-summary should fire, given the GLOBAL default
-    /// (`ServerConfig::default_summary_strategy`, the Settings toggle) and THIS
-    /// disc's stored strategy.
-    ///
-    /// The global `Off` is a **master kill-switch**: turning auto-summary off in
-    /// Settings suppresses it everywhere, including older discs whose per-disc
-    /// strategy was frozen to `Auto` at creation (the global default is only
-    /// applied to NEW discs, so changing it never rewrote existing rows — the
-    /// "I disabled it but long discs keep summarising" bug). Otherwise the
-    /// per-disc strategy decides, and only `Auto` auto-fires.
-    pub fn auto_fires(global_default: SummaryStrategy, disc: SummaryStrategy) -> bool {
-        if matches!(global_default, SummaryStrategy::Off) {
-            return false;
-        }
-        matches!(disc, SummaryStrategy::Auto)
-    }
-}
-
-#[cfg(test)]
-mod summary_strategy_tests {
-    use super::SummaryStrategy;
-    use super::SummaryStrategy::{Auto, Off, OnDemand};
-
-    #[test]
-    fn global_off_is_a_master_kill_switch() {
-        // The reported bug: global Off must suppress even an old disc frozen to Auto.
-        assert!(!SummaryStrategy::auto_fires(Off, Auto));
-        assert!(!SummaryStrategy::auto_fires(Off, OnDemand));
-        assert!(!SummaryStrategy::auto_fires(Off, Off));
-    }
-
-    #[test]
-    fn per_disc_decides_when_global_is_not_off() {
-        // Global Auto (or OnDemand) → the per-disc strategy is honoured.
-        assert!(SummaryStrategy::auto_fires(Auto, Auto));
-        assert!(!SummaryStrategy::auto_fires(Auto, Off));
-        assert!(!SummaryStrategy::auto_fires(Auto, OnDemand));
-        assert!(SummaryStrategy::auto_fires(OnDemand, Auto));
-        assert!(!SummaryStrategy::auto_fires(OnDemand, Off));
-    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]

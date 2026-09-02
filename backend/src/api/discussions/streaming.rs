@@ -3687,22 +3687,6 @@ async fn make_agent_stream_inner(
                     }
                 }
 
-                // Trigger background summary generation if conversation is long enough
-                if success {
-                    let summary_state = state.clone();
-                    let summary_disc_id = disc_id.clone();
-                    let summary_agent_type = agent_type.clone();
-                    let summary_tokens = tokens.clone();
-                    tokio::spawn(async move {
-                        super::orchestration::maybe_generate_summary(
-                            &summary_state,
-                            &summary_disc_id,
-                            &summary_agent_type,
-                            &summary_tokens,
-                        )
-                        .await;
-                    });
-                }
 
                 let done = serde_json::json!({ "message_id": agent_msg.id, "success": success, "tokens_used": tokens_used });
                 let _ = tx.send(AgentStreamEvent::Done { data: done }).await;

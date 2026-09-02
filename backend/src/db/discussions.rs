@@ -567,7 +567,7 @@ fn map_discussion_row(row: &rusqlite::Row) -> rusqlite::Result<Discussion> {
         test_mode_stash_ref: row.get::<_, Option<String>>(25).unwrap_or(None),
         summary_strategy: parse_summary_strategy(
             row.get::<_, String>(26)
-                .unwrap_or_else(|_| "Auto".into())
+                .unwrap_or_else(|_| "OnDemand".into())
                 .as_str(),
         ),
         introspection_call_count: row.get::<_, u32>(27).unwrap_or(0),
@@ -706,7 +706,7 @@ pub fn get_discussion(conn: &Connection, id: &str) -> Result<Option<Discussion>>
                 test_mode_stash_ref: row.get::<_, Option<String>>(24).unwrap_or(None),
                 summary_strategy: parse_summary_strategy(
                     row.get::<_, String>(25)
-                        .unwrap_or_else(|_| "Auto".into())
+                        .unwrap_or_else(|_| "OnDemand".into())
                         .as_str(),
                 ),
                 introspection_call_count: row.get::<_, u32>(26).unwrap_or(0),
@@ -814,7 +814,7 @@ pub fn ensure_mirror_by_shared_id(
         pin_first_message: false,
         summary_cache: None,
         summary_up_to_msg_idx: None,
-        summary_strategy: SummaryStrategy::Auto,
+        summary_strategy: SummaryStrategy::OnDemand,
         introspection_call_count: 0,
         shared_id: Some(shared_id.to_string()),
         shared_with: vec![],
@@ -3609,17 +3609,15 @@ fn format_model_tier(t: &ModelTier) -> &'static str {
 
 fn parse_summary_strategy(s: &str) -> crate::models::SummaryStrategy {
     match s {
-        "OnDemand" => crate::models::SummaryStrategy::OnDemand,
         "Off" => crate::models::SummaryStrategy::Off,
-        // Default + any unknown value (forward-compat for OLD rows or
-        // future variants that haven't shipped yet) → Auto.
-        _ => crate::models::SummaryStrategy::Auto,
+        // `OnDemand`, the pre-0.13.0 `Auto` rows, and any value a future
+        // variant might add all land here: summarise only when asked.
+        _ => crate::models::SummaryStrategy::OnDemand,
     }
 }
 
 fn format_summary_strategy(s: crate::models::SummaryStrategy) -> &'static str {
     match s {
-        crate::models::SummaryStrategy::Auto => "Auto",
         crate::models::SummaryStrategy::OnDemand => "OnDemand",
         crate::models::SummaryStrategy::Off => "Off",
     }
