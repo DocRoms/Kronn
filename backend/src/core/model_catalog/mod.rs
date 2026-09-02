@@ -564,6 +564,32 @@ pub async fn preflight_check(
                 recommended_action: recommended_action_for(reason).to_string(),
             })
         }
+        // KT-545 DoD #3: a model the catalog positively tags with
+        // capabilities that exclude chat (e.g. an image/video-only entry)
+        // is refused here, before any request reaches the provider — never
+        // just silently sent to the wrong endpoint. An entry with no
+        // recorded capabilities is unaffected (see `entry_supports_capability`).
+        Some(entry)
+            if !crate::http_transport::entry_supports_capability(
+                &entry,
+                crate::http_transport::CAPABILITY_CHAT,
+            ) =>
+        {
+            Some(CatalogPreflightFailure {
+                runtime_target_id,
+                agent_type,
+                model_id: Some(model_id),
+                reason: ModelUnavailableReason::Unsupported,
+                detail: format!(
+                    "model `{}` does not support chat (catalog capabilities: {})",
+                    entry.model_id,
+                    entry.capabilities.join(", ")
+                ),
+                last_checked_at: entry.last_checked_at,
+                recommended_action: recommended_action_for(ModelUnavailableReason::Unsupported)
+                    .to_string(),
+            })
+        }
         _ => None,
     }
 }
@@ -678,6 +704,76 @@ mod tests {
             log.last_error_reason,
             Some(ModelUnavailableReason::Unsupported)
         );
+    }
+
+    #[tokio::test]
+    async fn preflight_check_blocks_chat_incompatible_model() {
+        // KT-545 DoD #3: a named HTTP connection whose catalog marks a model
+        // video/image-only must never reach the chat codec.
+        let db = test_db();
+        db.with_conn(|conn| {
+            db::reconcile_live(
+                conn,
+                "http:connection-a",
+                &AgentType::Custom,
+                &[DiscoveredModel {
+                    model_id: "seedance-2.0-mini".into(),
+                    display_name: "Seedance 2.0 mini".into(),
+                    capabilities: vec!["video".into()],
+                    reasoning_modes: vec![],
+                    default_reasoning_mode: None,
+                }],
+            )
+        })
+        .await
+        .unwrap();
+
+        let failure = preflight_check(
+            &db,
+            Some("http:connection-a"),
+            AgentType::Custom,
+            ModelTier::Default,
+            Some("seedance-2.0-mini"),
+            None,
+        )
+        .await
+        .expect("a video-only catalog entry must refuse a chat launch");
+        assert_eq!(failure.reason, ModelUnavailableReason::Unsupported);
+        assert_eq!(failure.recommended_action, "configure_manual_model");
+        assert!(failure.detail.contains("does not support chat"));
+        assert!(failure.detail.contains("video"));
+    }
+
+    #[tokio::test]
+    async fn preflight_check_passes_chat_tagged_model_on_a_connection() {
+        let db = test_db();
+        db.with_conn(|conn| {
+            db::reconcile_live(
+                conn,
+                "http:connection-a",
+                &AgentType::Custom,
+                &[DiscoveredModel {
+                    model_id: "llama-3.3-70b".into(),
+                    display_name: "Llama 3.3 70B".into(),
+                    capabilities: vec!["chat".into()],
+                    reasoning_modes: vec![],
+                    default_reasoning_mode: None,
+                }],
+            )
+        })
+        .await
+        .unwrap();
+
+        let failure = preflight_check(
+            &db,
+            Some("http:connection-a"),
+            AgentType::Custom,
+            ModelTier::Default,
+            Some("llama-3.3-70b"),
+            None,
+        )
+        .await;
+        assert!(failure.is_none());
     }
 
     #[tokio::test]

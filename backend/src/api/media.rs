@@ -525,6 +525,7 @@ fn insert_media_discussion(
     };
     let (message_id, message) = build_prompt_message(prompt, now, None, media_job_id);
     let discussion = Discussion {
+        connection_id: None,
         awaiting_agent: false,
         agent_running: false,
         id: id.clone(),

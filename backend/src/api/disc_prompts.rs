@@ -828,6 +828,7 @@ mod tests {
 
     fn disc_with_messages(messages: Vec<DiscussionMessage>, language: &str) -> Discussion {
         Discussion {
+            connection_id: None,
             awaiting_agent: false,
             agent_running: false,
             id: "d-test".into(),

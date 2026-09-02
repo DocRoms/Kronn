@@ -1246,7 +1246,13 @@ export type CreateAdHocCompareResponse = { run_id: string, };
 
 export type CreateDirectiveRequest = { name: string, description: string, icon: string, category: DirectiveCategory, content: string, conflicts?: Array<string>, };
 
-export type CreateDiscussionRequest = { project_id?: string | null, title: string, agent: AgentType, language?: string, initial_prompt: string,
+export type CreateDiscussionRequest = { project_id?: string | null, title: string, agent: AgentType,
+/**
+ * Named connection backing `agent` (KT-545) — persisted as the
+ * discussion's sticky target so ordinary replies with no explicit
+ * @mention keep dispatching through the same connection.
+ */
+connection_id?: string | null, language?: string, initial_prompt: string,
 /**
  * Explicit recipients of the initial message, including per-agent tier
  * overrides selected from the new-discussion composer.
@@ -1717,7 +1723,15 @@ export type DiscUnlinkRequest = { disc_id: string,
  */
 source_agent?: string | null, source_session_id?: string | null, };
 
-export type Discussion = { id: string, project_id: string | null, title: string, agent: AgentType, language: string, participants: Array<AgentType>, messages: Array<DiscussionMessage>, message_count: number,
+export type Discussion = { id: string, project_id: string | null, title: string, agent: AgentType,
+/**
+ * Named HTTP connection backing `agent` when it is `Custom` (or an
+ * explicit LiteLLM/NVIDIA connection). This is the durable "sticky"
+ * target an ordinary reply with no explicit @mention resolves to —
+ * without it, `canonical_targets`'s implicit discussion-agent routing
+ * has no connection to dispatch through (KT-545 DoD #4).
+ */
+connection_id?: string | null, language: string, participants: Array<AgentType>, messages: Array<DiscussionMessage>, message_count: number,
 /**
  * Subset of `message_count` excluding `MessageRole::System` rows. The
  * streaming layer persists every tool call + every cached-summary
@@ -1845,7 +1859,15 @@ message_targets: { [key in string]: Array<MessageTarget> },
  * message yet. Lets a reconnect render saved text instead of an empty
  * loader while boot recovery/re-dispatch is settling.
  */
-partial_response?: InFlightAgentResponse, id: string, project_id: string | null, title: string, agent: AgentType, language: string, participants: Array<AgentType>, messages: Array<DiscussionMessage>, message_count: number,
+partial_response?: InFlightAgentResponse, id: string, project_id: string | null, title: string, agent: AgentType,
+/**
+ * Named HTTP connection backing `agent` when it is `Custom` (or an
+ * explicit LiteLLM/NVIDIA connection). This is the durable "sticky"
+ * target an ordinary reply with no explicit @mention resolves to —
+ * without it, `canonical_targets`'s implicit discussion-agent routing
+ * has no connection to dispatch through (KT-545 DoD #4).
+ */
+connection_id?: string | null, language: string, participants: Array<AgentType>, messages: Array<DiscussionMessage>, message_count: number,
 /**
  * Subset of `message_count` excluding `MessageRole::System` rows. The
  * streaming layer persists every tool call + every cached-summary
@@ -3762,7 +3784,15 @@ export type OnInvalid = "Continue" | "Fail";
  */
 export type OrchestrationControlState = "running" | "paused" | "awaiting_human" | "completed" | "cancelled" | "failed";
 
-export type OrchestrationRequest = { agents: Array<AgentType>, max_rounds?: number | null, skill_ids?: Array<string>, profile_ids?: Array<string>, directive_ids?: Array<string>, };
+/**
+ * One orchestration/debate participant. `connection_id` disambiguates
+ * between named HTTP connections that share `AgentType::Custom` (KT-545
+ * DoD #4) — without it, two different "Custom" connections in the same
+ * debate would be indistinguishable.
+ */
+export type OrchestrationParticipant = { agent_type: AgentType, connection_id?: string | null, };
+
+export type OrchestrationRequest = { agents: Array<OrchestrationParticipant>, max_rounds?: number | null, skill_ids?: Array<string>, profile_ids?: Array<string>, directive_ids?: Array<string>, };
 
 export type OrchestrationResiliencePolicy = { activity_timeout_secs: number | null, review_timeout_secs: number | null, human_wait_timeout_secs: number | null, cancellation_cleanup_policy: CancellationCleanupPolicy, };
 
@@ -5479,11 +5509,21 @@ export type StartAgentBackgroundJobRequest = {
  */
 quick_exec_id: string, variables?: Record<string, string>, reason: string, dedupe_key: string, task_execution_id?: string | null, };
 
-export type StartBatchCompareImprovementRequest = { agent: AgentType, tier?: ModelTier, };
+export type StartBatchCompareImprovementRequest = { agent: AgentType, tier?: ModelTier,
+/**
+ * See `StartBatchCompareJudgeRequest::connection_id` (KT-545 DoD #4).
+ */
+connection_id?: string | null, };
 
 export type StartBatchCompareImprovementResponse = { discussion_id: string, };
 
-export type StartBatchCompareJudgeRequest = { agent: AgentType, tier?: ModelTier, };
+export type StartBatchCompareJudgeRequest = { agent: AgentType, tier?: ModelTier,
+/**
+ * Named external API connection to dispatch through, when `agent` is
+ * `Custom` or the operator wants a specific LiteLLM/NVIDIA connection
+ * rather than the legacy single-slot config (KT-545 DoD #4).
+ */
+connection_id?: string | null, };
 
 export type StartBatchCompareJudgeResponse = { judge_run_id: string, judge_discussion_id: string, status: string, };
 
@@ -6151,6 +6191,13 @@ tier?: ModelTier | null,
  * Switch the primary agent for this discussion.
  */
 agent?: AgentType | null,
+/**
+ * Change the sticky named connection (KT-545). `Some(Some("id"))` = set,
+ * `Some(None)` = clear, absent = no change — same convention as
+ * `project_id`. Validated against `agent` (post-update if both are
+ * present in the same request).
+ */
+connection_id?: string | null | null,
 /**
  * Change the auto-summary policy. Persists in `discussions.summary_strategy`.
  */

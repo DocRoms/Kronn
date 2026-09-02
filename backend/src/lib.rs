@@ -4,6 +4,7 @@ pub mod api;
 pub mod core;
 pub mod db;
 pub mod delivery;
+pub mod http_transport;
 pub mod models;
 pub mod workflows;
 

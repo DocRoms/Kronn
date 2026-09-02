@@ -7921,4 +7921,36 @@ sleep 3600
 
         assert_eq!(process.reported_token_usage(), Some(8));
     }
+
+    #[test]
+    fn agent_concurrency_limits_preserves_litellm_and_nvidia_when_set() {
+        // KT-545 DoD #1 — LiteLLM/NVIDIA becoming named-connection presets
+        // must not lose their per-agent-type concurrency cap.
+        let mut cfg = crate::core::config::default_config().agents;
+        cfg.lite_llm.concurrency = Some(3);
+        cfg.nvidia.concurrency = Some(7);
+
+        let limits: serde_json::Value =
+            serde_json::from_str(&agent_concurrency_limits(&cfg, 2)).unwrap();
+
+        assert_eq!(limits["LiteLlm"], 3);
+        assert_eq!(limits["Nvidia"], 7);
+        assert_eq!(limits["__local_global"], 2);
+    }
+
+    #[test]
+    fn agent_concurrency_limits_leaves_remote_agents_unlimited_by_default() {
+        // An operator who never set a remote cap must get no entry at all
+        // (unlimited), not a silent default — remote endpoints are someone
+        // else's capacity to manage, not this machine's.
+        let cfg = crate::core::config::default_config().agents;
+        let limits: serde_json::Value =
+            serde_json::from_str(&agent_concurrency_limits(&cfg, 1)).unwrap();
+
+        assert!(limits.get("LiteLlm").is_none());
+        assert!(limits.get("Nvidia").is_none());
+        // Local agents still get their always-present default of 1.
+        assert_eq!(limits["ClaudeCode"], 1);
+        assert_eq!(limits["Ollama"], 1);
+    }
 }

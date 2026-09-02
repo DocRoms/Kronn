@@ -2138,10 +2138,18 @@ export function DiscussionsPage({
   const handleCreateDiscussion = async (config: NewDiscConfig) => {
     let disc;
     try {
+      // KT-545 — the discussion's sticky connection (persisted on the
+      // `discussions` row) comes from whichever initial target is the
+      // primary discussion agent, so ordinary replies with no explicit
+      // @mention keep resolving through the same named connection.
+      const primaryConnectionId = config.initialTargets?.find(
+        target => target.kind === 'discussion_agent' && target.agent_type === config.agent,
+      )?.connection_id ?? null;
       disc = await discussionsApi.create({
         project_id: config.projectId,
         title: config.title,
         agent: config.agent,
+        connection_id: primaryConnectionId,
         language: configLanguage ?? 'fr',
         initial_prompt: config.prompt,
         initial_targets: config.initialTargets ?? config.targetAgents.map(agent => ({
@@ -3271,7 +3279,13 @@ export function DiscussionsPage({
       [discId]: { active: true, round: 0, totalRounds: orchRounds, currentAgent: null, agentStreams: [], systemMessages: [] },
     }));
 
-    await discussionsApi.orchestrate(discId, { agents: orchAgents, max_rounds: orchRounds, skill_ids: orchSkillIds, ...(orchDirectiveIds.length > 0 ? { directive_ids: orchDirectiveIds } : {}) }, {
+    // KT-545: the wire shape carries a per-participant connection_id so two
+    // named HTTP connections sharing AgentType::Custom stay distinguishable.
+    // The debate picker only offers built-in agent types today, so it is
+    // always null here — the backend will resolve each participant's
+    // connection independently once the picker grows connection awareness.
+    const orchParticipants = orchAgents.map(agent_type => ({ agent_type, connection_id: null }));
+    await discussionsApi.orchestrate(discId, { agents: orchParticipants, max_rounds: orchRounds, skill_ids: orchSkillIds, ...(orchDirectiveIds.length > 0 ? { directive_ids: orchDirectiveIds } : {}) }, {
       onSystem: (text) => {
         setOrchState(prev => {
           const s = prev[discId];

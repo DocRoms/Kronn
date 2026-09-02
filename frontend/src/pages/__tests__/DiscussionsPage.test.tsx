@@ -3505,7 +3505,7 @@ describe('DiscussionsPage', () => {
 
     await waitFor(() => {
       expect(vi.mocked(discussionsApi.update))
-        .toHaveBeenCalledWith('d-dropdown', { agent: 'Codex', tier: 'default' });
+        .toHaveBeenCalledWith('d-dropdown', { agent: 'Codex', tier: 'default', connection_id: null });
     });
     expect(vi.mocked(discussionsApi.runAgent)).not.toHaveBeenCalled();
   });

@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::db::compare::{CompareAiVerdictInput, CompareJudgeLabel, NewCompareJudgeRun};
+use crate::http_transport::validate_connection_target;
 use crate::models::*;
 use crate::AppState;
 
@@ -535,6 +536,13 @@ pub async fn start_judge(
     if answers.is_empty() {
         return Json(ApiResponse::err("Aucune réponse exploitable à évaluer"));
     }
+    let connection_id =
+        match validate_connection_target(&state, &request.agent, request.connection_id.as_deref())
+            .await
+        {
+            Ok(connection_id) => connection_id,
+            Err(error) => return Json(ApiResponse::err(error)),
+        };
 
     let now = Utc::now();
     let judge_run_id = Uuid::new_v4().to_string();
@@ -565,6 +573,9 @@ pub async fn start_judge(
         reply_to_message_id: None,
     };
     let discussion = Discussion {
+        // KT-545 — the judge discussion's sticky connection, so a follow-up
+        // turn (if any) keeps dispatching through the same named connection.
+        connection_id: connection_id.clone(),
         awaiting_agent: false,
         agent_running: false,
         id: judge_discussion_id.clone(),
@@ -603,6 +614,7 @@ pub async fn start_judge(
     };
     let insert_id = judge_run_id.clone();
     let insert_run = run_id;
+    let insert_connection = connection_id;
     let insert_result = state
         .db
         .with_conn(move |conn| {
@@ -615,6 +627,7 @@ pub async fn start_judge(
                     message: &message,
                     labels: &labels,
                     rubric_version: COMPARE_RUBRIC_VERSION,
+                    connection_id: insert_connection.as_deref(),
                 },
             )
         })
@@ -690,6 +703,13 @@ pub async fn start_improvement(
         Ok(loaded) => loaded,
         Err(error) => return Json(ApiResponse::err(error.to_string())),
     };
+    let connection_id =
+        match validate_connection_target(&state, &request.agent, request.connection_id.as_deref())
+            .await
+        {
+            Ok(connection_id) => connection_id,
+            Err(error) => return Json(ApiResponse::err(error)),
+        };
 
     let prompt = build_improvement_prompt(
         &run_id,
@@ -742,6 +762,8 @@ pub async fn start_improvement(
         .map(|discussion| discussion.language.clone())
         .unwrap_or_else(|| "fr".into());
     let discussion = Discussion {
+        // KT-545 — see the judge discussion above.
+        connection_id: connection_id.clone(),
         awaiting_agent: false,
         agent_running: false,
         id: discussion_id.clone(),
@@ -779,6 +801,7 @@ pub async fn start_improvement(
     let insert_discussion = discussion.clone();
     let insert_message = message;
     let insert_qp = qp_id;
+    let insert_connection = connection_id;
     if let Err(error) = state
         .db
         .with_conn(move |conn| {
@@ -788,6 +811,7 @@ pub async fn start_improvement(
                 &insert_message,
                 &insert_qp,
                 current_version,
+                insert_connection.as_deref(),
             )
         })
         .await

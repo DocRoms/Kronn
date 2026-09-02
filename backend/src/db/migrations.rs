@@ -623,6 +623,14 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "165_context_file_extracted_from",
         include_str!("sql/165_context_file_extracted_from.sql"),
     ),
+    (
+        // KT-545 was authored against 165, which KT-556 had already taken and
+        // applied. A number that has run somewhere cannot be reused: the
+        // receipt is keyed by name, so the same ALTER would be replayed on a
+        // base that already has the column.
+        "166_discussion_connection_id",
+        include_str!("sql/166_discussion_connection_id.sql"),
+    ),
 ];
 
 /// Apply one migration inside the caller-owned transaction.
@@ -932,6 +940,47 @@ mod tests {
             .unwrap();
         assert!(table_exists);
         assert!(receipt_exists);
+    }
+
+    #[test]
+    fn migration_165_installs_the_discussion_connection_column() {
+        let conn = Connection::open_in_memory().unwrap();
+        let migration_index = MIGRATIONS
+            .iter()
+            .position(|(name, _)| *name == "166_discussion_connection_id")
+            .unwrap();
+        let previous_migration = MIGRATIONS[migration_index - 1].0;
+        run_through(&conn, previous_migration).unwrap();
+        let has_column_before = |conn: &Connection| -> bool {
+            conn.prepare("SELECT connection_id FROM discussions LIMIT 1")
+                .is_ok()
+        };
+        assert!(!has_column_before(&conn));
+
+        run(&conn).unwrap();
+
+        assert!(has_column_before(&conn));
+        let receipt_exists: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM _migrations WHERE name = '166_discussion_connection_id')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(receipt_exists);
+
+        // KT-545 DoD #5 — a second full migration pass (backend restart) must
+        // be a true no-op: no duplicate-column error, no second receipt row,
+        // no error at all.
+        run(&conn).unwrap();
+        let receipt_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM _migrations WHERE name = '166_discussion_connection_id'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(receipt_count, 1, "restart must not duplicate the receipt");
     }
 
     #[test]

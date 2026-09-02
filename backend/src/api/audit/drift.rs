@@ -830,6 +830,7 @@ pub async fn partial_audit(
         reply_to_message_id: None,
             };
             let disc = Discussion {
+                connection_id: None,
                 awaiting_agent: false,
                 agent_running: false,
                 id: disc_id,
@@ -1114,6 +1115,7 @@ mod partial_finalize_tests {
             reply_to_message_id: None,
         };
         let disc = Discussion {
+            connection_id: None,
             awaiting_agent: false,
             agent_running: false,
             id: id.into(),

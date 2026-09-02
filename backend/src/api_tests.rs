@@ -1289,6 +1289,7 @@ mod tests {
             .with_conn(|conn| {
                 let now = chrono::Utc::now();
                 let disc = crate::models::Discussion {
+                    connection_id: None,
                     awaiting_agent: false,
                     agent_running: false,
                     id: "disc-1".into(),
@@ -1461,6 +1462,7 @@ mod tests {
             .with_conn(|conn| {
                 let now = chrono::Utc::now();
                 let disc = crate::models::Discussion {
+                    connection_id: None,
                     awaiting_agent: false,
                     agent_running: false,
                     id: "disc-del".into(),
@@ -2350,6 +2352,7 @@ mod tests {
                 move |conn| {
                     let now = chrono::Utc::now();
                     let disc = crate::models::Discussion {
+                        connection_id: None,
                         awaiting_agent: false,
                         agent_running: false,
                         id: id.clone(),
@@ -3346,6 +3349,7 @@ mod tests {
             .with_conn(|conn| {
                 let now = chrono::Utc::now();
                 let disc = crate::models::Discussion {
+                    connection_id: None,
                     awaiting_agent: false,
                     agent_running: false,
                     id: "disc-pin".into(),
@@ -4998,6 +5002,7 @@ mod tests {
         let state = test_state();
         let discussion_id = "http-agent-planning-disc";
         let disc = crate::models::Discussion {
+            connection_id: None,
             awaiting_agent: false,
             agent_running: false,
             id: discussion_id.into(),

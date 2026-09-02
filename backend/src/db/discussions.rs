@@ -508,7 +508,8 @@ const DISC_SELECT_COLS: &str =
                 EXISTS(SELECT 1 FROM agent_dispatch_jobs j
                         WHERE j.discussion_id = d.id
                           AND j.status = 'Running'
-                          AND j.agent_started_at IS NOT NULL) AS agent_running";
+                          AND j.agent_started_at IS NOT NULL) AS agent_running,
+                d.connection_id";
 
 /// Map one `discussions` row (selected via [`DISC_SELECT_COLS`]) into a
 /// [`Discussion`] without its messages (those are loaded separately).
@@ -520,6 +521,8 @@ fn map_discussion_row(row: &rusqlite::Row) -> rusqlite::Result<Discussion> {
     let directive_ids_str: String = row.get::<_, String>(12).unwrap_or_else(|_| "[]".into());
 
     Ok(Discussion {
+        // KT-545 — Index 36, trailing column appended to DISC_SELECT_COLS.
+        connection_id: row.get::<_, Option<String>>(36).unwrap_or(None),
         id: row.get(0)?,
         project_id: row.get(1)?,
         title: row.get(2)?,
@@ -652,7 +655,7 @@ pub fn get_discussion(conn: &Connection, id: &str) -> Result<Option<Discussion>>
                 test_mode_restore_branch, test_mode_stash_ref,
                 summary_strategy, introspection_call_count,
                 source_agent, source_session_id, imported_at, diverged_at,
-                model, awaiting_agent
+                model, awaiting_agent, connection_id
          FROM discussions WHERE id = ?1"
     )?;
 
@@ -709,6 +712,7 @@ pub fn get_discussion(conn: &Connection, id: &str) -> Result<Option<Discussion>>
                 introspection_call_count: row.get::<_, u32>(26).unwrap_or(0),
                 created_at: parse_dt(row.get::<_, String>(6)?),
                 updated_at: parse_dt(row.get::<_, String>(7)?),
+                connection_id: row.get::<_, Option<String>>(33).unwrap_or(None),
             })
         })
         .ok();
@@ -729,8 +733,8 @@ pub fn get_discussion(conn: &Connection, id: &str) -> Result<Option<Discussion>>
 
 pub fn insert_discussion(conn: &Connection, disc: &Discussion) -> Result<()> {
     conn.execute(
-        "INSERT INTO discussions (id, project_id, title, agent, language, participants_json, created_at, updated_at, archived, pinned, skill_ids_json, profile_ids_json, directive_ids_json, workspace_mode, workspace_path, worktree_branch, model_tier, pin_first_message, shared_id, shared_with_json, workflow_run_id, test_mode_restore_branch, test_mode_stash_ref, model)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)",
+        "INSERT INTO discussions (id, project_id, title, agent, language, participants_json, created_at, updated_at, archived, pinned, skill_ids_json, profile_ids_json, directive_ids_json, workspace_mode, workspace_path, worktree_branch, model_tier, pin_first_message, shared_id, shared_with_json, workflow_run_id, test_mode_restore_branch, test_mode_stash_ref, model, connection_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)",
         params![
             disc.id,
             disc.project_id,
@@ -756,6 +760,7 @@ pub fn insert_discussion(conn: &Connection, disc: &Discussion) -> Result<()> {
             disc.test_mode_restore_branch,
             disc.test_mode_stash_ref,
             disc.model,
+            disc.connection_id,
         ],
     )?;
     Ok(())
@@ -784,6 +789,7 @@ pub fn ensure_mirror_by_shared_id(
     }
     let now = Utc::now();
     let disc = Discussion {
+        connection_id: None,
         awaiting_agent: false,
         agent_running: false,
         id: uuid::Uuid::new_v4().to_string(),
@@ -1070,6 +1076,34 @@ pub fn update_discussion_agent(conn: &Connection, id: &str, agent: &AgentType) -
     )?;
     tx.commit()?;
     Ok(true)
+}
+
+/// Cheap read of just the sticky connection column, for dispatch resolution
+/// paths that don't need the full `Discussion` (KT-545).
+pub fn get_discussion_connection_id(conn: &Connection, id: &str) -> Result<Option<String>> {
+    Ok(conn
+        .query_row(
+            "SELECT connection_id FROM discussions WHERE id = ?1",
+            [id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten())
+}
+
+/// Set or clear the discussion's sticky named-connection target (KT-545).
+/// `None` clears it — used when switching to a non-`Custom`/connectionless
+/// agent so a stale connection id never lingers under a different agent.
+pub fn update_discussion_connection(
+    conn: &Connection,
+    id: &str,
+    connection_id: Option<&str>,
+) -> Result<bool> {
+    let affected = conn.execute(
+        "UPDATE discussions SET connection_id = ?1, updated_at = ?2 WHERE id = ?3",
+        params![connection_id, Utc::now().to_rfc3339(), id],
+    )?;
+    Ok(affected > 0)
 }
 
 fn content_with_agent_handoff(content: &str, from: &str, to: &str) -> String {

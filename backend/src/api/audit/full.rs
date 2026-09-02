@@ -1937,6 +1937,7 @@ pub async fn full_audit(
             "Validation audit AI".to_string()
         };
         let discussion = Discussion {
+            connection_id: None,
             awaiting_agent: false,
             agent_running: false,
             id: discussion_id.clone(),

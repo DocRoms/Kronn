@@ -848,11 +848,8 @@ pub async fn compare_agents(
                                 "External API connection {connection_id} does not match the selected agent"
                             );
                         }
-                        let model = match target.tier {
-                            ModelTier::Economy => connection.economy_model.clone(),
-                            ModelTier::Default => connection.default_model.clone(),
-                            ModelTier::Reasoning => connection.reasoning_model.clone(),
-                        };
+                        let model =
+                            crate::http_transport::connection_tier_model(&connection, target.tier);
                         Ok((target, connection.display_name, model))
                     } else {
                         if target.agent == AgentType::Custom {

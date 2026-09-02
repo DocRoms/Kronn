@@ -594,7 +594,16 @@ pub fn create_batch_run_with_identities(
                 .as_ref()
                 .map(|target| target.tier)
                 .unwrap_or(qp.tier);
+            // KT-545 — Compare targets carry their own connection; classic
+            // batches fall back to the QP's own connection, so the child
+            // discussion's ordinary replies keep resolving through it.
+            let effective_connection_id = item
+                .agent_override
+                .as_ref()
+                .and_then(|target| target.connection_id.clone())
+                .or_else(|| qp.connection_id.clone());
             let discussion = Discussion {
+                connection_id: effective_connection_id,
                 awaiting_agent: false,
                 agent_running: false,
                 id: disc_id,
@@ -835,11 +844,7 @@ pub fn retry_batch_run(
                     "External API connection {connection_id} no longer matches its agent type"
                 );
             }
-            let model = match tier {
-                ModelTier::Economy => connection.economy_model,
-                ModelTier::Default => connection.default_model,
-                ModelTier::Reasoning => connection.reasoning_model,
-            };
+            let model = crate::http_transport::connection_tier_model(&connection, tier);
             Some(model.ok_or_else(|| {
                 anyhow::anyhow!(
                     "External API connection {} has no model configured for {:?}",

@@ -81,6 +81,7 @@ Full spec: [`docs/conventions/agents-md-format-v1.md`](conventions/agents-md-for
 | **Désagentification / `ApiCall` step** (workflow engine calls APIs directly, zero tokens) — incl. AI helper bubble | `docs/operations/deagent-apicall.md` |
 | **Ollama local models** (deterministic offload: model resolution, num_ctx / `/no_think` gotchas, TypedSchema `format`, quality escalation) | `docs/operations/ollama-local-models.md` |
 | **ACP adapters / agent transport toggles** (Codex/Claude via `AcpTransport`, `KRONN_ACP_ADAPTER_*`, permission broker) | `docs/operations/acp-adapters.md`, `docs/design/adr-003-acp-control-plane.md` |
+| **HTTP model-provider transport** (LiteLLM/NVIDIA/Custom connections, chat codec, pre-dispatch capability gate, stable connection target) | `docs/operations/http-transport.md`, `docs/design/adr-004-http-transport.md` |
 | Token cost | `docs/operations/token-economy-0.9.6.md` |
 | Fix known issue | `docs/inconsistencies-tech-debt.md` |
 

@@ -10,8 +10,9 @@ import type {
   ModelTier, ModelTiersConfig,
 } from '../types/generated';
 import { AgentSwitchPicker } from './AgentSwitchPicker';
+import type { AgentSwitchTarget } from './AgentSwitchPicker';
 import type { ExternalApiConnectionView } from '../lib/api';
-import { externalConnectionForDiscussion } from '../lib/externalAgentIdentity';
+import { externalAgentTargets, externalConnectionForDiscussion } from '../lib/externalAgentIdentity';
 
 type RankingMetric = 'weighted' | 'ai' | 'human' | 'duration' | 'tokens';
 type RankingDirection = 'asc' | 'desc';
@@ -110,12 +111,32 @@ export function BatchCompareDetailsPanel({
   const [savingDiscussionId, setSavingDiscussionId] = useState<string | null>(null);
   const defaultJudge = availableAgents.includes('Ollama') ? 'Ollama' : availableAgents[0] ?? 'Ollama';
   const [judgeAgent, setJudgeAgent] = useState<AgentType>(defaultJudge);
+  const [judgeConnectionId, setJudgeConnectionId] = useState<string | null>(null);
   const [judgeTier, setJudgeTier] = useState<ModelTier>('reasoning');
   const [startingJudge, setStartingJudge] = useState(false);
   const defaultImprover = availableAgents.includes('Codex') ? 'Codex' : availableAgents[0] ?? 'Ollama';
   const [improverAgent, setImproverAgent] = useState<AgentType>(defaultImprover);
+  const [improverConnectionId, setImproverConnectionId] = useState<string | null>(null);
   const [improverTier, setImproverTier] = useState<ModelTier>('reasoning');
   const [startingImprovement, setStartingImprovement] = useState(false);
+  // KT-545 DoD #4: judge/improver can target a named HTTP connection, not
+  // just a built-in agent type — same source as New Discussion/Quick Prompt.
+  const connectionTargets = useMemo(
+    () => externalAgentTargets(externalConnections),
+    [externalConnections],
+  );
+  const targetChoices: AgentSwitchTarget[] = useMemo(
+    () => [
+      ...availableAgents.map(agent => ({ agent })),
+      ...connectionTargets.map(target => ({
+        agent: target.agent,
+        connectionId: target.connectionId,
+        label: target.label,
+        modelTiers: target.modelTiers,
+      })),
+    ],
+    [availableAgents, connectionTargets],
+  );
 
   const load = useCallback(async (showLoader = false) => {
     if (showLoader) setLoading(true);
@@ -187,7 +208,10 @@ export function BatchCompareDetailsPanel({
   const launchJudge = async () => {
     setStartingJudge(true);
     try {
-      await workflowsApi.startBatchCompareJudge(runId, { agent: judgeAgent, tier: judgeTier });
+      await workflowsApi.startBatchCompareJudge(
+        runId,
+        { agent: judgeAgent, tier: judgeTier, connection_id: judgeConnectionId },
+      );
       await load();
       setError(null);
     } catch (judgeError) {
@@ -203,6 +227,7 @@ export function BatchCompareDetailsPanel({
       const response = await workflowsApi.startBatchCompareImprovement(runId, {
         agent: improverAgent,
         tier: improverTier,
+        connection_id: improverConnectionId,
       });
       setError(null);
       onOpenDiscussion(response.discussion_id);
@@ -305,9 +330,12 @@ export function BatchCompareDetailsPanel({
               <AgentSwitchPicker
                 currentAgent={judgeAgent}
                 availableAgents={availableAgents}
+                currentConnectionId={judgeConnectionId}
+                availableTargets={targetChoices}
                 currentTier={judgeTier}
-                onSelectionChange={async (agent, tier) => {
-                  setJudgeAgent(agent);
+                onTargetSelectionChange={async (target, tier) => {
+                  setJudgeAgent(target.agent);
+                  setJudgeConnectionId(target.connectionId ?? null);
                   setJudgeTier(tier);
                 }}
                 modelTiers={modelTiers}
@@ -371,9 +399,12 @@ export function BatchCompareDetailsPanel({
               <AgentSwitchPicker
                 currentAgent={improverAgent}
                 availableAgents={availableAgents}
+                currentConnectionId={improverConnectionId}
+                availableTargets={targetChoices}
                 currentTier={improverTier}
-                onSelectionChange={async (agent, tier) => {
-                  setImproverAgent(agent);
+                onTargetSelectionChange={async (target, tier) => {
+                  setImproverAgent(target.agent);
+                  setImproverConnectionId(target.connectionId ?? null);
                   setImproverTier(tier);
                 }}
                 modelTiers={modelTiers}

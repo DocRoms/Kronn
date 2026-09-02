@@ -494,6 +494,38 @@ pub struct NewCompareJudgeRun<'a> {
     pub message: &'a DiscussionMessage,
     pub labels: &'a [CompareJudgeLabel],
     pub rubric_version: &'a str,
+    /// Named HTTP connection the judge dispatches through (KT-545 DoD #4).
+    /// `None` keeps the legacy single-slot LiteLLM/NVIDIA/native-agent route.
+    pub connection_id: Option<&'a str>,
+}
+
+/// Persist the target both places a dispatch actually reads it: the job's
+/// `connection_id` (what `agent_dispatch`/`external_connection` resolution
+/// reads at run time — see `api/discussions/streaming.rs`), and a
+/// `MessageTarget` row (what the UI reads to display which connection ran
+/// the turn). Keeping both in sync is what makes a Compare judge/improve
+/// launch resolve identically to every other launch surface.
+fn persist_connection_target(
+    transaction: &Connection,
+    message_id: &str,
+    agent_type: &crate::models::AgentType,
+    connection_id: Option<&str>,
+    tier: crate::models::ModelTier,
+) -> Result<()> {
+    if connection_id.is_none() {
+        return Ok(());
+    }
+    super::discussions::replace_message_targets(
+        transaction,
+        message_id,
+        &[crate::models::MessageTarget {
+            kind: crate::models::MessageTargetKind::DiscussionAgent,
+            agent_type: agent_type.clone(),
+            connection_id: connection_id.map(String::from),
+            cli_session_id: None,
+            tier: Some(tier),
+        }],
+    )
 }
 
 pub fn insert_improvement_discussion(
@@ -502,11 +534,19 @@ pub fn insert_improvement_discussion(
     message: &DiscussionMessage,
     quick_prompt_id: &str,
     quick_prompt_version: u32,
+    connection_id: Option<&str>,
 ) -> Result<()> {
     let transaction = conn.unchecked_transaction()?;
     super::discussions::insert_discussion(&transaction, discussion)?;
     let trigger_sort_order =
         super::discussions::insert_message(&transaction, &discussion.id, message)?;
+    persist_connection_target(
+        &transaction,
+        &message.id,
+        &discussion.agent,
+        connection_id,
+        discussion.tier,
+    )?;
     super::discussions::set_originating_qp(
         &transaction,
         &discussion.id,
@@ -515,7 +555,7 @@ pub fn insert_improvement_discussion(
     )?;
     let dispatch_id = uuid::Uuid::new_v4().to_string();
     let dedupe_key = format!("compare-improve:{}:{}", quick_prompt_id, discussion.id);
-    super::agent_dispatch::enqueue(
+    super::agent_dispatch::enqueue_with_connection(
         &transaction,
         super::agent_dispatch::NewAgentDispatchJob {
             id: &dispatch_id,
@@ -529,6 +569,7 @@ pub fn insert_improvement_discussion(
             group_id: None,
             group_concurrency_limit: None,
         },
+        connection_id,
     )?;
     super::discussions::set_awaiting_agent(&transaction, &discussion.id, true)?;
     transaction.commit()?;
@@ -550,9 +591,16 @@ pub fn insert_judge_run(conn: &Connection, input: NewCompareJudgeRun<'_>) -> Res
     super::discussions::insert_discussion(&transaction, input.discussion)?;
     let trigger_sort_order =
         super::discussions::insert_message(&transaction, &input.discussion.id, input.message)?;
+    persist_connection_target(
+        &transaction,
+        &input.message.id,
+        &input.discussion.agent,
+        input.connection_id,
+        input.discussion.tier,
+    )?;
     let dispatch_id = uuid::Uuid::new_v4().to_string();
     let dedupe_key = format!("compare-judge:{}:{}", input.run_id, input.id);
-    super::agent_dispatch::enqueue(
+    super::agent_dispatch::enqueue_with_connection(
         &transaction,
         super::agent_dispatch::NewAgentDispatchJob {
             id: &dispatch_id,
@@ -566,6 +614,7 @@ pub fn insert_judge_run(conn: &Connection, input: NewCompareJudgeRun<'_>) -> Res
             group_id: None,
             group_concurrency_limit: None,
         },
+        input.connection_id,
     )?;
     super::discussions::set_awaiting_agent(&transaction, &input.discussion.id, true)?;
     transaction.execute(

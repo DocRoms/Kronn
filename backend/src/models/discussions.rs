@@ -84,6 +84,13 @@ pub struct Discussion {
     pub project_id: Option<String>,
     pub title: String,
     pub agent: AgentType,
+    /// Named HTTP connection backing `agent` when it is `Custom` (or an
+    /// explicit LiteLLM/NVIDIA connection). This is the durable "sticky"
+    /// target an ordinary reply with no explicit @mention resolves to —
+    /// without it, `canonical_targets`'s implicit discussion-agent routing
+    /// has no connection to dispatch through (KT-545 DoD #4).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection_id: Option<String>,
     pub language: String,
     pub participants: Vec<AgentType>,
     pub messages: Vec<DiscussionMessage>,
@@ -395,6 +402,11 @@ pub struct CreateDiscussionRequest {
     pub project_id: Option<String>,
     pub title: String,
     pub agent: AgentType,
+    /// Named connection backing `agent` (KT-545) — persisted as the
+    /// discussion's sticky target so ordinary replies with no explicit
+    /// @mention keep dispatching through the same connection.
+    #[serde(default)]
+    pub connection_id: Option<String>,
     #[serde(default = "super::setup::default_language")]
     pub language: String,
     pub initial_prompt: String,
@@ -451,6 +463,12 @@ pub struct UpdateDiscussionRequest {
     /// Switch the primary agent for this discussion.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<AgentType>,
+    /// Change the sticky named connection (KT-545). `Some(Some("id"))` = set,
+    /// `Some(None)` = clear, absent = no change — same convention as
+    /// `project_id`. Validated against `agent` (post-update if both are
+    /// present in the same request).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection_id: Option<Option<String>>,
     /// Change the auto-summary policy. Persists in `discussions.summary_strategy`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary_strategy: Option<SummaryStrategy>,
@@ -690,10 +708,22 @@ pub struct ShareDiscussionRequest {
     pub contact_ids: Vec<String>,
 }
 
+/// One orchestration/debate participant. `connection_id` disambiguates
+/// between named HTTP connections that share `AgentType::Custom` (KT-545
+/// DoD #4) — without it, two different "Custom" connections in the same
+/// debate would be indistinguishable.
+#[derive(Debug, Clone, Deserialize, TS)]
+#[ts(export)]
+pub struct OrchestrationParticipant {
+    pub agent_type: AgentType,
+    #[serde(default)]
+    pub connection_id: Option<String>,
+}
+
 #[derive(Debug, Deserialize, TS)]
 #[ts(export)]
 pub struct OrchestrationRequest {
-    pub agents: Vec<AgentType>,
+    pub agents: Vec<OrchestrationParticipant>,
     pub max_rounds: Option<u32>,
     #[serde(default)]
     pub skill_ids: Vec<String>,

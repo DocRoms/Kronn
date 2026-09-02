@@ -5108,7 +5108,6 @@ async fn start_ollama_http(
     http_request_timeout: Option<std::time::Duration>,
     parent_cancel: Option<&tokio_util::sync::CancellationToken>,
 ) -> Result<AgentProcess, String> {
-    use crate::agents::chat_codec::{ChatCodec, OllamaCodec, OpenAiCodec};
     let identity_context = http_agent_identity_context(agent_type, model);
     let system_context = if system_context.trim().is_empty() {
         identity_context
@@ -5116,12 +5115,9 @@ async fn start_ollama_http(
         format!("{identity_context}\n\n{system_context}")
     };
     // Endpoint, request body and line decoding are the only per-backend parts;
-    // everything below this block is shared transport.
-    let codec: Box<dyn ChatCodec> = if is_openai_wire_agent(agent_type) {
-        Box::new(OpenAiCodec)
-    } else {
-        Box::new(OllamaCodec)
-    };
+    // everything below this block is shared transport. Codec choice is the
+    // explicit, single decision point KT-545 requires (http_transport.rs).
+    let codec = crate::http_transport::resolve_chat_codec(agent_type);
     // A throttled local model must say so where the run is read, not only in a
     // log file nobody has open. Collected here so the Ollama arm can set it.
     let mut ctx_notice: Option<String> = None;

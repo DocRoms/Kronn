@@ -66,11 +66,18 @@ struct NativeDispatchTarget {
     connection_id: Option<String>,
 }
 
-fn native_dispatch_agents_for_targets(targets: &[MessageTarget]) -> Vec<NativeDispatchTarget> {
+fn native_dispatch_agents_for_targets(
+    targets: &[MessageTarget],
+    // KT-545 — the discussion's sticky connection, used only when no
+    // explicit target was persisted for this message (a plain reply with no
+    // @mention). Without it, a Custom-connection discussion's ordinary
+    // replies dispatch with no connection and fail.
+    fallback_connection_id: Option<&str>,
+) -> Vec<NativeDispatchTarget> {
     if targets.is_empty() {
         return vec![NativeDispatchTarget {
             agent_override: None,
-            connection_id: None,
+            connection_id: fallback_connection_id.map(str::to_string),
         }];
     }
 
@@ -104,7 +111,10 @@ fn enqueue_dispatches_for_trigger(
     run_key: &str,
 ) -> anyhow::Result<Vec<crate::db::agent_dispatch::AgentDispatchJob>> {
     let targets = crate::db::discussions::list_message_targets(conn, trigger_message_id)?;
-    let dispatch_agents = native_dispatch_agents_for_targets(&targets);
+    let fallback_connection_id =
+        crate::db::discussions::get_discussion_connection_id(conn, discussion_id)?;
+    let dispatch_agents =
+        native_dispatch_agents_for_targets(&targets, fallback_connection_id.as_deref());
     let mut jobs = Vec::with_capacity(dispatch_agents.len());
     for (position, dispatch_target) in dispatch_agents.iter().enumerate() {
         let job_id = Uuid::new_v4().to_string();
@@ -222,6 +232,11 @@ pub(crate) async fn canonical_targets(
         let canonical = match target.kind {
             MessageTargetKind::DiscussionAgent => {
                 let mut canonical = MessageTarget::discussion_agent(discussion.agent.clone());
+                // KT-545 — the implicit "reply as the discussion's own agent"
+                // target must carry the discussion's sticky connection, or a
+                // Custom-connection discussion loses its target on every
+                // ordinary reply (no explicit @mention resends it).
+                canonical.connection_id = discussion.connection_id.clone();
                 canonical.tier = target.tier;
                 canonical
             }
@@ -1342,7 +1357,7 @@ mod tests {
         ];
 
         assert_eq!(
-            native_dispatch_agents_for_targets(&targets),
+            native_dispatch_agents_for_targets(&targets, None),
             vec![
                 NativeDispatchTarget {
                     agent_override: None,
@@ -1365,14 +1380,14 @@ mod tests {
         ];
 
         assert_eq!(
-            native_dispatch_agents_for_targets(&targets),
+            native_dispatch_agents_for_targets(&targets, None),
             vec![NativeDispatchTarget {
                 agent_override: Some(AgentType::Ollama),
                 connection_id: None,
             }]
         );
         assert_eq!(
-            native_dispatch_agents_for_targets(&[]),
+            native_dispatch_agents_for_targets(&[], None),
             vec![NativeDispatchTarget {
                 agent_override: None,
                 connection_id: None,
@@ -1388,7 +1403,7 @@ mod tests {
         ];
 
         assert_eq!(
-            native_dispatch_agents_for_targets(&targets),
+            native_dispatch_agents_for_targets(&targets, None),
             vec![
                 NativeDispatchTarget {
                     agent_override: Some(AgentType::Custom),
@@ -1399,6 +1414,34 @@ mod tests {
                     connection_id: Some("groq".into()),
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn empty_targets_fall_back_to_the_discussion_sticky_connection() {
+        // KT-545 — an ordinary reply with no explicit @mention persists no
+        // MessageTarget rows; without the fallback, a Custom-connection
+        // discussion's plain replies would dispatch with no connection.
+        assert_eq!(
+            native_dispatch_agents_for_targets(&[], Some("groq")),
+            vec![NativeDispatchTarget {
+                agent_override: None,
+                connection_id: Some("groq".into()),
+            }]
+        );
+    }
+
+    #[test]
+    fn explicit_targets_ignore_the_discussion_fallback_connection() {
+        // An explicit target's own connection (or lack of one) always wins —
+        // the fallback only fires when nothing was resolved for the message.
+        let targets = vec![MessageTarget::agent(AgentType::ClaudeCode)];
+        assert_eq!(
+            native_dispatch_agents_for_targets(&targets, Some("groq")),
+            vec![NativeDispatchTarget {
+                agent_override: Some(AgentType::ClaudeCode),
+                connection_id: None,
+            }]
         );
     }
 
@@ -1751,6 +1794,47 @@ mod tests {
                 MessageTarget::discussion_agent(AgentType::LiteLlm).with_tier(ModelTier::Reasoning),
                 MessageTarget::agent(AgentType::Codex).with_tier(ModelTier::Default),
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn canonical_discussion_agent_target_carries_the_sticky_connection() {
+        // KT-545 — the implicit "reply as the discussion's own agent" target
+        // must resolve the discussion's sticky connection, or a
+        // Custom-connection discussion loses it on every target_all/no-mention
+        // round.
+        let disc = "d-sticky-connection";
+        let state = make_state_with_disc(disc).await;
+        state
+            .db
+            .with_conn(move |conn| {
+                conn.execute(
+                    "INSERT INTO external_api_connections
+                     (id, display_name, mention_alias, endpoint, credential_slug, origin_preset)
+                     VALUES ('conn-groq', 'Groq', 'groq', 'https://api.groq.com', 'conn-groq', 'other')",
+                    [],
+                )?;
+                crate::db::discussions::update_discussion_agent(conn, disc, &AgentType::Custom)?;
+                crate::db::discussions::update_discussion_connection(
+                    conn,
+                    disc,
+                    Some("conn-groq"),
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let all = canonical_targets(&state, disc, Vec::new(), true)
+            .await
+            .unwrap();
+        let discussion_agent_target = all
+            .iter()
+            .find(|target| target.kind == MessageTargetKind::DiscussionAgent)
+            .expect("target_all must include the discussion-agent target");
+        assert_eq!(
+            discussion_agent_target.connection_id.as_deref(),
+            Some("conn-groq")
         );
     }
 

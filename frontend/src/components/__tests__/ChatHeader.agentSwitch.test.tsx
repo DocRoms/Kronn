@@ -204,7 +204,7 @@ describe('ChatHeader — shared agent switcher', () => {
       expect(discussionsApi.update).toHaveBeenCalledTimes(1);
       expect(discussionsApi.update).toHaveBeenCalledWith(
         'disc-agent-switch',
-        { agent: 'Codex', tier: 'reasoning' },
+        { agent: 'Codex', tier: 'reasoning', connection_id: null },
       );
       expect(onAgentSwitch).toHaveBeenCalledTimes(1);
       expect(onAgentSwitch).toHaveBeenCalledWith('Codex');
@@ -224,7 +224,7 @@ describe('ChatHeader — shared agent switcher', () => {
     await waitFor(() => {
       expect(discussionsApi.update).toHaveBeenCalledWith(
         'disc-agent-switch',
-        { agent: 'ClaudeCode', tier: 'economy' },
+        { agent: 'ClaudeCode', tier: 'economy', connection_id: null },
       );
       expect(onAgentSwitch).toHaveBeenCalledWith('ClaudeCode');
     });

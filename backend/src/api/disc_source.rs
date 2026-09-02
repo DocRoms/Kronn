@@ -111,6 +111,7 @@ pub async fn disc_create(
     let agent = req.agent.clone();
     let no_agent = req.no_agent;
     let disc = Discussion {
+        connection_id: None,
         awaiting_agent: false,
         agent_running: false,
         id: disc_id.clone(),
