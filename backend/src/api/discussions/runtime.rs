@@ -754,8 +754,81 @@ async fn finish_dispatch_turn(
         return;
     }
 
+    // A saturated provider is the one failure worth waiting out. Same shape as
+    // the silent-crash retry above, with a longer, growing delay: retrying a
+    // 529 immediately just meets the same saturation. The last attempt falls
+    // through without deleting the reply, so the room keeps the provider's own
+    // message instead of going quiet (issue 202).
+    if !execution_succeeded
+        && super::is_transient_provider_overload(&response)
+        && job.turn_attempts < 2
+    {
+        let delay_seconds = 15 * (i64::from(job.turn_attempts) + 1);
+        tracing::warn!(
+            "Discussion {} hit a transient provider overload — retrying in {}s",
+            job.discussion_id,
+            delay_seconds
+        );
+        let retry_id = job.id.clone();
+        let retry_discussion_id = job.discussion_id.clone();
+        let retried = state
+            .db
+            .with_conn(move |conn| {
+                let transaction = conn.unchecked_transaction()?;
+                let queued = crate::db::agent_dispatch::retry_after(
+                    &transaction,
+                    &retry_id,
+                    delay_seconds,
+                    "transient_provider_overload",
+                )?;
+                anyhow::ensure!(queued, "overloaded dispatch is no longer running");
+                crate::db::discussions::delete_dispatch_reply_messages(
+                    &transaction,
+                    &retry_discussion_id,
+                    &retry_id,
+                )?;
+                crate::db::discussions::set_awaiting_agent(
+                    &transaction,
+                    &retry_discussion_id,
+                    true,
+                )?;
+                transaction.commit()?;
+                Ok(())
+            })
+            .await;
+        if let Err(error) = retried {
+            fail_dispatch_job(
+                state,
+                &job,
+                &format!("provider-overload retry failed: {error}"),
+            )
+            .await;
+        } else {
+            state.agent_dispatch_notify.notify_one();
+        }
+        return;
+    }
+
     if !execution_succeeded {
-        fail_dispatch_job(state, &job, &unsuccessful_completion_diagnostic(&response)).await;
+        let dispatch_id = job.id.clone();
+        let is_task_worker = state
+            .db
+            .with_conn(move |conn| {
+                Ok(
+                    crate::db::orchestration::get_execution_for_dispatch(conn, &dispatch_id)?
+                        .is_some(),
+                )
+            })
+            .await
+            // On a read failure, prefer the wording that states the real cause
+            // over one that sends the reader to a sub-discussion we can't confirm.
+            .unwrap_or(false);
+        fail_dispatch_job(
+            state,
+            &job,
+            &unsuccessful_completion_diagnostic(&response, is_task_worker),
+        )
+        .await;
         return;
     }
 
@@ -864,18 +937,39 @@ async fn finish_dispatch_turn(
     state.agent_dispatch_notify.notify_waiters();
 }
 
-fn unsuccessful_completion_diagnostic(response: &str) -> String {
+/// Durable `last_error` for a turn that ended unsuccessfully.
+///
+/// Two callers, two vocabularies. A task worker is expected to submit a
+/// delivery manifest, so naming the manifest and `task_exec_reassign` is the
+/// actionable next step. An ordinary room has neither, and the worker wording
+/// sent readers of issue 202 looking for a sub-discussion that never existed —
+/// while the provider's own reason (an `HTTP 529`, say) was dropped from the
+/// one field an operator inspects after the fact. Keep the reason.
+fn unsuccessful_completion_diagnostic(response: &str, is_task_worker: bool) -> String {
     let failure_kind = if response.trim().is_empty() {
         "no_visible_output"
     } else {
         "worker_reported_failure"
     };
-    format!(
-        "task-worker startup/completion failed: phase=worker_completion; \
-         failure_kind={failure_kind}; exit=unsuccessful. The worker did not submit a durable \
-         delivery manifest. Inspect the worker sub-discussion, then use `task_exec_reassign` \
-         to preserve this execution and its worktree while selecting another available worker."
-    )
+    if is_task_worker {
+        return format!(
+            "task-worker startup/completion failed: phase=worker_completion; \
+             failure_kind={failure_kind}; exit=unsuccessful. The worker did not submit a durable \
+             delivery manifest. Inspect the worker sub-discussion, then use `task_exec_reassign` \
+             to preserve this execution and its worktree while selecting another available worker."
+        );
+    }
+    // The reply is already visible in the room, so carrying it here exposes
+    // nothing new — it only puts the cause where an operator looks for it.
+    let cause = response.trim().chars().take(800).collect::<String>();
+    if cause.is_empty() {
+        format!(
+            "agent turn failed: failure_kind={failure_kind}; exit=unsuccessful. \
+             The agent produced no visible output."
+        )
+    } else {
+        format!("agent turn failed: failure_kind={failure_kind}; exit=unsuccessful. {cause}")
+    }
 }
 
 async fn fail_dispatch_job(
@@ -1105,10 +1199,67 @@ pub(crate) fn render_chain_qp_prompt(
 mod chain_render_tests {
     use super::{
         dispatch_target_tier, persist_dispatch_settlement, render_chain_qp_prompt,
-        select_quota_alternative, DispatchHandoffGuard,
+        select_quota_alternative, unsuccessful_completion_diagnostic, DispatchHandoffGuard,
     };
     use std::sync::Arc;
     use tokio::sync::RwLock;
+
+    #[test]
+    fn an_ordinary_room_failure_states_the_cause_not_a_worker_manifest() {
+        let diagnostic = unsuccessful_completion_diagnostic(
+            "[Agent provider error]\n\nAPI Error: 529 Overloaded\n\n(HTTP 529)",
+            false,
+        );
+
+        // The reason must survive into `last_error`: it is where an operator
+        // looks once the turn is over.
+        assert!(
+            diagnostic.contains("529 Overloaded"),
+            "the provider reason must be preserved, got: {diagnostic}"
+        );
+        // And none of the task-worker vocabulary, which sent readers of issue
+        // 202 looking for a sub-discussion that never existed.
+        for absent in [
+            "task-worker",
+            "delivery manifest",
+            "task_exec_reassign",
+            "worker sub-discussion",
+        ] {
+            assert!(
+                !diagnostic.contains(absent),
+                "an ordinary room must not mention {absent:?}, got: {diagnostic}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_task_worker_failure_still_names_the_manifest_and_the_reassign_tool() {
+        let diagnostic = unsuccessful_completion_diagnostic("worker gave up", true);
+
+        assert!(diagnostic.contains("task-worker"));
+        assert!(diagnostic.contains("delivery manifest"));
+        assert!(diagnostic.contains("task_exec_reassign"));
+        assert!(diagnostic.contains("failure_kind=worker_reported_failure"));
+    }
+
+    #[test]
+    fn a_silent_ordinary_turn_says_so_without_inventing_a_cause() {
+        let diagnostic = unsuccessful_completion_diagnostic("   \n  ", false);
+
+        assert!(diagnostic.contains("failure_kind=no_visible_output"));
+        assert!(diagnostic.contains("no visible output"));
+        assert!(!diagnostic.contains("task-worker"));
+    }
+
+    #[test]
+    fn a_long_cause_is_truncated_on_a_char_boundary() {
+        // Accented text: a byte-index cut would panic mid-character.
+        let long_cause = "é".repeat(2_000);
+        let diagnostic = unsuccessful_completion_diagnostic(&long_cause, false);
+
+        let carried = diagnostic.matches('é').count();
+        assert_eq!(carried, 800, "exactly the first 800 chars are carried");
+    }
 
     #[test]
     fn dispatch_uses_the_tier_of_its_exact_native_target() {

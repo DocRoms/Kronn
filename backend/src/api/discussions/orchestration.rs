@@ -1515,6 +1515,39 @@ fn provider_status_line(agent_type: &crate::models::AgentType) -> String {
 /// `agent_type` is used to point error messages at the right provider
 /// status page (Anthropic / OpenAI / Google / GitHub / …) — see
 /// [`provider_status_line`].
+/// A provider saturation that will likely clear on its own, as opposed to a
+/// plan or credit limit that will not.
+///
+/// Issue 202: two turns ended on `API Error: 529 Overloaded` and simply stopped.
+/// Nothing retried, nothing surfaced, and the user waited 18 minutes once and
+/// 1 h 27 the other time before relaunching by hand. A 529 is the one failure
+/// where waiting a little and trying again is the correct answer.
+///
+/// A hard quota must never reach this: callers test
+/// [`is_hard_quota_exhausted`] first, and the shared-capacity wordings it
+/// deliberately excludes are transient, so they belong here.
+pub(crate) fn is_transient_provider_overload(output: &str) -> bool {
+    let lower = output.to_lowercase();
+    if is_hard_quota_exhausted(output) {
+        return false;
+    }
+    // `529` is never matched on its own: the digits turn up in ids, token
+    // counts and durations, and a false positive spends a real API call.
+    [
+        "overloaded",
+        "http 529",
+        "error: 529",
+        "status 529",
+        "529 overloaded",
+        "resourceexhausted",
+        "worker local total request limit",
+        "request limit reached",
+        "service unavailable",
+    ]
+    .iter()
+    .any(|pattern| lower.contains(pattern))
+}
+
 pub(crate) fn is_hard_quota_exhausted(output: &str) -> bool {
     let lower = output.to_lowercase();
     // NVIDIA's hosted NIM uses ResourceExhausted for shared worker saturation;
@@ -1874,8 +1907,47 @@ mod orchestrate_validation_tests {
 
 #[cfg(test)]
 mod error_hint_tests {
-    use super::{detect_agent_error_hint, is_hard_quota_exhausted};
+    use super::{detect_agent_error_hint, is_hard_quota_exhausted, is_transient_provider_overload};
     use crate::models::AgentType;
+
+    #[test]
+    fn a_529_from_claude_code_is_worth_retrying() {
+        // The exact wording seen in the transcripts of issue 202.
+        assert!(is_transient_provider_overload("API Error: 529 Overloaded"));
+        // And the shape Kronn itself persists.
+        assert!(is_transient_provider_overload(
+            "[Agent provider error]\n\nOverloaded\n\n(HTTP 529; terminal_reason=api_error)"
+        ));
+    }
+
+    #[test]
+    fn a_plan_limit_is_never_retried_as_an_overload() {
+        // Retrying a spend limit only burns another call for the same refusal.
+        let out = "You've hit your org's monthly spend limit · run /usage-credits";
+        assert!(is_hard_quota_exhausted(out));
+        assert!(!is_transient_provider_overload(out));
+    }
+
+    #[test]
+    fn shared_capacity_saturation_counts_as_transient() {
+        // The wordings is_hard_quota_exhausted deliberately excludes.
+        assert!(is_transient_provider_overload("ResourceExhausted"));
+        assert!(is_transient_provider_overload(
+            "worker local total request limit"
+        ));
+    }
+
+    #[test]
+    fn bare_digits_never_trigger_a_retry() {
+        // 529 turns up in ids, token counts and durations; matching it alone
+        // would spend an API call on a run that simply failed.
+        assert!(!is_transient_provider_overload(
+            "run 3f529abc finished with 1529 tokens in 529 ms"
+        ));
+        assert!(!is_transient_provider_overload(
+            "[Agent exited with error] no such file"
+        ));
+    }
 
     #[test]
     fn fable_monthly_spend_429_is_hard_quota_not_transient_rate_limit() {
