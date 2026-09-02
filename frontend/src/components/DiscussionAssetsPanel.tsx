@@ -32,6 +32,7 @@ export function DiscussionAssetsPanel({
   onMediaLaunched,
   openAssetRequest,
   onAssetDeleted,
+  onAssetExtracted,
 }: {
   discussionId: string;
   files: ContextFile[];
@@ -50,6 +51,10 @@ export function DiscussionAssetsPanel({
   /// Fired once the server confirmed a deletion, so the discussion drops the
   /// file from its own inventory. Absent, the panel offers no deletion.
   onAssetDeleted?: (fileId: string) => void;
+  /// Fired once a frame extracted from a clip was accepted by the server, so
+  /// the new image joins the inventory and can be picked as a starting point
+  /// right away. Absent, the panel offers no extraction.
+  onAssetExtracted?: (file: ContextFile) => void;
 }) {
   const [query, setQuery] = useState('');
   const [filter, setFilter] = useState<AssetFilter>('all');
@@ -221,6 +226,7 @@ export function DiscussionAssetsPanel({
               carouselScope={carouselScope}
               openRequest={openAssetRequest}
               onDeleted={onAssetDeleted}
+              onExtracted={onAssetExtracted}
             />
             {shownCount < filteredFiles.length && (
               <button

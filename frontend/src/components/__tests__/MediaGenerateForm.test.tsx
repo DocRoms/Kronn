@@ -45,6 +45,8 @@ describe('MediaGenerateForm', () => {
     // fallback lists. Tests that care about the catalogue override this.
     mediaApi.capabilities.mockResolvedValue({ model: 'x', capabilities: null });
     contextFileBlob.mockResolvedValue(new Blob(['x']));
+    // jsdom decodes nothing; the width is what the test says the picture has.
+    globalThis.createImageBitmap = vi.fn(async () => ({ width: 512, height: 512, close: vi.fn() })) as never;
     URL.createObjectURL = vi.fn(() => 'blob:thumb');
     URL.revokeObjectURL = vi.fn();
     mediaApi.generate.mockResolvedValue({
@@ -306,6 +308,57 @@ describe('MediaGenerateForm', () => {
     // The browser sends an id. A path would tell it where the file lives and
     // let it point a generation outside this room.
     expect(JSON.stringify(body)).not.toContain('/tmp/');
+  });
+
+  it('refuses a starting picture the provider is too narrow to accept', async () => {
+    // Measured on 02/09: an 8x8 source came back `400 InvalidParameter —
+    // expected the width to be at least 300px`. The refusal is unbilled, but
+    // it costs a launch that could only fail, so it is caught here instead.
+    globalThis.createImageBitmap = vi.fn(async () => ({ width: 128, height: 128, close: vi.fn() })) as never;
+    mediaApi.capabilities.mockResolvedValue(videoCapabilities(['first_frame', 'last_frame']));
+    render(
+      <MediaGenerateForm
+        discussionId="d-1"
+        connections={[connection()]}
+        images={[image('asset-1', 'tiny.png')] as never}
+        t={t}
+      />,
+    );
+    fireEvent.click(screen.getByTestId('media-slot-conn-1:video'));
+    await waitFor(() => expect(screen.getByTestId('media-reference-picker')).toBeInTheDocument());
+    fireEvent.click(screen.getByTestId('media-reference-pick-asset-1'));
+
+    expect(await screen.findByTestId('media-reference-too-narrow'))
+      .toHaveTextContent('disc.media.referenceTooNarrow:128,300');
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'un renard' } });
+    const generate = screen.getByRole('button', { name: /disc\.media\.generate/ });
+    expect(generate).toBeDisabled();
+    fireEvent.click(generate);
+    expect(mediaApi.generate).not.toHaveBeenCalled();
+  });
+
+  it('launches on a picture that cannot be measured rather than blocking it', async () => {
+    // An unmeasurable picture is not a small one: refusing it would hide a
+    // source the provider would have accepted.
+    globalThis.createImageBitmap = vi.fn(async () => { throw new Error('no decoder'); }) as never;
+    mediaApi.capabilities.mockResolvedValue(videoCapabilities(['first_frame']));
+    render(
+      <MediaGenerateForm
+        discussionId="d-1"
+        connections={[connection()]}
+        images={[image('asset-1', 'origami.png')] as never}
+        t={t}
+      />,
+    );
+    fireEvent.click(screen.getByTestId('media-slot-conn-1:video'));
+    await waitFor(() => expect(screen.getByTestId('media-reference-picker')).toBeInTheDocument());
+    fireEvent.click(screen.getByTestId('media-reference-pick-asset-1'));
+    await screen.findByTestId('media-reference-mode-first_frame');
+    expect(screen.queryByTestId('media-reference-too-narrow')).toBeNull();
+
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'un renard' } });
+    fireEvent.click(screen.getByRole('button', { name: /disc\.media\.generate/ }));
+    await waitFor(() => expect(mediaApi.generate).toHaveBeenCalledTimes(1));
   });
 
   it('offers no source image when the model takes none', async () => {

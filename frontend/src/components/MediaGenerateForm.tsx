@@ -30,6 +30,12 @@ const FALLBACK_RESOLUTIONS = ['480p', '720p', '1080p'];
 /// `4:3` means nothing to most people until they see the shape.
 const FALLBACK_RATIOS = ['16:9', '4:3', '1:1', '9:16'];
 
+/// Measured against OpenRouter on 02/09: a 8x8 source came back
+/// `400 InvalidParameter — expected the width to be at least 300px`. The
+/// refusal is synchronous and unbilled, but it costs the operator a launch
+/// that could only fail, so the picture is measured here instead.
+const MIN_REFERENCE_WIDTH_PX = 300;
+
 /// Known shapes, so a ratio the provider names can still be drawn. An unknown
 /// one is listed without a preview rather than dropped: the provider accepts
 /// it, so the operator must be able to pick it.
@@ -96,6 +102,10 @@ export function MediaGenerateForm({
   // lives, and the backend re-checks that it belongs to this discussion.
   const [reference, setReference] = useState<{ assetId: string; mode: MediaFramePosition } | null>(null);
   const [referenceUrl, setReferenceUrl] = useState<string | null>(null);
+  /// Width of the chosen picture, or null while unknown. A picture that could
+  /// not be measured never blocks: refusing on an unknown would hide a source
+  /// the provider would have accepted.
+  const [referenceWidth, setReferenceWidth] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [launched, setLaunched] = useState<{ model: string } | null>(null);
@@ -166,20 +176,31 @@ export function MediaGenerateForm({
   useEffect(() => {
     if (!reference) {
       setReferenceUrl(null);
+      setReferenceWidth(null);
       return;
     }
     let objectUrl: string | null = null;
     let cancelled = false;
     discussionsApi.contextFileBlob(discussionId, reference.assetId)
-      .then((blob: Blob) => {
+      .then(async (blob: Blob) => {
         if (cancelled) return;
         objectUrl = URL.createObjectURL(blob);
         setReferenceUrl(objectUrl);
+        // Measured from the bytes already fetched for the thumbnail, so the
+        // warning appears with the picture rather than after a failed launch.
+        try {
+          const bitmap = await createImageBitmap(blob);
+          if (!cancelled) setReferenceWidth(bitmap.width);
+          bitmap.close();
+        } catch {
+          if (!cancelled) setReferenceWidth(null);
+        }
       })
-      .catch(() => { if (!cancelled) setReferenceUrl(null); });
+      .catch(() => { if (!cancelled) { setReferenceUrl(null); setReferenceWidth(null); } });
     return () => {
       cancelled = true;
       setReferenceUrl(null);
+      setReferenceWidth(null);
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
   }, [discussionId, reference]);
@@ -223,8 +244,10 @@ export function MediaGenerateForm({
     };
   }, [selected, durationSecs]);
 
+  const referenceTooNarrow = referenceWidth !== null && referenceWidth < MIN_REFERENCE_WIDTH_PX;
+
   const submit = useCallback(async () => {
-    if (!selected || !prompt.trim() || busy) return;
+    if (!selected || !prompt.trim() || busy || referenceTooNarrow) return;
     const signature = JSON.stringify({
       connectionId: selected.connectionId,
       modality: selected.modality,
@@ -269,7 +292,7 @@ export function MediaGenerateForm({
     } finally {
       setBusy(false);
     }
-  }, [aspectRatio, busy, discussionId, durationSecs, generateAudio, onLaunched, prompt, reference, resolution, selected]);
+  }, [aspectRatio, busy, discussionId, durationSecs, generateAudio, onLaunched, prompt, reference, referenceTooNarrow, resolution, selected]);
 
   if (slots.length === 0) {
     return (
@@ -390,6 +413,11 @@ export function MediaGenerateForm({
               >
                 <X size={13} aria-hidden="true" />
               </button>
+              {referenceTooNarrow && (
+                <p className="media-generate-reference-warning" role="alert" data-testid="media-reference-too-narrow">
+                  {t('disc.media.referenceTooNarrow', referenceWidth ?? 0, MIN_REFERENCE_WIDTH_PX)}
+                </p>
+              )}
             </div>
           ) : (
             <div className="media-generate-reference-choices">
@@ -449,7 +477,7 @@ export function MediaGenerateForm({
         </p>
       )}
 
-      <button type="submit" className="btn btn-sm" disabled={busy || !prompt.trim()}>
+      <button type="submit" className="btn btn-sm" disabled={busy || !prompt.trim() || referenceTooNarrow}>
         {busy
           ? <Loader2 size={13} aria-hidden="true" className="spin" />
           : <Sparkles size={13} aria-hidden="true" />}

@@ -6,11 +6,12 @@
 // isolation from the heavy MessageBubble.
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { ChevronLeft, ChevronRight, Download, ExternalLink, FileText, Image as ImageIcon, Loader2, MessageSquare, Sparkles, Trash2, X } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Download, ExternalLink, FileText, Image as ImageIcon, Loader2, MessageSquare, Scissors, Sparkles, Trash2, X } from 'lucide-react';
 import type { ContextFile } from '../types/generated';
 import { discussions as discussionsApi } from '../lib/api';
 import { triggerDownload } from '../lib/downloadBlob';
 import { isImageFile, isVideoFile, isViewableMedia } from '../lib/mediaKind';
+import { extractLastFrame, LastFrameError, lastFrameFilename } from '../lib/lastFrame';
 import { MediaPlayer } from './MediaPlayer';
 
 type T = (key: string, ...args: (string | number)[]) => string;
@@ -221,6 +222,7 @@ export function MessageAttachments({
   carouselScope,
   openRequest,
   onDeleted,
+  onExtracted,
 }: {
   files: ContextFile[];
   discussionId: string;
@@ -229,6 +231,9 @@ export function MessageAttachments({
   /** Enables deletion. Absent, no delete control is shown at all: a surface
    *  that cannot refresh its own list must not offer to shorten it. */
   onDeleted?: (fileId: string) => void;
+  /** Enables "keep the last frame" on a clip. Same rule as `onDeleted`: a
+   *  surface that cannot show the new file must not offer to create it. */
+  onExtracted?: (file: ContextFile) => void;
   onNavigateMessage?: (messageId: string) => void;
   /// Full sequence to browse once one thumbnail is opened. The grid still
   /// shows `files`; this is what the arrows walk through, so opening an image
@@ -259,6 +264,8 @@ export function MessageAttachments({
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [extracting, setExtracting] = useState(false);
+  const [extractError, setExtractError] = useState<string | null>(null);
   const objectUrlsRef = useRef<Map<string, string>>(new Map());
   const inFlightRef = useRef<Set<string>>(new Set());
   const generationRef = useRef(0);
@@ -343,7 +350,34 @@ export function MessageAttachments({
   useEffect(() => {
     setConfirmingDelete(false);
     setDeleteError(null);
+    setExtractError(null);
   }, [selectedId]);
+
+  // KT-556 — keep the clip's last picture as a file of this discussion, so a
+  // follow-up generation can start from it without a download and a re-upload.
+  // The frame is decoded by the player's own element: the backend cannot read
+  // these clips at all.
+  const keepLastFrame = useCallback(async (file: ContextFile, src: string) => {
+    setExtracting(true);
+    setExtractError(null);
+    try {
+      const frame = await extractLastFrame(src);
+      const image = new File([frame.blob], lastFrameFilename(file.filename), { type: 'image/png' });
+      const uploaded = await discussionsApi.uploadContextFile(file.discussion_id, image);
+      onExtracted?.(uploaded.file);
+      // Landing on the fresh image is the answer to "did it work": the reader
+      // sees the frame instead of a message claiming one exists.
+      setSelectedId(uploaded.file.id);
+    } catch (e) {
+      setExtractError(
+        e instanceof LastFrameError
+          ? t(`disc.media.lastFrame.error.${e.cause_}`)
+          : e instanceof Error ? e.message : String(e),
+      );
+    } finally {
+      setExtracting(false);
+    }
+  }, [onExtracted, t]);
 
   const selectedIndex = selectedId
     ? carouselFiles.findIndex(file => file.id === selectedId)
@@ -437,6 +471,22 @@ export function MessageAttachments({
               >
                 <ExternalLink size={17} />
               </a>
+              {onExtracted && isVideoFile(selectedFile) && urls[selectedFile.id] && (
+                // Offered only once the bytes are here: without them there is
+                // nothing to decode, and the button would promise a frame it
+                // cannot produce.
+                <button
+                  type="button"
+                  className="disc-image-lightbox-action"
+                  disabled={extracting}
+                  onClick={() => { void keepLastFrame(selectedFile, urls[selectedFile.id]); }}
+                  aria-label={t('disc.media.lastFrame.action')}
+                  title={t('disc.media.lastFrame.action')}
+                  data-testid="attachment-last-frame"
+                >
+                  {extracting ? <Loader2 size={18} /> : <Scissors size={18} />}
+                </button>
+              )}
               {onDeleted && (confirmingDelete ? (
                 <button
                   type="button"
@@ -491,6 +541,11 @@ export function MessageAttachments({
             {deleteError && (
               <p className="disc-image-lightbox-error" role="alert" data-testid="attachment-delete-error">
                 {deleteError}
+              </p>
+            )}
+            {extractError && (
+              <p className="disc-image-lightbox-error" role="alert" data-testid="attachment-last-frame-error">
+                {extractError}
               </p>
             )}
             <div className="disc-image-lightbox-content">

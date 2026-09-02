@@ -233,7 +233,14 @@
   white-space: nowrap;
   cursor: pointer;
 }
-.media-generate-reference-picked { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
+.media-generate-reference-picked { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
+/* Full width so the refusal reads as a sentence under the picture it judges. */
+.media-generate-reference-warning {
+  flex-basis: 100%;
+  margin: 0;
+  color: var(--kr-error);
+  font-size: var(--kr-fs-xs);
+}
 .media-generate-reference-picked img {
   width: 44px;
   height: 44px;

@@ -5135,6 +5135,15 @@ export function DiscussionsPage({
                     [discId]: (current[discId] ?? []).filter(file => file.id !== fileId),
                   }));
                 }}
+                onAssetExtracted={(file) => {
+                  // Same single inventory as a deletion, so the fresh frame is
+                  // immediately offered as a starting image by the launcher.
+                  const discId = activeDiscussion.id;
+                  setContextFilesMap(current => ({
+                    ...current,
+                    [discId]: [...(current[discId] ?? []), file],
+                  }));
+                }}
                 onNavigateMessage={(messageId) => {
                   setShowAssetsPanel(false);
                   setStickToBottom(false);
