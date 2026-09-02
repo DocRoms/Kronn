@@ -320,22 +320,20 @@ pub(crate) fn enrich_audit_status(project: &mut Project) {
     project.ai_todo_count = scanner::count_ai_todos(&project.path);
     project.tech_debt_count = scanner::count_tech_debt(&project.path);
     project.needs_docs_migration = scanner::needs_docs_migration(&resolved);
-    crate::core::docs_migration::backfill_docs_index(&resolved);
-    // Self-heal `{{PROJECT_NAME}}` / `{{STACK_SUMMARY}}` / `{{TEST_CMD}}`
-    // / `{{LINT_CMD}}` / `{{PROJECT_LANGUAGE}}` placeholders that the
-    // agent's bootstrap step 1 was supposed to fill. We only fire when
-    // the audit status is `TemplateInstalled` (= the scanner saw
-    // unfilled `{{...}}` tokens) so projects past bootstrap pay zero
-    // I/O cost. Targets only the 5 placeholders we can derive from
-    // the filesystem; agent-filled fields are left alone. After the
-    // first list-fetch following a Kronn upgrade, retroactively-broken
-    // projects (e.g. amp-easy-backo, user-reported 2026-05-11) have
-    // their cookie-cutter placeholders replaced with sensible defaults.
-    // Read paths must not write (Codex A2): the retroactive placeholder
-    // heal used to fire from here on every list/get. It now only runs on
-    // the WRITE paths that own the docs tree — template install and the
-    // audit Phase 1 — where prefill_template_placeholders is invoked
-    // explicitly. Legacy projects heal on their next install/audit.
+    // Read paths must not write (Codex A2). Two heals used to fire from here on
+    // every list and every get:
+    //
+    // - the retroactive `{{PROJECT_NAME}}` / `{{STACK_SUMMARY}}` / … placeholder
+    //   fill, moved earlier to the WRITE paths that own the docs tree — template
+    //   install and audit Phase 1 — where `prefill_template_placeholders` is
+    //   invoked explicitly;
+    // - `backfill_docs_index`, removed here for the same reason. Template
+    //   install already calls `ensure_docs_index`, so the only projects it
+    //   served were legacy trees whose index predates that call — and they heal
+    //   on their next install or audit, exactly like the placeholders.
+    //
+    // A GET that writes is also a GET that can fail on a read-only checkout, and
+    // it made `/api/projects` do disk work no reader asked for.
 }
 
 /// Find the common parent directory of existing projects.
@@ -438,6 +436,54 @@ mod tests {
             location: location.into(),
             description: description.into(),
         }
+    }
+
+    #[test]
+    fn enriching_a_project_never_writes_to_its_docs_tree() {
+        // `enrich_audit_status` serves GET /api/projects and GET /api/projects/{id}.
+        // It used to backfill `docs/index.md` from there — a read path that
+        // writes, which also fails on a read-only checkout. Both write paths
+        // that own the tree call `ensure_docs_index` themselves.
+        let dir = tempfile::TempDir::new().unwrap();
+        let docs = dir.path().join("docs");
+        std::fs::create_dir_all(&docs).unwrap();
+        std::fs::write(docs.join("AGENTS.md"), "# Agents\n").unwrap();
+        // The exact shape the old backfill fired on: AGENTS.md present,
+        // index.md absent.
+        assert!(!docs.join("index.md").exists());
+
+        let mut project = crate::models::Project {
+            id: "p-read-only".into(),
+            name: "read-only".into(),
+            path: dir.path().to_string_lossy().into_owned(),
+            repo_url: None,
+            token_override: None,
+            ai_config: crate::models::AiConfigStatus {
+                detected: false,
+                configs: vec![],
+            },
+            audit_status: crate::models::AiAuditStatus::NoTemplate,
+            ai_todo_count: 0,
+            tech_debt_count: 0,
+            needs_docs_migration: false,
+            path_exists: true,
+            write_access: None,
+            mcp_sync_report: None,
+            default_skill_ids: vec![],
+            default_profile_id: None,
+            briefing_notes: None,
+            linked_repos: vec![],
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        enrich_audit_status(&mut project);
+
+        assert!(
+            !docs.join("index.md").exists(),
+            "reading a project must not create files in its docs tree"
+        );
+        // The read itself still works: this is not a regression in what it reports.
+        assert!(project.path_exists);
     }
 
     #[test]
