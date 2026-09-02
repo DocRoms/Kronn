@@ -533,6 +533,7 @@ const zh: TranslationDict = {
   "projects.source.restoreFolder": "再次包含 “{0}”",
   "projects.source.exclusionError": "无法更新排除项",
   "automation.copyId": "为 {0} 复制 ID",
+  "automation.deleteConfirmAction": "确认",
   "automation.search": "搜索自动化…",
   "automation.clearSearch": "清除搜索",
   "automation.projectFilter": "按项目筛选自动化",

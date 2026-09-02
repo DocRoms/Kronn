@@ -1,0 +1,21 @@
+.kr-confirm-delete {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--kr-sp-2);
+}
+
+/* Armed reads as armed: the next click destroys something. */
+.kr-confirm-delete [data-armed='true'] {
+  color: var(--kr-error);
+  border-color: var(--kr-error);
+}
+
+.kr-confirm-delete-word {
+  font-size: var(--kr-fs-xs);
+  white-space: nowrap;
+}
+
+.kr-confirm-delete-error {
+  color: var(--kr-error);
+  font-size: var(--kr-fs-xs);
+}

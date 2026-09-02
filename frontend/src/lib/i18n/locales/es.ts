@@ -539,6 +539,7 @@ const es: TranslationDict = {
   'projects.source.restoreFolder': 'Volver a incluir «{0}»',
   'projects.source.exclusionError': 'No se pueden actualizar las exclusiones',
   'automation.copyId': 'Copiar el ID de {0}',
+  'automation.deleteConfirmAction': 'Confirmar',
   'automation.search': 'Buscar automatizaciones…',
   'automation.clearSearch': 'Borrar la búsqueda',
   'automation.projectFilter': 'Filtrar automatizaciones por proyecto',

@@ -14,7 +14,7 @@ import type {
 } from '../types/generated';
 import type { ApiPluginOption } from '../components/workflows/ApiCallStepCard';
 import {
-  Plus, Trash2, Play, Loader2, ChevronLeft, ChevronRight, ChevronDown,
+  Plus, Play, Loader2, ChevronLeft, ChevronRight, ChevronDown,
   Clock, GitBranch, Zap, Eye, Layers, X, Square,
   ToggleLeft, ToggleRight, Star,
   Upload, Download, AlertTriangle, Workflow as WorkflowIcon,
@@ -46,6 +46,7 @@ import { CollectionRowActions } from '../components/CollectionRowActions';
 import { CollectionSidebarFooter } from '../components/CollectionSidebarFooter';
 import { ListControls } from '../components/ListControls';
 import { CopyIdPill } from '../components/CopyIdPill';
+import { ConfirmDeleteButton } from '../components/ConfirmDeleteButton';
 import { ContextHelp } from '../components/ContextHelp';
 import { CollectionShell, CollectionSidebarCollapseButton } from '../components/CollectionShell';
 import {
@@ -1153,20 +1154,16 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
   };
 
   const handleDelete = async (id: string) => {
-    // Pre-fix the workflow card's red trash button fired delete with no
-    // confirmation — one mis-click destroyed the workflow + every run +
-    // every child discussion. Now an explicit confirm is required.
-    if (!confirm(t('wf.deleteWorkflowConfirm'))) return;
-    try {
-      await workflowsApi.delete(id);
-      if (selectedId === id) {
-        setSelectedId(null);
-        setDetailWorkflow(null);
-      }
-      refetch();
-    } catch (e) {
-      console.warn('Workflow action failed:', e);
+    // The red trash button once fired straight away — one mis-click destroyed
+    // the workflow, every run and every child discussion. The confirmation now
+    // lives in the button itself (`ConfirmDeleteButton`), which also means a
+    // refusal reaches the operator instead of a console line nobody reads.
+    await workflowsApi.delete(id);
+    if (selectedId === id) {
+      setSelectedId(null);
+      setDetailWorkflow(null);
     }
+    refetch();
   };
 
   const handleSaveQP = async (req: CreateQuickPromptRequest) => {
@@ -2509,14 +2506,15 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                           {triggering === wf.id ? <Loader2 size={11} className="spin" /> : <Play size={11} fill="currentColor" />}
                           {t('wf.trigger')}
                         </button>
-                        <button
+                        <ConfirmDeleteButton
                           className="wf-card-delete-btn"
-                          onClick={(e) => { e.stopPropagation(); handleDelete(wf.id); }}
-                          title={t('wf.delete')}
-                          aria-label={`${t('wf.delete')} ${wf.name}`}
-                        >
-                          <Trash2 size={12} />
-                        </button>
+                          label={t('wf.delete')}
+                          confirmLabel={t('automation.deleteConfirmAction')}
+                          itemName={wf.name}
+                          testId={`wf-delete-${wf.id}`}
+                          onError={message => toastProp?.(message, 'error')}
+                          onConfirm={() => handleDelete(wf.id)}
+                        />
                       </div>
                     </div>
                   </div>
@@ -2799,20 +2797,19 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                           >
                             <Download size={12} />
                           </button>
-                          <button
+                          <ConfirmDeleteButton
                             className="wf-icon-btn qp-card-tool-btn"
-                            data-danger="true"
-                            onClick={async () => {
-                              if (!confirm(t('qp.deleteConfirm'))) return;
+                            label={t('qp.delete')}
+                            confirmLabel={t('automation.deleteConfirmAction')}
+                            itemName={qp.name}
+                            testId={`qp-delete-${qp.id}`}
+                            onError={message => toastProp?.(message, 'error')}
+                            onConfirm={async () => {
                               await quickPromptsApi.delete(qp.id);
                               if (selectedQuickPromptId === qp.id) setSelectedQuickPromptId(null);
                               refetchQP();
                             }}
-                            title={t('qp.delete')}
-                            aria-label={`${t('qp.delete')} ${qp.name}`}
-                          >
-                            <Trash2 size={12} />
-                          </button>
+                          />
                         </div>
 
                         <div className="qp-card-primary-actions">
@@ -3358,20 +3355,19 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                           >
                             <Download size={12} />
                           </button>
-                          <button
+                          <ConfirmDeleteButton
                             className="wf-icon-btn qp-card-tool-btn"
-                            data-danger="true"
-                            onClick={async () => {
-                              if (!confirm(t('qa.deleteConfirm').replace('{name}', qa.name))) return;
+                            label={t('qa.delete')}
+                            confirmLabel={t('automation.deleteConfirmAction')}
+                            itemName={qa.name}
+                            testId={`qa-delete-${qa.id}`}
+                            onError={message => toastProp?.(message, 'error')}
+                            onConfirm={async () => {
                               await quickApisApi.delete(qa.id);
                               if (selectedQuickApiId === qa.id) setSelectedQuickApiId(null);
                               refetchQA();
                             }}
-                            title={t('qa.delete')}
-                            aria-label={`${t('qa.delete')} ${qa.name}`}
-                          >
-                            <Trash2 size={12} />
-                          </button>
+                          />
                         </div>
 
                         <div className="qp-card-primary-actions">
@@ -3765,19 +3761,20 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                           >
                             <Download size={12} />
                           </button>
-                          <button
+                          <ConfirmDeleteButton
                             className="wf-icon-btn qp-card-tool-btn"
-                            title={t('qe.delete')}
-                            onClick={async () => {
-                              if (!confirm(t('qe.deleteConfirm', quickExec.name))) return;
+                            label={t('qe.delete')}
+                            confirmLabel={t('automation.deleteConfirmAction')}
+                            itemName={quickExec.name}
+                            testId={`qe-delete-${quickExec.id}`}
+                            onError={message => toastProp?.(message, 'error')}
+                            onConfirm={async () => {
                               await quickExecsApi.delete(quickExec.id);
                               if (runningQE?.id === quickExec.id) setRunningQE(null);
                               if (selectedQuickExecId === quickExec.id) setSelectedQuickExecId(null);
                               refetchQE();
                             }}
-                          >
-                            <Trash2 size={12} />
-                          </button>
+                          />
                         </div>
                         <button
                           className="qp-launch-btn"
