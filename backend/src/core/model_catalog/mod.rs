@@ -598,6 +598,7 @@ pub async fn preflight_check(
 mod tests {
     use super::*;
     use crate::db::model_catalog as db;
+    use crate::models::UpsertManualModelRequest;
 
     fn test_db() -> Database {
         Database::open_in_memory().unwrap()
@@ -630,6 +631,76 @@ mod tests {
                 "{agent:?} must stay out of scope"
             );
         }
+    }
+
+    /// KT-543 — a model discovered over ACP feeds the tiers, and its
+    /// disappearance takes the tier with it rather than serving a stale id.
+    #[tokio::test]
+    async fn a_tier_follows_its_model_out_of_the_catalogue_and_back() {
+        let db = test_db();
+        let target = db::agent_runtime_target_id(&AgentType::OpenCode);
+        let request = UpsertManualModelRequest {
+            runtime_target_id: target.clone(),
+            agent_type: AgentType::OpenCode,
+            model_id: "zen/coder".into(),
+            display_name: "Zen Coder".into(),
+            capabilities: vec!["chat".into()],
+            reasoning_modes: vec!["high".into()],
+            default_reasoning_mode: Some("high".into()),
+            tier_assignment: Some(ModelTier::Reasoning),
+            cost_hint: None,
+            privacy_note: None,
+        };
+        db.with_conn(move |conn| {
+            db::create_manual(conn, &request)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        refresh_runtime_cache(&db).await.unwrap();
+        assert_eq!(
+            assigned_model_for_agent(&AgentType::OpenCode, ModelTier::Reasoning).as_deref(),
+            Some("zen/coder"),
+        );
+
+        // The provider stops listing it. The row is NEVER deleted — the
+        // operator's assignment and the audit trail survive — but the tier
+        // must stop resolving, because dispatching a model the runtime no
+        // longer serves fails after the request left.
+        let gone = target.clone();
+        db.with_conn(move |conn| {
+            db::mark_unavailable(
+                conn,
+                &gone,
+                "zen/coder",
+                ModelUnavailableReason::Unsupported,
+                Some("absent from the live catalogue"),
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        refresh_runtime_cache(&db).await.unwrap();
+        assert_eq!(
+            assigned_model_for_agent(&AgentType::OpenCode, ModelTier::Reasoning),
+            None,
+            "an unavailable model must not keep answering for its tier",
+        );
+
+        // Reappearing under the same canonical identity restores the tier by
+        // itself: the assignment was never lost, only suspended.
+        let back = target.clone();
+        db.with_conn(move |conn| {
+            db::mark_available(conn, &back, "zen/coder")?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        refresh_runtime_cache(&db).await.unwrap();
+        assert_eq!(
+            assigned_model_for_agent(&AgentType::OpenCode, ModelTier::Reasoning).as_deref(),
+            Some("zen/coder"),
+        );
     }
 
     #[tokio::test]
