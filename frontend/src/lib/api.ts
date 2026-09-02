@@ -2749,6 +2749,13 @@ export interface ExternalApiConnectionTestResult {
     display_name: string;
     capabilities: string[];
   }>;
+  /** Whether image/video compatibility is provable from catalog evidence
+   * (an explicit `architecture.output_modalities` field, or a dedicated
+   * capability endpoint that answered) — never inferred from the provider's
+   * name. Older backends omit these; callers must treat that as `false`,
+   * the safe default (KT-531). */
+  image_capability_known?: boolean;
+  video_capability_known?: boolean;
   hint: string | null;
 }
 

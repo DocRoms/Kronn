@@ -81,7 +81,7 @@ pub struct TestConnectionRequest {
     pub models: Vec<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Default, Serialize)]
 pub struct TestConnectionResponse {
     pub ok: bool,
     pub status: String,
@@ -91,6 +91,13 @@ pub struct TestConnectionResponse {
     /// the probe. Media selectors filter this list instead of treating chat
     /// models (or a previously saved free-text value) as media-capable.
     pub catalog: Vec<TestConnectionModel>,
+    /// Whether the image/video modality is provable from catalog evidence —
+    /// either `architecture.output_modalities` on the chat catalogue, or a
+    /// dedicated capability endpoint that answered. NVIDIA's `/v1/models`
+    /// carries neither, so both stay false: the picker cannot rule anything
+    /// in or out and must say so instead of silently filtering to nothing.
+    pub image_capability_known: bool,
+    pub video_capability_known: bool,
     pub hint: Option<String>,
 }
 
@@ -194,6 +201,7 @@ async fn probe_models(
                 models: vec![],
                 catalog: vec![],
                 hint: Some("Enter the OpenRouter API key before testing this connection.".into()),
+                ..Default::default()
             };
         };
         if let Some(failure) = probe_openrouter_credential(endpoint, key).await {
@@ -207,8 +215,16 @@ async fn probe_models(
             fetch_capability_catalogue(endpoint, api_key, "/v1/images/models", "image"),
             fetch_capability_catalogue(endpoint, api_key, "/v1/videos/models", "video"),
         );
-        merge_catalog(&mut catalogue.catalog, images);
-        merge_catalog(&mut catalogue.catalog, videos);
+        let (image_models, image_reached) = images;
+        let (video_models, video_reached) = videos;
+        merge_catalog(&mut catalogue.catalog, image_models);
+        merge_catalog(&mut catalogue.catalog, video_models);
+        // A capability endpoint that answered is authoritative on its own,
+        // even if it listed zero models this time (state C: proven, not
+        // merely unfiltered) — independent of whatever the chat catalogue's
+        // `architecture` field said.
+        catalogue.image_capability_known |= image_reached;
+        catalogue.video_capability_known |= video_reached;
     }
     if catalogue.ok {
         let is_nvidia = origin_preset == Some(ExternalApiConnectionPreset::Nvidia);
@@ -292,6 +308,7 @@ async fn probe_openrouter_credential(
                 models: vec![],
                 catalog: vec![],
                 hint: Some(hint.into()),
+                ..Default::default()
             })
         }
         Ok(response) => Some(TestConnectionResponse {
@@ -303,6 +320,7 @@ async fn probe_openrouter_credential(
                 "OpenRouter returned HTTP {} while validating the API key.",
                 response.status().as_u16()
             )),
+            ..Default::default()
         }),
         Err(error) if error.is_timeout() => Some(TestConnectionResponse {
             ok: false,
@@ -310,6 +328,7 @@ async fn probe_openrouter_credential(
             models: vec![],
             catalog: vec![],
             hint: Some("OpenRouter did not answer the API key validation in time.".into()),
+            ..Default::default()
         }),
         Err(_) => Some(TestConnectionResponse {
             ok: false,
@@ -317,6 +336,7 @@ async fn probe_openrouter_credential(
             models: vec![],
             catalog: vec![],
             hint: Some("Kronn could not reach OpenRouter to validate the API key.".into()),
+            ..Default::default()
         }),
     }
 }
@@ -364,6 +384,7 @@ async fn probe_auth(
                 hint: Some(format!(
                     "The endpoint refused '{model}'. Either the API key is rejected, or the key is valid but this model is not available to this account on this endpoint — image and video models are often served elsewhere. Check both before replacing the key."
                 )),
+                ..Default::default()
             })
         }
         Ok(response) if response.status().is_success() => None,
@@ -389,6 +410,7 @@ async fn probe_auth(
                 models,
                 catalog: vec![],
                 hint: Some(hint),
+                ..Default::default()
             })
         }
         Err(error) if error.is_timeout() => Some(TestConnectionResponse {
@@ -405,6 +427,7 @@ async fn probe_auth(
             } else {
                 "The endpoint did not respond in time. Check its URL and availability.".into()
             }),
+            ..Default::default()
         }),
         Err(_) => Some(TestConnectionResponse {
             ok: false,
@@ -420,6 +443,7 @@ async fn probe_auth(
             } else {
                 "Kronn could not reach this endpoint. Check the URL and network access.".into()
             }),
+            ..Default::default()
         }),
     }
 }
@@ -435,12 +459,19 @@ async fn fetch_catalogue(endpoint: &str, api_key: Option<&str>) -> TestConnectio
                 Ok(body) if model_ids_from_body(&body).is_some() => {
                     let models = model_ids_from_body(&body).expect("checked above");
                     let catalog = catalog_models_from_body(&body, "chat").unwrap_or_default();
+                    // Catalog evidence, not the provider's name: a chat catalogue
+                    // that never declares `architecture.output_modalities` on any
+                    // model (NVIDIA's `/v1/models` today) cannot rule image/video
+                    // in or out for ANY of its entries, known or not.
+                    let modality_declared = catalog_declares_modality(&body);
                     TestConnectionResponse {
                     ok: true,
                     status: "success".into(),
                     hint: models.is_empty().then(|| "The endpoint responded but returned no usable models. Check this account or endpoint.".into()),
                     models,
                     catalog,
+                    image_capability_known: modality_declared,
+                    video_capability_known: modality_declared,
                     }
                 }
                 _ => TestConnectionResponse {
@@ -452,6 +483,7 @@ async fn fetch_catalogue(endpoint: &str, api_key: Option<&str>) -> TestConnectio
                         "The endpoint responded, but its model catalogue is not OpenAI-compatible. Check the endpoint and provider settings."
                             .into(),
                     ),
+                    ..Default::default()
                 },
             }
         }
@@ -464,6 +496,7 @@ async fn fetch_catalogue(endpoint: &str, api_key: Option<&str>) -> TestConnectio
                 "The endpoint rejected the credentials. Check the API key and its permissions."
                     .into(),
             ),
+            ..Default::default()
         },
         Ok(response) => TestConnectionResponse {
             ok: false,
@@ -474,6 +507,7 @@ async fn fetch_catalogue(endpoint: &str, api_key: Option<&str>) -> TestConnectio
                 "The endpoint returned HTTP {} while loading models.",
                 response.status().as_u16()
             )),
+            ..Default::default()
         },
         Err(error) if error.is_timeout() => TestConnectionResponse {
             ok: false,
@@ -483,6 +517,7 @@ async fn fetch_catalogue(endpoint: &str, api_key: Option<&str>) -> TestConnectio
             hint: Some(
                 "The endpoint did not respond in time. Check its URL and availability.".into(),
             ),
+            ..Default::default()
         },
         Err(_) => TestConnectionResponse {
             ok: false,
@@ -492,6 +527,7 @@ async fn fetch_catalogue(endpoint: &str, api_key: Option<&str>) -> TestConnectio
             hint: Some(
                 "Kronn could not reach this endpoint. Check the URL and network access.".into(),
             ),
+            ..Default::default()
         },
     }
 }
@@ -499,29 +535,47 @@ async fn fetch_catalogue(endpoint: &str, api_key: Option<&str>) -> TestConnectio
 /// Fetch a provider-specific catalogue without changing the validity of the
 /// chat connection. OpenRouter intentionally serves image and video models on
 /// dedicated endpoints; a temporary failure of one optional route must not
-/// turn a valid chat credential into a failed connection test.
+/// turn a valid chat credential into a failed connection test. The `bool` is
+/// whether the endpoint answered with a parseable catalogue at all — distinct
+/// from an empty model list, which is itself proof of "no models" (state C),
+/// not "unreachable" (would otherwise be indistinguishable from state B).
 async fn fetch_capability_catalogue(
     endpoint: &str,
     api_key: Option<&str>,
     path: &str,
     capability: &str,
-) -> Vec<TestConnectionModel> {
+) -> (Vec<TestConnectionModel>, bool) {
     let mut request = probe_client().get(format!("{endpoint}{path}"));
     if let Some(key) = api_key.filter(|key| !key.trim().is_empty()) {
         request = request.bearer_auth(key);
     }
     let Ok(response) = request.send().await else {
-        return Vec::new();
+        return (Vec::new(), false);
     };
     if !response.status().is_success() {
-        return Vec::new();
+        return (Vec::new(), false);
     }
-    response
-        .json::<serde_json::Value>()
-        .await
-        .ok()
-        .and_then(|body| catalog_models_from_body(&body, capability))
-        .unwrap_or_default()
+    match response.json::<serde_json::Value>().await {
+        Ok(body) => match catalog_models_from_body(&body, capability) {
+            Some(models) => (models, true),
+            None => (Vec::new(), false),
+        },
+        Err(_) => (Vec::new(), false),
+    }
+}
+
+/// Whether any entry in a `/v1/models`-shaped body declares
+/// `architecture.output_modalities` at all — proof the provider's schema can
+/// state a model's output modality, regardless of what that entry says. Its
+/// absence across the WHOLE catalogue (not just one entry) means the schema
+/// never speaks to modality, so a missing field cannot be read as "chat only":
+/// it just was never asked.
+fn catalog_declares_modality(body: &serde_json::Value) -> bool {
+    body["data"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|model| model["architecture"]["output_modalities"].is_array())
 }
 
 fn catalog_models_from_body(
@@ -618,6 +672,7 @@ pub async fn test(
             models: vec![],
             catalog: vec![],
             hint: Some("Enter a valid endpoint before testing the connection.".into()),
+            ..Default::default()
         }));
     };
     if reqwest::Url::parse(&endpoint).is_err() {
@@ -627,6 +682,7 @@ pub async fn test(
             models: vec![],
             catalog: vec![],
             hint: Some("Enter a valid endpoint before testing the connection.".into()),
+            ..Default::default()
         }));
     }
 
@@ -661,6 +717,7 @@ pub async fn test(
                                 "The endpoint or provider changed. Enter the API key again before testing."
                                     .into(),
                             ),
+                            ..Default::default()
                         }));
                     }
                     _ => None,
@@ -1245,5 +1302,27 @@ mod tests {
             .find(|model| model.id == "bytedance/seedance")
             .unwrap();
         assert_eq!(seedance.capabilities, vec!["video"]);
+    }
+
+    #[test]
+    fn catalog_declares_modality_reads_catalog_evidence_not_the_provider_name() {
+        // OpenRouter-shaped: at least one entry carries the field.
+        let openrouter_like = serde_json::json!({"data": [
+            {"id": "text/chat", "architecture": {"output_modalities": ["text"]}},
+            {"id": "no-architecture-entry"}
+        ]});
+        assert!(catalog_declares_modality(&openrouter_like));
+
+        // NVIDIA's real `/v1/models` shape: no entry ever carries the field,
+        // regardless of how many chat/image/video models are actually listed.
+        let nvidia_like = serde_json::json!({"data": [
+            {"id": "meta/llama-3.1-70b-instruct"},
+            {"id": "black-forest-labs/flux.1-dev"},
+            {"id": "nvidia/cosmos-predict"}
+        ]});
+        assert!(!catalog_declares_modality(&nvidia_like));
+
+        assert!(!catalog_declares_modality(&serde_json::json!({"data": []})));
+        assert!(!catalog_declares_modality(&serde_json::json!({})));
     }
 }

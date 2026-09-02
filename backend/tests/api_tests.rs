@@ -7124,6 +7124,143 @@ async fn external_api_nvidia_probes_the_explicit_model_and_preserves_the_catalog
 }
 
 #[tokio::test]
+async fn external_api_nvidia_catalogue_without_modality_metadata_is_capability_unknown() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    // NVIDIA's real `/v1/models` shape: no entry carries `architecture`, so
+    // nothing in the response says which of these are image/video models —
+    // not even the ones that plainly are (KT-531).
+    let upstream = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": [
+                {"id": "meta/llama-3.1-70b-instruct"},
+                {"id": "black-forest-labs/flux.1-dev"}
+            ]
+        })))
+        .expect(1)
+        .mount(&upstream)
+        .await;
+
+    let (_, response) = post_json(
+        test_app(),
+        "/api/external-api/connections/test",
+        serde_json::json!({
+            "endpoint": upstream.uri(),
+            "api_key": "nvapi-test",
+            "origin_preset": "nvidia"
+        }),
+    )
+    .await;
+
+    assert_eq!(response["data"]["status"], "success", "{response}");
+    assert_eq!(response["data"]["image_capability_known"], false);
+    assert_eq!(response["data"]["video_capability_known"], false);
+    // Chat/tier selectors must still see every model — only the image/video
+    // pickers are affected by "capability unknown".
+    assert_eq!(
+        response["data"]["models"],
+        serde_json::json!(["meta/llama-3.1-70b-instruct", "black-forest-labs/flux.1-dev"])
+    );
+}
+
+#[tokio::test]
+async fn external_api_openrouter_reports_capability_known_even_with_an_empty_media_catalogue() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    // OpenRouter's dedicated endpoints answering with zero models is proof of
+    // "no compatible models" (state C), not "unreachable" (state B) — the two
+    // must not collapse into the same `false` flag.
+    let upstream = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/key"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": {"label": "k"}
+        })))
+        .mount(&upstream)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": [{"id": "text/chat", "architecture": {"output_modalities": ["text"]}}]
+        })))
+        .mount(&upstream)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v1/images/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": []})))
+        .mount(&upstream)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v1/videos/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": []})))
+        .mount(&upstream)
+        .await;
+
+    let (_, response) = post_json(
+        test_app(),
+        "/api/external-api/connections/test",
+        serde_json::json!({
+            "endpoint": upstream.uri(),
+            "api_key": "sk-or-v1-test",
+            "origin_preset": "open_router"
+        }),
+    )
+    .await;
+
+    assert_eq!(response["data"]["status"], "success", "{response}");
+    assert_eq!(response["data"]["image_capability_known"], true);
+    assert_eq!(response["data"]["video_capability_known"], true);
+    let catalog = response["data"]["catalog"].as_array().unwrap();
+    assert!(catalog.iter().all(|model| !model["capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|c| c == "image" || c == "video")));
+}
+
+#[tokio::test]
+async fn external_api_other_preset_with_modality_metadata_is_capability_known() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    // Catalog evidence, not the preset name: a self-hosted gateway declared
+    // under the generic "Other" preset gets the strict filter too, the moment
+    // its `/v1/models` publishes the same `output_modalities` field OpenRouter
+    // uses — no `origin_preset == open_router` check involved.
+    let upstream = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": [
+                {"id": "chat-model", "architecture": {"output_modalities": ["text"]}},
+                {"id": "image-model", "architecture": {"output_modalities": ["image"]}}
+            ]
+        })))
+        .expect(1)
+        .mount(&upstream)
+        .await;
+
+    let (_, response) = post_json(
+        test_app(),
+        "/api/external-api/connections/test",
+        serde_json::json!({
+            "endpoint": upstream.uri(),
+            "api_key": null,
+            "origin_preset": "other"
+        }),
+    )
+    .await;
+
+    assert_eq!(response["data"]["status"], "success", "{response}");
+    assert_eq!(response["data"]["image_capability_known"], true);
+    assert_eq!(response["data"]["video_capability_known"], true);
+}
+
+#[tokio::test]
 async fn external_api_test_route_returns_catalogue_without_returning_the_credential() {
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};

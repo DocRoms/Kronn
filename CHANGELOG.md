@@ -100,6 +100,17 @@ Release notes for 0.9.3 and earlier are available in the
   absence of a confirmed auth signal now reports "unknown, assume runnable"
   instead of a hard "not ready" that blocked dispatch outright.
 
+- The image/video model pickers for an HTTP connection (Settings > Agents >
+  External API) no longer go silently empty for a provider whose catalog
+  carries no modality metadata, as with NVIDIA's `/v1/models`: every one of
+  its entries used to be treated as chat-only, hiding its real image/video
+  models behind a filter that could never match. The picker now reads
+  catalog evidence and renders one of three states — known (strict filter,
+  unchanged for OpenRouter), unknown (the full catalog behind an explicit
+  warning, search and free-text entry preserved), or unsupported (the
+  connection proves it has no compatible model). A saved selection is never
+  cleared by a refresh or a re-test, whatever the state.
+
 ## [0.12.0] - 2026-08-30
 
 ### Added

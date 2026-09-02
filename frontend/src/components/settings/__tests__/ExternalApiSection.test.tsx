@@ -664,6 +664,128 @@ describe('ExternalApiSection', () => {
     expect(screen.queryByRole('option', { name: 'Image A' })).toBeNull();
   });
 
+  it('shows every model behind a warning when the catalogue cannot prove media compatibility (NVIDIA unknown fallback)', async () => {
+    testMock.mockResolvedValue({
+      ok: true,
+      status: 'success',
+      models: ['meta/llama-3.1-70b-instruct', 'black-forest-labs/flux.1-dev'],
+      catalog: [
+        { id: 'meta/llama-3.1-70b-instruct', display_name: 'meta/llama-3.1-70b-instruct', capabilities: ['chat'] },
+        { id: 'black-forest-labs/flux.1-dev', display_name: 'black-forest-labs/flux.1-dev', capabilities: ['chat'] },
+      ],
+      image_capability_known: false,
+      video_capability_known: false,
+      hint: null,
+    });
+    renderSection();
+    fireEvent.click(await screen.findByTestId('ext-api-add-connection'));
+    fireEvent.click(screen.getByTestId('ext-api-preset-nvidia'));
+    fireEvent.click(screen.getByTestId('ext-api-test'));
+
+    const warning = await screen.findByTestId('ext-api-media-image-unknown');
+    expect(warning).toHaveAttribute('role', 'status');
+    expect(screen.queryByTestId('ext-api-media-image-unsupported')).toBeNull();
+
+    // The full, unfiltered catalogue is offered — including a model NVIDIA
+    // never tagged as image-capable, because nothing in its response could.
+    const image = screen.getByTestId('ext-api-media-image');
+    fireEvent.focus(image);
+    expect(screen.getByRole('option', { name: 'black-forest-labs/flux.1-dev' })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: 'meta/llama-3.1-70b-instruct' })).toBeInTheDocument();
+
+    // Free-text entry: an id the catalogue never listed is still selectable.
+    fireEvent.change(image, { target: { value: 'nvidia/unlisted-cosmos-model' } });
+    fireEvent.keyDown(image, { key: 'Enter' });
+    expect(screen.getByTestId('ext-api-media-image')).toHaveValue('nvidia/unlisted-cosmos-model');
+  });
+
+  it('keeps a saved model selected and not flagged unavailable when its connection cannot prove media compatibility', async () => {
+    listMock.mockResolvedValue([conn({
+      id: 'nvidia-saved',
+      display_name: 'NVIDIA',
+      mention_alias: 'nvidia',
+      origin_preset: 'nvidia',
+      endpoint: 'https://integrate.api.nvidia.com',
+      has_credential: true,
+      image_model: 'black-forest-labs/flux.1-dev',
+    })]);
+    testMock.mockResolvedValue({
+      ok: true,
+      status: 'success',
+      models: ['meta/llama-3.1-70b-instruct', 'black-forest-labs/flux.1-dev'],
+      catalog: [
+        { id: 'meta/llama-3.1-70b-instruct', display_name: 'meta/llama-3.1-70b-instruct', capabilities: ['chat'] },
+        { id: 'black-forest-labs/flux.1-dev', display_name: 'black-forest-labs/flux.1-dev', capabilities: ['chat'] },
+      ],
+      image_capability_known: false,
+      video_capability_known: false,
+      hint: null,
+    });
+    renderSection();
+    fireEvent.click(await screen.findByTestId('ext-api-edit-nvidia-saved'));
+    // Retained across edit/reload before any new test runs.
+    expect(screen.getByTestId('ext-api-media-image')).toHaveValue('black-forest-labs/flux.1-dev');
+
+    fireEvent.click(screen.getByTestId('ext-api-test'));
+    await waitFor(() => expect(screen.getByTestId('ext-api-media-image')).not.toBeDisabled());
+    // Retained across refresh/test-connection too — never silently cleared.
+    expect(screen.getByTestId('ext-api-media-image')).toHaveValue('black-forest-labs/flux.1-dev');
+    fireEvent.focus(screen.getByTestId('ext-api-media-image'));
+    expect(screen.getByRole('option', { name: 'black-forest-labs/flux.1-dev' }))
+      .not.toHaveAttribute('aria-disabled', 'true');
+  });
+
+  it('shows the slot unavailable when the catalogue explicitly proves no compatible media models', async () => {
+    testMock.mockResolvedValue({
+      ok: true,
+      status: 'success',
+      models: ['model-a', 'model-b'],
+      catalog: [
+        { id: 'model-a', display_name: 'Model A', capabilities: ['chat'] },
+        { id: 'model-b', display_name: 'Model B', capabilities: ['chat'] },
+      ],
+      image_capability_known: true,
+      video_capability_known: true,
+      hint: null,
+    });
+    renderSection();
+    fireEvent.click(await screen.findByTestId('ext-api-add-connection'));
+    fireEvent.click(screen.getByTestId('ext-api-test'));
+
+    expect(await screen.findByTestId('ext-api-media-image-unsupported'))
+      .toHaveTextContent('config.extApi.mediaUnsupported.image');
+    expect(await screen.findByTestId('ext-api-media-video-unsupported'))
+      .toHaveTextContent('config.extApi.mediaUnsupported.video');
+    expect(screen.queryByTestId('ext-api-media-image')).toBeNull();
+    expect(screen.queryByTestId('ext-api-media-image-unknown')).toBeNull();
+  });
+
+  it('filters to declared image/video models when the catalogue proves capability explicitly (OpenRouter)', async () => {
+    testMock.mockResolvedValue({
+      ok: true,
+      status: 'success',
+      models: ['model-a'],
+      catalog: [
+        { id: 'model-a', display_name: 'Model A', capabilities: ['chat'] },
+        { id: 'image-a', display_name: 'Image A', capabilities: ['image'] },
+        { id: 'video-a', display_name: 'Video A', capabilities: ['video'] },
+      ],
+      image_capability_known: true,
+      video_capability_known: true,
+      hint: null,
+    });
+    renderSection();
+    fireEvent.click(await screen.findByTestId('ext-api-add-connection'));
+    fireEvent.click(screen.getByTestId('ext-api-preset-open_router'));
+    fireEvent.click(screen.getByTestId('ext-api-test'));
+
+    await waitFor(() => expect(screen.getByTestId('ext-api-media-image')).not.toBeDisabled());
+    expect(screen.queryByTestId('ext-api-media-image-unknown')).toBeNull();
+    fireEvent.focus(screen.getByTestId('ext-api-media-image'));
+    expect(screen.getByRole('option', { name: 'Image A' })).toBeInTheDocument();
+    expect(screen.queryByRole('option', { name: 'Model A' })).toBeNull();
+  });
+
   it('keeps the media block separate from the three text tiers', async () => {
     // Modalities are not quality levels: mixing them into the tier list would
     // suggest a text step could pick "tier Image".
