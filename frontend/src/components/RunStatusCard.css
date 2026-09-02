@@ -16,3 +16,8 @@
 .run-status-card-progress-track > span { display: block; height: 100%; border-radius: inherit; background: var(--kr-accent); }
 .run-status-card-diagnostic { margin: 10px 0 0; color: var(--kr-error); font-size: var(--kr-fs-xs); white-space: pre-wrap; }
 .run-status-card-result { max-height: 240px; margin: 10px 0 0; overflow: auto; font-size: var(--kr-fs-xs); white-space: pre-wrap; }
+.run-status-card-media { display: flex; align-items: center; gap: 8px; margin-top: 8px; font-size: var(--kr-fs-xs); color: var(--kr-text-muted); }
+.run-status-card-fold { margin-top: 10px; }
+.run-status-card-fold > summary { cursor: pointer; font-size: var(--kr-fs-xs); color: var(--kr-text-muted); }
+.run-status-card-fold > .run-status-card-result { margin-top: 6px; }
+.run-status-card-cost { margin: 8px 0 0; text-align: right; font-size: var(--kr-fs-xs); font-weight: 700; color: var(--kr-text-secondary); }

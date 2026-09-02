@@ -4145,6 +4145,7 @@ export function DiscussionsPage({
                       <Fragment key={msg.id}>
                         {separator}
                         <InlineMediaJob
+                          discussionId={activeDiscussion.id}
                           messageId={msg.id}
                           prompt={msg.content}
                           run={mediaRun}

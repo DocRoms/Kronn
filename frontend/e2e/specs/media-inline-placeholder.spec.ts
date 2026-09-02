@@ -158,6 +158,13 @@ test('a launch materializes an inline placeholder that becomes the asset in plac
   // Waiting for it is the real contract; reading it once only tests timing.
   await expect(firstBubble).toHaveAttribute('data-media-asset-id', /.+/, { timeout: 15_000 });
   const firstAssetId = await firstBubble.getAttribute('data-media-asset-id');
+  // KT-553 — the produced picture shows up in the bubble itself, and the
+  // bubble offers ONE destination: the card's generic "open the run" link is
+  // recomputed on every rehydration, so its suppression has to hold here.
+  await expect(firstBubble.getByTestId('media-bubble-preview').locator('img'))
+    .toBeVisible({ timeout: 15_000 });
+  await expect(firstCard.locator('a')).toHaveCount(0);
+  await expect(firstBubble.getByTestId('media-bubble-open-asset')).toHaveCount(1);
   await firstBubble.getByTestId('media-bubble-open-asset').click();
   await expect(page.getByRole('complementary', { name: 'Assets' })).toBeVisible();
   const viewer = page.getByRole('dialog', { name: /Visionneuse|viewer/i });
