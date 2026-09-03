@@ -821,6 +821,18 @@ fn escalation_step(step: &WorkflowStep) -> WorkflowStep {
 /// Refusing here rather than substituting another connection is deliberate: a
 /// step silently answered by the wrong provider is worse than one that fails
 /// with the runner's own diagnostic.
+/// Whether the step's named connection is the reviewer's endpoint too.
+///
+/// A connection belongs to an agent, not to a role. When the reviewer runs on
+/// the SAME agent as the author, they share it — dropping it sent the reviewer
+/// to the provider default while the author spoke to the configured endpoint,
+/// on the same step, with nothing on screen to say so. A reviewer on a
+/// DIFFERENT agent has no connection of its own to name yet, and inheriting
+/// this one would point it at an endpoint that does not serve it.
+fn reviewer_shares_step_connection(step: &WorkflowStep, reviewer_agent: &AgentType) -> bool {
+    *reviewer_agent == step.agent
+}
+
 async fn resolve_step_connection(
     step: &WorkflowStep,
     catalog_db: Option<&crate::db::Database>,
@@ -1241,6 +1253,8 @@ async fn run_multi_agent_debate(
 
     // A reviewer turn: a synthetic step running the reviewer agent (different
     // family + its own tier), FreeText, no nested debate / on_result.
+    let reviewer_shares_the_step_connection =
+        reviewer_shares_step_connection(step, &cfg.reviewer_agent);
     let reviewer_step = {
         let mut s = step.clone();
         s.agent = cfg.reviewer_agent.clone();
@@ -1252,7 +1266,13 @@ async fn run_multi_agent_debate(
             tier: cfg.reviewer_tier,
             reasoning_effort: None,
             max_tokens: None,
-            connection_id: None,
+            connection_id: reviewer_shares_the_step_connection
+                .then(|| {
+                    step.agent_settings
+                        .as_ref()
+                        .and_then(|settings| settings.connection_id.clone())
+                })
+                .flatten(),
         });
         s
     };
@@ -1286,10 +1306,12 @@ async fn run_multi_agent_debate(
             ollama_context_overrides,
             native_tools.clone(),
             progress_tx,
-            // The reviewer runs on its own `reviewer_agent`, so the step's
-            // connection does not apply to it. A reviewer pointed at a named
-            // connection is a separate gap, not this one.
-            None,
+            // Only when it is the same agent: a reviewer on a DIFFERENT agent
+            // has no connection of its own to name yet, and handing it this
+            // one would point it at an endpoint that does not serve it.
+            reviewer_shares_the_step_connection
+                .then_some(external_http)
+                .flatten(),
         )
         .await?;
         tokens += rev.tokens_used;
@@ -1665,6 +1687,30 @@ mod tests {
     // universe block injected by the runner) and the final prompt the
     // agent sees. A regression here would silently drop the cross-repo
     // evidence the entire 0.8.3 release is built around.
+
+    #[test]
+    fn a_reviewer_on_the_same_agent_speaks_to_the_same_endpoint() {
+        // The author reached the step's named connection while the reviewer
+        // silently fell back to the provider default — same step, two
+        // endpoints, nothing on screen to say so.
+        let step = make_step("anything");
+        assert_eq!(step.agent, crate::models::AgentType::ClaudeCode);
+        assert!(reviewer_shares_step_connection(
+            &step,
+            &crate::models::AgentType::ClaudeCode
+        ));
+    }
+
+    #[test]
+    fn a_reviewer_on_another_agent_never_inherits_the_connection() {
+        // That endpoint does not serve it; a reviewer pointed at a connection
+        // of its own is a separate, still-missing piece of configuration.
+        let step = make_step("anything");
+        assert!(!reviewer_shares_step_connection(
+            &step,
+            &crate::models::AgentType::Codex
+        ));
+    }
 
     fn make_step(prompt_template: &str) -> WorkflowStep {
         // Mirror of `workflows::big_ticket_template::blank_step` —
