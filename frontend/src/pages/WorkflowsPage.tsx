@@ -647,6 +647,10 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
   const detailScrollRef = useRef<HTMLDivElement>(null);
 
   const workflows = useMemo(() => workflowList ?? [], [workflowList]);
+  // KT-561 — a step that names a deleted prompt or API fails on its next run,
+  // not at deletion time; the person deleting would otherwise never learn why.
+  const usageImpact = (count: number, key: 'qp.deleteImpact' | 'qa.deleteImpact') =>
+    count === 0 ? t('automation.deleteImpactNone') : t(key, count);
   // Persist collapse state across reloads — same convention as the
   // discussions sidebar (`kronn:discCollapsedGroups`). Without this the
   // user re-collapses every project group on every nav back to this
@@ -2633,6 +2637,11 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                           confirmLabel={t('automation.deleteConfirmAction')}
                           itemName={wf.name}
                           testId={`wf-delete-${wf.id}`}
+                          impact={async () => {
+                            const runs = await workflowsApi.countRuns(wf.id);
+                            return runs === 0 ? t('automation.deleteImpactNone') : t('wf.deleteImpact', runs);
+                          }}
+                          impactUnknown={t('automation.deleteImpactUnknown')}
                           onError={message => toastProp?.(message, 'error')}
                           onConfirm={() => handleDelete(wf.id)}
                         />
@@ -2924,6 +2933,8 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                             confirmLabel={t('automation.deleteConfirmAction')}
                             itemName={qp.name}
                             testId={`qp-delete-${qp.id}`}
+                            impact={async () => usageImpact(await quickPromptsApi.usage(qp.id), 'qp.deleteImpact')}
+                            impactUnknown={t('automation.deleteImpactUnknown')}
                             onError={message => toastProp?.(message, 'error')}
                             onConfirm={async () => {
                               await quickPromptsApi.delete(qp.id);
@@ -3482,6 +3493,8 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                             confirmLabel={t('automation.deleteConfirmAction')}
                             itemName={qa.name}
                             testId={`qa-delete-${qa.id}`}
+                            impact={async () => usageImpact(await quickApisApi.usage(qa.id), 'qa.deleteImpact')}
+                            impactUnknown={t('automation.deleteImpactUnknown')}
                             onError={message => toastProp?.(message, 'error')}
                             onConfirm={async () => {
                               await quickApisApi.delete(qa.id);
@@ -3888,6 +3901,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                             confirmLabel={t('automation.deleteConfirmAction')}
                             itemName={quickExec.name}
                             testId={`qe-delete-${quickExec.id}`}
+                            impact={() => t('automation.deleteImpactNone')}
                             onError={message => toastProp?.(message, 'error')}
                             onConfirm={async () => {
                               await quickExecsApi.delete(quickExec.id);

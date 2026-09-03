@@ -2394,6 +2394,8 @@ export const quickPrompts = {
   setPinned: (id: string, pinned: boolean) =>
     api<QuickPrompt>('PATCH', `/quick-prompts/${id}`, { pinned }),
   delete: (id: string) => api<void>('DELETE', `/quick-prompts/${id}`),
+  /** Workflow steps that name it — they fail on their next run once it is gone. */
+  usage: (id: string) => api<number>('GET', `/quick-prompts/${id}/usage`),
   /**
    * Create N child discussions from a Quick Prompt + list of rendered prompts.
    * The frontend pre-renders each template (via the existing renderTemplate
@@ -2456,6 +2458,8 @@ export const quickApis = {
   setPinned: (id: string, pinned: boolean) =>
     api<QuickApi>('PATCH', `/quick-apis/${id}`, { pinned }),
   delete: (id: string) => api<void>('DELETE', `/quick-apis/${id}`),
+  /** Workflow steps that name it — they fail on their next run once it is gone. */
+  usage: (id: string) => api<number>('GET', `/quick-apis/${id}/usage`),
   runQa: (id: string, req: RunQuickApiRequest) =>
     api<RunQuickApiResponse>('POST', `/quick-apis/${id}/run`, req),
   batchRunQa: (id: string, req: BatchRunQuickApiRequest) =>

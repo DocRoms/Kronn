@@ -95,4 +95,95 @@ describe('ConfirmDeleteButton', () => {
     await act(async () => { deferred.resolve?.(); });
     expect(button).not.toBeDisabled();
   });
+  // KT-561 DoD 3 — what the deletion takes with it is said while armed, not
+  // discovered after. The four things that matter: it is absent before the
+  // first click, present and announced once armed, still readable when the
+  // count arrives late, and never silently missing when the count fails.
+  describe('impact', () => {
+    function renderWithImpact(
+      impact: () => string | null | Promise<string | null>,
+      impactUnknown?: string,
+    ) {
+      render(
+        <ConfirmDeleteButton
+          onConfirm={vi.fn().mockResolvedValue(undefined)}
+          label="Supprimer"
+          confirmLabel="Confirmer"
+          itemName="Mon workflow"
+          testId="delete-it"
+          impact={impact}
+          impactUnknown={impactUnknown}
+        />,
+      );
+      return screen.getByTestId('delete-it');
+    }
+
+    it('says what goes with the object once armed, and describes the button with it', () => {
+      const button = renderWithImpact(() => '3 exécutions supprimées avec lui');
+      expect(screen.queryByTestId('delete-it-impact')).toBeNull();
+
+      fireEvent.click(button);
+      expect(screen.getByTestId('delete-it-impact'))
+        .toHaveTextContent('3 exécutions supprimées avec lui');
+      expect(button).toHaveAccessibleDescription('3 exécutions supprimées avec lui');
+    });
+
+    it('shows a count that arrives late, and restarts the disarm window for it', async () => {
+      vi.useFakeTimers();
+      try {
+        const button = renderWithImpact(
+          () => new Promise(resolve => { window.setTimeout(() => resolve('12 exécutions'), 4000); }),
+        );
+        fireEvent.click(button);
+        expect(screen.queryByTestId('delete-it-impact')).toBeNull();
+
+        await act(async () => { await vi.advanceTimersByTimeAsync(4000); });
+        expect(screen.getByTestId('delete-it-impact')).toHaveTextContent('12 exécutions');
+
+        // 8 s after arming: the original 5 s window is over, the restarted one is not.
+        await act(async () => { await vi.advanceTimersByTimeAsync(4000); });
+        expect(button).toHaveAttribute('data-armed', 'true');
+        await act(async () => { await vi.advanceTimersByTimeAsync(1500); });
+        expect(button).toHaveAttribute('data-armed', 'false');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('reads as unknown when the count cannot be fetched, never as nothing', async () => {
+      const button = renderWithImpact(
+        () => Promise.reject(new Error('502')),
+        'Impact inconnu',
+      );
+      // The rejection settles in a microtask after the click: same act.
+      await act(async () => { fireEvent.click(button); });
+      expect(screen.getByTestId('delete-it-impact')).toHaveTextContent('Impact inconnu');
+      // The deletion itself is not blocked by an unreadable count.
+      expect(button).toHaveAttribute('data-armed', 'true');
+      expect(button).not.toBeDisabled();
+    });
+
+    it('drops a result that belongs to an earlier arming', async () => {
+      vi.useFakeTimers();
+      try {
+        let calls = 0;
+        const button = renderWithImpact(() => {
+          calls += 1;
+          const text = `arming ${calls}`;
+          return new Promise(resolve => { window.setTimeout(() => resolve(text), calls === 1 ? 7000 : 100); });
+        });
+        fireEvent.click(button);
+        // Disarmed by the timer before the slow first count lands…
+        await act(async () => { await vi.advanceTimersByTimeAsync(5001); });
+        expect(button).toHaveAttribute('data-armed', 'false');
+        // …re-armed, and only the second arming's count may describe it.
+        fireEvent.click(button);
+        await act(async () => { await vi.advanceTimersByTimeAsync(2500); });
+        expect(screen.getByTestId('delete-it-impact')).toHaveTextContent('arming 2');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
+
 });

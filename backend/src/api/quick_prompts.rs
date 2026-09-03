@@ -207,6 +207,24 @@ pub async fn delete(
     }
 }
 
+/// GET /api/quick-prompts/:id/usage
+///
+/// How many workflow steps name it — said before a deletion is confirmed,
+/// because those steps fail on their next run, not at deletion time.
+pub async fn usage(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Json<ApiResponse<u32>> {
+    match state
+        .db
+        .with_read_conn(move |conn| crate::db::quick_prompts::count_workflow_step_usage(conn, &id))
+        .await
+    {
+        Ok(count) => Json(ApiResponse::ok(count)),
+        Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
+    }
+}
+
 /// GET /api/quick-prompts/:id/history
 ///
 /// 0.8.5 — returns the full version snapshot list for a QP, newest

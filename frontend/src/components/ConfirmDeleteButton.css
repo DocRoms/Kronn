@@ -19,3 +19,10 @@
   color: var(--kr-error);
   font-size: var(--kr-fs-xs);
 }
+
+/* What the deletion takes with it, read while armed — information, not alarm. */
+.kr-confirm-delete-impact {
+  color: var(--kr-text-muted);
+  font-size: var(--kr-fs-xs);
+  white-space: nowrap;
+}

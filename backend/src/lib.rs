@@ -1518,6 +1518,11 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             "/api/quick-prompts/{id}/history",
             get(api::quick_prompts::history),
         )
+        // KT-561 — how many workflow steps name it, said before a deletion.
+        .route(
+            "/api/quick-prompts/{id}/usage",
+            get(api::quick_prompts::usage),
+        )
         .route(
             "/api/quick-prompts/{id}/metrics",
             get(api::quick_prompts::metrics),
@@ -1557,6 +1562,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route(
             "/api/quick-apis/{id}/export",
             get(api::quick_apis::export_qa),
+        )
+        .route(
+            "/api/quick-apis/{id}/usage",
+            get(api::quick_apis::usage),
         )
         .route("/api/quick-apis/import", post(api::quick_apis::import_qa))
         // ── Quick Execs (reusable shell-free CLI collectors) ──

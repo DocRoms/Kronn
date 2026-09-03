@@ -13,6 +13,15 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Added
 
+- Workflows, quick prompts, quick APIs and quick execs can be deleted from
+  their own row — armed by a first click, done by a second, never before the
+  server confirmed — and several at once from the sidebar selection. While
+  armed, the control says what goes with it: the past runs a workflow takes
+  along (their discussions stay), the workflow steps a prompt or an API is
+  used by (they fail on their next run), or that nothing else is touched. A
+  count that cannot be read says so, instead of reading as nothing.
+- A clip's last frame can be kept as an asset of its own, decoded server-side
+  by the one decoder able to read it, with a link back to the clip it came from.
 - Image and video generation on HTTP connections (LiteLLM, NVIDIA, OpenRouter).
   Media models are configured as their own slots on a connection — modalities,
   not quality tiers — so a text step can never select "tier Image". A
@@ -125,6 +134,9 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- A prompt's version history no longer outlives the prompt it belongs to.
+- A clip stored as `text/plain` by its provider still plays as a clip.
+- Batch steps stop accepting a per-item prompt that nothing ever read.
 - The agent bootstrap (`docs/AGENTS.md`) is back under its context ceiling
   without the ceiling moving. The 716 bytes over were exactly what 0.13.0 had
   added: two verbose rows in the task router and a section holding a single
