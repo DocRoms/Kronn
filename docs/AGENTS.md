@@ -80,7 +80,7 @@ Full spec: [`docs/conventions/agents-md-format-v1.md`](conventions/agents-md-for
 | Secret themes / unlock features | `docs/operations/secret-themes.md` |
 | **Désagentification / `ApiCall` step** | `docs/operations/deagent-apicall.md` |
 | **Ollama local models** (offload, `num_ctx`, quality escalation) | `docs/operations/ollama-local-models.md` |
-| **ACP adapters / agent transport toggles** | `docs/operations/acp-adapters.md`, `docs/design/adr-003-acp-control-plane.md` |
+| **ACP adapters / agent transport toggles** | `docs/operations/acp-adapters.md`, `docs/operations/agents-v2-matrix.md`, `docs/design/adr-003-acp-control-plane.md` |
 | **HTTP model-provider transport** (LiteLLM / NVIDIA / Custom) | `docs/operations/http-transport.md`, `docs/design/adr-004-http-transport.md` |
 | **Media generation** (image / video — billable, read first) | `docs/architecture/media-generation.md` |
 | Token cost | `docs/operations/token-economy-0.9.6.md` |
