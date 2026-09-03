@@ -3116,7 +3116,7 @@ const zh: TranslationDict = {
   "qp.agentBadgeTooltip": "QP 绑定至 {0} 代理",
   "qp.agentSwitchLabel": "更改 QP“{0}”的代理或 AI 模式（当前代理：{1}）",
   "qp.agentChanged": "QP “{0}” 的代理已更改为 {1} — AI 层级已保留。",
-  "qp.compareAgents.button": "跨 {0} 个已安装代理对比",
+  "qp.compareAgents.button": "跨 {0} 个目标对比",
   "qp.compareAgents.short": "对比",
   "qp.compareAgents.tooltip": "在 {0} 个代理/模型目标上运行此 QP — 每个结果保留其讨论并显示在比较工作区中。",
   "qp.compareAgents.cta": "对比 ({0})",

@@ -6,7 +6,8 @@
  * 1. The 🤝 icon button opens the launch form (even on a no-variable QP).
  * 2. The chip selector renders one chip per installed agent, all
  *    pre-selected (aria-pressed=true).
- * 3. The 🤝 Compare CTA's count matches the installed-agent count.
+ * 3. The 🤝 Compare CTA's count matches the TARGET count — installed agents
+ *    plus named HTTP connections, which is what the CTA offers since KT-545.
  * 4. Clicking the CTA fires `POST /api/quick-prompts/:id/compare-agents`
  *    with the FULL agent+model target array (not just the QP's default agent).
  * 5. The backend returns N child discussion ids — one per agent.
@@ -85,6 +86,41 @@ async function discoverInstalledAgents(request: APIRequestContext): Promise<stri
     .map(a => a.agent_type);
 }
 
+/**
+ * Named HTTP connections that the compare CTA counts alongside installed
+ * agents. Mirrors `externalAgentTargets` (frontend/src/lib/externalAgentIdentity.ts):
+ * an OpenRouter/Other preset with an endpoint and at least one model.
+ *
+ * Counting only installed agents is what made this spec fail once KT-545 made
+ * comparison connection-aware: the CTA said 9, the spec expected 8, and the
+ * spec was the one describing an older product.
+ */
+async function discoverExternalTargets(request: APIRequestContext): Promise<string[]> {
+  const r = await request.get('/api/external-api-connections');
+  if (!r.ok()) return [];
+  let parsed: {
+    data?: Array<{
+      id: string;
+      origin_preset?: string;
+      endpoint?: string | null;
+      economy_model?: string | null;
+      default_model?: string | null;
+      reasoning_model?: string | null;
+    }>;
+  };
+  try {
+    parsed = JSON.parse(await r.text());
+  } catch {
+    return [];
+  }
+  return (parsed.data ?? [])
+    .filter(c =>
+      (c.origin_preset === 'open_router' || c.origin_preset === 'other')
+      && Boolean(c.endpoint)
+      && Boolean(c.economy_model || c.default_model || c.reasoning_model))
+    .map(c => c.id);
+}
+
 test.describe('Compare-agents — chip selector + multi-disc fan-out (UI level)', () => {
   let qpId: string | null = null;
   let runId: string | null = null;
@@ -108,7 +144,11 @@ test.describe('Compare-agents — chip selector + multi-disc fan-out (UI level)'
 
   test('🤝 button opens the form, chips render all installed agents, CTA fires N-disc batch and siblings appear in sidebar', async ({ page, request }) => {
     const agents = await discoverInstalledAgents(request);
-    test.skip(agents.length < 2, `Need ≥ 2 installed agents (have ${agents.length})`);
+    // The CTA counts agent × connection TARGETS, not installed agents alone —
+    // that is what KT-545 made comparable. Count the same union it does.
+    const externalTargets = await discoverExternalTargets(request);
+    const targetCount = agents.length + externalTargets.length;
+    test.skip(targetCount < 2, `Need ≥ 2 compare targets (have ${targetCount})`);
 
     const qp = await createQp(request, agents[0]);
     qpId = qp.id;
@@ -152,7 +192,7 @@ test.describe('Compare-agents — chip selector + multi-disc fan-out (UI level)'
 
     // CTA shows the dynamic count.
     const cta = qpRow.locator('[data-testid="qp-compare-agents-launch"]');
-    await expect(cta).toContainText(String(agents.length));
+    await expect(cta).toContainText(String(targetCount));
 
     // Fire the launch.
     await cta.click();
@@ -162,14 +202,14 @@ test.describe('Compare-agents — chip selector + multi-disc fan-out (UI level)'
     const j = await resp.json();
     expect(j?.success).toBe(true);
     runId = j.data.run_id as string;
-    expect(j.data.batch_total).toBe(agents.length);
-    expect(j.data.discussion_ids).toHaveLength(agents.length);
+    expect(j.data.batch_total).toBe(targetCount);
+    expect(j.data.discussion_ids).toHaveLength(targetCount);
 
     // The UI must attempt every child run, but this E2E must never spend tokens.
     // Browser routing above records and answers those requests locally.
     const expectedRunPaths = (j.data.discussion_ids as string[])
       .map(discussionId => `/api/discussions/${discussionId}/run`);
-    await expect.poll(() => triggeredRunPaths, { timeout: 5_000 }).toHaveLength(agents.length);
+    await expect.poll(() => triggeredRunPaths, { timeout: 5_000 }).toHaveLength(targetCount);
     expect(triggeredRunPaths).toEqual(expect.arrayContaining(expectedRunPaths));
 
     // Inspect the current request contract. Compare targets now carry both
@@ -180,8 +220,8 @@ test.describe('Compare-agents — chip selector + multi-disc fan-out (UI level)'
     const req = await comparePromise;
     const sentBody = req.postDataJSON();
     const targets = sentBody?.targets as Array<{ agent: string; tier: string }> | undefined;
-    expect(targets, `payload.targets should contain all ${agents.length} agents`).toBeDefined();
-    expect(targets).toHaveLength(agents.length);
+    expect(targets, `payload.targets should contain all ${targetCount} targets`).toBeDefined();
+    expect(targets).toHaveLength(targetCount);
     expect(targets?.map(target => target.agent)).toEqual(expect.arrayContaining(agents));
     expect(targets?.every(target => target.tier === 'default')).toBe(true);
 
@@ -197,7 +237,7 @@ test.describe('Compare-agents — chip selector + multi-disc fan-out (UI level)'
       discAgents.add(dj.data.agent as string);
       discTitles.push(dj.data.title as string);
     }
-    expect(discAgents.size).toBe(agents.length);
+    expect(discAgents.size).toBe(targetCount);
 
     // Sidebar visibility — landing on the first child disc mounts the
     // DiscussionSidebar. The user-reported "only 1 conversation

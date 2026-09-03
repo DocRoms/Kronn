@@ -3176,7 +3176,7 @@ const fr: TranslationDict = {
   'qp.agentBadgeTooltip': 'QP lié à l\'agent {0}',
   'qp.agentSwitchLabel': 'Changer l\'agent ou le mode IA du QP « {0} » (actuellement {1})',
   'qp.agentChanged': 'Agent du QP « {0} » changé pour {1} — palier IA conservé.',
-  'qp.compareAgents.button': 'Comparer sur {0} agents installés',
+  'qp.compareAgents.button': 'Comparer sur {0} cibles',
   'qp.compareAgents.short': 'Comparer',
   'qp.compareAgents.tooltip': 'Lance ce QP sur {0} cibles agent/modèle — chaque résultat garde sa discussion et s’affiche dans le comparateur.',
   'qp.compareAgents.cta': 'Comparer ({0})',
