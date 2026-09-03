@@ -91,4 +91,85 @@ describe('SearchableSelect', () => {
     expect(input.closest('.searchable-select')).toHaveAttribute('data-placement', 'top');
     rectSpy.mockRestore();
   });
+
+  it('offers no free-text entry unless allowCustomValue is set (KT-531)', () => {
+    const onChange = vi.fn();
+    render(
+      <SearchableSelect
+        {...baseProps}
+        value=""
+        options={[{ value: 'known-model', label: 'Known model' }]}
+        onChange={onChange}
+      />,
+    );
+
+    const input = screen.getByRole('combobox', { name: 'Model' });
+    fireEvent.focus(input);
+    fireEvent.change(input, { target: { value: 'unlisted-model' } });
+
+    expect(screen.queryByRole('option', { name: 'unlisted-model' })).toBeNull();
+    fireEvent.keyDown(input, { key: 'Enter' });
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it('lets a typed id that matches nothing be confirmed via Enter (KT-531 unknown modality)', () => {
+    const onChange = vi.fn();
+    render(
+      <SearchableSelect
+        {...baseProps}
+        value=""
+        options={[{ value: 'known-model', label: 'Known model' }]}
+        onChange={onChange}
+        allowCustomValue
+        customValueHint="Not verified"
+      />,
+    );
+
+    const input = screen.getByRole('combobox', { name: 'Model' });
+    fireEvent.focus(input);
+    fireEvent.change(input, { target: { value: 'nvidia/unlisted-model' } });
+
+    const custom = screen.getByRole('option', { name: 'nvidia/unlisted-model — Not verified' });
+    expect(custom).toHaveAttribute('data-custom', 'true');
+    fireEvent.keyDown(input, { key: 'Enter' });
+    expect(onChange).toHaveBeenCalledWith('nvidia/unlisted-model');
+  });
+
+  it('lets a typed id that matches nothing be confirmed via click', () => {
+    const onChange = vi.fn();
+    render(
+      <SearchableSelect
+        {...baseProps}
+        value=""
+        options={[{ value: 'known-model', label: 'Known model' }]}
+        onChange={onChange}
+        allowCustomValue
+      />,
+    );
+
+    const input = screen.getByRole('combobox', { name: 'Model' });
+    fireEvent.focus(input);
+    fireEvent.change(input, { target: { value: 'custom-id' } });
+    fireEvent.click(screen.getByRole('option', { name: 'custom-id' }));
+
+    expect(onChange).toHaveBeenCalledWith('custom-id');
+  });
+
+  it('does not duplicate an existing option as a free-text entry', () => {
+    render(
+      <SearchableSelect
+        {...baseProps}
+        value=""
+        options={[{ value: 'known-model', label: 'Known model' }]}
+        onChange={vi.fn()}
+        allowCustomValue
+      />,
+    );
+
+    const input = screen.getByRole('combobox', { name: 'Model' });
+    fireEvent.focus(input);
+    fireEvent.change(input, { target: { value: 'Known model' } });
+
+    expect(screen.getAllByRole('option')).toHaveLength(1);
+  });
 });

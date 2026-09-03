@@ -610,14 +610,34 @@ const MIGRATIONS: &[(&str, &str)] = &[
         include_str!("sql/161_acp_runtime_sessions.sql"),
     ),
     (
-        // KT-538 owns 160 and KT-542 owns 161 on the integration branch.
+        // KT-538 owns 160 and KT-542 owns 161 on the integration branch;
+        // KT-531 owns 162.
         "162_model_catalog",
         include_str!("sql/162_model_catalog.sql"),
     ),
     (
-        // 163 reserved for a concurrent KT-368 lot on the integration branch.
+        "163_delivery_summaries",
+        include_str!("sql/163_delivery_summaries.sql"),
+    ),
+    (
         "164_model_catalog_cost_privacy",
         include_str!("sql/164_model_catalog_cost_privacy.sql"),
+    ),
+    (
+        "165_context_file_extracted_from",
+        include_str!("sql/165_context_file_extracted_from.sql"),
+    ),
+    (
+        // KT-545 was authored against 165, which KT-556 had already taken and
+        // applied. A number that has run somewhere cannot be reused: the
+        // receipt is keyed by name, so the same ALTER would be replayed on a
+        // base that already has the column.
+        "166_discussion_connection_id",
+        include_str!("sql/166_discussion_connection_id.sql"),
+    ),
+    (
+        "167_acp_session_last_seen",
+        include_str!("sql/167_acp_session_last_seen.sql"),
     ),
 ];
 
@@ -931,6 +951,47 @@ mod tests {
     }
 
     #[test]
+    fn migration_165_installs_the_discussion_connection_column() {
+        let conn = Connection::open_in_memory().unwrap();
+        let migration_index = MIGRATIONS
+            .iter()
+            .position(|(name, _)| *name == "166_discussion_connection_id")
+            .unwrap();
+        let previous_migration = MIGRATIONS[migration_index - 1].0;
+        run_through(&conn, previous_migration).unwrap();
+        let has_column_before = |conn: &Connection| -> bool {
+            conn.prepare("SELECT connection_id FROM discussions LIMIT 1")
+                .is_ok()
+        };
+        assert!(!has_column_before(&conn));
+
+        run(&conn).unwrap();
+
+        assert!(has_column_before(&conn));
+        let receipt_exists: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM _migrations WHERE name = '166_discussion_connection_id')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(receipt_exists);
+
+        // KT-545 DoD #5 — a second full migration pass (backend restart) must
+        // be a true no-op: no duplicate-column error, no second receipt row,
+        // no error at all.
+        run(&conn).unwrap();
+        let receipt_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM _migrations WHERE name = '166_discussion_connection_id'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(receipt_count, 1, "restart must not duplicate the receipt");
+    }
+
+    #[test]
     fn model_catalog_upgrades_from_its_immediate_predecessor() {
         let conn = Connection::open_in_memory().unwrap();
         let model_catalog_index = MIGRATIONS
@@ -967,17 +1028,83 @@ mod tests {
     }
 
     #[test]
+    fn extracted_from_upgrades_a_base_that_already_holds_context_files() {
+        // The column carries provenance for pictures taken out of a clip. An
+        // existing base must gain it without losing a row: every file recorded
+        // before simply has no source, which is the truth about it.
+        let conn = Connection::open_in_memory().unwrap();
+        let index = MIGRATIONS
+            .iter()
+            .position(|(name, _)| *name == "165_context_file_extracted_from")
+            .expect("extracted-from migration is registered");
+        let predecessor = MIGRATIONS
+            .get(index.saturating_sub(1))
+            .expect("extracted-from migration has a predecessor")
+            .0;
+        run_through(&conn, predecessor).unwrap();
+        conn.execute(
+            "INSERT INTO discussions (id, title, created_at, updated_at)
+             VALUES ('d-1', 'x', '2026-09-02 10:00:00', '2026-09-02 10:00:00')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO context_files
+                (id, discussion_id, filename, mime_type, original_size,
+                 extracted_size, extracted_text, disk_path, created_at)
+             VALUES ('cf-1', 'd-1', 'a.png', 'image/png', 10, 0, '', '/tmp/a.png',
+                     '2026-09-02 10:00:00')",
+            [],
+        )
+        .unwrap();
+        let column_exists = || -> bool {
+            conn.query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('context_files')
+                 WHERE name = 'extracted_from_asset_id'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        assert!(!column_exists());
+
+        run(&conn).unwrap();
+
+        assert!(column_exists());
+        let (kept, source): (i64, Option<String>) = conn
+            .query_row(
+                "SELECT COUNT(*), MAX(extracted_from_asset_id) FROM context_files",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(kept, 1, "the existing file survives the upgrade");
+        assert_eq!(source, None, "a file recorded before has no source");
+    }
+
+    #[test]
     fn model_catalog_cost_privacy_upgrades_from_162_model_catalog() {
         let conn = Connection::open_in_memory().unwrap();
         let index = MIGRATIONS
             .iter()
             .position(|(name, _)| *name == "164_model_catalog_cost_privacy")
             .expect("cost/privacy overlay migration is registered");
+        // What this pins is that the overlay lands on the state 162 leaves,
+        // NOT that the two are adjacent: a migration merged from another
+        // branch can slot in between them, and did (163). Asserting adjacency
+        // made that harmless insertion look like a broken upgrade path.
+        let base = MIGRATIONS
+            .iter()
+            .position(|(name, _)| *name == "162_model_catalog")
+            .expect("the catalogue migration the overlay extends is registered");
+        assert!(
+            base < index,
+            "the overlay must come after the catalogue it extends"
+        );
         let predecessor = MIGRATIONS
             .get(index.saturating_sub(1))
             .expect("cost/privacy overlay migration has a predecessor")
             .0;
-        assert_eq!(predecessor, "162_model_catalog");
         run_through(&conn, predecessor).unwrap();
         let column_exists = |name: &str| -> bool {
             conn.query_row(

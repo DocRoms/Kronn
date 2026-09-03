@@ -33,6 +33,14 @@ pub struct ActiveAgentDispatch {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub connection_id: Option<String>,
+    /// What this dispatch is doing right now — `upstream_wait` while it queues
+    /// behind another run, `tool_activity` while a tool is executing. Recorded
+    /// durably since 0.9.x but never surfaced, so a turn queued behind a
+    /// neighbour looked identical to one that had simply stalled: issue 202
+    /// clocked 54 s and 2 min 37 of invisible waiting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub progress_phase: Option<String>,
 }
 
 /// Durable snapshot of the text already emitted by an in-flight agent.
@@ -75,6 +83,12 @@ pub struct DiscussionDetail {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub partial_response: Option<InFlightAgentResponse>,
+    /// Who an ordinary turn — one naming nobody — actually reaches, resolved
+    /// by the same rule the router uses. The UI cannot derive it: a discussion
+    /// keeps its `agent` even when the native responder is switched off, so
+    /// reading that field alone announces a destination that receives nothing.
+    #[serde(default)]
+    pub default_targets: Vec<MessageTarget>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -84,6 +98,13 @@ pub struct Discussion {
     pub project_id: Option<String>,
     pub title: String,
     pub agent: AgentType,
+    /// Named HTTP connection backing `agent` when it is `Custom` (or an
+    /// explicit LiteLLM/NVIDIA connection). This is the durable "sticky"
+    /// target an ordinary reply with no explicit @mention resolves to —
+    /// without it, `canonical_targets`'s implicit discussion-agent routing
+    /// has no connection to dispatch through (KT-545 DoD #4).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection_id: Option<String>,
     pub language: String,
     pub participants: Vec<AgentType>,
     pub messages: Vec<DiscussionMessage>,
@@ -298,74 +319,30 @@ pub struct DiscussionMessage {
     pub author_cli_ordinal: Option<i64>,
 }
 
-/// Per-discussion summary strategy. Pre-fix the auto-summary loop fired
-/// after every agent reply once a per-agent threshold was crossed (12/8/4
-/// non-system messages). For big-context models or short threads that's
-/// often a waste — user feedback on 2026-05-09 asked for an off switch.
+/// Per-discussion summary strategy.
 ///
-/// `OnDemand` is reserved for the future kronn-internal MCP tool surface
-/// (`disc_summarize` callable by the agent itself); for now it behaves
-/// like `Off` from the auto-fire perspective and only differs in that we
-/// keep the cache mechanism alive so an explicit summarize call updates
-/// `summary_cache`.
+/// There is no automatic summary any more. It used to fire after every reply
+/// past a per-agent threshold, and it had been dead in practice for a while:
+/// the global default was `Off`, which acted as a master kill-switch, so a
+/// discussion displaying `Auto` never summarised. Removed in 0.13.0 rather
+/// than repaired — every runtime can now read the thread back itself
+/// (`disc_read` over MCP or as a declared tool), which is cheaper and more
+/// precise than a summary generated in advance for a need nobody expressed.
+///
+/// `OnDemand` keeps the cache alive so an explicit `disc_summarize` call —
+/// from the agent or from a human reopening a long room — writes into it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub enum SummaryStrategy {
-    /// Fire after every reply when the per-agent threshold is crossed.
-    /// Default for backward compatibility.
+    /// Summarise only when asked, through `disc_summarize`. The default:
+    /// rows written as `Auto` before 0.13.0 read back as this.
     #[default]
-    Auto,
-    /// No auto-fire. Reserved for the planned introspection tool surface
-    /// where the agent decides if/when to summarise.
     OnDemand,
     /// Never summarise. The agent receives the raw transcript until its
     /// context window saturates. Suitable for big-context models on
     /// short-to-medium threads, or when token cost matters more than
     /// context completeness.
     Off,
-}
-
-impl SummaryStrategy {
-    /// Whether the background auto-summary should fire, given the GLOBAL default
-    /// (`ServerConfig::default_summary_strategy`, the Settings toggle) and THIS
-    /// disc's stored strategy.
-    ///
-    /// The global `Off` is a **master kill-switch**: turning auto-summary off in
-    /// Settings suppresses it everywhere, including older discs whose per-disc
-    /// strategy was frozen to `Auto` at creation (the global default is only
-    /// applied to NEW discs, so changing it never rewrote existing rows — the
-    /// "I disabled it but long discs keep summarising" bug). Otherwise the
-    /// per-disc strategy decides, and only `Auto` auto-fires.
-    pub fn auto_fires(global_default: SummaryStrategy, disc: SummaryStrategy) -> bool {
-        if matches!(global_default, SummaryStrategy::Off) {
-            return false;
-        }
-        matches!(disc, SummaryStrategy::Auto)
-    }
-}
-
-#[cfg(test)]
-mod summary_strategy_tests {
-    use super::SummaryStrategy;
-    use super::SummaryStrategy::{Auto, Off, OnDemand};
-
-    #[test]
-    fn global_off_is_a_master_kill_switch() {
-        // The reported bug: global Off must suppress even an old disc frozen to Auto.
-        assert!(!SummaryStrategy::auto_fires(Off, Auto));
-        assert!(!SummaryStrategy::auto_fires(Off, OnDemand));
-        assert!(!SummaryStrategy::auto_fires(Off, Off));
-    }
-
-    #[test]
-    fn per_disc_decides_when_global_is_not_off() {
-        // Global Auto (or OnDemand) → the per-disc strategy is honoured.
-        assert!(SummaryStrategy::auto_fires(Auto, Auto));
-        assert!(!SummaryStrategy::auto_fires(Auto, Off));
-        assert!(!SummaryStrategy::auto_fires(Auto, OnDemand));
-        assert!(SummaryStrategy::auto_fires(OnDemand, Auto));
-        assert!(!SummaryStrategy::auto_fires(OnDemand, Off));
-    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -395,6 +372,11 @@ pub struct CreateDiscussionRequest {
     pub project_id: Option<String>,
     pub title: String,
     pub agent: AgentType,
+    /// Named connection backing `agent` (KT-545) — persisted as the
+    /// discussion's sticky target so ordinary replies with no explicit
+    /// @mention keep dispatching through the same connection.
+    #[serde(default)]
+    pub connection_id: Option<String>,
     #[serde(default = "super::setup::default_language")]
     pub language: String,
     pub initial_prompt: String,
@@ -451,6 +433,12 @@ pub struct UpdateDiscussionRequest {
     /// Switch the primary agent for this discussion.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<AgentType>,
+    /// Change the sticky named connection (KT-545). `Some(Some("id"))` = set,
+    /// `Some(None)` = clear, absent = no change — same convention as
+    /// `project_id`. Validated against `agent` (post-update if both are
+    /// present in the same request).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection_id: Option<Option<String>>,
     /// Change the auto-summary policy. Persists in `discussions.summary_strategy`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary_strategy: Option<SummaryStrategy>,
@@ -690,10 +678,22 @@ pub struct ShareDiscussionRequest {
     pub contact_ids: Vec<String>,
 }
 
+/// One orchestration/debate participant. `connection_id` disambiguates
+/// between named HTTP connections that share `AgentType::Custom` (KT-545
+/// DoD #4) — without it, two different "Custom" connections in the same
+/// debate would be indistinguishable.
+#[derive(Debug, Clone, Deserialize, TS)]
+#[ts(export)]
+pub struct OrchestrationParticipant {
+    pub agent_type: AgentType,
+    #[serde(default)]
+    pub connection_id: Option<String>,
+}
+
 #[derive(Debug, Deserialize, TS)]
 #[ts(export)]
 pub struct OrchestrationRequest {
-    pub agents: Vec<AgentType>,
+    pub agents: Vec<OrchestrationParticipant>,
     pub max_rounds: Option<u32>,
     #[serde(default)]
     pub skill_ids: Vec<String>,

@@ -4056,6 +4056,9 @@ async fn decide_authorized_review(
             .await
             .map_err(|error| ProvisionError::Internal(error.to_string()))?;
         return if approved {
+            // The report is derived here too: a crash between the approval and
+            // its publication must be repaired by the retry, not left silent.
+            publish_accepted_delivery_or_warn(db, &exec).await;
             Ok(ReviewOutcome::Reviewed {
                 verdict: ReviewVerdict::Approve,
                 execution: exec,
@@ -4234,6 +4237,9 @@ async fn decide_authorized_review(
                 })
                 .await
                 .map_err(|e| ProvisionError::Internal(e.to_string()))?;
+            if decision.decision == ReviewVerdict::Approve {
+                publish_accepted_delivery_or_warn(db, &execution).await;
+            }
             Ok(ReviewOutcome::Reviewed {
                 verdict: decision.decision,
                 execution,
@@ -4341,6 +4347,33 @@ fn enqueue_approved_integration(state: &AppState, outcome: ReviewOutcome) -> Rev
 /// from the delivered `head_sha`. Both shas pass through `resolve_commit`, so an abbreviated
 /// delivered sha and the full worktree HEAD compare equal — the abbreviated case never
 /// false-refuses (the one case that distinguishes normalization from a raw string compare).
+/// Publish the accepted report, logging rather than failing.
+///
+/// The approval is already durable when this runs. Turning a publication
+/// failure into an error would refuse an approval that HAPPENED, and invite a
+/// retry that the checkpoint would then reject. The record is idempotent and
+/// self-repairing, so the next approve replay finishes the job.
+async fn publish_accepted_delivery_or_warn(db: &Database, execution: &TaskExecution) {
+    match crate::api::delivery_publication::publish_accepted_delivery(db, execution).await {
+        Ok(Some(outcome)) => tracing::info!(
+            execution = %execution.id,
+            attempt = execution.attempt_no,
+            ?outcome,
+            "accepted delivery report published"
+        ),
+        Ok(None) => tracing::debug!(
+            execution = %execution.id,
+            "approved execution carries no manifest — nothing to report"
+        ),
+        Err(error) => tracing::warn!(
+            execution = %execution.id,
+            attempt = execution.attempt_no,
+            error = %error,
+            "accepted delivery report not published — a later approve replay repairs it"
+        ),
+    }
+}
+
 async fn approve_guards(
     db: &Database,
     exec: &TaskExecution,
@@ -4938,6 +4971,10 @@ fn worker_target_from_execution(execution: &TaskExecution) -> Result<MessageTarg
 fn build_sub_discussion(prepared: &Prepared, worker: &MessageTarget) -> Discussion {
     let now = chrono::Utc::now();
     Discussion {
+        // KT-545 — the delegated worker's own resolved connection, so a
+        // sub-discussion routed to a named HTTP connection keeps resolving
+        // through it on any turn beyond the initial brief.
+        connection_id: worker.connection_id.clone(),
         awaiting_agent: false,
         agent_running: false,
         id: Uuid::new_v4().to_string(),
@@ -10351,6 +10388,7 @@ mod tests {
     fn plain_discussion(id: &str, project_id: &str) -> Discussion {
         let now = chrono::Utc::now();
         Discussion {
+            connection_id: None,
             awaiting_agent: false,
             agent_running: false,
             id: id.into(),
@@ -16427,6 +16465,94 @@ mod tests {
             }
         ));
         assert!(review_row(&db, &exec_id).await.is_none());
+    }
+
+    /// KT-544: approving a delivery must leave exactly ONE derived report in
+    /// the parent discussion, and a replayed approval must not add a second.
+    #[tokio::test]
+    async fn approving_a_delivery_publishes_one_derived_report_in_the_parent() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (parent, _child, exec_id, _head, _path) =
+            delivered_awaiting_review(&db, repo.path()).await;
+
+        let approve = review_approve(&db, &exec_id).await;
+        let outcome = decide_review(&db, &exec_id, &approve, "ClaudeCode", "sess-b")
+            .await
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            ReviewOutcome::Reviewed {
+                verdict: ReviewVerdict::Approve,
+                ..
+            }
+        ));
+
+        let attempt_no = exec_of(&db, &exec_id).await.attempt_no;
+        let report_id = crate::db::delivery_summaries::message_id_for(&exec_id, attempt_no);
+
+        let report = {
+            let (report_id, parent) = (report_id.clone(), parent.clone());
+            db.with_conn(move |conn| {
+                Ok(conn
+                    .query_row(
+                        "SELECT content FROM messages WHERE id = ?1 AND discussion_id = ?2",
+                        rusqlite::params![report_id, parent],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .optional()?)
+            })
+            .await
+            .unwrap()
+        };
+        let report = report.expect("the accepted delivery is reported in the parent discussion");
+        // Kronn owns the layout: fixed heading and section order, whatever the
+        // worker wrote in its manifest.
+        assert!(report.starts_with("## ✅ Delivery accepted —"), "{report}");
+        assert!(report.contains("### Changes"), "{report}");
+        assert!(report.contains("### Validations"), "{report}");
+        assert!(report.contains("schema delivery_summary/v1"), "{report}");
+
+        // The record exists and is the canonical payload.
+        let stored = {
+            let exec_id = exec_id.clone();
+            db.with_conn(move |conn| {
+                crate::db::delivery_summaries::get(conn, &exec_id, attempt_no)
+            })
+            .await
+            .unwrap()
+        };
+        let stored = stored.expect("the report is backed by a persisted record");
+        assert_eq!(
+            stored.correlation_id,
+            format!("orch-delivery:{exec_id}:{attempt_no}")
+        );
+
+        // Replay: the same approval must consume the existing checkpoint and
+        // republish nothing.
+        let replayed = decide_review(&db, &exec_id, &approve, "ClaudeCode", "sess-b")
+            .await
+            .unwrap();
+        assert!(matches!(
+            replayed,
+            ReviewOutcome::Reviewed {
+                verdict: ReviewVerdict::Approve,
+                ..
+            }
+        ));
+        let count = {
+            let parent = parent.clone();
+            db.with_conn(move |conn| {
+                Ok(conn.query_row(
+                    "SELECT COUNT(*) FROM messages WHERE discussion_id = ?1 AND content LIKE '## ✅ Delivery accepted%'",
+                    [parent],
+                    |row| row.get::<_, i64>(0),
+                )?)
+            })
+            .await
+            .unwrap()
+        };
+        assert_eq!(count, 1, "a replayed approval must not add a second report");
     }
 
     /// KT-388: the transport boundary must consume the durable Approved

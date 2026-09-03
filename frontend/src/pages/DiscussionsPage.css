@@ -3567,6 +3567,19 @@ button.disc-contact-open {
 .disc-media-msg-header svg { flex: 0 0 auto; margin-top: 2px; color: var(--kr-accent); }
 .disc-media-msg-open { margin-top: 8px; }
 
+/* The produced media, shown where it was asked for. Height-capped so a
+   portrait clip cannot push the rest of the transcript off-screen. */
+.disc-media-msg-preview { margin-top: 10px; }
+.disc-media-msg-preview img,
+.disc-media-msg-preview video {
+  display: block;
+  width: 100%;
+  max-height: 420px;
+  object-fit: contain;
+  border-radius: var(--kr-r-md);
+  background: var(--kr-bg-subtle);
+}
+
 .disc-msg-bubble-full {
   width: 100%;
   max-width: none;
@@ -7845,4 +7858,39 @@ button.disc-contact-open {
   font-size: var(--kr-fs-2xs);
   color: var(--kr-text-dim);
   user-select: all;
+}
+
+/* What a clip was built on, stated where the clip is. */
+.disc-media-msg-source {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 8px 0 0;
+  color: var(--kr-text-muted);
+  font-size: var(--kr-fs-xs);
+}
+.disc-media-msg-source-open {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--kr-accent);
+  font-size: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+/* Deleting removes bytes from disk, so the second step says so in colour. */
+.disc-image-lightbox-danger {
+  width: auto;
+  padding: 0 10px;
+  border-color: var(--kr-error);
+  color: var(--kr-error);
+  font-size: var(--kr-fs-xs);
+  font-weight: 700;
+  white-space: nowrap;
+}
+.disc-image-lightbox-error {
+  margin: 6px 0 0;
+  color: var(--kr-error);
+  font-size: var(--kr-fs-xs);
 }

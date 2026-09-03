@@ -709,14 +709,18 @@ pub fn claim_launch(
         finished_at: action.finished_at.clone(),
         updated_at: action.updated_at.clone(),
     };
+    let target_still_exists =
+        target_contract(&transaction, action.kind, &action.target_id)?.is_some();
     let claimed_variables = kronn_action_engine::claim_launch(
         &transaction,
         kronn_action_engine::ActionTable::Discussion,
         &mut core,
         supplied,
+        target_still_exists,
     )?;
     action.state = core.state;
     action.values = core.values;
+    action.diagnostic = core.diagnostic;
     action.launched_at = core.launched_at;
     action.updated_at = core.updated_at;
     transaction.commit()?;
@@ -937,6 +941,148 @@ mod tests {
         let action = get(&conn, "action:msg-2:0").unwrap().unwrap();
         assert_eq!(action.state, DiscussionActionState::PreflightFailed);
         assert!(action.diagnostic.unwrap().contains("n’existe plus"));
+    }
+
+    #[test]
+    fn a_required_variable_left_empty_stops_the_launch_instead_of_running_short() {
+        // The human clicks without filling a required field. Launching anyway
+        // would run the command with a hole in it.
+        let conn = connection();
+        insert_target(&conn);
+        let content = r#"```kronn-action
+{"kind":"quick_exec","target_id":"qe-1"}
+```"#;
+        insert_message_row(&conn, "msg-missing", content);
+        ingest_message_actions(&conn, "disc-1", "msg-missing", content).unwrap();
+
+        let error = match claim_launch(
+            &conn,
+            "action:msg-missing:0",
+            &std::collections::HashMap::new(),
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("a required variable with no value must refuse the launch"),
+        };
+        assert!(error.to_string().contains("service"), "got: {error}");
+        assert_eq!(
+            get(&conn, "action:msg-missing:0").unwrap().unwrap().state,
+            DiscussionActionState::Proposed,
+            "a refused launch must leave the proposal claimable once completed"
+        );
+    }
+
+    #[test]
+    fn a_finished_run_writes_its_outcome_and_deep_link_back_onto_the_action() {
+        // The block stays anchored under the CTA and has to show the result:
+        // without this write-back it would sit on "launching" for good.
+        let conn = connection();
+        insert_target(&conn);
+        let content = r#"```kronn-action
+{"kind":"quick_exec","target_id":"qe-1"}
+```"#;
+        insert_message_row(&conn, "msg-done", content);
+        ingest_message_actions(&conn, "disc-1", "msg-done", content).unwrap();
+        let supplied =
+            std::collections::HashMap::from([("service".to_string(), "api".to_string())]);
+        claim_launch(&conn, "action:msg-done:0", &supplied)
+            .unwrap()
+            .unwrap();
+
+        complete(
+            &conn,
+            "action:msg-done:0",
+            ActionCompletion {
+                state: DiscussionActionState::Succeeded,
+                // No run row here: a Quick Exec reports its own outcome
+                // without a workflow run behind it.
+                shared_run_id: None,
+                result_discussion_id: Some("disc-1".into()),
+                deep_link: Some("/discussions/disc-1".into()),
+                diagnostic: None,
+            },
+        )
+        .unwrap();
+
+        let finished = get(&conn, "action:msg-done:0").unwrap().unwrap();
+        assert_eq!(finished.state, DiscussionActionState::Succeeded);
+        assert_eq!(finished.deep_link.as_deref(), Some("/discussions/disc-1"));
+        assert!(
+            finished.finished_at.is_some(),
+            "a terminal state must be dated, or nothing can order the timeline"
+        );
+    }
+
+    #[test]
+    fn an_action_aimed_at_another_project_is_refused_before_launch() {
+        // An agent proposes the fence; the human clicks. Nothing but this check
+        // stands between a discussion in one project and a Quick Exec that
+        // belongs to another. Covered on the Live Page side, never here.
+        let conn = connection();
+        insert_target(&conn);
+        let now = Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO projects (id, name, path, created_at, updated_at)
+             VALUES ('project-disc', 'Disc', '/tmp/disc', ?1, ?1),
+                    ('project-other', 'Other', '/tmp/other', ?1, ?1)",
+            [&now],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE discussions SET project_id = 'project-disc' WHERE id = 'disc-1'",
+            [],
+        )
+        .unwrap();
+        let content = r#"```kronn-action
+{"kind":"quick_exec","target_id":"qe-1","project_id":"project-other"}
+```"#;
+        insert_message_row(&conn, "msg-cross", content);
+        ingest_message_actions(&conn, "disc-1", "msg-cross", content).unwrap();
+
+        let action = get(&conn, "action:msg-cross:0").unwrap().unwrap();
+        assert_eq!(action.state, DiscussionActionState::PreflightFailed);
+        assert!(action
+            .diagnostic
+            .as_deref()
+            .is_some_and(|text| text.contains("n’est pas autorisée")));
+
+        // And the refusal must survive the click, not merely be displayed.
+        let outcome = claim_launch(&conn, &action.id, &std::collections::HashMap::new())
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            ClaimLaunchOutcome::Existing(existing)
+                if existing.state == DiscussionActionState::PreflightFailed
+        ));
+    }
+
+    #[test]
+    fn a_target_deleted_after_the_proposal_cannot_still_be_launched() {
+        // Preflight runs when the fence is ingested. Between that moment and
+        // the click, the Quick Exec can be deleted — the proposal sits in a
+        // transcript for as long as the transcript lives. Launching then would
+        // run against something that no longer exists.
+        let conn = connection();
+        insert_target(&conn);
+        let content = r#"```kronn-action
+{"kind":"quick_exec","target_id":"qe-1"}
+```"#;
+        insert_message_row(&conn, "msg-gone", content);
+        ingest_message_actions(&conn, "disc-1", "msg-gone", content).unwrap();
+        let proposed = get(&conn, "action:msg-gone:0").unwrap().unwrap();
+        assert_eq!(proposed.state, DiscussionActionState::Proposed);
+
+        conn.execute("DELETE FROM quick_execs WHERE id = 'qe-1'", [])
+            .unwrap();
+
+        let supplied = std::collections::HashMap::from([("service".to_string(), "api".to_string())]);
+        let outcome = claim_launch(&conn, "action:msg-gone:0", &supplied).unwrap();
+        assert!(
+            !matches!(outcome, Some(ClaimLaunchOutcome::Claimed { .. })),
+            "a deleted target must not be launchable — the click would run against nothing"
+        );
+        let reloaded = get(&conn, "action:msg-gone:0").unwrap().unwrap();
+        assert_eq!(reloaded.state, DiscussionActionState::PreflightFailed);
     }
 
     #[test]

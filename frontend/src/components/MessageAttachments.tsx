@@ -6,11 +6,12 @@
 // isolation from the heavy MessageBubble.
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { ChevronLeft, ChevronRight, Download, ExternalLink, FileText, Image as ImageIcon, Loader2, MessageSquare, Sparkles, X } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Download, ExternalLink, FileText, Image as ImageIcon, Loader2, MessageSquare, Scissors, Sparkles, Trash2, X } from 'lucide-react';
 import type { ContextFile } from '../types/generated';
 import { discussions as discussionsApi } from '../lib/api';
 import { triggerDownload } from '../lib/downloadBlob';
 import { isImageFile, isVideoFile, isViewableMedia } from '../lib/mediaKind';
+import { extractLastFrame, LastFrameError, lastFrameFilename } from '../lib/lastFrame';
 import { MediaPlayer } from './MediaPlayer';
 
 type T = (key: string, ...args: (string | number)[]) => string;
@@ -50,6 +51,49 @@ function AiGenerationDetails({ file, t }: { file: ContextFile; t: T }) {
       <p className="disc-ai-generation-prompt">
         <strong>{t('disc.assets.aiPrompt')}</strong>
         <span>{file.ai_generation.prompt}</span>
+      </p>
+    </div>
+  );
+}
+
+/// Where a picture came from when it was not generated: a frame decoded out of
+/// a clip of this discussion. Said plainly, and never as "AI generated" — that
+/// badge is an attestation, and nothing was produced here.
+function ExtractedFromDetails({ file, source, t, onOpenSource }: {
+  file: ContextFile;
+  source: ContextFile | null;
+  t: T;
+  onOpenSource?: (assetId: string) => void;
+}) {
+  const sourceId = file.extracted_from_asset_id;
+  if (!sourceId) return null;
+  return (
+    <div
+      className="disc-ai-generation-details"
+      role="note"
+      aria-label={t('disc.assets.extractedFrom')}
+      data-testid="extracted-from-details"
+    >
+      <div className="disc-ai-generation-heading">
+        <span className="disc-ai-generation-label">
+          <Scissors size={13} aria-hidden="true" />
+          {t('disc.assets.extractedFrom')}
+        </span>
+      </div>
+      <p className="disc-ai-generation-prompt">
+        <span>{t('disc.assets.extractedFromExplained')}</span>
+        {onOpenSource && (
+          // The clip is one click away: a provenance nobody can follow is a
+          // sentence, not a link back to the thing it names.
+          <button
+            type="button"
+            className="disc-media-msg-source-open"
+            onClick={() => onOpenSource(sourceId)}
+            data-testid="extracted-from-open-source"
+          >
+            {source ? source.filename : t('disc.assets.openSourceVideo')}
+          </button>
+        )}
       </p>
     </div>
   );
@@ -220,11 +264,19 @@ export function MessageAttachments({
   onNavigateMessage,
   carouselScope,
   openRequest,
+  onDeleted,
+  onExtracted,
 }: {
   files: ContextFile[];
   discussionId: string;
   t: T;
   variant?: 'message' | 'library';
+  /** Enables deletion. Absent, no delete control is shown at all: a surface
+   *  that cannot refresh its own list must not offer to shorten it. */
+  onDeleted?: (fileId: string) => void;
+  /** Enables "keep the last frame" on a clip. Same rule as `onDeleted`: a
+   *  surface that cannot show the new file must not offer to create it. */
+  onExtracted?: (file: ContextFile) => void;
   onNavigateMessage?: (messageId: string) => void;
   /// Full sequence to browse once one thumbnail is opened. The grid still
   /// shows `files`; this is what the arrows walk through, so opening an image
@@ -249,6 +301,14 @@ export function MessageAttachments({
   const [urls, setUrls] = useState<Record<string, string>>({});
   const [failedIds, setFailedIds] = useState<Set<string>>(() => new Set());
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  // Two steps on purpose: this removes bytes from disk, and the control sits
+  // next to "close". `error` is kept apart from the confirmation so a failure
+  // stays on screen instead of being wiped by the next render.
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [extracting, setExtracting] = useState(false);
+  const [extractError, setExtractError] = useState<string | null>(null);
   const objectUrlsRef = useRef<Map<string, string>>(new Map());
   const inFlightRef = useRef<Set<string>>(new Set());
   const generationRef = useRef(0);
@@ -327,6 +387,43 @@ export function MessageAttachments({
       loadMediaUrl(file);
     }
   }, [imageFiles, loadMediaUrl]);
+
+  // A confirmation belongs to one asset. Walking to the next one with a live
+  // confirmation would delete a file the reader never asked about.
+  useEffect(() => {
+    setConfirmingDelete(false);
+    setDeleteError(null);
+    setExtractError(null);
+  }, [selectedId]);
+
+  // KT-556 — keep the clip's last picture as a file of this discussion, so a
+  // follow-up generation can start from it without a download and a re-upload.
+  // The frame is decoded by the player's own element: the backend cannot read
+  // these clips at all.
+  const keepLastFrame = useCallback(async (file: ContextFile, src: string) => {
+    setExtracting(true);
+    setExtractError(null);
+    try {
+      const frame = await extractLastFrame(src);
+      const image = new File([frame.blob], lastFrameFilename(file.filename), { type: 'image/png' });
+      // Named as coming from this clip: the server gives it its own message,
+      // so it is never a pending attachment waiting on the next send — and
+      // deleting an unrelated message can no longer take it away.
+      const uploaded = await discussionsApi.uploadContextFile(file.discussion_id, image, file.id);
+      onExtracted?.(uploaded.file);
+      // Landing on the fresh image is the answer to "did it work": the reader
+      // sees the frame instead of a message claiming one exists.
+      setSelectedId(uploaded.file.id);
+    } catch (e) {
+      setExtractError(
+        e instanceof LastFrameError
+          ? t(`disc.media.lastFrame.error.${e.cause_}`)
+          : e instanceof Error ? e.message : String(e),
+      );
+    } finally {
+      setExtracting(false);
+    }
+  }, [onExtracted, t]);
 
   const selectedIndex = selectedId
     ? carouselFiles.findIndex(file => file.id === selectedId)
@@ -420,6 +517,63 @@ export function MessageAttachments({
               >
                 <ExternalLink size={17} />
               </a>
+              {onExtracted && isVideoFile(selectedFile) && urls[selectedFile.id] && (
+                // Offered only once the bytes are here: without them there is
+                // nothing to decode, and the button would promise a frame it
+                // cannot produce.
+                <button
+                  type="button"
+                  className="disc-image-lightbox-action"
+                  disabled={extracting}
+                  onClick={() => { void keepLastFrame(selectedFile, urls[selectedFile.id]); }}
+                  aria-label={t('disc.media.lastFrame.action')}
+                  title={t('disc.media.lastFrame.action')}
+                  data-testid="attachment-last-frame"
+                >
+                  {extracting ? <Loader2 size={18} /> : <Scissors size={18} />}
+                </button>
+              )}
+              {onDeleted && (confirmingDelete ? (
+                <button
+                  type="button"
+                  className="disc-image-lightbox-action disc-image-lightbox-danger"
+                  disabled={deleting}
+                  onClick={() => {
+                    const fileId = selectedFile.id;
+                    setDeleting(true);
+                    setDeleteError(null);
+                    discussionsApi.deleteContextFile(discussionId, fileId)
+                      .then(() => {
+                        // Closed rather than advanced: silently landing on the
+                        // neighbouring media would look like the wrong file
+                        // was deleted.
+                        setSelectedId(null);
+                        setConfirmingDelete(false);
+                        onDeleted(fileId);
+                      })
+                      // The asset stays on screen: it must never disappear
+                      // from the UI without having been deleted on the server.
+                      .catch((e: unknown) => setDeleteError(e instanceof Error ? e.message : String(e)))
+                      .finally(() => setDeleting(false));
+                  }}
+                  aria-label={t('disc.attachmentDeleteConfirm')}
+                  title={t('disc.attachmentDeleteConfirm')}
+                  data-testid="attachment-delete-confirm"
+                >
+                  {t('disc.attachmentDeleteConfirm')}
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className="disc-image-lightbox-action"
+                  onClick={() => { setConfirmingDelete(true); setDeleteError(null); }}
+                  aria-label={t('disc.attachmentDelete')}
+                  title={t('disc.attachmentDelete')}
+                  data-testid="attachment-delete"
+                >
+                  <Trash2 size={18} />
+                </button>
+              ))}
               <button
                 type="button"
                 className="disc-image-lightbox-action"
@@ -430,6 +584,16 @@ export function MessageAttachments({
                 <X size={20} />
               </button>
             </div>
+            {deleteError && (
+              <p className="disc-image-lightbox-error" role="alert" data-testid="attachment-delete-error">
+                {deleteError}
+              </p>
+            )}
+            {extractError && (
+              <p className="disc-image-lightbox-error" role="alert" data-testid="attachment-last-frame-error">
+                {extractError}
+              </p>
+            )}
             <div className="disc-image-lightbox-content">
               {carouselFiles.length > 1 && (
                 <button
@@ -460,6 +624,16 @@ export function MessageAttachments({
                     : <img src={urls[selectedFile.id]} alt={selectedFile.filename} />}
                 </div>
                 <AiGenerationDetails file={selectedFile} t={t} />
+                <ExtractedFromDetails
+                  file={selectedFile}
+                  source={carouselFiles.find(item => item.id === selectedFile.extracted_from_asset_id) ?? null}
+                  t={t}
+                  onOpenSource={assetId => {
+                    // Walking to the clip inside the same viewer: it is part
+                    // of this sequence, so nothing has to be reopened.
+                    if (carouselFiles.some(item => item.id === assetId)) setSelectedId(assetId);
+                  }}
+                />
               </div>
               {carouselFiles.length > 1 && (
                 <button

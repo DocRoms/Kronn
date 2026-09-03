@@ -24,14 +24,44 @@ use super::DiscoveryOutcome;
 #[derive(Debug, Deserialize)]
 struct ModelListEntry {
     id: String,
+    /// Present since Codex started sending a human name of its own
+    /// ("GPT-5.6-Sol" for `gpt-5.6-sol`). Absent on older builds, where the
+    /// id stays the only thing to show.
+    #[serde(default)]
+    #[serde(rename = "displayName")]
+    display_name: Option<String>,
     #[serde(default)]
     #[serde(rename = "supportedReasoningEfforts")]
-    supported_reasoning_efforts: Vec<String>,
+    supported_reasoning_efforts: Vec<ReasoningEffort>,
     #[serde(default)]
     #[serde(rename = "defaultReasoningEffort")]
     default_reasoning_effort: Option<String>,
     #[serde(default)]
     hidden: bool,
+}
+
+/// Codex used to list its reasoning efforts as bare strings and now sends
+/// objects carrying a description alongside the name. Reading only the new
+/// shape would break every older Codex; reading only the old one is what
+/// turned the whole catalogue into `invalid_catalog`, and a catalogue in
+/// error blocks every turn for that agent.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum ReasoningEffort {
+    Named(String),
+    Described {
+        #[serde(rename = "reasoningEffort")]
+        reasoning_effort: String,
+    },
+}
+
+impl ReasoningEffort {
+    fn name(self) -> String {
+        match self {
+            ReasoningEffort::Named(name) => name,
+            ReasoningEffort::Described { reasoning_effort } => reasoning_effort,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -124,10 +154,14 @@ async fn run_handshake_and_list(
             .into_iter()
             .filter(|entry| !entry.hidden)
             .map(|entry| DiscoveredModel {
-                display_name: entry.id.clone(),
+                display_name: entry.display_name.unwrap_or_else(|| entry.id.clone()),
                 model_id: entry.id,
                 capabilities: Vec::new(),
-                reasoning_modes: entry.supported_reasoning_efforts,
+                reasoning_modes: entry
+                    .supported_reasoning_efforts
+                    .into_iter()
+                    .map(ReasoningEffort::name)
+                    .collect(),
                 default_reasoning_mode: entry.default_reasoning_effort,
             })
             .collect(),
@@ -223,13 +257,60 @@ mod tests {
         let parsed: ModelListResult = serde_json::from_value(raw).unwrap();
         assert_eq!(parsed.data.len(), 2);
         assert_eq!(
-            parsed.data[0].supported_reasoning_efforts,
-            vec!["low", "medium", "high"]
+            efforts(&parsed.data[0]),
+            vec!["low", "medium", "high"],
+            "the older bare-string shape must keep parsing"
         );
         assert_eq!(
             parsed.data[0].default_reasoning_effort.as_deref(),
             Some("medium")
         );
         assert!(parsed.data[1].hidden);
+    }
+
+    fn efforts(entry: &ModelListEntry) -> Vec<String> {
+        entry
+            .supported_reasoning_efforts
+            .iter()
+            .map(|effort| match effort {
+                ReasoningEffort::Named(name) => name.clone(),
+                ReasoningEffort::Described { reasoning_effort } => reasoning_effort.clone(),
+            })
+            .collect()
+    }
+
+    /// Captured verbatim from `codex app-server` on 2026-09-03, after the
+    /// catalogue on this machine had been sitting in `invalid_catalog` — which
+    /// blocks EVERY turn for that agent, not just discovery.
+    #[test]
+    fn model_list_result_parses_the_described_effort_shape_codex_sends_now() {
+        let raw = json!({
+            "data": [
+                {
+                    "id": "gpt-5.6-sol",
+                    "model": "gpt-5.6-sol",
+                    "displayName": "GPT-5.6-Sol",
+                    "description": "Reliable agentic workhorse for everyday tasks.",
+                    "hidden": false,
+                    "supportedReasoningEfforts": [
+                        {"reasoningEffort": "low", "description": "Fast responses"},
+                        {"reasoningEffort": "high", "description": "Greater depth"}
+                    ],
+                    "defaultReasoningEffort": "low"
+                }
+            ]
+        });
+        let parsed: ModelListResult = serde_json::from_value(raw).unwrap();
+        assert_eq!(efforts(&parsed.data[0]), vec!["low", "high"]);
+        // The name Codex gives itself beats the id, when it sends one.
+        assert_eq!(parsed.data[0].display_name.as_deref(), Some("GPT-5.6-Sol"));
+    }
+
+    #[test]
+    fn an_entry_without_a_display_name_still_shows_its_id() {
+        let raw = json!({"data": [{"id": "gpt-5.1-codex"}]});
+        let parsed: ModelListResult = serde_json::from_value(raw).unwrap();
+        assert!(parsed.data[0].display_name.is_none());
+        assert!(efforts(&parsed.data[0]).is_empty());
     }
 }

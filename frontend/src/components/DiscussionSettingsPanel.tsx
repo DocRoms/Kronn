@@ -441,12 +441,12 @@ export function DiscussionSettingsPanel({
           <div className="disc-settings-field">
             <span>{t('disc.summaryStrategyLabel')}</span>
             <div className="disc-settings-options">
-              {(['Auto', 'OnDemand', 'Off'] as const).map(strategy => (
+              {(['OnDemand', 'Off'] as const).map(strategy => (
                 <button
                   key={strategy}
                   type="button"
                   className="disc-toggle-pill"
-                  data-active={(discussion.summary_strategy ?? 'Auto') === strategy}
+                  data-active={(discussion.summary_strategy ?? 'OnDemand') === strategy}
                   title={t(`disc.summaryStrategy.${strategy}.hint`)}
                   onClick={() => void updateDiscussion({ summary_strategy: strategy })}
                 >

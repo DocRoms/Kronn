@@ -13,6 +13,26 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Added
 
+- An approved delegation now publishes its report. The derivation and the
+  store existed but nothing called them, so an accepted delivery produced
+  nothing at all. Both approval paths publish it — the ordinary one, and a
+  replayed approval that repairs a crash between the approval and its message.
+  The record and its message are written in a single transaction, so a retry
+  cannot leave an accepted delivery with no report; a record found without its
+  message gets one, rendered from the stored payload rather than the caller's.
+  A report is produced even when parts of the manifest are unreadable — a
+  degraded report says what is missing, which is more use than no report. The
+  worker's duration counts from its own assignment, so earlier review rounds
+  are not charged to its attempt.
+- Workflows, quick prompts, quick APIs and quick execs can be deleted from
+  their own row — armed by a first click, done by a second, never before the
+  server confirmed — and several at once from the sidebar selection. While
+  armed, the control says what goes with it: the past runs a workflow takes
+  along (their discussions stay), the workflow steps a prompt or an API is
+  used by (they fail on their next run), or that nothing else is touched. A
+  count that cannot be read says so, instead of reading as nothing.
+- A clip's last frame can be kept as an asset of its own, decoded server-side
+  by the one decoder able to read it, with a link back to the clip it came from.
 - Image and video generation on HTTP connections (LiteLLM, NVIDIA, OpenRouter).
   Media models are configured as their own slots on a connection — modalities,
   not quality tiers — so a text step can never select "tier Image". A
@@ -28,6 +48,35 @@ Release notes for 0.9.3 and earlier are available in the
   generation from the provider's billed figure, never recomputed from a
   published rate. The estimate shown before sending comes from past billed
   generations, and reads as unknown — never as free — when there is none.
+  A finished generation shows the media itself inside its bubble, with the
+  price in the corner and a single way out — the asset in the carousel; the raw
+  job JSON folds away behind a "Details" toggle, and the only duration on
+  screen is the one of a produced clip. A video's soundtrack is now a stated
+  choice on both surfaces — a checkbox in the form and `generate_audio` on the
+  MCP tool, checked/true by default, which is what the providers were already
+  doing silently. That silence had a clip refused for audio copyright with
+  nothing in the request to explain it. The launcher's durations, resolutions,
+  ratios and audio switch now come from the provider's own catalogue instead of
+  a hard-coded list that offered choices the model rejects, and a video can
+  start from — or end on — an image the discussion already holds, picked in the
+  form or named by an agent through MCP. That image is referenced by id and
+  travels inline: no local path, URL or credential ever leaves Kronn.
+  An asset can finally be deleted, from the viewer, in two steps — the control
+  removes bytes from disk and sits next to "close", so it arms before it acts,
+  the viewer closes rather than silently landing on the neighbouring media, and
+  a server refusal leaves the file exactly where it was.
+  An image generation can now be drawn from SEVERAL pictures of the discussion,
+  up to the number each model advertises — from 1 to 16 across the catalogue,
+  so nothing is assumed — and the bubble opens every one of them. Asking for a
+  frame on an image, or for several images on one frame, is refused instead of
+  being quietly reduced to something else and billed for it.
+  A clip's last picture can be kept as a file of the discussion in one click,
+  and reused straight away as the starting image of the next generation — no
+  download, no re-upload, no dependency to install. It is decoded by the
+  viewer's own player, which reads these clips where the backend cannot, and an
+  extraction that decoded nothing says so rather than attaching a black
+  rectangle. A picture too narrow for the provider blocks the launch before it
+  is billed.
 
 - Discussions now report their storage weight, split by what a cleanup could
   actually reclaim: attachment bytes held on disk, extracted document text, and
@@ -51,7 +100,185 @@ Release notes for 0.9.3 and earlier are available in the
   CLI session without reusing it across projects. See
   `docs/operations/acp-adapters.md`.
 
+- A dedicated `http_transport` module now owns the seam between LiteLLM,
+  NVIDIA and named Custom connections and the shared OpenAI-compatible chat
+  codec, kept deliberately separate from the ACP boundary (`docs/design/
+  adr-004-http-transport.md`). The OpenAI Chat codec selection is an explicit,
+  single decision point; a model the catalog marks image/video-only is now
+  refused before dispatch with a diagnostic, never sent to the wrong endpoint.
+  Discussions persist a sticky named connection (`discussions.connection_id`)
+  so an ordinary reply with no explicit `@mention` keeps resolving through the
+  same connection instead of losing it — previously only the very first
+  message of a Custom-connection discussion reliably carried its target.
+  Compare's AI judge/prompt-improver launch and multi-agent orchestration
+  debates can now address a specific named connection instead of only a bare
+  agent type, with the same connection-mismatch validation Quick Prompts
+  already apply. See `docs/operations/http-transport.md`.
+
+### Changed
+
+- A turn no longer retells the whole discussion. Every message re-narrated the
+  entire history to a brand-new process: on the four longest discussions in a
+  real database, 1 288 Claude Code turns sent **436 million characters** where
+  the same turns need **1.9 million** — an average of 338 984 characters per
+  turn against 1 507. Claude Code already holds that conversation, so the turn
+  now resumes it and carries only what the agent has not seen. Counting the
+  preamble that repeats either way, a turn shrinks by a factor of 17 to 97
+  depending on how much context the discussion mounts. Five things keep it
+  honest: the delta is everything since the agent's last turn, never just the
+  newest message, because in a room the human or another agent writes in
+  between; the marker is a message id, so a history that was edited or pruned
+  simply fails to match and the full prompt goes out, where a numeric cursor
+  would have sent the wrong slice; the cursor only advances once the reply is
+  stored, so an interrupted turn is replayed rather than skipped; a dead
+  conversation id would fail the turn outright, so the CLI's session store is
+  checked first and a miss means full prompt; and resume never travels without
+  its delta, nor a full prompt with a resume. Task workers never resume — a
+  worker opens on a fresh worktree, and a room's history is not its business.
+  The figures above are measured on message volume, not end-to-end latency.
+
+- An agent's prompt no longer carries every MCP server's documentation. It
+  concatenated all of `docs/operations/mcp-servers/*.md` in full on every spawn
+  — 69 557 bytes on the Kronn project, 45 465 of them for `kronn-internal.md`
+  alone — whatever the discussion was about. It now carries the server listing,
+  the `mcp__<server>__<tool>` convention, a pointer to `tool_manual` for the
+  Kronn tools, and where to read a server's own notes if the agent is going to
+  use it: 907 bytes, 77 times smaller, about 17 000 tokens saved per turn. This
+  costs no latency either way — measured at 4.40 s against 4.44 s bare — so it
+  is a cost fix, not a speed one. Only CLI agents ever received this block, and
+  they have a filesystem: pointing at the file loses nothing and defers the
+  reading to the turn that needs it. Discussions without a project already
+  worked this way, and the two paths now agree.
+
+- Automatic conversation summaries are gone. They fired after every reply past a
+  per-agent threshold, and had been dead in practice: the global default was
+  `Off`, acting as a master kill-switch, so a discussion displaying `Auto` never
+  summarised — a strategy shown in the interface that could not apply. Removed
+  rather than repaired, because every runtime can now read the thread back
+  itself (`disc_read` over MCP or as a declared tool), which is cheaper and more
+  precise than a summary produced in advance for a need nobody expressed. The
+  `Auto` strategy no longer exists; rows written before 0.13.0 read back as
+  `OnDemand`, which keeps `disc_summarize` and the summarise action working for
+  an agent or a human reopening a long room. When history is trimmed, the notice
+  now points the agent at `disc_read` first, and at the user only if the answer
+  is not in the thread.
+
 ### Fixed
+
+- Codex and OpenCode list their models again. Both had moved to shapes the
+  catalogue reader did not know — Codex now describes each reasoning effort as
+  an object instead of a bare name, and OpenCode spells its session options
+  `currentValue` and `options[].value`. Neither is standardized, and a
+  catalogue left in error refuses every turn for that agent, so both readers
+  now accept the old and the new spelling. Codex also supplies a display name
+  of its own ("GPT-5.6-Sol"), which beats showing the bare id.
+- A message with no one mentioned now says where it goes, and reaches it. In a
+  room whose native agent is switched off, an ordinary turn used to resolve to
+  no destination at all — the native responder disabled, no peer named — so it
+  reached nobody and the writer was told nothing. It now goes to the sessions
+  joined to that room, which is what switching the agent off already promised.
+  The header names that destination, resolved by the router itself rather than
+  guessed from the discussion's configured agent, because that setting survives
+  being switched off and announced a reader who received nothing. When there is
+  genuinely no one, it says so.
+- An agent reached over ACP — OpenCode and the other native ACP runtimes — now
+  receives Kronn's own MCP bridge, so it can answer in the room it was invited
+  to instead of joining it mute. Only the command travels over the protocol:
+  the bridge reads its credentials from the environment it inherits from the
+  process Kronn spawned, so none is ever serialized into an ACP payload.
+- A generation asking for a source image on a provider that takes none is
+  refused at submission, naming what is missing, instead of queueing a job that
+  retries the same refusal until its deadline expires.
+- A provider failure no longer ends a turn in complete silence. When the API
+  is overloaded or a spend limit is hit, Claude Code does not report a
+  structured failure — it writes an assistant message of its own, which no
+  streaming delta precedes. The stream reader skipped every assistant message,
+  rightly so for ordinary ones (they repeat what was already streamed, and
+  keeping them would print each reply twice), and in doing so discarded the
+  only account of the failure. The turn ended with nothing at all, which is why
+  a room could sit empty for 18 minutes, once for an hour and a half, before
+  someone retried by hand. Errors the CLI writes itself are now read — and only
+  those, identified by two independent markers so a build that stops setting
+  one still surfaces them. Found in real transcripts rather than deduced: the
+  database held five persisted API errors and not a single 529.
+
+- An action whose target was deleted can no longer be launched. Preflight runs
+  when the proposal is ingested, but the click can come much later — a
+  transcript, and a published page, outlive the Quick Exec they name. Nothing
+  checked again at launch, so the click was accepted for something that no
+  longer existed. The action now says the target is gone instead. The check
+  lives in the launch engine both surfaces share, so the guarantee cannot hold
+  in a discussion and lapse on a page.
+
+- A prompt's version history no longer outlives the prompt it belongs to.
+- A clip stored as `text/plain` by its provider still plays as a clip.
+- Batch steps stop accepting a per-item prompt that nothing ever read.
+- The agent bootstrap (`docs/AGENTS.md`) is back under its context ceiling
+  without the ceiling moving. The 716 bytes over were exactly what 0.13.0 had
+  added: two verbose rows in the task router and a section holding a single
+  pointer. The router now routes and stops explaining — every detail it
+  dropped already lives at the destination it points to — and the sections
+  that only carried a pointer became rows of that same table. The inventory
+  of root redirector files moved to `docs/repo-map.md`, where repository
+  structure is documented.
+
+- Two CLI sessions of the same provider joined to one room — two Claude Codes,
+  say — now both appear among the participants, and each stays mentionable by
+  its own alias. A session that was working rather than listening read as
+  Offline, and the rule that hides the stale row left behind by a reconnecting
+  CLI could not tell that row from a live peer: it hid whichever session was
+  busy, so one Claude could not see or address the other. A row is now hidden
+  only when it is Offline and nobody has heard from it for a while; a working
+  session touches `last_seen` on every append and every wait, so it stays.
+
+- Sending a message in a room with joined CLI agents, in a human-only
+  discussion, re-sending a duplicate, or revising a message no longer raises
+  "SSE stream closed before a terminal event" on every turn. The frontend had
+  learned on 1 September to read a stream that closes without a terminal event
+  as an interruption — which is what protects a half-written reply across a
+  backend restart — while five backend paths still ended their stream on
+  purpose without saying so. Those paths now close with an explicit `complete`,
+  so the interruption rule stays true and stops firing on finished turns.
+
+- Listing a workflow's runs no longer carries every step's full output. A run's
+  `step_results_json` averages 470 KB, and `output` is all of it — measured at
+  100% of a 3.9 MB row, every other field together under 700 bytes — yet that
+  column travelled through each listing, decoded and re-encoded, to render rows
+  showing only a step's name and status. One workflow's runs answered with
+  237 MB in 8.7 s, and the run detail's fan-out progress asked for the same page
+  every 8 seconds. Outputs are now blanked inside SQLite on the listing paths:
+  9.3 MB → 28 KB for a page of ten, 241 MB → 1.3 MB for the 500-run cap, and
+  14.6 MB → 33 KB for `/api/workflows`, which had been decoding each workflow's
+  last run in full only to keep five fields of it. Opening a run still serves
+  everything.
+
+- A discussion turn that fails on a saturated provider is retried instead of
+  stopping silently. Two `529 Overloaded` turns simply ended with nothing shown
+  and nothing relaunched; the user waited 18 minutes once and 1 h 27 the other
+  time before restarting by hand. Saturation now retries with a growing delay,
+  and the last attempt keeps the provider's own message in the room rather than
+  going quiet. A hard quota is never retried — it is checked first — and `529`
+  is never matched on its own, since those digits appear in ids, token counts
+  and durations where a false positive would spend a real API call.
+
+- The durable error of a failed turn no longer describes an ordinary room as a
+  task worker. Every unsuccessful turn wrote the same "task-worker
+  startup/completion failed … use `task_exec_reassign`" text, which sent readers
+  looking for a sub-discussion that never existed and overwrote the provider's
+  actual reason. Real task workers keep that guidance; an ordinary room now
+  states the cause it actually hit.
+
+- An agent that cannot start because of a NUL byte in its command line now says
+  what carries it — an environment variable by name, an argument by the flag it
+  follows, the program name, or the working directory — instead of repeating
+  `nul byte found in provided data` every 30 seconds. One report shows the same
+  refusal replayed 282 times without diagnosing anything: the failure is settled
+  before the process runs, so it is now a hard preflight failure, surfaced in
+  the discussion. Values are never logged, only their carrier.
+
+- The stream now says when a tool STARTS, not only when it finishes. A single
+  Bash call can run 80 seconds, and for that whole time the interface sat on a
+  frozen placeholder while Kronn already knew which tool was running.
 
 - A Page's inline Kronn action CTAs (`data-kronn-action`) now work from the
   standalone tab and every mosaic tile, not only the embedded viewer: clicking
@@ -70,6 +297,17 @@ Release notes for 0.9.3 and earlier are available in the
   local or no-auth providers Kronn cannot see from that one file, so the
   absence of a confirmed auth signal now reports "unknown, assume runnable"
   instead of a hard "not ready" that blocked dispatch outright.
+
+- The image/video model pickers for an HTTP connection (Settings > Agents >
+  External API) no longer go silently empty for a provider whose catalog
+  carries no modality metadata, as with NVIDIA's `/v1/models`: every one of
+  its entries used to be treated as chat-only, hiding its real image/video
+  models behind a filter that could never match. The picker now reads
+  catalog evidence and renders one of three states — known (strict filter,
+  unchanged for OpenRouter), unknown (the full catalog behind an explicit
+  warning, search and free-text entry preserved), or unsupported (the
+  connection proves it has no compatible model). A saved selection is never
+  cleared by a refresh or a re-test, whatever the state.
 
 ## [0.12.0] - 2026-08-30
 

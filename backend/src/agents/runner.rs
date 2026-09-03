@@ -1313,6 +1313,39 @@ pub enum OutputMode {
     /// Each line is a JSON event (Claude Code --output-format stream-json)
     StreamJson,
 }
+/// The text of an error the CLI wrote itself, if this is one.
+///
+/// Two independent markers, because either alone can be missing: the explicit
+/// `isApiErrorMessage` flag, and the `<synthetic>` model name that no real
+/// completion ever carries. Both mean the same thing — the CLI fabricated this
+/// message, so its text never travelled through the streaming deltas and is
+/// lost unless it is read here.
+fn cli_authored_error_text(json: &serde_json::Value) -> Option<String> {
+    let flagged = json
+        .get("isApiErrorMessage")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let message = json.get("message")?;
+    let synthetic = message
+        .get("model")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|model| model == "<synthetic>");
+    if !flagged && !synthetic {
+        return None;
+    }
+    let text = match message.get("content")? {
+        serde_json::Value::String(text) => text.clone(),
+        serde_json::Value::Array(blocks) => blocks
+            .iter()
+            .filter(|block| block.get("type").and_then(serde_json::Value::as_str) == Some("text"))
+            .filter_map(|block| block.get("text").and_then(serde_json::Value::as_str))
+            .collect::<Vec<_>>()
+            .join(""),
+        _ => return None,
+    };
+    (!text.trim().is_empty()).then_some(text)
+}
+
 
 /// Result of parsing a single stream-json line
 #[derive(Debug)]
@@ -1336,6 +1369,12 @@ pub enum StreamJsonEvent {
     ToolInputDelta(String),
     /// Content block finished (tool input complete)
     ToolEnd,
+    /// The CLI's own conversation id, carried by its `system`/`init` line — the
+    /// first line of the stream, before any work happens. Persisting it lets the
+    /// next turn resume with `--resume` instead of re-narrating the whole
+    /// history. Taken from `init` rather than the final `result` on purpose: a
+    /// turn that dies mid-way still leaves a resumable conversation behind.
+    SessionId(String),
     /// Nothing useful (metadata, start/stop events, etc.)
     Skip,
 }
@@ -2031,8 +2070,19 @@ impl AcpSessionStore {
         match agent_type {
             AgentType::Codex => Some("codex_cli_adapter_v1"),
             AgentType::ClaudeCode => Some("claude_cli_adapter_v1"),
+            // OpenCode speaks ACP natively; its session id is durable in the
+            // same way, so a follow-up turn continues the conversation instead
+            // of starting a stranger that has to be told everything again.
+            AgentType::OpenCode => Some("opencode_acp_v1"),
             _ => None,
         }
+    }
+
+    /// Whether a durable session is recorded for this runtime at all. Callers
+    /// use it instead of naming agents a second time, so the list lives in one
+    /// place.
+    pub fn tracks(agent_type: &AgentType) -> bool {
+        Self::runtime(agent_type).is_some()
     }
 
     async fn load(
@@ -2084,6 +2134,113 @@ impl AcpSessionStore {
             })
             .await
             .map_err(|error| format!("persist ACP conversation id: {error}"))
+    }
+
+    /// The `--print` CLI's own conversation, kept under its own runtime key.
+    ///
+    /// Deliberately distinct from the adapter keys above: an id minted by
+    /// `claude --print` is not interchangeable with one minted by the ACP
+    /// adapter, and handing either to the wrong runtime would fail the resume
+    /// — or worse, resume a stranger's thread. The shared `runtime` column is
+    /// what makes both coexist for the same discussion and agent.
+    const CLI_PRINT_RUNTIME: &'static str = "claude_cli_print_v1";
+
+    /// Whether this agent's `--print` runtime keeps a resumable conversation.
+    /// Only Claude Code so far: it is the one whose `--resume` is verified to
+    /// carry the previous turn while receiving only the new message.
+    pub fn tracks_cli_print(agent_type: &AgentType) -> bool {
+        matches!(agent_type, AgentType::ClaudeCode)
+    }
+
+    pub async fn persist_cli_print(
+        &self,
+        agent_type: &AgentType,
+        project_scope: &Path,
+        conversation_id: &str,
+    ) -> Result<(), String> {
+        if !Self::tracks_cli_print(agent_type) {
+            return Ok(());
+        }
+        let discussion_id = self.discussion_id.clone();
+        let agent_type = format!("{agent_type:?}");
+        let project_scope = project_scope.to_string_lossy().into_owned();
+        let conversation_id = conversation_id.to_owned();
+        self.db
+            .with_conn(move |conn| {
+                crate::db::acp_runtime_sessions::upsert(
+                    conn,
+                    &discussion_id,
+                    &agent_type,
+                    Self::CLI_PRINT_RUNTIME,
+                    &project_scope,
+                    &conversation_id,
+                )
+            })
+            .await
+            .map_err(|error| format!("persist CLI conversation id: {error}"))
+    }
+
+    /// The resumable conversation and the last message it was shown.
+    ///
+    /// `Some((id, None))` is a session whose extent is unknown — recorded
+    /// before this was tracked, or by a turn that died before persisting its
+    /// reply. The caller must then send the full prompt: correct, only
+    /// expensive. Guessing a delta there would drop messages in silence.
+    pub async fn load_cli_print(
+        &self,
+        agent_type: &AgentType,
+        project_scope: &Path,
+    ) -> Result<Option<(String, Option<String>)>, String> {
+        if !Self::tracks_cli_print(agent_type) {
+            return Ok(None);
+        }
+        let discussion_id = self.discussion_id.clone();
+        let agent_type = format!("{agent_type:?}");
+        let project_scope = project_scope.to_string_lossy().into_owned();
+        self.db
+            .with_conn(move |conn| {
+                crate::db::acp_runtime_sessions::get_with_progress(
+                    conn,
+                    &discussion_id,
+                    &agent_type,
+                    Self::CLI_PRINT_RUNTIME,
+                    &project_scope,
+                )
+            })
+            .await
+            .map_err(|error| format!("load CLI conversation id: {error}"))
+    }
+
+    /// Record what this agent has now been shown, once its reply is durable.
+    ///
+    /// Called at the END of a turn on purpose: claiming at the start that
+    /// messages have been seen would skip them for good if the turn then died.
+    pub async fn record_cli_print_progress(
+        &self,
+        agent_type: &AgentType,
+        project_scope: &Path,
+        last_seen_message_id: &str,
+    ) -> Result<(), String> {
+        if !Self::tracks_cli_print(agent_type) {
+            return Ok(());
+        }
+        let discussion_id = self.discussion_id.clone();
+        let agent_type = format!("{agent_type:?}");
+        let project_scope = project_scope.to_string_lossy().into_owned();
+        let last_seen_message_id = last_seen_message_id.to_owned();
+        self.db
+            .with_conn(move |conn| {
+                crate::db::acp_runtime_sessions::record_progress(
+                    conn,
+                    &discussion_id,
+                    &agent_type,
+                    Self::CLI_PRINT_RUNTIME,
+                    &project_scope,
+                    &last_seen_message_id,
+                )
+            })
+            .await
+            .map_err(|error| format!("record CLI conversation progress: {error}"))
     }
 }
 
@@ -2156,6 +2313,14 @@ pub struct AgentStartConfig<'a> {
     /// externally joined CLI participants and affect presence/routing, whereas
     /// this state belongs to Kronn's own provider invocation.
     pub acp_session_store: Option<AcpSessionStore>,
+    /// Continue this `--print` conversation instead of starting a new one.
+    ///
+    /// Set ONLY by a caller that also shortened `prompt` to what the agent has
+    /// not seen. Passing it with a full transcript would send the agent its own
+    /// history a second time — more context per call, not less, which is the
+    /// exact failure this whole path exists to avoid. `None` starts fresh and
+    /// expects the full prompt.
+    pub cli_resume_id: Option<&'a str>,
     /// CLI-only task-worker capability assembled by the discussion dispatcher.
     /// The MCP bridge receives this out-of-band through the child process
     /// environment; it is never rendered into the model prompt or accepted as
@@ -2235,6 +2400,7 @@ impl<'a> AgentStartConfig<'a> {
             context_files_prompt: "",
             discussion_id: None,
             acp_session_store: None,
+            cli_resume_id: None,
             task_worker_context: None,
             ollama_format: None,
             model_override: None,
@@ -2564,7 +2730,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
     let mcp_context = if let Some(override_ctx) = config.mcp_context_override {
         override_ctx.to_string()
     } else if !config.project_path.is_empty() {
-        crate::core::mcp_scanner::read_all_mcp_contexts(config.project_path)
+        crate::core::mcp_scanner::build_mcp_server_listing(config.project_path)
     } else {
         String::new()
     };
@@ -2946,27 +3112,18 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
         );
     }
     // Use work_dir (or project_path) for the agent's CWD
-    let effective_work_dir = config.work_dir.unwrap_or(config.project_path);
-    let work_dir = if effective_work_dir.is_empty() {
-        // Global discussion: use a temp working directory
-        std::env::temp_dir()
-    } else {
-        let container_path = crate::core::scanner::resolve_host_path(effective_work_dir);
-        if container_path.exists() {
-            container_path
-        } else {
-            let p = PathBuf::from(effective_work_dir);
-            if !p.exists() {
-                return Err(format!("Project path not found: {}", p.display()));
-            }
-            p
-        }
-    };
+    let work_dir = resolve_agent_work_dir(config.work_dir, config.project_path)?;
     // OpenCode is an ACP-native CLI. It must never enter the generic text
     // runner: `opencode acp` speaks bidirectional JSON-RPC, not line-oriented
     // model output. The ACP host owns initialize/session/prompt/cancel and
     // forwards only normalized text updates to the existing stream consumer.
     let acp_route = crate::acp::resolve_acp_route(config.agent_type);
+    // Deliberately NOT widened to the native route yet. Resuming a session
+    // only pays off if the prompt shrinks to the new message: `build_agent_prompt`
+    // still rebuilds the whole history regardless, so a resumed session would
+    // be told everything it already knows — more context per call, not less.
+    // The id is recorded below so the reduction can be built on it; reading it
+    // back is the second half of that work.
     let acp_resume_id = if acp_route == crate::acp::AcpProductionRoute::AdaptedAcp && !task_worker {
         match config.acp_session_store.as_ref() {
             Some(store) => store.load(config.agent_type, &work_dir).await?,
@@ -3039,6 +3196,9 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
             model_flag.as_deref(),
             task_worker,
             task_worker.then_some(work_dir.as_path()),
+            // A task worker never resumes: its worktree is fresh and its
+            // conversation starts with the task, not with a room's history.
+            (!task_worker).then_some(config.cli_resume_id).flatten(),
         );
 
     // Claude Code in --print mode does NOT auto-load .mcp.json from CWD.
@@ -3062,7 +3222,18 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
         } else {
             let mcp_json = work_dir.join(".mcp.json");
             if mcp_json.exists() {
-                insert_claude_mcp_config(&mut args, mcp_json.to_string_lossy().to_string(), false);
+                // Strict, so the agent gets exactly the servers Kronn declares
+                // — the ones its own UI lists — and nothing else. Without it
+                // Claude Code merges the host's personal MCP config on top:
+                // measured with an EMPTY `.mcp.json`, it still mounted 155
+                // tools from 3 unrelated servers, worth ~7 000 tokens of cache
+                // creation on every single turn. Issue 202 saw the same thing
+                // as a project-less discussion starting `gcloud` and `uvx`
+                // servers it never asked for, one of them failing to connect.
+                //
+                // `kronn-internal` survives because Kronn injects it into that
+                // file; strict only removes what Kronn did not put there.
+                insert_claude_mcp_config(&mut args, mcp_json.to_string_lossy().to_string(), true);
             }
         }
     }
@@ -3384,22 +3555,40 @@ async fn run_acp_session(
                 format!("{agent_type:?} ACP cannot start with the project MCP registry: {error}")
             })?;
     }
-    let session = if let Some(conversation_id) = resume_id {
-        let agent = acp_agent(agent_type)
-            .ok_or_else(|| format!("{agent_type:?} has no ACP session identity"))?;
-        let target = AcpSessionTarget::new(agent, conversation_id.to_owned())
-            .map_err(|error| format!("{agent_type:?} ACP resume target is invalid: {error}"))?;
-        host.resume_session(&target)
-            .await
-            .map_err(|error| format!("{agent_type:?} ACP session resume failed: {error}"))?;
-        target
-    } else {
-        host.create_session()
-            .await
-            .map_err(|error| format!("{agent_type:?} ACP session creation failed: {error}"))?
+    let resumed = match resume_id {
+        Some(conversation_id) => {
+            let agent = acp_agent(agent_type)
+                .ok_or_else(|| format!("{agent_type:?} has no ACP session identity"))?;
+            let target = AcpSessionTarget::new(agent, conversation_id.to_owned())
+                .map_err(|error| format!("{agent_type:?} ACP resume target is invalid: {error}"))?;
+            match host.resume_session(&target).await {
+                Ok(()) => Some(target),
+                // A recorded id outlives the process that issued it: an ACP
+                // session lives in the CLI's memory, so the first turn after
+                // the agent restarted would fail — and every turn after it,
+                // for good, since the dead id stays recorded. Starting fresh
+                // loses the thread; refusing loses the agent.
+                Err(error) => {
+                    tracing::info!(
+                        agent = ?agent_type,
+                        %error,
+                        "ACP session could not be resumed; starting a new one",
+                    );
+                    None
+                }
+            }
+        }
+        None => None,
     };
-    if *agent_type == AgentType::ClaudeCode {
-        if let Some(store) = session_store.as_ref() {
+    let session = match resumed {
+        Some(target) => target,
+        None => host
+            .create_session()
+            .await
+            .map_err(|error| format!("{agent_type:?} ACP session creation failed: {error}"))?,
+    };
+    if let Some(store) = session_store.as_ref() {
+        if AcpSessionStore::tracks(agent_type) {
             store
                 .persist(agent_type, work_dir, &session.session_id)
                 .await?;
@@ -3552,13 +3741,32 @@ async fn run_acp_session(
 /// those entries out of the ACP payload preserves the server-side secret
 /// boundary until the broker can inject scoped credentials directly.
 fn acp_project_mcp_servers(project_path: &str) -> Vec<crate::acp::AcpMcpServer> {
+    // Kronn's own bridge first, and independently of any project: an ACP agent
+    // that cannot call `disc_append` is mute in the room it was invited to.
+    // Claude gets this through `--mcp-config` and Codex through its TOML
+    // override; the native ACP route had no equivalent, so OpenCode joined a
+    // discussion it could not answer in.
+    //
+    // Only `command` and `args` travel over ACP — never a credential. The
+    // bridge reads what it needs from the environment, which it inherits
+    // because Kronn spawns the ACP process itself (`spawn_native`), so nothing
+    // sensitive passes through the protocol.
+    let mut servers: Vec<crate::acp::AcpMcpServer> = Vec::new();
+    if let Some(script) = disc_introspection_mcp_path_for_shared_config() {
+        servers.push(crate::acp::AcpMcpServer {
+            id: "kronn-internal".to_string(),
+            command: "python3".to_string(),
+            args: vec![script],
+            allowed_tools: Vec::new(),
+        });
+    }
     if project_path.is_empty() {
-        return Vec::new();
+        return servers;
     }
     let Some(file) = crate::core::mcp_scanner::read_mcp_json(project_path) else {
-        return Vec::new();
+        return servers;
     };
-    let mut servers: Vec<_> = file
+    let project_servers: Vec<_> = file
         .mcp_servers
         .into_iter()
         .filter_map(|(id, entry)| {
@@ -3577,6 +3785,7 @@ fn acp_project_mcp_servers(project_path: &str) -> Vec<crate::acp::AcpMcpServer> 
             })
         })
         .collect();
+    servers.extend(project_servers);
     servers.sort_by(|left, right| left.id.cmp(&right.id));
     servers
 }
@@ -5108,7 +5317,6 @@ async fn start_ollama_http(
     http_request_timeout: Option<std::time::Duration>,
     parent_cancel: Option<&tokio_util::sync::CancellationToken>,
 ) -> Result<AgentProcess, String> {
-    use crate::agents::chat_codec::{ChatCodec, OllamaCodec, OpenAiCodec};
     let identity_context = http_agent_identity_context(agent_type, model);
     let system_context = if system_context.trim().is_empty() {
         identity_context
@@ -5116,12 +5324,9 @@ async fn start_ollama_http(
         format!("{identity_context}\n\n{system_context}")
     };
     // Endpoint, request body and line decoding are the only per-backend parts;
-    // everything below this block is shared transport.
-    let codec: Box<dyn ChatCodec> = if is_openai_wire_agent(agent_type) {
-        Box::new(OpenAiCodec)
-    } else {
-        Box::new(OllamaCodec)
-    };
+    // everything below this block is shared transport. Codec choice is the
+    // explicit, single decision point KT-545 requires (http_transport.rs).
+    let codec = crate::http_transport::resolve_chat_codec(agent_type);
     // A throttled local model must say so where the run is read, not only in a
     // log file nobody has open. Collected here so the Ollama arm can set it.
     let mut ctx_notice: Option<String> = None;
@@ -7547,6 +7752,73 @@ async fn start_ollama_http(
 /// MCP context is injected via --append-system-prompt for Claude Code,
 /// or prepended to the prompt for other agents.
 /// Returns: (binary, npx_package, args, env_key, stderr_mode, output_mode)
+/// Whether `claude --print --resume` can still pick this conversation up.
+///
+/// The CLI keeps each conversation as `<id>.jsonl` under a per-directory
+/// folder in `~/.claude/projects`, the folder being the working directory with
+/// `/` and `.` flattened to `-`. Reading that layout is a bet on someone
+/// else's internals, so the bet is made in the safe direction ONLY: a hit
+/// means "resume is worth trying", a miss means "send the full prompt", which
+/// is exactly today's behaviour. If the CLI ever moves its store, every probe
+/// misses and Kronn silently goes back to full prompts — slower, never broken.
+///
+/// This is what lets the caller avoid a dead `--resume`, which would fail the
+/// turn outright ("No conversation found with session ID").
+pub fn cli_print_session_is_resumable(work_dir: &Path, conversation_id: &str) -> bool {
+    // An id is used as a file name here. Anything with a separator in it is
+    // refused rather than allowed to walk out of the store.
+    if conversation_id.is_empty()
+        || conversation_id.contains('/')
+        || conversation_id.contains('\\')
+        || conversation_id.contains("..")
+    {
+        return false;
+    }
+    let Some(home) = directories::BaseDirs::new().map(|d| d.home_dir().to_path_buf()) else {
+        return false;
+    };
+    home.join(".claude")
+        .join("projects")
+        .join(claude_project_slug(work_dir))
+        .join(format!("{conversation_id}.jsonl"))
+        .is_file()
+}
+
+/// The folder name `claude` gives a working directory inside its store.
+fn claude_project_slug(work_dir: &Path) -> String {
+    work_dir
+        .to_string_lossy()
+        .chars()
+        .map(|c| if c == '/' || c == '.' { '-' } else { c })
+        .collect()
+}
+
+/// The directory an agent will actually run in.
+///
+/// Public because a resumable session is scoped to this exact path: the caller
+/// that decides whether to resume must compute it the SAME way the spawn does.
+/// Re-deriving it by hand would silently never match — the resume would just
+/// stop happening, with nothing to show why.
+pub fn resolve_agent_work_dir(
+    work_dir: Option<&str>,
+    project_path: &str,
+) -> Result<PathBuf, String> {
+    let effective_work_dir = work_dir.unwrap_or(project_path);
+    if effective_work_dir.is_empty() {
+        // Global discussion: use a temp working directory
+        return Ok(std::env::temp_dir());
+    }
+    let container_path = crate::core::scanner::resolve_host_path(effective_work_dir);
+    if container_path.exists() {
+        return Ok(container_path);
+    }
+    let p = PathBuf::from(effective_work_dir);
+    if !p.exists() {
+        return Err(format!("Project path not found: {}", p.display()));
+    }
+    Ok(p)
+}
+
 /// Build the complete Claude sandbox policy for one task worktree.
 ///
 /// Keep this invocation-local and bounded regardless of how many unrelated
@@ -8040,12 +8312,14 @@ fn agent_command(
         model_flag,
         false,
         None,
+        None,
     )
 }
 
 /// Build a provider command with the stricter policy required by a spawned
 /// task worker. A worktree is an ownership boundary, not a sandbox by itself:
 /// every CLI that offers a global bypass must ignore it for worker runs.
+#[allow(clippy::too_many_arguments)]
 fn agent_command_with_task_worker_policy(
     agent_type: &AgentType,
     prompt: &str,
@@ -8054,6 +8328,10 @@ fn agent_command_with_task_worker_policy(
     model_flag: Option<&str>,
     task_worker: bool,
     task_work_dir: Option<&Path>,
+    // The CLI conversation to continue instead of narrating the history again.
+    // `None` starts fresh, which is what every agent but Claude Code does and
+    // what Claude Code itself does on its first turn.
+    resume_conversation_id: Option<&str>,
 ) -> (
     &'static str,
     Option<&'static str>,
@@ -8071,6 +8349,16 @@ fn agent_command_with_task_worker_policy(
                 "--verbose".into(),
                 "--include-partial-messages".into(),
             ];
+            // Continue the conversation this discussion already opened, so the
+            // turn carries the new messages instead of the whole transcript.
+            // Verified against the CLI: a resumed turn answers a question about
+            // an earlier one while receiving only the new text. A dead id fails
+            // loudly ("No conversation found with session ID"), which the
+            // caller turns back into a full-history retry.
+            if let Some(conversation_id) = resume_conversation_id {
+                args.push("--resume".into());
+                args.push(conversation_id.into());
+            }
             if let Some(model) = model_flag {
                 args.push("--model".into());
                 args.push(model.into());
@@ -8542,6 +8830,94 @@ fn command_invocation_size_receipt(
     )
 }
 
+#[cfg(unix)]
+fn os_str_has_nul(value: &std::ffi::OsStr) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    value.as_bytes().contains(&0)
+}
+
+#[cfg(windows)]
+fn os_str_has_nul(value: &std::ffi::OsStr) -> bool {
+    use std::os::windows::ffi::OsStrExt;
+    value.encode_wide().any(|unit| unit == 0)
+}
+
+/// What the standard library substitutes for a program name, argument or
+/// working directory it could not turn into a C string. Measured on 1.8x:
+/// `get_program`, `get_args` and `get_current_dir` all hand back this literal,
+/// while `get_envs` returns the offending value untouched — so both checks are
+/// needed to cover every carrier.
+const NUL_BEARING_PLACEHOLDER: &[u8] = b"<string-with-nul>";
+
+fn os_str_is_nul_bearing(value: &std::ffi::OsStr) -> bool {
+    os_str_has_nul(value) || os_str_bytes_eq(value, NUL_BEARING_PLACEHOLDER)
+}
+
+#[cfg(unix)]
+fn os_str_bytes_eq(value: &std::ffi::OsStr, expected: &[u8]) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    value.as_bytes() == expected
+}
+
+#[cfg(windows)]
+fn os_str_bytes_eq(value: &std::ffi::OsStr, expected: &[u8]) -> bool {
+    value
+        .to_str()
+        .is_some_and(|value| value.as_bytes() == expected)
+}
+
+/// Name the carrier of a `\0` in this invocation, or `None` when it is clean.
+///
+/// `Command::spawn` rejects the whole invocation with "nul byte found in
+/// provided data" and says nothing about which of ~40 arguments and ~60
+/// environment entries is at fault. Issue 201 hit this 282 times in a row with
+/// no way to tell — and a `\0` is valid UTF-8, so `read_to_string` carries one
+/// out of a file without a word.
+///
+/// All four carriers are checked, because all four produce that identical
+/// error: the program name, any argument, any environment entry, and the
+/// working directory — that last one being easy to overlook, since Kronn
+/// derives it from a project path it did not necessarily create.
+///
+/// Returns the CARRIER, never the content: these values hold API keys and
+/// tokens. Same rule as `InvocationSizeReceipt` ("No argument content was
+/// logged"). An argument is identified by the flag it follows when there is
+/// one, since positions shift between agents.
+fn nul_byte_offender(command: &tokio::process::Command) -> Option<String> {
+    let command = command.as_std();
+    if os_str_is_nul_bearing(command.get_program()) {
+        return Some("the program name".to_string());
+    }
+    if command
+        .get_current_dir()
+        .is_some_and(|directory| os_str_is_nul_bearing(directory.as_os_str()))
+    {
+        return Some("the working directory".to_string());
+    }
+
+    let args: Vec<&std::ffi::OsStr> = command.get_args().collect();
+    if let Some(index) = args.iter().position(|arg| os_str_is_nul_bearing(arg)) {
+        let preceding_flag = index
+            .checked_sub(1)
+            .and_then(|previous| args.get(previous))
+            .and_then(|arg| arg.to_str())
+            .filter(|arg| arg.starts_with("--"));
+        return Some(match preceding_flag {
+            Some(flag) => format!("the value of argument {flag} (position {index})"),
+            None => format!("argument at position {index}"),
+        });
+    }
+
+    // Only the overrides this call sets: an inherited variable would already
+    // have broken every other spawn on the host.
+    command
+        .get_envs()
+        .find(|(key, value)| {
+            os_str_is_nul_bearing(key) || value.is_some_and(os_str_is_nul_bearing)
+        })
+        .map(|(key, _)| format!("environment variable {}", key.to_string_lossy()))
+}
+
 fn resolve_agent_invocation(
     binary: &str,
     npx_package: Option<&str>,
@@ -8892,6 +9268,15 @@ fn try_spawn(
         receipt.validate_single_argument_limit()?;
     }
 
+    // Name the carrier before the OS refuses the whole invocation for it.
+    if let Some(offender) = nul_byte_offender(&cmd) {
+        return Err(format!(
+            "{cmd_name} cannot start: {offender} contains a NUL byte, which the operating system \
+             refuses in a command line. This never resolves on its own — the value must be fixed \
+             at its source. No argument or environment content was logged."
+        ));
+    }
+
     let mut child = cmd.spawn().map_err(|error| {
         if let Some(receipt) = invocation_receipt {
             format!(
@@ -9080,9 +9465,27 @@ pub fn parse_claude_stream_line(line: &str) -> StreamJsonEvent {
         // "assistant" messages with --include-partial-messages are cumulative snapshots
         // (they contain the full text so far, not a delta). We skip them to avoid
         // duplicating text already received via stream_event deltas.
-        "assistant" => StreamJsonEvent::Skip,
+        //
+        // EXCEPT the ones the CLI writes itself. An API failure — "API Error:
+        // 529 Overloaded", a spend limit, an expired session — arrives as an
+        // assistant message the model never produced: no deltas precede it,
+        // so skipping it dropped the only account of what went wrong. That is
+        // how a turn ended in silence and the human waited (18 min once, 1 h 27
+        // another) before retrying by hand. Verified against real transcripts
+        // on this machine: `isApiErrorMessage: true`, `model: "<synthetic>"`.
+        "assistant" => cli_authored_error_text(&json)
+            .map(StreamJsonEvent::Text)
+            .unwrap_or(StreamJsonEvent::Skip),
 
-        // Everything else (system, init, etc.)
+        // The `init` line opens the stream and names the conversation. Reading
+        // it here — rather than the final `result` — means an interrupted turn
+        // still leaves an id its successor can resume from.
+        "system" => json
+            .get("session_id")
+            .and_then(|value| value.as_str())
+            .map(|id| StreamJsonEvent::SessionId(id.to_string()))
+            .unwrap_or(StreamJsonEvent::Skip),
+
         _ => StreamJsonEvent::Skip,
     }
 }
@@ -9390,5 +9793,95 @@ fn read_gemini_settings_api_key() -> Option<String> {
         None
     } else {
         Some(key.to_string())
+    }
+}
+
+#[cfg(test)]
+mod acp_resume_tests {
+    use super::*;
+    use crate::acp::{
+        AcpConfigOption, AcpError, AcpInitialize, AcpNegotiatedCapabilities, AcpSessionEvent,
+        AcpSessionTarget, AcpTransport,
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Answers every call, and records whether a fresh session had to be made.
+    struct ResumeTransport {
+        resume_ok: bool,
+        created: AtomicUsize,
+        resumed: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl AcpTransport for ResumeTransport {
+        async fn initialize(
+            &self,
+            _: AcpInitialize,
+        ) -> Result<AcpNegotiatedCapabilities, AcpError> {
+            unimplemented!("the resume decision is taken after negotiation")
+        }
+        async fn create_session(&self) -> Result<AcpSessionTarget, AcpError> {
+            self.created.fetch_add(1, Ordering::SeqCst);
+            AcpSessionTarget::new(crate::acp::AcpAgent::OpenCode, "fresh-session")
+        }
+        async fn config_options(&self) -> Vec<AcpConfigOption> {
+            Vec::new()
+        }
+        async fn set_config_option(&self, _: &AcpSessionTarget, _: &str, _: &str) -> Result<(), AcpError> {
+            Ok(())
+        }
+        async fn resume_session(&self, _: &AcpSessionTarget) -> Result<(), AcpError> {
+            self.resumed.fetch_add(1, Ordering::SeqCst);
+            if self.resume_ok {
+                Ok(())
+            } else {
+                Err(AcpError::Transport("session not found".into()))
+            }
+        }
+        async fn prompt(
+            &self,
+            _: &AcpSessionTarget,
+            _: &str,
+            _: tokio::sync::mpsc::Sender<AcpSessionEvent>,
+        ) -> Result<(), AcpError> {
+            Ok(())
+        }
+        async fn cancel(&self, _: &AcpSessionTarget) -> Result<(), AcpError> {
+            Ok(())
+        }
+        async fn shutdown(&self) -> Result<(), AcpError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_native_acp_agent_gets_a_durable_session_like_the_adapted_ones() {
+        // Without this, OpenCode started a stranger on every turn while Codex
+        // and Claude continued their conversation.
+        assert!(AcpSessionStore::tracks(&AgentType::OpenCode));
+        assert!(AcpSessionStore::tracks(&AgentType::Codex));
+        assert!(AcpSessionStore::tracks(&AgentType::ClaudeCode));
+        // Agents with no ACP session identity must not claim one.
+        assert!(!AcpSessionStore::tracks(&AgentType::Ollama));
+        assert!(!AcpSessionStore::tracks(&AgentType::Custom));
+    }
+
+    #[tokio::test]
+    async fn a_recorded_session_that_no_longer_exists_starts_a_new_one() {
+        // An ACP session lives in the CLI's memory, so a recorded id dies with
+        // the process that issued it. Refusing the turn would strand the agent
+        // for good: the dead id stays recorded, so every later turn fails too.
+        let transport = Arc::new(ResumeTransport {
+            resume_ok: false,
+            created: AtomicUsize::new(0),
+            resumed: AtomicUsize::new(0),
+        });
+        let target = AcpSessionTarget::new(crate::acp::AcpAgent::OpenCode, "stale-session").unwrap();
+        let outcome = transport.resume_session(&target).await;
+        assert!(outcome.is_err(), "the fixture must refuse the stale id");
+        let session = transport.create_session().await.expect("a fresh session");
+        assert_eq!(session.session_id, "fresh-session");
+        assert_eq!(transport.resumed.load(Ordering::SeqCst), 1);
+        assert_eq!(transport.created.load(Ordering::SeqCst), 1);
     }
 }

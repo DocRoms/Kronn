@@ -61,6 +61,17 @@ function keysIn(block) {
   return keys;
 }
 
+// An entry written at column 0 is skipped by `keysIn` above, so the key looks
+// undefined everywhere at lint time while working fine at runtime. Report it
+// instead of letting it hide a genuinely missing translation.
+function unindentedEntries(block) {
+  const found = [];
+  const re = /^(['"])([^'"\n]*\.[^'"\n]*)\1[\t ]*:/gm;
+  let m;
+  while ((m = re.exec(block))) found.push(m[2]);
+  return found;
+}
+
 const localeBlocks = Object.fromEntries(LOCALES.map(locale => [locale, extractLocaleBlock(locale)]));
 const localeKeys = Object.fromEntries(LOCALES.map(locale => [locale, keysIn(localeBlocks[locale])]));
 
@@ -69,6 +80,11 @@ const localeKeys = Object.fromEntries(LOCALES.map(locale => [locale, keysIn(loca
 // also exist in every other shipped locale.
 const errors = [];
 const ref = localeKeys.fr;
+for (const lang of LOCALES) {
+  for (const k of unindentedEntries(localeBlocks[lang])) {
+    errors.push(`[indent] '${k}' is declared at column 0 in ${lang} — indent it, or the parity check never sees it`);
+  }
+}
 for (const lang of LOCALES.filter(locale => locale !== 'fr')) {
   const set = localeKeys[lang];
   for (const k of ref) {

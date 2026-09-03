@@ -276,6 +276,7 @@ fn blank_agent_settings() -> AgentSettings {
         tier: None,
         reasoning_effort: None,
         max_tokens: None,
+        connection_id: None,
     }
 }
 
@@ -414,6 +415,7 @@ fn build_triage_step(agent: AgentType, ticket_ref: &str, reviewer: AgentType) ->
         tier: Some(ModelTier::Reasoning),
         reasoning_effort: None,
         max_tokens: None,
+        connection_id: None,
     });
     s.stall_timeout_secs = Some(900);
     s.retry = agent_retry();

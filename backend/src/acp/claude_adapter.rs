@@ -285,8 +285,10 @@ impl AcpTransport for ClaudeAcpAdapter {
                     StreamJsonEvent::TerminalError(terminal_failure) => {
                         failure = Some(terminal_failure.user_message());
                     }
+                    // The adapter carries its own ACP session identity.
                     StreamJsonEvent::ToolInputDelta(_)
                     | StreamJsonEvent::ToolEnd
+                    | StreamJsonEvent::SessionId(_)
                     | StreamJsonEvent::Skip => {}
                 },
                 Ok(None) => break,

@@ -157,4 +157,13 @@ describe('DiscussionWeightBadge', () => {
     badge.focus();
     expect(document.activeElement).toBe(badge);
   });
+
+  it('gives the pending badge a role that may carry its name', () => {
+    // A bare span is `generic`, which FORBIDS aria-label: axe reports it as a
+    // serious violation and a screen reader announces nothing at all.
+    render(<DiscussionWeightBadge weight={null} state="loading" t={t} />);
+    const pending = screen.getByTestId('disc-weight-pending');
+    expect(pending).toHaveAttribute('role', 'img');
+    expect(pending).toHaveAccessibleName('disc.weight.loading');
+  });
 });

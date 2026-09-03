@@ -28,7 +28,16 @@ use super::routing::{route_human_turn, DispatchRoute};
 use super::streaming::make_agent_stream;
 use super::{SseStream, MAX_CONTENT_LEN};
 
-fn sse_events(events: Vec<Event>) -> Sse<SseStream> {
+/// A stream that says everything it has to say, then ends.
+///
+/// The frontend treats a stream that closes without a terminal event as an
+/// interruption — a backend restart mid-reply — and that rule is what keeps a
+/// partial answer from being thrown away. These streams end on purpose, so
+/// they say so: `complete` is terminal for the client and read by nothing
+/// else. Without it, every message in a room with joined CLIs, every human-only
+/// room, every duplicate and every revision surfaced as a broken stream.
+fn sse_events(mut events: Vec<Event>) -> Sse<SseStream> {
+    events.push(Event::default().event("complete").data("{}"));
     let stream: SseStream = Box::pin(futures::stream::iter(
         events.into_iter().map(Ok::<_, Infallible>),
     ));
@@ -66,11 +75,18 @@ struct NativeDispatchTarget {
     connection_id: Option<String>,
 }
 
-fn native_dispatch_agents_for_targets(targets: &[MessageTarget]) -> Vec<NativeDispatchTarget> {
+fn native_dispatch_agents_for_targets(
+    targets: &[MessageTarget],
+    // KT-545 — the discussion's sticky connection, used only when no
+    // explicit target was persisted for this message (a plain reply with no
+    // @mention). Without it, a Custom-connection discussion's ordinary
+    // replies dispatch with no connection and fail.
+    fallback_connection_id: Option<&str>,
+) -> Vec<NativeDispatchTarget> {
     if targets.is_empty() {
         return vec![NativeDispatchTarget {
             agent_override: None,
-            connection_id: None,
+            connection_id: fallback_connection_id.map(str::to_string),
         }];
     }
 
@@ -104,7 +120,10 @@ fn enqueue_dispatches_for_trigger(
     run_key: &str,
 ) -> anyhow::Result<Vec<crate::db::agent_dispatch::AgentDispatchJob>> {
     let targets = crate::db::discussions::list_message_targets(conn, trigger_message_id)?;
-    let dispatch_agents = native_dispatch_agents_for_targets(&targets);
+    let fallback_connection_id =
+        crate::db::discussions::get_discussion_connection_id(conn, discussion_id)?;
+    let dispatch_agents =
+        native_dispatch_agents_for_targets(&targets, fallback_connection_id.as_deref());
     let mut jobs = Vec::with_capacity(dispatch_agents.len());
     for (position, dispatch_target) in dispatch_agents.iter().enumerate() {
         let job_id = Uuid::new_v4().to_string();
@@ -190,6 +209,26 @@ pub(crate) async fn canonical_targets(
         .map_err(|error| error.to_string())?;
     let (discussion, sessions, connections, no_agent) = context;
 
+    // A room whose native agent is off still has readers: the sessions joined
+    // to it. Without this, an ordinary turn there resolves to no target at
+    // all — the native responder is disabled and no peer was named — so the
+    // message reaches nobody and the writer is told nothing. Three of Romu's
+    // turns went that way on 03/09 before anyone noticed.
+    //
+    // Naming the joined sessions is what `no_agent` already promises: "joined
+    // peers remain participants and continue receiving turns".
+    if !target_all && requested.is_empty() && no_agent && !sessions.is_empty() {
+        return Ok(sessions
+            .iter()
+            .map(|session| {
+                MessageTarget::cli(
+                    crate::db::discussions::parse_agent_type(&session.agent_type),
+                    session.id,
+                )
+            })
+            .collect());
+    }
+
     let mut candidates = if target_all {
         let mut all = if no_agent {
             Vec::new()
@@ -222,6 +261,11 @@ pub(crate) async fn canonical_targets(
         let canonical = match target.kind {
             MessageTargetKind::DiscussionAgent => {
                 let mut canonical = MessageTarget::discussion_agent(discussion.agent.clone());
+                // KT-545 — the implicit "reply as the discussion's own agent"
+                // target must carry the discussion's sticky connection, or a
+                // Custom-connection discussion loses its target on every
+                // ordinary reply (no explicit @mention resends it).
+                canonical.connection_id = discussion.connection_id.clone();
                 canonical.tier = target.tier;
                 canonical
             }
@@ -1342,7 +1386,7 @@ mod tests {
         ];
 
         assert_eq!(
-            native_dispatch_agents_for_targets(&targets),
+            native_dispatch_agents_for_targets(&targets, None),
             vec![
                 NativeDispatchTarget {
                     agent_override: None,
@@ -1365,14 +1409,14 @@ mod tests {
         ];
 
         assert_eq!(
-            native_dispatch_agents_for_targets(&targets),
+            native_dispatch_agents_for_targets(&targets, None),
             vec![NativeDispatchTarget {
                 agent_override: Some(AgentType::Ollama),
                 connection_id: None,
             }]
         );
         assert_eq!(
-            native_dispatch_agents_for_targets(&[]),
+            native_dispatch_agents_for_targets(&[], None),
             vec![NativeDispatchTarget {
                 agent_override: None,
                 connection_id: None,
@@ -1388,7 +1432,7 @@ mod tests {
         ];
 
         assert_eq!(
-            native_dispatch_agents_for_targets(&targets),
+            native_dispatch_agents_for_targets(&targets, None),
             vec![
                 NativeDispatchTarget {
                     agent_override: Some(AgentType::Custom),
@@ -1399,6 +1443,34 @@ mod tests {
                     connection_id: Some("groq".into()),
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn empty_targets_fall_back_to_the_discussion_sticky_connection() {
+        // KT-545 — an ordinary reply with no explicit @mention persists no
+        // MessageTarget rows; without the fallback, a Custom-connection
+        // discussion's plain replies would dispatch with no connection.
+        assert_eq!(
+            native_dispatch_agents_for_targets(&[], Some("groq")),
+            vec![NativeDispatchTarget {
+                agent_override: None,
+                connection_id: Some("groq".into()),
+            }]
+        );
+    }
+
+    #[test]
+    fn explicit_targets_ignore_the_discussion_fallback_connection() {
+        // An explicit target's own connection (or lack of one) always wins —
+        // the fallback only fires when nothing was resolved for the message.
+        let targets = vec![MessageTarget::agent(AgentType::ClaudeCode)];
+        assert_eq!(
+            native_dispatch_agents_for_targets(&targets, Some("groq")),
+            vec![NativeDispatchTarget {
+                agent_override: Some(AgentType::ClaudeCode),
+                connection_id: None,
+            }]
         );
     }
 
@@ -1751,6 +1823,47 @@ mod tests {
                 MessageTarget::discussion_agent(AgentType::LiteLlm).with_tier(ModelTier::Reasoning),
                 MessageTarget::agent(AgentType::Codex).with_tier(ModelTier::Default),
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn canonical_discussion_agent_target_carries_the_sticky_connection() {
+        // KT-545 — the implicit "reply as the discussion's own agent" target
+        // must resolve the discussion's sticky connection, or a
+        // Custom-connection discussion loses it on every target_all/no-mention
+        // round.
+        let disc = "d-sticky-connection";
+        let state = make_state_with_disc(disc).await;
+        state
+            .db
+            .with_conn(move |conn| {
+                conn.execute(
+                    "INSERT INTO external_api_connections
+                     (id, display_name, mention_alias, endpoint, credential_slug, origin_preset)
+                     VALUES ('conn-groq', 'Groq', 'groq', 'https://api.groq.com', 'conn-groq', 'other')",
+                    [],
+                )?;
+                crate::db::discussions::update_discussion_agent(conn, disc, &AgentType::Custom)?;
+                crate::db::discussions::update_discussion_connection(
+                    conn,
+                    disc,
+                    Some("conn-groq"),
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let all = canonical_targets(&state, disc, Vec::new(), true)
+            .await
+            .unwrap();
+        let discussion_agent_target = all
+            .iter()
+            .find(|target| target.kind == MessageTargetKind::DiscussionAgent)
+            .expect("target_all must include the discussion-agent target");
+        assert_eq!(
+            discussion_agent_target.connection_id.as_deref(),
+            Some("conn-groq")
         );
     }
 
@@ -2148,6 +2261,76 @@ mod tests {
         assert!(
             accepted_pos < skipped_pos,
             "accepted receipt must precede no-agent skip: {body}"
+        );
+    }
+
+    /// KT-578 — a room whose native agent is off still has readers.
+    ///
+    /// Without this, an ordinary turn there resolved to no target at all: the
+    /// native responder is disabled and no peer was named, so the message
+    /// reached nobody and the writer was told nothing. Three turns went that
+    /// way on 03/09 before the silence was noticed — and the header, reading
+    /// the discussion's `agent` (which survives being switched off), announced
+    /// a destination that received none of them.
+    #[tokio::test]
+    async fn a_turn_naming_nobody_reaches_the_joined_sessions_when_the_native_agent_is_off() {
+        let disc = "d-no-agent-joined";
+        let state = make_state_with_disc(disc).await;
+        let cli_session_id = state
+            .db
+            .with_conn(move |conn| {
+                conn.execute("UPDATE discussions SET no_agent = 1 WHERE id = ?1", [disc])?;
+                let session_id = crate::db::discussion_sessions::create_session(
+                    conn,
+                    disc,
+                    "ClaudeCode",
+                    Some("sess-joined"),
+                    "peer",
+                )?;
+                Ok(session_id)
+            })
+            .await
+            .unwrap();
+
+        let resolved = canonical_targets(&state, disc, Vec::new(), false)
+            .await
+            .expect("an ordinary turn resolves");
+
+        assert_eq!(resolved.len(), 1, "the joined session is the destination");
+        assert_eq!(resolved[0].kind, MessageTargetKind::Cli);
+        assert_eq!(resolved[0].cli_session_id, Some(cli_session_id));
+        assert_eq!(resolved[0].agent_type, AgentType::ClaudeCode);
+    }
+
+    /// The other half of the same rule: with the native agent ON, an ordinary
+    /// turn still belongs to it. Joined sessions do not steal a turn nobody
+    /// addressed to them.
+    #[tokio::test]
+    async fn a_turn_naming_nobody_still_belongs_to_an_enabled_native_agent() {
+        let disc = "d-native-on-joined";
+        let state = make_state_with_disc(disc).await;
+        state
+            .db
+            .with_conn(move |conn| {
+                crate::db::discussion_sessions::create_session(
+                    conn,
+                    disc,
+                    "ClaudeCode",
+                    Some("sess-bystander"),
+                    "peer",
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let resolved = canonical_targets(&state, disc, Vec::new(), false)
+            .await
+            .expect("an ordinary turn resolves");
+
+        assert!(
+            resolved.is_empty(),
+            "an enabled native agent owns the turn through its own route, got {resolved:?}"
         );
     }
 

@@ -20,13 +20,17 @@ use sha2::{Digest, Sha256};
 
 use crate::agents::media_worker::DEFAULT_DEADLINE;
 use crate::db::media_jobs::{self, NewMediaJob};
-use crate::models::{ApiResponse, MediaJobStatus, MediaModality, MediaParams};
+use crate::models::{ApiResponse, MediaJobStatus, MediaModality, MediaParams, MediaReferenceMode};
 use crate::AppState;
 
 /// Hard ceilings for any caller. The human UI shows an estimate before sending;
 /// these stop a mistake — or an agent — from ordering an expensive generation.
 const MAX_DURATION_SECS: u32 = 15;
 const ALLOWED_RESOLUTIONS: [&str; 3] = ["480p", "720p", "1080p"];
+/// Ceiling for a source image. Providers reject oversized inputs anyway; being
+/// refused here costs nothing, being refused there costs a round trip and,
+/// depending on the provider, a submission.
+const MAX_REFERENCE_BYTES: u64 = 12 * 1024 * 1024;
 
 #[derive(Debug, Deserialize)]
 pub struct GenerateMediaRequest {
@@ -58,6 +62,19 @@ pub struct GenerateMediaRequest {
     pub aspect_ratio: Option<String>,
     #[serde(default)]
     pub generate_audio: Option<bool>,
+    /// Images of THIS discussion to generate from, in the order they should
+    /// reach the provider. Ids, never paths or URLs: the caller — browser or
+    /// agent — never learns where a file lives, and cannot point the
+    /// generation at anything outside the room.
+    #[serde(default)]
+    pub reference_asset_ids: Option<Vec<String>>,
+    /// Single-image form. Accepted so a caller written against the earlier
+    /// contract keeps working; equivalent to a one-element list.
+    #[serde(default)]
+    pub reference_asset_id: Option<String>,
+    /// What those images are for: `first_frame`, `last_frame` or `reference`.
+    #[serde(default)]
+    pub reference_mode: Option<MediaReferenceMode>,
 }
 
 #[derive(Debug, Serialize)]
@@ -149,6 +166,24 @@ pub async fn generate(
         )));
     };
 
+    // A source image is validated BEFORE anything durable is written and long
+    // before the provider is paid: it must exist, live in the very discussion
+    // this generation lands in, be a real image on disk, be small enough, and
+    // its mode must be one the chosen model actually advertises. Every one of
+    // those failures costs nothing here and would cost a billed submission
+    // there.
+    let references = match resolve_references(
+        &state,
+        &req,
+        &connection,
+        &model,
+    )
+    .await
+    {
+        Ok(references) => references,
+        Err(message) => return Json(ApiResponse::err(message)),
+    };
+
     // Every non-DB validation has passed. From here on, the discussion (when
     // one has to be created), its anchor message and the job itself are
     // written in ONE transaction: a rejected request or a mid-write DB failure
@@ -175,6 +210,13 @@ pub async fn generate(
         resolution: req.resolution.clone(),
         aspect_ratio: req.aspect_ratio.clone(),
         generate_audio: req.generate_audio,
+        reference_asset_ids: references
+            .as_ref()
+            .map(|(ids, _)| ids.clone())
+            .unwrap_or_default(),
+        // Never written again: the plural list above is the contract now.
+        reference_asset_id: None,
+        reference_mode: references.as_ref().map(|(_, mode)| *mode),
     };
     if idempotency_key.is_some() {
         let existing_lookup = job_id.clone();
@@ -483,6 +525,7 @@ fn insert_media_discussion(
     };
     let (message_id, message) = build_prompt_message(prompt, now, None, media_job_id);
     let discussion = Discussion {
+        connection_id: None,
         awaiting_agent: false,
         agent_running: false,
         id: id.clone(),
@@ -960,4 +1003,329 @@ mod tests {
             "validation errors must not leave jobs behind"
         );
     }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ModelCapabilitiesQuery {
+    pub connection_id: String,
+    pub modality: MediaModality,
+}
+
+/// What the launcher may offer for the model configured on this connection.
+///
+/// `capabilities` is `None` when the provider advertises nothing we can read —
+/// NVIDIA serves no media catalogue at all — and the caller must then keep its
+/// own configured defaults rather than showing an empty form.
+#[derive(Debug, Serialize)]
+pub struct MediaModelCapabilitiesResponse {
+    pub model: String,
+    pub capabilities: Option<crate::agents::media_capabilities::MediaModelCapabilities>,
+}
+
+/// What one catalogue read produced, and when. `None` is a real answer —
+/// "this provider advertises nothing" — not a cache miss.
+type CachedCapabilities = (
+    chrono::DateTime<Utc>,
+    Option<crate::agents::media_capabilities::MediaModelCapabilities>,
+);
+
+/// Catalogue answers change rarely and are read on every form open. A short
+/// memory cache keeps a discussion's UI responsive without ever serving a
+/// stale envelope for long — an expired entry is refetched, never extended.
+static CAPABILITY_CACHE: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<String, CachedCapabilities>>,
+> = std::sync::OnceLock::new();
+
+const CAPABILITY_CACHE_TTL_SECS: i64 = 600;
+
+fn cached_capabilities(
+    key: &str,
+    now: chrono::DateTime<Utc>,
+) -> Option<Option<crate::agents::media_capabilities::MediaModelCapabilities>> {
+    let cache = CAPABILITY_CACHE.get_or_init(Default::default);
+    let guard = cache.lock().ok()?;
+    let (stored_at, value) = guard.get(key)?;
+    ((now - *stored_at).num_seconds() < CAPABILITY_CACHE_TTL_SECS).then(|| value.clone())
+}
+
+fn store_capabilities(
+    key: String,
+    now: chrono::DateTime<Utc>,
+    value: Option<crate::agents::media_capabilities::MediaModelCapabilities>,
+) {
+    let cache = CAPABILITY_CACHE.get_or_init(Default::default);
+    if let Ok(mut guard) = cache.lock() {
+        guard.insert(key, (now, value));
+    }
+}
+
+/// Read what the provider advertises for the configured model.
+///
+/// The launcher used to offer a hard-coded 3 s / 1080p that `seedance-2.0-mini`
+/// rejects, and hid six ratios it accepts — a billable click that could only
+/// fail. Everything offered now comes from the provider's own answer.
+pub async fn model_capabilities(
+    State(state): State<AppState>,
+    Query(query): Query<ModelCapabilitiesQuery>,
+) -> Json<ApiResponse<MediaModelCapabilitiesResponse>> {
+    let lookup = query.connection_id.clone();
+    let connection = match state
+        .db
+        .with_read_conn(move |conn| crate::db::external_api_connections::get(conn, &lookup))
+        .await
+    {
+        Ok(Some(connection)) => connection,
+        Ok(None) => {
+            return Json(ApiResponse::err(format!(
+                "unknown connection: {}",
+                query.connection_id
+            )))
+        }
+        Err(e) => return Json(ApiResponse::err(format!("failed to read connection: {e}"))),
+    };
+
+    let configured = match query.modality {
+        MediaModality::Image => connection.image_model.clone(),
+        MediaModality::Video => connection.video_model.clone(),
+    };
+    let Some(model) = configured.filter(|model| !model.trim().is_empty()) else {
+        return Json(ApiResponse::err(format!(
+            "connection '{}' has no {} model configured",
+            connection.display_name,
+            query.modality.as_str()
+        )));
+    };
+
+    let now = Utc::now();
+    let cache_key = format!("{}::{}::{}", connection.id, query.modality.as_str(), model);
+    if let Some(capabilities) = cached_capabilities(&cache_key, now) {
+        return Json(ApiResponse::ok(MediaModelCapabilitiesResponse {
+            model,
+            capabilities,
+        }));
+    }
+
+    let base = connection
+        .media_endpoint
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| connection.endpoint.clone())
+        .unwrap_or_default();
+    let capabilities = fetch_model_capabilities(
+        &state,
+        &base,
+        &connection.credential_slug,
+        &model,
+        query.modality,
+    )
+    .await;
+    store_capabilities(cache_key, now, capabilities.clone());
+    Json(ApiResponse::ok(MediaModelCapabilitiesResponse {
+        model,
+        capabilities,
+    }))
+}
+
+/// Fetches one catalogue and reads the configured model out of it.
+///
+/// Every failure degrades to "nothing advertised": a provider without a media
+/// catalogue (NVIDIA), an unreachable one, or a shape we cannot read must all
+/// leave the launcher on its configured defaults rather than emptying it.
+async fn fetch_model_capabilities(
+    state: &AppState,
+    base: &str,
+    credential_slug: &str,
+    model: &str,
+    modality: MediaModality,
+) -> Option<crate::agents::media_capabilities::MediaModelCapabilities> {
+    let base = base.trim_end_matches('/').trim_end_matches("/v1");
+    if base.is_empty() {
+        return None;
+    }
+    let path = match modality {
+        MediaModality::Image => "/v1/images/models",
+        MediaModality::Video => "/v1/videos/models",
+    };
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(6))
+        .connect_timeout(std::time::Duration::from_secs(3))
+        .build()
+        .ok()?;
+    let mut request = client.get(format!("{base}{path}"));
+    if let Some(key) = state
+        .config
+        .read()
+        .await
+        .tokens
+        .active_key_for(credential_slug)
+    {
+        request = request.bearer_auth(key);
+    }
+    let response = request.send().await.ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    let body: serde_json::Value = response.json().await.ok()?;
+    crate::agents::media_capabilities::capabilities_for(&body, model, modality)
+}
+
+/// Validates the requested source image and returns what the job should store.
+///
+/// `Ok(None)` is the ordinary text-to-media case. Every error is a sentence a
+/// caller can act on: an agent that picked an asset from another discussion, a
+/// browser that sent a mode the model does not support, a file that is not an
+/// image. None of them reaches the provider.
+async fn resolve_references(
+    state: &AppState,
+    req: &GenerateMediaRequest,
+    connection: &crate::models::ExternalApiConnection,
+    model: &str,
+) -> Result<Option<(Vec<String>, MediaReferenceMode)>, String> {
+    // Both forms describe the same thing, so they are merged into one list
+    // rather than made to compete: a caller sending both gets what it named,
+    // in the order it named it, with no duplicate reaching the provider.
+    let mut asset_ids: Vec<String> = Vec::new();
+    for candidate in req
+        .reference_asset_id
+        .iter()
+        .chain(req.reference_asset_ids.iter().flatten())
+    {
+        let id = candidate.trim();
+        if !id.is_empty() && !asset_ids.iter().any(|kept| kept == id) {
+            asset_ids.push(id.to_string());
+        }
+    }
+    if asset_ids.is_empty() {
+        // A mode without an image describes nothing, and silently dropping
+        // it would produce a plain text-to-media the caller did not ask
+        // for — and would still be billed for.
+        return match req.reference_mode {
+            Some(_) => Err("reference_mode requires at least one reference asset".to_string()),
+            None => Ok(None),
+        };
+    }
+    let Some(mode) = req.reference_mode else {
+        return Err(
+            "reference_mode is required with a reference asset: first_frame, last_frame or reference"
+                .to_string(),
+        );
+    };
+    // Some providers take no source image on any model. Their catalogue
+    // cannot say so — NVIDIA serves no media catalogue at all — so the
+    // capability check below would be skipped and the refusal would surface in
+    // the worker, where it looks like an outage and is retried until the
+    // deadline. Refusing here says it once, before a job exists.
+    if !crate::agents::media_codec::codec_for(connection.origin_preset).accepts_reference_images() {
+        return Err(format!(
+            "this connection's provider does not accept a source image: '{}' cannot be used here",
+            mode.as_str()
+        ));
+    }
+    // A frame is one exact picture at one end of a clip; there is no such
+    // thing as several. This holds with or without a catalogue, so it is
+    // checked before anything is fetched — sending more would silently drop
+    // all but one, after billing.
+    if mode.frame_capability().is_some() && asset_ids.len() > 1 {
+        return Err(format!(
+            "'{}' takes a single image, {} were sent",
+            mode.as_str(),
+            asset_ids.len()
+        ));
+    }
+    let Some(discussion_id) = req.discussion_id.as_deref().map(str::trim).filter(|id| !id.is_empty())
+    else {
+        // Without a room there is nothing to check membership against, and a
+        // generation that creates its own discussion cannot already hold an
+        // image of it.
+        return Err("reference_asset_id requires an existing discussion_id".to_string());
+    };
+    let discussion_id = discussion_id.to_string();
+
+    for asset_id in &asset_ids {
+        let lookup = asset_id.clone();
+        let file = state
+            .db
+            .with_read_conn(move |conn| {
+                Ok(crate::db::discussions::get_context_file(conn, &lookup)?)
+            })
+            .await
+            .map_err(|e| format!("failed to read the source image: {e}"))?
+            .ok_or_else(|| format!("unknown reference asset: {asset_id}"))?;
+
+        // Membership is the security boundary: an id is guessable, a room is
+        // not shared. Same message for "absent" and "elsewhere" would leak
+        // which ids exist, so both say what the caller can act on without
+        // confirming the existence of another room's file.
+        if file.discussion_id != discussion_id {
+            return Err("the reference asset does not belong to this discussion".to_string());
+        }
+        if file.disk_path.is_none() {
+            return Err(
+                "the reference asset has no stored file — only an uploaded image can be used"
+                    .to_string(),
+            );
+        }
+        if !file.mime_type.starts_with("image/") {
+            return Err(format!(
+                "the reference asset is not an image ({})",
+                file.mime_type
+            ));
+        }
+        if file.original_size > MAX_REFERENCE_BYTES {
+            return Err(format!(
+                "the reference image is too large ({} MB); the ceiling is {} MB",
+                file.original_size / (1024 * 1024),
+                MAX_REFERENCE_BYTES / (1024 * 1024)
+            ));
+        }
+    }
+
+    // Capability preflight. An unreachable catalogue answers nothing, and a
+    // silence must not become a refusal: the provider stays the authority, and
+    // the submission is what will tell. What we DO refuse is a mode the
+    // catalogue explicitly does not list.
+    let base = connection
+        .media_endpoint
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| connection.endpoint.clone())
+        .unwrap_or_default();
+    if let Some(capabilities) = fetch_model_capabilities(
+        state,
+        &base,
+        &connection.credential_slug,
+        model,
+        req.modality,
+    )
+    .await
+    {
+        if !capabilities.supports_reference_mode(mode) {
+            let offered = capabilities.advertised_modes();
+            let offered = if offered.is_empty() {
+                "no source image at all".to_string()
+            } else {
+                offered.join(", ")
+            };
+            return Err(format!(
+                "model '{model}' does not support '{}' — it advertises: {offered}",
+                mode.as_str()
+            ));
+        }
+        // The ceiling is per model, and it ranges from 1 to 16 across the
+        // catalogue: a fixed one would be wrong for nearly every provider.
+        // A catalogue that advertises nothing stays silent — the submission is
+        // what tells — but a stated maximum is enforced before it is billed.
+        if let (MediaReferenceMode::Reference, Some(maximum)) =
+            (mode, capabilities.max_input_references)
+        {
+            if asset_ids.len() as u32 > maximum {
+                return Err(format!(
+                    "model '{model}' takes at most {maximum} reference image(s), {} were sent",
+                    asset_ids.len()
+                ));
+            }
+        }
+    }
+
+    Ok(Some((asset_ids, mode)))
 }

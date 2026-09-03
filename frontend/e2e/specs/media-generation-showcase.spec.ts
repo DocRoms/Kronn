@@ -38,8 +38,13 @@ async function expectDecodedVideo(video: Locator, label: string) {
     .toBeGreaterThan(0);
 }
 
+// A capture pass over real generated assets: it needs a discussion that holds
+// some, named by the operator. Without one there is nothing to capture, and a
+// missing precondition is a skip — an assertion here turned every default run
+// of the suite red on machines that never set the variable.
+test.skip(!DISC, 'MEDIA_DISC_ID must name a discussion holding generated assets');
+
 test.beforeAll(() => {
-  expect(DISC, 'MEDIA_DISC_ID must name a discussion holding generated assets').not.toBe('');
   mkdirSync(OUT, { recursive: true });
 });
 

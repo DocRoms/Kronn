@@ -352,6 +352,7 @@ describe('BatchComparePanel', () => {
     await waitFor(() => expect(compareApi.startImprovement).toHaveBeenCalledWith('run-1', {
       agent: 'Codex',
       tier: 'reasoning',
+      connection_id: null,
     }));
     expect(onOpenDiscussion).toHaveBeenCalledWith('disc-improvement');
   });

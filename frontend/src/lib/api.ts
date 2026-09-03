@@ -216,6 +216,9 @@ import type {
 import type {
   CatalogModelEntry,
   DeleteManualModelRequest,
+  MediaFramePosition,
+  MediaReferenceMode,
+  MediaModelCapabilities,
   ModelCatalogSnapshot,
   ModelCatalogView,
   RefreshModelCatalogRequest,
@@ -751,7 +754,7 @@ export const config = {
       'GET',
       `/discussion-weights?discussion_ids=${encodeURIComponent(discussionIds.join(','))}`,
     ),
-  setServerConfig: (req: { domain?: string; max_concurrent_agents?: number; agent_stall_timeout_min?: number; agent_global_timeout_min?: number; local_agent_global_timeout_min?: number; pseudo?: string; avatar_email?: string; bio?: string; debug_mode?: boolean; discussion_notes_enabled?: boolean; default_model_tier?: 'economy' | 'default' | 'reasoning'; default_summary_strategy?: 'Auto' | 'OnDemand' | 'Off'; agent_handoffs_enabled?: boolean; agent_handoff_paid_limit?: number; agent_handoff_paid_unlimited?: boolean; agent_handoff_blocked_agents?: AgentType[]; discussion_weight?: DiscussionWeightConfig; execution_variable_retention_days?: number }) => api<void>('POST', '/config/server', req),
+  setServerConfig: (req: { domain?: string; max_concurrent_agents?: number; agent_stall_timeout_min?: number; agent_global_timeout_min?: number; local_agent_global_timeout_min?: number; pseudo?: string; avatar_email?: string; bio?: string; debug_mode?: boolean; discussion_notes_enabled?: boolean; default_model_tier?: 'economy' | 'default' | 'reasoning'; default_summary_strategy?: 'OnDemand' | 'Off'; agent_handoffs_enabled?: boolean; agent_handoff_paid_limit?: number; agent_handoff_paid_unlimited?: boolean; agent_handoff_blocked_agents?: AgentType[]; discussion_weight?: DiscussionWeightConfig; execution_variable_retention_days?: number }) => api<void>('POST', '/config/server', req),
   regenerateAuthToken: () => api<string>('POST', '/config/auth-token/regenerate'),
 };
 
@@ -1454,7 +1457,7 @@ export const discussions = {
   ),
   create: (req: CreateDiscussionRequest) => api<Discussion>('POST', '/discussions', req),
   delete: (id: string) => api<void>('DELETE', `/discussions/${id}`),
-  update: (id: string, body: { title?: string; archived?: boolean; pinned?: boolean; skill_ids?: string[]; profile_ids?: string[]; directive_ids?: string[]; project_id?: string | null; tier?: ModelTier; agent?: AgentType; summary_strategy?: 'Auto' | 'OnDemand' | 'Off'; no_agent?: boolean; agent_handoffs_disabled?: boolean; agent_handoffs_unlimited?: boolean; execution_variable_retention_days?: number | null }) => api<void>('PATCH', `/discussions/${id}`, body),
+  update: (id: string, body: { title?: string; archived?: boolean; pinned?: boolean; skill_ids?: string[]; profile_ids?: string[]; directive_ids?: string[]; project_id?: string | null; tier?: ModelTier; agent?: AgentType; connection_id?: string | null; summary_strategy?: 'Auto' | 'OnDemand' | 'Off'; no_agent?: boolean; agent_handoffs_disabled?: boolean; agent_handoffs_unlimited?: boolean; execution_variable_retention_days?: number | null }) => api<void>('PATCH', `/discussions/${id}`, body),
   nativeAgentMode: (id: string) =>
     api<DiscussionNativeAgentMode>('GET', `/discussions/${id}/native-agent`),
   agentHandoffMode: (id: string) =>
@@ -1703,9 +1706,17 @@ export const discussions = {
     if (!res.ok) throw new Error(`Failed to load attachment (${res.status})`);
     return res.blob();
   },
-  uploadContextFile: async (id: string, file: File): Promise<UploadContextFileResponse> => {
+  /** `extractedFromAssetId` marks a frame decoded out of a clip of the same
+   *  discussion: the server then gives it its OWN transcript message, so it
+   *  never waits to be pinned to the next thing the user sends. */
+  uploadContextFile: async (
+    id: string,
+    file: File,
+    extractedFromAssetId?: string,
+  ): Promise<UploadContextFileResponse> => {
     const form = new FormData();
     form.append('file', file);
+    if (extractedFromAssetId) form.append('extracted_from_asset_id', extractedFromAssetId);
     const res = await fetch(`${_apiBase}/api/discussions/${id}/context-files`, {
       method: 'POST',
       headers: { ...authHeaders() },
@@ -2330,7 +2341,9 @@ export const pages = {
 
 export interface BatchItem {
   title: string;
-  prompt: string;
+  /** Values rendered into the Quick Prompt's template. The prompt itself is
+   *  never sent per item — the template owns it, and the substitution happens
+   *  at execution from these values. */
   variables?: Record<string, string>;
 }
 
@@ -2381,6 +2394,8 @@ export const quickPrompts = {
   setPinned: (id: string, pinned: boolean) =>
     api<QuickPrompt>('PATCH', `/quick-prompts/${id}`, { pinned }),
   delete: (id: string) => api<void>('DELETE', `/quick-prompts/${id}`),
+  /** Workflow steps that name it — they fail on their next run once it is gone. */
+  usage: (id: string) => api<number>('GET', `/quick-prompts/${id}/usage`),
   /**
    * Create N child discussions from a Quick Prompt + list of rendered prompts.
    * The frontend pre-renders each template (via the existing renderTemplate
@@ -2443,6 +2458,8 @@ export const quickApis = {
   setPinned: (id: string, pinned: boolean) =>
     api<QuickApi>('PATCH', `/quick-apis/${id}`, { pinned }),
   delete: (id: string) => api<void>('DELETE', `/quick-apis/${id}`),
+  /** Workflow steps that name it — they fail on their next run once it is gone. */
+  usage: (id: string) => api<number>('GET', `/quick-apis/${id}/usage`),
   runQa: (id: string, req: RunQuickApiRequest) =>
     api<RunQuickApiResponse>('POST', `/quick-apis/${id}/run`, req),
   batchRunQa: (id: string, req: BatchRunQuickApiRequest) =>
@@ -2736,6 +2753,13 @@ export interface ExternalApiConnectionTestResult {
     display_name: string;
     capabilities: string[];
   }>;
+  /** Whether image/video compatibility is provable from catalog evidence
+   * (an explicit `architecture.output_modalities` field, or a dedicated
+   * capability endpoint that answered) — never inferred from the provider's
+   * name. Older backends omit these; callers must treat that as `false`,
+   * the safe default (KT-531). */
+  image_capability_known?: boolean;
+  video_capability_known?: boolean;
   hint: string | null;
 }
 
@@ -2789,6 +2813,13 @@ export interface MediaJobView {
   attempts: number;
 }
 
+export type { MediaFramePosition, MediaReferenceMode, MediaModelCapabilities };
+
+export interface MediaModelCapabilitiesResponse {
+  model: string;
+  capabilities: MediaModelCapabilities | null;
+}
+
 export interface MediaEstimate {
   model: string;
   /** Absent when nothing comparable was billed yet — an unknown price is shown
@@ -2824,6 +2855,13 @@ export const media = {
     const params = new URLSearchParams({ connection_id: connectionId, modality });
     if (durationSecs !== undefined) params.set('duration_secs', String(durationSecs));
     return api<MediaEstimate>('GET', `/media/estimate?${params.toString()}`);
+  },
+  /** What the provider says the configured model accepts. `capabilities` is
+   *  null when nothing is advertised (NVIDIA serves no media catalogue), and
+   *  the caller must then keep its own defaults rather than emptying the form. */
+  capabilities: (connectionId: string, modality: MediaModality) => {
+    const params = new URLSearchParams({ connection_id: connectionId, modality });
+    return api<MediaModelCapabilitiesResponse>('GET', `/media/models?${params.toString()}`);
   },
 };
 

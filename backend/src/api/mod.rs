@@ -12,6 +12,7 @@ pub mod compare;
 pub mod contacts;
 pub mod context_audit;
 pub mod debug;
+pub mod delivery_publication;
 pub mod directives;
 pub mod disc_git;
 pub mod disc_helpers;

@@ -151,7 +151,7 @@ pub fn list_active_for_discussion(
 ) -> Result<Vec<ActiveAgentDispatch>> {
     let mut stmt = conn.prepare(
         "SELECT id, trigger_message_id, agent_override_json, status, attempts, last_error,
-                connection_id
+                connection_id, progress_phase
          FROM agent_dispatch_jobs
          WHERE discussion_id = ?1 AND status IN ('Pending', 'Running')
          ORDER BY trigger_sort_order ASC, created_at ASC",
@@ -170,6 +170,7 @@ pub fn list_active_for_discussion(
             attempts: Some(row.get::<_, i64>(4)?.max(0) as u32),
             last_error: row.get(5)?,
             connection_id: row.get(6)?,
+            progress_phase: row.get(7)?,
         })
     })?;
     rows.collect::<rusqlite::Result<Vec<_>>>()

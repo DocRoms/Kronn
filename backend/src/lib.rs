@@ -4,6 +4,7 @@ pub mod api;
 pub mod core;
 pub mod db;
 pub mod delivery;
+pub mod http_transport;
 pub mod models;
 pub mod workflows;
 
@@ -1206,6 +1207,7 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route("/api/media/jobs/{id}/cancel", post(api::media::cancel_job))
         .route("/api/media/costs", get(api::media::spend))
         .route("/api/media/estimate", get(api::media::estimate))
+        .route("/api/media/models", get(api::media::model_capabilities))
         // ── Secret themes (hidden palette unlock via code) ──
         .route("/api/themes/unlock", post(api::themes::unlock))
         // ── Document generation (5 formats through the Python sidecar) ──
@@ -1516,6 +1518,11 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             "/api/quick-prompts/{id}/history",
             get(api::quick_prompts::history),
         )
+        // KT-561 — how many workflow steps name it, said before a deletion.
+        .route(
+            "/api/quick-prompts/{id}/usage",
+            get(api::quick_prompts::usage),
+        )
         .route(
             "/api/quick-prompts/{id}/metrics",
             get(api::quick_prompts::metrics),
@@ -1555,6 +1562,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route(
             "/api/quick-apis/{id}/export",
             get(api::quick_apis::export_qa),
+        )
+        .route(
+            "/api/quick-apis/{id}/usage",
+            get(api::quick_apis::usage),
         )
         .route("/api/quick-apis/import", post(api::quick_apis::import_qa))
         // ── Quick Execs (reusable shell-free CLI collectors) ──

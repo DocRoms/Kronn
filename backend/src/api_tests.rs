@@ -1289,6 +1289,7 @@ mod tests {
             .with_conn(|conn| {
                 let now = chrono::Utc::now();
                 let disc = crate::models::Discussion {
+                    connection_id: None,
                     awaiting_agent: false,
                     agent_running: false,
                     id: "disc-1".into(),
@@ -1313,7 +1314,7 @@ mod tests {
                     pin_first_message: false,
                     summary_cache: None,
                     summary_up_to_msg_idx: None,
-                    summary_strategy: crate::models::SummaryStrategy::Auto,
+                    summary_strategy: crate::models::SummaryStrategy::OnDemand,
                     introspection_call_count: 0,
                     shared_id: None,
                     shared_with: vec![],
@@ -1461,6 +1462,7 @@ mod tests {
             .with_conn(|conn| {
                 let now = chrono::Utc::now();
                 let disc = crate::models::Discussion {
+                    connection_id: None,
                     awaiting_agent: false,
                     agent_running: false,
                     id: "disc-del".into(),
@@ -1485,7 +1487,7 @@ mod tests {
                     pin_first_message: false,
                     summary_cache: None,
                     summary_up_to_msg_idx: None,
-                    summary_strategy: crate::models::SummaryStrategy::Auto,
+                    summary_strategy: crate::models::SummaryStrategy::OnDemand,
                     introspection_call_count: 0,
                     shared_id: None,
                     shared_with: vec![],
@@ -2350,6 +2352,7 @@ mod tests {
                 move |conn| {
                     let now = chrono::Utc::now();
                     let disc = crate::models::Discussion {
+                        connection_id: None,
                         awaiting_agent: false,
                         agent_running: false,
                         id: id.clone(),
@@ -2374,7 +2377,7 @@ mod tests {
                         pin_first_message: false,
                         summary_cache: None,
                         summary_up_to_msg_idx: None,
-                        summary_strategy: crate::models::SummaryStrategy::Auto,
+                        summary_strategy: crate::models::SummaryStrategy::OnDemand,
                         introspection_call_count: 0,
                         shared_id: None,
                         shared_with: vec![],
@@ -3346,6 +3349,7 @@ mod tests {
             .with_conn(|conn| {
                 let now = chrono::Utc::now();
                 let disc = crate::models::Discussion {
+                    connection_id: None,
                     awaiting_agent: false,
                     agent_running: false,
                     id: "disc-pin".into(),
@@ -3370,7 +3374,7 @@ mod tests {
                     pin_first_message: true,
                     summary_cache: None,
                     summary_up_to_msg_idx: None,
-                    summary_strategy: crate::models::SummaryStrategy::Auto,
+                    summary_strategy: crate::models::SummaryStrategy::OnDemand,
                     introspection_call_count: 0,
                     shared_id: None,
                     shared_with: vec![],
@@ -4998,6 +5002,7 @@ mod tests {
         let state = test_state();
         let discussion_id = "http-agent-planning-disc";
         let disc = crate::models::Discussion {
+            connection_id: None,
             awaiting_agent: false,
             agent_running: false,
             id: discussion_id.into(),
@@ -5022,7 +5027,7 @@ mod tests {
             pin_first_message: false,
             summary_cache: None,
             summary_up_to_msg_idx: None,
-            summary_strategy: crate::models::SummaryStrategy::Auto,
+            summary_strategy: crate::models::SummaryStrategy::OnDemand,
             introspection_call_count: 0,
             shared_id: None,
             shared_with: Vec::new(),

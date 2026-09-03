@@ -176,6 +176,15 @@ stale pre-migration model names. [src: file: backend/src/api/external_api_connec
 After upgrading, verify both migrated cards, run their connection tests and
 confirm the intended models for all three tiers before using them.
 
+## Dispatch, codecs and the discussion's sticky connection (KT-545)
+
+How a connection is actually dispatched to — codec selection, the
+pre-dispatch capability gate, and how a discussion keeps addressing the same
+connection across ordinary replies — is covered in
+[`docs/operations/http-transport.md`](http-transport.md). This page stays
+the configuration guide (creating/testing/tiering a connection); that one is
+the runtime-resolution guide.
+
 ## Troubleshooting
 
 - **No models:** confirm that `GET <base>/v1/models` returns a JSON `data` array

@@ -1079,11 +1079,14 @@ describe('WorkflowsPage', () => {
     expect(mockWorkflowsApi.get).not.toHaveBeenCalled();
   });
 
-  it('Delete workflow button asks for confirmation before calling the API', async () => {
+  it('Delete workflow button arms before calling the API', async () => {
     // Pre-fix: the red trash button on each workflow card called
     // `workflowsApi.delete` instantly. A mis-click destroyed the
-    // workflow + every run + every child discussion. Now an explicit
-    // `confirm()` is required.
+    // workflow + every run + every child discussion.
+    //
+    // KT-561 — the gate is no longer a native `confirm()`: some contexts never
+    // show it and answer `false`, so the click did nothing at all and the
+    // deletion looked broken. The button arms itself instead.
     const summary: WorkflowSummary = {
       id: 'wf-del',
       name: 'DeleteMe',
@@ -1099,19 +1102,127 @@ describe('WorkflowsPage', () => {
     };
     mockWorkflowsApi.list.mockResolvedValue([summary]);
     mockWorkflowsApi.delete.mockClear();
-    window.confirm = vi.fn();
-    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    mockWorkflowsApi.delete.mockResolvedValue(undefined);
 
     await wrap(
       <WorkflowsPage projects={[]} installedAgentTypes={['ClaudeCode']} agentAccess={fullConfig} />
     );
 
-    const deleteBtn = screen.getByLabelText('Suppr. DeleteMe');
+    const deleteBtn = screen.getByTestId('wf-delete-wf-del');
+    await act(async () => { fireEvent.click(deleteBtn); });
+    // First click arms and destroys nothing.
+    expect(mockWorkflowsApi.delete).not.toHaveBeenCalled();
+    expect(deleteBtn).toHaveAttribute('data-armed', 'true');
+
+    await act(async () => { fireEvent.click(deleteBtn); });
+    expect(mockWorkflowsApi.delete).toHaveBeenCalledWith('wf-del');
+  });
+
+  it('deletes one automation straight from its own row menu', async () => {
+    // KT-561 — the eye goes to the row, not to the bottom of a card in a grid.
+    // Same control as a discussion row, so the gesture is already known.
+    const summary: WorkflowSummary = {
+      id: 'wf-row',
+      name: 'RowOne',
+      project_id: null,
+      project_name: null,
+      trigger_type: 'manual',
+      step_count: 1,
+      misconfigured_step_count: 0,
+      enabled: true,
+      pinned: false,
+      last_run: null,
+      created_at: '2026-01-01T00:00:00Z',
+    };
+    mockWorkflowsApi.list.mockResolvedValue([summary]);
+    mockWorkflowsApi.delete.mockClear();
+    mockWorkflowsApi.delete.mockResolvedValue(undefined);
+
+    await wrap(
+      <WorkflowsPage projects={[]} installedAgentTypes={['ClaudeCode']} agentAccess={fullConfig} />
+    );
+
+    // The trigger names the row it belongs to, so the right menu opens.
+    await act(async () => {
+      fireEvent.click(screen.getByLabelText('Plus d’actions · RowOne'));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('menuitem', { name: /Supprimer/ }));
+    });
+
+    expect(mockWorkflowsApi.delete).toHaveBeenCalledWith('wf-row');
+  });
+
+  it('deletes several automations at once from the sidebar', async () => {
+    // KT-561 — the per-card trash sits at the bottom of a card, which is where
+    // nobody found it. The sidebar offers the same power as Discussions: pick
+    // several, delete them from the top.
+    const summary: WorkflowSummary = {
+      id: 'wf-bulk',
+      name: 'BulkOne',
+      project_id: null,
+      project_name: null,
+      trigger_type: 'manual',
+      step_count: 1,
+      misconfigured_step_count: 0,
+      enabled: true,
+      pinned: false,
+      last_run: null,
+      created_at: '2026-01-01T00:00:00Z',
+    };
+    mockWorkflowsApi.list.mockResolvedValue([summary]);
+    mockWorkflowsApi.delete.mockClear();
+    mockWorkflowsApi.delete.mockResolvedValue(undefined);
+
+    await wrap(
+      <WorkflowsPage projects={[]} installedAgentTypes={['ClaudeCode']} agentAccess={fullConfig} />
+    );
+
+    // Selection mode is one click away, in the sidebar's own menu.
+    await act(async () => { fireEvent.click(screen.getByLabelText('Autres actions')); });
+    await act(async () => { fireEvent.click(screen.getByRole('menuitem', { name: /Sélection multiple/ })); });
+
+    const checkbox = screen.getAllByRole('checkbox')
+      .find(node => node.getAttribute('aria-label')?.includes('BulkOne'));
+    expect(checkbox, 'every row is selectable in selection mode').toBeTruthy();
+    await act(async () => { fireEvent.click(checkbox!); });
+
+    await act(async () => { fireEvent.click(screen.getByLabelText('Supprimer la sélection')); });
+    expect(mockWorkflowsApi.delete).toHaveBeenCalledWith('wf-bulk');
+  });
+
+  it('keeps a workflow on screen when the server refuses to delete it', async () => {
+    // The old handler swallowed the rejection into a console line, so a
+    // refusal was indistinguishable from a click that did nothing.
+    const summary: WorkflowSummary = {
+      id: 'wf-busy',
+      name: 'BusyOne',
+      project_id: null,
+      project_name: null,
+      trigger_type: 'manual',
+      step_count: 1,
+      misconfigured_step_count: 0,
+      enabled: true,
+      pinned: false,
+      last_run: null,
+      created_at: '2026-01-01T00:00:00Z',
+    };
+    mockWorkflowsApi.list.mockResolvedValue([summary]);
+    mockWorkflowsApi.delete.mockClear();
+    mockWorkflowsApi.delete.mockRejectedValue(new Error('a run is still in flight'));
+
+    await wrap(
+      <WorkflowsPage projects={[]} installedAgentTypes={['ClaudeCode']} agentAccess={fullConfig} />
+    );
+
+    const deleteBtn = screen.getByTestId('wf-delete-wf-busy');
+    await act(async () => { fireEvent.click(deleteBtn); });
     await act(async () => { fireEvent.click(deleteBtn); });
 
-    expect(confirmSpy).toHaveBeenCalled();
-    expect(mockWorkflowsApi.delete).not.toHaveBeenCalled();
-    confirmSpy.mockRestore();
+    expect(await screen.findByTestId('wf-delete-wf-busy-error'))
+      .toHaveTextContent('a run is still in flight');
+    // The card is still there: nothing may look deleted that was not.
+    expect(screen.getByTestId('wf-delete-wf-busy')).toBeInTheDocument();
   });
 });
 

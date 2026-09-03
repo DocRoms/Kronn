@@ -687,15 +687,26 @@ pub(crate) enum AgentExecutionOutcome {
 fn agent_start_failure_outcome(agent_type: &AgentType, error: &str) -> AgentExecutionOutcome {
     let non_retryable_http_status = agent_http_status(error)
         .is_some_and(|status| (400..500).contains(&status) && !matches!(status, 408 | 425 | 429));
+    // A NUL byte in the command line is settled before anything runs, so
+    // deferring it is pure repetition: issue 201 logged the same refusal 282
+    // times, once every 30 s, and diagnosed nothing. Both wordings are matched
+    // — Kronn's own pre-spawn check, and the OS message if one slips past it.
+    let deterministic_nul_byte = error.contains("contains a NUL byte")
+        || error.contains("nul byte found in provided data");
     if matches!(
         agent_type,
         AgentType::LiteLlm | AgentType::Nvidia | AgentType::Ollama | AgentType::Custom
     ) || error.starts_with("Project path not found:")
         || error.starts_with("Copilot task worker cannot start:")
         || non_retryable_http_status
+        || deterministic_nul_byte
     {
         AgentExecutionOutcome::PreflightFailed {
-            diagnostic: if error.starts_with("Copilot task worker cannot start:") {
+            diagnostic: if error.starts_with("Copilot task worker cannot start:")
+                || deterministic_nul_byte
+            {
+                // Carries the offending carrier's name, never its value — the
+                // whole point is that the operator can act on it.
                 error.to_string()
             } else {
                 "agent execution preflight failed".into()
@@ -1121,6 +1132,86 @@ fn independent_sibling_notice(language: &str, aliases: &str) -> String {
     }
 }
 
+/// The messages written since the agent last saw the discussion.
+///
+/// `None` means "no trustworthy delta exists", and the caller must send the
+/// full history. Two distinct cases return it, both on purpose:
+///   - the marker is gone: the history no longer matches what the agent was
+///     shown (edited, pruned, rebuilt), so any slice would be a guess;
+///   - nothing follows it: there is nothing to say, and resuming would send an
+///     empty turn.
+///
+/// Everything after the marker is returned, never just the last message: in a
+/// room, the human or another agent routinely writes between two turns of the
+/// same agent, and dropping that would be an invisible loss.
+fn messages_not_yet_seen(
+    messages: &[crate::models::DiscussionMessage],
+    last_seen: &str,
+) -> Option<Vec<crate::models::DiscussionMessage>> {
+    let position = messages.iter().position(|message| message.id == last_seen)?;
+    let unseen = &messages[position + 1..];
+    (!unseen.is_empty()).then(|| unseen.to_vec())
+}
+
+/// Decide whether this turn can continue the CLI's own conversation.
+///
+/// Kronn's default is to re-narrate the whole discussion every turn. That is
+/// always correct and always expensive: the same history is re-sent, re-read
+/// and re-billed at each message. When the CLI still holds the conversation,
+/// the turn can instead carry only what the agent has not seen.
+///
+/// Returns the prompt to send and, when resuming, the conversation to resume.
+/// The two travel together on purpose: a delta prompt WITHOUT `--resume` loses
+/// the history, and a full prompt WITH `--resume` states it twice. Every path
+/// that cannot prove both is right returns the full prompt and no id.
+#[allow(clippy::too_many_arguments)]
+async fn resume_with_delta_if_possible(
+    store: &runner::AcpSessionStore,
+    agent_type: &AgentType,
+    work_dir: Option<&str>,
+    project_path: &str,
+    prompt_disc: &crate::models::Discussion,
+    extra_context_len: usize,
+    full_prompt: String,
+    is_task_worker: bool,
+) -> (String, Option<String>) {
+    // A task worker opens on a fresh worktree with the task as its first turn.
+    // Resuming a room's conversation there would hand it a history it has no
+    // business seeing — and the runner refuses the id anyway, which would
+    // leave the delta prompt travelling alone.
+    if is_task_worker || !runner::AcpSessionStore::tracks_cli_print(agent_type) {
+        return (full_prompt, None);
+    }
+    let Ok(scope) = runner::resolve_agent_work_dir(work_dir, project_path) else {
+        return (full_prompt, None);
+    };
+    let Ok(Some((conversation_id, Some(last_seen)))) =
+        store.load_cli_print(agent_type, &scope).await
+    else {
+        return (full_prompt, None);
+    };
+    // A dead id does not degrade the turn, it FAILS it. Ask the store first.
+    if !runner::cli_print_session_is_resumable(&scope, &conversation_id) {
+        return (full_prompt, None);
+    }
+    let Some(unseen) = messages_not_yet_seen(&prompt_disc.messages, &last_seen) else {
+        return (full_prompt, None);
+    };
+    let mut delta_disc = prompt_disc.clone();
+    delta_disc.messages = unseen;
+    let delta_prompt = build_agent_prompt(&delta_disc, agent_type, extra_context_len);
+    // A delta that saves nothing is not worth the divergence risk it carries.
+    if delta_prompt.len() >= full_prompt.len() {
+        return (full_prompt, None);
+    }
+    tracing::debug!(
+        conversation_id = %conversation_id,
+        saved_bytes = full_prompt.len() - delta_prompt.len(),
+        "resuming the CLI conversation instead of replaying the discussion"
+    );
+    (delta_prompt, Some(conversation_id))
+}
+
 async fn make_agent_stream_inner(
     state: AppState,
     discussion_id: String,
@@ -1292,14 +1383,7 @@ async fn make_agent_stream_inner(
     };
     let disc_model = disc_model.or_else(|| {
         external_connection.as_ref().and_then(|connection| {
-            let selected = match disc_tier {
-                crate::models::ModelTier::Economy => &connection.economy_model,
-                crate::models::ModelTier::Default => &connection.default_model,
-                crate::models::ModelTier::Reasoning => &connection.reasoning_model,
-            };
-            selected
-                .clone()
-                .or_else(|| connection.default_model.clone())
+            crate::http_transport::connection_tier_model(connection, disc_tier)
         })
     });
     let skill_ids = disc.skill_ids.clone();
@@ -1781,7 +1865,7 @@ async fn make_agent_stream_inner(
             // plugin block, since
             // `mcp_context_override = Some(...)` short-circuits the
             // disk read in runner.rs.
-            let disk_ctx = crate::core::mcp_scanner::read_all_mcp_contexts(&project_path);
+            let disk_ctx = crate::core::mcp_scanner::build_mcp_server_listing(&project_path);
             let combined = if disk_ctx.is_empty() {
                 plugin_block
             } else {
@@ -2169,6 +2253,23 @@ async fn make_agent_stream_inner(
     }
     let prompt = build_agent_prompt(&prompt_disc, &agent_type, extra_context_len);
 
+    // KT-562 — the same discussion, re-narrated in full at every turn, is what
+    // made Kronn slower than the same CLI driven by hand. Continue the
+    // conversation the CLI already holds whenever that can be proven safe.
+    let acp_session_store =
+        runner::AcpSessionStore::new(state.db.clone(), discussion_id.clone());
+    let (prompt, cli_resume_id) = resume_with_delta_if_possible(
+        &acp_session_store,
+        &agent_type,
+        workspace_path.as_deref(),
+        &project_path,
+        &prompt_disc,
+        extra_context_len,
+        prompt,
+        cli_task_worker_context.is_some(),
+    )
+    .await;
+
     let auth_mode_str = auth_mode_for(&agent_type, &tokens);
 
     // KT-37 — resolve the concrete model this run will ATTEMPT, once, with the
@@ -2377,10 +2478,8 @@ async fn make_agent_stream_inner(
             // Forward to the agent process env so the kronn-internal MCP
             // bridge knows which discussion to introspect when called.
             discussion_id: Some(&discussion_id),
-            acp_session_store: Some(runner::AcpSessionStore::new(
-                state.db.clone(),
-                discussion_id.clone(),
-            )),
+            acp_session_store: Some(acp_session_store.clone()),
+            cli_resume_id: cli_resume_id.as_deref(),
             task_worker_context: cli_task_worker_context.as_ref(),
             // Only HTTP agents consume this: CLI agents already reach the same
             // primitives through the stdio bridge, and handing them a second
@@ -2399,6 +2498,12 @@ async fn make_agent_stream_inner(
                 let mut stream_json_cost: Option<f64> = None;
                 let mut stream_json_failure: Option<runner::StreamJsonFailure> = None;
                 let is_stream_json = process.output_mode == runner::OutputMode::StreamJson;
+                // Scope a resumable conversation to the directory it ran in: a
+                // moved or regenerated worktree must not resume a thread that
+                // knew another tree. Captured here because the borrow of
+                // `process` below outlives the read.
+                let session_scope = process.work_dir.clone();
+                let mut cli_session_persisted = false;
                 // Track current tool for rich log messages
                 let mut current_tool: Option<String> = None;
                 let mut current_tool_input = String::new();
@@ -2692,6 +2797,18 @@ async fn make_agent_stream_inner(
                                         tracing::warn!(dispatch_job_id = %job_id, "Unable to persist tool progress: {error}");
                                     }
                                 }
+                                // Tell the client a tool STARTED, not only that
+                                // one finished. A single Bash can run 80 s
+                                // (issue 202's worst case), and until now that
+                                // whole time was a frozen placeholder while
+                                // Kronn already knew what was running.
+                                if !client_gone {
+                                    let _ = tx
+                                        .send(AgentStreamEvent::Log {
+                                            text: format!("→ {name}"),
+                                        })
+                                        .await;
+                                }
                                 current_tool = Some(name);
                                 current_tool_input.clear();
                             }
@@ -2741,6 +2858,32 @@ async fn make_agent_stream_inner(
                                         .await
                                     {
                                         tracing::warn!(dispatch_job_id = %job_id, "Unable to persist post-tool progress: {error}");
+                                    }
+                                }
+                            }
+                            runner::StreamJsonEvent::SessionId(session_id) => {
+                                // The `init` line, so this lands before any work.
+                                // Recorded once per turn: the id never changes
+                                // mid-stream, and a turn cut short still leaves
+                                // a conversation its successor can resume.
+                                if !cli_session_persisted
+                                    && runner::AcpSessionStore::tracks_cli_print(&agent_type)
+                                {
+                                    cli_session_persisted = true;
+                                    let store = runner::AcpSessionStore::new(
+                                        state.db.clone(),
+                                        discussion_id.clone(),
+                                    );
+                                    if let Err(error) = store
+                                        .persist_cli_print(&agent_type, &session_scope, &session_id)
+                                        .await
+                                    {
+                                        // Losing the id costs a full-history
+                                        // turn next time, never correctness.
+                                        tracing::warn!(
+                                            disc_id = %discussion_id,
+                                            "Unable to persist the CLI conversation id: {error}"
+                                        );
                                     }
                                 }
                             }
@@ -3244,6 +3387,27 @@ async fn make_agent_stream_inner(
                     .await
                 {
                     Ok(outcome) => {
+                        // KT-562 — the reply is stored, so the agent has now
+                        // seen everything up to and including it. Recorded
+                        // HERE and not at the start of the turn: a turn that
+                        // dies before this point must be replayed in full, not
+                        // silently skipped over.
+                        if let Ok(scope) = runner::resolve_agent_work_dir(
+                            workspace_path.as_deref(),
+                            &project_path,
+                        ) {
+                            if let Err(error) = acp_session_store
+                                .record_cli_print_progress(&agent_type, &scope, &agent_msg.id)
+                                .await
+                            {
+                                // Losing the cursor costs a full replay next
+                                // turn, which is merely the old behaviour.
+                                tracing::warn!(
+                                    discussion_id = %disc_id,
+                                    "Unable to record CLI conversation progress: {error}"
+                                );
+                            }
+                        }
                         if !outcome.dispatched_agents.is_empty() {
                             tracing::info!(
                                 discussion_id = %disc_id,
@@ -3671,22 +3835,6 @@ async fn make_agent_stream_inner(
                     }
                 }
 
-                // Trigger background summary generation if conversation is long enough
-                if success {
-                    let summary_state = state.clone();
-                    let summary_disc_id = disc_id.clone();
-                    let summary_agent_type = agent_type.clone();
-                    let summary_tokens = tokens.clone();
-                    tokio::spawn(async move {
-                        super::orchestration::maybe_generate_summary(
-                            &summary_state,
-                            &summary_disc_id,
-                            &summary_agent_type,
-                            &summary_tokens,
-                        )
-                        .await;
-                    });
-                }
 
                 let done = serde_json::json!({ "message_id": agent_msg.id, "success": success, "tokens_used": tokens_used });
                 let _ = tx.send(AgentStreamEvent::Done { data: done }).await;
@@ -4007,6 +4155,14 @@ pub(super) async fn run_agent_streaming(
                                     stream_json_failure = Some(failure);
                                 }
                                 runner::StreamJsonEvent::ToolStart(name) => {
+                                    // Same reason as the discussion loop: a
+                                    // debate round showed a frozen "thinking"
+                                    // line for the whole of a long tool call.
+                                    if !tx.is_closed() {
+                                        let _ = tx.send(AgentStreamEvent::Log {
+                                            text: format!("→ {name}"),
+                                        }).await;
+                                    }
                                     current_tool = Some(name);
                                     tool_input.clear();
                                 }
@@ -4024,7 +4180,10 @@ pub(super) async fn run_agent_streaming(
                                     current_tool = None;
                                     tool_input.clear();
                                 }
-                                runner::StreamJsonEvent::Skip => {}
+                                // A debate round is scored on its own; rounds do
+                                // not resume one another's conversation.
+                                runner::StreamJsonEvent::SessionId(_)
+                                | runner::StreamJsonEvent::Skip => {}
                             }
                         } else {
                             let nl = if raw_stream || full_response.is_empty() { "" } else { "\n" };
@@ -4523,6 +4682,38 @@ mod agent_lifecycle_tests {
     }
 
     #[test]
+    fn a_nul_byte_in_the_command_line_is_a_hard_stop_not_a_deferral() {
+        // Issue 201: this exact refusal was deferred and replayed 282 times,
+        // every 30 s. A NUL byte does not go away by waiting.
+        let kronn_check = "npx cannot start: environment variable ANTHROPIC_API_KEY contains a \
+                           NUL byte, which the operating system refuses in a command line.";
+        assert_eq!(
+            agent_start_failure_outcome(&AgentType::ClaudeCode, kronn_check),
+            AgentExecutionOutcome::PreflightFailed {
+                diagnostic: kronn_check.into()
+            },
+            "the carrier's name must reach the operator, not a generic preflight message"
+        );
+
+        // The OS wording, in case a NUL slips past the pre-spawn check.
+        let os_message = "Spawn failed for npx: nul byte found in provided data";
+        assert_eq!(
+            agent_start_failure_outcome(&AgentType::ClaudeCode, os_message),
+            AgentExecutionOutcome::PreflightFailed {
+                diagnostic: os_message.into()
+            }
+        );
+
+        // And a genuinely transient absence still defers, as before.
+        assert_eq!(
+            agent_start_failure_outcome(&AgentType::ClaudeCode, "Binary 'claude' not found"),
+            AgentExecutionOutcome::RuntimeUnavailable {
+                reason: "Binary 'claude' not found".into()
+            }
+        );
+    }
+
+    #[test]
     fn model_http_error_is_a_structured_actionable_system_event() {
         let raw = r#"LiteLLM error 404 Not Found: {"error":{"message":"Vertex details"}}"#;
         let content = agent_start_error_content(
@@ -4812,9 +5003,13 @@ mod run_agent_streaming_tests {
 
     #[tokio::test]
     async fn tool_call_emits_a_log_event() {
-        // ToolStart → ToolInputDelta → ToolEnd must produce exactly one Log
-        // event (the human-readable tool-call breadcrumb), not pollute the
-        // response text.
+        // ToolStart → ToolInputDelta → ToolEnd produces TWO Log events — the
+        // tool starting, then the human-readable breadcrumb once it is done —
+        // and neither pollutes the response text.
+        //
+        // The start event was added deliberately: emitting only on ToolEnd
+        // left the UI frozen for the entire duration of a call (80 s at worst
+        // in issue 202) while Kronn already knew which tool was running.
         let (tx, rx) = tokio::sync::mpsc::channel(100);
         let proc = ScriptedProcess::stream_json([
             text_delta("Reading file. "),
@@ -4840,11 +5035,21 @@ mod run_agent_streaming_tests {
             .collect();
         assert_eq!(
             logs.len(),
-            1,
-            "exactly one Log event for the Read tool call"
+            2,
+            "one Log when the Read tool starts, one when it completes"
         );
         if let AgentStreamEvent::Log { text } = &logs[0] {
+            assert_eq!(
+                text, "→ Read",
+                "the start event announces the tool and nothing else yet"
+            );
+        }
+        if let AgentStreamEvent::Log { text } = &logs[1] {
             assert!(text.contains("Read"), "log should name the tool: {text}");
+            assert_ne!(
+                text, "→ Read",
+                "the completion event must be the breadcrumb, not a repeat of the start"
+            );
         }
     }
 
@@ -4984,6 +5189,92 @@ mod run_agent_streaming_tests {
         drop(tx);
         assert_eq!(res.response, "[No response]");
         let _ = drain(rx);
+    }
+}
+
+#[cfg(test)]
+mod resume_delta_tests {
+    //! KT-562 — what a resumed turn actually sends. Every wrong answer here is
+    //! an invisible one: the agent replies confidently to a history it was
+    //! never given.
+    use super::messages_not_yet_seen;
+    use crate::models::{AgentType, DiscussionMessage, MessageChannel, MessageRole};
+    use chrono::Utc;
+
+    fn message(id: &str, role: MessageRole) -> DiscussionMessage {
+        DiscussionMessage {
+            id: id.to_string(),
+            role,
+            channel: MessageChannel::Main,
+            content: format!("content of {id}"),
+            agent_type: Some(AgentType::ClaudeCode),
+            timestamp: Utc::now(),
+            tokens_used: 0,
+            session_tokens_at_message: None,
+            recovered_partial: false,
+            auth_mode: None,
+            model_tier: None,
+            model: None,
+            cost_usd: None,
+            author_pseudo: None,
+            author_avatar_email: None,
+            author_cli_ordinal: None,
+            source_msg_id: None,
+            duration_ms: None,
+            lint_report: None,
+            target_agent: None,
+            reply_to_message_id: None,
+        }
+    }
+
+    #[test]
+    fn everything_written_since_the_marker_travels_not_only_the_last_message() {
+        // The case that makes "just send the new message" wrong: between the
+        // agent's own reply and its next turn, the human AND another agent
+        // wrote. Both must reach it.
+        let history = vec![
+            message("m1", MessageRole::User),
+            message("m2", MessageRole::Agent),
+            message("m3", MessageRole::User),
+            message("m4", MessageRole::Agent),
+            message("m5", MessageRole::User),
+        ];
+        let unseen = messages_not_yet_seen(&history, "m2").expect("a delta exists");
+        let ids: Vec<_> = unseen.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, vec!["m3", "m4", "m5"]);
+    }
+
+    #[test]
+    fn a_marker_that_left_the_history_forces_the_full_prompt() {
+        // Edited away, pruned, discussion rebuilt: the slice would be a guess,
+        // so there must be no slice at all.
+        let history = vec![message("m1", MessageRole::User)];
+        assert!(messages_not_yet_seen(&history, "gone").is_none());
+        assert!(messages_not_yet_seen(&[], "m1").is_none());
+    }
+
+    #[test]
+    fn nothing_new_since_the_marker_is_not_a_delta() {
+        // Resuming here would send an empty turn.
+        let history = vec![
+            message("m1", MessageRole::User),
+            message("m2", MessageRole::Agent),
+        ];
+        assert!(messages_not_yet_seen(&history, "m2").is_none());
+    }
+
+    #[test]
+    fn the_marker_itself_is_never_repeated() {
+        // It is the last message the agent SAW, so re-sending it would show it
+        // its own reply a second time.
+        let history = vec![
+            message("m1", MessageRole::User),
+            message("m2", MessageRole::Agent),
+            message("m3", MessageRole::User),
+        ];
+        let unseen = messages_not_yet_seen(&history, "m2").expect("a delta exists");
+        assert_eq!(unseen.len(), 1);
+        assert_eq!(unseen[0].id, "m3");
     }
 }
 
