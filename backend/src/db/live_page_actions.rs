@@ -694,14 +694,19 @@ pub fn claim_launch(
         finished_at: action.finished_at.clone(),
         updated_at: action.updated_at.clone(),
     };
+    let target_still_exists =
+        discussion_actions::target_contract(&transaction, action.kind, &action.target_id)?
+            .is_some();
     let claimed_variables = kronn_action_engine::claim_launch(
         &transaction,
         ActionTable::LivePage,
         &mut core,
         &resolved_supplied,
+        target_still_exists,
     )?;
     action.state = core.state;
     action.values = core.values;
+    action.diagnostic = core.diagnostic;
     action.launched_at = core.launched_at;
     action.updated_at = core.updated_at;
     transaction.commit()?;
@@ -1574,6 +1579,42 @@ mod tests {
             DiscussionActionState::Proposed,
             "a rejected stale launch must not claim the old proposal"
         );
+    }
+
+    #[test]
+    fn a_target_deleted_after_the_page_was_published_cannot_still_be_launched() {
+        // Parity with the discussion side. A published page outlives the Quick
+        // Exec it names: preflight passed when the block was ingested, and the
+        // click can come weeks later. Claiming then would launch against
+        // nothing — the shared engine refuses, so neither origin can drift.
+        let conn = connection();
+        insert_target(&conn);
+        let html = action_block("gone", r#"{"kind":"quick_exec","target_id":"qe-1"}"#);
+        insert_page(&conn, "page-gone", "rev-1", &html);
+        ingest_page_actions(&conn, "page-gone", "rev-1", &html).unwrap();
+        let proposed = get(&conn, "page-action:page-gone:gone").unwrap().unwrap();
+        assert_eq!(proposed.state, DiscussionActionState::Proposed);
+
+        conn.execute("DELETE FROM quick_execs WHERE id = 'qe-1'", [])
+            .unwrap();
+
+        let outcome = claim_launch(
+            &conn,
+            &proposed.id,
+            &HashMap::from([("service".into(), "api".into())]),
+            &HashMap::new(),
+        )
+        .unwrap();
+        assert!(
+            !matches!(outcome, Some(LivePageActionClaimOutcome::Claimed { .. })),
+            "a deleted target must not be launchable from a page either"
+        );
+        let reloaded = get(&conn, &proposed.id).unwrap().unwrap();
+        assert_eq!(reloaded.state, DiscussionActionState::PreflightFailed);
+        assert!(reloaded
+            .diagnostic
+            .as_deref()
+            .is_some_and(|text| text.contains("n’existe plus")));
     }
 
     #[test]
