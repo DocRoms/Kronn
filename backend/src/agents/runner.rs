@@ -3741,13 +3741,32 @@ async fn run_acp_session(
 /// those entries out of the ACP payload preserves the server-side secret
 /// boundary until the broker can inject scoped credentials directly.
 fn acp_project_mcp_servers(project_path: &str) -> Vec<crate::acp::AcpMcpServer> {
+    // Kronn's own bridge first, and independently of any project: an ACP agent
+    // that cannot call `disc_append` is mute in the room it was invited to.
+    // Claude gets this through `--mcp-config` and Codex through its TOML
+    // override; the native ACP route had no equivalent, so OpenCode joined a
+    // discussion it could not answer in.
+    //
+    // Only `command` and `args` travel over ACP — never a credential. The
+    // bridge reads what it needs from the environment, which it inherits
+    // because Kronn spawns the ACP process itself (`spawn_native`), so nothing
+    // sensitive passes through the protocol.
+    let mut servers: Vec<crate::acp::AcpMcpServer> = Vec::new();
+    if let Some(script) = disc_introspection_mcp_path_for_shared_config() {
+        servers.push(crate::acp::AcpMcpServer {
+            id: "kronn-internal".to_string(),
+            command: "python3".to_string(),
+            args: vec![script],
+            allowed_tools: Vec::new(),
+        });
+    }
     if project_path.is_empty() {
-        return Vec::new();
+        return servers;
     }
     let Some(file) = crate::core::mcp_scanner::read_mcp_json(project_path) else {
-        return Vec::new();
+        return servers;
     };
-    let mut servers: Vec<_> = file
+    let project_servers: Vec<_> = file
         .mcp_servers
         .into_iter()
         .filter_map(|(id, entry)| {
@@ -3766,6 +3785,7 @@ fn acp_project_mcp_servers(project_path: &str) -> Vec<crate::acp::AcpMcpServer> 
             })
         })
         .collect();
+    servers.extend(project_servers);
     servers.sort_by(|left, right| left.id.cmp(&right.id));
     servers
 }

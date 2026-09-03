@@ -154,6 +154,11 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- An agent reached over ACP — OpenCode and the other native ACP runtimes — now
+  receives Kronn's own MCP bridge, so it can answer in the room it was invited
+  to instead of joining it mute. Only the command travels over the protocol:
+  the bridge reads its credentials from the environment it inherits from the
+  process Kronn spawned, so none is ever serialized into an ACP payload.
 - A generation asking for a source image on a provider that takes none is
   refused at submission, naming what is missing, instead of queueing a job that
   retries the same refusal until its deadline expires.

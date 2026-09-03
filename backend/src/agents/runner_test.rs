@@ -20,12 +20,18 @@ mod tests {
         .unwrap();
 
         let servers = acp_project_mcp_servers(project.path().to_str().unwrap());
+        // Kronn's own bridge rides along and is asserted on its own below;
+        // what this test guards is which PROJECT servers survive the filter.
+        let project_servers: Vec<_> = servers
+            .iter()
+            .filter(|server| server.id != "kronn-internal")
+            .collect();
 
-        assert_eq!(servers.len(), 1);
-        assert_eq!(servers[0].id, "safe");
-        assert_eq!(servers[0].command, "safe-server");
-        assert_eq!(servers[0].args, vec!["--project"]);
-        assert!(servers[0].allowed_tools.is_empty());
+        assert_eq!(project_servers.len(), 1);
+        assert_eq!(project_servers[0].id, "safe");
+        assert_eq!(project_servers[0].command, "safe-server");
+        assert_eq!(project_servers[0].args, vec!["--project"]);
+        assert!(project_servers[0].allowed_tools.is_empty());
     }
 
     #[test]
@@ -46,17 +52,59 @@ mod tests {
         .unwrap();
 
         let servers = acp_project_mcp_servers(project.path().to_str().unwrap());
+        let project_servers: Vec<_> = servers
+            .iter()
+            .filter(|server| server.id != "kronn-internal")
+            .collect();
 
         assert_eq!(
-            servers.len(),
+            project_servers.len(),
             1,
             "the leaky server must be dropped wholesale"
         );
-        assert_eq!(servers[0].id, "safe");
+        assert_eq!(project_servers[0].id, "safe");
         assert!(servers.iter().all(|server| !server
             .args
             .iter()
             .any(|arg| arg.contains("sk-super-secret"))));
+    }
+
+    /// KT-543 — an ACP agent that cannot reach the bridge is mute in the room.
+    ///
+    /// Claude receives `kronn-internal` through `--mcp-config` and Codex
+    /// through its TOML override. The native ACP route had no equivalent, so
+    /// OpenCode joined discussions it could not answer in. The registry now
+    /// carries it, and carries it even with no project attached — the bridge
+    /// is about the room, not about a checkout.
+    #[test]
+    #[serial]
+    fn acp_mcp_registry_carries_the_kronn_bridge_with_no_credential_in_the_payload() {
+        let script = tempfile::NamedTempFile::new().unwrap();
+        let previous = std::env::var("KRONN_DISC_INTROSPECTION_MCP").ok();
+        std::env::set_var("KRONN_DISC_INTROSPECTION_MCP", script.path());
+
+        let with_no_project = acp_project_mcp_servers("");
+        let bridge = with_no_project
+            .iter()
+            .find(|server| server.id == "kronn-internal")
+            .expect("the bridge does not depend on a project being attached");
+        assert_eq!(bridge.command, "python3");
+        assert_eq!(bridge.args, vec![script.path().to_string_lossy().to_string()]);
+
+        // The whole point of passing it this way: the protocol carries the
+        // command and nothing else. The bridge reads its token from the
+        // environment it inherits from the process Kronn spawned, so no
+        // credential is ever serialized into an ACP payload.
+        assert!(bridge.allowed_tools.is_empty());
+        assert!(
+            !bridge.args.iter().any(|arg| arg.contains("KRONN_AUTH_TOKEN")),
+            "no credential, and no placeholder for one, may travel over ACP"
+        );
+
+        match previous {
+            Some(value) => std::env::set_var("KRONN_DISC_INTROSPECTION_MCP", value),
+            None => std::env::remove_var("KRONN_DISC_INTROSPECTION_MCP"),
+        }
     }
 
     /// Drive the production `forward_chat_line` with Ollama's codec, in the
