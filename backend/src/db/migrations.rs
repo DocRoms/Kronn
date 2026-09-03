@@ -1089,11 +1089,22 @@ mod tests {
             .iter()
             .position(|(name, _)| *name == "164_model_catalog_cost_privacy")
             .expect("cost/privacy overlay migration is registered");
+        // What this pins is that the overlay lands on the state 162 leaves,
+        // NOT that the two are adjacent: a migration merged from another
+        // branch can slot in between them, and did (163). Asserting adjacency
+        // made that harmless insertion look like a broken upgrade path.
+        let base = MIGRATIONS
+            .iter()
+            .position(|(name, _)| *name == "162_model_catalog")
+            .expect("the catalogue migration the overlay extends is registered");
+        assert!(
+            base < index,
+            "the overlay must come after the catalogue it extends"
+        );
         let predecessor = MIGRATIONS
             .get(index.saturating_sub(1))
             .expect("cost/privacy overlay migration has a predecessor")
             .0;
-        assert_eq!(predecessor, "162_model_catalog");
         run_through(&conn, predecessor).unwrap();
         let column_exists = |name: &str| -> bool {
             conn.query_row(
