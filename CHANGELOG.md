@@ -167,6 +167,14 @@ Release notes for 0.9.3 and earlier are available in the
   one still surfaces them. Found in real transcripts rather than deduced: the
   database held five persisted API errors and not a single 529.
 
+- An action whose target was deleted can no longer be launched. Preflight runs
+  when the proposal is ingested, but the click can come much later — a
+  transcript, and a published page, outlive the Quick Exec they name. Nothing
+  checked again at launch, so the click was accepted for something that no
+  longer existed. The action now says the target is gone instead. The check
+  lives in the launch engine both surfaces share, so the guarantee cannot hold
+  in a discussion and lapse on a page.
+
 - A prompt's version history no longer outlives the prompt it belongs to.
 - A clip stored as `text/plain` by its provider still plays as a clip.
 - Batch steps stop accepting a per-item prompt that nothing ever read.
