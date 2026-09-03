@@ -106,6 +106,26 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Changed
 
+- A turn no longer retells the whole discussion. Every message re-narrated the
+  entire history to a brand-new process: on the four longest discussions in a
+  real database, 1 288 Claude Code turns sent **436 million characters** where
+  the same turns need **1.9 million** — an average of 338 984 characters per
+  turn against 1 507. Claude Code already holds that conversation, so the turn
+  now resumes it and carries only what the agent has not seen. Counting the
+  preamble that repeats either way, a turn shrinks by a factor of 17 to 97
+  depending on how much context the discussion mounts. Five things keep it
+  honest: the delta is everything since the agent's last turn, never just the
+  newest message, because in a room the human or another agent writes in
+  between; the marker is a message id, so a history that was edited or pruned
+  simply fails to match and the full prompt goes out, where a numeric cursor
+  would have sent the wrong slice; the cursor only advances once the reply is
+  stored, so an interrupted turn is replayed rather than skipped; a dead
+  conversation id would fail the turn outright, so the CLI's session store is
+  checked first and a miss means full prompt; and resume never travels without
+  its delta, nor a full prompt with a resume. Task workers never resume — a
+  worker opens on a fresh worktree, and a room's history is not its business.
+  The figures above are measured on message volume, not end-to-end latency.
+
 - An agent's prompt no longer carries every MCP server's documentation. It
   concatenated all of `docs/operations/mcp-servers/*.md` in full on every spawn
   — 69 557 bytes on the Kronn project, 45 465 of them for `kronn-internal.md`
