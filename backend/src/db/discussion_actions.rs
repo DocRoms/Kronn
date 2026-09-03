@@ -944,6 +944,75 @@ mod tests {
     }
 
     #[test]
+    fn a_required_variable_left_empty_stops_the_launch_instead_of_running_short() {
+        // The human clicks without filling a required field. Launching anyway
+        // would run the command with a hole in it.
+        let conn = connection();
+        insert_target(&conn);
+        let content = r#"```kronn-action
+{"kind":"quick_exec","target_id":"qe-1"}
+```"#;
+        insert_message_row(&conn, "msg-missing", content);
+        ingest_message_actions(&conn, "disc-1", "msg-missing", content).unwrap();
+
+        let error = match claim_launch(
+            &conn,
+            "action:msg-missing:0",
+            &std::collections::HashMap::new(),
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("a required variable with no value must refuse the launch"),
+        };
+        assert!(error.to_string().contains("service"), "got: {error}");
+        assert_eq!(
+            get(&conn, "action:msg-missing:0").unwrap().unwrap().state,
+            DiscussionActionState::Proposed,
+            "a refused launch must leave the proposal claimable once completed"
+        );
+    }
+
+    #[test]
+    fn a_finished_run_writes_its_outcome_and_deep_link_back_onto_the_action() {
+        // The block stays anchored under the CTA and has to show the result:
+        // without this write-back it would sit on "launching" for good.
+        let conn = connection();
+        insert_target(&conn);
+        let content = r#"```kronn-action
+{"kind":"quick_exec","target_id":"qe-1"}
+```"#;
+        insert_message_row(&conn, "msg-done", content);
+        ingest_message_actions(&conn, "disc-1", "msg-done", content).unwrap();
+        let supplied =
+            std::collections::HashMap::from([("service".to_string(), "api".to_string())]);
+        claim_launch(&conn, "action:msg-done:0", &supplied)
+            .unwrap()
+            .unwrap();
+
+        complete(
+            &conn,
+            "action:msg-done:0",
+            ActionCompletion {
+                state: DiscussionActionState::Succeeded,
+                // No run row here: a Quick Exec reports its own outcome
+                // without a workflow run behind it.
+                shared_run_id: None,
+                result_discussion_id: Some("disc-1".into()),
+                deep_link: Some("/discussions/disc-1".into()),
+                diagnostic: None,
+            },
+        )
+        .unwrap();
+
+        let finished = get(&conn, "action:msg-done:0").unwrap().unwrap();
+        assert_eq!(finished.state, DiscussionActionState::Succeeded);
+        assert_eq!(finished.deep_link.as_deref(), Some("/discussions/disc-1"));
+        assert!(
+            finished.finished_at.is_some(),
+            "a terminal state must be dated, or nothing can order the timeline"
+        );
+    }
+
+    #[test]
     fn an_action_aimed_at_another_project_is_refused_before_launch() {
         // An agent proposes the fence; the human clicks. Nothing but this check
         // stands between a discussion in one project and a Quick Exec that
