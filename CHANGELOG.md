@@ -165,6 +165,13 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- Codex and OpenCode list their models again. Both had moved to shapes the
+  catalogue reader did not know — Codex now describes each reasoning effort as
+  an object instead of a bare name, and OpenCode spells its session options
+  `currentValue` and `options[].value`. Neither is standardized, and a
+  catalogue left in error refuses every turn for that agent, so both readers
+  now accept the old and the new spelling. Codex also supplies a display name
+  of its own ("GPT-5.6-Sol"), which beats showing the bare id.
 - A message with no one mentioned now says where it goes, and reaches it. In a
   room whose native agent is switched off, an ordinary turn used to resolve to
   no destination at all — the native responder disabled, no peer named — so it

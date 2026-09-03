@@ -293,15 +293,21 @@ fn parse_config_options(result: &Value) -> Vec<AcpConfigOption> {
                 .and_then(Value::as_str)
                 .filter(|id| !id.trim().is_empty())?
                 .to_owned();
+            // Every runtime spells this differently and none of it is
+            // standardized. OpenCode sends `currentValue` + `options[].value`;
+            // reading only the shapes we knew made its whole catalogue look
+            // absent, and an agent with no catalogue is refused at preflight.
             let current = option
                 .get("value")
                 .or_else(|| option.get("current"))
+                .or_else(|| option.get("currentValue"))
                 .and_then(Value::as_str)
                 .map(str::to_owned);
             let available = option
                 .get("availableValues")
                 .or_else(|| option.get("available_values"))
                 .or_else(|| option.get("values"))
+                .or_else(|| option.get("options"))
                 .and_then(Value::as_array)
                 .map(|values| {
                     values
@@ -309,6 +315,7 @@ fn parse_config_options(result: &Value) -> Vec<AcpConfigOption> {
                         .filter_map(|value| {
                             let vid = value
                                 .get("id")
+                                .or_else(|| value.get("value"))
                                 .and_then(Value::as_str)
                                 .filter(|id| !id.trim().is_empty())?
                                 .to_owned();
@@ -1276,6 +1283,45 @@ mod tests {
         );
         // No configOptions => no fabricated catalogue.
         assert!(parse_config_options(&json!({"sessionId": "s1"})).is_empty());
+    }
+
+    /// Captured verbatim from `opencode acp` on 2026-09-03. None of these key
+    /// names is standardized, and reading only the ones we already knew made
+    /// OpenCode's whole catalogue look absent — which gets the agent refused
+    /// at preflight, for every turn, with "no live discovery path".
+    #[test]
+    fn config_options_are_parsed_from_the_shape_opencode_sends() {
+        let options = parse_config_options(&json!({
+            "sessionId": "ses_f96d2f31",
+            "configOptions": [{
+                "id": "model",
+                "name": "Model",
+                "category": "model",
+                "type": "select",
+                "currentValue": "opencode/big-pickle",
+                "options": [
+                    {"value": "opencode/big-pickle", "name": "OpenCode Zen/Big Pickle"},
+                    {"value": "opencode/mimo-v2.5-free", "name": "OpenCode Zen/MiMo V2.5 Free"}
+                ]
+            }]
+        }));
+        assert_eq!(
+            options,
+            vec![AcpConfigOption {
+                id: "model".into(),
+                current: Some("opencode/big-pickle".into()),
+                available: vec![
+                    AcpConfigValue {
+                        id: "opencode/big-pickle".into(),
+                        name: "OpenCode Zen/Big Pickle".into()
+                    },
+                    AcpConfigValue {
+                        id: "opencode/mimo-v2.5-free".into(),
+                        name: "OpenCode Zen/MiMo V2.5 Free".into()
+                    },
+                ],
+            }]
+        );
     }
 
     #[tokio::test]
