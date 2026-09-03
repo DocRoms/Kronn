@@ -154,6 +154,19 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- A provider failure no longer ends a turn in complete silence. When the API
+  is overloaded or a spend limit is hit, Claude Code does not report a
+  structured failure — it writes an assistant message of its own, which no
+  streaming delta precedes. The stream reader skipped every assistant message,
+  rightly so for ordinary ones (they repeat what was already streamed, and
+  keeping them would print each reply twice), and in doing so discarded the
+  only account of the failure. The turn ended with nothing at all, which is why
+  a room could sit empty for 18 minutes, once for an hour and a half, before
+  someone retried by hand. Errors the CLI writes itself are now read — and only
+  those, identified by two independent markers so a build that stops setting
+  one still surfaces them. Found in real transcripts rather than deduced: the
+  database held five persisted API errors and not a single 529.
+
 - A prompt's version history no longer outlives the prompt it belongs to.
 - A clip stored as `text/plain` by its provider still plays as a clip.
 - Batch steps stop accepting a per-item prompt that nothing ever read.
