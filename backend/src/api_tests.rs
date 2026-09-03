@@ -785,6 +785,113 @@ mod tests {
         assert_eq!(missing_json["error_code"], "not_found");
     }
 
+    /// Phase 4 — a Page may only trigger its bound workflow, and only with
+    /// variables the binding's `trigger_variable_allowlist` permits. The handler
+    /// is the authorization boundary; we exercise it directly (the router/auth
+    /// gate is covered by `is_destructive`).
+    #[tokio::test]
+    async fn page_trigger_enforces_the_binding() {
+        use crate::models::PageTriggerRequest;
+        let state = test_state();
+        state
+            .db
+            .with_conn(|conn| {
+                conn.execute(
+                    "INSERT INTO workflows
+                     (id, name, trigger_json, steps_json, actions_json, safety_json,
+                      enabled, created_at, updated_at)
+                     VALUES ('wf-ticket', 'Mutation → Ticket EW', '{\"type\":\"Manual\"}',
+                             '[]', '[]', '{}', 1, 'now', 'now')",
+                    [],
+                )?;
+                conn.execute(
+                    "INSERT INTO live_pages
+                     (id, title, slug, data_revision, created_at, updated_at)
+                     VALUES ('page-mut', 'Mutation', 'mutation-ads-video', 1, 'now', 'now')",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let call = |req: PageTriggerRequest| {
+            let state = state.clone();
+            async move {
+                crate::api::live_pages::trigger_workflow(
+                    axum::extract::State(state),
+                    axum::extract::Path("page-mut".to_string()),
+                    axum::Json(req),
+                )
+                .await
+                .0
+            }
+        };
+        let vars = |pairs: &[(&str, &str)]| {
+            pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect::<std::collections::HashMap<_, _>>()
+        };
+
+        // 1. No binding for (page, dataset) → refused as not found.
+        let no_binding = call(PageTriggerRequest {
+            dataset: "ticket_trigger".into(),
+            variables: vars(&[]),
+        })
+        .await;
+        assert!(!no_binding.success);
+        assert_eq!(no_binding.error_code.as_deref(), Some("not_found"));
+
+        // A read/gate-only binding (allowlist NULL) is NOT triggerable.
+        let insert_binding = |allowlist: Option<&str>| {
+            let allowlist = allowlist.map(str::to_string);
+            state.db.with_conn(move |conn| {
+                conn.execute(
+                    "INSERT INTO live_page_workflow_bindings
+                     (id, page_id, workflow_id, dataset, run_selector, phase_map_json,
+                      meta_map_json, allowed_gate_steps_json,
+                      trigger_variable_allowlist_json, created_at, updated_at)
+                     VALUES ('bind-1', 'page-mut', 'wf-ticket', 'ticket_trigger', 'latest',
+                             'null', 'null', '[]', ?1,
+                             '2026-08-31T08:00:00Z', '2026-08-31T08:00:00Z')
+                     ON CONFLICT(page_id, dataset) DO UPDATE SET
+                       trigger_variable_allowlist_json = excluded.trigger_variable_allowlist_json",
+                    rusqlite::params![allowlist],
+                )?;
+                Ok(())
+            })
+        };
+
+        insert_binding(None).await.unwrap();
+        let not_triggerable = call(PageTriggerRequest {
+            dataset: "ticket_trigger".into(),
+            variables: vars(&[]),
+        })
+        .await;
+        assert!(!not_triggerable.success);
+        assert_eq!(not_triggerable.error_code.as_deref(), Some("validation"));
+
+        // 2. Triggerable, but a variable outside the allowlist is refused.
+        insert_binding(Some("[\"besoin\"]")).await.unwrap();
+        let smuggled = call(PageTriggerRequest {
+            dataset: "ticket_trigger".into(),
+            variables: vars(&[("evil", "x")]),
+        })
+        .await;
+        assert!(!smuggled.success);
+        assert_eq!(smuggled.error_code.as_deref(), Some("validation"));
+
+        // 3. Allowed variable → the run is spawned and its id returned.
+        let ok = call(PageTriggerRequest {
+            dataset: "ticket_trigger".into(),
+            variables: vars(&[("besoin", "Refonte du player vidéo")]),
+        })
+        .await;
+        assert!(ok.success, "trigger rejected: {:?}", ok.error);
+        assert!(!ok.data.unwrap().run_id.is_empty());
+    }
+
     // ─── Q2: Auth middleware tests ────────────────────────────────────────────
 
     /// Health endpoint bypasses auth even when auth is enabled.

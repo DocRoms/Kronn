@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   buildSandboxDocument,
+  createLivePageActionRelay,
   createLivePageOpenLinkRelay,
   LIVE_PAGE_CSP,
   requestRenderedPageHtml,
@@ -49,6 +50,10 @@ describe('Live Page sandbox', () => {
     expect(output).toContain("anchor.target.toLowerCase()!=='_blank'");
     expect(output).toContain('userActivation&&!userActivation.isActive');
     expect(output).toContain("Object.defineProperty(window,'open'");
+    // Phase 4 — the bridge exposes a trigger action mapped to `workflow.trigger`,
+    // going through the same `callAction` (so the user-activation gate applies).
+    expect(output).toContain("decideGate:(opts)=>callAction('gate.decide'");
+    expect(output).toContain("trigger:(opts)=>callAction('workflow.trigger'");
     const script = output.match(/<script>([\s\S]*?)<\/script>/)?.[1];
     expect(script).toBeDefined();
     expect(() => new Function(script!)).not.toThrow();
@@ -183,5 +188,48 @@ describe('Live Page sandbox', () => {
     const data = runtimeData(detail);
     expect(data.datasets.latency.points[0].value).toEqual({ ms: 87 });
     expect(data.page.data_revision).toBe(4);
+  });
+
+  it('brokers a page action through the private port and posts the result back', async () => {
+    const postMessage = vi.fn();
+    const target = { postMessage } as unknown as Window;
+    const handle = vi.fn(async (action: string, payload: unknown) => ({ action, payload }));
+    const relay = createLivePageActionRelay('ch', handle);
+    relay.connect(target);
+    const port = (postMessage.mock.calls[0][2] as MessagePort[])[0];
+    const results: Array<Record<string, unknown>> = [];
+    port.onmessage = event => results.push(event.data);
+
+    port.postMessage({
+      type: 'kronn:page-action', version: 1, channel_id: 'ch', id: 7,
+      action: 'gate.decide', payload: { dataset: 'pipeline', run_id: 'r1' },
+    });
+
+    await vi.waitFor(() =>
+      expect(handle).toHaveBeenCalledWith('gate.decide', { dataset: 'pipeline', run_id: 'r1' }));
+    await vi.waitFor(() => expect(results.some(r =>
+      r.type === 'kronn:page-action-result' && r.id === 7 && r.ok === true)).toBe(true));
+    relay.dispose();
+  });
+
+  it('ignores forged/mismatched action messages and reports handler errors', async () => {
+    const postMessage = vi.fn();
+    const target = { postMessage } as unknown as Window;
+    const handle = vi.fn().mockRejectedValue(new Error('nope'));
+    const relay = createLivePageActionRelay('ch', handle);
+    relay.connect(target);
+    const port = (postMessage.mock.calls[0][2] as MessagePort[])[0];
+    const results: Array<Record<string, unknown>> = [];
+    port.onmessage = event => results.push(event.data);
+
+    port.postMessage({ type: 'kronn:page-action', version: 1, channel_id: 'other', id: 1, action: 'x' });
+    port.postMessage({ type: 'kronn:page-export', version: 1, channel_id: 'ch', id: 2 });
+    port.postMessage({ type: 'kronn:page-action', version: 1, channel_id: 'ch', action: 'x' }); // no id
+    port.postMessage({ type: 'kronn:page-action', version: 1, channel_id: 'ch', id: 9, action: 'gate.decide', payload: {} });
+
+    await vi.waitFor(() => expect(results.some(r =>
+      r.id === 9 && r.ok === false && /nope/.test(String(r.error)))).toBe(true));
+    expect(handle).toHaveBeenCalledTimes(1); // forged messages never reached the handler
+    relay.dispose();
   });
 });

@@ -635,6 +635,308 @@ async fn live_page_workflows_returns_configured_publishers() {
     assert_eq!(missing["error_code"], "not_found");
 }
 
+fn mk_gate_run(
+    id: &str,
+    workflow_id: &str,
+    status: kronn::models::RunStatus,
+    gate: Option<&str>,
+) -> kronn::models::WorkflowRun {
+    let now = chrono::Utc::now();
+    let step_results = gate
+        .map(|name| {
+            vec![kronn::models::StepResult {
+                step_name: name.into(),
+                status: kronn::models::RunStatus::WaitingApproval,
+                output: String::new(),
+                tokens_used: 0,
+                duration_ms: 0,
+                started_at: Some(now),
+                condition_result: None,
+                envelope_detected: None,
+                step_kind: Some("Gate".into()),
+                step_agent: None,
+                step_model: None,
+                step_api_plugin_slug: None,
+                step_api_endpoint_path: None,
+                is_rollback: false,
+                child_run_id: None,
+                native_tool_calls: Box::default(),
+            }]
+        })
+        .unwrap_or_default();
+    kronn::models::WorkflowRun {
+        id: id.into(),
+        workflow_id: workflow_id.into(),
+        status,
+        trigger_context: None,
+        step_results,
+        tokens_used: 0,
+        workspace_path: None,
+        started_at: now,
+        finished_at: None,
+        run_type: "linear".into(),
+        batch_total: 0,
+        batch_completed: 0,
+        batch_failed: 0,
+        batch_no_response: 0,
+        batch_name: None,
+        parent_run_id: None,
+        state: std::collections::HashMap::new(),
+        produced_branches: vec![],
+        parent_workflow_id: None,
+        parent_workflow_name: None,
+        parent_run_started_at: None,
+    }
+}
+
+#[tokio::test]
+async fn live_page_gate_decision_enforces_the_binding() {
+    let state = test_state();
+    state
+        .db
+        .with_conn(|connection| {
+            let now = chrono::Utc::now().to_rfc3339();
+            connection.execute(
+                "INSERT INTO live_pages (id, project_id, title, slug, current_revision_id, data_revision, created_at, updated_at)
+                 VALUES ('page-gate', NULL, 'Gate Page', 'gate-page', 'rev-gate', 0, ?1, ?1)",
+                [&now],
+            )?;
+            connection.execute(
+                "INSERT INTO live_page_revisions (id, page_id, revision, html, created_at)
+                 VALUES ('rev-gate', 'page-gate', 1, '<h1>Gate</h1>', ?1)",
+                [&now],
+            )?;
+            for id in ["wf-bound", "wf-other"] {
+                let workflow = kronn::models::Workflow {
+                    id: id.into(),
+                    name: format!("WF {id}"),
+                    project_id: None,
+                    trigger: kronn::models::WorkflowTrigger::Manual,
+                    steps: vec![],
+                    actions: vec![],
+                    safety: kronn::models::WorkflowSafety { sandbox: false, max_files: None, max_lines: None, require_approval: false },
+                    workspace_config: None,
+                    concurrency_limit: None,
+                    guards: None,
+                    artifacts: std::collections::HashMap::new(),
+                    on_failure: vec![],
+                    exec_allowlist: vec![],
+                    variables: vec![],
+                    enabled: true,
+                    pinned: false,
+                    created_at: chrono::Utc::now(),
+                    updated_at: chrono::Utc::now(),
+                };
+                kronn::db::workflows::insert_workflow(connection, &workflow)?;
+            }
+            // A run of the OTHER workflow, waiting on gate_ok.
+            kronn::db::workflows::insert_run(connection, &mk_gate_run("run-foreign", "wf-other", kronn::models::RunStatus::WaitingApproval, Some("gate_ok")))?;
+            // A run of the bound workflow, waiting on a gate that is NOT allowed.
+            kronn::db::workflows::insert_run(connection, &mk_gate_run("run-wrong", "wf-bound", kronn::models::RunStatus::WaitingApproval, Some("gate_nope")))?;
+            // A run of the bound workflow that is not waiting at all.
+            kronn::db::workflows::insert_run(connection, &mk_gate_run("run-done", "wf-bound", kronn::models::RunStatus::Success, None))?;
+            // A run of the bound workflow waiting on the ALLOWED gate → decidable.
+            kronn::db::workflows::insert_run(connection, &mk_gate_run("run-ok", "wf-bound", kronn::models::RunStatus::WaitingApproval, Some("gate_ok")))?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let app = build_router_with_auth(state.clone(), false);
+
+    // Bind page dataset `pipeline` → wf-bound, allowing only gate_ok.
+    let (status, _) = post_json(
+        app.clone(),
+        "/api/pages/gate-page/bindings",
+        serde_json::json!({
+            "workflow_id": "wf-bound", "dataset": "pipeline",
+            "phase_map": [], "meta_map": {}, "allowed_gate_steps": ["gate_ok"],
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // No binding for this dataset → not_found.
+    let (_, no_binding) = post_json(
+        app.clone(),
+        "/api/pages/gate-page/gate-decision",
+        serde_json::json!({ "dataset": "absent", "run_id": "run-done", "decision": "approve" }),
+    )
+    .await;
+    assert_eq!(no_binding["error_code"], "not_found");
+
+    // Run belongs to a different workflow → refused.
+    let (_, foreign) = post_json(
+        app.clone(),
+        "/api/pages/gate-page/gate-decision",
+        serde_json::json!({ "dataset": "pipeline", "run_id": "run-foreign", "decision": "approve" }),
+    )
+    .await;
+    assert_eq!(foreign["success"], false);
+    assert!(foreign["error"]
+        .as_str()
+        .unwrap()
+        .contains("does not belong"));
+
+    // Gate not in allowed_gate_steps → refused.
+    let (_, wrong_gate) = post_json(
+        app.clone(),
+        "/api/pages/gate-page/gate-decision",
+        serde_json::json!({ "dataset": "pipeline", "run_id": "run-wrong", "decision": "approve" }),
+    )
+    .await;
+    assert!(wrong_gate["error"]
+        .as_str()
+        .unwrap()
+        .contains("not decidable"));
+
+    // Run not waiting for approval → refused.
+    let (_, not_waiting) = post_json(
+        app.clone(),
+        "/api/pages/gate-page/gate-decision",
+        serde_json::json!({ "dataset": "pipeline", "run_id": "run-done", "decision": "approve" }),
+    )
+    .await;
+    assert!(not_waiting["error"]
+        .as_str()
+        .unwrap()
+        .to_lowercase()
+        .contains("waiting"));
+
+    // Happy path: bound run, waiting on an allowed gate → the decision is
+    // accepted and the run is claimed for resume (status flips to Running). The
+    // background resume is fire-and-forget; we only assert the synchronous
+    // envelope the caller gets back.
+    let (status, approved) = post_json(
+        app,
+        "/api/pages/gate-page/gate-decision",
+        serde_json::json!({ "dataset": "pipeline", "run_id": "run-ok", "decision": "approve" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(approved["success"], true);
+    assert_eq!(approved["data"]["run_id"], "run-ok");
+    assert_eq!(approved["data"]["new_status"], "Running");
+}
+
+#[tokio::test]
+async fn live_page_workflow_binding_crud_round_trip() {
+    let state = test_state();
+    state
+        .db
+        .with_conn(|connection| {
+            let now = chrono::Utc::now().to_rfc3339();
+            connection.execute(
+                "INSERT INTO live_pages (id, project_id, title, slug, current_revision_id, data_revision, created_at, updated_at)
+                 VALUES ('page-bind', NULL, 'Bind Page', 'bind-page', 'rev-bind', 0, ?1, ?1)",
+                [&now],
+            )?;
+            connection.execute(
+                "INSERT INTO live_page_revisions (id, page_id, revision, html, created_at)
+                 VALUES ('rev-bind', 'page-bind', 1, '<h1>Bind</h1>', ?1)",
+                [&now],
+            )?;
+            for id in ["wf-a", "wf-b"] {
+                let workflow = kronn::models::Workflow {
+                    id: id.into(),
+                    name: format!("Pipeline {id}"),
+                    project_id: None,
+                    trigger: kronn::models::WorkflowTrigger::Manual,
+                    steps: vec![],
+                    actions: vec![],
+                    safety: kronn::models::WorkflowSafety {
+                        sandbox: false,
+                        max_files: None,
+                        max_lines: None,
+                        require_approval: false,
+                    },
+                    workspace_config: None,
+                    concurrency_limit: None,
+                    guards: None,
+                    artifacts: std::collections::HashMap::new(),
+                    on_failure: vec![],
+                    exec_allowlist: vec![],
+                    variables: vec![],
+                    enabled: true,
+                    pinned: false,
+                    created_at: chrono::Utc::now(),
+                    updated_at: chrono::Utc::now(),
+                };
+                kronn::db::workflows::insert_workflow(connection, &workflow)?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let app = build_router_with_auth(state.clone(), false);
+
+    // Create.
+    let (status, created) = post_json(
+        app.clone(),
+        "/api/pages/bind-page/bindings",
+        serde_json::json!({
+            "workflow_id": "wf-a",
+            "dataset": "pipeline",
+            "run_selector": "latest_active",
+            "phase_map": [{ "name": "Prep", "steps": [{ "step": "a", "tag": "git" }] }],
+            "meta_map": { "ticket_from": "trigger.jira_ticket_key" },
+            "allowed_gate_steps": ["gate_prod"],
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(created["success"], true);
+    assert_eq!(created["data"]["workflow_id"], "wf-a");
+    assert_eq!(created["data"]["run_selector"], "latest_active");
+    assert_eq!(created["data"]["allowed_gate_steps"][0], "gate_prod");
+    assert_eq!(created["data"]["phase_map"][0]["name"], "Prep");
+    let binding_id = created["data"]["id"].as_str().unwrap().to_string();
+
+    // Re-upsert the same (page, dataset) → in-place update, no duplicate.
+    let (_, updated) = post_json(
+        app.clone(),
+        "/api/pages/bind-page/bindings",
+        serde_json::json!({
+            "workflow_id": "wf-b",
+            "dataset": "pipeline",
+            "phase_map": [],
+            "meta_map": {},
+        }),
+    )
+    .await;
+    assert_eq!(updated["data"]["id"], binding_id, "same row reused");
+    assert_eq!(updated["data"]["workflow_id"], "wf-b");
+    assert_eq!(updated["data"]["run_selector"], "latest");
+
+    let (_, listed) = get_json(app.clone(), "/api/pages/bind-page/bindings").await;
+    assert_eq!(listed["data"].as_array().unwrap().len(), 1);
+
+    // Unknown workflow → not_found.
+    let (_, bad) = post_json(
+        app.clone(),
+        "/api/pages/bind-page/bindings",
+        serde_json::json!({
+            "workflow_id": "ghost",
+            "dataset": "other",
+            "phase_map": [],
+            "meta_map": {},
+        }),
+    )
+    .await;
+    assert_eq!(bad["success"], false);
+    assert_eq!(bad["error_code"], "not_found");
+
+    // Delete.
+    let (_, deleted) = delete_json(app.clone(), "/api/pages/bind-page/bindings/pipeline").await;
+    assert_eq!(deleted["success"], true);
+    let (_, empty) = get_json(app.clone(), "/api/pages/bind-page/bindings").await;
+    assert!(empty["data"].as_array().unwrap().is_empty());
+
+    // Missing page → not_found.
+    let (_, missing) = get_json(app, "/api/pages/missing/bindings").await;
+    assert_eq!(missing["success"], false);
+    assert_eq!(missing["error_code"], "not_found");
+}
+
 #[tokio::test]
 async fn workflow_export_import_bundles_quick_prompt_quick_api_and_page() {
     let state = test_state();

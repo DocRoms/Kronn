@@ -467,14 +467,36 @@ const DESTRUCTIVE_POSTS: &[&str] = &[
 ];
 
 /// Passe D — the destructive-request criterion: every DELETE (no benign DELETE
-/// exists in this API), the listed POSTs, and the parameterized
-/// `/api/mcps/custom/{id}/cleanup-orphan-env`.
+/// exists in this API), the listed POSTs, and the parameterized routes below.
+///
+/// Run-resume endpoints (`…/runs/{id}/decide` and `…/pages/{id}/gate-decision`)
+/// are destructive: approving a gate resumes a workflow, which can deploy to
+/// prod. The page path is *more* exposed than the workflow one — its slug is a
+/// shareable published URL and the `run_id` is surfaced into the page — so a
+/// mere page viewer must not be able to resume a run under the auth-off default.
 fn is_destructive(method: &axum::http::Method, path: &str) -> bool {
     method == axum::http::Method::DELETE
         || DESTRUCTIVE_POSTS.contains(&path)
         || path.ends_with("/cleanup-orphan-env")
         || path.ends_with("/context-audit/baseline")
         || path.ends_with("/audit-attestation")
+        || path.ends_with("/decide")
+        || path.ends_with("/gate-decision")
+        // A Page trigger spawns a workflow run (tokens, side effects), so it is a
+        // write — like gate-decision, the page slug is a shareable URL, so a mere
+        // viewer must not reach it under the auth-off default. Scoped to the page
+        // route so `/api/workflows/{id}/trigger` (the workflow UI) stays open.
+        || (path.contains("/pages/") && path.ends_with("/trigger"))
+        // A page-bindings WRITE (POST upsert / PUT) DEFINES the authorization
+        // policy the decide/gate/trigger endpoints above enforce — workflow_id,
+        // allowed_gate_steps, trigger_variable_allowlist. Under the auth-off
+        // default a LAN peer must not be able to rewrite that policy, so the
+        // write is destructive. Scoped by METHOD so the GET list stays open (a
+        // read), and by suffix so `/api/pages/{id}/bindings/{dataset}` DELETE is
+        // left to the `method == DELETE` arm above.
+        || ((method == axum::http::Method::POST || method == axum::http::Method::PUT)
+            && path.contains("/pages/")
+            && path.ends_with("/bindings"))
 }
 
 /// Pure auth decision for a request that already cleared the always-open
@@ -658,6 +680,22 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route(
             "/api/pages/{id}/datasets",
             post(api::live_pages::add_dataset),
+        )
+        .route(
+            "/api/pages/{id}/bindings",
+            get(api::live_pages::list_bindings).post(api::live_pages::upsert_binding),
+        )
+        .route(
+            "/api/pages/{id}/bindings/{dataset}",
+            delete(api::live_pages::delete_binding),
+        )
+        .route(
+            "/api/pages/{id}/gate-decision",
+            post(api::live_pages::decide_gate),
+        )
+        .route(
+            "/api/pages/{id}/trigger",
+            post(api::live_pages::trigger_workflow),
         )
         .route("/api/pages/{id}/publish", post(api::live_pages::publish))
         // ── OpenAPI / Swagger UI ──
@@ -2308,6 +2346,14 @@ mod auth_tests {
             "/api/mcps/custom/srv-1/cleanup-orphan-env",
             "/api/projects/p1/context-audit/baseline",
             "/api/projects/p1/audit-attestation",
+            // Run-resume: gate approval can trigger a prod deploy, so it must
+            // not be reachable by a remote no-token caller under the auth-off
+            // default — for the workflow-UI path and the page-broker path alike.
+            "/api/workflows/wf-1/runs/run-1/decide",
+            "/api/pages/my-page/gate-decision",
+            // A page-bindings WRITE defines the auth policy the decide/trigger
+            // endpoints enforce — a remote no-token caller must not rewrite it.
+            "/api/pages/my-page/bindings",
         ] {
             assert!(
                 !auth_allows(&Method::POST, p, false, true, false, false),
@@ -2318,6 +2364,41 @@ mod auth_tests {
                 "{p} allows local"
             );
         }
+    }
+
+    #[test]
+    fn page_bindings_write_is_destructive_but_read_is_open() {
+        const BINDINGS: &str = "/api/pages/my-page/bindings";
+        // WRITE (POST upsert / PUT) rewrites the authorization policy → gated
+        // even under the auth-off default; open only to local or a valid token.
+        for method in [Method::POST, Method::PUT] {
+            assert!(
+                !auth_allows(&method, BINDINGS, false, true, false, false),
+                "{method} /bindings must deny remote+no-token"
+            );
+            assert!(
+                auth_allows(&method, BINDINGS, false, true, true, false),
+                "{method} /bindings allows local"
+            );
+        }
+        // The GET list is a read — it keeps the historical auth-off-is-open rule.
+        assert!(
+            auth_allows(&Method::GET, BINDINGS, false, true, false, false),
+            "GET /bindings must stay open (read)"
+        );
+        // DELETE unbind is covered by the verb arm, not the /bindings suffix, so
+        // the parametrized `/bindings/{dataset}` path is still gated.
+        assert!(
+            !auth_allows(
+                &Method::DELETE,
+                "/api/pages/my-page/bindings/pipeline",
+                false,
+                true,
+                false,
+                false
+            ),
+            "DELETE unbind must deny remote+no-token"
+        );
     }
 
     #[test]

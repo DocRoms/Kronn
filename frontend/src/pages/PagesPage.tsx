@@ -15,8 +15,8 @@ import {
   buildSandboxDocument,
   createLivePageOpenLinkRelay,
   requestRenderedPageHtml,
-  runtimeData,
 } from '../lib/live-page-sandbox';
+import { useLivePageMirror } from '../lib/useLivePageMirror';
 import { formatRelativeTime } from '../lib/relativeTime';
 import { CopyIdPill } from '../components/CopyIdPill';
 import { CollectionFavoritesHeader } from '../components/CollectionFavoritesHeader';
@@ -574,18 +574,26 @@ export function PagesPage({
     () => revisionHtml ? buildSandboxDocument(revisionHtml, bridgeChannel) : '',
     [bridgeChannel, revisionHtml],
   );
-  const publishToFrame = useCallback(() => {
-    if (!detail) return;
-    const target = iframeRef.current?.contentWindow ?? null;
-    if (!target) return;
-    linkRelayRef.current?.connect(target);
-    target.postMessage({
-      type: 'kronn:page-data',
-      version: 1,
-      channel_id: bridgeChannel,
-      data: runtimeData(detail),
-    }, '*');
-  }, [bridgeChannel, detail]);
+  // Mirror the selected Page's bound run into the preview on an adaptive cadence
+  // (fast while a bound run is active or the page's data_revision keeps moving,
+  // idle heartbeat otherwise, paused when the tab is hidden), so the editor
+  // preview validates steps live like the published standalone view instead of
+  // showing only the page's mock fallback. The editor already owns `detail`, so
+  // the hook only mirrors the bound run and overlays it into the preview frame.
+  const { publishToFrame } = useLivePageMirror({
+    pageId: detail?.id ?? null,
+    bridgeChannel,
+    iframeRef,
+    ownsDetail: false,
+    externalDetail: detail,
+  });
+  // A freshly loaded preview document must receive the relay + current data
+  // regardless of the signature guard, so connect the link relay once per loaded
+  // document (a stable private port across data pushes) and force this publish.
+  const handleFrameLoad = useCallback(() => {
+    linkRelayRef.current?.connect(iframeRef.current?.contentWindow ?? null);
+    publishToFrame(true);
+  }, [publishToFrame]);
   useEffect(() => {
     const relay = createLivePageOpenLinkRelay(bridgeChannel);
     linkRelayRef.current = relay;
@@ -1137,7 +1145,7 @@ export function PagesPage({
                 title={detail.title}
                 sandbox="allow-scripts"
                 srcDoc={document}
-                onLoad={publishToFrame}
+                onLoad={handleFrameLoad}
                 data-testid="live-page-frame"
               />
             )}

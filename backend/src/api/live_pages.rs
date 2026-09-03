@@ -8,7 +8,9 @@ use uuid::Uuid;
 use crate::models::{
     ApiErrorCode, ApiResponse, CreateLivePageDataset, CreateLivePageRequest,
     LinkLivePageDiscussionRequest, LivePage, LivePageDataset, LivePageDiscussionRelation,
-    LivePageRevision, PublishLivePageRequest, UpdateLivePageHtmlRequest, UpdateLivePageRequest,
+    LivePageRevision, LivePageWorkflowBinding, PageGateDecisionRequest, PageTriggerRequest,
+    PageTriggerResponse, PublishLivePageRequest, RunStatus, UpdateLivePageHtmlRequest,
+    UpdateLivePageRequest, UpsertLivePageBindingRequest,
 };
 use crate::AppState;
 
@@ -443,6 +445,334 @@ pub async fn add_dataset(
                 code,
                 format!("Unable to add dataset: {error}"),
             ))
+        }
+    }
+}
+
+pub async fn list_bindings(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Json<ApiResponse<Vec<LivePageWorkflowBinding>>> {
+    match state
+        .db
+        .with_conn(move |conn| crate::db::live_pages::list_live_page_bindings(conn, &id))
+        .await
+    {
+        Ok(Some(bindings)) => Json(ApiResponse::ok(bindings)),
+        Ok(None) => Json(ApiResponse::err_coded(
+            ApiErrorCode::NotFound,
+            "Page not found",
+        )),
+        Err(error) => Json(ApiResponse::err_coded(
+            ApiErrorCode::Internal,
+            format!("Unable to list bindings: {error}"),
+        )),
+    }
+}
+
+pub async fn upsert_binding(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<UpsertLivePageBindingRequest>,
+) -> Json<ApiResponse<LivePageWorkflowBinding>> {
+    use crate::db::live_pages::UpsertBindingError;
+    // The db layer returns a typed `UpsertBindingError` (not message text), so
+    // the mapping below is total and survives any reword of the error strings.
+    // `with_conn` needs an `anyhow::Result`, so the typed result rides INSIDE the
+    // Ok — the outer Err is reserved for infra/panic failures.
+    match state
+        .db
+        .with_conn(move |conn| {
+            Ok(crate::db::live_pages::upsert_live_page_binding(
+                conn, &id, &req,
+            ))
+        })
+        .await
+    {
+        Ok(Ok(binding)) => Json(ApiResponse::ok(binding)),
+        Ok(Err(UpsertBindingError::PageNotFound)) => Json(ApiResponse::err_coded(
+            ApiErrorCode::NotFound,
+            "Page not found",
+        )),
+        Ok(Err(UpsertBindingError::WorkflowNotFound(workflow_id))) => Json(ApiResponse::err_coded(
+            ApiErrorCode::NotFound,
+            format!("Workflow not found: {workflow_id}"),
+        )),
+        Ok(Err(UpsertBindingError::InvalidDataset(message))) => {
+            Json(ApiResponse::err_coded(ApiErrorCode::Validation, message))
+        }
+        Ok(Err(UpsertBindingError::Db(message))) => Json(ApiResponse::err_coded(
+            ApiErrorCode::Internal,
+            format!("Unable to save binding: {message}"),
+        )),
+        Err(error) => Json(ApiResponse::err_coded(
+            ApiErrorCode::Internal,
+            format!("Unable to save binding: {error}"),
+        )),
+    }
+}
+
+pub async fn delete_binding(
+    State(state): State<AppState>,
+    Path((id, dataset)): Path<(String, String)>,
+) -> Json<ApiResponse<()>> {
+    match state
+        .db
+        .with_conn(move |conn| crate::db::live_pages::delete_live_page_binding(conn, &id, &dataset))
+        .await
+    {
+        Ok(true) => Json(ApiResponse::ok(())),
+        Ok(false) => Json(ApiResponse::err_coded(
+            ApiErrorCode::NotFound,
+            "Binding not found",
+        )),
+        Err(error) => Json(ApiResponse::err_coded(
+            ApiErrorCode::Internal,
+            format!("Unable to delete binding: {error}"),
+        )),
+    }
+}
+
+/// POST /api/pages/:id/gate-decision
+///
+/// Decide the gate a Page's bound run is waiting on, from the Page itself. The
+/// `(page, dataset)` binding is the authorization boundary: the run must belong
+/// to the bound workflow, be `WaitingApproval`, and the gate it is waiting on
+/// must be listed in the binding's `allowed_gate_steps`. The actual resume goes
+/// through the same audited path as the workflow-UI decide endpoint.
+pub async fn decide_gate(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<PageGateDecisionRequest>,
+) -> Json<ApiResponse<crate::api::workflows::DecideRunResponse>> {
+    // 1. Resolve the binding — no binding, no authority.
+    let page_id = id.clone();
+    let dataset = req.dataset.clone();
+    let binding = match state
+        .db
+        .with_conn(move |conn| {
+            crate::db::live_pages::get_live_page_binding(conn, &page_id, &dataset)
+        })
+        .await
+    {
+        Ok(Some(binding)) => binding,
+        Ok(None) => {
+            return Json(ApiResponse::err_coded(
+                ApiErrorCode::NotFound,
+                "No workflow binding for this page/dataset",
+            ))
+        }
+        Err(error) => {
+            return Json(ApiResponse::err_coded(
+                ApiErrorCode::Internal,
+                format!("DB error: {error}"),
+            ))
+        }
+    };
+
+    // 2. Load the run and enforce it belongs to the bound workflow.
+    let run_id = req.run_id.clone();
+    let run = match state
+        .db
+        .with_conn(move |conn| crate::db::workflows::get_run(conn, &run_id))
+        .await
+    {
+        Ok(Some(run)) => run,
+        Ok(None) => {
+            return Json(ApiResponse::err_coded(
+                ApiErrorCode::NotFound,
+                "Run not found",
+            ))
+        }
+        Err(error) => {
+            return Json(ApiResponse::err_coded(
+                ApiErrorCode::Internal,
+                format!("DB error: {error}"),
+            ))
+        }
+    };
+    if run.workflow_id != binding.workflow_id {
+        return Json(ApiResponse::err_coded(
+            ApiErrorCode::Validation,
+            "Run does not belong to the workflow bound to this page",
+        ));
+    }
+
+    // The client sends the run_id it actually rendered, so trusting it (rather
+    // than re-resolving "the mirrored run" server-side at click time) is what the
+    // page's real use case needs: a concurrent second run of the same workflow —
+    // routine for a "mise en prod" — must not flip the resolution and reject the
+    // human's in-flight approval of the run they saw. Authorization is still
+    // bounded below: the run must belong to the bound workflow, be
+    // `WaitingApproval`, and its waiting gate must be in `allowed_gate_steps`.
+    if run.status != RunStatus::WaitingApproval {
+        return Json(ApiResponse::err_coded(
+            ApiErrorCode::Conflict,
+            format!("Run is not waiting for approval (status: {:?})", run.status),
+        ));
+    }
+
+    // 3. Only the gate the run is CURRENTLY waiting on, and only if the binding
+    //    lists it, may be decided from the Page. `resume_run` resumes the
+    //    TRAILING step (see runner.rs), so authorize exactly that step — not
+    //    merely "some waiting step" — to keep the allowlist check and the resume
+    //    target provably identical if a future step is ever recorded past a gate.
+    let current_gate = match run.step_results.last() {
+        Some(result) if result.status == RunStatus::WaitingApproval => result.step_name.clone(),
+        _ => {
+            return Json(ApiResponse::err_coded(
+                ApiErrorCode::Conflict,
+                "Run has no waiting gate step",
+            ))
+        }
+    };
+    if !binding
+        .allowed_gate_steps
+        .iter()
+        .any(|s| s == &current_gate)
+    {
+        return Json(ApiResponse::err_coded(
+            ApiErrorCode::Validation,
+            format!("Gate `{current_gate}` is not decidable from this page"),
+        ));
+    }
+
+    // 4. Load the workflow and apply the decision through the shared audited path.
+    let wf_id = binding.workflow_id.clone();
+    let workflow = match state
+        .db
+        .with_conn(move |conn| crate::db::workflows::get_workflow(conn, &wf_id))
+        .await
+    {
+        Ok(Some(workflow)) => workflow,
+        Ok(None) => {
+            return Json(ApiResponse::err_coded(
+                ApiErrorCode::NotFound,
+                "Workflow not found",
+            ))
+        }
+        Err(error) => {
+            return Json(ApiResponse::err_coded(
+                ApiErrorCode::Internal,
+                format!("DB error: {error}"),
+            ))
+        }
+    };
+    let decision =
+        match crate::api::workflows::parse_gate_decision(&req.decision, req.comment.clone()) {
+            Ok(decision) => decision,
+            Err(error) => return Json(ApiResponse::err_coded(ApiErrorCode::Validation, error)),
+        };
+    match crate::api::workflows::resume_with_decision(&state, run, workflow, decision).await {
+        Ok(response) => Json(ApiResponse::ok(response)),
+        // A concurrent decision (page vs workflow-UI, double-click) winning the
+        // atomic claim is a benign race → Conflict…
+        Err(crate::api::workflows::ResumeDecisionError::LostRace) => Json(ApiResponse::err_coded(
+            ApiErrorCode::Conflict,
+            "Run was just decided by another caller — decision ignored (no double-resume)",
+        )),
+        // …but a genuine DB/internal failure must surface as Internal, not be
+        // masked as a routine race.
+        Err(crate::api::workflows::ResumeDecisionError::Internal(msg)) => {
+            Json(ApiResponse::err_coded(ApiErrorCode::Internal, msg))
+        }
+    }
+}
+
+/// POST /api/pages/:id/trigger
+///
+/// Trigger the workflow a Page is bound to, from the Page itself (Phase 4). The
+/// `(page, dataset)` binding is the authorization boundary: it must carry a
+/// `trigger_variable_allowlist` (a `None` binding is a read/gate-only mirror and
+/// is not triggerable), and every launch variable the Page passes must be listed
+/// in that allowlist. The workflow's own declared-variable validation still runs
+/// on top (required vars enforced, unknown vars dropped). The run is dispatched
+/// detached — the Page's auto-refresh/mirror surfaces its progress.
+pub async fn trigger_workflow(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<PageTriggerRequest>,
+) -> Json<ApiResponse<PageTriggerResponse>> {
+    // 1. Resolve the binding — no binding, no authority.
+    let page_id = id.clone();
+    let dataset = req.dataset.clone();
+    let binding = match state
+        .db
+        .with_conn(move |conn| {
+            crate::db::live_pages::get_live_page_binding(conn, &page_id, &dataset)
+        })
+        .await
+    {
+        Ok(Some(binding)) => binding,
+        Ok(None) => {
+            return Json(ApiResponse::err_coded(
+                ApiErrorCode::NotFound,
+                "No workflow binding for this page/dataset",
+            ))
+        }
+        Err(error) => {
+            return Json(ApiResponse::err_coded(
+                ApiErrorCode::Internal,
+                format!("DB error: {error}"),
+            ))
+        }
+    };
+
+    // 2. The binding must opt into triggering, and bound the launch variables.
+    let Some(allowlist) = binding.trigger_variable_allowlist.as_ref() else {
+        return Json(ApiResponse::err_coded(
+            ApiErrorCode::Validation,
+            "This page is not allowed to trigger its bound workflow",
+        ));
+    };
+    if let Some(unknown) = req.variables.keys().find(|k| !allowlist.contains(k)) {
+        return Json(ApiResponse::err_coded(
+            ApiErrorCode::Validation,
+            format!("Variable `{unknown}` is not allowed for this page trigger"),
+        ));
+    }
+
+    // 3. Load the bound workflow and enforce it is enabled.
+    let wf_id = binding.workflow_id.clone();
+    let workflow = match state
+        .db
+        .with_conn(move |conn| crate::db::workflows::get_workflow(conn, &wf_id))
+        .await
+    {
+        Ok(Some(workflow)) => workflow,
+        Ok(None) => {
+            return Json(ApiResponse::err_coded(
+                ApiErrorCode::NotFound,
+                "Workflow not found",
+            ))
+        }
+        Err(error) => {
+            return Json(ApiResponse::err_coded(
+                ApiErrorCode::Internal,
+                format!("DB error: {error}"),
+            ))
+        }
+    };
+    if !workflow.enabled {
+        return Json(ApiResponse::err_coded(
+            ApiErrorCode::Conflict,
+            "Workflow is disabled",
+        ));
+    }
+
+    // 4. Dispatch the run through the shared detached-spawn path.
+    match crate::api::workflows::spawn_detached_run(&state, workflow, req.variables).await {
+        Ok(run_id) => Json(ApiResponse::ok(PageTriggerResponse { run_id })),
+        Err(error) => {
+            let code = if error.starts_with("Concurrency limit") {
+                ApiErrorCode::Conflict
+            } else if error.starts_with("DB error") {
+                ApiErrorCode::Internal
+            } else {
+                // validate_launch_variables surfaces missing-required-var messages.
+                ApiErrorCode::Validation
+            };
+            Json(ApiResponse::err_coded(code, error))
         }
     }
 }

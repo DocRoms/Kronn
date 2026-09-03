@@ -88,7 +88,25 @@ export function buildSandboxDocument(html: string, channelId: string): string {
     const portStart=MessagePort.prototype.start;
     let latest=null;
     let linkPort=null;
+    let actionPort=null;
+    const pending=Object.create(null);
+    let actionSeq=0;
     Object.defineProperty(window,'KronnPageData',{configurable:false,get:()=>latest});
+    const ACTION_TIMEOUT_MS=30000;
+    const callAction=(action,payload)=>{
+      if(!actionPort)return Promise.reject(new Error('Kronn actions unavailable'));
+      if(userActivation&&!userActivation.isActive)return Promise.reject(new Error('A user gesture is required'));
+      const id=++actionSeq;
+      return new Promise((resolve,reject)=>{
+        const timer=setTimeout(()=>{const p=pending[id];if(!p)return;delete pending[id];reject(new Error('Action timed out'));},ACTION_TIMEOUT_MS);
+        pending[id]={resolve:resolve,reject:reject,timer:timer};
+        portPost.call(actionPort,{type:'kronn:page-action',version:1,channel_id:channel,id:id,action:action,payload:payload});
+      });
+    };
+    Object.defineProperty(window,'KronnPageActions',{configurable:false,value:Object.freeze({
+      decideGate:(opts)=>callAction('gate.decide',{dataset:opts&&opts.dataset,run_id:opts&&(opts.runId||opts.run_id),decision:opts&&opts.decision,comment:(opts&&opts.comment)||null}),
+      trigger:(opts)=>callAction('workflow.trigger',{dataset:opts&&opts.dataset,variables:(opts&&opts.variables)||{}})
+    })});
     const materializedRoot=()=>{
       const root=document.documentElement.cloneNode(true);
       const sourceCanvases=document.querySelectorAll('canvas');
@@ -144,6 +162,14 @@ export function buildSandboxDocument(html: string, channelId: string): string {
         stopImmediate.call(event);
         linkPort=event.ports[0];
         portStart.call(linkPort);
+        return;
+      }
+      if(message.type==='kronn:page-action-port'){
+        if(event.ports.length!==1)return;
+        stopImmediate.call(event);
+        actionPort=event.ports[0];
+        actionPort.onmessage=ev=>{const m=ev.data;if(!m||m.type!=='kronn:page-action-result'||m.channel_id!==channel)return;const p=pending[m.id];if(!p)return;delete pending[m.id];if(p.timer)clearTimeout(p.timer);if(m.ok)p.resolve(m.data);else p.reject(new Error(m.error||'Action failed'));};
+        portStart.call(actionPort);
         return;
       }
       if(message.type==='kronn:page-data'){
@@ -236,6 +262,77 @@ export function createLivePageOpenLinkRelay(
     dispose() {
       activePort?.close();
       activePort = null;
+    },
+  };
+}
+
+export interface LivePageActionRelay {
+  connect(target: Window | null): void;
+  dispose(): void;
+}
+
+/**
+ * Broker page-authored actions (e.g. gate decisions) to the trusted parent.
+ * A private MessagePort is transferred to the bridge; the bridge's
+ * `window.KronnPageActions` posts `kronn:page-action` requests over it (only on
+ * user activation), the parent runs `handle`, and the result is posted back as
+ * `kronn:page-action-result`. Writes stay gated: the sandbox can't reach the
+ * network, so every server call goes through the authenticated parent, and the
+ * backend re-checks the page's binding before doing anything.
+ */
+export function createLivePageActionRelay(
+  channelId: string,
+  handle: (action: string, payload: unknown) => Promise<unknown>,
+): LivePageActionRelay {
+  let port: MessagePort | null = null;
+  const onMessage = async (data: {
+    type?: string;
+    version?: number;
+    channel_id?: string;
+    id?: number;
+    action?: string;
+    payload?: unknown;
+  }) => {
+    if (
+      !data
+      || data.type !== 'kronn:page-action'
+      || data.version !== 1
+      || data.channel_id !== channelId
+      || typeof data.id !== 'number'
+    ) return;
+    const reply = (body: Record<string, unknown>) =>
+      port?.postMessage({
+        type: 'kronn:page-action-result',
+        version: 1,
+        channel_id: channelId,
+        id: data.id,
+        ...body,
+      });
+    try {
+      const result = await handle(String(data.action), data.payload);
+      reply({ ok: true, data: result });
+    } catch (cause) {
+      reply({ ok: false, error: cause instanceof Error ? cause.message : String(cause) });
+    }
+  };
+  return {
+    connect(target) {
+      port?.close();
+      port = null;
+      if (!target) return;
+      const channel = new MessageChannel();
+      port = channel.port1;
+      port.onmessage = event => { void onMessage(event.data); };
+      port.start();
+      target.postMessage(
+        { type: 'kronn:page-action-port', version: 1, channel_id: channelId },
+        '*',
+        [channel.port2],
+      );
+    },
+    dispose() {
+      port?.close();
+      port = null;
     },
   };
 }

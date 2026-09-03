@@ -102,14 +102,40 @@ export function groupToolCallsByName(
     .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
 }
 
+export interface FormatDurationCompactOptions {
+  /** Add an hours tier above 60 minutes: `1h`, `1h12`. Default: false. */
+  hours?: boolean;
+  /** Return `undefined` for nullish / non-positive input instead of `<1s`.
+   *  Default: false — the base contract always returns a string. */
+  undefinedOnNonPositive?: boolean;
+}
+
 /** Format a duration in milliseconds compactly. < 1s → `<1s` (the
  *  precision below a second isn't useful for tool-call timing) ;
- *  1-60s → `Ns` ; > 60s → `MmSs`. */
-export function formatDurationCompact(ms: number): string {
-  if (ms < 1000) return '<1s';
-  const totalSeconds = Math.round(ms / 1000);
+ *  1-60s → `Ns` ; > 60s → `MmSs`. With `{ hours: true }`, spans past 60 min
+ *  collapse to an hours tier (`1h`, `1h12`). With `{ undefinedOnNonPositive:
+ *  true }`, nullish / non-positive input yields `undefined` (used by callers
+ *  that omit a duration entirely rather than render `<1s`). */
+export function formatDurationCompact(ms: number): string;
+export function formatDurationCompact(
+  ms: number | null | undefined,
+  options: FormatDurationCompactOptions,
+): string | undefined;
+export function formatDurationCompact(
+  ms: number | null | undefined,
+  options: FormatDurationCompactOptions = {},
+): string | undefined {
+  if (options.undefinedOnNonPositive && (ms == null || ms <= 0)) return undefined;
+  const value = ms ?? 0;
+  if (value < 1000) return '<1s';
+  const totalSeconds = Math.round(value / 1000);
   if (totalSeconds < 60) return `${totalSeconds}s`;
   const minutes = Math.floor(totalSeconds / 60);
-  const seconds = totalSeconds % 60;
-  return seconds > 0 ? `${minutes}m${seconds}s` : `${minutes}m`;
+  if (!options.hours || minutes < 60) {
+    const seconds = totalSeconds % 60;
+    return seconds > 0 ? `${minutes}m${seconds}s` : `${minutes}m`;
+  }
+  const hours = Math.floor(minutes / 60);
+  const restMinutes = minutes % 60;
+  return restMinutes ? `${hours}h${String(restMinutes).padStart(2, '0')}` : `${hours}h`;
 }

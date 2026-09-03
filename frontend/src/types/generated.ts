@@ -2793,7 +2793,34 @@ export type LivePagePublication = { id: string, page_id: string, data_revision: 
 
 export type LivePageRevision = { id: string, page_id: string, revision: number, html: string, created_by_agent: string | null, created_at: string, };
 
+/**
+ * Which run of the bound workflow the Page should mirror.
+ */
+export type LivePageRunSelector = "latest" | "latest_active";
+
 export type LivePagesCapability = { activated: boolean, activated_at: string | null, };
+
+/**
+ * Binds a Page dataset to a workflow so the Page can mirror that workflow's
+ * live run state (read) and, from Phase 3, decide its gates (write). The
+ * `phase_map` / `meta_map` blobs are interpreted client-side (they describe how
+ * to fold a run's `step_results` into the Page's pipeline shape); the backend
+ * stores them verbatim and owns the authorization boundary via `workflow_id`
+ * and `allowed_gate_steps`.
+ */
+export type LivePageWorkflowBinding = { id: string, page_id: string, workflow_id: string, dataset: string, run_selector: LivePageRunSelector, phase_map: any, meta_map: any,
+/**
+ * Gate step names this Page is allowed to decide. Empty = no gate is
+ * decidable from the Page (read-only mirror).
+ */
+allowed_gate_steps: Array<string>,
+/**
+ * Launch variables the Page is allowed to pass when triggering the bound
+ * workflow (Phase 4). `None` = triggering is not allowed from the Page;
+ * `Some([])` = triggerable with no variables; `Some(list)` = triggerable and
+ * provided variables must be a subset of `list`.
+ */
+trigger_variable_allowlist: Array<string> | null, created_at: string, updated_at: string, };
 
 /**
  * Live workflow configurations that publish into this Page. A Page is not
@@ -3383,6 +3410,32 @@ export type OrchestrationRunStatus = "active" | "completed" | "cancelled" | "fai
 export type PacingRegime = "hot" | "cold";
 
 export type PacingState = { regime: PacingRegime, next_delay_seconds: number, attention_until?: string, };
+
+/**
+ * A Live Page's request to decide the gate its bound run is waiting on. The
+ * backend authorizes it against the `(page, dataset)` binding: the run must
+ * belong to the bound workflow, be `WaitingApproval`, and its waiting gate step
+ * must be listed in the binding's `allowed_gate_steps`.
+ */
+export type PageGateDecisionRequest = { dataset: string, run_id: string,
+/**
+ * `approve` | `request_changes` | `reject` (case-insensitive).
+ */
+decision: string, comment?: string | null, };
+
+/**
+ * A Live Page's request to trigger its bound workflow (Phase 4). Authorized
+ * against the `(page, dataset)` binding: the binding must carry a
+ * `trigger_variable_allowlist` (else triggering is refused) and every provided
+ * variable key must be listed in it.
+ */
+export type PageTriggerRequest = { dataset: string, variables?: Record<string, string>, };
+
+/**
+ * The id of the run spawned by a Page trigger. The Page doesn't stream the run;
+ * its auto-refresh / mirror surfaces the run's progress.
+ */
+export type PageTriggerResponse = { run_id: string, };
 
 /**
  * Pagination strategy for an `ApiCall` step. `Auto` covers the three most
@@ -5736,6 +5789,26 @@ export type UploadContextFileResponse = { file: ContextFile,
  * Suggested skill IDs based on file extension
  */
 suggested_skills: Array<string>, };
+
+/**
+ * Create or replace the binding for `(page, dataset)`. Idempotent on that pair.
+ */
+export type UpsertLivePageBindingRequest = { workflow_id: string, dataset: string, run_selector?: LivePageRunSelector | null,
+/**
+ * Client-side phase grouping. Optional: a read-only mirror can omit it
+ * (defaults to JSON `null`, folded to an empty phase list downstream).
+ */
+phase_map?: any,
+/**
+ * Client-side meta resolution spec. Optional (defaults to JSON `null`).
+ */
+meta_map?: any, allowed_gate_steps?: Array<string>,
+/**
+ * Optional trigger authorization (Phase 4). Omitted / `null` leaves the
+ * binding non-triggerable; a (possibly empty) array makes it triggerable and
+ * bounds the launch variables a Page may pass.
+ */
+trigger_variable_allowlist?: Array<string> | null, };
 
 /**
  * A ranked usage entry (for top N lists)

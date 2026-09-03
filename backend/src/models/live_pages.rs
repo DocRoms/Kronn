@@ -257,3 +257,123 @@ pub struct LivePagesCapability {
     pub activated: bool,
     pub activated_at: Option<DateTime<Utc>>,
 }
+
+/// Which run of the bound workflow the Page should mirror.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum LivePageRunSelector {
+    /// Most recently started run, regardless of status.
+    Latest,
+    /// Most recent non-terminal run (Pending / Running / WaitingApproval),
+    /// falling back to the latest run when none is active.
+    LatestActive,
+}
+
+impl LivePageRunSelector {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Latest => "latest",
+            Self::LatestActive => "latest_active",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "latest" => Some(Self::Latest),
+            "latest_active" => Some(Self::LatestActive),
+            _ => None,
+        }
+    }
+}
+
+/// Binds a Page dataset to a workflow so the Page can mirror that workflow's
+/// live run state (read) and, from Phase 3, decide its gates (write). The
+/// `phase_map` / `meta_map` blobs are interpreted client-side (they describe how
+/// to fold a run's `step_results` into the Page's pipeline shape); the backend
+/// stores them verbatim and owns the authorization boundary via `workflow_id`
+/// and `allowed_gate_steps`.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct LivePageWorkflowBinding {
+    pub id: String,
+    pub page_id: String,
+    pub workflow_id: String,
+    pub dataset: String,
+    pub run_selector: LivePageRunSelector,
+    #[ts(type = "any")]
+    pub phase_map: serde_json::Value,
+    #[ts(type = "any")]
+    pub meta_map: serde_json::Value,
+    /// Gate step names this Page is allowed to decide. Empty = no gate is
+    /// decidable from the Page (read-only mirror).
+    pub allowed_gate_steps: Vec<String>,
+    /// Launch variables the Page is allowed to pass when triggering the bound
+    /// workflow (Phase 4). `None` = triggering is not allowed from the Page;
+    /// `Some([])` = triggerable with no variables; `Some(list)` = triggerable and
+    /// provided variables must be a subset of `list`.
+    pub trigger_variable_allowlist: Option<Vec<String>>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// A Live Page's request to decide the gate its bound run is waiting on. The
+/// backend authorizes it against the `(page, dataset)` binding: the run must
+/// belong to the bound workflow, be `WaitingApproval`, and its waiting gate step
+/// must be listed in the binding's `allowed_gate_steps`.
+#[derive(Debug, Clone, Deserialize, TS)]
+#[ts(export)]
+pub struct PageGateDecisionRequest {
+    pub dataset: String,
+    pub run_id: String,
+    /// `approve` | `request_changes` | `reject` (case-insensitive).
+    pub decision: String,
+    #[serde(default)]
+    pub comment: Option<String>,
+}
+
+/// Create or replace the binding for `(page, dataset)`. Idempotent on that pair.
+#[derive(Debug, Clone, Deserialize, TS)]
+#[ts(export)]
+pub struct UpsertLivePageBindingRequest {
+    pub workflow_id: String,
+    pub dataset: String,
+    pub run_selector: Option<LivePageRunSelector>,
+    /// Client-side phase grouping. Optional: a read-only mirror can omit it
+    /// (defaults to JSON `null`, folded to an empty phase list downstream).
+    #[serde(default)]
+    #[ts(type = "any")]
+    pub phase_map: serde_json::Value,
+    /// Client-side meta resolution spec. Optional (defaults to JSON `null`).
+    #[serde(default)]
+    #[ts(type = "any")]
+    pub meta_map: serde_json::Value,
+    #[serde(default)]
+    pub allowed_gate_steps: Vec<String>,
+    /// Optional trigger authorization (Phase 4). Omitted / `null` leaves the
+    /// binding non-triggerable; a (possibly empty) array makes it triggerable and
+    /// bounds the launch variables a Page may pass.
+    #[serde(default)]
+    pub trigger_variable_allowlist: Option<Vec<String>>,
+}
+
+/// A Live Page's request to trigger its bound workflow (Phase 4). Authorized
+/// against the `(page, dataset)` binding: the binding must carry a
+/// `trigger_variable_allowlist` (else triggering is refused) and every provided
+/// variable key must be listed in it.
+#[derive(Debug, Clone, Deserialize, TS)]
+#[ts(export)]
+pub struct PageTriggerRequest {
+    pub dataset: String,
+    #[serde(default)]
+    #[ts(type = "Record<string, string>")]
+    pub variables: std::collections::HashMap<String, String>,
+}
+
+/// The id of the run spawned by a Page trigger. The Page doesn't stream the run;
+/// its auto-refresh / mirror surfaces the run's progress.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct PageTriggerResponse {
+    pub run_id: String,
+}

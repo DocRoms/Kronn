@@ -1,13 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { LivePageDetail } from '../types/generated';
 import { pages as pagesApi } from '../lib/api';
 import {
   buildSandboxDocument,
+  createLivePageActionRelay,
   createLivePageOpenLinkRelay,
-  runtimeData,
 } from '../lib/live-page-sandbox';
+import { useLivePageMirror } from '../lib/useLivePageMirror';
 import { useT } from '../lib/I18nContext';
-import { userError } from '../lib/userError';
 import './StandaloneLivePage.css';
 
 function channelId(): string {
@@ -16,24 +15,19 @@ function channelId(): string {
 
 export function StandaloneLivePage({ pageId }: { pageId: string }) {
   const { t } = useT();
-  const [detail, setDetail] = useState<LivePageDetail | null>(null);
-  const [error, setError] = useState<string | null>(null);
   const [bridgeChannel] = useState(channelId);
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const linkRelayRef = useRef<ReturnType<typeof createLivePageOpenLinkRelay> | null>(null);
+  const actionRelayRef = useRef<ReturnType<typeof createLivePageActionRelay> | null>(null);
 
-  useEffect(() => {
-    let active = true;
-    pagesApi.get(pageId).then(page => {
-      if (!active) return;
-      setDetail(page);
-      setError(null);
-    }).catch(cause => {
-      if (!active) return;
-      setError(userError(cause));
-    });
-    return () => { active = false; };
-  }, [pageId]);
+  // The published view owns its page detail: the shared mirror hook fetches it
+  // and the bound run together on an adaptive cadence, pausing on a hidden tab.
+  const { detail, error, publishToFrame } = useLivePageMirror({
+    pageId,
+    bridgeChannel,
+    iframeRef,
+    ownsDetail: true,
+  });
 
   useEffect(() => {
     if (!detail) return undefined;
@@ -46,18 +40,6 @@ export function StandaloneLivePage({ pageId }: { pageId: string }) {
     () => detail ? buildSandboxDocument(detail.revision.html, bridgeChannel) : '',
     [bridgeChannel, detail],
   );
-  const publishToFrame = useCallback(() => {
-    if (!detail) return;
-    const target = iframeRef.current?.contentWindow ?? null;
-    if (!target) return;
-    linkRelayRef.current?.connect(target);
-    target.postMessage({
-      type: 'kronn:page-data',
-      version: 1,
-      channel_id: bridgeChannel,
-      data: runtimeData(detail),
-    }, '*');
-  }, [bridgeChannel, detail]);
   useEffect(() => {
     const relay = createLivePageOpenLinkRelay(bridgeChannel);
     linkRelayRef.current = relay;
@@ -66,6 +48,54 @@ export function StandaloneLivePage({ pageId }: { pageId: string }) {
       relay.dispose();
     };
   }, [bridgeChannel]);
+
+  // Broker page-authored actions (gate decisions, workflow triggers) to the
+  // authenticated parent. The backend re-checks the page's binding on every call.
+  const handleAction = useCallback(async (action: string, payload: unknown): Promise<unknown> => {
+    if (action === 'gate.decide') {
+      const request = (payload ?? {}) as {
+        dataset?: string; run_id?: string; decision?: string; comment?: string | null;
+      };
+      if (!request.dataset || !request.run_id || !request.decision) {
+        throw new Error('Missing dataset, run_id or decision');
+      }
+      return pagesApi.decideGate(pageId, {
+        dataset: request.dataset,
+        run_id: request.run_id,
+        decision: request.decision,
+        comment: request.comment ?? null,
+      });
+    }
+    if (action === 'workflow.trigger') {
+      const request = (payload ?? {}) as { dataset?: string; variables?: Record<string, string> };
+      if (!request.dataset) throw new Error('Missing dataset');
+      return pagesApi.triggerWorkflow(pageId, {
+        dataset: request.dataset,
+        variables: request.variables ?? {},
+      });
+    }
+    throw new Error(`Unknown action: ${action}`);
+  }, [pageId]);
+  useEffect(() => {
+    const relay = createLivePageActionRelay(bridgeChannel, handleAction);
+    actionRelayRef.current = relay;
+    return () => {
+      if (actionRelayRef.current === relay) actionRelayRef.current = null;
+      relay.dispose();
+    };
+  }, [bridgeChannel, handleAction]);
+
+  // Connect the action relay once per loaded document (not on every data push),
+  // so a decision in flight isn't dropped by a 4s refresh re-transferring the port.
+  const handleFrameLoad = useCallback(() => {
+    // A fresh document must receive the relays + current data regardless of the
+    // signature guard, so force this publish. Connecting both relays once per
+    // loaded document (not on every push) keeps their private ports stable so an
+    // in-flight decision isn't dropped by a refresh.
+    linkRelayRef.current?.connect(iframeRef.current?.contentWindow ?? null);
+    actionRelayRef.current?.connect(iframeRef.current?.contentWindow ?? null);
+    publishToFrame(true);
+  }, [publishToFrame]);
   useEffect(() => { publishToFrame(); }, [publishToFrame]);
 
   if (error) {
@@ -82,7 +112,7 @@ export function StandaloneLivePage({ pageId }: { pageId: string }) {
         title={detail.title}
         sandbox="allow-scripts"
         srcDoc={sandboxDocument}
-        onLoad={publishToFrame}
+        onLoad={handleFrameLoad}
         data-testid="standalone-live-page-frame"
       />
     </main>
