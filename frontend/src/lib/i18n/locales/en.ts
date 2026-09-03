@@ -1539,6 +1539,7 @@ const en: TranslationDict = {
   'disc.selectOrCreate': 'Select or create a discussion',
   'disc.mentionHint': '{0} to target an agent...',
   'disc.targetDiscussionAgent': 'discussion agent',
+  'disc.routingImplicit': 'No one is named: this message goes to the discussion\'s agent',
   'disc.tourDemoAuthor': 'Kronn demo',
   'disc.tourDemoKind': 'preloaded content',
   'disc.targetPunctualAgent': 'punctual agent',

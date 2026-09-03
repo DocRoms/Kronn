@@ -1539,6 +1539,7 @@ const es: TranslationDict = {
   'disc.selectOrCreate': 'Seleccione o cree una discusión',
   'disc.mentionHint': '{0} para dirigirse a un agente...',
   'disc.targetDiscussionAgent': 'agente de la conversación',
+  'disc.routingImplicit': 'Nadie está mencionado: este mensaje va al agente de la discusión',
   'disc.tourDemoAuthor': 'Demo de Kronn',
   'disc.tourDemoKind': 'contenido precargado',
   'disc.targetPunctualAgent': 'agente puntual',

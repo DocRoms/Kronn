@@ -657,16 +657,34 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
                     · humain
                   </span>
                 )}
-                {targets.length > 0 && (
-                  <span
-                    className="disc-msg-routing-receipt"
-                    role="group"
-                    aria-label={t('disc.routingRequested')}
-                    title={t('disc.routingRequested')}
-                    data-testid="message-routing-receipt"
-                  >
-                    <span className="disc-msg-routing-label" aria-hidden="true">→</span>
-                    <span className="disc-msg-routing-targets">
+                {/* A message with no named target is NOT sent to everyone: it
+                 *  goes to the discussion's own agent, and joined CLI sessions
+                 *  never receive it. Showing nothing in that case is what let
+                 *  three messages be written to an agent that could not answer,
+                 *  while the CLI in the room saw none of them. So the receipt
+                 *  renders always — naming the implicit destination when there
+                 *  is no explicit one. */}
+                <span
+                  className="disc-msg-routing-receipt"
+                  role="group"
+                  aria-label={targets.length > 0 ? t('disc.routingRequested') : t('disc.routingImplicit')}
+                  title={targets.length > 0 ? t('disc.routingRequested') : t('disc.routingImplicit')}
+                  data-testid="message-routing-receipt"
+                  data-implicit={targets.length === 0}
+                >
+                  <span className="disc-msg-routing-label" aria-hidden="true">→</span>
+                  <span className="disc-msg-routing-targets">
+                    {targets.length === 0 && (
+                      <span className="disc-msg-routing-target" data-kind="discussion_agent">
+                        <span>
+                          {defaultAgentAlias
+                            ? `@${defaultAgentAlias}`
+                            : AGENT_MENTIONS.find(mention => mention.type === defaultAgent)?.trigger
+                              ?? `@${AGENT_LABELS[defaultAgent] ?? defaultAgent}`}{' '}
+                        </span>
+                        <span className="disc-msg-routing-tier">· {t('disc.targetDiscussionAgent')}</span>
+                      </span>
+                    )}
                       {targets.map((target, index) => {
                         const dynamicAlias = target.connection_id
                           ? targetConnectionAliases[target.connection_id]
@@ -699,9 +717,8 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
                           </span>
                         );
                       })}
-                    </span>
                   </span>
-                )}
+                </span>
               </div>
             )}
             {msg.role === 'Agent' && (

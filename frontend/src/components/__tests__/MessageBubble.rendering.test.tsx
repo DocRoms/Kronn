@@ -437,9 +437,18 @@ describe('MessageBubble — durable routing receipt', () => {
     expect(receipt).not.toHaveTextContent('🎯');
   });
 
-  it('stays hidden when no durable routing data exists', () => {
+  // KT-578 — this used to assert the receipt stayed hidden. Hiding it was the
+  // bug: a message with no named target is not sent to everyone, it goes to
+  // the discussion's agent, and joined CLI sessions never see it. Showing
+  // nothing let three messages be written to an agent that could not answer
+  // while the CLI in the room received none of them.
+  it('names the discussion agent when no one was mentioned', () => {
     renderBubble(makeMessage({ role: 'User', content: 'Sans métadonnées' }));
-    expect(screen.queryByTestId('message-routing-receipt')).not.toBeInTheDocument();
+    const receipt = screen.getByTestId('message-routing-receipt');
+    expect(receipt.dataset.implicit).toBe('true');
+    // The destination is named, and qualified — never presented as "everyone".
+    expect(receipt).toHaveTextContent('disc.targetDiscussionAgent');
+    expect(receipt.textContent).not.toMatch(/@all/i);
   });
 });
 

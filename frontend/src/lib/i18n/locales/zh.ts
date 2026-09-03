@@ -1520,6 +1520,7 @@ const zh: TranslationDict = {
   "disc.selectOrCreate": "选择或创建讨论",
   "disc.mentionHint": "{0} 以定位代理…",
   "disc.targetDiscussionAgent": "讨论代理",
+  "disc.routingImplicit": "未指定收件人：此消息发送给讨论的代理",
   "disc.tourDemoAuthor": "Kronn 演示",
   "disc.tourDemoKind": "预加载内容",
   "disc.targetPunctualAgent": "即时代理",

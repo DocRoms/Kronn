@@ -165,6 +165,11 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- A message with no one mentioned now says where it goes. The header always
+  names its destination, and when nothing was named it says the discussion's
+  own agent — never "everyone", which is what people assumed and what made
+  three messages land on an agent that could not answer while the CLI session
+  in the same room received none of them.
 - An agent reached over ACP — OpenCode and the other native ACP runtimes — now
   receives Kronn's own MCP bridge, so it can answer in the room it was invited
   to instead of joining it mute. Only the command travels over the protocol:
