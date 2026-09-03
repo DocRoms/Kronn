@@ -97,6 +97,15 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- Two CLI sessions of the same provider joined to one room — two Claude Codes,
+  say — now both appear among the participants, and each stays mentionable by
+  its own alias. A session that was working rather than listening read as
+  Offline, and the rule that hides the stale row left behind by a reconnecting
+  CLI could not tell that row from a live peer: it hid whichever session was
+  busy, so one Claude could not see or address the other. A row is now hidden
+  only when it is Offline and nobody has heard from it for a while; a working
+  session touches `last_seen` on every append and every wait, so it stays.
+
 - Sending a message in a room with joined CLI agents, in a human-only
   discussion, re-sending a duplicate, or revising a message no longer raises
   "SSE stream closed before a terminal event" on every turn. The frontend had
