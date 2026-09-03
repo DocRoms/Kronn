@@ -279,6 +279,7 @@ Kronn/
 - **API client**: `frontend/src/lib/api.ts` — all fetch calls, SSE streaming logic.
 - **Type generation**: `make typegen` reads `#[derive(TS)]` attributes in Rust models.
 - **CLI commands**: `kronn` script, sources `lib/*.sh`.
+- **Agent-instruction redirectors** (every one points at `docs/AGENTS.md`, the single source of truth): `CLAUDE.md`, `GEMINI.md`, `AGENTS.md`, `.kiro/steering/instructions.md`, `.vibe/instructions.md`, `.cursorrules`, `.cursor/rules/repo-instructions.mdc`, `.github/copilot-instructions.md`, `.windsurfrules`, `.clinerules`.
 
 ## Notes
 - `README.md` is not guaranteed to be up-to-date; prefer actual config files as source of truth.

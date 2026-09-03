@@ -97,6 +97,15 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- The agent bootstrap (`docs/AGENTS.md`) is back under its context ceiling
+  without the ceiling moving. The 716 bytes over were exactly what 0.13.0 had
+  added: two verbose rows in the task router and a section holding a single
+  pointer. The router now routes and stops explaining — every detail it
+  dropped already lives at the destination it points to — and the sections
+  that only carried a pointer became rows of that same table. The inventory
+  of root redirector files moved to `docs/repo-map.md`, where repository
+  structure is documented.
+
 - Two CLI sessions of the same provider joined to one room — two Claude Codes,
   say — now both appear among the participants, and each stays mentionable by
   its own alias. A session that was working rather than listening read as
