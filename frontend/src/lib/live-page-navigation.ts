@@ -1,5 +1,6 @@
 import { writeActiveDiscussionId, writeDashboardPage } from './dashboard-navigation';
 
+export const STANDALONE_DISCUSSION_HASH_PREFIX = '#discussion-';
 export const STANDALONE_LIVE_PAGE_HASH_PREFIX = '#page/';
 export const STANDALONE_LIVE_PAGE_MOSAIC_HASH_PREFIX = '#pages/mosaic?';
 
@@ -78,13 +79,37 @@ export function standaloneLivePageMosaicUrl(
   return `${location.origin}${location.pathname}${STANDALONE_LIVE_PAGE_MOSAIC_HASH_PREFIX}${params.toString()}`;
 }
 
+/** The discussion a `#discussion-<id>` URL names, or null. */
+export function standaloneDiscussionId(hash: string): string | null {
+  if (!hash.startsWith(STANDALONE_DISCUSSION_HASH_PREFIX)) return null;
+  const encodedId = hash.slice(STANDALONE_DISCUSSION_HASH_PREFIX.length);
+  if (!encodedId) return null;
+  try {
+    const discussionId = decodeURIComponent(encodedId).trim();
+    return discussionId || null;
+  } catch {
+    return null;
+  }
+}
+
+export function standaloneDiscussionUrl(
+  discussionId: string,
+  location: Pick<Location, 'origin' | 'pathname'> = window.location,
+): string {
+  return `${location.origin}${location.pathname}${STANDALONE_DISCUSSION_HASH_PREFIX}${encodeURIComponent(discussionId)}`;
+}
+
 /**
- * A standalone/mosaic Live Page tab has no Dashboard shell to navigate
- * within, so an action's "open discussion" jump seeds the same session-
- * storage checkpoint Dashboard already reads on mount (`dashboard-
- * navigation.ts`) and opens it in a fresh tab. `window.open` without
- * `noopener` keeps the opener relationship the browser needs to clone
- * session storage into that new tab.
+ * A standalone/mosaic Live Page tab has no Dashboard shell to navigate within,
+ * so an action's "open discussion" jump opens the target in a fresh tab.
+ *
+ * The URL carries the discussion in its hash, like the Live Page routes above.
+ * Session storage is still seeded — a reload of the ORIGINAL tab must keep its
+ * place — but the new tab no longer depends on it, which is what lets this
+ * open with `noopener,noreferrer`: nothing has to be cloned across windows, so
+ * nothing needs a back-reference to the opener. The address is also the point:
+ * it can be copied, pasted and sent, which a session-storage checkpoint never
+ * could.
  */
 export function openStandaloneDiscussion(
   discussionId: string,
@@ -93,5 +118,5 @@ export function openStandaloneDiscussion(
 ): void {
   writeDashboardPage('discussions');
   writeActiveDiscussionId(discussionId);
-  open(`${location.origin}${location.pathname}`, '_blank');
+  open(standaloneDiscussionUrl(discussionId, location), '_blank', 'noopener,noreferrer');
 }

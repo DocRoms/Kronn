@@ -207,6 +207,24 @@ pub async fn delete(
     }
 }
 
+/// GET /api/quick-prompts/:id/usage
+///
+/// How many workflow steps name it — said before a deletion is confirmed,
+/// because those steps fail on their next run, not at deletion time.
+pub async fn usage(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Json<ApiResponse<u32>> {
+    match state
+        .db
+        .with_read_conn(move |conn| crate::db::quick_prompts::count_workflow_step_usage(conn, &id))
+        .await
+    {
+        Ok(count) => Json(ApiResponse::ok(count)),
+        Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
+    }
+}
+
 /// GET /api/quick-prompts/:id/history
 ///
 /// 0.8.5 — returns the full version snapshot list for a QP, newest
@@ -416,7 +434,10 @@ pub async fn import_qp(
 #[derive(Debug, Clone, Deserialize)]
 pub struct BatchItem {
     pub title: String,
-    pub prompt: String,
+    /// Per-item values rendered into the Quick Prompt's own template. The
+    /// prompt is NEVER supplied per item: it comes from the template, and the
+    /// substitution happens at execution from the values resolved here — the
+    /// same contract `qp_batch_run` exposes to agents.
     #[serde(default)]
     pub variables: std::collections::HashMap<String, String>,
 }
@@ -517,6 +538,17 @@ pub async fn batch_run(
         (secret, config.server.execution_variable_retention_days)
     };
     let effective_project = req.project_id.clone().or(qp.project_id.clone());
+    let workspace_mode = req.workspace_mode.clone().unwrap_or_else(|| "Direct".into());
+
+    // Safety: Isolated mode needs a project (git repo) to worktree against.
+    // Checked BEFORE the variables are prepared, because preparing them writes
+    // resolved values to the database — a batch that cannot run must not leave
+    // any behind.
+    if workspace_mode == "Isolated" && effective_project.is_none() {
+        return Json(ApiResponse::err(
+            "Isolated workspace mode requires a project_id (the Quick Prompt or the batch request must target a git-backed project)"
+        ));
+    }
     let declarations = qp.variables.clone();
     let template = qp.prompt_template.clone();
     let raw_items = req.items;
@@ -567,15 +599,6 @@ pub async fn batch_run(
         Ok(items) => items,
         Err(error) => return Json(ApiResponse::err(error.to_string())),
     };
-    let workspace_mode = req.workspace_mode.unwrap_or_else(|| "Direct".into());
-
-    // Safety: Isolated mode needs a project (git repo) to worktree against.
-    // Check the effective project_id (request override OR QP default).
-    if workspace_mode == "Isolated" && req.project_id.is_none() && qp.project_id.is_none() {
-        return Json(ApiResponse::err(
-            "Isolated workspace mode requires a project_id (the Quick Prompt or the batch request must target a git-backed project)"
-        ));
-    }
     // Captured before the `move` closure below takes ownership of `qp`/`req` —
     // used to stamp the shared runs created per child discussion.
     let shared_project_id = req.project_id.clone().or_else(|| qp.project_id.clone());
@@ -843,11 +866,8 @@ pub async fn compare_agents(
                                 "External API connection {connection_id} does not match the selected agent"
                             );
                         }
-                        let model = match target.tier {
-                            ModelTier::Economy => connection.economy_model.clone(),
-                            ModelTier::Default => connection.default_model.clone(),
-                            ModelTier::Reasoning => connection.reasoning_model.clone(),
-                        };
+                        let model =
+                            crate::http_transport::connection_tier_model(&connection, target.tier);
                         Ok((target, connection.display_name, model))
                     } else {
                         if target.agent == AgentType::Custom {

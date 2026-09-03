@@ -78,11 +78,15 @@ Full spec: [`docs/conventions/agents-md-format-v1.md`](conventions/agents-md-for
 | Workflow engine work | `docs/architecture/overview.md`, `docs/inconsistencies-tech-debt.md`, `docs/coding-rules.md` |
 | Docker / deployment / starting the stack | `docs/operations/debug-operations.md`, `docs/operations/running-the-stack.md` |
 | Secret themes / unlock features | `docs/operations/secret-themes.md` |
-| **Désagentification / `ApiCall` step** (workflow engine calls APIs directly, zero tokens) — incl. AI helper bubble | `docs/operations/deagent-apicall.md` |
-| **Ollama local models** (deterministic offload: model resolution, num_ctx / `/no_think` gotchas, TypedSchema `format`, quality escalation) | `docs/operations/ollama-local-models.md` |
-| **ACP adapters / agent transport toggles** (Codex/Claude via `AcpTransport`, `KRONN_ACP_ADAPTER_*`, permission broker) | `docs/operations/acp-adapters.md`, `docs/design/adr-003-acp-control-plane.md` |
+| **Désagentification / `ApiCall` step** | `docs/operations/deagent-apicall.md` |
+| **Ollama local models** (offload, `num_ctx`, quality escalation) | `docs/operations/ollama-local-models.md` |
+| **ACP adapters / agent transport toggles** | `docs/operations/acp-adapters.md`, `docs/operations/agents-v2-matrix.md`, `docs/design/adr-003-acp-control-plane.md` |
+| **HTTP model-provider transport** (LiteLLM / NVIDIA / Custom) | `docs/operations/http-transport.md`, `docs/design/adr-004-http-transport.md` |
+| **Media generation** (image / video — billable, read first) | `docs/architecture/media-generation.md` |
 | Token cost | `docs/operations/token-economy-0.9.6.md` |
 | Fix known issue | `docs/inconsistencies-tech-debt.md` |
+| Documentation history | `docs/release-notes-archive.md` |
+| Stack overview | `docs/stack.md` |
 
 #### Tier 2 — For needs not covered above (max 3 files)
 
@@ -102,10 +106,6 @@ Never load everything "just in case".
 - Architecture overview → `docs/architecture/overview.md`
 
 ---
-
-## 2. Running the stack
-
-→ [`operations/running-the-stack.md`](operations/running-the-stack.md)
 
 ## 3. DO NOT (common mistakes)
 
@@ -197,24 +197,6 @@ After completing a task: if you discovered something non-obvious (a gotcha, a mi
 
 ---
 
-## 8. Stack
-
-→ [`stack.md`](stack.md)
-
-## 9. UI structure
-
-→ [`architecture/ui-structure.md`](architecture/ui-structure.md)
-
-## 9bis. Media generation (image / video)
-
-→ [`architecture/media-generation.md`](architecture/media-generation.md)
-
-Read it before touching a media path: submission is billable and the rules
-around resubmission, provider URLs and cost persistence exist to keep a crash
-from paying twice.
-
----
-
 ## 10. RTK integration
 
 Kronn's RTK detection/activation internals moved to
@@ -223,15 +205,9 @@ The rule for agents — prefix commands with `rtk` — is in `CLAUDE.md`.
 
 ## 11. Multi-agent configuration
 
-Redirectors to this file: `CLAUDE.md`, `GEMINI.md`, `AGENTS.md`, `.kiro/steering/instructions.md`, `.vibe/instructions.md`, `.cursorrules`, `.cursor/rules/repo-instructions.mdc`, `.github/copilot-instructions.md`, `.windsurfrules`, `.clinerules`.
+Every agent-instruction file at the repo root redirects here; the list lives in `docs/repo-map.md`.
 
 **Maintenance rule**: all content lives in `docs/`. Redirectors contain a summary of critical rules + pointer to `docs/AGENTS.md` as source of truth.
-
----
-
-## 12. Documentation history
-
-→ [`release-notes-archive.md`](release-notes-archive.md)
 
 <!-- kronn:section name="learnings" curated="ai" -->
 ## Learned conventions

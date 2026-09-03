@@ -190,8 +190,34 @@ pub(crate) fn claim_launch(
     table: ActionTable,
     core: &mut ActionCore,
     supplied: &HashMap<String, String>,
+    // Whether the proposal's target still resolves, checked by the origin
+    // module against the same contract preflight used.
+    target_still_exists: bool,
 ) -> Result<Option<HashMap<String, String>>> {
     debug_assert_eq!(core.state, DiscussionActionState::Proposed);
+    // Preflight ran when the proposal was ingested; the click can come much
+    // later, and a transcript or a published page outlives the Quick Exec it
+    // names. Claiming here would hand the caller variables for a target that
+    // no longer exists — a launch with nothing behind it.
+    if !target_still_exists {
+        let now = Utc::now().to_rfc3339();
+        core.state = DiscussionActionState::PreflightFailed;
+        core.diagnostic = Some("La cible n’existe plus ou n’est pas accessible.".into());
+        core.updated_at = now.clone();
+        transaction.execute(
+            &format!(
+                "UPDATE {} SET state = ?2, diagnostic = ?3, updated_at = ?4 WHERE id = ?1",
+                table.name()
+            ),
+            params![
+                &core.id,
+                state_db_str(core.state),
+                core.diagnostic.as_deref(),
+                &now
+            ],
+        )?;
+        return Ok(None);
+    }
     for (name, supplied_value) in supplied {
         let Some(value) = core.values.iter_mut().find(|value| value.name == *name) else {
             anyhow::bail!("unknown action variable `{name}`");

@@ -206,6 +206,24 @@ pub async fn delete(
     }
 }
 
+/// GET /api/quick-apis/:id/usage
+///
+/// How many workflow steps name it — said before a deletion is confirmed,
+/// because those steps fail on their next run, not at deletion time.
+pub async fn usage(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Json<ApiResponse<u32>> {
+    match state
+        .db
+        .with_read_conn(move |conn| crate::db::quick_apis::count_workflow_step_usage(conn, &id))
+        .await
+    {
+        Ok(count) => Json(ApiResponse::ok(count)),
+        Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
+    }
+}
+
 /// GET /api/quick-apis/:id/export
 pub async fn export_qa(
     State(state): State<AppState>,

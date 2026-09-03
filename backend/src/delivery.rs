@@ -51,7 +51,15 @@ pub enum DeliveryCommit {
 pub struct DeliveryValidation {
     pub command: String,
     pub result: String,
-    pub duration_ms: u64,
+    /// Absent when the runtime never timed the validation. Deliberately
+    /// nullable rather than defaulting to 0: a zero renders as a measurement,
+    /// and "instantaneous" is a different claim from "not measured".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    /// Evidence backing the result. May carry an explicit "not provided"
+    /// marker: once a delivery is accepted its report must converge, so a
+    /// missing proof degrades the report instead of suppressing it. The review
+    /// gate is where an unevidenced claim gets refused.
     pub evidence: String,
 }
 
@@ -302,12 +310,15 @@ impl DeliverySummaryV1 {
             out.push_str("_none_\n\n");
         } else {
             for validation in &self.validations {
+                // "not measured" and "0 ms" are different claims; the report
+                // must not turn the first into the second.
+                let timing = match validation.duration_ms {
+                    Some(ms) => format!("{ms} ms"),
+                    None => "duration not measured".to_owned(),
+                };
                 out.push_str(&format!(
-                    "- `{}` → {} ({} ms) — {}\n",
-                    validation.command,
-                    validation.result,
-                    validation.duration_ms,
-                    validation.evidence
+                    "- `{}` → {} ({}) — {}\n",
+                    validation.command, validation.result, timing, validation.evidence
                 ));
             }
             out.push('\n');
@@ -417,7 +428,7 @@ mod tests {
             validations: vec![DeliveryValidation {
                 command: "cargo test --lib delivery::".into(),
                 result: "pass".into(),
-                duration_ms: 1200,
+                duration_ms: Some(1200),
                 evidence: "8 passed".into(),
             }],
             documentation: DeliveryDocumentation::Updated {

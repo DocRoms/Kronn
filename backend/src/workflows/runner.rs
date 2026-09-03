@@ -3793,6 +3793,7 @@ mod tests {
             tier: Some(ModelTier::Reasoning),
             reasoning_effort: None,
             max_tokens: None,
+            connection_id: None,
         });
         let mut r = empty_result();
         apply_step_snapshot(&step, &mut r, None);
@@ -3804,6 +3805,7 @@ mod tests {
             tier: None,
             reasoning_effort: None,
             max_tokens: None,
+            connection_id: None,
         });
         let mut r2 = empty_result();
         apply_step_snapshot(&step, &mut r2, None);
@@ -4999,6 +5001,7 @@ mod tests {
             tier: None,
             reasoning_effort: None,
             max_tokens: None,
+            connection_id: None,
         });
         let mut result = fake_result("reason");
         assert!(

@@ -63,7 +63,7 @@ import {
 import { externalConnectionForDiscussion } from '../lib/externalAgentIdentity';
 
 type LoadedDiscussion = Discussion
-  & Partial<Pick<DiscussionDetail, 'active_agent_dispatches' | 'message_targets' | 'partial_response'>>;
+  & Partial<Pick<DiscussionDetail, 'active_agent_dispatches' | 'message_targets' | 'partial_response' | 'default_targets'>>;
 
 type InterruptedStreamState = {
   text: string;
@@ -159,6 +159,7 @@ function StreamingAgentReplyBubble({
   recovering,
   recoveryLabel,
   agentLabel,
+  waitingUpstream,
 }: {
   agent: AgentType;
   triggerMessageId: string;
@@ -172,6 +173,8 @@ function StreamingAgentReplyBubble({
   recovering: boolean;
   recoveryLabel: string | null;
   agentLabel?: string;
+  /** Queued behind another run rather than working — worth saying so. */
+  waitingUpstream: boolean;
 }) {
   const { t } = useT();
   const displayAgent = agentLabel ?? AGENT_LABELS[agent] ?? agent;
@@ -225,7 +228,7 @@ function StreamingAgentReplyBubble({
         ) : (
           <div className="disc-streaming-waiting" aria-live="assertive">
             <span className="disc-pulse-dot" />
-            {t('disc.running')}
+            {waitingUpstream ? t('disc.waitingForSlot') : t('disc.running')}
             {logs.length > 0 && (
               <span className="disc-streaming-log-hint">— {logs.at(-1)?.slice(0, 60)}</span>
             )}
@@ -2138,10 +2141,18 @@ export function DiscussionsPage({
   const handleCreateDiscussion = async (config: NewDiscConfig) => {
     let disc;
     try {
+      // KT-545 — the discussion's sticky connection (persisted on the
+      // `discussions` row) comes from whichever initial target is the
+      // primary discussion agent, so ordinary replies with no explicit
+      // @mention keep resolving through the same named connection.
+      const primaryConnectionId = config.initialTargets?.find(
+        target => target.kind === 'discussion_agent' && target.agent_type === config.agent,
+      )?.connection_id ?? null;
       disc = await discussionsApi.create({
         project_id: config.projectId,
         title: config.title,
         agent: config.agent,
+        connection_id: primaryConnectionId,
         language: configLanguage ?? 'fr',
         initial_prompt: config.prompt,
         initial_targets: config.initialTargets ?? config.targetAgents.map(agent => ({
@@ -3271,7 +3282,13 @@ export function DiscussionsPage({
       [discId]: { active: true, round: 0, totalRounds: orchRounds, currentAgent: null, agentStreams: [], systemMessages: [] },
     }));
 
-    await discussionsApi.orchestrate(discId, { agents: orchAgents, max_rounds: orchRounds, skill_ids: orchSkillIds, ...(orchDirectiveIds.length > 0 ? { directive_ids: orchDirectiveIds } : {}) }, {
+    // KT-545: the wire shape carries a per-participant connection_id so two
+    // named HTTP connections sharing AgentType::Custom stay distinguishable.
+    // The debate picker only offers built-in agent types today, so it is
+    // always null here — the backend will resolve each participant's
+    // connection independently once the picker grows connection awareness.
+    const orchParticipants = orchAgents.map(agent_type => ({ agent_type, connection_id: null }));
+    await discussionsApi.orchestrate(discId, { agents: orchParticipants, max_rounds: orchRounds, skill_ids: orchSkillIds, ...(orchDirectiveIds.length > 0 ? { directive_ids: orchDirectiveIds } : {}) }, {
       onSystem: (text) => {
         setOrchState(prev => {
           const s = prev[discId];
@@ -4060,6 +4077,7 @@ export function DiscussionsPage({
                             elapsed={sendingElapsed}
                             text={deferredStreamingText}
                             logs={agentLogs}
+                            waitingUpstream={durablePartial?.dispatch?.progress_phase === 'upstream_wait'}
                             showLogs={showLogs}
                             onToggleLogs={() => setShowLogs(value => !value)}
                             stopping={stoppingDispatchIds.has(reply.id)}
@@ -4145,6 +4163,7 @@ export function DiscussionsPage({
                       <Fragment key={msg.id}>
                         {separator}
                         <InlineMediaJob
+                          discussionId={activeDiscussion.id}
                           messageId={msg.id}
                           prompt={msg.content}
                           run={mediaRun}
@@ -4160,6 +4179,7 @@ export function DiscussionsPage({
                       <MessageBubble
                         msg={msg}
                         targets={activeDiscussion.message_targets?.[msg.id] ?? []}
+                        defaultTargets={activeDiscussion.default_targets ?? []}
                         idx={idx}
                         attachments={attachmentsByMessageId[msg.id] ?? EMPTY_ATTACHMENTS}
                         discussionMedia={activeContextFiles}
@@ -5124,6 +5144,25 @@ export function DiscussionsPage({
                   reloadDiscussion(activeDiscussion.id);
                 }}
                 openAssetRequest={assetOpenRequest}
+                onAssetDeleted={(fileId) => {
+                  // Dropped from the discussion's own inventory, which every
+                  // surface reads: the grid, the counters, the carousel and a
+                  // message's attachments all follow from this one map.
+                  const discId = activeDiscussion.id;
+                  setContextFilesMap(current => ({
+                    ...current,
+                    [discId]: (current[discId] ?? []).filter(file => file.id !== fileId),
+                  }));
+                }}
+                onAssetExtracted={(file) => {
+                  // Same single inventory as a deletion, so the fresh frame is
+                  // immediately offered as a starting image by the launcher.
+                  const discId = activeDiscussion.id;
+                  setContextFilesMap(current => ({
+                    ...current,
+                    [discId]: [...(current[discId] ?? []), file],
+                  }));
+                }}
                 onNavigateMessage={(messageId) => {
                   setShowAssetsPanel(false);
                   setStickToBottom(false);

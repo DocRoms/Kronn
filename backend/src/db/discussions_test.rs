@@ -18,6 +18,7 @@ mod tests {
     fn make_discussion(id: &str) -> Discussion {
         let now = Utc::now();
         Discussion {
+            connection_id: None,
             awaiting_agent: false,
             agent_running: false,
             id: id.into(),
@@ -42,7 +43,7 @@ mod tests {
             pin_first_message: false,
             summary_cache: None,
             summary_up_to_msg_idx: None,
-            summary_strategy: crate::models::SummaryStrategy::Auto,
+            summary_strategy: crate::models::SummaryStrategy::OnDemand,
             introspection_call_count: 0,
             shared_id: None,
             shared_with: vec![],
@@ -1249,6 +1250,54 @@ mod tests {
     fn update_discussion_agent_nonexistent_returns_false() {
         let conn = test_conn();
         let updated = update_discussion_agent(&conn, "nonexistent", &AgentType::Vibe).unwrap();
+        assert!(!updated);
+    }
+
+    #[test]
+    fn update_discussion_connection_round_trips_through_get() {
+        let conn = test_conn();
+        let disc = make_discussion("conn-switch");
+        insert_discussion(&conn, &disc).unwrap();
+        conn.execute(
+            "INSERT INTO external_api_connections
+             (id, display_name, mention_alias, endpoint, credential_slug, origin_preset)
+             VALUES ('conn-groq', 'Groq', 'groq', 'https://api.groq.com', 'conn-groq', 'other')",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            get_discussion_connection_id(&conn, "conn-switch").unwrap(),
+            None
+        );
+
+        let updated =
+            update_discussion_connection(&conn, "conn-switch", Some("conn-groq")).unwrap();
+        assert!(updated);
+        assert_eq!(
+            get_discussion_connection_id(&conn, "conn-switch").unwrap(),
+            Some("conn-groq".to_string())
+        );
+        assert_eq!(
+            get_discussion(&conn, "conn-switch")
+                .unwrap()
+                .unwrap()
+                .connection_id
+                .as_deref(),
+            Some("conn-groq")
+        );
+
+        let cleared = update_discussion_connection(&conn, "conn-switch", None).unwrap();
+        assert!(cleared);
+        assert_eq!(
+            get_discussion_connection_id(&conn, "conn-switch").unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn update_discussion_connection_nonexistent_returns_false() {
+        let conn = test_conn();
+        let updated = update_discussion_connection(&conn, "nonexistent", Some("x")).unwrap();
         assert!(!updated);
     }
 

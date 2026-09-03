@@ -1,14 +1,23 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import type { ContextFile } from '../../types/generated';
+import { LastFrameError } from '../../lib/lastFrame';
+import type * as LastFrameModule from '../../lib/lastFrame';
 
-const { discussionsApi, triggerDownload } = vi.hoisted(() => ({
-  discussionsApi: { contextFileBlob: vi.fn() },
+const { discussionsApi, triggerDownload, extractLastFrame } = vi.hoisted(() => ({
+  discussionsApi: { contextFileBlob: vi.fn(), deleteContextFile: vi.fn(), uploadContextFile: vi.fn() },
   triggerDownload: vi.fn(),
+  extractLastFrame: vi.fn(),
 }));
 
 vi.mock('../../lib/api', () => ({ discussions: discussionsApi }));
 vi.mock('../../lib/downloadBlob', () => ({ triggerDownload }));
+// The decode itself is covered against a fake element in lastFrame.test.ts;
+// what this file owns is the trip from the click to the discussion's files.
+vi.mock('../../lib/lastFrame', async () => {
+  const actual = await vi.importActual<typeof LastFrameModule>('../../lib/lastFrame');
+  return { ...actual, extractLastFrame };
+});
 
 import { DiscussionAssetsPanel } from '../DiscussionAssetsPanel';
 
@@ -37,7 +46,23 @@ describe('DiscussionAssetsPanel', () => {
     globalThis.URL.createObjectURL = vi.fn(({ type }: Blob) => `blob:${type}`);
     globalThis.URL.revokeObjectURL = vi.fn();
     discussionsApi.contextFileBlob.mockResolvedValue(new Blob(['image'], { type: 'image/png' }));
+    discussionsApi.deleteContextFile.mockResolvedValue(undefined);
+    extractLastFrame.mockResolvedValue({
+      blob: new Blob(['png'], { type: 'image/png' }),
+      width: 640,
+      height: 640,
+    });
   });
+
+  /** A clip of the discussion, as the viewer sees it. */
+  function clip(overrides: Partial<ContextFile> = {}): ContextFile {
+    return file(1, {
+      filename: 'seedance-clip.mp4',
+      mime_type: 'video/mp4',
+      disk_path: '/tmp/seedance-clip.mp4',
+      ...overrides,
+    });
+  }
 
   it('searches and filters every discussion asset without scanning messages', async () => {
     const files = [
@@ -325,4 +350,208 @@ describe('DiscussionAssetsPanel', () => {
     // And the reason is on screen without a click.
     expect(screen.getByTestId('assets-generate-hint')).toHaveTextContent('disc.media.noSlot');
   });
+
+  /// KT-554 — deleting an asset removes bytes from disk, so it takes two steps
+  /// and never happens on screen before the server confirmed it.
+  it('deletes an asset only after a confirmation, and closes the viewer', async () => {
+    const onAssetDeleted = vi.fn();
+    const files = [
+      file(1, { filename: 'dashboard.png', mime_type: 'image/png', disk_path: '/tmp/dashboard.png' }),
+      file(2, { filename: 'other.png', mime_type: 'image/png', disk_path: '/tmp/other.png' }),
+    ];
+    render(
+      <DiscussionAssetsPanel
+        discussionId="disc-1"
+        files={files}
+        onClose={vi.fn()}
+        onNavigateMessage={vi.fn()}
+        onAssetDeleted={onAssetDeleted}
+        openAssetRequest={{ assetId: 'file-1', nonce: 1 }}
+        t={t}
+      />,
+    );
+
+    const viewer = await screen.findByRole('dialog');
+
+    // First click only arms it: one click away from the close button must not
+    // destroy a file.
+    fireEvent.click(within(viewer).getByTestId('attachment-delete'));
+    expect(discussionsApi.deleteContextFile).not.toHaveBeenCalled();
+
+    fireEvent.click(within(viewer).getByTestId('attachment-delete-confirm'));
+    await waitFor(() => expect(discussionsApi.deleteContextFile).toHaveBeenCalledWith('disc-1', 'file-1'));
+    expect(onAssetDeleted).toHaveBeenCalledWith('file-1');
+    // Closed rather than advanced: landing silently on the neighbouring image
+    // would read as having deleted the wrong one.
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  });
+
+  it('keeps an asset on screen when the server refuses to delete it', async () => {
+    discussionsApi.deleteContextFile.mockRejectedValue(new Error('file is still in use'));
+    const onAssetDeleted = vi.fn();
+    render(
+      <DiscussionAssetsPanel
+        discussionId="disc-1"
+        files={[file(1, { filename: 'dashboard.png', mime_type: 'image/png', disk_path: '/tmp/dashboard.png' })]}
+        onClose={vi.fn()}
+        onNavigateMessage={vi.fn()}
+        onAssetDeleted={onAssetDeleted}
+        openAssetRequest={{ assetId: 'file-1', nonce: 1 }}
+        t={t}
+      />,
+    );
+
+    const viewer = await screen.findByRole('dialog');
+    fireEvent.click(within(viewer).getByTestId('attachment-delete'));
+    fireEvent.click(within(viewer).getByTestId('attachment-delete-confirm'));
+
+    expect(await screen.findByTestId('attachment-delete-error')).toHaveTextContent('file is still in use');
+    // Nothing was removed anywhere: the asset must never vanish from the UI
+    // without having been deleted on the server.
+    expect(onAssetDeleted).not.toHaveBeenCalled();
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
+  });
+
+
+  it('keeps a clip\'s last frame as a file of the discussion', async () => {
+    // The whole point of KT-556: the picture must land in the room's own
+    // inventory, so the launcher offers it as a starting image with no
+    // download and no re-upload in between.
+    const extracted = file(2, { filename: 'seedance-clip-last-frame.png', mime_type: 'image/png', disk_path: '/tmp/frame.png' });
+    discussionsApi.uploadContextFile.mockResolvedValue({ file: extracted });
+    const onAssetExtracted = vi.fn();
+    render(
+      <DiscussionAssetsPanel
+        discussionId="disc-1"
+        files={[clip()]}
+        onClose={vi.fn()}
+        onNavigateMessage={vi.fn()}
+        onAssetExtracted={onAssetExtracted}
+        openAssetRequest={{ assetId: 'file-1', nonce: 1 }}
+        t={t}
+      />,
+    );
+
+    const viewer = await screen.findByRole('dialog');
+    fireEvent.click(await within(viewer).findByTestId('attachment-last-frame'));
+
+    await waitFor(() => expect(discussionsApi.uploadContextFile).toHaveBeenCalledTimes(1));
+    const [discussionId, uploaded, extractedFrom] = discussionsApi.uploadContextFile.mock.calls[0];
+    expect(discussionId).toBe('disc-1');
+    // Named as coming from this clip: the server then gives it its OWN
+    // message. Without this it stayed a pending attachment, waiting to be
+    // pinned to whatever the user sent next — and deleting THAT message took
+    // the picture with it.
+    expect(extractedFrom).toBe('file-1');
+    // Named after the clip it came from, and a PNG: the launcher filters its
+    // starting pictures on the MIME type.
+    expect(uploaded.name).toBe('seedance-clip-last-frame.png');
+    expect(uploaded.type).toBe('image/png');
+    expect(onAssetExtracted).toHaveBeenCalledWith(extracted);
+  });
+
+  it('shows where an extracted picture came from, and opens the clip', async () => {
+    const clipFile = clip();
+    const extracted = file(2, {
+      filename: 'seedance-clip-last-frame.png',
+      mime_type: 'image/png',
+      disk_path: '/tmp/frame.png',
+      extracted_from_asset_id: clipFile.id,
+    });
+    render(
+      <DiscussionAssetsPanel
+        discussionId="disc-1"
+        files={[clipFile, extracted]}
+        onClose={vi.fn()}
+        onNavigateMessage={vi.fn()}
+        openAssetRequest={{ assetId: extracted.id, nonce: 1 }}
+        t={t}
+      />,
+    );
+
+    const viewer = await screen.findByRole('dialog');
+    const provenance = await within(viewer).findByTestId('extracted-from-details');
+    expect(provenance).toHaveTextContent('disc.assets.extractedFromExplained');
+    // Never the AI badge: that one is an attestation, and nothing was
+    // generated — a picture was cut out of a clip.
+    expect(within(viewer).queryByTestId('ai-generation-details')).toBeNull();
+
+    // The clip is one click away, inside the same viewer.
+    fireEvent.click(within(viewer).getByTestId('extracted-from-open-source'));
+    await waitFor(() =>
+      expect(screen.getByRole('dialog')).toHaveAttribute('data-asset-id', clipFile.id));
+  });
+
+  it('says nothing was decoded instead of attaching a black picture', async () => {
+    // The central trap: an extractor without this check would attach the 9th
+    // frame out of 97, or a blank rectangle — crisp, exportable and wrong.
+    extractLastFrame.mockRejectedValue(new LastFrameError('decode'));
+    const onAssetExtracted = vi.fn();
+    render(
+      <DiscussionAssetsPanel
+        discussionId="disc-1"
+        files={[clip()]}
+        onClose={vi.fn()}
+        onNavigateMessage={vi.fn()}
+        onAssetExtracted={onAssetExtracted}
+        openAssetRequest={{ assetId: 'file-1', nonce: 1 }}
+        t={t}
+      />,
+    );
+
+    const viewer = await screen.findByRole('dialog');
+    fireEvent.click(await within(viewer).findByTestId('attachment-last-frame'));
+
+    expect(await screen.findByTestId('attachment-last-frame-error'))
+      .toHaveTextContent('disc.media.lastFrame.error.decode');
+    expect(discussionsApi.uploadContextFile).not.toHaveBeenCalled();
+    expect(onAssetExtracted).not.toHaveBeenCalled();
+  });
+
+  it('offers no extraction on an image, nor on a surface that cannot show the result', async () => {
+    const { rerender } = render(
+      <DiscussionAssetsPanel
+        discussionId="disc-1"
+        files={[file(1, { filename: 'dashboard.png', mime_type: 'image/png', disk_path: '/tmp/dashboard.png' })]}
+        onClose={vi.fn()}
+        onNavigateMessage={vi.fn()}
+        onAssetExtracted={vi.fn()}
+        openAssetRequest={{ assetId: 'file-1', nonce: 1 }}
+        t={t}
+      />,
+    );
+    expect(within(await screen.findByRole('dialog')).queryByTestId('attachment-last-frame')).toBeNull();
+
+    rerender(
+      <DiscussionAssetsPanel
+        discussionId="disc-1"
+        files={[clip()]}
+        onClose={vi.fn()}
+        onNavigateMessage={vi.fn()}
+        openAssetRequest={{ assetId: 'file-1', nonce: 2 }}
+        t={t}
+      />,
+    );
+    const viewer = await screen.findByRole('dialog');
+    // Waited on the player, not on a timer: the button is gated on the bytes
+    // being here, so checking before they are would pass for the wrong reason.
+    await within(viewer).findByTestId('media-player-video');
+    expect(within(viewer).queryByTestId('attachment-last-frame')).toBeNull();
+  });
+
+  it('offers no deletion on a surface that cannot refresh its list', async () => {
+    render(
+      <DiscussionAssetsPanel
+        discussionId="disc-1"
+        files={[file(1, { filename: 'dashboard.png', mime_type: 'image/png', disk_path: '/tmp/dashboard.png' })]}
+        onClose={vi.fn()}
+        onNavigateMessage={vi.fn()}
+        openAssetRequest={{ assetId: 'file-1', nonce: 1 }}
+        t={t}
+      />,
+    );
+    const viewer = await screen.findByRole('dialog');
+    expect(within(viewer).queryByTestId('attachment-delete')).toBeNull();
+  });
+
 });

@@ -511,6 +511,19 @@ pub fn mime_from_extension(filename: &str) -> &'static str {
         "bmp" => "image/bmp",
         "tiff" | "tif" => "image/tiff",
         "ico" => "image/x-icon",
+        "avif" => "image/avif",
+        // Video and audio, for the same reason as images: a generated clip
+        // served as `text/plain` cannot be played by a browser, and a check
+        // that reads the recorded type sees a text file where a video is.
+        "mp4" | "m4v" => "video/mp4",
+        "webm" => "video/webm",
+        "mov" => "video/quicktime",
+        "ogv" => "video/ogg",
+        "mp3" => "audio/mpeg",
+        "wav" => "audio/wav",
+        "m4a" => "audio/mp4",
+        "ogg" | "oga" => "audio/ogg",
+        "flac" => "audio/flac",
         _ => "text/plain",
     }
 }
@@ -672,6 +685,21 @@ mod tests {
             ExtractedContent::DiskFile { preview, .. } => assert_eq!(preview, "short note"),
             _ => panic!("expected DiskFile"),
         }
+    }
+
+    #[test]
+    fn mime_from_extension_maps_video_and_audio_not_text() {
+        // A generated clip served as `text/plain` cannot be played by a
+        // browser, and a server-side check that reads the recorded type sees a
+        // text file where a video is — which is how "keep the last frame"
+        // refused a real clip.
+        assert_eq!(mime_from_extension("seedance.mp4"), "video/mp4");
+        assert_eq!(mime_from_extension("clip.webm"), "video/webm");
+        assert_eq!(mime_from_extension("clip.MOV"), "video/quicktime");
+        assert_eq!(mime_from_extension("voice.mp3"), "audio/mpeg");
+        assert_eq!(mime_from_extension("voice.wav"), "audio/wav");
+        // Unknown extensions still fall back, deliberately.
+        assert_eq!(mime_from_extension("notes.unknownext"), "text/plain");
     }
 
     #[test]

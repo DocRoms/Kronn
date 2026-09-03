@@ -930,6 +930,7 @@ fn tour_demo_envelope(ui_language: &str) -> DiscussionExportEnvelope {
         secret_policy: SECRET_POLICY.into(),
         source_discussion_id: TOUR_DEMO_SOURCE_ID.into(),
         discussion: Discussion {
+            connection_id: None,
             id: TOUR_DEMO_SOURCE_ID.into(),
             project_id: None,
             title: "Kronn · Demo".into(),
@@ -1228,6 +1229,7 @@ mod tests {
 
     fn test_discussion(id: &str) -> Discussion {
         Discussion {
+            connection_id: None,
             id: id.into(),
             project_id: None,
             title: "Portable".into(),

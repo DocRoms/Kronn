@@ -21,6 +21,10 @@ export type MediaRunDetails = {
   height?: number;
   durationMs?: number;
   assetId?: string;
+  /** The pictures this generation started from, when it did. Ordered as the
+   *  caller chose them: providers weigh references by position. */
+  referenceAssetIds: string[];
+  referenceMode?: 'first_frame' | 'last_frame' | 'reference';
 };
 
 function positive(value: unknown): number | undefined {
@@ -46,5 +50,20 @@ export function mediaRunDetails(result: unknown): MediaRunDetails | null {
     height: positive(raw.height),
     durationMs: positive(raw.media_duration_ms),
     assetId: typeof raw.asset_id === 'string' && raw.asset_id ? raw.asset_id : undefined,
+    // Both forms are read: runs published before a generation could start
+    // from several pictures still name their source.
+    referenceAssetIds: Array.isArray(raw.reference_asset_ids)
+      ? raw.reference_asset_ids.filter((id): id is string => typeof id === 'string' && !!id)
+      : typeof raw.reference_asset_id === 'string' && raw.reference_asset_id
+        ? [raw.reference_asset_id]
+        : [],
+    // An unknown mode is dropped rather than shown: a label invented for a
+    // value we cannot name would describe the generation wrongly.
+    referenceMode:
+      raw.reference_mode === 'first_frame'
+        || raw.reference_mode === 'last_frame'
+        || raw.reference_mode === 'reference'
+        ? raw.reference_mode
+        : undefined,
   };
 }

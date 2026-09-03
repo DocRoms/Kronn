@@ -88,6 +88,10 @@ export function DiscussionWeightBadge({
         className="disc-weight-badge disc-weight-badge--pending"
         data-testid="disc-weight-pending"
         data-state={state}
+        // A bare span is `generic`, a role that forbids a name: the label was
+        // invalid AND inaudible, so a screen reader announced nothing at all
+        // for this badge.
+        role="img"
         aria-label={label}
         title={label}
       >

@@ -367,6 +367,15 @@ const NEXT_POLL_GRACE: Duration = Duration::seconds(120);
 /// Beyond this, a stored success decays to `unknown` — an old write is not
 /// proof the append path works right now.
 const WRITE_LIVENESS_WINDOW: Duration = Duration::seconds(120);
+/// How long a session with no open poll still counts as alive for the
+/// participant projection. A CLI that is WORKING — running tests, editing —
+/// does not keep a wait open, so its presence decays to Offline within
+/// seconds; but every append and every wait it does make touches `last_seen`.
+/// Thirty minutes covers a long silent stretch of work. The price is that the
+/// stale row of a CLI that reconnected shows next to its live one for up to
+/// that long; the alternative — hiding a peer that is alive and cannot then be
+/// mentioned — is worse.
+const RECENTLY_SEEN_WINDOW: Duration = Duration::minutes(30);
 
 /// Pure honest-presence derivation (unit-testable without a DB). `activity` is
 /// the ALREADY read-time-expired value (`None` once its TTL passed).
@@ -685,18 +694,28 @@ pub fn list_participant_views(conn: &Connection, disc_id: &str) -> Result<Vec<Pa
     // only the newest row so the actionable "reconnection required" state
     // remains visible exactly once. `list_sessions(include_left=true)` stays
     // untouched for audit/history use-cases.
+    //
+    // "Stale" is Offline AND silent for a while. Two sessions of the same
+    // provider can be genuinely concurrent — two Claude CLIs joined to one
+    // room — and the one that is working instead of listening reads Offline
+    // by poll while its `last_seen` says otherwise. Hiding it made the peer
+    // invisible and unmentionable. Only a row nobody has heard from is a wreck.
+    let is_stale = |participant: &ParticipantView| {
+        participant.presence_state == PresenceState::Offline
+            && !parse_ts_opt(participant.last_seen.as_deref())
+                .is_some_and(|seen| now - seen <= RECENTLY_SEEN_WINDOW)
+    };
     let agents_with_reachable_session: std::collections::HashSet<String> = rows
         .iter()
-        .filter(|participant| participant.presence_state != PresenceState::Offline)
+        .filter(|participant| !is_stale(participant))
         .map(|participant| participant.agent_type.clone())
         .collect();
     rows.retain(|participant| {
-        participant.presence_state != PresenceState::Offline
-            || !agents_with_reachable_session.contains(&participant.agent_type)
+        !is_stale(participant) || !agents_with_reachable_session.contains(&participant.agent_type)
     });
     let newest_offline_by_agent: std::collections::HashMap<String, i64> = rows
         .iter()
-        .filter(|participant| participant.presence_state == PresenceState::Offline)
+        .filter(|participant| is_stale(participant))
         .fold(
             std::collections::HashMap::new(),
             |mut newest, participant| {
@@ -708,7 +727,7 @@ pub fn list_participant_views(conn: &Connection, disc_id: &str) -> Result<Vec<Pa
             },
         );
     rows.retain(|participant| {
-        participant.presence_state != PresenceState::Offline
+        !is_stale(participant)
             || newest_offline_by_agent.get(&participant.agent_type) == Some(&participant.id)
     });
 
@@ -2181,6 +2200,8 @@ mod tests {
     fn participant_view_hides_offline_siblings_when_same_agent_is_reachable() {
         let conn = setup_db();
         let old_id = create_session(&conn, "d1", "Vibe", Some("v-old"), "peer").unwrap();
+        // The row a reconnecting CLI leaves behind: nobody has heard from it.
+        backdate_last_seen(&conn, "v-old");
         let live_id = create_session(&conn, "d1", "Vibe", Some("v-live"), "peer").unwrap();
         set_session_activity(&conn, "d1", "Vibe", Some("v-live"), "listening", 90).unwrap();
 
@@ -2205,6 +2226,10 @@ mod tests {
         create_session(&conn, "d1", "Vibe", Some("v1"), "peer").unwrap();
         create_session(&conn, "d1", "Vibe", Some("v2"), "peer").unwrap();
         let newest_id = create_session(&conn, "d1", "Vibe", Some("v3"), "peer").unwrap();
+        // Reconnect history: every row went silent long ago.
+        for session in ["v1", "v2", "v3"] {
+            backdate_last_seen(&conn, session);
+        }
 
         let vibe: Vec<_> = list_participant_views(&conn, "d1")
             .unwrap()
@@ -2218,6 +2243,54 @@ mod tests {
         );
         assert_eq!(vibe[0].id, newest_id);
         assert_eq!(vibe[0].presence_state, PresenceState::Offline);
+    }
+
+    /// A wreck is a row nobody has heard from: past the recently-seen window.
+    fn backdate_last_seen(conn: &Connection, session_id: &str) {
+        conn.execute(
+            "UPDATE discussion_sessions SET last_seen = ?1 WHERE session_id = ?2",
+            params![(Utc::now() - RECENTLY_SEEN_WINDOW - Duration::seconds(60)).to_rfc3339(), session_id],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn two_concurrent_sessions_of_one_provider_are_both_shown_while_they_work() {
+        // Two Claude CLIs joined to one room, both busy — neither keeps a poll
+        // open, so both read Offline. They are alive: their `last_seen` is
+        // fresh. Hiding either one made a live peer unmentionable.
+        let conn = setup_db();
+        let second = create_session(&conn, "d1", "ClaudeCode", Some("c-2"), "peer").unwrap();
+        let third = create_session(&conn, "d1", "ClaudeCode", Some("c-3"), "peer").unwrap();
+
+        let claude: Vec<_> = list_participant_views(&conn, "d1")
+            .unwrap()
+            .into_iter()
+            .filter(|participant| participant.agent_type == "ClaudeCode")
+            .collect();
+        let ids: Vec<i64> = claude.iter().map(|participant| participant.id).collect();
+        assert_eq!(ids, vec![second, third], "both live sessions must be projected");
+        // And each keeps its own stable number, so both stay addressable.
+        assert_eq!(claude[0].cli_ordinal, Some(1));
+        assert_eq!(claude[1].cli_ordinal, Some(2));
+    }
+
+    #[test]
+    fn a_working_session_is_not_hidden_by_a_listening_sibling() {
+        // The exact shape of the incident: one session listening, the other
+        // working. The first rule used to hide the second.
+        let conn = setup_db();
+        let working = create_session(&conn, "d1", "ClaudeCode", Some("c-work"), "peer").unwrap();
+        let listening = create_session(&conn, "d1", "ClaudeCode", Some("c-listen"), "peer").unwrap();
+        set_session_activity(&conn, "d1", "ClaudeCode", Some("c-listen"), "listening", 90).unwrap();
+
+        let ids: Vec<i64> = list_participant_views(&conn, "d1")
+            .unwrap()
+            .into_iter()
+            .filter(|participant| participant.agent_type == "ClaudeCode")
+            .map(|participant| participant.id)
+            .collect();
+        assert_eq!(ids, vec![working, listening]);
     }
 
     #[test]

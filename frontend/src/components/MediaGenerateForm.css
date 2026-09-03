@@ -196,3 +196,95 @@
 .media-generate-ratio-shape[data-ratio='4:3']  { width: 21px; height: 16px; }
 .media-generate-ratio-shape[data-ratio='1:1']  { width: 16px; height: 16px; }
 .media-generate-ratio-shape[data-ratio='9:16'] { width: 9px;  height: 16px; }
+/* The rest of what the catalogues actually advertise — seedance alone names
+   seven ratios, of which the four above were the only ones ever drawn. */
+.media-generate-ratio-shape[data-ratio='3:4']  { width: 12px; height: 16px; }
+.media-generate-ratio-shape[data-ratio='21:9'] { width: 37px; height: 16px; }
+.media-generate-ratio-shape[data-ratio='9:21'] { width: 7px;  height: 16px; }
+.media-generate-ratio-shape[data-ratio='2:3']  { width: 11px; height: 16px; }
+.media-generate-ratio-shape[data-ratio='3:2']  { width: 24px; height: 16px; }
+.media-generate-ratio-shape[data-ratio='4:5']  { width: 13px; height: 16px; }
+.media-generate-ratio-shape[data-ratio='5:4']  { width: 20px; height: 16px; }
+
+.media-generate-check {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: var(--kr-fs-xs);
+  color: var(--kr-text-secondary);
+  cursor: pointer;
+}
+
+.media-generate-check input { accent-color: var(--kr-accent); cursor: pointer; }
+
+.media-generate-reference { border: 0; margin: 0; padding: 0; }
+.media-generate-reference > legend { padding: 0; font-size: var(--kr-fs-xs); color: var(--kr-text-muted); }
+.media-generate-reference-tools { display: flex; align-items: center; gap: 6px; margin-top: 6px; }
+/* The list takes the row; the paperclip keeps only what an icon needs. Sharing
+   the width with a labelled button left the field too narrow to read a
+   filename in. */
+.media-generate-reference-select { flex: 1; min-width: 0; }
+.media-generate-attach {
+  flex: 0 0 auto;
+  padding-left: var(--kr-sp-3);
+  padding-right: var(--kr-sp-3);
+}
+.media-generate-reference-choices { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.media-generate-reference-choice {
+  max-width: 100%;
+  overflow: hidden;
+  padding: 4px 8px;
+  border: 1px solid var(--kr-border-light);
+  border-radius: var(--kr-r-sm);
+  background: var(--kr-bg-subtle);
+  color: var(--kr-text-secondary);
+  font-size: var(--kr-fs-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.media-generate-reference-picked { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
+/* Full width so the refusal reads as a sentence under the picture it judges. */
+.media-generate-reference-warning {
+  flex-basis: 100%;
+  margin: 0;
+  color: var(--kr-error);
+  font-size: var(--kr-fs-xs);
+}
+.media-generate-reference-picked img {
+  width: 44px;
+  height: 44px;
+  object-fit: cover;
+  border-radius: var(--kr-r-sm);
+  background: var(--kr-bg-subtle);
+}
+/* One line per picked picture, numbered: providers weigh references by
+   position, so the order has to be readable. */
+.media-generate-reference-list {
+  flex-basis: 100%;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.media-generate-reference-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  font-size: var(--kr-fs-xs);
+  color: var(--kr-text-secondary);
+}
+.media-generate-reference-modes { display: flex; gap: 4px; }
+.media-generate-reference-mode {
+  padding: 4px 8px;
+  border: 1px solid var(--kr-border-light);
+  border-radius: var(--kr-r-sm);
+  background: transparent;
+  color: var(--kr-text-muted);
+  font-size: var(--kr-fs-xs);
+  cursor: pointer;
+}
+.media-generate-reference-mode[data-active='true'] { border-color: var(--kr-accent); color: var(--kr-text-primary); }

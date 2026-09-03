@@ -777,7 +777,7 @@ pub fn build_agent_prompt(
                 if has_summary {
                     " (resume ci-dessus)"
                 } else {
-                    " — demandez a l'utilisateur si besoin"
+                    " — utilisez `disc_read` pour lire ce qui manque, puis demandez a l'utilisateur si vous ne trouvez pas"
                 }
             ),
             "es" => format!(
@@ -788,7 +788,7 @@ pub fn build_agent_prompt(
                 if has_summary {
                     " (resumen arriba)"
                 } else {
-                    " — pregunte al usuario si necesario"
+                    " — use `disc_read` para leer lo que falta, luego pregunte al usuario si no lo encuentra"
                 }
             ),
             _ => format!(
@@ -799,7 +799,13 @@ pub fn build_agent_prompt(
                 if has_summary {
                     " (see summary above)"
                 } else {
-                    " — ask user to recap if needed"
+                    // Look first, ask second. Every runtime can read the
+                    // discussion back — CLI agents through MCP, HTTP agents
+                    // through the declared `disc_read` tool — so going
+                    // straight to the human costs a whole turn for something
+                    // the agent could fetch. Asking stays the fallback when
+                    // the answer genuinely isn't in the thread.
+                    " — use `disc_read` to read what is missing, then ask the user if you cannot find it"
                 }
             ),
         };
@@ -828,6 +834,7 @@ mod tests {
 
     fn disc_with_messages(messages: Vec<DiscussionMessage>, language: &str) -> Discussion {
         Discussion {
+            connection_id: None,
             awaiting_agent: false,
             agent_running: false,
             id: "d-test".into(),
@@ -852,7 +859,7 @@ mod tests {
             pin_first_message: false,
             summary_cache: None,
             summary_up_to_msg_idx: None,
-            summary_strategy: crate::models::SummaryStrategy::Auto,
+            summary_strategy: crate::models::SummaryStrategy::OnDemand,
             introspection_call_count: 0,
             shared_id: None,
             shared_with: vec![],

@@ -14,9 +14,9 @@ import type {
 } from '../types/generated';
 import type { ApiPluginOption } from '../components/workflows/ApiCallStepCard';
 import {
-  Plus, Trash2, Play, Loader2, ChevronLeft, ChevronRight, ChevronDown,
+  Plus, Play, Loader2, ChevronLeft, ChevronRight, ChevronDown,
   Clock, GitBranch, Zap, Eye, Layers, X, Square,
-  ToggleLeft, ToggleRight, Star,
+  ToggleLeft, ToggleRight, Star, Trash2,
   Upload, Download, AlertTriangle, Workflow as WorkflowIcon,
   PlugZap, MessageSquareText, TerminalSquare, Filter,
 } from 'lucide-react';
@@ -46,8 +46,9 @@ import { CollectionRowActions } from '../components/CollectionRowActions';
 import { CollectionSidebarFooter } from '../components/CollectionSidebarFooter';
 import { ListControls } from '../components/ListControls';
 import { CopyIdPill } from '../components/CopyIdPill';
+import { ConfirmDeleteButton } from '../components/ConfirmDeleteButton';
 import { ContextHelp } from '../components/ContextHelp';
-import { CollectionShell, CollectionSidebarCollapseButton } from '../components/CollectionShell';
+import { CollectionShell } from '../components/CollectionShell';
 import {
   sortQuickApis,
   sortQuickPrompts,
@@ -122,6 +123,11 @@ interface AutomationResourceRowProps {
   onOpen: () => void;
   onTogglePinned: () => void;
   rowProps?: { className: string; 'aria-current'?: 'true'; onClick: () => void };
+  /** Present only in selection mode: a row that cannot be picked shows no box. */
+  selection?: { checked: boolean; onToggle: () => void; label: string };
+  /** Deletes this one from the row's own menu, where the eye already looks —
+   *  the per-card control sits at the bottom of a card in a grid. */
+  onDelete?: () => Promise<void>;
 }
 
 function AutomationResourceRow({
@@ -137,11 +143,22 @@ function AutomationResourceRow({
   onOpen,
   onTogglePinned,
   rowProps,
+  selection,
+  onDelete,
 }: AutomationResourceRowProps) {
   const { t } = useT();
   return (
     <div className="disc-swipe-wrap automation-resource-row">
-      <div className="disc-item" data-active={active}>
+      <div className="disc-item" data-active={active} data-multi-selected={selection?.checked || undefined}>
+        {selection && (
+          <input
+            type="checkbox"
+            className="automation-resource-select"
+            checked={selection.checked}
+            onChange={selection.onToggle}
+            aria-label={selection.label}
+          />
+        )}
         <button
           type="button"
           {...rowProps}
@@ -165,6 +182,13 @@ function AutomationResourceRow({
           menuLabel={t('collection.moreActions')}
           copyId={resourceId}
           copyLabel={t('disc.copyId')}
+          actions={onDelete ? [{
+            id: 'delete',
+            label: t('disc.delete'),
+            icon: <Trash2 size={12} />,
+            danger: true,
+            onSelect: onDelete,
+          }] : []}
         />
       </div>
     </div>
@@ -623,6 +647,10 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
   const detailScrollRef = useRef<HTMLDivElement>(null);
 
   const workflows = useMemo(() => workflowList ?? [], [workflowList]);
+  // KT-561 — a step that names a deleted prompt or API fails on its next run,
+  // not at deletion time; the person deleting would otherwise never learn why.
+  const usageImpact = (count: number, key: 'qp.deleteImpact' | 'qa.deleteImpact') =>
+    count === 0 ? t('automation.deleteImpactNone') : t(key, count);
   // Persist collapse state across reloads — same convention as the
   // discussions sidebar (`kronn:discCollapsedGroups`). Without this the
   // user re-collapses every project group on every nav back to this
@@ -1152,21 +1180,31 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     refetch();
   };
 
-  const handleDelete = async (id: string) => {
-    // Pre-fix the workflow card's red trash button fired delete with no
-    // confirmation — one mis-click destroyed the workflow + every run +
-    // every child discussion. Now an explicit confirm is required.
-    if (!confirm(t('wf.deleteWorkflowConfirm'))) return;
-    try {
-      await workflowsApi.delete(id);
-      if (selectedId === id) {
-        setSelectedId(null);
-        setDetailWorkflow(null);
-      }
-      refetch();
-    } catch (e) {
-      console.warn('Workflow action failed:', e);
+  // KT-561 — the per-card trash lives at the bottom of a card, which is where
+  // it was never found. The sidebar now offers the same power as Discussions:
+  // pick several, delete them from the top.
+  const [automationSelection, setAutomationSelection] = useState<ReadonlySet<string>>(() => new Set());
+
+  const deleteAutomationResource = useCallback(async (resource: AutomationResource) => {
+    switch (resource.kind) {
+      case 'workflows': await workflowsApi.delete(resource.resourceId); break;
+      case 'quickPrompts': await quickPromptsApi.delete(resource.resourceId); break;
+      case 'quickApis': await quickApisApi.delete(resource.resourceId); break;
+      case 'quickExecs': await quickExecsApi.delete(resource.resourceId); break;
     }
+  }, []);
+
+  const handleDelete = async (id: string) => {
+    // The red trash button once fired straight away — one mis-click destroyed
+    // the workflow, every run and every child discussion. The confirmation now
+    // lives in the button itself (`ConfirmDeleteButton`), which also means a
+    // refusal reaches the operator instead of a console line nobody reads.
+    await workflowsApi.delete(id);
+    if (selectedId === id) {
+      setSelectedId(null);
+      setDetailWorkflow(null);
+    }
+    refetch();
   };
 
   const handleSaveQP = async (req: CreateQuickPromptRequest) => {
@@ -1633,7 +1671,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     try {
       const items = lines.map(line => {
         const vars: Record<string, string> = { [keyVar.name]: line };
-        return { title: `${qp.name} — ${line}`, prompt: qp.prompt_template, variables: vars };
+        return { title: `${qp.name} — ${line}`, variables: vars };
       });
       const now = new Date();
       const batchName = `${qp.name} — ${now.toLocaleString(configLanguage || 'fr', {
@@ -1878,6 +1916,42 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
           favoritesOnly: false,
           onFavoritesOnlyChange: () => {},
         }}
+        // The tour anchors on the library title, which the shell now owns.
+        title={<span data-tour-id="automation-library">{t('wf.title')}</span>}
+        titleCount={totalAutomationResources}
+        selectedIds={automationSelection}
+        onSelectedIdsChange={setAutomationSelection}
+        actions={[{
+          id: 'delete',
+          label: t('automation.bulkDelete'),
+          icon: <Trash2 size={15} />,
+          danger: true,
+          disabled: items => items.length === 0,
+          onSelect: async items => {
+            // Each one is deleted on its own: a failure on the third must not
+            // hide that the first two are gone, and the list is reloaded from
+            // the server rather than guessed at.
+            const failures: string[] = [];
+            for (const resource of items) {
+              try {
+                await deleteAutomationResource(resource);
+              } catch (e) {
+                failures.push(`${resource.name}: ${userError(e)}`);
+              }
+            }
+            refetch();
+            refetchQP();
+            refetchQA();
+            refetchQE();
+            if (failures.length) {
+              toastProp?.(t('automation.bulkDeleteFailed', failures.length, failures[0]), 'error');
+              // Thrown so the shell keeps the selection: the operator can see
+              // what survived and retry it.
+              throw new Error(failures[0]);
+            }
+            toastProp?.(t('automation.bulkDeleteDone', items.length), 'success');
+          },
+        }]}
         selectedId={tab === 'workflows' && selectedId ? `workflows:${selectedId}`
           : tab === 'quickApis' && selectedQuickApiId ? `quickApis:${selectedQuickApiId}`
             : tab === 'quickPrompts' && selectedQuickPromptId ? `quickPrompts:${selectedQuickPromptId}`
@@ -1891,38 +1965,44 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
         showControls={false}
         sidebarOpen={sidebarOpen}
         onSidebarOpenChange={setSidebarOpen}
-        labels={{ search: t('automation.search'), favorites: t('disc.favorites'), clearFilters: t('automation.clearSearch'), moreActions: t('wf.title'), openCollection: t('collection.openCollection'), closeCollection: t('collection.closeCollection'), selectItem: t('automation.openResource', '') }}
+        labels={{
+          search: t('automation.search'),
+          favorites: t('disc.favorites'),
+          clearFilters: t('automation.clearSearch'),
+          moreActions: t('automation.moreActions'),
+          openCollection: t('collection.openCollection'),
+          closeCollection: t('collection.closeCollection'),
+          selectItem: t('automation.openResource', ''),
+          selectMultiple: t('automation.selectMultiple'),
+          cancelSelection: t('automation.cancelSelection'),
+          selectedCount: count => t('automation.selectedCount', count),
+        }}
+        headerActions={<>
+          <button
+            type="button"
+            className="disc-icon-btn disc-sidebar-new-btn collection-shell-primary-action"
+            data-tour-id="automation-actions"
+            onClick={() => setShowAutomationActions(true)}
+            aria-label={t('tour.automationActions.title')}
+            title={t('tour.automationActions.title')}
+          >
+            <Plus size={16} />
+            <span className="disc-sidebar-visually-hidden">{t('tour.automationActions.title')}</span>
+          </button>
+          <ContextHelp title={t('contextHelp.automation.title')}>
+            <p>{t('contextHelp.automation.intro')}</p>
+            <ul>
+              <li>{t('contextHelp.automation.wf')}</li>
+              <li>{t('contextHelp.automation.qa')}</li>
+              <li>{t('contextHelp.automation.qp')}</li>
+              <li>{t('contextHelp.automation.qe')}</li>
+            </ul>
+            <p className="kr-context-help-agent-note">{t('contextHelp.automation.mcp')}</p>
+          </ContextHelp>
+        </>}
         slots={{
-          beforeSidebarHeader: <div className="disc-sidebar-header" data-tour-id="automation-library">
-          <span className="disc-sidebar-header-title">
-            {t('wf.title')}
-            <span className="disc-sidebar-header-count">{' · '}{totalAutomationResources}</span>
-          </span>
-          <div className="disc-sidebar-header-actions">
-            <button
-              type="button"
-              className="disc-icon-btn disc-sidebar-new-btn collection-shell-primary-action"
-              data-tour-id="automation-actions"
-              onClick={() => setShowAutomationActions(true)}
-              aria-label={t('tour.automationActions.title')}
-              title={t('tour.automationActions.title')}
-            >
-              <Plus size={16} />
-              <span className="disc-sidebar-visually-hidden">{t('tour.automationActions.title')}</span>
-            </button>
-            <ContextHelp title={t('contextHelp.automation.title')}>
-              <p>{t('contextHelp.automation.intro')}</p>
-              <ul>
-                <li>{t('contextHelp.automation.wf')}</li>
-                <li>{t('contextHelp.automation.qa')}</li>
-                <li>{t('contextHelp.automation.qp')}</li>
-                <li>{t('contextHelp.automation.qe')}</li>
-              </ul>
-              <p className="kr-context-help-agent-note">{t('contextHelp.automation.mcp')}</p>
-            </ContextHelp>
-            <CollectionSidebarCollapseButton label={t('collection.closeCollection')} onCollapse={() => setSidebarOpen(false)} />
-          </div>
-          </div>,
+          // The tour still anchors on the library; the shell owns the title
+          // row now, so the marker travels with it.
           sidebarHeaderEnd: <button
             ref={automationProjectFilterButtonRef}
             type="button"
@@ -1964,7 +2044,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
               {projects.map(project => <option key={project.id} value={project.id}>{project.name}</option>)}
             </select>
           </div> : null,
-          renderList: ({ visibleItems, getRowProps }) => {
+          renderList: ({ visibleItems, getRowProps, canMultiSelect, isMultiSelected, toggleMultiSelection }) => {
             const sidebarWorkflows = visibleItems.flatMap(resource => resource.workflow ? [resource.workflow] : []);
             const sidebarQuickApis = visibleItems.flatMap(resource => resource.quickApi ? [resource.quickApi] : []);
             const sidebarQuickPrompts = visibleItems.flatMap(resource => resource.quickPrompt ? [resource.quickPrompt] : []);
@@ -1973,6 +2053,32 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
             const rowProps = (kind: AutomationTab, resourceId: string) => {
               const resource = visibleItems.find(item => item.kind === kind && item.resourceId === resourceId);
               return resource ? getRowProps(resource) : undefined;
+            };
+            const deleteFor = (kind: AutomationTab, resourceId: string) => async () => {
+              const resource = visibleItems.find(item => item.kind === kind && item.resourceId === resourceId);
+              if (!resource) return;
+              try {
+                await deleteAutomationResource(resource);
+              } catch (e) {
+                // Reported where the operator is looking; the row stays until
+                // the server actually removed it.
+                toastProp?.(userError(e), 'error');
+                return;
+              }
+              refetch();
+              refetchQP();
+              refetchQA();
+              refetchQE();
+            };
+            const selectionFor = (kind: AutomationTab, resourceId: string) => {
+              if (!canMultiSelect) return undefined;
+              const resource = visibleItems.find(item => item.kind === kind && item.resourceId === resourceId);
+              if (!resource) return undefined;
+              return {
+                checked: isMultiSelected(resource),
+                onToggle: () => toggleMultiSelection(resource.id),
+                label: t('automation.selectResource', resource.name),
+              };
             };
             return <>
         <div className="disc-sidebar-list automation-sidebar-items" data-tour-id="automation-kinds">
@@ -2002,6 +2108,8 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                   onOpen={() => { clearAutomationEditors(); setTab('workflows'); void openDetail(workflow.id); }}
                   onTogglePinned={() => { void handleTogglePin(workflow); }}
                   rowProps={rowProps('workflows', workflow.id)}
+                  selection={selectionFor('workflows', workflow.id)}
+                  onDelete={deleteFor('workflows', workflow.id)}
                 />
               ))}
               {!isAutomationSectionCollapsed('favorites') && sidebarQuickApis.filter(item => item.pinned).map(quickApi => (
@@ -2019,6 +2127,8 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                   onOpen={() => openQuickApi(quickApi)}
                   onTogglePinned={() => { void toggleQuickFavorite('quickApis', quickApi.id, quickApi.pinned, quickApisApi.setPinned, refetchQA); }}
                   rowProps={rowProps('quickApis', quickApi.id)}
+                  selection={selectionFor('quickApis', quickApi.id)}
+                  onDelete={deleteFor('quickApis', quickApi.id)}
                 />
               ))}
               {!isAutomationSectionCollapsed('favorites') && sidebarQuickPrompts.filter(item => item.pinned).map(quickPrompt => (
@@ -2036,6 +2146,8 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                   onOpen={() => openQuickPrompt(quickPrompt)}
                   onTogglePinned={() => { void toggleQuickFavorite('quickPrompts', quickPrompt.id, quickPrompt.pinned, quickPromptsApi.setPinned, refetchQP); }}
                   rowProps={rowProps('quickPrompts', quickPrompt.id)}
+                  selection={selectionFor('quickPrompts', quickPrompt.id)}
+                  onDelete={deleteFor('quickPrompts', quickPrompt.id)}
                 />
               ))}
               {!isAutomationSectionCollapsed('favorites') && sidebarQuickExecs.filter(item => item.pinned).map(quickExec => (
@@ -2053,6 +2165,8 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                   onOpen={() => openQuickExec(quickExec)}
                   onTogglePinned={() => { void toggleQuickFavorite('quickExecs', quickExec.id, quickExec.pinned, quickExecsApi.setPinned, refetchQE); }}
                   rowProps={rowProps('quickExecs', quickExec.id)}
+                  selection={selectionFor('quickExecs', quickExec.id)}
+                  onDelete={deleteFor('quickExecs', quickExec.id)}
                 />
               ))}
             </div>
@@ -2087,6 +2201,8 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                 onOpen={() => { clearAutomationEditors(); setTab('workflows'); void openDetail(workflow.id); }}
                 onTogglePinned={() => { void handleTogglePin(workflow); }}
                 rowProps={rowProps('workflows', workflow.id)}
+                  selection={selectionFor('workflows', workflow.id)}
+                  onDelete={deleteFor('workflows', workflow.id)}
               />
             ))}
           </div>
@@ -2120,6 +2236,8 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                 onOpen={() => openQuickApi(quickApi)}
                 onTogglePinned={() => { void toggleQuickFavorite('quickApis', quickApi.id, quickApi.pinned, quickApisApi.setPinned, refetchQA); }}
                 rowProps={rowProps('quickApis', quickApi.id)}
+                  selection={selectionFor('quickApis', quickApi.id)}
+                  onDelete={deleteFor('quickApis', quickApi.id)}
               />
             ))}
           </div>
@@ -2153,6 +2271,8 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                 onOpen={() => openQuickPrompt(quickPrompt)}
                 onTogglePinned={() => { void toggleQuickFavorite('quickPrompts', quickPrompt.id, quickPrompt.pinned, quickPromptsApi.setPinned, refetchQP); }}
                 rowProps={rowProps('quickPrompts', quickPrompt.id)}
+                  selection={selectionFor('quickPrompts', quickPrompt.id)}
+                  onDelete={deleteFor('quickPrompts', quickPrompt.id)}
               />
             ))}
           </div>
@@ -2186,6 +2306,8 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                 onOpen={() => openQuickExec(quickExec)}
                 onTogglePinned={() => { void toggleQuickFavorite('quickExecs', quickExec.id, quickExec.pinned, quickExecsApi.setPinned, refetchQE); }}
                 rowProps={rowProps('quickExecs', quickExec.id)}
+                  selection={selectionFor('quickExecs', quickExec.id)}
+                  onDelete={deleteFor('quickExecs', quickExec.id)}
               />
             ))}
           </div>
@@ -2509,14 +2631,20 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                           {triggering === wf.id ? <Loader2 size={11} className="spin" /> : <Play size={11} fill="currentColor" />}
                           {t('wf.trigger')}
                         </button>
-                        <button
+                        <ConfirmDeleteButton
                           className="wf-card-delete-btn"
-                          onClick={(e) => { e.stopPropagation(); handleDelete(wf.id); }}
-                          title={t('wf.delete')}
-                          aria-label={`${t('wf.delete')} ${wf.name}`}
-                        >
-                          <Trash2 size={12} />
-                        </button>
+                          label={t('wf.delete')}
+                          confirmLabel={t('automation.deleteConfirmAction')}
+                          itemName={wf.name}
+                          testId={`wf-delete-${wf.id}`}
+                          impact={async () => {
+                            const runs = await workflowsApi.countRuns(wf.id);
+                            return runs === 0 ? t('automation.deleteImpactNone') : t('wf.deleteImpact', runs);
+                          }}
+                          impactUnknown={t('automation.deleteImpactUnknown')}
+                          onError={message => toastProp?.(message, 'error')}
+                          onConfirm={() => handleDelete(wf.id)}
+                        />
                       </div>
                     </div>
                   </div>
@@ -2799,20 +2927,21 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                           >
                             <Download size={12} />
                           </button>
-                          <button
+                          <ConfirmDeleteButton
                             className="wf-icon-btn qp-card-tool-btn"
-                            data-danger="true"
-                            onClick={async () => {
-                              if (!confirm(t('qp.deleteConfirm'))) return;
+                            label={t('qp.delete')}
+                            confirmLabel={t('automation.deleteConfirmAction')}
+                            itemName={qp.name}
+                            testId={`qp-delete-${qp.id}`}
+                            impact={async () => usageImpact(await quickPromptsApi.usage(qp.id), 'qp.deleteImpact')}
+                            impactUnknown={t('automation.deleteImpactUnknown')}
+                            onError={message => toastProp?.(message, 'error')}
+                            onConfirm={async () => {
                               await quickPromptsApi.delete(qp.id);
                               if (selectedQuickPromptId === qp.id) setSelectedQuickPromptId(null);
                               refetchQP();
                             }}
-                            title={t('qp.delete')}
-                            aria-label={`${t('qp.delete')} ${qp.name}`}
-                          >
-                            <Trash2 size={12} />
-                          </button>
+                          />
                         </div>
 
                         <div className="qp-card-primary-actions">
@@ -3358,20 +3487,21 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                           >
                             <Download size={12} />
                           </button>
-                          <button
+                          <ConfirmDeleteButton
                             className="wf-icon-btn qp-card-tool-btn"
-                            data-danger="true"
-                            onClick={async () => {
-                              if (!confirm(t('qa.deleteConfirm').replace('{name}', qa.name))) return;
+                            label={t('qa.delete')}
+                            confirmLabel={t('automation.deleteConfirmAction')}
+                            itemName={qa.name}
+                            testId={`qa-delete-${qa.id}`}
+                            impact={async () => usageImpact(await quickApisApi.usage(qa.id), 'qa.deleteImpact')}
+                            impactUnknown={t('automation.deleteImpactUnknown')}
+                            onError={message => toastProp?.(message, 'error')}
+                            onConfirm={async () => {
                               await quickApisApi.delete(qa.id);
                               if (selectedQuickApiId === qa.id) setSelectedQuickApiId(null);
                               refetchQA();
                             }}
-                            title={t('qa.delete')}
-                            aria-label={`${t('qa.delete')} ${qa.name}`}
-                          >
-                            <Trash2 size={12} />
-                          </button>
+                          />
                         </div>
 
                         <div className="qp-card-primary-actions">
@@ -3765,19 +3895,21 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                           >
                             <Download size={12} />
                           </button>
-                          <button
+                          <ConfirmDeleteButton
                             className="wf-icon-btn qp-card-tool-btn"
-                            title={t('qe.delete')}
-                            onClick={async () => {
-                              if (!confirm(t('qe.deleteConfirm', quickExec.name))) return;
+                            label={t('qe.delete')}
+                            confirmLabel={t('automation.deleteConfirmAction')}
+                            itemName={quickExec.name}
+                            testId={`qe-delete-${quickExec.id}`}
+                            impact={() => t('automation.deleteImpactNone')}
+                            onError={message => toastProp?.(message, 'error')}
+                            onConfirm={async () => {
                               await quickExecsApi.delete(quickExec.id);
                               if (runningQE?.id === quickExec.id) setRunningQE(null);
                               if (selectedQuickExecId === quickExec.id) setSelectedQuickExecId(null);
                               refetchQE();
                             }}
-                          >
-                            <Trash2 size={12} />
-                          </button>
+                          />
                         </div>
                         <button
                           className="qp-launch-btn"

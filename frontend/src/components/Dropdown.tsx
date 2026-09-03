@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState, type KeyboardEvent } from 'react';
+import { useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import { ChevronDown, Check } from 'lucide-react';
 import './Dropdown.css';
 
@@ -7,6 +7,10 @@ export interface DropdownOption<V extends string = string> {
   label: string;
   description?: string;
   disabled?: boolean;
+  /** Shown before the label, in the list AND on the trigger: a thumbnail of
+   *  the picture, the shape of a ratio. A name alone makes the reader open
+   *  every entry to find the one they meant. */
+  visual?: ReactNode;
 }
 
 interface DropdownProps<V extends string = string> {
@@ -158,6 +162,9 @@ export function Dropdown<V extends string = string>({
         }}
         data-testid={testId}
       >
+        {current?.visual && (
+          <span className="kr-dropdown-trigger-visual" aria-hidden="true">{current.visual}</span>
+        )}
         <span className="kr-dropdown-trigger-label">{displayLabel}</span>
         <ChevronDown size={14} className="kr-dropdown-trigger-chev" aria-hidden />
       </button>
@@ -195,6 +202,9 @@ export function Dropdown<V extends string = string>({
               >
                 <div className="kr-dropdown-option-main">
                   {isSelected && <Check size={12} className="kr-dropdown-option-check" />}
+                  {opt.visual && (
+                    <span className="kr-dropdown-option-visual" aria-hidden="true">{opt.visual}</span>
+                  )}
                   <span className="kr-dropdown-option-label">{opt.label}</span>
                 </div>
                 {opt.description && (

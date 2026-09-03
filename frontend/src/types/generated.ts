@@ -21,7 +21,15 @@ last_error?: string,
  * example OpenRouter). The generic agent type alone is not enough to
  * render or resume that provider honestly.
  */
-connection_id?: string, };
+connection_id?: string,
+/**
+ * What this dispatch is doing right now — `upstream_wait` while it queues
+ * behind another run, `tool_activity` while a tool is executing. Recorded
+ * durably since 0.9.x but never surfaced, so a turn queued behind a
+ * neighbour looked identical to one that had simply stalled: issue 202
+ * clocked 54 s and 2 min 37 of invisible waiting.
+ */
+progress_phase?: string, };
 
 /**
  * Result of adding a contact, with optional diagnostic hint for unreachable peers.
@@ -287,7 +295,22 @@ model?: string | null,
 /**
  * Abstract tier selection. Resolved to a concrete --model flag per agent.
  */
-tier?: ModelTier | null, reasoning_effort?: string | null, max_tokens?: number | null, };
+tier?: ModelTier | null,
+/**
+ * Which named external HTTP connection this step talks to.
+ *
+ * `AgentType::Custom` is shared by every non-legacy OpenAI-compatible
+ * connection, so the agent type alone cannot say WHICH one — two
+ * OpenRouter accounts, or an OpenRouter and a self-hosted LiteLLM, are
+ * indistinguishable without it. Discussions, Quick Prompts, Compare and
+ * orchestration all carry this identity already; steps did not, so a step
+ * pointed at a named connection failed every run with "the selected
+ * external API connection is unavailable" — advice the step author had no
+ * way to act on, since there was no selector to re-pick from.
+ *
+ * `None` for every other agent type, which resolve from their own config.
+ */
+connection_id?: string | null, reasoning_effort?: string | null, max_tokens?: number | null, };
 
 export type AgentType = "ClaudeCode" | "Codex" | "OpenCode" | "Vibe" | "GeminiCli" | "Kiro" | "CopilotCli" | "Ollama" | "LiteLlm" | "Nvidia" | "Custom";
 
@@ -1224,7 +1247,13 @@ message_id: string | null,
  * media job. `None` means "no attested AI provenance", never "probably
  * human" based on a filename or MIME-type heuristic.
  */
-ai_generation: ContextFileAiGeneration | null, created_at: string, };
+ai_generation: ContextFileAiGeneration | null,
+/**
+ * The asset this picture was taken OUT of — a frame decoded from a clip
+ * of the same discussion. It is not an AI generation and must never be
+ * labelled as one: nothing was produced, a picture was extracted.
+ */
+extracted_from_asset_id?: string | null, created_at: string, };
 
 /**
  * Provenance recorded by Kronn for an asset produced by an AI media job.
@@ -1240,7 +1269,13 @@ export type CreateAdHocCompareResponse = { run_id: string, };
 
 export type CreateDirectiveRequest = { name: string, description: string, icon: string, category: DirectiveCategory, content: string, conflicts?: Array<string>, };
 
-export type CreateDiscussionRequest = { project_id?: string | null, title: string, agent: AgentType, language?: string, initial_prompt: string,
+export type CreateDiscussionRequest = { project_id?: string | null, title: string, agent: AgentType,
+/**
+ * Named connection backing `agent` (KT-545) — persisted as the
+ * discussion's sticky target so ordinary replies with no explicit
+ * @mention keep dispatching through the same connection.
+ */
+connection_id?: string | null, language?: string, initial_prompt: string,
 /**
  * Explicit recipients of the initial message, including per-agent tier
  * overrides selected from the new-discussion composer.
@@ -1711,7 +1746,15 @@ export type DiscUnlinkRequest = { disc_id: string,
  */
 source_agent?: string | null, source_session_id?: string | null, };
 
-export type Discussion = { id: string, project_id: string | null, title: string, agent: AgentType, language: string, participants: Array<AgentType>, messages: Array<DiscussionMessage>, message_count: number,
+export type Discussion = { id: string, project_id: string | null, title: string, agent: AgentType,
+/**
+ * Named HTTP connection backing `agent` when it is `Custom` (or an
+ * explicit LiteLLM/NVIDIA connection). This is the durable "sticky"
+ * target an ordinary reply with no explicit @mention resolves to —
+ * without it, `canonical_targets`'s implicit discussion-agent routing
+ * has no connection to dispatch through (KT-545 DoD #4).
+ */
+connection_id?: string | null, language: string, participants: Array<AgentType>, messages: Array<DiscussionMessage>, message_count: number,
 /**
  * Subset of `message_count` excluding `MessageRole::System` rows. The
  * streaming layer persists every tool call + every cached-summary
@@ -1839,7 +1882,22 @@ message_targets: { [key in string]: Array<MessageTarget> },
  * message yet. Lets a reconnect render saved text instead of an empty
  * loader while boot recovery/re-dispatch is settling.
  */
-partial_response?: InFlightAgentResponse, id: string, project_id: string | null, title: string, agent: AgentType, language: string, participants: Array<AgentType>, messages: Array<DiscussionMessage>, message_count: number,
+partial_response?: InFlightAgentResponse,
+/**
+ * Who an ordinary turn — one naming nobody — actually reaches, resolved
+ * by the same rule the router uses. The UI cannot derive it: a discussion
+ * keeps its `agent` even when the native responder is switched off, so
+ * reading that field alone announces a destination that receives nothing.
+ */
+default_targets: Array<MessageTarget>, id: string, project_id: string | null, title: string, agent: AgentType,
+/**
+ * Named HTTP connection backing `agent` when it is `Custom` (or an
+ * explicit LiteLLM/NVIDIA connection). This is the durable "sticky"
+ * target an ordinary reply with no explicit @mention resolves to —
+ * without it, `canonical_targets`'s implicit discussion-agent routing
+ * has no connection to dispatch through (KT-545 DoD #4).
+ */
+connection_id?: string | null, language: string, participants: Array<AgentType>, messages: Array<DiscussionMessage>, message_count: number,
 /**
  * Subset of `message_count` excluding `MessageRole::System` rows. The
  * streaming layer persists every tool call + every cached-summary
@@ -3265,6 +3323,12 @@ cost_usd: number,
  */
 is_byok: boolean, };
 
+/**
+ * Where a still image can be pinned in a generated clip. Only what the model
+ * advertises; nothing is offered by default.
+ */
+export type MediaFramePosition = "first_frame" | "last_frame";
+
 export type MediaJobStatus = "pending" | "running" | "completed" | "failed" | "cancelled" | "timed_out";
 
 /**
@@ -3274,15 +3338,71 @@ export type MediaJobStatus = "pending" | "running" | "completed" | "failed" | "c
 export type MediaModality = "image" | "video";
 
 /**
+ * The advertised envelope of one model, as the launcher must present it.
+ *
+ * Every list is "what the provider named". An empty list is a statement — the
+ * capability is not offered — and the UI must render it as such rather than
+ * falling back to a default that would be rejected at submission time.
+ */
+export type MediaModelCapabilities = { model: string, modality: MediaModality,
+/**
+ * Seconds, exactly as advertised. Video only.
+ */
+durations_secs: Array<number>, resolutions: Array<string>, aspect_ratios: Array<string>,
+/**
+ * Where a source image may be pinned. Empty means this model does not
+ * take an input frame at all.
+ */
+frame_positions: Array<MediaFramePosition>,
+/**
+ * How many reference images the model accepts. `None` means the provider
+ * says nothing, which is not the same as zero — but the UI treats both as
+ * "do not offer it" rather than guessing.
+ */
+max_input_references: number | null,
+/**
+ * Whether the model itself advertises a soundtrack switch. A model that
+ * does not name it must not be shown an audio checkbox (KT-553).
+ */
+generate_audio: boolean | null, };
+
+/**
  * Generation parameters as REQUESTED. The provider may honour them loosely,
  * so nothing downstream may treat these as describing the output.
  */
-export type MediaParams = { duration_secs?: number | null, resolution?: string | null, aspect_ratio?: string | null, generate_audio?: boolean | null, };
+export type MediaParams = { duration_secs?: number | null, resolution?: string | null, aspect_ratio?: string | null, generate_audio?: boolean | null,
+/**
+ * Context files of the SAME discussion used as visual sources. Only ids
+ * are stored: the bytes are read at execution time, so a job resumed
+ * after a restart re-reads the same files instead of carrying a copy of
+ * them — and no local path or private URL is ever persisted, sent to a
+ * browser or handed to an agent.
+ */
+reference_asset_ids?: Array<string>,
+/**
+ * Single-image form written before several references existed. Read, and
+ * never written again: jobs recorded then must keep running unchanged.
+ */
+reference_asset_id?: string | null,
+/**
+ * What those images are for. Meaningless — and refused — without an asset.
+ */
+reference_mode?: MediaReferenceMode | null, };
 
 /**
  * Coarse provider phase, for progress reporting.
  */
 export type MediaPhase = "submitting" | "polling" | "downloading" | "persisting";
+
+/**
+ * How a source image is used by a generation.
+ *
+ * Kept apart from the provider's advertised `MediaFramePosition`: this is what
+ * the CALLER asked for and what the job persists, while the capability is what
+ * one model happens to accept today. A model losing `last_frame` tomorrow must
+ * not silently reinterpret a stored job as something else.
+ */
+export type MediaReferenceMode = "first_frame" | "last_frame" | "reference";
 
 /**
  * What actually came back, read from the produced file.
@@ -3294,7 +3414,18 @@ export type MediaRendered = { width?: number | null, height?: number | null, dur
  * the provider actually measures it — an invented percentage is worse than
  * none, because it looks authoritative.
  */
-export type MediaRunResult = { schema_version: number, modality: MediaModality, phase: MediaPhase, progress?: number | null, generation_id?: string | null, asset_id?: string | null, message_id?: string | null, cost_usd?: number | null, is_byok?: boolean | null, width?: number | null, height?: number | null, media_duration_ms?: number | null, };
+export type MediaRunResult = { schema_version: number, modality: MediaModality, phase: MediaPhase, progress?: number | null, generation_id?: string | null, asset_id?: string | null, message_id?: string | null, cost_usd?: number | null, is_byok?: boolean | null, width?: number | null, height?: number | null, media_duration_ms?: number | null,
+/**
+ * The pictures this generation started from, so a viewer can see what a
+ * result was built on without reading the job's parameters. Ids, like
+ * everywhere else: the projection reaches a browser.
+ */
+reference_asset_ids?: Array<string>,
+/**
+ * Single-image form of the field above, kept readable for runs published
+ * before a generation could start from several pictures.
+ */
+reference_asset_id?: string | null, reference_mode?: MediaReferenceMode | null, };
 
 /**
  * Lean attachment descriptor surfaced to agents via `disc_get_message`. The
@@ -3683,7 +3814,15 @@ export type OnInvalid = "Continue" | "Fail";
  */
 export type OrchestrationControlState = "running" | "paused" | "awaiting_human" | "completed" | "cancelled" | "failed";
 
-export type OrchestrationRequest = { agents: Array<AgentType>, max_rounds?: number | null, skill_ids?: Array<string>, profile_ids?: Array<string>, directive_ids?: Array<string>, };
+/**
+ * One orchestration/debate participant. `connection_id` disambiguates
+ * between named HTTP connections that share `AgentType::Custom` (KT-545
+ * DoD #4) — without it, two different "Custom" connections in the same
+ * debate would be indistinguishable.
+ */
+export type OrchestrationParticipant = { agent_type: AgentType, connection_id?: string | null, };
+
+export type OrchestrationRequest = { agents: Array<OrchestrationParticipant>, max_rounds?: number | null, skill_ids?: Array<string>, profile_ids?: Array<string>, directive_ids?: Array<string>, };
 
 export type OrchestrationResiliencePolicy = { activity_timeout_secs: number | null, review_timeout_secs: number | null, human_wait_timeout_secs: number | null, cancellation_cleanup_policy: CancellationCleanupPolicy, };
 
@@ -5400,11 +5539,21 @@ export type StartAgentBackgroundJobRequest = {
  */
 quick_exec_id: string, variables?: Record<string, string>, reason: string, dedupe_key: string, task_execution_id?: string | null, };
 
-export type StartBatchCompareImprovementRequest = { agent: AgentType, tier?: ModelTier, };
+export type StartBatchCompareImprovementRequest = { agent: AgentType, tier?: ModelTier,
+/**
+ * See `StartBatchCompareJudgeRequest::connection_id` (KT-545 DoD #4).
+ */
+connection_id?: string | null, };
 
 export type StartBatchCompareImprovementResponse = { discussion_id: string, };
 
-export type StartBatchCompareJudgeRequest = { agent: AgentType, tier?: ModelTier, };
+export type StartBatchCompareJudgeRequest = { agent: AgentType, tier?: ModelTier,
+/**
+ * Named external API connection to dispatch through, when `agent` is
+ * `Custom` or the operator wants a specific LiteLLM/NVIDIA connection
+ * rather than the legacy single-slot config (KT-545 DoD #4).
+ */
+connection_id?: string | null, };
 
 export type StartBatchCompareJudgeResponse = { judge_run_id: string, judge_discussion_id: string, status: string, };
 
@@ -5578,18 +5727,20 @@ export type SummarizeResponse = { summary: string, from_idx: number, to_idx: num
 tokens_used: number, };
 
 /**
- * Per-discussion summary strategy. Pre-fix the auto-summary loop fired
- * after every agent reply once a per-agent threshold was crossed (12/8/4
- * non-system messages). For big-context models or short threads that's
- * often a waste — user feedback on 2026-05-09 asked for an off switch.
+ * Per-discussion summary strategy.
  *
- * `OnDemand` is reserved for the future kronn-internal MCP tool surface
- * (`disc_summarize` callable by the agent itself); for now it behaves
- * like `Off` from the auto-fire perspective and only differs in that we
- * keep the cache mechanism alive so an explicit summarize call updates
- * `summary_cache`.
+ * There is no automatic summary any more. It used to fire after every reply
+ * past a per-agent threshold, and it had been dead in practice for a while:
+ * the global default was `Off`, which acted as a master kill-switch, so a
+ * discussion displaying `Auto` never summarised. Removed in 0.13.0 rather
+ * than repaired — every runtime can now read the thread back itself
+ * (`disc_read` over MCP or as a declared tool), which is cheaper and more
+ * precise than a summary generated in advance for a need nobody expressed.
+ *
+ * `OnDemand` keeps the cache alive so an explicit `disc_summarize` call —
+ * from the agent or from a human reopening a long room — writes into it.
  */
-export type SummaryStrategy = "Auto" | "OnDemand" | "Off";
+export type SummaryStrategy = "OnDemand" | "Off";
 
 /**
  * The durable unit of work (ADR §1, §3, §4bis).
@@ -6072,6 +6223,13 @@ tier?: ModelTier | null,
  * Switch the primary agent for this discussion.
  */
 agent?: AgentType | null,
+/**
+ * Change the sticky named connection (KT-545). `Some(Some("id"))` = set,
+ * `Some(None)` = clear, absent = no change — same convention as
+ * `project_id`. Validated against `agent` (post-update if both are
+ * present in the same request).
+ */
+connection_id?: string | null | null,
 /**
  * Change the auto-summary policy. Persists in `discussions.summary_strategy`.
  */

@@ -94,7 +94,27 @@ async fn submit(
         // record and nothing to resume.
         MediaModality::Image => {
             let url = ctx.codec.image_url(ctx.base);
-            let body = ctx.codec.image_body(&job.model, &job.prompt, &job.params);
+            // Same rule as video: read at execution time from the ids the job
+            // stored, so a restart resumes with the same pictures.
+            let references = match load_references(db, job).await {
+                Ok(references) => references,
+                Err(e) => {
+                    settle_failure(db, &job.id, MediaJobStatus::Failed, &e.to_string(), now)
+                        .await?;
+                    return Ok(MediaJobStatus::Failed);
+                }
+            };
+            let body = match ctx
+                .codec
+                .image_body(&job.model, &job.prompt, &job.params, &references)
+            {
+                Ok(body) => body,
+                Err(e) => {
+                    settle_failure(db, &job.id, MediaJobStatus::Failed, &e.to_string(), now)
+                        .await?;
+                    return Ok(MediaJobStatus::Failed);
+                }
+            };
             // Stamped BEFORE the billable request leaves, and committed, so a
             // crash in flight cannot look like "never submitted".
             mark_attempt(db, &job.id, now).await?;
@@ -128,7 +148,36 @@ async fn submit(
         }
         MediaModality::Video => {
             let url = ctx.codec.video_submit_url(ctx.base);
-            let body = ctx.codec.video_body(&job.model, &job.prompt, &job.params);
+            // Read at execution time from the id the job stored, so a restart
+            // resumes with the same source picture instead of a copy that
+            // could have been taken before the file was even final.
+            let reference = match load_references(db, job).await.map(|mut r| {
+                // Every video model advertises a single frame; sending more
+                // would silently drop all but one.
+                (!r.is_empty()).then(|| r.remove(0))
+            }) {
+                Ok(reference) => reference,
+                Err(e) => {
+                    settle_failure(db, &job.id, MediaJobStatus::Failed, &e.to_string(), now)
+                        .await?;
+                    return Ok(MediaJobStatus::Failed);
+                }
+            };
+            let body = match ctx
+                .codec
+                .video_body(&job.model, &job.prompt, &job.params, reference.as_ref())
+            {
+                Ok(body) => body,
+                // A provider that cannot take this source image must fail
+                // BEFORE the submission: a text-to-video billed in place of
+                // the requested image-to-video is a charge for something
+                // nobody asked for.
+                Err(e) => {
+                    settle_failure(db, &job.id, MediaJobStatus::Failed, &e.to_string(), now)
+                        .await?;
+                    return Ok(MediaJobStatus::Failed);
+                }
+            };
             mark_attempt(db, &job.id, now).await?;
             let text = send_json(ctx.client, &url, ctx.api_key, &body).await?;
             let ack = match ctx.codec.parse_submit_response(&text) {
@@ -625,12 +674,15 @@ async fn advance_claimed(
     // The codec follows the connection's provider: OpenRouter's proprietary
     // shapes and NVIDIA's visual routes are not interchangeable, and NVIDIA
     // does not even serve media from the host stored on the connection.
-    let codec: Box<dyn crate::agents::media_codec::MediaCodec> = match connection.origin_preset {
-        crate::models::ExternalApiConnectionPreset::Nvidia => {
-            Box::new(crate::agents::media_codec::NvidiaMediaCodec)
-        }
-        _ => Box::new(crate::agents::media_codec::OpenRouterMediaCodec),
-    };
+    let codec = crate::agents::media_codec::codec_for(connection.origin_preset);
+    // A job queued before this connection could be checked — or moved to
+    // another provider since — must not spend its deadline retrying a refusal
+    // no attempt can lift.
+    if !codec.accepts_reference_images() && !job.params.reference_ids().is_empty() {
+        return Err(AdvanceFailure::Permanent(
+            "this connection's provider does not accept a source image".into(),
+        ));
+    }
     let ctx = MediaContext {
         codec: codec.as_ref(),
         base: &base,
@@ -645,6 +697,52 @@ async fn advance_claimed(
     tracing::debug!(job = %job.id, status = ?status, "media job advanced");
 
     Ok(())
+}
+
+/// Reads the source image a job named, at the moment it is needed.
+///
+/// The job stores an id, never bytes and never a path: the file is re-read on
+/// every attempt, so a retry after a restart uses the same picture, and a file
+/// that disappeared fails with a sentence instead of submitting a generation
+/// silently stripped of what made it the requested one.
+async fn load_references(
+    db: &Database,
+    job: &MediaJob,
+) -> Result<Vec<crate::agents::media_codec::MediaReferenceImage>> {
+    let asset_ids = job.params.reference_ids();
+    let Some(mode) = job.params.reference_mode else {
+        return Ok(Vec::new());
+    };
+    let mut loaded = Vec::with_capacity(asset_ids.len());
+    for asset_id in asset_ids {
+        let lookup = asset_id.clone();
+        let file = db
+            .with_read_conn(move |conn| Ok(crate::db::discussions::get_context_file(conn, &lookup)?))
+            .await?
+            .ok_or_else(|| anyhow!("a source image of this generation no longer exists"))?;
+        // Re-checked here and not only at request time: the file could have
+        // been replaced or unlinked between the launch and this attempt, and a
+        // job must never read something outside the discussion it belongs to.
+        if job
+            .discussion_id
+            .as_deref()
+            .is_some_and(|discussion| discussion != file.discussion_id)
+        {
+            bail!("a source image no longer belongs to this discussion");
+        }
+        let path = file
+            .disk_path
+            .ok_or_else(|| anyhow!("a source image has no stored file"))?;
+        let bytes = tokio::fs::read(&path)
+            .await
+            .map_err(|e| anyhow!("a source image could not be read: {e}"))?;
+        loaded.push(crate::agents::media_codec::MediaReferenceImage {
+            mode,
+            mime_type: file.mime_type,
+            bytes,
+        });
+    }
+    Ok(loaded)
 }
 
 #[cfg(test)]
@@ -691,6 +789,106 @@ mod tests {
         .await
         .expect("seed");
         db
+    }
+
+    /// KT-551 — the source image is re-read on every attempt, from the id the
+    /// job stored, so a restart resumes with the same picture and a file that
+    /// left the room fails the job instead of reaching the provider.
+    #[tokio::test]
+    async fn a_source_image_is_re_read_from_its_id_at_each_attempt() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("frame.png");
+        tokio::fs::write(&path, b"first-bytes").await.expect("write");
+
+        let db = Database::open_in_memory().expect("in-memory db");
+        let disk_path = path.to_string_lossy().to_string();
+        db.with_conn({
+            let disk_path = disk_path.clone();
+            move |conn| {
+                let now = Utc::now().to_rfc3339();
+                conn.execute(
+                    "INSERT INTO discussions (id, title, created_at, updated_at)
+                     VALUES ('disc-1', 'Room', ?1, ?1)",
+                    [&now],
+                )?;
+                conn.execute(
+                    "INSERT INTO context_files
+                        (id, discussion_id, filename, mime_type, original_size,
+                         extracted_size, extracted_text, disk_path, created_at)
+                     VALUES ('asset-1', 'disc-1', 'frame.png', 'image/png', 11, 0, '', ?1, ?2)",
+                    rusqlite::params![disk_path, now],
+                )?;
+                Ok(())
+            }
+        })
+        .await
+        .expect("seed");
+
+        let params = MediaParams {
+            reference_asset_id: Some("asset-1".into()),
+            reference_mode: Some(crate::models::MediaReferenceMode::FirstFrame),
+            ..MediaParams::default()
+        };
+        let scheduled = at("2026-09-02T04:00:00Z");
+        let job_id = "job-ref";
+        db.with_conn({
+            let params = params.clone();
+            move |conn| {
+                media_jobs::insert(
+                    conn,
+                    NewMediaJob {
+                        id: job_id,
+                        modality: MediaModality::Video,
+                        connection_id: "conn-1",
+                        model: "m",
+                        prompt: "un renard",
+                        params: &params,
+                        discussion_id: Some("disc-1"),
+                        message_id: None,
+                        project_id: None,
+                        scheduled_at: scheduled,
+                        deadline_at: scheduled + ChronoDuration::minutes(20),
+                    },
+                    scheduled,
+                )
+            }
+        })
+        .await
+        .expect("insert");
+        let job = db
+            .with_read_conn(move |conn| media_jobs::get(conn, job_id))
+            .await
+            .expect("read")
+            .expect("job");
+
+        let loaded = load_references(&db, &job).await.expect("readable");
+        let first = loaded.first().expect("a source image");
+        assert_eq!(first.bytes, b"first-bytes");
+        assert_eq!(first.mime_type, "image/png");
+
+        // The bytes are read now, not at launch: replacing the file changes
+        // what the next attempt submits, which is what makes a restart resume
+        // with the real current picture.
+        tokio::fs::write(&path, b"second").await.expect("rewrite");
+        let second = load_references(&db, &job).await.expect("readable");
+        assert_eq!(second[0].bytes, b"second");
+
+        // A file that disappeared fails the job with a sentence instead of
+        // submitting a generation silently stripped of its source image.
+        tokio::fs::remove_file(&path).await.expect("remove");
+        let error = load_references(&db, &job).await.unwrap_err().to_string();
+        assert!(error.contains("could not be read"), "got {error}");
+    }
+
+    #[tokio::test]
+    async fn a_job_without_a_source_image_reads_nothing() {
+        let db = db_with_job("job-plain", None, at("2026-09-02T04:00:00Z")).await;
+        let job = db
+            .with_read_conn(|conn| media_jobs::get(conn, "job-plain"))
+            .await
+            .expect("read")
+            .expect("job");
+        assert!(load_references(&db, &job).await.expect("ok").is_empty());
     }
 
     /// One-request HTTP server, returning the address and the raw request head

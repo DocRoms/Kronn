@@ -325,13 +325,19 @@ async fn rename_index_to_agents(docs_dir: &Path) -> Result<(), String> {
 }
 
 /// Self-heal pass : if a project already has `docs/AGENTS.md` (or
-/// `doc/AGENTS.md`) but no `index.md` next to it, generate one. Used
-/// on read-paths (`enrich_audit_status`) so projects that migrated
-/// BEFORE the index.md generation shipped automatically catch up
-/// without the operator having to re-trigger anything.
+/// `doc/AGENTS.md`) but no `index.md` next to it, generate one.
 ///
-/// Best-effort : a write failure is logged but never returned — the
-/// caller path is just `GET /api/projects` enrichment.
+/// NO PRODUCTION CALLER since 0.13.0. It ran from `enrich_audit_status`, which
+/// serves `GET /api/projects` — a read path that must not write, and one that
+/// would fail on a read-only checkout. Both write paths that own the docs tree
+/// (template install, project bootstrap) call [`ensure_docs_index`] directly,
+/// so a project that migrated before index generation shipped catches up on its
+/// next install or bootstrap rather than on someone opening a list.
+///
+/// Kept, with its tests, as the folder-detecting wrapper a future migration
+/// entry point would want. Wire it to a write path — never back to a read one.
+///
+/// Best-effort : a write failure is logged, never returned.
 pub fn backfill_docs_index(project_path: &Path) {
     for folder in ["docs", "doc"] {
         let dir = project_path.join(folder);

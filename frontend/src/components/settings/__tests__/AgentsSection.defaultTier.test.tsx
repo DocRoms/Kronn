@@ -409,7 +409,7 @@ describe('AgentsSection — default summary strategy (0.8.6 phase 4)', () => {
     expect(screen.getByText('config.defaultSummaryInfoMcp')).toBeTruthy();
   });
 
-  it('renders 3 strategy options with Off marked active by default', async () => {
+  it('renders the two remaining strategies with Off active by default', async () => {
     getServerConfigMock.mockResolvedValue({
       default_model_tier: 'default',
       default_summary_strategy: 'Off',
@@ -428,26 +428,28 @@ describe('AgentsSection — default summary strategy (0.8.6 phase 4)', () => {
     );
     await waitFor(() => {
       expect(screen.getByTestId('default-summary-btn-off')).toBeTruthy();
-      expect(screen.getByTestId('default-summary-btn-auto')).toBeTruthy();
       expect(screen.getByTestId('default-summary-btn-ondemand')).toBeTruthy();
     });
+    // 0.13.0 — the automatic strategy is gone, so it must not be offered.
+    expect(screen.queryByTestId('default-summary-btn-auto')).toBeNull();
     await waitFor(() => {
       expect(screen.getByTestId('default-summary-btn-off').getAttribute('data-active')).toBe('true');
-      expect(screen.getByTestId('default-summary-btn-auto').getAttribute('data-active')).toBe('false');
+      expect(screen.getByTestId('default-summary-btn-ondemand').getAttribute('data-active')).toBe('false');
     });
     expect(screen.getByText('config.defaultSummary.offHint')).toBeTruthy();
-    expect(screen.getByText('config.defaultSummary.autoHint')).toBeTruthy();
     expect(screen.getByText('config.defaultSummary.ondemandHint')).toBeTruthy();
-    expect(screen.getByText('config.comingSoon')).toBeTruthy();
-    expect(screen.getByTestId('default-summary-btn-ondemand')).toBeDisabled();
+    // On demand is the real mode now, not a planned one.
+    expect(screen.queryByText('config.comingSoon')).toBeNull();
+    expect(screen.getByTestId('default-summary-btn-ondemand')).not.toBeDisabled();
   });
 
-  it('does not save the planned OnDemand strategy', async () => {
+  it('saves the OnDemand strategy, which is no longer planned', async () => {
     getServerConfigMock.mockResolvedValue({
       default_model_tier: 'default',
       default_summary_strategy: 'Off',
       host: 'localhost', port: 3140,
     });
+    setServerConfigMock.mockResolvedValue(undefined);
     render(
       <AgentsSection
         agents={EMPTY_AGENTS}
@@ -463,7 +465,9 @@ describe('AgentsSection — default summary strategy (0.8.6 phase 4)', () => {
 
     fireEvent.click(onDemand);
 
-    expect(setServerConfigMock).not.toHaveBeenCalledWith({ default_summary_strategy: 'OnDemand' });
+    await waitFor(() => {
+      expect(setServerConfigMock).toHaveBeenCalledWith({ default_summary_strategy: 'OnDemand' });
+    });
   });
 
   it('PATCHes /config/server with default_summary_strategy on click', async () => {
@@ -484,12 +488,12 @@ describe('AgentsSection — default summary strategy (0.8.6 phase 4)', () => {
         t={t}
       />,
     );
-    await waitFor(() => expect(screen.getByTestId('default-summary-btn-auto')).toBeTruthy());
+    await waitFor(() => expect(screen.getByTestId('default-summary-btn-ondemand')).toBeTruthy());
 
-    fireEvent.click(screen.getByTestId('default-summary-btn-auto'));
+    fireEvent.click(screen.getByTestId('default-summary-btn-ondemand'));
 
     await waitFor(() => {
-      expect(setServerConfigMock).toHaveBeenCalledWith({ default_summary_strategy: 'Auto' });
+      expect(setServerConfigMock).toHaveBeenCalledWith({ default_summary_strategy: 'OnDemand' });
     });
     expect(toastFn).toHaveBeenCalledWith('config.saved', 'success');
   });
@@ -512,13 +516,13 @@ describe('AgentsSection — default summary strategy (0.8.6 phase 4)', () => {
         t={t}
       />,
     );
-    await waitFor(() => expect(screen.getByTestId('default-summary-btn-auto')).toBeTruthy());
+    await waitFor(() => expect(screen.getByTestId('default-summary-btn-ondemand')).toBeTruthy());
 
-    fireEvent.click(screen.getByTestId('default-summary-btn-auto'));
+    fireEvent.click(screen.getByTestId('default-summary-btn-ondemand'));
 
     await waitFor(() => expect(toastFn).toHaveBeenCalledWith('config.saveError', 'error'));
     // Reverted to Off.
     expect(screen.getByTestId('default-summary-btn-off').getAttribute('data-active')).toBe('true');
-    expect(screen.getByTestId('default-summary-btn-auto').getAttribute('data-active')).toBe('false');
+    expect(screen.getByTestId('default-summary-btn-ondemand').getAttribute('data-active')).toBe('false');
   });
 });

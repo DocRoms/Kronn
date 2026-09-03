@@ -130,6 +130,11 @@ pub struct StartBatchCompareJudgeRequest {
     pub agent: AgentType,
     #[serde(default)]
     pub tier: ModelTier,
+    /// Named external API connection to dispatch through, when `agent` is
+    /// `Custom` or the operator wants a specific LiteLLM/NVIDIA connection
+    /// rather than the legacy single-slot config (KT-545 DoD #4).
+    #[serde(default)]
+    pub connection_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, TS)]
@@ -146,6 +151,9 @@ pub struct StartBatchCompareImprovementRequest {
     pub agent: AgentType,
     #[serde(default = "reasoning_tier")]
     pub tier: ModelTier,
+    /// See `StartBatchCompareJudgeRequest::connection_id` (KT-545 DoD #4).
+    #[serde(default)]
+    pub connection_id: Option<String>,
 }
 
 fn reasoning_tier() -> ModelTier {

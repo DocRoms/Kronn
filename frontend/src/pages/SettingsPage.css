@@ -2984,6 +2984,26 @@
   width: 100%;
 }
 
+/* KT-531 — catalogue-evidence media states. Orange conveys "unverified", but
+   the icon + text carry the meaning too, never color alone. */
+.set-ext-api-media-warning {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin: 0;
+  padding: 6px 8px;
+  border-radius: var(--kr-r-sm);
+  background: var(--kr-warning-bg);
+  color: var(--kr-warning);
+  font-size: var(--kr-fs-2xs);
+  line-height: 1.35;
+}
+
+.set-ext-api-media-warning svg {
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
 .set-ext-api-tier-panel {
   display: grid;
   gap: var(--kr-sp-3);

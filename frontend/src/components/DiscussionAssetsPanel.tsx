@@ -31,6 +31,8 @@ export function DiscussionAssetsPanel({
   connections = [],
   onMediaLaunched,
   openAssetRequest,
+  onAssetDeleted,
+  onAssetExtracted,
 }: {
   discussionId: string;
   files: ContextFile[];
@@ -46,6 +48,14 @@ export function DiscussionAssetsPanel({
   /** One-shot request from a transcript media bubble. The nonce lets the same
    * asset be deliberately opened again after the viewer was closed. */
   openAssetRequest?: { assetId: string; nonce: number } | null;
+  /// Fired once the server confirmed a deletion, so the discussion drops the
+  /// file from its own inventory. Absent, the panel offers no deletion.
+  onAssetDeleted?: (fileId: string) => void;
+  /// Fired once an image the server accepted joins this discussion — a frame
+  /// extracted from a clip, or a picture attached from the launcher — so it
+  /// enters the inventory and can be picked as a starting point right away.
+  /// Absent, the panel offers neither extraction nor attachment.
+  onAssetExtracted?: (file: ContextFile) => void;
 }) {
   const [query, setQuery] = useState('');
   const [filter, setFilter] = useState<AssetFilter>('all');
@@ -165,8 +175,13 @@ export function DiscussionAssetsPanel({
           <MediaGenerateForm
             discussionId={discussionId}
             connections={connections}
+            /* The images already in this room are the only ones a generation
+               may start from, so the launcher gets the inventory it stands in
+               rather than a separate picker of its own. */
+            images={files.filter(isImage)}
             t={t}
             onLaunched={onMediaLaunched}
+            onImageAttached={onAssetExtracted}
           />
         )}
       </div>
@@ -212,6 +227,8 @@ export function DiscussionAssetsPanel({
               onNavigateMessage={onNavigateMessage}
               carouselScope={carouselScope}
               openRequest={openAssetRequest}
+              onDeleted={onAssetDeleted}
+              onExtracted={onAssetExtracted}
             />
             {shownCount < filteredFiles.length && (
               <button

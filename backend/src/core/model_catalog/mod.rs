@@ -564,6 +564,32 @@ pub async fn preflight_check(
                 recommended_action: recommended_action_for(reason).to_string(),
             })
         }
+        // KT-545 DoD #3: a model the catalog positively tags with
+        // capabilities that exclude chat (e.g. an image/video-only entry)
+        // is refused here, before any request reaches the provider — never
+        // just silently sent to the wrong endpoint. An entry with no
+        // recorded capabilities is unaffected (see `entry_supports_capability`).
+        Some(entry)
+            if !crate::http_transport::entry_supports_capability(
+                &entry,
+                crate::http_transport::CAPABILITY_CHAT,
+            ) =>
+        {
+            Some(CatalogPreflightFailure {
+                runtime_target_id,
+                agent_type,
+                model_id: Some(model_id),
+                reason: ModelUnavailableReason::Unsupported,
+                detail: format!(
+                    "model `{}` does not support chat (catalog capabilities: {})",
+                    entry.model_id,
+                    entry.capabilities.join(", ")
+                ),
+                last_checked_at: entry.last_checked_at,
+                recommended_action: recommended_action_for(ModelUnavailableReason::Unsupported)
+                    .to_string(),
+            })
+        }
         _ => None,
     }
 }
@@ -572,6 +598,7 @@ pub async fn preflight_check(
 mod tests {
     use super::*;
     use crate::db::model_catalog as db;
+    use crate::models::UpsertManualModelRequest;
 
     fn test_db() -> Database {
         Database::open_in_memory().unwrap()
@@ -604,6 +631,76 @@ mod tests {
                 "{agent:?} must stay out of scope"
             );
         }
+    }
+
+    /// KT-543 — a model discovered over ACP feeds the tiers, and its
+    /// disappearance takes the tier with it rather than serving a stale id.
+    #[tokio::test]
+    async fn a_tier_follows_its_model_out_of_the_catalogue_and_back() {
+        let db = test_db();
+        let target = db::agent_runtime_target_id(&AgentType::OpenCode);
+        let request = UpsertManualModelRequest {
+            runtime_target_id: target.clone(),
+            agent_type: AgentType::OpenCode,
+            model_id: "zen/coder".into(),
+            display_name: "Zen Coder".into(),
+            capabilities: vec!["chat".into()],
+            reasoning_modes: vec!["high".into()],
+            default_reasoning_mode: Some("high".into()),
+            tier_assignment: Some(ModelTier::Reasoning),
+            cost_hint: None,
+            privacy_note: None,
+        };
+        db.with_conn(move |conn| {
+            db::create_manual(conn, &request)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        refresh_runtime_cache(&db).await.unwrap();
+        assert_eq!(
+            assigned_model_for_agent(&AgentType::OpenCode, ModelTier::Reasoning).as_deref(),
+            Some("zen/coder"),
+        );
+
+        // The provider stops listing it. The row is NEVER deleted — the
+        // operator's assignment and the audit trail survive — but the tier
+        // must stop resolving, because dispatching a model the runtime no
+        // longer serves fails after the request left.
+        let gone = target.clone();
+        db.with_conn(move |conn| {
+            db::mark_unavailable(
+                conn,
+                &gone,
+                "zen/coder",
+                ModelUnavailableReason::Unsupported,
+                Some("absent from the live catalogue"),
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        refresh_runtime_cache(&db).await.unwrap();
+        assert_eq!(
+            assigned_model_for_agent(&AgentType::OpenCode, ModelTier::Reasoning),
+            None,
+            "an unavailable model must not keep answering for its tier",
+        );
+
+        // Reappearing under the same canonical identity restores the tier by
+        // itself: the assignment was never lost, only suspended.
+        let back = target.clone();
+        db.with_conn(move |conn| {
+            db::mark_available(conn, &back, "zen/coder")?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        refresh_runtime_cache(&db).await.unwrap();
+        assert_eq!(
+            assigned_model_for_agent(&AgentType::OpenCode, ModelTier::Reasoning).as_deref(),
+            Some("zen/coder"),
+        );
     }
 
     #[tokio::test]
@@ -678,6 +775,76 @@ mod tests {
             log.last_error_reason,
             Some(ModelUnavailableReason::Unsupported)
         );
+    }
+
+    #[tokio::test]
+    async fn preflight_check_blocks_chat_incompatible_model() {
+        // KT-545 DoD #3: a named HTTP connection whose catalog marks a model
+        // video/image-only must never reach the chat codec.
+        let db = test_db();
+        db.with_conn(|conn| {
+            db::reconcile_live(
+                conn,
+                "http:connection-a",
+                &AgentType::Custom,
+                &[DiscoveredModel {
+                    model_id: "seedance-2.0-mini".into(),
+                    display_name: "Seedance 2.0 mini".into(),
+                    capabilities: vec!["video".into()],
+                    reasoning_modes: vec![],
+                    default_reasoning_mode: None,
+                }],
+            )
+        })
+        .await
+        .unwrap();
+
+        let failure = preflight_check(
+            &db,
+            Some("http:connection-a"),
+            AgentType::Custom,
+            ModelTier::Default,
+            Some("seedance-2.0-mini"),
+            None,
+        )
+        .await
+        .expect("a video-only catalog entry must refuse a chat launch");
+        assert_eq!(failure.reason, ModelUnavailableReason::Unsupported);
+        assert_eq!(failure.recommended_action, "configure_manual_model");
+        assert!(failure.detail.contains("does not support chat"));
+        assert!(failure.detail.contains("video"));
+    }
+
+    #[tokio::test]
+    async fn preflight_check_passes_chat_tagged_model_on_a_connection() {
+        let db = test_db();
+        db.with_conn(|conn| {
+            db::reconcile_live(
+                conn,
+                "http:connection-a",
+                &AgentType::Custom,
+                &[DiscoveredModel {
+                    model_id: "llama-3.3-70b".into(),
+                    display_name: "Llama 3.3 70B".into(),
+                    capabilities: vec!["chat".into()],
+                    reasoning_modes: vec![],
+                    default_reasoning_mode: None,
+                }],
+            )
+        })
+        .await
+        .unwrap();
+
+        let failure = preflight_check(
+            &db,
+            Some("http:connection-a"),
+            AgentType::Custom,
+            ModelTier::Default,
+            Some("llama-3.3-70b"),
+            None,
+        )
+        .await;
+        assert!(failure.is_none());
     }
 
     #[tokio::test]

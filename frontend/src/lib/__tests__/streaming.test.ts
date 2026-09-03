@@ -360,6 +360,22 @@ describe('_streamSSE — malformed SSE data', () => {
     expect(onChunk).not.toHaveBeenCalled();
   });
 
+  it('treats a skipped turn that ends with complete as finished, not interrupted', async () => {
+    // A room with joined CLIs never spawns the native agent: the backend
+    // answers `accepted` + `skipped_live_agents` and closes. That close is
+    // intentional and says so with `complete`, so the interruption rule below
+    // must not fire — it did, on every message, for every multi-agent room.
+    const { onChunk, onDone, onError } = await callStreamSSE([
+      'event: accepted\ndata: {"message_id":"m1","sort_order":7,"duplicate":false}\n\n',
+      'event: skipped_live_agents\ndata: {"skipped":true,"reason":"live_mcp_agents","live_agents":2}\n\n',
+      'event: complete\ndata: {}\n\n',
+    ]);
+
+    expect(onError).not.toHaveBeenCalled();
+    expect(onDone).toHaveBeenCalledTimes(1);
+    expect(onChunk).not.toHaveBeenCalled();
+  });
+
   it('reports a completely empty stream as interrupted', async () => {
     const { onChunk, onDone, onError } = await callStreamSSE([]);
 

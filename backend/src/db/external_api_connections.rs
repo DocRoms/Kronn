@@ -374,6 +374,32 @@ mod tests {
     }
 
     #[test]
+    fn backfill_legacy_config_is_idempotent_across_restarts() {
+        // KT-545 DoD #5 — a backend restart re-runs bootstrap on every boot;
+        // it must never duplicate the canonical LiteLLM/NVIDIA rows or error
+        // on the second pass.
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+        let config = default_config();
+
+        backfill_legacy_config(&conn, &config).unwrap();
+        backfill_legacy_config(&conn, &config).unwrap();
+        backfill_legacy_config(&conn, &config).unwrap();
+
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM external_api_connections WHERE id IN (?1, ?2)",
+                params![LEGACY_LITELLM_ID, LEGACY_NVIDIA_ID],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            count, 2,
+            "exactly one row per legacy preset, however many restarts"
+        );
+    }
+
+    #[test]
     fn mention_alias_is_unique_for_insert_and_update_case_insensitively() {
         let conn = Connection::open_in_memory().unwrap();
         crate::db::migrations::run(&conn).unwrap();

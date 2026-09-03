@@ -225,6 +225,20 @@ pub fn delete_quick_api(conn: &Connection, id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Workflow steps that call this API by id. Each fails on its next run once
+/// the API is gone, so a deletion says this number before it is confirmed
+/// (KT-561).
+pub fn count_workflow_step_usage(conn: &Connection, id: &str) -> Result<u32> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*)
+           FROM workflows w, json_each(w.steps_json) s
+          WHERE json_extract(s.value, '$.quick_api_id') = ?1",
+        params![id],
+        |row| row.get(0),
+    )?;
+    Ok(n as u32)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -359,5 +373,25 @@ mod tests {
             fetched.project_id.is_none(),
             "project_id should be NULL after parent deletion"
         );
+    }
+
+    #[test]
+    fn usage_counts_the_steps_that_call_the_api_and_nothing_else() {
+        let conn = open_test_db();
+        let insert = |id: &str, steps_json: &str| {
+            conn.execute(
+                "INSERT INTO workflows (id, name, trigger_json, steps_json, created_at, updated_at)
+                 VALUES (?1, ?1, '{}', ?2, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                params![id, steps_json],
+            )
+            .unwrap();
+        };
+        insert("wf-a", r#"[{"quick_api_id":"qa-1"},{"quick_api_id":"qa-2"},{"quick_prompt_id":"qa-1"}]"#);
+        insert("wf-b", r#"[{"quick_api_id":"qa-1"}]"#);
+
+        // The `quick_prompt_id` holding the same string names a prompt, not this API.
+        assert_eq!(count_workflow_step_usage(&conn, "qa-1").unwrap(), 2);
+        assert_eq!(count_workflow_step_usage(&conn, "qa-2").unwrap(), 1);
+        assert_eq!(count_workflow_step_usage(&conn, "qa-none").unwrap(), 0);
     }
 }

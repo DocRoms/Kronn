@@ -45,7 +45,16 @@ function resultText(result: unknown): string | null {
   }
 }
 
-export function RunStatusCard({ model: initialModel, runId, compact = false }: { model?: RunStatusCardModel; runId?: string; compact?: boolean }) {
+export function RunStatusCard({ model: initialModel, runId, compact = false, hideRunLink = false }: {
+  model?: RunStatusCardModel;
+  runId?: string;
+  compact?: boolean;
+  /** Suppress the "open the run" link. A caller that already offers a better
+   *  destination (the media bubble opens the asset itself) must be able to hide
+   *  it for good: self-hydration below rebuilds the model from the server, href
+   *  included, so a `href: null` passed in props would come back a second later. */
+  hideRunLink?: boolean;
+}) {
   const { t } = useT();
   const rootRef = useRef<HTMLElement>(null);
   // Start suspended: without a real IntersectionObserver measurement yet, a
@@ -76,11 +85,14 @@ export function RunStatusCard({ model: initialModel, runId, compact = false }: {
     if (visible && runId && message.type === 'shared_run_updated' && message.run_id === runId) void hydrate('live');
   }, () => { if (visible && runId) void hydrate('rehydrated'); }, Boolean(runId && visible && active));
 
+  // Media cards show no elapsed time (see below), so ticking every second
+  // would re-render them for a value nobody reads.
+  const ticking = active && model?.kind !== 'media';
   useEffect(() => {
-    if (!visible || !active || !model?.startedAt) return;
+    if (!visible || !ticking || !model?.startedAt) return;
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(timer);
-  }, [active, model?.startedAt, visible]);
+  }, [model?.startedAt, ticking, visible]);
 
   const result = useMemo(() => resultText(model?.result), [model?.result]);
 
@@ -94,6 +106,16 @@ export function RunStatusCard({ model: initialModel, runId, compact = false }: {
   const progressPercent = progress && progress.total > 0
     ? Math.min(100, Math.max(0, (progress.completed / progress.total) * 100))
     : null;
+  // A media bubble states no elapsed time and no freshness: the run duration
+  // is not the duration of what was produced, and on an image — or a video
+  // that failed — the line only ever read "Duration unavailable / Rehydrated
+  // from the server", two labels that answer nothing. The duration that means
+  // something for a media is the one of the produced file, shown below.
+  const showRunMeta = model.kind !== 'media';
+  // Media runs publish a full JSON projection the reader rarely needs; it is
+  // folded away for them only, so workflow and quick-prompt cards keep the
+  // rendering they have today.
+  const foldResult = model.kind === 'media';
 
   return (
     <section ref={rootRef} className="run-status-card" data-status={model.status} data-kind={model.kind} data-testid="run-status-card">
@@ -102,7 +124,7 @@ export function RunStatusCard({ model: initialModel, runId, compact = false }: {
         <span className="run-status-card-status" data-status={model.status}>
           {statusIcon(model.status)} {t(`run.status.${model.status}`)}
         </span>
-        {model.href && (
+        {!hideRunLink && model.href && (
           <a className="run-status-card-link" href={model.href} aria-label={t('run.open')}>
             <ExternalLink size={14} aria-hidden />
           </a>
@@ -110,10 +132,12 @@ export function RunStatusCard({ model: initialModel, runId, compact = false }: {
       </div>
       {!compact && (
         <>
-          <div className="run-status-card-meta">
-            <span><Clock3 size={13} aria-hidden /> {duration == null ? t('run.durationUnavailable') : formatDurationCompact(duration)}</span>
-            {model.freshness && <span data-freshness={model.freshness}>{t(`run.freshness.${model.freshness}`)}</span>}
-          </div>
+          {showRunMeta && (
+            <div className="run-status-card-meta">
+              <span><Clock3 size={13} aria-hidden /> {duration == null ? t('run.durationUnavailable') : formatDurationCompact(duration)}</span>
+              {model.freshness && <span data-freshness={model.freshness}>{t(`run.freshness.${model.freshness}`)}</span>}
+            </div>
+          )}
           {progress && progressPercent != null && (
             <div className="run-status-card-progress">
               <div className="run-status-card-progress-label">
@@ -133,16 +157,25 @@ export function RunStatusCard({ model: initialModel, runId, compact = false }: {
                 // honour the requested resolution.
                 <span data-testid="run-status-card-media-size">{media.width}×{media.height}</span>
               )}
-              {media.durationMs && <span>{Math.round(media.durationMs / 1000)}s</span>}
-              {media.costUsd != null && (
-                <span data-testid="run-status-card-media-cost">
-                  {media.isByok ? t('run.media.byok') : `$${media.costUsd.toFixed(4)}`}
-                </span>
-              )}
+              {media.modality === 'video' && media.durationMs && <span>{Math.round(media.durationMs / 1000)}s</span>}
             </div>
           )}
           {model.diagnostic && <p className="run-status-card-diagnostic">{model.diagnostic}</p>}
-          {result && <pre className="run-status-card-result">{result}</pre>}
+          {result && (foldResult ? (
+            <details className="run-status-card-fold" data-testid="run-status-card-result-fold">
+              <summary>{t('run.details')}</summary>
+              <pre className="run-status-card-result">{result}</pre>
+            </details>
+          ) : (
+            <pre className="run-status-card-result">{result}</pre>
+          ))}
+          {/* Last child, aligned right: the price of a generation is what the
+              eye looks for once the media is there, not a detail in the header. */}
+          {media && media.costUsd != null && (
+            <p className="run-status-card-cost" data-testid="run-status-card-media-cost">
+              {media.isByok ? t('run.media.byok') : `$${media.costUsd.toFixed(4)}`}
+            </p>
+          )}
         </>
       )}
     </section>

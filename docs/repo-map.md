@@ -279,6 +279,7 @@ Kronn/
 - **API client**: `frontend/src/lib/api.ts` — all fetch calls, SSE streaming logic.
 - **Type generation**: `make typegen` reads `#[derive(TS)]` attributes in Rust models.
 - **CLI commands**: `kronn` script, sources `lib/*.sh`.
+- **Agent-instruction redirectors** (every one points at `docs/AGENTS.md`, the single source of truth): `CLAUDE.md`, `GEMINI.md`, `AGENTS.md`, `.kiro/steering/instructions.md`, `.vibe/instructions.md`, `.cursorrules`, `.cursor/rules/repo-instructions.mdc`, `.github/copilot-instructions.md`, `.windsurfrules`, `.clinerules`.
 
 ## Notes
 - `README.md` is not guaranteed to be up-to-date; prefer actual config files as source of truth.
@@ -293,3 +294,4 @@ Kronn/
 - Shell tests live in `tests/bats/`. See `docs/testing-quality.md`.
 - CI pipeline: `.github/workflows/ci-test.yml` triggered on push to main + all PRs (backend clippy/test + frontend tsc/test + shell bats + security scan). Desktop build: `.github/workflows/desktop-build.yml`.
 - `templates/` directory contains the project documentation template files (docs/ skeleton, CLAUDE.md, .cursorrules, etc.) mounted at `/app/templates:ro` in Docker.
+- `backend/src/acp.rs` (KT-542) and `backend/src/http_transport.rs` (KT-545) are top-level modules (siblings of `agents/`, `api/`, `core/`, `db/`) not yet reflected in the tree snapshot above: `acp.rs` owns the ACP control-plane boundary, `http_transport.rs` owns the OpenAI-compatible HTTP chat codec/capability-gate seam shared by LiteLLM/NVIDIA/Custom connections. See `docs/design/adr-003-acp-control-plane.md` / `docs/design/adr-004-http-transport.md`.

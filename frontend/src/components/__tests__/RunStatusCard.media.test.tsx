@@ -11,7 +11,7 @@
  * so duplicating it here with a mocked hook would test the mock, not the card.
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
-import { render, screen, cleanup } from '@testing-library/react';
+import { act, render, screen, cleanup, waitFor } from '@testing-library/react';
 
 // The card suspends loading while off-screen, and jsdom never fires a real
 // IntersectionObserver — so visibility is flipped deterministically here,
@@ -31,7 +31,11 @@ class MockIntersectionObserver {
 const runsGet = vi.fn();
 
 vi.mock('../../lib/api', () => ({
-  runs: { get: (...a: unknown[]) => runsGet(...a) },
+  runsApi: { get: (...a: unknown[]) => runsGet(...a) },
+  // A visible, still-running card opens a WebSocket; both are read by the
+  // shared hook before anything else happens.
+  getApiBase: () => '',
+  getAuthToken: () => null,
 }));
 
 const { RunStatusCard } = await import('../RunStatusCard');
@@ -150,6 +154,82 @@ describe('RunStatusCard — media', () => {
       expect(screen.getByTestId('run-status-card')).toBeTruthy();
       expect(screen.queryByTestId('run-status-card-media')).toBeNull();
     }
+  });
+
+  it('states no elapsed time and no freshness on a media bubble', () => {
+    // What a reader got on an image was "Duration unavailable / Rehydrated
+    // from the server" — two labels that answer nothing about a picture. The
+    // duration that means something for a media is the one of the file it
+    // produced, and that one lives in the media row.
+    const model = sharedRunStatusCardModel(
+      run({ schema_version: 1, modality: 'image', phase: 'persisting', width: 1024, height: 1024 }),
+    );
+    render(<RunStatusCard model={model} />);
+    expect(screen.queryByText('run.durationUnavailable')).toBeNull();
+    expect(screen.queryByText('run.freshness.live')).toBeNull();
+  });
+
+  it('leaves every other kind of run with the meta line it has today', () => {
+    // DoD #9: the folding, the duration rule and the price all target media
+    // only — a workflow card must render exactly as before.
+    const model = sharedRunStatusCardModel({ ...run(null), kind: 'workflow' } as SharedRun);
+    render(<RunStatusCard model={model} />);
+    expect(screen.getByText('run.durationUnavailable')).toBeInTheDocument();
+    expect(screen.getByText('run.freshness.live')).toBeInTheDocument();
+  });
+
+  it('times the produced clip, never the produced picture', () => {
+    // `media_duration_ms` on an image would be the generation time wearing the
+    // clothes of a playback length.
+    const model = sharedRunStatusCardModel(
+      run({ schema_version: 1, modality: 'image', phase: 'persisting', media_duration_ms: 8000 }),
+    );
+    render(<RunStatusCard model={model} />);
+    expect(screen.getByTestId('run-status-card-media').textContent).not.toContain('8s');
+  });
+
+  it('folds the raw projection away on a media run, and only there', () => {
+    const media = sharedRunStatusCardModel(run(VIDEO_RESULT));
+    const { unmount } = render(<RunStatusCard model={media} />);
+    const fold = screen.getByTestId('run-status-card-result-fold');
+    // Present and readable on demand, but closed: the JSON is a debugging
+    // detail, not the answer the bubble exists to give.
+    expect(fold.tagName).toBe('DETAILS');
+    expect((fold as HTMLDetailsElement).open).toBe(false);
+    expect(fold.textContent).toContain('run.details');
+    expect(fold.querySelector('pre')?.textContent).toContain('864');
+    unmount();
+
+    const workflow = sharedRunStatusCardModel({ ...run(VIDEO_RESULT), kind: 'workflow' } as SharedRun);
+    render(<RunStatusCard model={workflow} />);
+    expect(screen.queryByTestId('run-status-card-result-fold')).toBeNull();
+    expect(document.querySelector('.run-status-card-result')?.textContent).toContain('864');
+  });
+
+  it('closes the card on the price, outside the media row', () => {
+    const model = sharedRunStatusCardModel(run(VIDEO_RESULT));
+    render(<RunStatusCard model={model} />);
+    const cost = screen.getByTestId('run-status-card-media-cost');
+    // Bottom right of the bubble: the price is what the eye looks for once the
+    // media is there.
+    expect(cost.closest('[data-testid="run-status-card-media"]')).toBeNull();
+    expect(screen.getByTestId('run-status-card').lastElementChild).toBe(cost);
+  });
+
+  it('keeps the run link suppressed across a rehydration', async () => {
+    // The bubble owns a better destination (the asset itself). Self-hydration
+    // rebuilds the model from the server, href included, so a suppression that
+    // only applied to the initial props would come back a second later.
+    const rehydrated = run(VIDEO_RESULT);
+    runsGet.mockResolvedValue(rehydrated);
+    render(<RunStatusCard model={sharedRunStatusCardModel(rehydrated)} runId="job-1" hideRunLink />);
+
+    act(() => MockIntersectionObserver.instances[0].setIntersecting(true));
+    await waitFor(() => expect(runsGet).toHaveBeenCalledWith('job-1'));
+    // The server projection does carry an href — it is the suppression that
+    // has to survive, not the absence of a destination.
+    expect(sharedRunStatusCardModel(rehydrated).href).toBeTruthy();
+    expect(screen.queryByRole('link')).toBeNull();
   });
 
   it('shows BYOK instead of a misleading zero', () => {

@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import '../pages/DiscussionsPage.css';
 import { discussions as discussionsApi } from '../lib/api';
 import type {
@@ -30,12 +30,15 @@ import { MatrixText } from './MatrixText';
 import { LearningsBadge } from './LearningsBadge';
 import { DiscParticipantsHeader } from './DiscParticipantsHeader';
 import { AgentSwitchPicker } from './AgentSwitchPicker';
+import type { AgentSwitchTarget } from './AgentSwitchPicker';
 import { DiscussionSessionBinding } from './DiscussionSessionBinding';
 import { DiscussionTokenCost } from './DiscussionTokenCost';
 import { triggerDownload } from '../lib/downloadBlob';
 import { ContextHelp } from './ContextHelp';
 import type { ExternalApiConnectionView } from '../lib/api';
-import { discussionConnectionId, externalConnectionForDiscussion } from '../lib/externalAgentIdentity';
+import {
+  discussionConnectionId, externalAgentTargets, externalConnectionForDiscussion,
+} from '../lib/externalAgentIdentity';
 
 export interface ChatHeaderProps {
   discussion: Discussion;
@@ -117,6 +120,13 @@ export function ChatHeader({
 }: ChatHeaderProps) {
   const externalConnection = externalConnectionForDiscussion(discussion, externalConnections);
   const externalConnectionId = discussionConnectionId(discussion);
+  // KT-545 DoD #4: switching mid-thread can target a named HTTP connection,
+  // not just a built-in agent type — same source as New Discussion/Quick
+  // Prompt, so the same connection resolves identically everywhere.
+  const connectionTargets = useMemo(
+    () => externalAgentTargets(externalConnections),
+    [externalConnections],
+  );
   // Header-only state
   const [editingTitleId, setEditingTitleId] = useState<string | null>(null);
   const [editingTitleText, setEditingTitleText] = useState('');
@@ -400,6 +410,15 @@ export function ChatHeader({
                   currentConnectionId={externalConnectionId}
                   currentTargetLabel={externalConnection?.display_name}
                   availableAgents={installedAgentsList.map(agent => agent.agent_type)}
+                  availableTargets={[
+                    ...installedAgentsList.map(agent => ({ agent: agent.agent_type })),
+                    ...connectionTargets.map(target => ({
+                      agent: target.agent,
+                      connectionId: target.connectionId,
+                      label: target.label,
+                      modelTiers: target.modelTiers,
+                    })),
+                  ]}
                   disabled={sending || nativeAgentDisabled === null || nativeAgentModeSaving}
                   title={t('disc.switchAgentAndTier')}
                   ariaLabel={t('disc.switchAgentAndTier')}
@@ -418,10 +437,14 @@ export function ChatHeader({
                       : AGENT_MENTIONS.find(mention => mention.type === discussion.agent)?.trigger
                     ?? discussion.agent
                   }
-                  onSelectionChange={async (agent, tier) => {
+                  onTargetSelectionChange={async (target: AgentSwitchTarget, tier) => {
                     try {
-                      await discussionsApi.update(discussion.id, { agent, tier });
-                      onAgentSwitch(agent);
+                      await discussionsApi.update(discussion.id, {
+                        agent: target.agent,
+                        tier,
+                        connection_id: target.connectionId ?? null,
+                      });
+                      onAgentSwitch(target.agent);
                     } catch (err) {
                       toast(String(err), 'error');
                       throw err;

@@ -8101,3 +8101,15 @@
     grid-column: auto;
   }
 }
+
+/* KT-561 — the picker only exists in selection mode, so it must not shift the
+   row when it is absent. */
+.automation-resource-select {
+  flex: 0 0 auto;
+  margin-left: var(--kr-sp-3);
+  accent-color: var(--kr-accent);
+}
+
+.automation-resource-row .disc-item[data-multi-selected='true'] {
+  background: var(--kr-bg-hover);
+}

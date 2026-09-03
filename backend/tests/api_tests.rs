@@ -4514,7 +4514,15 @@ async fn discussion_agent_switch_waits_for_next_user_message() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let body = resp.into_body().collect().await.unwrap().to_bytes();
-    assert!(String::from_utf8_lossy(&body).contains("skipped_no_agent"));
+    let body_str = String::from_utf8_lossy(&body);
+    assert!(body_str.contains("skipped_no_agent"));
+    // The stream ends on purpose, and says so: a client that treats a silent
+    // close as an interruption must not be told this one was interrupted.
+    let skipped_at = body_str.find("skipped_no_agent").unwrap();
+    let complete_at = body_str
+        .find("event: complete")
+        .expect("an intentional close must end with a terminal event");
+    assert!(complete_at > skipped_at, "the terminal event comes last");
 
     let (content, pending): (String, Option<String>) = state
         .db
@@ -7124,6 +7132,143 @@ async fn external_api_nvidia_probes_the_explicit_model_and_preserves_the_catalog
 }
 
 #[tokio::test]
+async fn external_api_nvidia_catalogue_without_modality_metadata_is_capability_unknown() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    // NVIDIA's real `/v1/models` shape: no entry carries `architecture`, so
+    // nothing in the response says which of these are image/video models —
+    // not even the ones that plainly are (KT-531).
+    let upstream = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": [
+                {"id": "meta/llama-3.1-70b-instruct"},
+                {"id": "black-forest-labs/flux.1-dev"}
+            ]
+        })))
+        .expect(1)
+        .mount(&upstream)
+        .await;
+
+    let (_, response) = post_json(
+        test_app(),
+        "/api/external-api/connections/test",
+        serde_json::json!({
+            "endpoint": upstream.uri(),
+            "api_key": "nvapi-test",
+            "origin_preset": "nvidia"
+        }),
+    )
+    .await;
+
+    assert_eq!(response["data"]["status"], "success", "{response}");
+    assert_eq!(response["data"]["image_capability_known"], false);
+    assert_eq!(response["data"]["video_capability_known"], false);
+    // Chat/tier selectors must still see every model — only the image/video
+    // pickers are affected by "capability unknown".
+    assert_eq!(
+        response["data"]["models"],
+        serde_json::json!(["meta/llama-3.1-70b-instruct", "black-forest-labs/flux.1-dev"])
+    );
+}
+
+#[tokio::test]
+async fn external_api_openrouter_reports_capability_known_even_with_an_empty_media_catalogue() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    // OpenRouter's dedicated endpoints answering with zero models is proof of
+    // "no compatible models" (state C), not "unreachable" (state B) — the two
+    // must not collapse into the same `false` flag.
+    let upstream = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/key"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": {"label": "k"}
+        })))
+        .mount(&upstream)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": [{"id": "text/chat", "architecture": {"output_modalities": ["text"]}}]
+        })))
+        .mount(&upstream)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v1/images/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": []})))
+        .mount(&upstream)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v1/videos/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": []})))
+        .mount(&upstream)
+        .await;
+
+    let (_, response) = post_json(
+        test_app(),
+        "/api/external-api/connections/test",
+        serde_json::json!({
+            "endpoint": upstream.uri(),
+            "api_key": "sk-or-v1-test",
+            "origin_preset": "open_router"
+        }),
+    )
+    .await;
+
+    assert_eq!(response["data"]["status"], "success", "{response}");
+    assert_eq!(response["data"]["image_capability_known"], true);
+    assert_eq!(response["data"]["video_capability_known"], true);
+    let catalog = response["data"]["catalog"].as_array().unwrap();
+    assert!(catalog.iter().all(|model| !model["capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|c| c == "image" || c == "video")));
+}
+
+#[tokio::test]
+async fn external_api_other_preset_with_modality_metadata_is_capability_known() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    // Catalog evidence, not the preset name: a self-hosted gateway declared
+    // under the generic "Other" preset gets the strict filter too, the moment
+    // its `/v1/models` publishes the same `output_modalities` field OpenRouter
+    // uses — no `origin_preset == open_router` check involved.
+    let upstream = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": [
+                {"id": "chat-model", "architecture": {"output_modalities": ["text"]}},
+                {"id": "image-model", "architecture": {"output_modalities": ["image"]}}
+            ]
+        })))
+        .expect(1)
+        .mount(&upstream)
+        .await;
+
+    let (_, response) = post_json(
+        test_app(),
+        "/api/external-api/connections/test",
+        serde_json::json!({
+            "endpoint": upstream.uri(),
+            "api_key": null,
+            "origin_preset": "other"
+        }),
+    )
+    .await;
+
+    assert_eq!(response["data"]["status"], "success", "{response}");
+    assert_eq!(response["data"]["image_capability_known"], true);
+    assert_eq!(response["data"]["video_capability_known"], true);
+}
+
+#[tokio::test]
 async fn external_api_test_route_returns_catalogue_without_returning_the_credential() {
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -8895,6 +9040,7 @@ async fn ws_chat_message_inserts_into_shared_discussion() {
     // Create a discussion with a shared_id
     let now = chrono::Utc::now();
     let disc = kronn::models::Discussion {
+        connection_id: None,
         awaiting_agent: false,
         agent_running: false,
         id: "disc-chat-test".into(),
@@ -8919,7 +9065,7 @@ async fn ws_chat_message_inserts_into_shared_discussion() {
         pin_first_message: false,
         summary_cache: None,
         summary_up_to_msg_idx: None,
-        summary_strategy: kronn::models::SummaryStrategy::Auto,
+        summary_strategy: kronn::models::SummaryStrategy::OnDemand,
         introspection_call_count: 0,
         shared_id: Some("shared-abc-123".into()),
         shared_with: vec![],
@@ -9371,6 +9517,10 @@ async fn send_message_to_no_agent_disc_skips_the_runner() {
         body_str.contains("skipped_no_agent"),
         "no_agent disc must skip the runner, got: {body_str}"
     );
+    assert!(
+        body_str.contains("event: complete"),
+        "a skipped turn is a finished stream, not an interrupted one: {body_str}"
+    );
 
     // Plural explicit targets still persist in text order (deduplicated), even
     // though no-agent mode intentionally creates no native jobs.
@@ -9498,6 +9648,7 @@ async fn ws_chat_message_idempotent() {
     // Create a shared discussion
     let now = chrono::Utc::now();
     let disc = kronn::models::Discussion {
+        connection_id: None,
         awaiting_agent: false,
         agent_running: false,
         id: "disc-idempotent".into(),
@@ -9522,7 +9673,7 @@ async fn ws_chat_message_idempotent() {
         pin_first_message: false,
         summary_cache: None,
         summary_up_to_msg_idx: None,
-        summary_strategy: kronn::models::SummaryStrategy::Auto,
+        summary_strategy: kronn::models::SummaryStrategy::OnDemand,
         introspection_call_count: 0,
         shared_id: Some("shared-idem-001".into()),
         shared_with: vec![],
@@ -10694,9 +10845,11 @@ async fn batch_run_isolated_without_project_id_fails_early() {
         app,
         &format!("/api/quick-prompts/{}/batch", qp_id),
         serde_json::json!({
+            // The prompt comes from the QP's template; an item only carries
+            // the values rendered into it.
             "items": [
-                { "title": "EW-1", "prompt": "Analyse EW-1" },
-                { "title": "EW-2", "prompt": "Analyse EW-2" },
+                { "title": "EW-1", "variables": { "ticket": "EW-1" } },
+                { "title": "EW-2", "variables": { "ticket": "EW-2" } },
             ],
             "batch_name": "Should-fail batch",
             "workspace_mode": "Isolated",
@@ -10716,6 +10869,54 @@ async fn batch_run_isolated_without_project_id_fails_early() {
         "Error should mention Isolated + project requirement: got {:?}",
         err
     );
+}
+
+/// KT-557 — a batch that cannot run must not leave resolved values behind.
+#[tokio::test]
+async fn batch_run_refused_for_isolated_writes_no_variable_snapshot() {
+    // Preparing the variables WRITES them, so the structural refusal has to
+    // come first. Checked on the storage rather than on the message: an order
+    // that changed back would still return the same error text.
+    let state = test_state();
+    let app = kronn::build_router_with_auth(state.clone(), false);
+
+    let (_, json) = post_json(
+        app.clone(),
+        "/api/quick-prompts",
+        serde_json::json!({
+            "name": "Isolated QP",
+            "prompt_template": "Analyse {{ticket}}",
+            "variables": [{ "name": "ticket", "label": "Ticket", "placeholder": "EW-1" }],
+            "agent": "ClaudeCode",
+        }),
+    )
+    .await;
+    let qp_id = json["data"]["id"].as_str().unwrap().to_string();
+
+    let (_, json) = post_json(
+        app,
+        &format!("/api/quick-prompts/{}/batch", qp_id),
+        serde_json::json!({
+            "items": [{ "title": "EW-1", "variables": { "ticket": "EW-1" } }],
+            "batch_name": "Should-fail batch",
+            "workspace_mode": "Isolated",
+        }),
+    )
+    .await;
+    assert_eq!(json["success"], false, "got {json}");
+
+    let snapshots: i64 = state
+        .db
+        .with_read_conn(|connection| {
+            Ok(connection.query_row(
+                "SELECT COUNT(*) FROM execution_variable_snapshots",
+                [],
+                |row| row.get(0),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(snapshots, 0, "a refused batch must persist nothing");
 }
 
 #[tokio::test]
@@ -10745,7 +10946,7 @@ async fn batch_run_direct_mode_works_without_project_id() {
         app,
         &format!("/api/quick-prompts/{}/batch", qp_id),
         serde_json::json!({
-            "items": [{ "title": "EW-1", "prompt": "Analyse EW-1" }],
+            "items": [{ "title": "EW-1", "variables": { "ticket": "EW-1" } }],
             "batch_name": "Analysis batch",
             // workspace_mode omitted → defaults to Direct on the backend
         }),
@@ -10863,6 +11064,7 @@ async fn insert_test_mode_discussion(
 ) {
     let now = chrono::Utc::now();
     let disc = kronn::models::Discussion {
+        connection_id: None,
         awaiting_agent: false,
         agent_running: false,
         id: id.into(),
@@ -10887,7 +11089,7 @@ async fn insert_test_mode_discussion(
         pin_first_message: false,
         summary_cache: None,
         summary_up_to_msg_idx: None,
-        summary_strategy: kronn::models::SummaryStrategy::Auto,
+        summary_strategy: kronn::models::SummaryStrategy::OnDemand,
         introspection_call_count: 0,
         shared_id: None,
         shared_with: vec![],
@@ -13134,6 +13336,7 @@ mod cold_api_handlers_tests {
 
         let disc_id = format!("disc-{}", uuid::Uuid::new_v4());
         let disc = kronn::models::Discussion {
+            connection_id: None,
             awaiting_agent: false,
             agent_running: false,
             id: disc_id.clone(),
@@ -13158,7 +13361,7 @@ mod cold_api_handlers_tests {
             pin_first_message: false,
             summary_cache: None,
             summary_up_to_msg_idx: None,
-            summary_strategy: kronn::models::SummaryStrategy::Auto,
+            summary_strategy: kronn::models::SummaryStrategy::OnDemand,
             introspection_call_count: 0,
             shared_id: None,
             shared_with: vec![],
@@ -16668,6 +16871,324 @@ async fn media_transitions_broadcast_a_shared_run_updated_event() {
         kronn::models::WsMessage::SharedRunUpdated { run_id } => assert_eq!(run_id, job_id),
         other => panic!("expected SharedRunUpdated, got {other:?}"),
     }
+}
+
+/// Inserts an image asset into a discussion, so a generation can name it.
+async fn seed_reference_image(
+    state: &kronn::AppState,
+    id: &str,
+    discussion_id: &str,
+    mime_type: &str,
+    disk_path: Option<&str>,
+) {
+    let id = id.to_string();
+    let discussion_id = discussion_id.to_string();
+    let mime_type = mime_type.to_string();
+    let disk_path = disk_path.map(str::to_string);
+    state
+        .db
+        .with_conn(move |connection| {
+            let now = chrono::Utc::now().to_rfc3339();
+            connection.execute(
+                "INSERT INTO context_files
+                    (id, discussion_id, filename, mime_type, original_size,
+                     extracted_size, extracted_text, disk_path, created_at)
+                 VALUES (?1, ?2, 'frame.png', ?3, 2048, 0, '', ?4, ?5)",
+                rusqlite::params![id, discussion_id, mime_type, disk_path, now],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
+/// KT-551 — a source image is an id inside the room, never a path.
+///
+/// Each of these is refused before anything durable is written and long before
+/// the provider is paid. The catalogue is never consulted on this path: every
+/// case fails on the request itself, so the assertions hold with no network.
+#[tokio::test]
+async fn media_generate_refuses_a_source_image_it_cannot_vouch_for() {
+    let state = test_state();
+    seed_media_connection(&state, None, Some("bytedance/seedance-2.0-mini")).await;
+    state
+        .db
+        .with_conn(|connection| {
+            let now = chrono::Utc::now().to_rfc3339();
+            connection.execute(
+                "INSERT INTO discussions (id, title, created_at, updated_at)
+                 VALUES ('disc-other', 'Another room', ?1, ?1)",
+                [&now],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    seed_reference_image(&state, "asset-elsewhere", "disc-other", "image/png", Some("/tmp/x.png")).await;
+    seed_reference_image(&state, "asset-not-image", "disc-media", "text/csv", Some("/tmp/x.csv")).await;
+    seed_reference_image(&state, "asset-no-file", "disc-media", "image/png", None).await;
+    let app = build_router_with_auth(state, false);
+
+    for (label, extra, expected) in [
+        (
+            "a mode with no image describes nothing",
+            serde_json::json!({ "reference_mode": "first_frame" }),
+            "requires at least one reference asset",
+        ),
+        (
+            "an image with no mode would silently become a plain text-to-video",
+            serde_json::json!({ "reference_asset_id": "asset-no-file" }),
+            "reference_mode is required",
+        ),
+        (
+            "an asset of another discussion",
+            serde_json::json!({ "reference_asset_id": "asset-elsewhere", "reference_mode": "first_frame" }),
+            "does not belong to this discussion",
+        ),
+        (
+            "an asset that is not an image",
+            serde_json::json!({ "reference_asset_id": "asset-not-image", "reference_mode": "first_frame" }),
+            "is not an image",
+        ),
+        (
+            "an asset whose bytes were never stored",
+            serde_json::json!({ "reference_asset_id": "asset-no-file", "reference_mode": "first_frame" }),
+            "has no stored file",
+        ),
+        (
+            "an asset that does not exist",
+            serde_json::json!({ "reference_asset_id": "asset-ghost", "reference_mode": "reference" }),
+            "unknown reference asset",
+        ),
+        (
+            // KT-555 — a frame is one exact picture at one end of a clip.
+            // Several would be silently reduced to one, after billing.
+            "two images for a single frame",
+            serde_json::json!({
+                "reference_asset_ids": ["asset-no-file", "asset-not-image"],
+                "reference_mode": "last_frame"
+            }),
+            "takes a single image",
+        ),
+        (
+            "an unknown id inside a list is caught like a lone one",
+            serde_json::json!({
+                "reference_asset_ids": ["asset-ghost"], "reference_mode": "reference"
+            }),
+            "unknown reference asset",
+        ),
+    ] {
+        let mut body = serde_json::json!({
+            "connection_id": "conn-media", "modality": "video",
+            "prompt": "un renard", "discussion_id": "disc-media"
+        });
+        for (key, value) in extra.as_object().unwrap() {
+            body[key] = value.clone();
+        }
+        let (_, answer) = post_json(app.clone(), "/api/media/generate", body).await;
+        assert_eq!(answer["success"], false, "{label} must be refused");
+        let error = answer["error"].as_str().unwrap_or_default();
+        assert!(
+            error.contains(expected),
+            "{label}: expected a message naming '{expected}', got '{error}'"
+        );
+    }
+}
+
+/// KT-551 — a provider that takes no source image refuses before a job exists.
+///
+/// NVIDIA serves no media catalogue, so the per-model capability check has
+/// nothing to read and lets the request through. The refusal then surfaces in
+/// the worker, where it cannot be told apart from a provider outage and is
+/// retried until the deadline expires. What the caller sees is a generation
+/// that hangs, then dies, for a reason nobody names.
+#[tokio::test]
+async fn media_generate_refuses_a_source_image_on_a_provider_that_takes_none() {
+    let state = test_state();
+    seed_media_connection(&state, None, Some("bytedance/seedance-2.0-mini")).await;
+    state
+        .db
+        .with_conn(|connection| {
+            let now = chrono::Utc::now().to_rfc3339();
+            connection.execute(
+                "INSERT INTO external_api_connections
+                    (id, display_name, mention_alias, endpoint, credential_slug,
+                     origin_preset, created_at, updated_at, video_model)
+                 VALUES ('conn-nvidia', 'NVIDIA', 'nvidia',
+                         'https://integrate.api.nvidia.com/v1', 'conn-nvidia', 'nvidia',
+                         ?1, ?1, 'nvidia/some-video-model')",
+                [&now],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    seed_reference_image(&state, "asset-src", "disc-media", "image/png", Some("/tmp/src.png")).await;
+    let app = build_router_with_auth(state.clone(), false);
+
+    let (status, body) = post_json(
+        app,
+        "/api/media/generate",
+        serde_json::json!({
+            "connection_id": "conn-nvidia", "modality": "video",
+            "prompt": "une suite du plan", "discussion_id": "disc-media",
+            "reference_asset_id": "asset-src", "reference_mode": "first_frame"
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["success"], false, "got {body}");
+    let error = body["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("does not accept a source image"),
+        "the refusal must name what is missing, got '{error}'"
+    );
+
+    // The point of refusing here rather than in the worker: nothing was
+    // queued, so there is no job to watch fail and nothing to cancel.
+    let queued: i64 = state
+        .db
+        .with_read_conn(|connection| {
+            Ok(connection.query_row("SELECT COUNT(*) FROM media_jobs", [], |row| row.get(0))?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(queued, 0, "a refused generation must not leave a job behind");
+}
+
+/// KT-555 — several reference images reach the job, in the order chosen.
+#[tokio::test]
+async fn media_generate_records_every_reference_image_for_an_image() {
+    let state = test_state();
+    seed_media_connection(&state, Some("google/gemini-3-pro-image"), None).await;
+    seed_reference_image(&state, "asset-a", "disc-media", "image/png", Some("/tmp/a.png")).await;
+    seed_reference_image(&state, "asset-b", "disc-media", "image/jpeg", Some("/tmp/b.jpg")).await;
+    let app = build_router_with_auth(state.clone(), false);
+
+    let (status, body) = post_json(
+        app.clone(),
+        "/api/media/generate",
+        serde_json::json!({
+            "connection_id": "conn-media", "modality": "image",
+            "prompt": "un renard origami", "discussion_id": "disc-media",
+            "reference_asset_ids": ["asset-a", "asset-b"],
+            "reference_mode": "reference"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["success"], true, "got {body}");
+    let job_id = body["data"]["job_id"].as_str().unwrap().to_string();
+
+    let stored = state
+        .db
+        .with_read_conn(move |connection| {
+            kronn::db::media_jobs::get(connection, &job_id)
+        })
+        .await
+        .unwrap()
+        .expect("the job was written");
+    // Providers weigh references by position, so the order the caller chose is
+    // the order the job keeps.
+    assert_eq!(
+        stored.params.reference_ids(),
+        vec!["asset-a".to_string(), "asset-b".to_string()]
+    );
+    // The plural list is the contract now; the single-image field is only ever
+    // read, never written again.
+    assert!(stored.params.reference_asset_id.is_none());
+}
+
+#[tokio::test]
+async fn media_generate_refuses_a_source_image_before_creating_anything() {
+    // The refusal must leave no trace: an orphan anchor message would show a
+    // generation nobody launched, at a position no job will ever fill.
+    let state = test_state();
+    seed_media_connection(&state, None, Some("bytedance/seedance-2.0-mini")).await;
+    let app = build_router_with_auth(state.clone(), false);
+
+    let (_, answer) = post_json(
+        app,
+        "/api/media/generate",
+        serde_json::json!({
+            "connection_id": "conn-media", "modality": "video",
+            "prompt": "un renard", "discussion_id": "disc-media",
+            "reference_asset_id": "asset-ghost", "reference_mode": "first_frame"
+        }),
+    )
+    .await;
+    assert_eq!(answer["success"], false);
+
+    let counts = state
+        .db
+        .with_read_conn(|connection| {
+            let messages: i64 = connection.query_row(
+                "SELECT COUNT(*) FROM messages WHERE discussion_id = 'disc-media'",
+                [],
+                |row| row.get(0),
+            )?;
+            let jobs: i64 =
+                connection.query_row("SELECT COUNT(*) FROM media_jobs", [], |row| row.get(0))?;
+            Ok((messages, jobs))
+        })
+        .await
+        .unwrap();
+    assert_eq!(counts, (0, 0), "a refused request must write nothing");
+}
+
+#[tokio::test]
+async fn deleting_a_generated_asset_stops_its_bubble_offering_it() {
+    // KT-554 — the file is gone; a run still pointing at it would have the
+    // bubble promise "open the media" on bytes that no longer exist, and the
+    // click could only fail. Cleared server-side so the answer survives a
+    // reload rather than being patched in the UI.
+    let state = test_state();
+    seed_media_connection(&state, Some("meta/muse-image"), None).await;
+    seed_reference_image(&state, "asset-produced", "disc-media", "image/png", Some("/tmp/out.png")).await;
+    state
+        .db
+        .with_conn(|connection| {
+            let now = chrono::Utc::now().to_rfc3339();
+            connection.execute(
+                "INSERT INTO media_jobs
+                    (id, modality, status, connection_id, model, prompt, params_json,
+                     discussion_id, context_file_id, attempts, created_at, updated_at,
+                     scheduled_at, deadline_at)
+                 VALUES ('job-done', 'image', 'completed', 'conn-media', 'meta/muse-image',
+                         'un chat', '{}', 'disc-media', 'asset-produced', 1, ?1, ?1, ?1, ?1)",
+                [&now],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    let app = build_router_with_auth(state.clone(), false);
+    let response = app
+        .oneshot(
+            axum::http::Request::builder()
+                .method("DELETE")
+                .uri("/api/discussions/disc-media/context-files/asset-produced")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+
+    let linked: Option<String> = state
+        .db
+        .with_read_conn(|connection| {
+            Ok(connection.query_row(
+                "SELECT context_file_id FROM media_jobs WHERE id = 'job-done'",
+                [],
+                |row| row.get(0),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(linked, None, "the job must no longer point at a deleted file");
 }
 
 #[tokio::test]

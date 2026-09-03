@@ -8896,12 +8896,19 @@ class MentionConventionTests(unittest.TestCase):
             self.assertIn(trigger, description)
 
     def test_disc_join_says_to_stay_and_follow_the_room(self):
+        # The rule is pinned where each reader meets it. The description is
+        # billed on every turn, so it carries only what a model must know
+        # before calling; the manual carries the rest. Asserting the long form
+        # in the description would pit this test against the surface ceiling.
         description = self._tool("disc_join")["description"]
-        self.assertIn("JOINING IS NOT THE TASK", description)
+        self.assertIn("joining is not the task", description.lower())
         self.assertIn("disc_wait_for_peer", description)
-        self.assertIn("plan_get", description)
-        self.assertIn("BEFORE", description)
         self.assertIn("disc_append", description)
+
+        manual = self.mod.TOOL_MANUALS["disc_join"]
+        self.assertIn("plan_get", manual)
+        self.assertIn("before", manual.lower())
+        self.assertIn("disc_wait_for_peer", manual)
 
     def test_wait_contract_pins_read_cursor_and_exact_ack_ids(self):
         description = self._tool("disc_wait_for_peer")["description"]
@@ -10556,6 +10563,138 @@ class TaskAckTests(unittest.TestCase):
         ):
             source = inspect.getsource(getattr(self.mod, name))
             self.assertIn("_task_ack", source, f"{name} still returns the whole task")
+
+
+class MediaGenerateAudioTests(unittest.TestCase):
+    """KT-553 — the soundtrack is a decision, never a provider default.
+
+    Omitting `generate_audio` used to let the provider add a soundtrack on its
+    own. That is how a clip got refused for audio copyright with nothing in the
+    request to explain it, so the tool now states the value it means.
+    """
+
+    def setUp(self):
+        self.mod = _load_module()
+        self.fake_http = mock.MagicMock(return_value={
+            "success": True,
+            "data": {"job_id": "job-1", "status": "pending", "model": "m"},
+        })
+        patch = mock.patch.object(self.mod, "_http", self.fake_http)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def _body(self, args):
+        self.mod.call_media_generate({
+            "connection_id": "conn-1",
+            "prompt": "un renard en origami",
+            "discussion_id": "disc-1",
+            **args,
+        })
+        return self.fake_http.call_args.args[2]
+
+    def test_video_carries_audio_true_when_the_caller_says_nothing(self):
+        body = self._body({"modality": "video"})
+        self.assertIs(body["generate_audio"], True)
+
+    def test_an_agent_can_ask_for_a_silent_clip(self):
+        self.assertIs(self._body({"modality": "video", "generate_audio": False})["generate_audio"], False)
+
+    def test_an_image_is_never_asked_for_a_soundtrack(self):
+        self.assertNotIn("generate_audio", self._body({"modality": "image"}))
+
+    def test_the_schema_states_the_real_default(self):
+        """An agent reads the description, not our source: if the default is
+        not written there, `false` is never passed and the option is dead."""
+        tool = next(t for t in self.mod.TOOLS if t["name"] == "media_generate")
+        described = tool["inputSchema"]["properties"]["generate_audio"]["description"]
+        self.assertIn("DEFAULTS TO TRUE", described)
+        self.assertIn("copyright", described.lower())
+
+
+class MediaGenerateReferenceTests(unittest.TestCase):
+    """KT-551 — a source image is an id in the room, never a path or a URL."""
+
+    def setUp(self):
+        self.mod = _load_module()
+        self.fake_http = mock.MagicMock(return_value={
+            "success": True,
+            "data": {"job_id": "job-1", "status": "pending", "model": "m"},
+        })
+        patch = mock.patch.object(self.mod, "_http", self.fake_http)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def _call(self, **extra):
+        self.mod.call_media_generate({
+            "connection_id": "conn-1",
+            "modality": "video",
+            "prompt": "un renard",
+            "discussion_id": "disc-1",
+            **extra,
+        })
+        return self.fake_http.call_args.args[2]
+
+    def test_the_pair_travels_to_the_backend(self):
+        body = self._call(reference_asset_id="asset-7", reference_mode="first_frame")
+        # The plural list is the contract; a single id is folded into it.
+        self.assertEqual(body["reference_asset_ids"], ["asset-7"])
+        self.assertEqual(body["reference_mode"], "first_frame")
+
+    def test_an_image_takes_several_references_in_the_order_given(self):
+        # KT-555 — providers weigh references by position, so the order the
+        # agent chose is the order that leaves.
+        self.mod.call_media_generate({
+            "connection_id": "conn-1", "modality": "image", "prompt": "p",
+            "discussion_id": "disc-1",
+            "reference_asset_ids": ["asset-a", "asset-b"],
+            "reference_mode": "reference",
+        })
+        body = self.fake_http.call_args.args[2]
+        self.assertEqual(body["reference_asset_ids"], ["asset-a", "asset-b"])
+
+    def test_a_frame_takes_one_picture_and_says_so(self):
+        # Keeping one of them silently would bill the generation for something
+        # else, and only the result would show it.
+        with self.assertRaises(RuntimeError):
+            self._call(
+                reference_asset_ids=["asset-a", "asset-b"],
+                reference_mode="last_frame",
+            )
+        self.fake_http.assert_not_called()
+
+    def test_both_forms_together_never_send_the_same_id_twice(self):
+        body = self._call(
+            reference_asset_id="asset-a",
+            reference_asset_ids=["asset-a"],
+            reference_mode="first_frame",
+        )
+        self.assertEqual(body["reference_asset_ids"], ["asset-a"])
+
+    def test_half_a_pair_is_refused_before_any_http(self):
+        # Sent alone, the id would be read as a plain text-to-video and billed
+        # as one — the generation would succeed and be the wrong thing.
+        for extra in ({"reference_asset_id": "asset-7"}, {"reference_mode": "last_frame"}):
+            with self.assertRaises(RuntimeError):
+                self._call(**extra)
+            self.fake_http.assert_not_called()
+
+    def test_an_image_generation_is_never_given_a_frame(self):
+        with self.assertRaises(RuntimeError):
+            self.mod.call_media_generate({
+                "connection_id": "conn-1", "modality": "image", "prompt": "p",
+                "discussion_id": "disc-1",
+                "reference_asset_id": "asset-7", "reference_mode": "first_frame",
+            })
+        self.fake_http.assert_not_called()
+
+    def test_the_schema_tells_an_agent_where_the_images_come_from(self):
+        tool = next(t for t in self.mod.TOOLS if t["name"] == "media_generate")
+        described = tool["inputSchema"]["properties"]["reference_asset_ids"]["description"]
+        self.assertIn("THIS DISCUSSION", described)
+        self.assertIn("never paths or URLs", described)
+        self.assertIn("reference_mode", described)
+        # An agent must know the ceiling is the model's, not a constant.
+        self.assertIn("advertises", described)
 
 
 if __name__ == "__main__":

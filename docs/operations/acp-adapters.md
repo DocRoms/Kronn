@@ -112,6 +112,13 @@ project path never reuses that identifier.
   yet. A project mixing safe and credential-bearing entries is therefore
   denied as a whole by Claude's strict config path; Codex/native ACP retain
   only the independently reconstructed safe entries.
+- **An agent reached over ACP reports no spend.** The protocol's `usage`
+  carries token counts and nothing else, the model catalogue records a
+  qualitative hint (free / paid / unknown) rather than a per-token price, and
+  the spend report reads the local logs of Claude, Codex and Gemini only. So an
+  ACP agent's tokens are visible while its cost is not, and it does not appear
+  in the usage breakdown at all. Read that absence as unknown, never as free.
+
 - **`codex exec resume` cannot change the sandbox mode** — verified absent
   from `codex exec resume --help` though present on `codex exec` — so a
   resumed Codex adapter session keeps whatever sandbox policy its first turn

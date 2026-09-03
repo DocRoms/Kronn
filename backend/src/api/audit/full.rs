@@ -1183,10 +1183,12 @@ pub async fn full_audit(
                                         }).to_string()
                                     );
                                 }
+                                // An audit is a one-shot run: nothing to resume.
                                 runner::StreamJsonEvent::Text(_)
                                 | runner::StreamJsonEvent::TerminalError(_)
                                 | runner::StreamJsonEvent::ToolInputDelta(_)
                                 | runner::StreamJsonEvent::ToolEnd
+                                | runner::StreamJsonEvent::SessionId(_)
                                 | runner::StreamJsonEvent::Skip => {}
                             }
                         }
@@ -1937,6 +1939,7 @@ pub async fn full_audit(
             "Validation audit AI".to_string()
         };
         let discussion = Discussion {
+            connection_id: None,
             awaiting_agent: false,
             agent_running: false,
             id: discussion_id.clone(),
@@ -1965,7 +1968,7 @@ pub async fn full_audit(
             worktree_branch: None,
             summary_cache: None,
             summary_up_to_msg_idx: None,
-            summary_strategy: crate::models::SummaryStrategy::Auto,
+            summary_strategy: crate::models::SummaryStrategy::OnDemand,
             introspection_call_count: 0,
             shared_id: None,
             shared_with: vec![],

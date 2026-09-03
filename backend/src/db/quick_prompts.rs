@@ -400,8 +400,33 @@ pub fn current_version_index(conn: &Connection, qp_id: &str) -> Result<Option<u3
 }
 
 pub fn delete_quick_prompt(conn: &Connection, id: &str) -> Result<()> {
+    // `quick_prompt_versions` carries no foreign key: without this line the
+    // snapshots outlive the prompt they belong to.
+    conn.execute(
+        "DELETE FROM quick_prompt_versions WHERE quick_prompt_id = ?1",
+        params![id],
+    )?;
     conn.execute("DELETE FROM quick_prompts WHERE id = ?1", params![id])?;
     Ok(())
+}
+
+/// Workflow steps that name this prompt — as the fan-out prompt, as a chained
+/// one, or directly. Each of them fails on its next run once the prompt is
+/// gone, so a deletion says this number before it is confirmed (KT-561).
+pub fn count_workflow_step_usage(conn: &Connection, id: &str) -> Result<u32> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*)
+           FROM workflows w, json_each(w.steps_json) s
+          WHERE json_extract(s.value, '$.batch_quick_prompt_id') = ?1
+             OR json_extract(s.value, '$.quick_prompt_id') = ?1
+             OR EXISTS (
+                  SELECT 1 FROM json_each(json_extract(s.value, '$.batch_chain_prompt_ids')) c
+                   WHERE c.value = ?1
+                )",
+        params![id],
+        |row| row.get(0),
+    )?;
+    Ok(n as u32)
 }
 
 #[cfg(test)]
@@ -592,5 +617,56 @@ mod tests {
         let reloaded = get_quick_prompt(&conn, "qp-U").unwrap().unwrap();
         assert_eq!(reloaded.name, "Updated");
         assert_eq!(reloaded.prompt_template, "new template");
+    }
+
+    fn insert_workflow_with_steps(conn: &Connection, id: &str, steps_json: &str) {
+        conn.execute(
+            "INSERT INTO workflows (id, name, trigger_json, steps_json, created_at, updated_at)
+             VALUES (?1, ?1, '{}', ?2, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+            params![id, steps_json],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn deleting_a_prompt_takes_its_versions_with_it() {
+        let conn = test_conn();
+        insert_quick_prompt(&conn, &mk_qp("qp-1", "Review")).unwrap();
+        insert_quick_prompt(&conn, &mk_qp("qp-2", "Summary")).unwrap();
+        let versions = |id: &str| -> i64 {
+            conn.query_row(
+                "SELECT COUNT(*) FROM quick_prompt_versions WHERE quick_prompt_id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        assert!(versions("qp-1") >= 1, "a new prompt seeds its v1 snapshot");
+
+        delete_quick_prompt(&conn, "qp-1").unwrap();
+
+        assert_eq!(versions("qp-1"), 0, "no snapshot may outlive its prompt");
+        assert!(versions("qp-2") >= 1, "the neighbour keeps its history");
+    }
+
+    #[test]
+    fn usage_counts_every_step_that_names_the_prompt_and_nothing_else() {
+        let conn = test_conn();
+        insert_workflow_with_steps(
+            &conn,
+            "wf-a",
+            r#"[{"batch_quick_prompt_id":"qp-1"},{"quick_prompt_id":"qp-1"},{"quick_api_id":"qp-1"}]"#,
+        );
+        insert_workflow_with_steps(
+            &conn,
+            "wf-b",
+            r#"[{"batch_quick_prompt_id":"qp-9","batch_chain_prompt_ids":["qp-3","qp-1"]},{"name":"plain"}]"#,
+        );
+
+        // Two direct names in wf-a, one chained name in wf-b. The `quick_api_id`
+        // that happens to hold the same string is an API reference, not a prompt.
+        assert_eq!(count_workflow_step_usage(&conn, "qp-1").unwrap(), 3);
+        assert_eq!(count_workflow_step_usage(&conn, "qp-3").unwrap(), 1);
+        assert_eq!(count_workflow_step_usage(&conn, "qp-none").unwrap(), 0);
     }
 }

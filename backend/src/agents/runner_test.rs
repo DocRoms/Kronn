@@ -20,12 +20,18 @@ mod tests {
         .unwrap();
 
         let servers = acp_project_mcp_servers(project.path().to_str().unwrap());
+        // Kronn's own bridge rides along and is asserted on its own below;
+        // what this test guards is which PROJECT servers survive the filter.
+        let project_servers: Vec<_> = servers
+            .iter()
+            .filter(|server| server.id != "kronn-internal")
+            .collect();
 
-        assert_eq!(servers.len(), 1);
-        assert_eq!(servers[0].id, "safe");
-        assert_eq!(servers[0].command, "safe-server");
-        assert_eq!(servers[0].args, vec!["--project"]);
-        assert!(servers[0].allowed_tools.is_empty());
+        assert_eq!(project_servers.len(), 1);
+        assert_eq!(project_servers[0].id, "safe");
+        assert_eq!(project_servers[0].command, "safe-server");
+        assert_eq!(project_servers[0].args, vec!["--project"]);
+        assert!(project_servers[0].allowed_tools.is_empty());
     }
 
     #[test]
@@ -46,17 +52,59 @@ mod tests {
         .unwrap();
 
         let servers = acp_project_mcp_servers(project.path().to_str().unwrap());
+        let project_servers: Vec<_> = servers
+            .iter()
+            .filter(|server| server.id != "kronn-internal")
+            .collect();
 
         assert_eq!(
-            servers.len(),
+            project_servers.len(),
             1,
             "the leaky server must be dropped wholesale"
         );
-        assert_eq!(servers[0].id, "safe");
+        assert_eq!(project_servers[0].id, "safe");
         assert!(servers.iter().all(|server| !server
             .args
             .iter()
             .any(|arg| arg.contains("sk-super-secret"))));
+    }
+
+    /// KT-543 — an ACP agent that cannot reach the bridge is mute in the room.
+    ///
+    /// Claude receives `kronn-internal` through `--mcp-config` and Codex
+    /// through its TOML override. The native ACP route had no equivalent, so
+    /// OpenCode joined discussions it could not answer in. The registry now
+    /// carries it, and carries it even with no project attached — the bridge
+    /// is about the room, not about a checkout.
+    #[test]
+    #[serial]
+    fn acp_mcp_registry_carries_the_kronn_bridge_with_no_credential_in_the_payload() {
+        let script = tempfile::NamedTempFile::new().unwrap();
+        let previous = std::env::var("KRONN_DISC_INTROSPECTION_MCP").ok();
+        std::env::set_var("KRONN_DISC_INTROSPECTION_MCP", script.path());
+
+        let with_no_project = acp_project_mcp_servers("");
+        let bridge = with_no_project
+            .iter()
+            .find(|server| server.id == "kronn-internal")
+            .expect("the bridge does not depend on a project being attached");
+        assert_eq!(bridge.command, "python3");
+        assert_eq!(bridge.args, vec![script.path().to_string_lossy().to_string()]);
+
+        // The whole point of passing it this way: the protocol carries the
+        // command and nothing else. The bridge reads its token from the
+        // environment it inherits from the process Kronn spawned, so no
+        // credential is ever serialized into an ACP payload.
+        assert!(bridge.allowed_tools.is_empty());
+        assert!(
+            !bridge.args.iter().any(|arg| arg.contains("KRONN_AUTH_TOKEN")),
+            "no credential, and no placeholder for one, may travel over ACP"
+        );
+
+        match previous {
+            Some(value) => std::env::set_var("KRONN_DISC_INTROSPECTION_MCP", value),
+            None => std::env::remove_var("KRONN_DISC_INTROSPECTION_MCP"),
+        }
     }
 
     /// Drive the production `forward_chat_line` with Ollama's codec, in the
@@ -384,6 +432,29 @@ mod tests {
         ));
         assert!(matches!(
             parse_claude_stream_line("  "),
+            StreamJsonEvent::Skip
+        ));
+    }
+
+    #[test]
+    fn the_init_line_yields_the_conversation_id() {
+        // Shape captured from a real `claude -p --output-format stream-json`
+        // run: the id is on the FIRST line, before any work, which is why a
+        // turn cut short still leaves something resumable.
+        let line = r#"{"type":"system","subtype":"init","cwd":"/tmp/x","session_id":"2c19fd03-fde4-4c0d-a893-adae1d816df2","tools":["Bash"]}"#;
+        match parse_claude_stream_line(line) {
+            StreamJsonEvent::SessionId(id) => {
+                assert_eq!(id, "2c19fd03-fde4-4c0d-a893-adae1d816df2")
+            }
+            other => panic!("expected SessionId, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_system_line_without_an_id_is_skipped() {
+        let line = r#"{"type":"system","subtype":"something_else"}"#;
+        assert!(matches!(
+            parse_claude_stream_line(line),
             StreamJsonEvent::Skip
         ));
     }
@@ -5473,6 +5544,7 @@ Suite de la réponse.";
             None,
             true,
             Some(worktree.path()),
+            None,
         );
 
         assert!(!args.contains(&"--dangerously-skip-permissions".to_string()));
@@ -5537,6 +5609,7 @@ Suite de la réponse.";
             None,
             true,
             Some(worktree.path()),
+            None,
         );
         let mcp_config = r#"{"mcpServers":{"kronn-internal":{}}}"#;
         super::super::insert_claude_mcp_config(&mut args, mcp_config.into(), true);
@@ -5608,6 +5681,7 @@ Suite de la réponse.";
             None,
             true,
             Some(worktree.path()),
+            None,
         );
         let stdin_prompt = args.pop().unwrap();
 
@@ -5872,6 +5946,110 @@ Suite de la réponse.";
     }
 
     #[test]
+    fn a_nul_byte_is_named_by_its_carrier_never_by_its_value() {
+        let secret_with_nul = "sk-ant-must-not-leak\0trailing";
+
+        // In an environment variable — the likeliest source: a key decrypted
+        // with a stale material, or a config read as UTF-16.
+        let mut command = crate::core::cmd::async_cmd("claude");
+        command
+            .args(["--print", "hello"])
+            .env("ANTHROPIC_API_KEY", secret_with_nul);
+        let offender =
+            super::super::nul_byte_offender(&command).expect("a NUL byte must be detected");
+        assert!(
+            offender.contains("ANTHROPIC_API_KEY"),
+            "the variable must be named, got: {offender}"
+        );
+        assert!(
+            !offender.contains("must-not-leak"),
+            "the value must never be reported, got: {offender}"
+        );
+
+        // In an argument — identified by the flag it follows, since positions
+        // shift between agents.
+        let mut command = crate::core::cmd::async_cmd("claude");
+        command.args([
+            "--print",
+            "--append-system-prompt",
+            "context with a \0 inside",
+            "hello",
+        ]);
+        let offender =
+            super::super::nul_byte_offender(&command).expect("a NUL byte must be detected");
+        assert!(
+            offender.contains("--append-system-prompt"),
+            "the flag must be named, got: {offender}"
+        );
+        assert!(!offender.contains("context with"));
+
+        // The working directory: Kronn derives it from a project path it did
+        // not necessarily create, and it fails the spawn just the same.
+        let mut command = crate::core::cmd::async_cmd("claude");
+        command.arg("--print").current_dir("/tmp/pro\0ject");
+        let offender =
+            super::super::nul_byte_offender(&command).expect("a NUL byte must be detected");
+        assert!(
+            offender.contains("working directory"),
+            "the working directory must be named, got: {offender}"
+        );
+
+        // The program name.
+        let mut command = crate::core::cmd::async_cmd("cla\0ude");
+        command.arg("--print");
+        let offender =
+            super::super::nul_byte_offender(&command).expect("a NUL byte must be detected");
+        assert!(offender.contains("program name"), "got: {offender}");
+
+        // A clean command must not be refused.
+        let mut command = crate::core::cmd::async_cmd("claude");
+        command
+            .args(["--print", "--append-system-prompt", "clean", "hello"])
+            .env("ANTHROPIC_API_KEY", "sk-ant-clean")
+            .current_dir("/tmp");
+        assert!(
+            super::super::nul_byte_offender(&command).is_none(),
+            "a clean invocation must pass"
+        );
+    }
+
+    /// The argument/program/cwd checks lean on a standard-library placeholder,
+    /// so pin the behaviour they depend on: if a future release stops
+    /// substituting `<string-with-nul>`, this fails instead of the detection
+    /// silently going blind.
+    #[test]
+    fn the_standard_library_still_masks_nul_bearing_values_it_cannot_encode() {
+        let mut command = std::process::Command::new("/bin/echo");
+        command.arg("abc\0def").current_dir("/tm\0p");
+
+        let masked = command
+            .get_args()
+            .next()
+            .expect("one argument")
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(masked, "<string-with-nul>");
+        assert_eq!(
+            command
+                .get_current_dir()
+                .expect("a cwd")
+                .to_string_lossy()
+                .into_owned(),
+            "<string-with-nul>"
+        );
+
+        // Environment values, by contrast, keep their NUL — which is why the
+        // detection needs both a byte scan and the placeholder check.
+        let mut command = std::process::Command::new("/bin/echo");
+        command.env("KRONN_PROBE", "abc\0def");
+        let (_, value) = command.get_envs().next().expect("one variable");
+        assert!(
+            value.expect("a value").to_string_lossy().contains('\0'),
+            "environment values are handed back unmasked"
+        );
+    }
+
+    #[test]
     fn claude_task_worker_allows_exact_status_commit_and_delivery_tools() {
         let (_, _, args, _, _, _) = super::super::agent_command_with_task_worker_policy(
             &AgentType::ClaudeCode,
@@ -5880,6 +6058,7 @@ Suite de la réponse.";
             "worker context",
             None,
             true,
+            None,
             None,
         );
 
@@ -5908,6 +6087,7 @@ Suite de la réponse.";
             "worker context",
             None,
             true,
+            None,
             None,
         );
 
@@ -6000,6 +6180,7 @@ Suite de la réponse.";
                 "worker context",
                 None,
                 true,
+                None,
                 None,
             );
             assert!(
@@ -7254,6 +7435,125 @@ Suite de la réponse.";
     // ─── --mcp-config insertion order ─────────────────────────────────────────
 
     #[test]
+    fn a_529_written_by_the_cli_reaches_the_room_instead_of_vanishing() {
+        // Shape taken verbatim from a real transcript on this machine
+        // (~/.claude/projects/.../*.jsonl): the CLI answers a 529 with an
+        // assistant message it wrote itself. No deltas precede it, so the
+        // generic "skip assistant snapshots" rule used to drop the only
+        // account of the failure — the turn ended in silence and the human
+        // waited minutes before retrying by hand.
+        let line = r#"{"type":"assistant","isApiErrorMessage":true,"message":{"model":"<synthetic>","role":"assistant","stop_reason":"stop_sequence","content":[{"type":"text","text":"API Error: 529 Overloaded. This is a server-side issue, usually temporary — try again in a moment."}]}}"#;
+        match super::super::parse_claude_stream_line(line) {
+            StreamJsonEvent::Text(text) => {
+                assert!(text.contains("529 Overloaded"), "got: {text}");
+            }
+            other => panic!("a CLI-authored failure must reach the room, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_spend_limit_written_by_the_cli_is_kept_too() {
+        // Same carrier, different cause — and the one seen most often here
+        // (66 occurrences). Recognised through the synthetic model name alone,
+        // so a build that stops setting the flag still surfaces it.
+        let line = r#"{"type":"assistant","message":{"model":"<synthetic>","role":"assistant","content":[{"type":"text","text":"You've hit your org's monthly spend limit · run /usage-credits to raise it"}]}}"#;
+        match super::super::parse_claude_stream_line(line) {
+            StreamJsonEvent::Text(text) => assert!(text.contains("spend limit"), "got: {text}"),
+            other => panic!("a spend limit must reach the room, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_ordinary_assistant_snapshot_is_still_skipped() {
+        // The reason the blanket skip exists: with --include-partial-messages
+        // a real assistant message repeats everything already streamed. Keeping
+        // it would print the whole reply a second time.
+        let line = r#"{"type":"assistant","message":{"model":"claude-opus-4","role":"assistant","content":[{"type":"text","text":"Voici la réponse complète."}]}}"#;
+        assert!(
+            matches!(
+                super::super::parse_claude_stream_line(line),
+                StreamJsonEvent::Skip
+            ),
+            "a real assistant snapshot must stay skipped, or every reply doubles"
+        );
+    }
+
+    #[test]
+    fn a_cli_error_with_no_text_is_not_turned_into_an_empty_reply() {
+        let line = r#"{"type":"assistant","isApiErrorMessage":true,"message":{"model":"<synthetic>","role":"assistant","content":[{"type":"text","text":"   "}]}}"#;
+        assert!(matches!(
+            super::super::parse_claude_stream_line(line),
+            StreamJsonEvent::Skip
+        ));
+    }
+
+    #[test]
+    fn the_session_probe_reads_the_layout_this_machine_actually_has() {
+        // Pinned against a real store observed on macOS:
+        //   ~/.claude/projects/-Users-priol-Repositories-Kronn-perf201/<id>.jsonl
+        // Both `/` and `.` flatten to `-` — the second is easy to miss, and a
+        // home under `~/.cache/...` is where it shows.
+        assert_eq!(
+            super::super::claude_project_slug(Path::new("/Users/priol/Repositories/Kronn")),
+            "-Users-priol-Repositories-Kronn"
+        );
+        assert_eq!(
+            super::super::claude_project_slug(Path::new("/Users/priol/.cache/kronn-test-tmp")),
+            "-Users-priol--cache-kronn-test-tmp"
+        );
+    }
+
+    #[test]
+    fn an_id_that_would_leave_the_session_store_is_never_probed() {
+        // The id lands in a file name. A traversal must be refused outright,
+        // not merely fail to match.
+        let dir = tempfile::tempdir().unwrap();
+        for hostile in ["", "../../etc/passwd", "a/b", "..", "x\\y"] {
+            assert!(
+                !super::super::cli_print_session_is_resumable(dir.path(), hostile),
+                "{hostile:?} should never be probed"
+            );
+        }
+    }
+
+    #[test]
+    fn a_resumed_turn_carries_resume_and_a_fresh_one_does_not() {
+        let (_, _, resumed, _, _, _) = super::super::agent_command_with_task_worker_policy(
+            &AgentType::ClaudeCode,
+            "only the new message",
+            false,
+            "",
+            None,
+            false,
+            None,
+            Some("2c19fd03-fde4-4c0d-a893-adae1d816df2"),
+        );
+        let flag = resumed
+            .iter()
+            .position(|arg| arg == "--resume")
+            .expect("--resume present when a conversation is resumed");
+        assert_eq!(resumed[flag + 1], "2c19fd03-fde4-4c0d-a893-adae1d816df2");
+        // The prompt stays the last positional: --resume must not displace it,
+        // or `--append-system-prompt` would swallow the wrong argument.
+        assert_eq!(resumed.last().unwrap(), "only the new message");
+
+        let (_, _, fresh, _, _, _) = super::super::agent_command_with_task_worker_policy(
+            &AgentType::ClaudeCode,
+            "the whole history",
+            false,
+            "",
+            None,
+            false,
+            None,
+            None,
+        );
+        assert!(
+            !fresh.contains(&"--resume".to_string()),
+            "a first turn must start a new conversation"
+        );
+    }
+
+    #[test]
     fn mcp_config_inserted_before_append_system_prompt() {
         // Simulates what start_agent_with_config does: insert --mcp-config
         // before --append-system-prompt and its value.
@@ -7282,6 +7582,39 @@ Suite de la réponse.";
     }
 
     #[test]
+    fn strict_flag_keeps_the_ordering_a_discussion_now_depends_on() {
+        // Since 0.13.0 an ordinary discussion passes strict too, so this is the
+        // real argument shape — not just the task-worker one. Both inserted
+        // flags must still land before --append-system-prompt, which would
+        // otherwise swallow the next positional as its value.
+        let (_, _, mut args, _, _, _) = super::super::agent_command(
+            &AgentType::ClaudeCode,
+            "the prompt",
+            false,
+            "MCP context",
+            None,
+        );
+
+        super::super::insert_claude_mcp_config(&mut args, "/path/to/.mcp.json".into(), true);
+
+        let strict_idx = args
+            .iter()
+            .position(|a| a == "--strict-mcp-config")
+            .expect("strict flag present");
+        let mcp_idx = args.iter().position(|a| a == "--mcp-config").unwrap();
+        let sys_idx = args
+            .iter()
+            .position(|a| a == "--append-system-prompt")
+            .unwrap();
+
+        assert!(strict_idx < sys_idx, "args: {args:?}");
+        assert!(mcp_idx < sys_idx, "args: {args:?}");
+        // The path must follow its own flag, not the strict one.
+        assert_eq!(args[mcp_idx + 1], "/path/to/.mcp.json");
+        assert_eq!(args.last().unwrap(), "the prompt");
+    }
+
+    #[test]
     fn mcp_config_works_without_append_system_prompt() {
         // When there's no MCP context, --append-system-prompt is absent
         let (_, _, mut args, _, _, _) =
@@ -7304,6 +7637,7 @@ Suite de la réponse.";
             "",
             None,
             true,
+            None,
             None,
         );
 
@@ -7920,5 +8254,37 @@ sleep 3600
         };
 
         assert_eq!(process.reported_token_usage(), Some(8));
+    }
+
+    #[test]
+    fn agent_concurrency_limits_preserves_litellm_and_nvidia_when_set() {
+        // KT-545 DoD #1 — LiteLLM/NVIDIA becoming named-connection presets
+        // must not lose their per-agent-type concurrency cap.
+        let mut cfg = crate::core::config::default_config().agents;
+        cfg.lite_llm.concurrency = Some(3);
+        cfg.nvidia.concurrency = Some(7);
+
+        let limits: serde_json::Value =
+            serde_json::from_str(&agent_concurrency_limits(&cfg, 2)).unwrap();
+
+        assert_eq!(limits["LiteLlm"], 3);
+        assert_eq!(limits["Nvidia"], 7);
+        assert_eq!(limits["__local_global"], 2);
+    }
+
+    #[test]
+    fn agent_concurrency_limits_leaves_remote_agents_unlimited_by_default() {
+        // An operator who never set a remote cap must get no entry at all
+        // (unlimited), not a silent default — remote endpoints are someone
+        // else's capacity to manage, not this machine's.
+        let cfg = crate::core::config::default_config().agents;
+        let limits: serde_json::Value =
+            serde_json::from_str(&agent_concurrency_limits(&cfg, 1)).unwrap();
+
+        assert!(limits.get("LiteLlm").is_none());
+        assert!(limits.get("Nvidia").is_none());
+        // Local agents still get their always-present default of 1.
+        assert_eq!(limits["ClaudeCode"], 1);
+        assert_eq!(limits["Ollama"], 1);
     }
 }

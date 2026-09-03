@@ -503,6 +503,7 @@ fn merge_mcp_json_file(
     }
 
     let mut now_owned = BTreeSet::new();
+    let mut collisions: Vec<String> = Vec::new();
     for (name, wanted) in desired {
         match existing.get(&name) {
             Some(current) if previously_owned.contains(&name) || current == &wanted => {
@@ -510,17 +511,28 @@ fn merge_mcp_json_file(
                 now_owned.insert(name);
             }
             Some(_) => {
-                tracing::warn!(
-                    "MCP config collision in {} for '{}': preserving user-owned entry",
-                    file.display(),
-                    name
-                );
+                // Collected, not logged one by one. A sync walks every project
+                // × every agent config file, so a handful of standing
+                // collisions became 12 436 identical warnings in one report —
+                // enough to bury the 712 real errors underneath them. One line
+                // per file keeps the signal and drops the repetition.
+                collisions.push(name.clone());
             }
             None => {
                 existing.insert(name.clone(), wanted);
                 now_owned.insert(name);
             }
         }
+    }
+
+    if !collisions.is_empty() {
+        tracing::warn!(
+            "MCP config: {} user-owned entr{} preserved in {} ({})",
+            collisions.len(),
+            if collisions.len() == 1 { "y" } else { "ies" },
+            file.display(),
+            collisions.join(", ")
+        );
     }
 
     if existed {
@@ -3385,12 +3397,13 @@ pub fn is_default_mcp_context(content: &str) -> bool {
     })
 }
 
-/// Whether a per-MCP context file is REAL user/agent-written guidance worth
-/// injecting into agent prompts. Filters out (a) the scaffolding file itself
-/// (`TEMPLATE.md`), (b) any file still carrying `{{...}}` placeholders — an
-/// unfilled template injected verbatim wastes tokens and confuses the agent
-/// (`# {{MCP_NAME}} — Context` was reaching live audit prompts), and (c) the
-/// legacy `<!-- Examples: -->` boilerplate.
+/// Whether a per-MCP context file is REAL user/agent-written guidance, as
+/// opposed to untouched scaffolding. Filters out (a) the scaffolding file
+/// itself (`TEMPLATE.md`), (b) any file still carrying `{{...}}` placeholders,
+/// and (c) the legacy `<!-- Examples: -->` boilerplate.
+///
+/// Since 0.13.0 agent prompts carry only a server listing, so this no longer
+/// gates prompt injection — it answers "has someone actually written this?".
 pub fn should_inject_mcp_context(file_name: &str, content: &str) -> bool {
     if file_name.eq_ignore_ascii_case("TEMPLATE.md") {
         return false;
@@ -3401,80 +3414,65 @@ pub fn should_inject_mcp_context(file_name: &str, content: &str) -> bool {
     !is_default_mcp_context(content)
 }
 
-/// Read all MCP context files for a project and return concatenated content.
-/// Used for prompt injection when spawning agents.
-pub fn read_all_mcp_contexts(project_path: &str) -> String {
-    let resolved = resolve_host_path(project_path);
-
-    // 1. Read available MCP servers from .mcp.json (always present if synced)
+/// Build the MCP block injected into a CLI agent's prompt: which servers exist,
+/// how their tools are named, and where to read a server's own instructions.
+///
+/// It used to concatenate every `docs/operations/mcp-servers/*.md` in full —
+/// 69 196 bytes on the Kronn project, 45 465 of them for `kronn-internal.md`
+/// alone, on every single spawn regardless of what the discussion was about.
+/// That cost no measurable latency (4.40 s against 4.44 s bare) but roughly
+/// 17 000 tokens per turn, forever, for documentation most turns never opened.
+///
+/// Only CLI agents receive this block — the HTTP path takes another branch —
+/// and CLI agents have a filesystem. So point at the file instead of pasting
+/// it: the agent reads it when it decides to use that server, and pays nothing
+/// otherwise. `kronn-internal` gets `tool_manual`, which already serves exactly
+/// this on demand.
+pub fn build_mcp_server_listing(project_path: &str) -> String {
     let mcp_json = read_mcp_json(project_path);
-    let server_names: Vec<String> = mcp_json
+    let mut server_names: Vec<String> = mcp_json
         .as_ref()
-        .map(|f| {
-            let mut names: Vec<_> = f.mcp_servers.keys().cloned().collect();
-            names.sort();
-            names
-        })
+        .map(|f| f.mcp_servers.keys().cloned().collect())
         .unwrap_or_default();
+    server_names.sort();
 
-    // 2. Read custom context files (user-written instructions per MCP)
-    let ctx_dir = mcp_context_dir(&resolved);
-    let mut contexts = Vec::new();
-    if ctx_dir.is_dir() {
-        if let Ok(entries) = std::fs::read_dir(&ctx_dir) {
-            let mut files: Vec<_> = entries
-                .filter_map(|e| e.ok())
-                .filter(|e| e.path().extension().is_some_and(|ext| ext == "md"))
-                .collect();
-            files.sort_by_key(|e| e.file_name());
-
-            for entry in files {
-                let name = entry.file_name();
-                if let Ok(content) = std::fs::read_to_string(entry.path()) {
-                    if should_inject_mcp_context(&name.to_string_lossy(), &content) {
-                        contexts.push(content);
-                    }
-                }
-            }
-        }
-    }
-
-    // Nothing to inject
-    if server_names.is_empty() && contexts.is_empty() {
+    if server_names.is_empty() {
         return String::new();
     }
 
     let mut result = String::from("## MCP Servers available\n\n");
-
-    // Always list available MCP servers so the agent knows what tools it has
-    if !server_names.is_empty() {
-        result.push_str(
-            "You have access to external tools via MCP (Model Context Protocol) servers.\n",
-        );
-        result.push_str(
-            "Each server exposes tools with the naming convention `mcp__<server>__<tool>`.\n",
-        );
-        result.push_str(
-            "Use these tools instead of Bash workarounds when a matching tool exists.\n\n",
-        );
-        result.push_str("Available servers:\n");
-        for name in &server_names {
-            result.push_str(&format!("- **{}** — tools: `mcp__{}__*`\n", name, name));
-        }
-        result.push('\n');
+    result.push_str("You have access to external tools via MCP (Model Context Protocol) servers.\n");
+    result.push_str("Each server exposes tools with the naming convention `mcp__<server>__<tool>`.\n");
+    result.push_str("Use these tools instead of Bash workarounds when a matching tool exists.\n\n");
+    result.push_str("Available servers:\n");
+    for name in &server_names {
+        result.push_str(&format!("- **{}** — tools: `mcp__{}__*`\n", name, name));
     }
+    result.push('\n');
 
-    // Append custom context instructions
-    if !contexts.is_empty() {
-        result.push_str("### Server-specific instructions\n\n");
-        for ctx in contexts {
-            result.push_str(&ctx);
-            result.push_str("\n---\n\n");
-        }
+    if server_names.iter().any(|name| name == "kronn-internal") {
+        result.push_str(
+            "Call `tool_manual({tool: \"<name>\"})` for the full contract of a \
+             `kronn-internal` tool, when you are about to use one.\n",
+        );
     }
+    let doc_dir = format!(
+        "{}/{}",
+        crate::core::scanner::detect_docs_dir(Path::new(&resolve_host_path(project_path)))
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "docs".to_string()),
+        MCP_CONTEXT_SUBPATH
+    );
+    result.push_str(&format!(
+        "Project-specific notes for a server, when it has any, live in \
+         `{doc_dir}/<server>.md` — read that file if you are going to use that \
+         server, not before.\n"
+    ));
 
     result
 }
+
 
 /// Substitute `{ENV_KEY}` placeholders in a template with values from the
 /// config's env map. Used by:
@@ -4305,6 +4303,51 @@ mod host_sync_tests {
         );
         assert!(backup.exists(), "backup created at {}", backup.display());
         let _ = std::fs::remove_file(&backup); // cleanup
+    }
+
+    #[test]
+    fn the_prompt_block_lists_servers_and_points_at_docs_without_pasting_them() {
+        let project = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            project.path().join(".mcp.json"),
+            r#"{"mcpServers":{"kronn-internal":{"command":"python3"},"github":{"command":"npx"}}}"#,
+        )
+        .unwrap();
+
+        // A server doc big enough that pasting it would be unmistakable.
+        let docs = project.path().join("docs/operations/mcp-servers");
+        std::fs::create_dir_all(&docs).unwrap();
+        let bulky = format!("# github\n\n{}", "Detailed usage rules.\n".repeat(500));
+        std::fs::write(docs.join("github.md"), &bulky).unwrap();
+
+        let block = build_mcp_server_listing(project.path().to_str().unwrap());
+
+        // The listing: what exists and how its tools are named.
+        assert!(block.contains("- **github** — tools: `mcp__github__*`"));
+        assert!(block.contains("- **kronn-internal** — tools: `mcp__kronn-internal__*`"));
+        // The pointers: where to look, and the on-demand manual.
+        assert!(block.contains("tool_manual"), "got: {block}");
+        assert!(
+            block.contains("docs/operations/mcp-servers/<server>.md"),
+            "the block must say where a server's notes live, got: {block}"
+        );
+
+        // But never the documentation itself — that was 69 KB per spawn.
+        assert!(
+            !block.contains("Detailed usage rules."),
+            "server documentation must not be pasted into the prompt"
+        );
+        assert!(
+            block.len() < 1_000,
+            "the block must stay small, got {} bytes",
+            block.len()
+        );
+    }
+
+    #[test]
+    fn a_project_without_mcp_servers_contributes_nothing() {
+        let project = tempfile::TempDir::new().unwrap();
+        assert!(build_mcp_server_listing(project.path().to_str().unwrap()).is_empty());
     }
 
     #[test]

@@ -19,7 +19,7 @@ const makeDiscussion = (id: string): Discussion => ({
   message_count: 0,
   non_system_message_count: 0,
   tier: 'default',
-  summary_strategy: 'Auto',
+  summary_strategy: 'OnDemand',
   introspection_call_count: 0,
   archived: false,
   pinned: false,

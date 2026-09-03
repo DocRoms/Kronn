@@ -258,7 +258,7 @@ const makeListDiscussion = (id: string, msgCount: number): Discussion => ({
   messages: [],           // list endpoint returns empty messages
   message_count: msgCount, non_system_message_count: msgCount, // but provides the count
   archived: false, pinned: false, pin_first_message: false,
-  tier: "default" as const, summary_strategy: "Auto" as const, introspection_call_count: 0,
+  tier: "default" as const, summary_strategy: "OnDemand" as const, introspection_call_count: 0,
   workspace_mode: 'Direct',
   created_at: '2026-01-01T00:00:00Z',
   updated_at: '2026-01-01T00:00:00Z',
@@ -790,6 +790,64 @@ describe('DiscussionsPage', () => {
     expect(response).toHaveTextContent('OpenRouter');
     expect(response).toHaveTextContent('Les 1 919 caractères déjà analysés restent visibles.');
     expect(response).toHaveTextContent('Backend redémarré — brouillon sauvegardé');
+    expect(response).not.toHaveTextContent("Agent en cours d'exécution...");
+  });
+
+  it('says a turn is queued behind another run instead of showing a bare spinner', async () => {
+    // Issue 202 clocked 54 s and 2 min 37 of waiting behind a neighbouring
+    // run, indistinguishable from a stalled turn. The phase was recorded
+    // durably all along; it just never reached the screen.
+    const queuedDispatch = {
+      id: 'job-queued',
+      trigger_message_id: 'u-queued',
+      agent_type: 'ClaudeCode' as const,
+      status: 'Running',
+      attempts: 1,
+      progress_phase: 'upstream_wait',
+    };
+    const fullDisc = {
+      ...makeListDiscussion('d-queued', 1),
+      agent: 'ClaudeCode' as const,
+      participants: ['ClaudeCode' as const],
+      awaiting_agent: true,
+      messages: [{
+        id: 'u-queued', role: 'User' as const, channel: 'main' as const,
+        content: 'Une question courte', agent_type: null,
+        timestamp: '2026-09-02T09:45:13Z', tokens_used: 0, auth_mode: null,
+      }],
+      active_agent_dispatches: [queuedDispatch],
+      partial_response: {
+        message_id: 'partial-queued',
+        content: '',
+        started_at: '2026-09-02T09:46:40Z',
+        agent_type: 'ClaudeCode' as const,
+        trigger_message_id: 'u-queued',
+        dispatch: queuedDispatch,
+      },
+    };
+    vi.mocked(discussionsApi.get).mockResolvedValue(fullDisc);
+
+    await wrap(
+      <DiscussionsPage
+        projects={[]}
+        agents={[]}
+        allDiscussions={[fullDisc]}
+        configLanguage="fr"
+        agentAccess={null}
+        refetchDiscussions={noop}
+        refetchProjects={noop}
+        onNavigate={noop}
+        toast={toastFn}
+        initialActiveDiscussionId="d-queued"
+        {...liftedProps()}
+        // The turn is in flight: the user has sent, nothing has come back yet.
+        sendingMap={{ 'd-queued': true }}
+      />,
+    );
+
+    const response = await screen.findByTestId('streaming-agent-ClaudeCode');
+    expect(response).toHaveTextContent("En attente d'un créneau d'agent...");
+    // The generic wording would hide the distinction the phase exists to make.
     expect(response).not.toHaveTextContent("Agent en cours d'exécution...");
   });
 
@@ -1897,7 +1955,7 @@ describe('DiscussionsPage', () => {
     const activeDisc: Discussion = {
       ...makeListDiscussion('d1', 3),
       archived: false, pinned: false, pin_first_message: false,
-  tier: "default" as const, summary_strategy: "Auto" as const, introspection_call_count: 0,
+  tier: "default" as const, summary_strategy: "OnDemand" as const, introspection_call_count: 0,
     };
     const archivedDisc: Discussion = {
       ...makeListDiscussion('d2', 5),
@@ -2281,7 +2339,7 @@ describe('DiscussionsPage', () => {
         ...initialDisc.messages,
         { id: 'persisted-agent', role: 'Agent', channel: 'main', content: 'Streamed agent reply.', agent_type: 'ClaudeCode', timestamp: '2026-01-01T00:00:01Z', tokens_used: 12, auth_mode: null },
       ],
-      message_count: 2, non_system_message_count: 2, tier: "default" as const, summary_strategy: "Auto" as const, introspection_call_count: 0,
+      message_count: 2, non_system_message_count: 2, tier: "default" as const, summary_strategy: "OnDemand" as const, introspection_call_count: 0,
     };
     let getCallCount = 0;
     vi.mocked(discussionsApi.get).mockImplementation(async () => {
@@ -3505,7 +3563,7 @@ describe('DiscussionsPage', () => {
 
     await waitFor(() => {
       expect(vi.mocked(discussionsApi.update))
-        .toHaveBeenCalledWith('d-dropdown', { agent: 'Codex', tier: 'default' });
+        .toHaveBeenCalledWith('d-dropdown', { agent: 'Codex', tier: 'default', connection_id: null });
     });
     expect(vi.mocked(discussionsApi.runAgent)).not.toHaveBeenCalled();
   });
@@ -3773,7 +3831,7 @@ describe('DiscussionsPage', () => {
     messages: [
       { id: 'm1', role: 'User', channel: 'main', content: 'Tell me about my project', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
     ],
-    message_count: 1, non_system_message_count: 1, tier: "default" as const, summary_strategy: "Auto" as const, introspection_call_count: 0,
+    message_count: 1, non_system_message_count: 1, tier: "default" as const, summary_strategy: "OnDemand" as const, introspection_call_count: 0,
     archived: false, pinned: false, pin_first_message: false,
     workspace_mode: 'Direct',
     created_at: '2026-01-01T00:00:00Z',

@@ -25,6 +25,7 @@ import { ContextHelp } from '../ContextHelp';
 import { SearchableSelect } from '../SearchableSelect';
 import { SecretField } from '../SecretField';
 import {
+  AlertTriangle,
   Check,
   Key,
   Link2,
@@ -398,39 +399,74 @@ function ConnectionForm({
                     ? { ...prev, image_model: next }
                     : { ...prev, video_model: next },
                 );
+              const tested = testResult?.ok === true;
+              // A backend that omits the field entirely (old bundle, bare test
+              // fixture) is read as "known" — the pre-KT-531 behaviour, which
+              // already filtered strictly on whatever `capabilities` it sent.
+              // Only an explicit `false` (NVIDIA's real `/v1/models`, which
+              // never carries modality metadata) opens the unknown state.
+              const capabilityKnown = (
+                modality === 'image' ? testResult?.image_capability_known : testResult?.video_capability_known
+              ) ?? true;
+              const discovered = catalogModels(modality);
+              // Unknown: the catalogue never says which models render media,
+              // so nothing can be ruled out — fall back to every chat model
+              // instead of a strict filter that would always be empty.
+              const isUnknown = tested && !capabilityKnown;
+              const isUnsupported = tested && capabilityKnown && discovered.length === 0;
+              const pool = isUnknown ? catalogModels('chat') : discovered;
+              const poolIds = pool.map(model => model.id);
               // Keep an already-saved value visible even when a provider no
               // longer returns it. This is the same explicit, non-destructive
               // behaviour as the text tiers; the user can see and replace it
               // after a successful connection test.
-              const discovered = catalogModels(modality);
-              const discoveredIds = discovered.map(model => model.id);
-              const models = [...new Set([value, ...discoveredIds].filter(Boolean))];
+              const models = [...new Set([value, ...poolIds].filter(Boolean))];
+              const showPicker = !isUnsupported || Boolean(value);
+              const mediaState = !tested ? 'pending' : isUnsupported ? 'unsupported' : isUnknown ? 'unknown' : 'known';
               return (
-                <div className="set-ext-api-tier" key={modality} data-tier={modality}>
+                <div className="set-ext-api-tier" key={modality} data-tier={modality} data-media-state={mediaState}>
                   <span className="set-ext-api-tier-label">
                     <span aria-hidden="true">{modality === 'image' ? '🖼' : '🎬'}</span>{' '}
                     {t(`config.extApi.media.${modality}`)}
                   </span>
-                  <SearchableSelect
-                    className="searchable-select--compact"
-                    value={value}
-                    options={models.map(model => ({
-                      value: model,
-                      label: discovered.find(item => item.id === model)?.display_name ?? model,
-                      keywords: model.replaceAll('/', ' '),
-                      disabled: model === value && !discoveredIds.includes(model),
-                      description: model === value && !discoveredIds.includes(model)
-                        ? t('modelCatalog.unavailable')
-                        : model,
-                    }))}
-                    onChange={setValue}
-                    label={t(`config.extApi.media.${modality}`)}
-                    placeholder={t(`config.extApi.mediaPlaceholder.${modality}`)}
-                    emptyLabel={t('config.searchModelEmpty')}
-                    clearLabel={t('config.defaultModel')}
-                    disabled={!testResult?.ok || (discovered.length === 0 && !value)}
-                    testId={`ext-api-media-${modality}`}
-                  />
+                  {isUnknown ? (
+                    <p
+                      className="set-ext-api-media-warning"
+                      role="status"
+                      data-testid={`ext-api-media-${modality}-unknown`}
+                    >
+                      <AlertTriangle size={12} aria-hidden="true" /> {t('config.extApi.mediaUnknownWarning')}
+                    </p>
+                  ) : null}
+                  {isUnsupported ? (
+                    <p className="set-hint" data-testid={`ext-api-media-${modality}-unsupported`}>
+                      {t(`config.extApi.mediaUnsupported.${modality}`)}
+                    </p>
+                  ) : null}
+                  {showPicker ? (
+                    <SearchableSelect
+                      className="searchable-select--compact"
+                      value={value}
+                      options={models.map(model => ({
+                        value: model,
+                        label: pool.find(item => item.id === model)?.display_name ?? model,
+                        keywords: model.replaceAll('/', ' '),
+                        disabled: !isUnknown && model === value && !poolIds.includes(model),
+                        description: !isUnknown && model === value && !poolIds.includes(model)
+                          ? t('modelCatalog.unavailable')
+                          : model,
+                      }))}
+                      onChange={setValue}
+                      allowCustomValue={isUnknown}
+                      customValueHint={t('config.extApi.mediaCustomOptionHint')}
+                      label={t(`config.extApi.media.${modality}`)}
+                      placeholder={t(`config.extApi.mediaPlaceholder.${modality}`)}
+                      emptyLabel={t('config.searchModelEmpty')}
+                      clearLabel={t('config.defaultModel')}
+                      disabled={!tested || (pool.length === 0 && !value)}
+                      testId={`ext-api-media-${modality}`}
+                    />
+                  ) : null}
                   {value && modelCostSuffix ? (
                     <span className="text-2xs text-muted">{modelCostSuffix(value)}</span>
                   ) : null}
