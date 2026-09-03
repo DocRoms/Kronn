@@ -7387,6 +7387,59 @@ Suite de la réponse.";
     // ─── --mcp-config insertion order ─────────────────────────────────────────
 
     #[test]
+    fn a_529_written_by_the_cli_reaches_the_room_instead_of_vanishing() {
+        // Shape taken verbatim from a real transcript on this machine
+        // (~/.claude/projects/.../*.jsonl): the CLI answers a 529 with an
+        // assistant message it wrote itself. No deltas precede it, so the
+        // generic "skip assistant snapshots" rule used to drop the only
+        // account of the failure — the turn ended in silence and the human
+        // waited minutes before retrying by hand.
+        let line = r#"{"type":"assistant","isApiErrorMessage":true,"message":{"model":"<synthetic>","role":"assistant","stop_reason":"stop_sequence","content":[{"type":"text","text":"API Error: 529 Overloaded. This is a server-side issue, usually temporary — try again in a moment."}]}}"#;
+        match super::super::parse_claude_stream_line(line) {
+            StreamJsonEvent::Text(text) => {
+                assert!(text.contains("529 Overloaded"), "got: {text}");
+            }
+            other => panic!("a CLI-authored failure must reach the room, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_spend_limit_written_by_the_cli_is_kept_too() {
+        // Same carrier, different cause — and the one seen most often here
+        // (66 occurrences). Recognised through the synthetic model name alone,
+        // so a build that stops setting the flag still surfaces it.
+        let line = r#"{"type":"assistant","message":{"model":"<synthetic>","role":"assistant","content":[{"type":"text","text":"You've hit your org's monthly spend limit · run /usage-credits to raise it"}]}}"#;
+        match super::super::parse_claude_stream_line(line) {
+            StreamJsonEvent::Text(text) => assert!(text.contains("spend limit"), "got: {text}"),
+            other => panic!("a spend limit must reach the room, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_ordinary_assistant_snapshot_is_still_skipped() {
+        // The reason the blanket skip exists: with --include-partial-messages
+        // a real assistant message repeats everything already streamed. Keeping
+        // it would print the whole reply a second time.
+        let line = r#"{"type":"assistant","message":{"model":"claude-opus-4","role":"assistant","content":[{"type":"text","text":"Voici la réponse complète."}]}}"#;
+        assert!(
+            matches!(
+                super::super::parse_claude_stream_line(line),
+                StreamJsonEvent::Skip
+            ),
+            "a real assistant snapshot must stay skipped, or every reply doubles"
+        );
+    }
+
+    #[test]
+    fn a_cli_error_with_no_text_is_not_turned_into_an_empty_reply() {
+        let line = r#"{"type":"assistant","isApiErrorMessage":true,"message":{"model":"<synthetic>","role":"assistant","content":[{"type":"text","text":"   "}]}}"#;
+        assert!(matches!(
+            super::super::parse_claude_stream_line(line),
+            StreamJsonEvent::Skip
+        ));
+    }
+
+    #[test]
     fn the_session_probe_reads_the_layout_this_machine_actually_has() {
         // Pinned against a real store observed on macOS:
         //   ~/.claude/projects/-Users-priol-Repositories-Kronn-perf201/<id>.jsonl

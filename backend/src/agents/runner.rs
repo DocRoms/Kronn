@@ -1313,6 +1313,39 @@ pub enum OutputMode {
     /// Each line is a JSON event (Claude Code --output-format stream-json)
     StreamJson,
 }
+/// The text of an error the CLI wrote itself, if this is one.
+///
+/// Two independent markers, because either alone can be missing: the explicit
+/// `isApiErrorMessage` flag, and the `<synthetic>` model name that no real
+/// completion ever carries. Both mean the same thing — the CLI fabricated this
+/// message, so its text never travelled through the streaming deltas and is
+/// lost unless it is read here.
+fn cli_authored_error_text(json: &serde_json::Value) -> Option<String> {
+    let flagged = json
+        .get("isApiErrorMessage")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let message = json.get("message")?;
+    let synthetic = message
+        .get("model")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|model| model == "<synthetic>");
+    if !flagged && !synthetic {
+        return None;
+    }
+    let text = match message.get("content")? {
+        serde_json::Value::String(text) => text.clone(),
+        serde_json::Value::Array(blocks) => blocks
+            .iter()
+            .filter(|block| block.get("type").and_then(serde_json::Value::as_str) == Some("text"))
+            .filter_map(|block| block.get("text").and_then(serde_json::Value::as_str))
+            .collect::<Vec<_>>()
+            .join(""),
+        _ => return None,
+    };
+    (!text.trim().is_empty()).then_some(text)
+}
+
 
 /// Result of parsing a single stream-json line
 #[derive(Debug)]
@@ -9412,7 +9445,17 @@ pub fn parse_claude_stream_line(line: &str) -> StreamJsonEvent {
         // "assistant" messages with --include-partial-messages are cumulative snapshots
         // (they contain the full text so far, not a delta). We skip them to avoid
         // duplicating text already received via stream_event deltas.
-        "assistant" => StreamJsonEvent::Skip,
+        //
+        // EXCEPT the ones the CLI writes itself. An API failure — "API Error:
+        // 529 Overloaded", a spend limit, an expired session — arrives as an
+        // assistant message the model never produced: no deltas precede it,
+        // so skipping it dropped the only account of what went wrong. That is
+        // how a turn ended in silence and the human waited (18 min once, 1 h 27
+        // another) before retrying by hand. Verified against real transcripts
+        // on this machine: `isApiErrorMessage: true`, `model: "<synthetic>"`.
+        "assistant" => cli_authored_error_text(&json)
+            .map(StreamJsonEvent::Text)
+            .unwrap_or(StreamJsonEvent::Skip),
 
         // The `init` line opens the stream and names the conversation. Reading
         // it here — rather than the final `result` — means an interrupted turn
