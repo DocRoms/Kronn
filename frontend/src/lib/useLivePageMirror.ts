@@ -97,7 +97,10 @@ export function useLivePageMirror({
   useEffect(() => { externalDetailRef.current = externalDetail; }, [externalDetail]);
 
   useEffect(() => {
-    // Reset per-page so one page's mirror never briefly overlays the next.
+    // Reset per-page so one page's mirror never briefly overlays the next. This
+    // is the sanctioned "reset state when a prop changes" case, so the synchronous
+    // setState here is intentional (same pattern as WorkflowsPage).
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setPipelines({});
     lastPublishedSig.current = null;
     if (ownsDetail) {
@@ -188,7 +191,6 @@ export function useLivePageMirror({
       }
     };
     // `ownsDetail` is a constant per call site; the loop restarts only per page.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pageId, ownsDetail]);
 
   const publishToFrame = useCallback((force = false) => {

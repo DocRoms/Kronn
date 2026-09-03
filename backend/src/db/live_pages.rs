@@ -754,7 +754,9 @@ pub fn upsert_live_page_binding(
         .optional()?
         .unwrap_or(false);
     if !workflow_exists {
-        return Err(UpsertBindingError::WorkflowNotFound(req.workflow_id.clone()));
+        return Err(UpsertBindingError::WorkflowNotFound(
+            req.workflow_id.clone(),
+        ));
     }
 
     let selector = req.run_selector.unwrap_or(LivePageRunSelector::Latest);

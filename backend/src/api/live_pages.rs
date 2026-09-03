@@ -482,7 +482,11 @@ pub async fn upsert_binding(
     // Ok — the outer Err is reserved for infra/panic failures.
     match state
         .db
-        .with_conn(move |conn| Ok(crate::db::live_pages::upsert_live_page_binding(conn, &id, &req)))
+        .with_conn(move |conn| {
+            Ok(crate::db::live_pages::upsert_live_page_binding(
+                conn, &id, &req,
+            ))
+        })
         .await
     {
         Ok(Ok(binding)) => Json(ApiResponse::ok(binding)),
@@ -490,9 +494,10 @@ pub async fn upsert_binding(
             ApiErrorCode::NotFound,
             "Page not found",
         )),
-        Ok(Err(UpsertBindingError::WorkflowNotFound(workflow_id))) => Json(
-            ApiResponse::err_coded(ApiErrorCode::NotFound, format!("Workflow not found: {workflow_id}")),
-        ),
+        Ok(Err(UpsertBindingError::WorkflowNotFound(workflow_id))) => Json(ApiResponse::err_coded(
+            ApiErrorCode::NotFound,
+            format!("Workflow not found: {workflow_id}"),
+        )),
         Ok(Err(UpsertBindingError::InvalidDataset(message))) => {
             Json(ApiResponse::err_coded(ApiErrorCode::Validation, message))
         }

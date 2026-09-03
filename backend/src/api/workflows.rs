@@ -2354,7 +2354,11 @@ pub(crate) async fn spawn_detached_run(
     let run = build_manual_run(&wf, &provided_vars);
     insert_run_with_concurrency_check(state, &wf, &run).await?;
 
-    tracing::info!("Workflow run created (detached): {} for {}", run.id, wf.name);
+    tracing::info!(
+        "Workflow run created (detached): {} for {}",
+        run.id,
+        wf.name
+    );
 
     let run_id = run.id.clone();
     let state_for_run = state.clone();

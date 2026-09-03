@@ -3257,7 +3257,9 @@ mod tests {
             sub_workflow_foreach_file: Some(".kronn/prs.json".into()),
             ..WorkflowStep::default()
         };
-        assert!(workflow_steps_require_worktree(std::slice::from_ref(&foreach)));
+        assert!(workflow_steps_require_worktree(std::slice::from_ref(
+            &foreach
+        )));
 
         // A single (non-foreach) sub-workflow can create its own worktree, so
         // it does NOT force one on the parent.
@@ -3267,7 +3269,9 @@ mod tests {
             sub_workflow_foreach_file: None,
             ..WorkflowStep::default()
         };
-        assert!(!workflow_steps_require_worktree(std::slice::from_ref(&single)));
+        assert!(!workflow_steps_require_worktree(std::slice::from_ref(
+            &single
+        )));
 
         // An empty foreach path is not a real fan-out.
         let blank = WorkflowStep {
@@ -3275,7 +3279,9 @@ mod tests {
             sub_workflow_foreach_file: Some("   ".into()),
             ..WorkflowStep::default()
         };
-        assert!(!workflow_steps_require_worktree(std::slice::from_ref(&blank)));
+        assert!(!workflow_steps_require_worktree(std::slice::from_ref(
+            &blank
+        )));
 
         // Non-subworkflow steps never force a worktree on their own.
         assert!(!workflow_steps_require_worktree(&[WorkflowStep {
