@@ -13,6 +13,17 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Added
 
+- An approved delegation now publishes its report. The derivation and the
+  store existed but nothing called them, so an accepted delivery produced
+  nothing at all. Both approval paths publish it — the ordinary one, and a
+  replayed approval that repairs a crash between the approval and its message.
+  The record and its message are written in a single transaction, so a retry
+  cannot leave an accepted delivery with no report; a record found without its
+  message gets one, rendered from the stored payload rather than the caller's.
+  A report is produced even when parts of the manifest are unreadable — a
+  degraded report says what is missing, which is more use than no report. The
+  worker's duration counts from its own assignment, so earlier review rounds
+  are not charged to its attempt.
 - Workflows, quick prompts, quick APIs and quick execs can be deleted from
   their own row — armed by a first click, done by a second, never before the
   server confirmed — and several at once from the sidebar selection. While
