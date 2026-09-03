@@ -8896,12 +8896,19 @@ class MentionConventionTests(unittest.TestCase):
             self.assertIn(trigger, description)
 
     def test_disc_join_says_to_stay_and_follow_the_room(self):
+        # The rule is pinned where each reader meets it. The description is
+        # billed on every turn, so it carries only what a model must know
+        # before calling; the manual carries the rest. Asserting the long form
+        # in the description would pit this test against the surface ceiling.
         description = self._tool("disc_join")["description"]
-        self.assertIn("JOINING IS NOT THE TASK", description)
+        self.assertIn("joining is not the task", description.lower())
         self.assertIn("disc_wait_for_peer", description)
-        self.assertIn("plan_get", description)
-        self.assertIn("BEFORE", description)
         self.assertIn("disc_append", description)
+
+        manual = self.mod.TOOL_MANUALS["disc_join"]
+        self.assertIn("plan_get", manual)
+        self.assertIn("before", manual.lower())
+        self.assertIn("disc_wait_for_peer", manual)
 
     def test_wait_contract_pins_read_cursor_and_exact_ack_ids(self):
         description = self._tool("disc_wait_for_peer")["description"]
