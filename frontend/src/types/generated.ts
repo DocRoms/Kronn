@@ -1882,7 +1882,14 @@ message_targets: { [key in string]: Array<MessageTarget> },
  * message yet. Lets a reconnect render saved text instead of an empty
  * loader while boot recovery/re-dispatch is settling.
  */
-partial_response?: InFlightAgentResponse, id: string, project_id: string | null, title: string, agent: AgentType,
+partial_response?: InFlightAgentResponse,
+/**
+ * Who an ordinary turn — one naming nobody — actually reaches, resolved
+ * by the same rule the router uses. The UI cannot derive it: a discussion
+ * keeps its `agent` even when the native responder is switched off, so
+ * reading that field alone announces a destination that receives nothing.
+ */
+default_targets: Array<MessageTarget>, id: string, project_id: string | null, title: string, agent: AgentType,
 /**
  * Named HTTP connection backing `agent` when it is `Custom` (or an
  * explicit LiteLLM/NVIDIA connection). This is the durable "sticky"

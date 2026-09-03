@@ -74,11 +74,32 @@ pub async fn get(
                 crate::db::discussions::get_in_flight_agent_response(conn, &id, &discussion.agent)?;
             let message_targets =
                 crate::db::discussions::list_discussion_message_targets(conn, &id)?;
+            // Same rule as `canonical_targets`: the native agent owns an
+            // ordinary turn unless it is switched off, and then the joined
+            // sessions do. Resolved here so the transcript can name the real
+            // destination instead of guessing from `agent`.
+            let default_targets = if crate::db::discussions::disc_is_no_agent(conn, &id)? {
+                crate::db::discussion_sessions::list_sessions(conn, &id, false)?
+                    .iter()
+                    .map(|session| {
+                        crate::models::MessageTarget::cli(
+                            crate::db::discussions::parse_agent_type(&session.agent_type),
+                            session.id,
+                        )
+                    })
+                    .collect()
+            } else {
+                let mut target =
+                    crate::models::MessageTarget::discussion_agent(discussion.agent.clone());
+                target.connection_id = discussion.connection_id.clone();
+                vec![target]
+            };
             Ok(Some(crate::models::DiscussionDetail {
                 discussion,
                 active_agent_dispatches,
                 message_targets,
                 partial_response,
+                default_targets,
             }))
         })
         .await

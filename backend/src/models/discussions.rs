@@ -83,6 +83,12 @@ pub struct DiscussionDetail {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub partial_response: Option<InFlightAgentResponse>,
+    /// Who an ordinary turn — one naming nobody — actually reaches, resolved
+    /// by the same rule the router uses. The UI cannot derive it: a discussion
+    /// keeps its `agent` even when the native responder is switched off, so
+    /// reading that field alone announces a destination that receives nothing.
+    #[serde(default)]
+    pub default_targets: Vec<MessageTarget>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]

@@ -442,13 +442,29 @@ describe('MessageBubble — durable routing receipt', () => {
   // the discussion's agent, and joined CLI sessions never see it. Showing
   // nothing let three messages be written to an agent that could not answer
   // while the CLI in the room received none of them.
-  it('names the discussion agent when no one was mentioned', () => {
-    renderBubble(makeMessage({ role: 'User', content: 'Sans métadonnées' }));
+  it('names the destination the server resolved when no one was mentioned', () => {
+    renderBubble(makeMessage({ role: 'User', content: 'Sans métadonnées' }), {
+      defaultTargets: [{ kind: 'cli', agent_type: 'ClaudeCode', cli_session_id: 140 }],
+    });
     const receipt = screen.getByTestId('message-routing-receipt');
     expect(receipt.dataset.implicit).toBe('true');
-    // The destination is named, and qualified — never presented as "everyone".
-    expect(receipt).toHaveTextContent('disc.targetDiscussionAgent');
+    // A joined session reads as a joined session, not as "the discussion
+    // agent": that label is what announced a destination receiving nothing.
+    expect(receipt).toHaveTextContent('disc.targetCli');
     expect(receipt.textContent).not.toMatch(/@all/i);
+  });
+
+  // The case that made all this necessary: the native responder is off and no
+  // session is joined, so an ordinary turn reaches nobody. Naming the
+  // discussion's `agent` there — it survives being switched off — claimed a
+  // reader that does not exist.
+  it('says nobody is listening when the server resolved no destination', () => {
+    renderBubble(makeMessage({ role: 'User', content: 'Sans métadonnées' }), {
+      defaultTargets: [],
+    });
+    const receipt = screen.getByTestId('message-routing-receipt');
+    expect(receipt).toHaveTextContent('disc.routingNobody');
+    expect(receipt.textContent).not.toMatch(/disc\.targetDiscussionAgent/);
   });
 });
 

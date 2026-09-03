@@ -63,7 +63,7 @@ import {
 import { externalConnectionForDiscussion } from '../lib/externalAgentIdentity';
 
 type LoadedDiscussion = Discussion
-  & Partial<Pick<DiscussionDetail, 'active_agent_dispatches' | 'message_targets' | 'partial_response'>>;
+  & Partial<Pick<DiscussionDetail, 'active_agent_dispatches' | 'message_targets' | 'partial_response' | 'default_targets'>>;
 
 type InterruptedStreamState = {
   text: string;
@@ -4179,6 +4179,7 @@ export function DiscussionsPage({
                       <MessageBubble
                         msg={msg}
                         targets={activeDiscussion.message_targets?.[msg.id] ?? []}
+                        defaultTargets={activeDiscussion.default_targets ?? []}
                         idx={idx}
                         attachments={attachmentsByMessageId[msg.id] ?? EMPTY_ATTACHMENTS}
                         discussionMedia={activeContextFiles}

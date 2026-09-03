@@ -209,6 +209,26 @@ pub(crate) async fn canonical_targets(
         .map_err(|error| error.to_string())?;
     let (discussion, sessions, connections, no_agent) = context;
 
+    // A room whose native agent is off still has readers: the sessions joined
+    // to it. Without this, an ordinary turn there resolves to no target at
+    // all — the native responder is disabled and no peer was named — so the
+    // message reaches nobody and the writer is told nothing. Three of Romu's
+    // turns went that way on 03/09 before anyone noticed.
+    //
+    // Naming the joined sessions is what `no_agent` already promises: "joined
+    // peers remain participants and continue receiving turns".
+    if !target_all && requested.is_empty() && no_agent && !sessions.is_empty() {
+        return Ok(sessions
+            .iter()
+            .map(|session| {
+                MessageTarget::cli(
+                    crate::db::discussions::parse_agent_type(&session.agent_type),
+                    session.id,
+                )
+            })
+            .collect());
+    }
+
     let mut candidates = if target_all {
         let mut all = if no_agent {
             Vec::new()
@@ -2241,6 +2261,76 @@ mod tests {
         assert!(
             accepted_pos < skipped_pos,
             "accepted receipt must precede no-agent skip: {body}"
+        );
+    }
+
+    /// KT-578 — a room whose native agent is off still has readers.
+    ///
+    /// Without this, an ordinary turn there resolved to no target at all: the
+    /// native responder is disabled and no peer was named, so the message
+    /// reached nobody and the writer was told nothing. Three turns went that
+    /// way on 03/09 before the silence was noticed — and the header, reading
+    /// the discussion's `agent` (which survives being switched off), announced
+    /// a destination that received none of them.
+    #[tokio::test]
+    async fn a_turn_naming_nobody_reaches_the_joined_sessions_when_the_native_agent_is_off() {
+        let disc = "d-no-agent-joined";
+        let state = make_state_with_disc(disc).await;
+        let cli_session_id = state
+            .db
+            .with_conn(move |conn| {
+                conn.execute("UPDATE discussions SET no_agent = 1 WHERE id = ?1", [disc])?;
+                let session_id = crate::db::discussion_sessions::create_session(
+                    conn,
+                    disc,
+                    "ClaudeCode",
+                    Some("sess-joined"),
+                    "peer",
+                )?;
+                Ok(session_id)
+            })
+            .await
+            .unwrap();
+
+        let resolved = canonical_targets(&state, disc, Vec::new(), false)
+            .await
+            .expect("an ordinary turn resolves");
+
+        assert_eq!(resolved.len(), 1, "the joined session is the destination");
+        assert_eq!(resolved[0].kind, MessageTargetKind::Cli);
+        assert_eq!(resolved[0].cli_session_id, Some(cli_session_id));
+        assert_eq!(resolved[0].agent_type, AgentType::ClaudeCode);
+    }
+
+    /// The other half of the same rule: with the native agent ON, an ordinary
+    /// turn still belongs to it. Joined sessions do not steal a turn nobody
+    /// addressed to them.
+    #[tokio::test]
+    async fn a_turn_naming_nobody_still_belongs_to_an_enabled_native_agent() {
+        let disc = "d-native-on-joined";
+        let state = make_state_with_disc(disc).await;
+        state
+            .db
+            .with_conn(move |conn| {
+                crate::db::discussion_sessions::create_session(
+                    conn,
+                    disc,
+                    "ClaudeCode",
+                    Some("sess-bystander"),
+                    "peer",
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let resolved = canonical_targets(&state, disc, Vec::new(), false)
+            .await
+            .expect("an ordinary turn resolves");
+
+        assert!(
+            resolved.is_empty(),
+            "an enabled native agent owns the turn through its own route, got {resolved:?}"
         );
     }
 
