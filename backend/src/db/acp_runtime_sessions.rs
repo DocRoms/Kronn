@@ -71,6 +71,67 @@ pub fn upsert(
     Ok(())
 }
 
+/// The conversation id AND the last message this agent was shown.
+///
+/// Separate from [`get`] because the ACP adapters have no use for the second
+/// half: only the `--print` resume path sends a delta, and giving every caller
+/// a tuple it ignores would invite someone to trust a `None` that simply was
+/// never written.
+pub fn get_with_progress(
+    conn: &Connection,
+    discussion_id: &str,
+    agent_type: &str,
+    runtime: &str,
+    project_scope: &str,
+) -> Result<Option<(String, Option<String>)>> {
+    conn.query_row(
+        "SELECT conversation_id, last_seen_message_id
+           FROM acp_runtime_sessions
+          WHERE discussion_id = ?1
+            AND agent_type = ?2
+            AND runtime = ?3
+            AND project_scope = ?4",
+        params![discussion_id, agent_type, runtime, project_scope],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+/// Record the last message the agent was shown, on an existing session.
+///
+/// Deliberately not folded into [`upsert`]: the id is known when the turn
+/// STARTS (the CLI's `init` line), the progress only when it ENDS and the reply
+/// is durable. Writing them together would mean claiming, at the start of a
+/// turn, that messages have been seen which the agent may never receive — and
+/// a crash in between would silently skip them on the next turn.
+pub fn record_progress(
+    conn: &Connection,
+    discussion_id: &str,
+    agent_type: &str,
+    runtime: &str,
+    project_scope: &str,
+    last_seen_message_id: &str,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE acp_runtime_sessions
+            SET last_seen_message_id = ?5, updated_at = ?6
+          WHERE discussion_id = ?1
+            AND agent_type = ?2
+            AND runtime = ?3
+            AND project_scope = ?4",
+        params![
+            discussion_id,
+            agent_type,
+            runtime,
+            project_scope,
+            last_seen_message_id,
+            Utc::now().to_rfc3339()
+        ],
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -89,6 +150,7 @@ mod tests {
                  conversation_id TEXT NOT NULL,
                  created_at TEXT NOT NULL,
                  updated_at TEXT NOT NULL,
+                 last_seen_message_id TEXT,
                  PRIMARY KEY (discussion_id, agent_type, runtime)
              );",
         )

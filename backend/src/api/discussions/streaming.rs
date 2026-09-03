@@ -1132,6 +1132,86 @@ fn independent_sibling_notice(language: &str, aliases: &str) -> String {
     }
 }
 
+/// The messages written since the agent last saw the discussion.
+///
+/// `None` means "no trustworthy delta exists", and the caller must send the
+/// full history. Two distinct cases return it, both on purpose:
+///   - the marker is gone: the history no longer matches what the agent was
+///     shown (edited, pruned, rebuilt), so any slice would be a guess;
+///   - nothing follows it: there is nothing to say, and resuming would send an
+///     empty turn.
+///
+/// Everything after the marker is returned, never just the last message: in a
+/// room, the human or another agent routinely writes between two turns of the
+/// same agent, and dropping that would be an invisible loss.
+fn messages_not_yet_seen(
+    messages: &[crate::models::DiscussionMessage],
+    last_seen: &str,
+) -> Option<Vec<crate::models::DiscussionMessage>> {
+    let position = messages.iter().position(|message| message.id == last_seen)?;
+    let unseen = &messages[position + 1..];
+    (!unseen.is_empty()).then(|| unseen.to_vec())
+}
+
+/// Decide whether this turn can continue the CLI's own conversation.
+///
+/// Kronn's default is to re-narrate the whole discussion every turn. That is
+/// always correct and always expensive: the same history is re-sent, re-read
+/// and re-billed at each message. When the CLI still holds the conversation,
+/// the turn can instead carry only what the agent has not seen.
+///
+/// Returns the prompt to send and, when resuming, the conversation to resume.
+/// The two travel together on purpose: a delta prompt WITHOUT `--resume` loses
+/// the history, and a full prompt WITH `--resume` states it twice. Every path
+/// that cannot prove both is right returns the full prompt and no id.
+#[allow(clippy::too_many_arguments)]
+async fn resume_with_delta_if_possible(
+    store: &runner::AcpSessionStore,
+    agent_type: &AgentType,
+    work_dir: Option<&str>,
+    project_path: &str,
+    prompt_disc: &crate::models::Discussion,
+    extra_context_len: usize,
+    full_prompt: String,
+    is_task_worker: bool,
+) -> (String, Option<String>) {
+    // A task worker opens on a fresh worktree with the task as its first turn.
+    // Resuming a room's conversation there would hand it a history it has no
+    // business seeing — and the runner refuses the id anyway, which would
+    // leave the delta prompt travelling alone.
+    if is_task_worker || !runner::AcpSessionStore::tracks_cli_print(agent_type) {
+        return (full_prompt, None);
+    }
+    let Ok(scope) = runner::resolve_agent_work_dir(work_dir, project_path) else {
+        return (full_prompt, None);
+    };
+    let Ok(Some((conversation_id, Some(last_seen)))) =
+        store.load_cli_print(agent_type, &scope).await
+    else {
+        return (full_prompt, None);
+    };
+    // A dead id does not degrade the turn, it FAILS it. Ask the store first.
+    if !runner::cli_print_session_is_resumable(&scope, &conversation_id) {
+        return (full_prompt, None);
+    }
+    let Some(unseen) = messages_not_yet_seen(&prompt_disc.messages, &last_seen) else {
+        return (full_prompt, None);
+    };
+    let mut delta_disc = prompt_disc.clone();
+    delta_disc.messages = unseen;
+    let delta_prompt = build_agent_prompt(&delta_disc, agent_type, extra_context_len);
+    // A delta that saves nothing is not worth the divergence risk it carries.
+    if delta_prompt.len() >= full_prompt.len() {
+        return (full_prompt, None);
+    }
+    tracing::debug!(
+        conversation_id = %conversation_id,
+        saved_bytes = full_prompt.len() - delta_prompt.len(),
+        "resuming the CLI conversation instead of replaying the discussion"
+    );
+    (delta_prompt, Some(conversation_id))
+}
+
 async fn make_agent_stream_inner(
     state: AppState,
     discussion_id: String,
@@ -2173,6 +2253,23 @@ async fn make_agent_stream_inner(
     }
     let prompt = build_agent_prompt(&prompt_disc, &agent_type, extra_context_len);
 
+    // KT-562 — the same discussion, re-narrated in full at every turn, is what
+    // made Kronn slower than the same CLI driven by hand. Continue the
+    // conversation the CLI already holds whenever that can be proven safe.
+    let acp_session_store =
+        runner::AcpSessionStore::new(state.db.clone(), discussion_id.clone());
+    let (prompt, cli_resume_id) = resume_with_delta_if_possible(
+        &acp_session_store,
+        &agent_type,
+        workspace_path.as_deref(),
+        &project_path,
+        &prompt_disc,
+        extra_context_len,
+        prompt,
+        cli_task_worker_context.is_some(),
+    )
+    .await;
+
     let auth_mode_str = auth_mode_for(&agent_type, &tokens);
 
     // KT-37 — resolve the concrete model this run will ATTEMPT, once, with the
@@ -2381,10 +2478,8 @@ async fn make_agent_stream_inner(
             // Forward to the agent process env so the kronn-internal MCP
             // bridge knows which discussion to introspect when called.
             discussion_id: Some(&discussion_id),
-            acp_session_store: Some(runner::AcpSessionStore::new(
-                state.db.clone(),
-                discussion_id.clone(),
-            )),
+            acp_session_store: Some(acp_session_store.clone()),
+            cli_resume_id: cli_resume_id.as_deref(),
             task_worker_context: cli_task_worker_context.as_ref(),
             // Only HTTP agents consume this: CLI agents already reach the same
             // primitives through the stdio bridge, and handing them a second
@@ -3292,6 +3387,27 @@ async fn make_agent_stream_inner(
                     .await
                 {
                     Ok(outcome) => {
+                        // KT-562 — the reply is stored, so the agent has now
+                        // seen everything up to and including it. Recorded
+                        // HERE and not at the start of the turn: a turn that
+                        // dies before this point must be replayed in full, not
+                        // silently skipped over.
+                        if let Ok(scope) = runner::resolve_agent_work_dir(
+                            workspace_path.as_deref(),
+                            &project_path,
+                        ) {
+                            if let Err(error) = acp_session_store
+                                .record_cli_print_progress(&agent_type, &scope, &agent_msg.id)
+                                .await
+                            {
+                                // Losing the cursor costs a full replay next
+                                // turn, which is merely the old behaviour.
+                                tracing::warn!(
+                                    discussion_id = %disc_id,
+                                    "Unable to record CLI conversation progress: {error}"
+                                );
+                            }
+                        }
                         if !outcome.dispatched_agents.is_empty() {
                             tracing::info!(
                                 discussion_id = %disc_id,
@@ -5073,6 +5189,92 @@ mod run_agent_streaming_tests {
         drop(tx);
         assert_eq!(res.response, "[No response]");
         let _ = drain(rx);
+    }
+}
+
+#[cfg(test)]
+mod resume_delta_tests {
+    //! KT-562 — what a resumed turn actually sends. Every wrong answer here is
+    //! an invisible one: the agent replies confidently to a history it was
+    //! never given.
+    use super::messages_not_yet_seen;
+    use crate::models::{AgentType, DiscussionMessage, MessageChannel, MessageRole};
+    use chrono::Utc;
+
+    fn message(id: &str, role: MessageRole) -> DiscussionMessage {
+        DiscussionMessage {
+            id: id.to_string(),
+            role,
+            channel: MessageChannel::Main,
+            content: format!("content of {id}"),
+            agent_type: Some(AgentType::ClaudeCode),
+            timestamp: Utc::now(),
+            tokens_used: 0,
+            session_tokens_at_message: None,
+            recovered_partial: false,
+            auth_mode: None,
+            model_tier: None,
+            model: None,
+            cost_usd: None,
+            author_pseudo: None,
+            author_avatar_email: None,
+            author_cli_ordinal: None,
+            source_msg_id: None,
+            duration_ms: None,
+            lint_report: None,
+            target_agent: None,
+            reply_to_message_id: None,
+        }
+    }
+
+    #[test]
+    fn everything_written_since_the_marker_travels_not_only_the_last_message() {
+        // The case that makes "just send the new message" wrong: between the
+        // agent's own reply and its next turn, the human AND another agent
+        // wrote. Both must reach it.
+        let history = vec![
+            message("m1", MessageRole::User),
+            message("m2", MessageRole::Agent),
+            message("m3", MessageRole::User),
+            message("m4", MessageRole::Agent),
+            message("m5", MessageRole::User),
+        ];
+        let unseen = messages_not_yet_seen(&history, "m2").expect("a delta exists");
+        let ids: Vec<_> = unseen.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, vec!["m3", "m4", "m5"]);
+    }
+
+    #[test]
+    fn a_marker_that_left_the_history_forces_the_full_prompt() {
+        // Edited away, pruned, discussion rebuilt: the slice would be a guess,
+        // so there must be no slice at all.
+        let history = vec![message("m1", MessageRole::User)];
+        assert!(messages_not_yet_seen(&history, "gone").is_none());
+        assert!(messages_not_yet_seen(&[], "m1").is_none());
+    }
+
+    #[test]
+    fn nothing_new_since_the_marker_is_not_a_delta() {
+        // Resuming here would send an empty turn.
+        let history = vec![
+            message("m1", MessageRole::User),
+            message("m2", MessageRole::Agent),
+        ];
+        assert!(messages_not_yet_seen(&history, "m2").is_none());
+    }
+
+    #[test]
+    fn the_marker_itself_is_never_repeated() {
+        // It is the last message the agent SAW, so re-sending it would show it
+        // its own reply a second time.
+        let history = vec![
+            message("m1", MessageRole::User),
+            message("m2", MessageRole::Agent),
+            message("m3", MessageRole::User),
+        ];
+        let unseen = messages_not_yet_seen(&history, "m2").expect("a delta exists");
+        assert_eq!(unseen.len(), 1);
+        assert_eq!(unseen[0].id, "m3");
     }
 }
 

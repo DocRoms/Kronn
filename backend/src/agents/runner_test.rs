@@ -5496,6 +5496,7 @@ Suite de la réponse.";
             None,
             true,
             Some(worktree.path()),
+            None,
         );
 
         assert!(!args.contains(&"--dangerously-skip-permissions".to_string()));
@@ -5560,6 +5561,7 @@ Suite de la réponse.";
             None,
             true,
             Some(worktree.path()),
+            None,
         );
         let mcp_config = r#"{"mcpServers":{"kronn-internal":{}}}"#;
         super::super::insert_claude_mcp_config(&mut args, mcp_config.into(), true);
@@ -5631,6 +5633,7 @@ Suite de la réponse.";
             None,
             true,
             Some(worktree.path()),
+            None,
         );
         let stdin_prompt = args.pop().unwrap();
 
@@ -6008,6 +6011,7 @@ Suite de la réponse.";
             None,
             true,
             None,
+            None,
         );
 
         let allowed_tools_index = args.iter().position(|arg| arg == "--allowedTools").unwrap();
@@ -6035,6 +6039,7 @@ Suite de la réponse.";
             "worker context",
             None,
             true,
+            None,
             None,
         );
 
@@ -6127,6 +6132,7 @@ Suite de la réponse.";
                 "worker context",
                 None,
                 true,
+                None,
                 None,
             );
             assert!(
@@ -7381,6 +7387,72 @@ Suite de la réponse.";
     // ─── --mcp-config insertion order ─────────────────────────────────────────
 
     #[test]
+    fn the_session_probe_reads_the_layout_this_machine_actually_has() {
+        // Pinned against a real store observed on macOS:
+        //   ~/.claude/projects/-Users-priol-Repositories-Kronn-perf201/<id>.jsonl
+        // Both `/` and `.` flatten to `-` — the second is easy to miss, and a
+        // home under `~/.cache/...` is where it shows.
+        assert_eq!(
+            super::super::claude_project_slug(Path::new("/Users/priol/Repositories/Kronn")),
+            "-Users-priol-Repositories-Kronn"
+        );
+        assert_eq!(
+            super::super::claude_project_slug(Path::new("/Users/priol/.cache/kronn-test-tmp")),
+            "-Users-priol--cache-kronn-test-tmp"
+        );
+    }
+
+    #[test]
+    fn an_id_that_would_leave_the_session_store_is_never_probed() {
+        // The id lands in a file name. A traversal must be refused outright,
+        // not merely fail to match.
+        let dir = tempfile::tempdir().unwrap();
+        for hostile in ["", "../../etc/passwd", "a/b", "..", "x\\y"] {
+            assert!(
+                !super::super::cli_print_session_is_resumable(dir.path(), hostile),
+                "{hostile:?} should never be probed"
+            );
+        }
+    }
+
+    #[test]
+    fn a_resumed_turn_carries_resume_and_a_fresh_one_does_not() {
+        let (_, _, resumed, _, _, _) = super::super::agent_command_with_task_worker_policy(
+            &AgentType::ClaudeCode,
+            "only the new message",
+            false,
+            "",
+            None,
+            false,
+            None,
+            Some("2c19fd03-fde4-4c0d-a893-adae1d816df2"),
+        );
+        let flag = resumed
+            .iter()
+            .position(|arg| arg == "--resume")
+            .expect("--resume present when a conversation is resumed");
+        assert_eq!(resumed[flag + 1], "2c19fd03-fde4-4c0d-a893-adae1d816df2");
+        // The prompt stays the last positional: --resume must not displace it,
+        // or `--append-system-prompt` would swallow the wrong argument.
+        assert_eq!(resumed.last().unwrap(), "only the new message");
+
+        let (_, _, fresh, _, _, _) = super::super::agent_command_with_task_worker_policy(
+            &AgentType::ClaudeCode,
+            "the whole history",
+            false,
+            "",
+            None,
+            false,
+            None,
+            None,
+        );
+        assert!(
+            !fresh.contains(&"--resume".to_string()),
+            "a first turn must start a new conversation"
+        );
+    }
+
+    #[test]
     fn mcp_config_inserted_before_append_system_prompt() {
         // Simulates what start_agent_with_config does: insert --mcp-config
         // before --append-system-prompt and its value.
@@ -7464,6 +7536,7 @@ Suite de la réponse.";
             "",
             None,
             true,
+            None,
             None,
         );
 

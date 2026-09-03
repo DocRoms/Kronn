@@ -2147,11 +2147,17 @@ impl AcpSessionStore {
             .map_err(|error| format!("persist CLI conversation id: {error}"))
     }
 
+    /// The resumable conversation and the last message it was shown.
+    ///
+    /// `Some((id, None))` is a session whose extent is unknown — recorded
+    /// before this was tracked, or by a turn that died before persisting its
+    /// reply. The caller must then send the full prompt: correct, only
+    /// expensive. Guessing a delta there would drop messages in silence.
     pub async fn load_cli_print(
         &self,
         agent_type: &AgentType,
         project_scope: &Path,
-    ) -> Result<Option<String>, String> {
+    ) -> Result<Option<(String, Option<String>)>, String> {
         if !Self::tracks_cli_print(agent_type) {
             return Ok(None);
         }
@@ -2160,7 +2166,7 @@ impl AcpSessionStore {
         let project_scope = project_scope.to_string_lossy().into_owned();
         self.db
             .with_conn(move |conn| {
-                crate::db::acp_runtime_sessions::get(
+                crate::db::acp_runtime_sessions::get_with_progress(
                     conn,
                     &discussion_id,
                     &agent_type,
@@ -2170,6 +2176,38 @@ impl AcpSessionStore {
             })
             .await
             .map_err(|error| format!("load CLI conversation id: {error}"))
+    }
+
+    /// Record what this agent has now been shown, once its reply is durable.
+    ///
+    /// Called at the END of a turn on purpose: claiming at the start that
+    /// messages have been seen would skip them for good if the turn then died.
+    pub async fn record_cli_print_progress(
+        &self,
+        agent_type: &AgentType,
+        project_scope: &Path,
+        last_seen_message_id: &str,
+    ) -> Result<(), String> {
+        if !Self::tracks_cli_print(agent_type) {
+            return Ok(());
+        }
+        let discussion_id = self.discussion_id.clone();
+        let agent_type = format!("{agent_type:?}");
+        let project_scope = project_scope.to_string_lossy().into_owned();
+        let last_seen_message_id = last_seen_message_id.to_owned();
+        self.db
+            .with_conn(move |conn| {
+                crate::db::acp_runtime_sessions::record_progress(
+                    conn,
+                    &discussion_id,
+                    &agent_type,
+                    Self::CLI_PRINT_RUNTIME,
+                    &project_scope,
+                    &last_seen_message_id,
+                )
+            })
+            .await
+            .map_err(|error| format!("record CLI conversation progress: {error}"))
     }
 }
 
@@ -2242,6 +2280,14 @@ pub struct AgentStartConfig<'a> {
     /// externally joined CLI participants and affect presence/routing, whereas
     /// this state belongs to Kronn's own provider invocation.
     pub acp_session_store: Option<AcpSessionStore>,
+    /// Continue this `--print` conversation instead of starting a new one.
+    ///
+    /// Set ONLY by a caller that also shortened `prompt` to what the agent has
+    /// not seen. Passing it with a full transcript would send the agent its own
+    /// history a second time — more context per call, not less, which is the
+    /// exact failure this whole path exists to avoid. `None` starts fresh and
+    /// expects the full prompt.
+    pub cli_resume_id: Option<&'a str>,
     /// CLI-only task-worker capability assembled by the discussion dispatcher.
     /// The MCP bridge receives this out-of-band through the child process
     /// environment; it is never rendered into the model prompt or accepted as
@@ -2321,6 +2367,7 @@ impl<'a> AgentStartConfig<'a> {
             context_files_prompt: "",
             discussion_id: None,
             acp_session_store: None,
+            cli_resume_id: None,
             task_worker_context: None,
             ollama_format: None,
             model_override: None,
@@ -3032,22 +3079,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
         );
     }
     // Use work_dir (or project_path) for the agent's CWD
-    let effective_work_dir = config.work_dir.unwrap_or(config.project_path);
-    let work_dir = if effective_work_dir.is_empty() {
-        // Global discussion: use a temp working directory
-        std::env::temp_dir()
-    } else {
-        let container_path = crate::core::scanner::resolve_host_path(effective_work_dir);
-        if container_path.exists() {
-            container_path
-        } else {
-            let p = PathBuf::from(effective_work_dir);
-            if !p.exists() {
-                return Err(format!("Project path not found: {}", p.display()));
-            }
-            p
-        }
-    };
+    let work_dir = resolve_agent_work_dir(config.work_dir, config.project_path)?;
     // OpenCode is an ACP-native CLI. It must never enter the generic text
     // runner: `opencode acp` speaks bidirectional JSON-RPC, not line-oriented
     // model output. The ACP host owns initialize/session/prompt/cancel and
@@ -3131,6 +3163,9 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
             model_flag.as_deref(),
             task_worker,
             task_worker.then_some(work_dir.as_path()),
+            // A task worker never resumes: its worktree is fresh and its
+            // conversation starts with the task, not with a room's history.
+            (!task_worker).then_some(config.cli_resume_id).flatten(),
         );
 
     // Claude Code in --print mode does NOT auto-load .mcp.json from CWD.
@@ -7664,6 +7699,73 @@ async fn start_ollama_http(
 /// MCP context is injected via --append-system-prompt for Claude Code,
 /// or prepended to the prompt for other agents.
 /// Returns: (binary, npx_package, args, env_key, stderr_mode, output_mode)
+/// Whether `claude --print --resume` can still pick this conversation up.
+///
+/// The CLI keeps each conversation as `<id>.jsonl` under a per-directory
+/// folder in `~/.claude/projects`, the folder being the working directory with
+/// `/` and `.` flattened to `-`. Reading that layout is a bet on someone
+/// else's internals, so the bet is made in the safe direction ONLY: a hit
+/// means "resume is worth trying", a miss means "send the full prompt", which
+/// is exactly today's behaviour. If the CLI ever moves its store, every probe
+/// misses and Kronn silently goes back to full prompts — slower, never broken.
+///
+/// This is what lets the caller avoid a dead `--resume`, which would fail the
+/// turn outright ("No conversation found with session ID").
+pub fn cli_print_session_is_resumable(work_dir: &Path, conversation_id: &str) -> bool {
+    // An id is used as a file name here. Anything with a separator in it is
+    // refused rather than allowed to walk out of the store.
+    if conversation_id.is_empty()
+        || conversation_id.contains('/')
+        || conversation_id.contains('\\')
+        || conversation_id.contains("..")
+    {
+        return false;
+    }
+    let Some(home) = directories::BaseDirs::new().map(|d| d.home_dir().to_path_buf()) else {
+        return false;
+    };
+    home.join(".claude")
+        .join("projects")
+        .join(claude_project_slug(work_dir))
+        .join(format!("{conversation_id}.jsonl"))
+        .is_file()
+}
+
+/// The folder name `claude` gives a working directory inside its store.
+fn claude_project_slug(work_dir: &Path) -> String {
+    work_dir
+        .to_string_lossy()
+        .chars()
+        .map(|c| if c == '/' || c == '.' { '-' } else { c })
+        .collect()
+}
+
+/// The directory an agent will actually run in.
+///
+/// Public because a resumable session is scoped to this exact path: the caller
+/// that decides whether to resume must compute it the SAME way the spawn does.
+/// Re-deriving it by hand would silently never match — the resume would just
+/// stop happening, with nothing to show why.
+pub fn resolve_agent_work_dir(
+    work_dir: Option<&str>,
+    project_path: &str,
+) -> Result<PathBuf, String> {
+    let effective_work_dir = work_dir.unwrap_or(project_path);
+    if effective_work_dir.is_empty() {
+        // Global discussion: use a temp working directory
+        return Ok(std::env::temp_dir());
+    }
+    let container_path = crate::core::scanner::resolve_host_path(effective_work_dir);
+    if container_path.exists() {
+        return Ok(container_path);
+    }
+    let p = PathBuf::from(effective_work_dir);
+    if !p.exists() {
+        return Err(format!("Project path not found: {}", p.display()));
+    }
+    Ok(p)
+}
+
 /// Build the complete Claude sandbox policy for one task worktree.
 ///
 /// Keep this invocation-local and bounded regardless of how many unrelated
@@ -8157,12 +8259,14 @@ fn agent_command(
         model_flag,
         false,
         None,
+        None,
     )
 }
 
 /// Build a provider command with the stricter policy required by a spawned
 /// task worker. A worktree is an ownership boundary, not a sandbox by itself:
 /// every CLI that offers a global bypass must ignore it for worker runs.
+#[allow(clippy::too_many_arguments)]
 fn agent_command_with_task_worker_policy(
     agent_type: &AgentType,
     prompt: &str,
@@ -8171,6 +8275,10 @@ fn agent_command_with_task_worker_policy(
     model_flag: Option<&str>,
     task_worker: bool,
     task_work_dir: Option<&Path>,
+    // The CLI conversation to continue instead of narrating the history again.
+    // `None` starts fresh, which is what every agent but Claude Code does and
+    // what Claude Code itself does on its first turn.
+    resume_conversation_id: Option<&str>,
 ) -> (
     &'static str,
     Option<&'static str>,
@@ -8188,6 +8296,16 @@ fn agent_command_with_task_worker_policy(
                 "--verbose".into(),
                 "--include-partial-messages".into(),
             ];
+            // Continue the conversation this discussion already opened, so the
+            // turn carries the new messages instead of the whole transcript.
+            // Verified against the CLI: a resumed turn answers a question about
+            // an earlier one while receiving only the new text. A dead id fails
+            // loudly ("No conversation found with session ID"), which the
+            // caller turns back into a full-history retry.
+            if let Some(conversation_id) = resume_conversation_id {
+                args.push("--resume".into());
+                args.push(conversation_id.into());
+            }
             if let Some(model) = model_flag {
                 args.push("--model".into());
                 args.push(model.into());
