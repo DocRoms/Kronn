@@ -154,6 +154,9 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- A generation asking for a source image on a provider that takes none is
+  refused at submission, naming what is missing, instead of queueing a job that
+  retries the same refusal until its deadline expires.
 - A provider failure no longer ends a turn in complete silence. When the API
   is overloaded or a spend limit is hit, Claude Code does not report a
   structured failure — it writes an assistant message of its own, which no

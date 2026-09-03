@@ -1210,6 +1210,17 @@ async fn resolve_references(
                 .to_string(),
         );
     };
+    // Some providers take no source image on any model. Their catalogue
+    // cannot say so — NVIDIA serves no media catalogue at all — so the
+    // capability check below would be skipped and the refusal would surface in
+    // the worker, where it looks like an outage and is retried until the
+    // deadline. Refusing here says it once, before a job exists.
+    if !crate::agents::media_codec::codec_for(connection.origin_preset).accepts_reference_images() {
+        return Err(format!(
+            "this connection's provider does not accept a source image: '{}' cannot be used here",
+            mode.as_str()
+        ));
+    }
     // A frame is one exact picture at one end of a clip; there is no such
     // thing as several. This holds with or without a catalogue, so it is
     // checked before anything is fetched — sending more would silently drop

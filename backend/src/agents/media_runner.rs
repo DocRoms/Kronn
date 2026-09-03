@@ -674,12 +674,15 @@ async fn advance_claimed(
     // The codec follows the connection's provider: OpenRouter's proprietary
     // shapes and NVIDIA's visual routes are not interchangeable, and NVIDIA
     // does not even serve media from the host stored on the connection.
-    let codec: Box<dyn crate::agents::media_codec::MediaCodec> = match connection.origin_preset {
-        crate::models::ExternalApiConnectionPreset::Nvidia => {
-            Box::new(crate::agents::media_codec::NvidiaMediaCodec)
-        }
-        _ => Box::new(crate::agents::media_codec::OpenRouterMediaCodec),
-    };
+    let codec = crate::agents::media_codec::codec_for(connection.origin_preset);
+    // A job queued before this connection could be checked — or moved to
+    // another provider since — must not spend its deadline retrying a refusal
+    // no attempt can lift.
+    if !codec.accepts_reference_images() && !job.params.reference_ids().is_empty() {
+        return Err(AdvanceFailure::Permanent(
+            "this connection's provider does not accept a source image".into(),
+        ));
+    }
     let ctx = MediaContext {
         codec: codec.as_ref(),
         base: &base,

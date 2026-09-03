@@ -86,6 +86,15 @@ pub trait MediaCodec: Send + Sync {
     /// chat endpoint, which is the current failure mode.
     fn supports(&self, modality: MediaModality) -> bool;
 
+    /// Whether this provider takes source images at all, asked BEFORE a job
+    /// exists. `image_body`/`video_body` still refuse one that reaches them,
+    /// but by then the caller has already queued a generation that can only
+    /// fail — and a refusal discovered in the worker reads as a provider
+    /// outage, so it is retried until the deadline instead of being told.
+    fn accepts_reference_images(&self) -> bool {
+        true
+    }
+
     fn image_url(&self, base: &str) -> String;
     fn video_submit_url(&self, base: &str) -> String;
     fn video_poll_url(&self, base: &str, provider_job_id: &str) -> String;
@@ -400,6 +409,10 @@ impl NvidiaMediaCodec {
 }
 
 impl MediaCodec for NvidiaMediaCodec {
+    fn accepts_reference_images(&self) -> bool {
+        false
+    }
+
     fn supports(&self, modality: MediaModality) -> bool {
         // Both are served, but through the OpenAI-compatible visual routes
         // rather than the proprietary shapes OpenRouter uses.
@@ -547,6 +560,16 @@ impl MediaCodec for NvidiaMediaCodec {
             "" => bail!("poll response carries no status"),
             _ => Ok(MediaPollState::Pending),
         }
+    }
+}
+
+/// The codec a connection's provider needs. Both the submission path and the
+/// worker resolve it here: a preflight that guessed differently from the
+/// worker would refuse the wrong requests, or let the wrong ones through.
+pub fn codec_for(preset: crate::models::ExternalApiConnectionPreset) -> Box<dyn MediaCodec> {
+    match preset {
+        crate::models::ExternalApiConnectionPreset::Nvidia => Box::new(NvidiaMediaCodec),
+        _ => Box::new(OpenRouterMediaCodec),
     }
 }
 
@@ -996,5 +1019,35 @@ mod tests {
         assert!(NvidiaMediaCodec
             .video_body("m", "p", &MediaParams::default(), None)
             .is_ok());
+    }
+
+    #[test]
+    fn a_provider_that_takes_no_source_image_says_so_before_a_job_exists() {
+        // The bodies already refuse a reference that reaches them, but by then
+        // the generation is queued and the refusal reads as an outage. This is
+        // the same knowledge, askable while there is still nothing to cancel.
+        assert!(!NvidiaMediaCodec.accepts_reference_images());
+        assert!(OpenRouterMediaCodec.accepts_reference_images());
+
+        // The declaration and the bodies must not drift apart: a codec that
+        // announced acceptance and then refused would queue jobs that can only
+        // fail, which is exactly the bug this pair prevents.
+        let refused = NvidiaMediaCodec.video_body(
+            "m",
+            "p",
+            &MediaParams::default(),
+            Some(&reference(MediaReferenceMode::FirstFrame)),
+        );
+        assert!(refused.is_err());
+    }
+
+    #[test]
+    fn the_codec_selector_follows_the_connection_preset() {
+        use crate::models::ExternalApiConnectionPreset;
+        // The submission path and the worker both resolve the codec here. If
+        // they disagreed, a preflight would clear what the worker refuses.
+        assert!(!codec_for(ExternalApiConnectionPreset::Nvidia).accepts_reference_images());
+        assert!(codec_for(ExternalApiConnectionPreset::OpenRouter).accepts_reference_images());
+        assert!(codec_for(ExternalApiConnectionPreset::Other).accepts_reference_images());
     }
 }

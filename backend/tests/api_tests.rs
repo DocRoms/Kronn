@@ -16995,6 +16995,68 @@ async fn media_generate_refuses_a_source_image_it_cannot_vouch_for() {
     }
 }
 
+/// KT-551 — a provider that takes no source image refuses before a job exists.
+///
+/// NVIDIA serves no media catalogue, so the per-model capability check has
+/// nothing to read and lets the request through. The refusal then surfaces in
+/// the worker, where it cannot be told apart from a provider outage and is
+/// retried until the deadline expires. What the caller sees is a generation
+/// that hangs, then dies, for a reason nobody names.
+#[tokio::test]
+async fn media_generate_refuses_a_source_image_on_a_provider_that_takes_none() {
+    let state = test_state();
+    seed_media_connection(&state, None, Some("bytedance/seedance-2.0-mini")).await;
+    state
+        .db
+        .with_conn(|connection| {
+            let now = chrono::Utc::now().to_rfc3339();
+            connection.execute(
+                "INSERT INTO external_api_connections
+                    (id, display_name, mention_alias, endpoint, credential_slug,
+                     origin_preset, created_at, updated_at, video_model)
+                 VALUES ('conn-nvidia', 'NVIDIA', 'nvidia',
+                         'https://integrate.api.nvidia.com/v1', 'conn-nvidia', 'nvidia',
+                         ?1, ?1, 'nvidia/some-video-model')",
+                [&now],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    seed_reference_image(&state, "asset-src", "disc-media", "image/png", Some("/tmp/src.png")).await;
+    let app = build_router_with_auth(state.clone(), false);
+
+    let (status, body) = post_json(
+        app,
+        "/api/media/generate",
+        serde_json::json!({
+            "connection_id": "conn-nvidia", "modality": "video",
+            "prompt": "une suite du plan", "discussion_id": "disc-media",
+            "reference_asset_id": "asset-src", "reference_mode": "first_frame"
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["success"], false, "got {body}");
+    let error = body["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("does not accept a source image"),
+        "the refusal must name what is missing, got '{error}'"
+    );
+
+    // The point of refusing here rather than in the worker: nothing was
+    // queued, so there is no job to watch fail and nothing to cancel.
+    let queued: i64 = state
+        .db
+        .with_read_conn(|connection| {
+            Ok(connection.query_row("SELECT COUNT(*) FROM media_jobs", [], |row| row.get(0))?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(queued, 0, "a refused generation must not leave a job behind");
+}
+
 /// KT-555 — several reference images reach the job, in the order chosen.
 #[tokio::test]
 async fn media_generate_records_every_reference_image_for_an_image() {
