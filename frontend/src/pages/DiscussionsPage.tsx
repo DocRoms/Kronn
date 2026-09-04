@@ -15,7 +15,6 @@ import { TerminalPanel } from '../components/TerminalPanel';
 import { DiscussionPlanPanel } from '../components/DiscussionPlanPanel';
 import { DiscussionSettingsPanel } from '../components/DiscussionSettingsPanel';
 import { DiscussionAssetsPanel } from '../components/DiscussionAssetsPanel';
-import { DiscussionAttachedRuns } from '../components/DiscussionAttachedRuns';
 import { InlineMediaJob } from '../components/InlineMediaJob';
 import { BatchComparePanel } from '../components/BatchComparePanel';
 import { TestModeBanner } from '../components/TestModeBanner';
@@ -43,6 +42,7 @@ import { saveDraft } from '../lib/chat-drafts';
 import { clearReplyDraft, loadReplyDraft, saveReplyDraft } from '../lib/chat-reply-drafts';
 import { publishMessageSendSettled } from '../lib/messageSendLifecycle';
 import { findRenderedTextRanges } from '../lib/discussionMessageSearch';
+import { triggerDownload } from '../lib/downloadBlob';
 import { consumeDiscussionWorkspaceTarget } from '../lib/discussion-navigation';
 import { buildBatchTriageRows, buildContinuationDraft, type BatchTriageRow } from '../lib/batchTriage';
 import { useT } from '../lib/I18nContext';
@@ -58,6 +58,8 @@ import {
   Terminal,
   Settings,
   ListTodo,
+  Download,
+  Trash2,
 } from 'lucide-react';
 import { useIsMobile } from '../hooks/useMediaQuery';
 import {
@@ -452,7 +454,7 @@ export function DiscussionsPage({
   // not already know (a known run's own card self-hydrates) — this flows
   // through the page's single existing socket subscription instead of
   // opening a second one of its own.
-  const [attachedRunsEvent, setAttachedRunsEvent] = useState<{ runId: string; seq: number } | undefined>();
+
   const [showMessageSearch, setShowMessageSearch] = useState(false);
   const [showDiscussionNotes, setShowDiscussionNotes] = useState<boolean>(() => {
     try { return localStorage.getItem('kronn:showDiscussionNotes') !== 'false'; } catch { return true; }
@@ -515,6 +517,32 @@ export function DiscussionsPage({
     }, 5_000);
     return () => window.clearInterval(interval);
   }, [allDiscussions.length, refreshExecutionDiscussionLinks]);
+
+  // Export and delete moved out of the header with the panel buttons: the
+  // header now carries nothing a discussion does, only what it is.
+  const [exportingDiscussion, setExportingDiscussion] = useState(false);
+  const exportInFlight = useRef(false);
+  const exportActiveDiscussion = useCallback(async (discId: string) => {
+    if (exportInFlight.current) return;
+    exportInFlight.current = true;
+    setExportingDiscussion(true);
+    try {
+      const { filename, blob } = await discussionsApi.exportDiscussion(discId);
+      triggerDownload(filename, blob);
+      toast(t('disc.portability.exportDone'), 'success');
+    } catch (error) {
+      toast(t('disc.portability.exportError', String(error)), 'error');
+    } finally {
+      exportInFlight.current = false;
+      setExportingDiscussion(false);
+    }
+  }, [toast, t]);
+  const deleteActiveDiscussion = useCallback(async (discId: string) => {
+    if (!confirm(t('disc.confirmDelete'))) return;
+    await discussionsApi.delete(discId);
+    setActiveDiscussionId(null);
+    refetchDiscussions();
+  }, [t, refetchDiscussions]);
 
   // One panel at a time, decided here rather than in the switcher: the rule
   // already lived in this file (Escape closes them all), and splitting it in
@@ -1464,12 +1492,7 @@ export function DiscussionsPage({
 
   // WebSocket-based real-time events (presence, chat, invites)
   const handleWsMessage = useCallback((msg: WsMessage) => {
-    // KT-243 — a run attached to some discussion changed; forward the exact
-    // run_id so the attached-runs strip only relists for a run it doesn't
-    // already track (a known run's own card self-hydrates via its own
-    // scoped subscription).
     if (msg.type === 'shared_run_updated') {
-      setAttachedRunsEvent(prev => ({ runId: msg.run_id, seq: (prev?.seq ?? 0) + 1 }));
       // A brand-new media job (not yet in the by-message map) needs a relist
       // so its placeholder appears; a known one's own RunStatusCard
       // self-hydrates via its own scoped subscription.
@@ -3465,7 +3488,6 @@ export function DiscussionsPage({
           onSelect={handleDiscSelect}
           onArchive={handleDiscArchive}
           onUnarchive={handleDiscUnarchive}
-          onDelete={handleDiscDelete}
           onBulkArchive={handleBulkArchive}
           onBulkDelete={handleBulkDelete}
           onCompareSelected={openSelectedComparison}
@@ -3590,6 +3612,7 @@ export function DiscussionsPage({
             if (next.has(runId)) next.delete(runId); else next.add(runId);
             return next;
           })}
+          onDelete={handleDiscDelete}
           onCollapse={() => {
             setFocusCollapsedSidebarRail(true);
             setSidebarCollapsed(true);
@@ -3767,21 +3790,7 @@ export function DiscussionsPage({
                 terminal: showTerminalPanel,
                 settings: showSettingsPanel,
               })}
-              showMessageSearch={showMessageSearch}
-              onToggleMessageSearch={() => {
-                if (showMessageSearch) {
-                  closeMessageSearch();
-                } else {
-                  setShowMessageSearch(true);
-                }
-              }}
               onToggleSidebar={() => setSidebarOpen(true)}
-              onDelete={async (discId) => {
-                if (!confirm(t('disc.confirmDelete'))) return;
-                await discussionsApi.delete(discId);
-                setActiveDiscussionId(null);
-                refetchDiscussions();
-              }}
               onDiscussionUpdated={handleDiscussionUpdated}
               onAgentSwitch={handleAgentSwitch}
               toast={toast}
@@ -3791,6 +3800,70 @@ export function DiscussionsPage({
             {/* Messages + one shared utility panel side by side */}
             <div className="disc-messages-git-row">
             <div className="disc-messages-col" data-replying={!!replyTarget}>
+            {/* KT-581 — first in the column, so it opens level with the panel
+              *  strip rather than a few banners lower: the two controls belong
+              *  to the same row of the interface. */}
+            {showMessageSearch && (
+              <div className="disc-message-search" role="search" data-testid="disc-message-search">
+                <Search size={14} aria-hidden="true" />
+                <input
+                  ref={messageSearchInputRef}
+                  type="search"
+                  value={messageSearchQuery}
+                  onChange={event => {
+                    setMessageSearchQuery(event.target.value);
+                    setMessageSearchIndex(0);
+                    setStickToBottom(false);
+                  }}
+                  onKeyDown={event => {
+                    if (event.key === 'Escape') {
+                      event.preventDefault();
+                      closeMessageSearch();
+                    } else if (event.key === 'Enter') {
+                      event.preventDefault();
+                      moveMessageSearch(event.shiftKey ? -1 : 1);
+                    }
+                  }}
+                  placeholder={t('disc.messageSearch.placeholder')}
+                  aria-label={t('disc.messageSearch.placeholder')}
+                />
+                <span className="disc-message-search-position" aria-live="polite">
+                  {deferredMessageSearchQuery
+                    ? messageSearchMatches.length > 0
+                      ? `${messageSearchIndex + 1} / ${messageSearchMatches.length}`
+                      : t('disc.messageSearch.empty')
+                    : t('disc.messageSearch.hint')}
+                </span>
+                <div className="disc-message-search-nav">
+                  <button
+                    type="button"
+                    onClick={() => moveMessageSearch(-1)}
+                    disabled={messageSearchMatches.length === 0}
+                    title={t('disc.messageSearch.previous')}
+                    aria-label={t('disc.messageSearch.previous')}
+                  >
+                    <ChevronUp size={14} />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => moveMessageSearch(1)}
+                    disabled={messageSearchMatches.length === 0}
+                    title={t('disc.messageSearch.next')}
+                    aria-label={t('disc.messageSearch.next')}
+                  >
+                    <ChevronDown size={14} />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={closeMessageSearch}
+                    title={t('disc.messageSearch.close')}
+                    aria-label={t('disc.messageSearch.close')}
+                  >
+                    <X size={14} />
+                  </button>
+                </div>
+              </div>
+            )}
 
             {wsConnectionState === 'reconnecting' && (
               <div className="disc-realtime-status" role="status" aria-live="polite">
@@ -3800,12 +3873,6 @@ export function DiscussionsPage({
               </div>
             )}
 
-            {/* KT-243 — a run launched elsewhere (QP batch, QA/QE,
-                Workflow) that got attached to this discussion via its
-                discussion_id shows up here automatically, through the
-                shared RunStatusCard/SharedRun model. Self-hides when
-                there are no attached runs. */}
-            <DiscussionAttachedRuns discussionId={activeDiscussion.id} runEvent={attachedRunsEvent} />
 
             {/* 0.8.3 (#280) — Audit-running warning. When an audit
                 is in progress on the same project, Kronn has filtered
@@ -3911,67 +3978,6 @@ export function DiscussionsPage({
               </div>
             )}
 
-            {showMessageSearch && (
-              <div className="disc-message-search" role="search" data-testid="disc-message-search">
-                <Search size={14} aria-hidden="true" />
-                <input
-                  ref={messageSearchInputRef}
-                  type="search"
-                  value={messageSearchQuery}
-                  onChange={event => {
-                    setMessageSearchQuery(event.target.value);
-                    setMessageSearchIndex(0);
-                    setStickToBottom(false);
-                  }}
-                  onKeyDown={event => {
-                    if (event.key === 'Escape') {
-                      event.preventDefault();
-                      closeMessageSearch();
-                    } else if (event.key === 'Enter') {
-                      event.preventDefault();
-                      moveMessageSearch(event.shiftKey ? -1 : 1);
-                    }
-                  }}
-                  placeholder={t('disc.messageSearch.placeholder')}
-                  aria-label={t('disc.messageSearch.placeholder')}
-                />
-                <span className="disc-message-search-position" aria-live="polite">
-                  {deferredMessageSearchQuery
-                    ? messageSearchMatches.length > 0
-                      ? `${messageSearchIndex + 1} / ${messageSearchMatches.length}`
-                      : t('disc.messageSearch.empty')
-                    : t('disc.messageSearch.hint')}
-                </span>
-                <div className="disc-message-search-nav">
-                  <button
-                    type="button"
-                    onClick={() => moveMessageSearch(-1)}
-                    disabled={messageSearchMatches.length === 0}
-                    title={t('disc.messageSearch.previous')}
-                    aria-label={t('disc.messageSearch.previous')}
-                  >
-                    <ChevronUp size={14} />
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => moveMessageSearch(1)}
-                    disabled={messageSearchMatches.length === 0}
-                    title={t('disc.messageSearch.next')}
-                    aria-label={t('disc.messageSearch.next')}
-                  >
-                    <ChevronDown size={14} />
-                  </button>
-                  <button
-                    type="button"
-                    onClick={closeMessageSearch}
-                    title={t('disc.messageSearch.close')}
-                    aria-label={t('disc.messageSearch.close')}
-                  >
-                    <X size={14} />
-                  </button>
-                </div>
-              </div>
-            )}
 
             {/* Messages */}
             <div
@@ -5066,6 +5072,38 @@ export function DiscussionsPage({
               openLabel={t('disc.panelRail.open')}
               closeLabel={t('disc.panelRail.close')}
               onToggleColumn={openLastPanel}
+              leading={(
+                <button
+                  type="button"
+                  className="disc-panel-switcher-item"
+                  data-active={showMessageSearch}
+                  onClick={() => setShowMessageSearch(open => !open)}
+                  title={t('disc.messageSearch.open')}
+                  aria-label={t('disc.messageSearch.open')}
+                  aria-expanded={showMessageSearch}
+                  data-action="search"
+                >
+                  <Search size={14} />
+                </button>
+              )}
+              actions={[
+                {
+                  id: 'export',
+                  label: t('disc.portability.export'),
+                  icon: exportingDiscussion
+                    ? <Loader2 size={14} className="spin" />
+                    : <Download size={14} />,
+                  active: false,
+                  onSelect: () => { void exportActiveDiscussion(activeDiscussion.id); },
+                },
+                {
+                  id: 'delete',
+                  label: t('disc.deleteAction'),
+                  icon: <Trash2 size={14} />,
+                  active: false,
+                  onSelect: () => { void deleteActiveDiscussion(activeDiscussion.id); },
+                },
+              ]}
               panels={[
                 {
                   id: 'plan',

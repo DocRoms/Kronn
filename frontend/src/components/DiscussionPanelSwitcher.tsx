@@ -28,12 +28,21 @@ export interface SwitchablePanel {
 
 export function DiscussionPanelSwitcher({
   panels,
+  actions = [],
+  leading,
   groupLabel,
   openLabel,
   closeLabel,
   onToggleColumn,
 }: {
   panels: SwitchablePanel[];
+  /** Things the discussion does rather than shows — export, delete. They sit
+   *  after the panels, behind a separator, so a destructive one is never the
+   *  neighbour of a panel someone meant to click. */
+  actions?: SwitchablePanel[];
+  /** Rendered before the open control. Message search lives here: it is not a
+   *  panel, but it belongs to the same strip so the header keeps nothing. */
+  leading?: React.ReactNode;
   groupLabel: string;
   openLabel: string;
   closeLabel: string;
@@ -54,6 +63,7 @@ export function DiscussionPanelSwitcher({
       data-testid="panel-switcher"
       data-open={anyOpen}
     >
+      {leading}
       <button
         type="button"
         className="disc-panel-switcher-item disc-panel-switcher-toggle"
@@ -87,6 +97,24 @@ export function DiscussionPanelSwitcher({
           )}
         </button>
       ))}
+      {anyOpen && actions.length > 0 && (
+        <>
+          <span className="disc-panel-switcher-sep" aria-hidden="true" />
+          {actions.map(action => (
+            <button
+              key={action.id}
+              type="button"
+              className="disc-panel-switcher-item"
+              data-action={action.id}
+              onClick={action.onSelect}
+              title={action.label}
+              aria-label={action.label}
+            >
+              {action.icon}
+            </button>
+          ))}
+        </>
+      )}
     </div>
   );
 }

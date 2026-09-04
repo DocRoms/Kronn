@@ -88,7 +88,6 @@ function renderHeader(options: {
       sending={sending}
       onRequestTestMode={noop}
       onToggleSidebar={noop}
-      onDelete={noop}
       onDiscussionUpdated={onDiscussionUpdated}
       onAgentSwitch={onAgentSwitch}
       toast={toast}

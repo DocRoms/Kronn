@@ -124,6 +124,14 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Changed
 
+- A discussion's header stopped acting on the discussion. Search, export and
+  delete joined the panels in the strip that sits above the panel column, so
+  the header only describes what the discussion IS — its title, its agent, its
+  tier, its counters. Message search opens level with that strip rather than a
+  few banners lower, because the control and its field belong to the same row.
+- The attached-runs list is gone from the transcript. It repeated what the
+  Automations page already shows, and cost a slice of the conversation's height
+  to do it; a launched action is visible as its own card in the thread.
 - A discussion's panels — plan, assets, code, terminal, settings and message
   search — left the header row. It also carries the title, the agent, the tier
   and the counters, and every version narrowed it further. One control now

@@ -87,3 +87,12 @@
   font-weight: 600;
   text-align: center;
 }
+
+/* Panels first, then what the discussion DOES. The rule keeps a destructive
+   action from sitting flush against a panel someone meant to open. */
+.disc-panel-switcher-sep {
+  width: 1px;
+  align-self: stretch;
+  margin: 2px 4px;
+  background: var(--kr-border-ghost);
+}

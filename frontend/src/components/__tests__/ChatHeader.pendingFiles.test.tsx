@@ -57,8 +57,6 @@ function renderHeader(
       sending={false}
       onRequestTestMode={noop}
       onToggleSidebar={noop}
-      onToggleMessageSearch={noop}
-      onDelete={noop}
       onDiscussionUpdated={noop}
       onAgentSwitch={noop}
       toast={vi.fn()}
@@ -112,8 +110,11 @@ describe('ChatHeader — pending files badge', () => {
     expect(screen.queryByRole('button', { name: 'planning.openPlan' })).toBeNull();
   });
 
-  it('keeps message search, which is not a panel', () => {
+  it('carries no action either — export and delete moved with the panels', () => {
     renderHeader(0);
-    expect(screen.getByRole('button', { name: 'disc.messageSearch.open' })).toBeInTheDocument();
+    // The header describes the discussion; it no longer performs anything on
+    // it. Search, export and delete all live in the panel column's strip.
+    expect(screen.queryByRole('button', { name: 'disc.messageSearch.open' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'disc.portability.export' })).toBeNull();
   });
 });

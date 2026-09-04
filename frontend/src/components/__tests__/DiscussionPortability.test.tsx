@@ -49,13 +49,12 @@ const discussion: Discussion = {
 };
 
 describe('discussion portability UI', () => {
-  it('downloads the complete discussion bundle from the header', async () => {
-    const blob = new Blob(['{}'], { type: 'application/json' });
-    mocks.exportDiscussion.mockResolvedValue({
-      filename: 'portable.kronn-discussion.json',
-      blob,
-    });
-    const toast = vi.fn();
+  // KT-581 — export left the header with the panel buttons: the header now
+  // describes the discussion, it no longer acts on it. The behaviour itself
+  // (call the API, hand the blob to the browser, report the outcome) moved to
+  // DiscussionsPage, which owns the strip that triggers it. Asserting it from
+  // a header that no longer carries the button would test nothing.
+  it('no longer exposes the export action from the header', () => {
     render(
       <ChatHeader
         discussion={discussion}
@@ -65,23 +64,13 @@ describe('discussion portability UI', () => {
         sending={false}
         onRequestTestMode={noop}
         onToggleSidebar={noop}
-        onDelete={noop}
         onDiscussionUpdated={noop}
         onAgentSwitch={noop}
-        toast={toast}
+        toast={vi.fn()}
         t={t}
       />,
     );
-
-    fireEvent.click(screen.getByRole('button', { name: 'disc.portability.export' }));
-    await waitFor(() =>
-      expect(mocks.exportDiscussion).toHaveBeenCalledWith('disc-portable'),
-    );
-    expect(mocks.triggerDownload).toHaveBeenCalledWith(
-      'portable.kronn-discussion.json',
-      blob,
-    );
-    expect(toast).toHaveBeenCalledWith('disc.portability.exportDone', 'success');
+    expect(screen.queryByRole('button', { name: 'disc.portability.export' })).toBeNull();
   });
 
   it('passes the selected JSON bundle to the sidebar import action once', async () => {
@@ -100,7 +89,6 @@ describe('discussion portability UI', () => {
         onSelect={noop}
         onArchive={noop}
         onUnarchive={noop}
-        onDelete={noop}
         onTogglePin={noop}
         onNewDiscussion={noop}
         onImportDiscussion={onImportDiscussion}
@@ -110,6 +98,7 @@ describe('discussion portability UI', () => {
         toast={vi.fn()}
         t={t}
         collapsedGroups={new Set()}
+        onDelete={noop}
         onToggleGroup={noop}
       />,
     );

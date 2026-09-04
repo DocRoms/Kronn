@@ -13,15 +13,12 @@ import { AGENT_MENTIONS, isUsable, isValidationDisc, isBriefingDisc, isBootstrap
 import type { ToastFn } from '../hooks/useToast';
 import {
   GitBranch,
-  Trash2,
   Pencil, ShieldCheck, Check, Zap, FileText, Rocket,
   Menu, Lock, Unlock, Star,
   FlaskConical, Info, UserCircle,
-  Download,
-  Loader2,
   Power,
   PowerOff,
-  Search,
+  Loader2,
 } from 'lucide-react';
 import { MatrixText } from './MatrixText';
 import { LearningsBadge } from './LearningsBadge';
@@ -30,7 +27,6 @@ import { AgentSwitchPicker } from './AgentSwitchPicker';
 import type { AgentSwitchTarget } from './AgentSwitchPicker';
 import { DiscussionSessionBinding } from './DiscussionSessionBinding';
 import { DiscussionTokenCost } from './DiscussionTokenCost';
-import { triggerDownload } from '../lib/downloadBlob';
 import { ContextHelp } from './ContextHelp';
 import type { ExternalApiConnectionView } from '../lib/api';
 import {
@@ -43,7 +39,6 @@ export interface ChatHeaderProps {
   agents: AgentDetection[];
   modelTiers?: ModelTiersConfig | null;
   externalConnections?: ExternalApiConnectionView[];
-  showMessageSearch?: boolean;
   isMobile: boolean;
   sending: boolean;
   /// Number of uncommitted files in the discussion worktree (Isolated mode
@@ -57,9 +52,7 @@ export interface ChatHeaderProps {
    *  is a shortcut on what it describes, not one of the panel buttons. */
   onToggleSettingsPanel?: () => void;
   /** Any panel currently open — the control reads as expanded then. */
-  onToggleMessageSearch?: () => void;
   onToggleSidebar: () => void;
-  onDelete: (discId: string) => void;
   onDiscussionUpdated: () => void;
   onAgentSwitch: (newAgent: AgentType) => void;
   toast: ToastFn;
@@ -72,14 +65,11 @@ export function ChatHeader({
   agents,
   modelTiers = null,
   externalConnections = [],
-  showMessageSearch = false,
   isMobile,
   sending,
   onRequestTestMode,
   onToggleSettingsPanel,
-  onToggleMessageSearch,
   onToggleSidebar,
-  onDelete,
   onDiscussionUpdated,
   onAgentSwitch,
   toast,
@@ -98,14 +88,12 @@ export function ChatHeader({
   const [editingTitleId, setEditingTitleId] = useState<string | null>(null);
   const [editingTitleText, setEditingTitleText] = useState('');
   const [isDiscIdCopied, setIsDiscIdCopied] = useState(false);
-  const [exporting, setExporting] = useState(false);
   const [nativeAgentMode, setNativeAgentMode] = useState<{
     discussionId: string;
     disabled: boolean;
   } | null>(null);
   const [nativeAgentModeSaving, setNativeAgentModeSaving] = useState(false);
   const [sessionWorkspaces, setSessionWorkspaces] = useState<DiscussionWorkspace[]>([]);
-  const exportInFlight = useRef(false);
   const nativeAgentModeInFlight = useRef(false);
   const discIdResetTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -518,51 +506,6 @@ export function ChatHeader({
       <div className="disc-chat-header-actions" data-tour-id="disc-output-controls">
         {/* 0.10.0 — pending-learnings badge (self-contained; hidden when 0). */}
         <LearningsBadge t={t} toast={toast} />
-        {onToggleMessageSearch && (
-          <button
-            type="button"
-            className="disc-icon-btn"
-            data-active={showMessageSearch}
-            onClick={onToggleMessageSearch}
-            title={t('disc.messageSearch.open')}
-            aria-label={t('disc.messageSearch.open')}
-            aria-expanded={showMessageSearch}
-          >
-            <Search size={13} />
-          </button>
-        )}
-        <button
-          type="button"
-          className="disc-icon-btn"
-          disabled={exporting}
-          onClick={async () => {
-            if (exportInFlight.current) return;
-            exportInFlight.current = true;
-            setExporting(true);
-            try {
-              const { filename, blob } = await discussionsApi.exportDiscussion(discussion.id);
-              triggerDownload(filename, blob);
-              toast(t('disc.portability.exportDone'), 'success');
-            } catch (error) {
-              toast(t('disc.portability.exportError', String(error)), 'error');
-            } finally {
-              exportInFlight.current = false;
-              setExporting(false);
-            }
-          }}
-          title={t('disc.portability.exportHint')}
-          aria-label={t('disc.portability.export')}
-        >
-          {exporting ? <Loader2 size={13} className="spin" /> : <Download size={13} />}
-        </button>
-
-        <button
-          className="disc-icon-btn" style={{ color: 'var(--kr-error)' }}
-          onClick={() => onDelete(discussion.id)}
-          aria-label="Delete discussion"
-        >
-          <Trash2 size={12} />
-        </button>
       </div>
     </div>
   );
