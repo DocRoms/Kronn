@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef, type CSSProperties, type ReactNode 
 import { config as configApi, agents as agentsApi, usage as usageApi, nvidia as nvidiaApi } from '../../lib/api';
 import { userError } from '../../lib/userError';
 import { useAsyncGuard } from '../../hooks/useAsyncGuard';
+import { useIsMobile } from '../../hooks/useMediaQuery';
 import { OllamaCard } from './OllamaCard';
 import { ExternalApiSection } from './ExternalApiSection';
 import { ModelCatalogSection } from './ModelCatalogSection';
@@ -515,339 +516,25 @@ export function AgentsSection({
   // special case inside the CLI loop; it is not a CLI, it is the local one.
   const cliAgents = fleetAgents.filter(agent => agent.agent_type !== 'Ollama');
   const localAgents = fleetAgents.filter(agent => agent.agent_type === 'Ollama');
+  // Alternating rather than balanced by height: a card must not change column
+  // when a neighbour is expanded — that is the jump this layout exists to
+  // avoid. Two columns, each one a stack that only moves within itself.
+  // One column below the grid's breakpoint, and then the split must not show:
+  // stacking the two lists would read 1, 3, 5, 7, 2, 4, 6.
+  const singleColumn = useIsMobile(900);
+  const agentColumns = singleColumn
+    ? [cliAgents]
+    : [
+        cliAgents.filter((_, index) => index % 2 === 0),
+        cliAgents.filter((_, index) => index % 2 === 1),
+      ];
 
   const activeAgentCount = fleetAgents.filter(agent => agent.enabled && (agent.installed || agent.runtime_available)).length;
 
-  return (
-    <div className="set-agents-section">
-        {(() => {
-          const isWSL = agents.some(a => a.host_label === 'WSL');
-          const hasDockerAgent = agents.some(a => a.installed && !a.host_managed);
-          return isWSL && hasDockerAgent ? (
-            <div className="set-wsl-warning">
-              <AlertTriangle size={12} className="text-warning flex-shrink-0" style={{ marginTop: 2 }} />
-              <span className="text-sm text-tertiary" style={{ lineHeight: 1.4 }}>{t('config.wslWarning')}</span>
-            </div>
-          ) : null;
-        })()}
-
-        <section className="set-agent-defaults" data-testid="agent-defaults">
-          <div className="set-agent-defaults-head">
-            <div>
-              <div className="font-semibold text-base">{t('config.agentDefaultsTitle')}</div>
-              <p className="set-hint">{t('config.agentDefaultsHint')}</p>
-            </div>
-          </div>
-          <div className="set-agent-defaults-grid">
-            <div className="set-agent-default-card" data-testid="default-tier-section">
-              <div className="set-agent-default-title">
-                <Gauge size={15} aria-hidden="true" />
-                <span>{t('config.defaultTierLabel')}</span>
-              </div>
-              <p>{t('config.defaultTierHint')}</p>
-              <div className="set-agent-choice-list" role="radiogroup" aria-label={t('config.defaultTierLabel')}>
-                {(['economy', 'default', 'reasoning'] as const).map(tier => {
-                  const labels = {
-                    economy: t('disc.tier.economy'),
-                    default: t('disc.tier.default'),
-                    reasoning: t('disc.tier.reasoning'),
-                  };
-                  const icons = {
-                    economy: '⚡',
-                    default: '🎯',
-                    reasoning: '🧠',
-                  };
-                  const active = defaultTier === tier;
-                  return (
-                    <button
-                      key={tier}
-                      type="button"
-                      role="radio"
-                      aria-checked={active}
-                      className="set-agent-choice"
-                      data-active={active}
-                      data-testid={`default-tier-btn-${tier}`}
-                      onClick={() => saveDefaultTier(tier)}
-                      disabled={defaultTier === null}
-                    >
-                      <span className="set-agent-choice-mark" aria-hidden="true" />
-                      <span>
-                        <strong>
-                          <span className="set-agent-choice-icon" aria-hidden="true">{icons[tier]}</span>
-                          {labels[tier]}
-                        </strong>
-                        <small>{t(`config.defaultTier.${tier}Hint`)}</small>
-                      </span>
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-
-            <div className="set-agent-default-card" data-testid="default-summary-section">
-              <div className="set-agent-default-title">
-                <FileText size={15} aria-hidden="true" />
-                <span>{t('config.defaultSummaryLabel')}</span>
-                <ContextHelp title={t('config.defaultSummaryInfoTitle')} align="end">
-                  <p>{t('config.defaultSummaryInfoHistory')}</p>
-                  <p>{t('config.defaultSummaryInfoMcp')}</p>
-                </ContextHelp>
-              </div>
-              <p>{t('config.defaultSummaryHint')}</p>
-              <div className="set-agent-choice-list" role="radiogroup" aria-label={t('config.defaultSummaryLabel')}>
-                {(['Off', 'OnDemand'] as const).map(strategy => {
-                  const labels = {
-                    Off: t('config.summaryOff'),
-                    OnDemand: t('config.summaryOnDemand'),
-                  };
-                  const active = defaultSummaryStrategy === strategy;
-                  return (
-                    <button
-                      key={strategy}
-                      type="button"
-                      role="radio"
-                      aria-checked={active}
-                      className="set-agent-choice"
-                      data-active={active}
-                      data-testid={`default-summary-btn-${strategy.toLowerCase()}`}
-                      onClick={() => saveDefaultSummary(strategy)}
-                      disabled={defaultSummaryStrategy === null}
-                    >
-                      <span className="set-agent-choice-mark" aria-hidden="true" />
-                      <span>
-                        <strong>
-                          {labels[strategy]}
-                        </strong>
-                        <small>{t(`config.defaultSummary.${strategy.toLowerCase()}Hint`)}</small>
-                      </span>
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-
-            <div
-              id="settings-agent-handoffs"
-              className="set-agent-default-card set-agent-handoff-card"
-              data-testid="agent-handoff-section"
-            >
-              <div className="set-agent-default-title">
-                <GitFork size={15} aria-hidden="true" />
-                <span>{t('config.agentHandoffTitle')}</span>
-                <button
-                  type="button"
-                  className="set-agent-handoff-toggle"
-                  data-enabled={agentHandoffsEnabled === true}
-                  aria-pressed={agentHandoffsEnabled === true}
-                  disabled={agentHandoffsEnabled === null}
-                  onClick={() => void saveAgentHandoffsEnabled(!agentHandoffsEnabled)}
-                >
-                  <span>{agentHandoffsEnabled ? t('config.agentHandoffOn') : t('config.agentHandoffOff')}</span>
-                  <span className="set-toggle-track" data-on={agentHandoffsEnabled === true}>
-                    <span className="set-toggle-thumb" data-on={agentHandoffsEnabled === true} />
-                  </span>
-                </button>
-              </div>
-              {agentHandoffsEnabled === true && (
-                <div className="set-agent-handoff-expanded" data-testid="agent-handoff-details">
-                  <p>{t('config.agentHandoffHint')}</p>
-                  <label className="set-agent-handoff-limit">
-                    <span>{t('config.agentHandoffPaidLimit')}</span>
-                    <select
-                      value={agentHandoffPaidUnlimited ? 'unlimited' : String(agentHandoffPaidLimit)}
-                      onChange={event => void saveAgentHandoffPaidLimit(
-                        event.target.value === 'unlimited' ? 'unlimited' : Number(event.target.value),
-                      )}
-                    >
-                      {[0, 1, 2, 3, 4, 5].map(limit => (
-                        <option key={limit} value={limit}>
-                          {limit === 0
-                            ? t('config.agentHandoffPaidLimitZero')
-                            : limit === 1
-                              ? t('config.agentHandoffPaidLimitOne')
-                              : t('config.agentHandoffPaidLimitMany', limit)}
-                        </option>
-                      ))}
-                      <option value="unlimited">{t('config.agentHandoffPaidLimitUnlimited')}</option>
-                    </select>
-                    <small>{t('config.agentHandoffPaidLimitHint')}</small>
-                  </label>
-                  {agentHandoffPaidUnlimited && (
-                    <div className="set-agent-handoff-warning" role="alert">
-                      <AlertTriangle size={16} aria-hidden="true" />
-                      <span>
-                        <strong>{t('config.agentHandoffUnlimitedWarningTitle')}</strong>
-                        <small>{t('config.agentHandoffUnlimitedWarning')}</small>
-                      </span>
-                    </div>
-                  )}
-                  <div className="set-agent-handoff-targets">
-                    <div className="set-agent-handoff-targets-copy">
-                      <strong>{t('config.agentHandoffTargetsTitle')}</strong>
-                      <small>{t('config.agentHandoffTargetsHint')}</small>
-                    </div>
-                    <div className="set-agent-handoff-target-grid">
-                      {agents.map(agent => {
-                        const allowed = !agentHandoffBlockedAgents.includes(agent.agent_type);
-                        const local = agent.agent_type === 'Ollama';
-                        return (
-                          <button
-                            key={agent.agent_type}
-                            type="button"
-                            className="set-agent-handoff-target"
-                            data-allowed={allowed}
-                            aria-pressed={allowed}
-                            onClick={() => void saveAgentHandoffTarget(agent.agent_type, !allowed)}
-                          >
-                            <span className="set-agent-handoff-target-check" aria-hidden="true">
-                              {allowed ? <Check size={11} /> : <X size={11} />}
-                            </span>
-                            <span>
-                              <strong>{AGENT_LABELS[agent.agent_type] ?? agent.name}</strong>
-                              <small>{t(local ? 'config.agentHandoffTargetLocal' : 'config.agentHandoffTargetPaid')}</small>
-                            </span>
-                            <span className="set-agent-handoff-target-state">
-                              {t(allowed
-                                ? 'config.agentHandoffTargetAllowed'
-                                : 'config.agentHandoffTargetBlocked')}
-                            </span>
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </div>
-                  <div className="set-agent-handoff-cli-note" role="note">
-                    <Info size={15} aria-hidden="true" />
-                    <span>
-                      <strong>{t('config.agentHandoffCliTitle')}</strong>
-                      <small>{t('config.agentHandoffCliHint')}</small>
-                    </span>
-                  </div>
-                </div>
-              )}
-            </div>
-          </div>
-        </section>
-
-        <div className="set-agent-economy-grid">
-          <CompressionSection agents={agents} onActivated={refetchAgents} toast={toast} t={t} />
-          {usagePanel}
-        </div>
-
-        <div className="set-agent-list-head">
-          <div>
-            <div className="set-agent-list-title">
-              <span className="font-semibold text-base">{t('config.agentFleetTitle')}</span>
-              <span className="set-agent-active-count">{t('config.agentActiveCount', activeAgentCount, fleetAgents.length)}</span>
-            </div>
-            <p className="set-hint">{t('config.agentFleetHint')}</p>
-          </div>
-          <div className="set-agent-list-actions">
-            <button
-              className="set-discover-btn"
-              title={t('config.discoverKeys')}
-              onClick={async () => {
-                try {
-                  const res = await configApi.discoverKeys();
-                  if (res.imported_count > 0) {
-                    toast(t('config.discoverKeysFound').replace('{0}', String(res.discovered.length)).replace('{1}', String(res.imported_count)), 'success');
-                    refetchTokens();
-                  } else if (res.discovered.length > 0) {
-                    toast(t('config.discoverKeysFound').replace('{0}', String(res.discovered.length)).replace('{1}', '0'), 'info');
-                  } else {
-                    toast(t('config.discoverKeysNone'), 'info');
-                  }
-                } catch { toast(t('config.discoverKeysNone'), 'error'); }
-              }}
-            >
-              <FolderSearch size={10} /> {t('config.discoverKeys')}
-            </button>
-            <button className="set-icon-btn" onClick={() => refetchAgents()} title={t('config.refresh')} aria-label={t('config.refresh')}>
-              <RefreshCw size={12} />
-            </button>
-          </div>
-        </div>
-
-        {observedCostModels.length > 0 && (
-          <div className="set-agent-cost-display" data-testid="model-cost-display">
-            <div className="set-agent-cost-display-copy">
-              <strong>
-                {t('config.modelCostDisplayTitle')}{' '}
-                <a
-                  href={CCUSAGE_GITHUB_URL}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="set-compression-link"
-                >
-                  ccusage <ExternalLink size={10} />
-                </a>
-              </strong>
-              <span>{t('config.modelCostDisplayHint')}</span>
-            </div>
-            <div className="set-agent-cost-display-controls">
-              <div
-                className="set-agent-cost-mode"
-                role="radiogroup"
-                aria-label={t('config.modelCostDisplayTitle')}
-              >
-                <button
-                  type="button"
-                  role="radio"
-                  aria-checked={costDisplayMode === 'absolute'}
-                  data-active={costDisplayMode === 'absolute'}
-                  data-testid="model-cost-mode-absolute"
-                  onClick={() => setCostDisplayMode('absolute')}
-                >
-                  {t('config.modelCostModeAbsolute')}
-                </button>
-                <button
-                  type="button"
-                  role="radio"
-                  aria-checked={costDisplayMode === 'relative'}
-                  data-active={costDisplayMode === 'relative'}
-                  data-testid="model-cost-mode-relative"
-                  disabled={relativeReferenceModels.length === 0}
-                  onClick={() => setCostDisplayMode('relative')}
-                >
-                  {t('config.modelCostModeRelative')}
-                </button>
-              </div>
-              {costDisplayMode === 'relative' && effectiveReferenceModel && (
-                <label className="set-agent-cost-reference">
-                  <span>{t('config.modelCostReference')}</span>
-                  <select
-                    value={effectiveReferenceModel}
-                    onChange={event => setCostReferenceModel(event.target.value)}
-                    data-testid="model-cost-reference"
-                  >
-                    {relativeReferenceModels.map(model => (
-                      <option key={model.model} value={model.model}>
-                        {model.model} · ≈ {formatObservedCost(model.cost)}/M
-                      </option>
-                    ))}
-                  </select>
-                </label>
-              )}
-            </div>
-          </div>
-        )}
-
-        {inDocker && (
-          <div className="set-agent-runtime-warning" role="note">
-            ⚠️ {t('config.dockerInstallNote')}
-          </div>
-        )}
-
-        <section className="set-agent-mode" data-mode="cli" data-testid="agent-mode-cli">
-          <div className="set-agent-mode-head">
-            <span className="set-external-api-heading-icon" aria-hidden="true"><Terminal size={17} /></span>
-            <span className="set-external-api-heading-copy">
-              <strong>{t('config.modeCliTitle')}</strong>
-              <small>{t('config.modeCliHint')}</small>
-            </span>
-          </div>
-          <div className="set-agent-mode-grid">
-        {cliAgents.map(agent => {
+  // KT-586 — rendered from two independent columns rather than one grid, so
+  // a tall card does not leave a hole beside it and expanding one never moves
+  // the other column. Extracted for that reason alone: the markup is unchanged.
+  const renderAgentCard = (agent: AgentDetection) => {
           // KT-339 — LiteLLM, NVIDIA and any other OpenAI-compatible service are
           // now named connections in the unified External API zone below, so the
           // fleet loop never renders them as their own cards.
@@ -1572,7 +1259,342 @@ export function AgentsSection({
           </div>
           </React.Fragment>
           );
-        })}
+  };
+
+  return (
+    <div className="set-agents-section">
+        {(() => {
+          const isWSL = agents.some(a => a.host_label === 'WSL');
+          const hasDockerAgent = agents.some(a => a.installed && !a.host_managed);
+          return isWSL && hasDockerAgent ? (
+            <div className="set-wsl-warning">
+              <AlertTriangle size={12} className="text-warning flex-shrink-0" style={{ marginTop: 2 }} />
+              <span className="text-sm text-tertiary" style={{ lineHeight: 1.4 }}>{t('config.wslWarning')}</span>
+            </div>
+          ) : null;
+        })()}
+
+        <section className="set-agent-defaults" data-testid="agent-defaults">
+          <div className="set-agent-defaults-head">
+            <div>
+              <div className="font-semibold text-base">{t('config.agentDefaultsTitle')}</div>
+              <p className="set-hint">{t('config.agentDefaultsHint')}</p>
+            </div>
+          </div>
+          <div className="set-agent-defaults-grid">
+            <div className="set-agent-default-card" data-testid="default-tier-section">
+              <div className="set-agent-default-title">
+                <Gauge size={15} aria-hidden="true" />
+                <span>{t('config.defaultTierLabel')}</span>
+              </div>
+              <p>{t('config.defaultTierHint')}</p>
+              <div className="set-agent-choice-list" role="radiogroup" aria-label={t('config.defaultTierLabel')}>
+                {(['economy', 'default', 'reasoning'] as const).map(tier => {
+                  const labels = {
+                    economy: t('disc.tier.economy'),
+                    default: t('disc.tier.default'),
+                    reasoning: t('disc.tier.reasoning'),
+                  };
+                  const icons = {
+                    economy: '⚡',
+                    default: '🎯',
+                    reasoning: '🧠',
+                  };
+                  const active = defaultTier === tier;
+                  return (
+                    <button
+                      key={tier}
+                      type="button"
+                      role="radio"
+                      aria-checked={active}
+                      className="set-agent-choice"
+                      data-active={active}
+                      data-testid={`default-tier-btn-${tier}`}
+                      onClick={() => saveDefaultTier(tier)}
+                      disabled={defaultTier === null}
+                    >
+                      <span className="set-agent-choice-mark" aria-hidden="true" />
+                      <span>
+                        <strong>
+                          <span className="set-agent-choice-icon" aria-hidden="true">{icons[tier]}</span>
+                          {labels[tier]}
+                        </strong>
+                        <small>{t(`config.defaultTier.${tier}Hint`)}</small>
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="set-agent-default-card" data-testid="default-summary-section">
+              <div className="set-agent-default-title">
+                <FileText size={15} aria-hidden="true" />
+                <span>{t('config.defaultSummaryLabel')}</span>
+                <ContextHelp title={t('config.defaultSummaryInfoTitle')} align="end">
+                  <p>{t('config.defaultSummaryInfoHistory')}</p>
+                  <p>{t('config.defaultSummaryInfoMcp')}</p>
+                </ContextHelp>
+              </div>
+              <p>{t('config.defaultSummaryHint')}</p>
+              <div className="set-agent-choice-list" role="radiogroup" aria-label={t('config.defaultSummaryLabel')}>
+                {(['Off', 'OnDemand'] as const).map(strategy => {
+                  const labels = {
+                    Off: t('config.summaryOff'),
+                    OnDemand: t('config.summaryOnDemand'),
+                  };
+                  const active = defaultSummaryStrategy === strategy;
+                  return (
+                    <button
+                      key={strategy}
+                      type="button"
+                      role="radio"
+                      aria-checked={active}
+                      className="set-agent-choice"
+                      data-active={active}
+                      data-testid={`default-summary-btn-${strategy.toLowerCase()}`}
+                      onClick={() => saveDefaultSummary(strategy)}
+                      disabled={defaultSummaryStrategy === null}
+                    >
+                      <span className="set-agent-choice-mark" aria-hidden="true" />
+                      <span>
+                        <strong>
+                          {labels[strategy]}
+                        </strong>
+                        <small>{t(`config.defaultSummary.${strategy.toLowerCase()}Hint`)}</small>
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div
+              id="settings-agent-handoffs"
+              className="set-agent-default-card set-agent-handoff-card"
+              data-testid="agent-handoff-section"
+            >
+              <div className="set-agent-default-title">
+                <GitFork size={15} aria-hidden="true" />
+                <span>{t('config.agentHandoffTitle')}</span>
+                <button
+                  type="button"
+                  className="set-agent-handoff-toggle"
+                  data-enabled={agentHandoffsEnabled === true}
+                  aria-pressed={agentHandoffsEnabled === true}
+                  disabled={agentHandoffsEnabled === null}
+                  onClick={() => void saveAgentHandoffsEnabled(!agentHandoffsEnabled)}
+                >
+                  <span>{agentHandoffsEnabled ? t('config.agentHandoffOn') : t('config.agentHandoffOff')}</span>
+                  <span className="set-toggle-track" data-on={agentHandoffsEnabled === true}>
+                    <span className="set-toggle-thumb" data-on={agentHandoffsEnabled === true} />
+                  </span>
+                </button>
+              </div>
+              {agentHandoffsEnabled === true && (
+                <div className="set-agent-handoff-expanded" data-testid="agent-handoff-details">
+                  <p>{t('config.agentHandoffHint')}</p>
+                  <label className="set-agent-handoff-limit">
+                    <span>{t('config.agentHandoffPaidLimit')}</span>
+                    <select
+                      value={agentHandoffPaidUnlimited ? 'unlimited' : String(agentHandoffPaidLimit)}
+                      onChange={event => void saveAgentHandoffPaidLimit(
+                        event.target.value === 'unlimited' ? 'unlimited' : Number(event.target.value),
+                      )}
+                    >
+                      {[0, 1, 2, 3, 4, 5].map(limit => (
+                        <option key={limit} value={limit}>
+                          {limit === 0
+                            ? t('config.agentHandoffPaidLimitZero')
+                            : limit === 1
+                              ? t('config.agentHandoffPaidLimitOne')
+                              : t('config.agentHandoffPaidLimitMany', limit)}
+                        </option>
+                      ))}
+                      <option value="unlimited">{t('config.agentHandoffPaidLimitUnlimited')}</option>
+                    </select>
+                    <small>{t('config.agentHandoffPaidLimitHint')}</small>
+                  </label>
+                  {agentHandoffPaidUnlimited && (
+                    <div className="set-agent-handoff-warning" role="alert">
+                      <AlertTriangle size={16} aria-hidden="true" />
+                      <span>
+                        <strong>{t('config.agentHandoffUnlimitedWarningTitle')}</strong>
+                        <small>{t('config.agentHandoffUnlimitedWarning')}</small>
+                      </span>
+                    </div>
+                  )}
+                  <div className="set-agent-handoff-targets">
+                    <div className="set-agent-handoff-targets-copy">
+                      <strong>{t('config.agentHandoffTargetsTitle')}</strong>
+                      <small>{t('config.agentHandoffTargetsHint')}</small>
+                    </div>
+                    <div className="set-agent-handoff-target-grid">
+                      {agents.map(agent => {
+                        const allowed = !agentHandoffBlockedAgents.includes(agent.agent_type);
+                        const local = agent.agent_type === 'Ollama';
+                        return (
+                          <button
+                            key={agent.agent_type}
+                            type="button"
+                            className="set-agent-handoff-target"
+                            data-allowed={allowed}
+                            aria-pressed={allowed}
+                            onClick={() => void saveAgentHandoffTarget(agent.agent_type, !allowed)}
+                          >
+                            <span className="set-agent-handoff-target-check" aria-hidden="true">
+                              {allowed ? <Check size={11} /> : <X size={11} />}
+                            </span>
+                            <span>
+                              <strong>{AGENT_LABELS[agent.agent_type] ?? agent.name}</strong>
+                              <small>{t(local ? 'config.agentHandoffTargetLocal' : 'config.agentHandoffTargetPaid')}</small>
+                            </span>
+                            <span className="set-agent-handoff-target-state">
+                              {t(allowed
+                                ? 'config.agentHandoffTargetAllowed'
+                                : 'config.agentHandoffTargetBlocked')}
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                  <div className="set-agent-handoff-cli-note" role="note">
+                    <Info size={15} aria-hidden="true" />
+                    <span>
+                      <strong>{t('config.agentHandoffCliTitle')}</strong>
+                      <small>{t('config.agentHandoffCliHint')}</small>
+                    </span>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        </section>
+
+        <div className="set-agent-economy-grid">
+          <CompressionSection agents={agents} onActivated={refetchAgents} toast={toast} t={t} />
+          {usagePanel}
+        </div>
+
+        <div className="set-agent-list-head">
+          <div>
+            <div className="set-agent-list-title">
+              <span className="font-semibold text-base">{t('config.agentFleetTitle')}</span>
+              <span className="set-agent-active-count">{t('config.agentActiveCount', activeAgentCount, fleetAgents.length)}</span>
+            </div>
+            <p className="set-hint">{t('config.agentFleetHint')}</p>
+          </div>
+          <div className="set-agent-list-actions">
+            <button
+              className="set-discover-btn"
+              title={t('config.discoverKeys')}
+              onClick={async () => {
+                try {
+                  const res = await configApi.discoverKeys();
+                  if (res.imported_count > 0) {
+                    toast(t('config.discoverKeysFound').replace('{0}', String(res.discovered.length)).replace('{1}', String(res.imported_count)), 'success');
+                    refetchTokens();
+                  } else if (res.discovered.length > 0) {
+                    toast(t('config.discoverKeysFound').replace('{0}', String(res.discovered.length)).replace('{1}', '0'), 'info');
+                  } else {
+                    toast(t('config.discoverKeysNone'), 'info');
+                  }
+                } catch { toast(t('config.discoverKeysNone'), 'error'); }
+              }}
+            >
+              <FolderSearch size={10} /> {t('config.discoverKeys')}
+            </button>
+            <button className="set-icon-btn" onClick={() => refetchAgents()} title={t('config.refresh')} aria-label={t('config.refresh')}>
+              <RefreshCw size={12} />
+            </button>
+          </div>
+        </div>
+
+        {observedCostModels.length > 0 && (
+          <div className="set-agent-cost-display" data-testid="model-cost-display">
+            <div className="set-agent-cost-display-copy">
+              <strong>
+                {t('config.modelCostDisplayTitle')}{' '}
+                <a
+                  href={CCUSAGE_GITHUB_URL}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="set-compression-link"
+                >
+                  ccusage <ExternalLink size={10} />
+                </a>
+              </strong>
+              <span>{t('config.modelCostDisplayHint')}</span>
+            </div>
+            <div className="set-agent-cost-display-controls">
+              <div
+                className="set-agent-cost-mode"
+                role="radiogroup"
+                aria-label={t('config.modelCostDisplayTitle')}
+              >
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked={costDisplayMode === 'absolute'}
+                  data-active={costDisplayMode === 'absolute'}
+                  data-testid="model-cost-mode-absolute"
+                  onClick={() => setCostDisplayMode('absolute')}
+                >
+                  {t('config.modelCostModeAbsolute')}
+                </button>
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked={costDisplayMode === 'relative'}
+                  data-active={costDisplayMode === 'relative'}
+                  data-testid="model-cost-mode-relative"
+                  disabled={relativeReferenceModels.length === 0}
+                  onClick={() => setCostDisplayMode('relative')}
+                >
+                  {t('config.modelCostModeRelative')}
+                </button>
+              </div>
+              {costDisplayMode === 'relative' && effectiveReferenceModel && (
+                <label className="set-agent-cost-reference">
+                  <span>{t('config.modelCostReference')}</span>
+                  <select
+                    value={effectiveReferenceModel}
+                    onChange={event => setCostReferenceModel(event.target.value)}
+                    data-testid="model-cost-reference"
+                  >
+                    {relativeReferenceModels.map(model => (
+                      <option key={model.model} value={model.model}>
+                        {model.model} · ≈ {formatObservedCost(model.cost)}/M
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              )}
+            </div>
+          </div>
+        )}
+
+        {inDocker && (
+          <div className="set-agent-runtime-warning" role="note">
+            ⚠️ {t('config.dockerInstallNote')}
+          </div>
+        )}
+
+        <section className="set-agent-mode" data-mode="cli" data-testid="agent-mode-cli">
+          <div className="set-agent-mode-head">
+            <span className="set-external-api-heading-icon" aria-hidden="true"><Terminal size={17} /></span>
+            <span className="set-external-api-heading-copy">
+              <strong>{t('config.modeCliTitle')}</strong>
+              <small>{t('config.modeCliHint')}</small>
+            </span>
+          </div>
+          <div className="set-agent-mode-grid">
+            {agentColumns.map((column, index) => (
+              <div className="set-agent-mode-col" key={index}>
+                {column.map(renderAgentCard)}
+              </div>
+            ))}
           </div>
         </section>
 

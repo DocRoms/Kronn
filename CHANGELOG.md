@@ -156,6 +156,13 @@ Release notes for 0.9.3 and earlier are available in the
   Local / External API, built the same way so they read as three of a kind, and
   the model catalogue moved below them: a catalogue is what the modes draw
   from, not a fourth way of reaching a model.
+- The agent cards sit in two independent columns. Laid out as a grid, a row
+  was as tall as its tallest card, so a short one left a hole beside a tall one
+  — and expanding either pushed both columns down, moving cards the reader was
+  not looking at. Each column is its own stack now: a card only ever moves the
+  cards under it, in its own column. Below the breakpoint the two collapse back
+  into one list in the original order.
+
 - An agent's card says its name once. The title and the mention-colour chip
   beside it both carried it; the title is the colour control now, so picking a
   colour happens on the name that colour applies to. What only matters while

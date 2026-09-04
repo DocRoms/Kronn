@@ -895,4 +895,30 @@ describe('AgentsSection — CLI / Local / External zones', () => {
     const rule = css.match(/\.set-agent-mode-grid\s*\{([^}]*)\}/)?.[1] ?? '';
     expect(rule).toContain('grid-template-columns: repeat(2, minmax(0, 1fr))');
   });
+
+  /// Each column is its own stack, not a grid track. In a grid a row is as tall
+  /// as its tallest card, so a short card left a hole beside a tall one and
+  /// expanding either pushed BOTH columns down.
+  it('splits the agents into two independent stacks', () => {
+    renderSection({
+      agents: [
+        makeAgent({ name: 'A1', agent_type: 'ClaudeCode', installed: true, enabled: true }),
+        makeAgent({ name: 'A2', agent_type: 'Codex', installed: true, enabled: true }),
+        makeAgent({ name: 'A3', agent_type: 'OpenCode', installed: true, enabled: true }),
+      ],
+    });
+
+    const columns = [...document.querySelectorAll('.set-agent-mode-col')];
+    expect(columns).toHaveLength(2);
+    const names = columns.map(column => [...column.querySelectorAll('.set-agent-row')]
+      .map(row => row.getAttribute('data-agent-type')));
+    // Alternating: a card must not change column when a neighbour expands.
+    expect(names).toEqual([['ClaudeCode', 'OpenCode'], ['Codex']]);
+  });
+
+  it('gives each column its own vertical stack in CSS', () => {
+    const css = readFileSync('src/pages/SettingsPage.css', 'utf8');
+    const rule = css.match(/\.set-agent-mode-col\s*\{([^}]*)\}/)?.[1] ?? '';
+    expect(rule).toContain('flex-direction: column');
+  });
 });

@@ -2421,14 +2421,25 @@
 }
 
 /* Two columns, like the external connections: a CLI agent says roughly what a
-   connection says, and had the whole width to say it. Every card keeps its
-   column — one spanning both leaves a hole beside it. */
+   connection says, and had the whole width to say it.
+   Each column is its own stack rather than a grid track. In a grid, a row is
+   as tall as its tallest card, so a short card left a hole beside a tall one —
+   and expanding either pushed BOTH columns down. Here a card only ever moves
+   the cards under it, in its own column. CSS multi-column would also close the
+   holes, but it re-balances on expand and cards jump between columns. */
 .set-agent-mode-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   align-items: start;
   gap: var(--kr-sp-4);
   padding: var(--kr-sp-5);
+}
+
+.set-agent-mode-col {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: var(--kr-sp-4);
 }
 
 @media (max-width: 900px) {
@@ -2439,7 +2450,7 @@
 
 /* The grid owns the spacing now; the row keeping its own bottom margin left a
    ragged gap between the two columns. */
-.set-agent-mode-grid > .set-agent-row {
+.set-agent-mode-grid .set-agent-row {
   margin-bottom: 0;
 }
 
