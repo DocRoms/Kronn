@@ -135,6 +135,16 @@ Release notes for 0.9.3 and earlier are available in the
   scheme's default, each published host keeps its own, and an endpoint nothing
   is listening on is shown as unreachable rather than offered as a link.
 
+- OpenCode answers in the room again. Every chunk it streams carries its text
+  as a single content object, a shape the ACP reader handled neither as a
+  string nor as an array — so the whole reply fell through, the turn was
+  recorded as failed with no visible output, and the message offered two
+  guesses that were both wrong. Its private reasoning, which arrives the same
+  way, is read and deliberately not shown: it is a scratchpad, and folding it
+  into the answer would leak it. The turn's tokens are read from the response
+  too, where ACP puts them, instead of being dropped with it — a reply that
+  cost 7 946 tokens was recorded as costing nothing.
+
 - Kronn stopped telling agents to run linters the project does not have. A
   `composer.json` was enough to write `Lint: phpcs` into all eight generated
   instruction files, but phpcs is an optional Composer package, absent from
