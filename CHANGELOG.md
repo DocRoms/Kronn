@@ -122,6 +122,20 @@ Release notes for 0.9.3 and earlier are available in the
   agent type, with the same connection-mismatch validation Quick Prompts
   already apply. See `docs/operations/http-transport.md`.
 
+### Fixed
+
+- Kronn stopped telling agents to run linters the project does not have. A
+  `composer.json` was enough to write `Lint: phpcs` into all eight generated
+  instruction files, but phpcs is an optional Composer package, absent from
+  most PHP projects — so every agent read a command that could not run, and
+  the contradiction propagated eight files at a time. It is now declared only
+  when something proves it: the vendored binary, a `require-dev` entry, or a
+  ruleset. Ruff had the same flaw, since it does not ship with Python either,
+  and a `lint` script was chained onto `tsc --noEmit` whether or not
+  `package.json` defined one — which made the whole command fail where it did
+  not. Linters that come with their toolchain, clippy and `go vet`, are still
+  assumed from the language.
+
 ### Changed
 
 - The discussion header reads as two lines instead of three. Inviting a peer
