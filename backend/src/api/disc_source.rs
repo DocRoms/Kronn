@@ -1233,6 +1233,10 @@ pub struct DiscSearchQuery {
     pub limit: Option<u32>,
     #[serde(default)]
     pub include_notes: bool,
+    /// Where the term may match. Absent means `all`, so an existing caller
+    /// keeps the behaviour it had.
+    #[serde(default)]
+    pub scope: crate::db::disc_source::DiscSearchScope,
 }
 
 /// `GET /api/disc/search?q=…&limit=…`
@@ -1247,7 +1251,13 @@ pub async fn disc_search(
     let result = state
         .db
         .with_conn(move |conn| {
-            crate::db::disc_source::search_discussions(conn, &q.q, limit, q.include_notes)
+            crate::db::disc_source::search_discussions(
+                conn,
+                &q.q,
+                limit,
+                q.include_notes,
+                q.scope,
+            )
         })
         .await;
     match result {
@@ -1262,6 +1272,9 @@ pub async fn disc_search(
 #[ts(export)]
 pub struct MessageSearchQuery {
     pub q: String,
+    /// Where the term may match: `all` (default), `title` or `content`.
+    #[serde(default)]
+    pub scope: crate::db::disc_source::DiscSearchScope,
     #[serde(default)]
     pub discussion_id: Option<String>,
     #[serde(default)]
@@ -1299,6 +1312,7 @@ pub async fn message_search(
         .db
         .with_conn(move |conn| {
             let filters = crate::db::disc_source::MessageSearchFilters {
+                scope: q.scope,
                 discussion_id: q.discussion_id.as_deref(),
                 project_id: q.project_id.as_deref(),
                 author: q.author.as_deref(),

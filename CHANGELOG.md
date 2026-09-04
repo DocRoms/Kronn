@@ -13,6 +13,13 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Added
 
+- Search can be told where to look. A term that appears in one discussion's
+  title and in twenty transcripts used to drown the room actually named after
+  it, and no amount of ranking fixes that — the reader wants to exclude, not to
+  re-sort. So the scope is a filter, title / content / both, and it is
+  remembered between visits. Under "both", a title match now comes before a
+  content match: someone searching for a name is looking for a place, not for
+  an occurrence. The MCP search agents use gained the same scope.
 - An approved delegation now publishes its report. The derivation and the
   store existed but nothing called them, so an accepted delivery produced
   nothing at all. Both approval paths publish it — the ordinary one, and a

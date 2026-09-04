@@ -1696,7 +1696,22 @@ export type DiscoverSourceError = { source_id: string, source_label: string, pro
  */
 export type DiscSearchHit = { disc_id: string, title: string, snippet: string, source_agent: string | null, source_session_id: string | null, };
 
-export type DiscSearchQuery = { q: string, limit?: number | null, include_notes?: boolean, };
+export type DiscSearchQuery = { q: string, limit?: number | null, include_notes?: boolean,
+/**
+ * Where the term may match. Absent means `all`, so an existing caller
+ * keeps the behaviour it had.
+ */
+scope?: DiscSearchScope, };
+
+/**
+ * Where a search term is allowed to match.
+ *
+ * Past a few dozen discussions, a term that appears in one title and in
+ * twenty transcripts drowns the room actually named after it. Ranking alone
+ * does not fix that — the reader wants to EXCLUDE, not to re-sort — so the
+ * scope is a filter, and the ranking below is what handles the mixed case.
+ */
+export type DiscSearchScope = "all" | "title" | "content";
 
 export type DiscSessionStatusQuery = { source_agent: string, source_session_id: string, };
 
@@ -3457,7 +3472,11 @@ snippet: string, agent_type: string | null, author_pseudo: string | null, projec
  * KT-65 — filters for the message-level search. Every field is optional and
  * they combine with AND, so the caller narrows instead of paging blindly.
  */
-export type MessageSearchQuery = { q: string, discussion_id?: string | null, project_id?: string | null,
+export type MessageSearchQuery = { q: string,
+/**
+ * Where the term may match: `all` (default), `title` or `content`.
+ */
+scope?: DiscSearchScope, discussion_id?: string | null, project_id?: string | null,
 /**
  * Agent type ("Codex") or federated human pseudo ("Romu - mac").
  */

@@ -216,6 +216,7 @@ import type {
 import type {
   CatalogModelEntry,
   DeleteManualModelRequest,
+  DiscSearchScope,
   MediaFramePosition,
   MediaReferenceMode,
   MediaModelCapabilities,
@@ -1506,8 +1507,12 @@ export const discussions = {
     until?: string;
     limit?: number;
     offset?: number;
+    scope?: DiscSearchScope;
   }) => {
     const query = new URLSearchParams({ q: params.q });
+    // Omitted means `all`, which is what the backend defaults to: an older
+    // caller keeps the behaviour it had.
+    if (params.scope && params.scope !== 'all') query.set('scope', params.scope);
     if (params.discussionId) query.set('discussion_id', params.discussionId);
     if (params.projectId) query.set('project_id', params.projectId);
     if (params.author) query.set('author', params.author);
