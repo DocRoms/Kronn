@@ -12,7 +12,6 @@ import type {
 import { AGENT_MENTIONS, isUsable, isValidationDisc, isBriefingDisc, isBootstrapDisc } from '../lib/constants';
 import type { ToastFn } from '../hooks/useToast';
 import {
-  PanelRight,
   GitBranch,
   Trash2,
   Pencil, ShieldCheck, Check, Zap, FileText, Rocket,
@@ -57,9 +56,7 @@ export interface ChatHeaderProps {
   /** The configured-context summary opens the settings panel directly; it
    *  is a shortcut on what it describes, not one of the panel buttons. */
   onToggleSettingsPanel?: () => void;
-  onOpenPanels?: () => void;
   /** Any panel currently open — the control reads as expanded then. */
-  anyPanelOpen?: boolean;
   onToggleMessageSearch?: () => void;
   onToggleSidebar: () => void;
   onDelete: (discId: string) => void;
@@ -80,8 +77,6 @@ export function ChatHeader({
   sending,
   onRequestTestMode,
   onToggleSettingsPanel,
-  onOpenPanels,
-  anyPanelOpen = false,
   onToggleMessageSearch,
   onToggleSidebar,
   onDelete,
@@ -534,24 +529,6 @@ export function ChatHeader({
             aria-expanded={showMessageSearch}
           >
             <Search size={13} />
-          </button>
-        )}
-        {/* One control, not six. It opens the panel column; switching between
-         *  panels happens above the panel itself, where each one already draws
-         *  its own header — putting those icons here too showed every one of
-         *  them twice. */}
-        {onOpenPanels && (
-          <button
-            type="button"
-            className="disc-icon-btn"
-            data-active={anyPanelOpen}
-            onClick={onOpenPanels}
-            title={t('disc.panelRail.open')}
-            aria-label={t('disc.panelRail.open')}
-            aria-expanded={anyPanelOpen}
-            data-testid="panel-open-toggle"
-          >
-            <PanelRight size={13} />
           </button>
         )}
         <button

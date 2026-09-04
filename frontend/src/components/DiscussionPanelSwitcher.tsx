@@ -9,9 +9,11 @@
 // icon twice — once in the list, once in the open panel — and it hung under
 // the header, unattached to the thing it controlled.
 //
-// So the switcher lives WITH the panel: it appears above it when one is open,
-// and disappears with it. Nothing is duplicated, and the control sits where
-// its effect is visible.
+// So this strip lives in the panel's own column, above the panel, and it also
+// carries the control that opens the column at all. Left in the discussion
+// header, that control was separated from its panel by a whole row of
+// counters — the two read as unrelated things.
+import { PanelRightClose, PanelRightOpen } from 'lucide-react';
 import './DiscussionPanelSwitcher.css';
 
 export interface SwitchablePanel {
@@ -27,22 +29,45 @@ export interface SwitchablePanel {
 export function DiscussionPanelSwitcher({
   panels,
   groupLabel,
+  openLabel,
+  closeLabel,
+  onToggleColumn,
 }: {
   panels: SwitchablePanel[];
   groupLabel: string;
+  openLabel: string;
+  closeLabel: string;
+  /** Opens the column on the last-read panel, or closes whatever is open. */
+  onToggleColumn: () => void;
 }) {
-  // Nothing open means nothing to switch between: the header's single control
-  // is what opens the first one.
-  if (!panels.some(panel => panel.active)) return null;
+  const anyOpen = panels.some(panel => panel.active);
 
+  // Always rendered, and always in the panel's own column: the control that
+  // opens a panel has to sit against it. Left in the discussion header it was
+  // separated from the panel by a whole row of counters, so the two read as
+  // unrelated things.
   return (
     <div
       className="disc-panel-switcher"
       role="group"
       aria-label={groupLabel}
       data-testid="panel-switcher"
+      data-open={anyOpen}
     >
-      {panels.map(panel => (
+      <button
+        type="button"
+        className="disc-panel-switcher-item disc-panel-switcher-toggle"
+        onClick={onToggleColumn}
+        title={anyOpen ? closeLabel : openLabel}
+        aria-label={anyOpen ? closeLabel : openLabel}
+        aria-expanded={anyOpen}
+        data-testid="panel-open-toggle"
+      >
+        {anyOpen ? <PanelRightClose size={14} /> : <PanelRightOpen size={14} />}
+      </button>
+      {/* The panel icons only make sense once there is a panel to move away
+       *  from; before that the column stays a narrow strip. */}
+      {anyOpen && panels.map(panel => (
         <button
           key={panel.id}
           type="button"

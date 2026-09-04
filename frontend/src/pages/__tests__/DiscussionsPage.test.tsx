@@ -1793,9 +1793,10 @@ describe('DiscussionsPage', () => {
       />,
     );
     await waitFor(() => expect(planningApi.proposals).toHaveBeenCalledTimes(1));
-    // KT-581 — the counts live on the switcher, which only exists while a
-    // panel is open. Nothing is open here, so nothing is shown.
-    expect(container.querySelector('[data-testid="panel-switcher"]')).toBeNull();
+    // KT-581 — the strip is always present (it holds the control that opens
+    // the column), but its panel icons only appear once one is open.
+    expect(container.querySelector('[data-testid="panel-switcher"]'))
+      .toHaveAttribute('data-open', 'false');
 
     await act(async () => {
       rerender(

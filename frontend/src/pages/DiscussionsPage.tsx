@@ -3767,8 +3767,6 @@ export function DiscussionsPage({
                 terminal: showTerminalPanel,
                 settings: showSettingsPanel,
               })}
-              onOpenPanels={openLastPanel}
-              anyPanelOpen={anyPanelOpen}
               showMessageSearch={showMessageSearch}
               onToggleMessageSearch={() => {
                 if (showMessageSearch) {
@@ -5059,11 +5057,15 @@ export function DiscussionsPage({
 
             </div>{/* end messages column */}
 
+            <div className="disc-utility-col">
             {/* KT-581 — switching panels, above the panel being switched.
               *  Each panel draws its own header, so putting these icons in the
               *  discussion header too showed every one of them twice. */}
             <DiscussionPanelSwitcher
               groupLabel={t('disc.panelRail.group')}
+              openLabel={t('disc.panelRail.open')}
+              closeLabel={t('disc.panelRail.close')}
+              onToggleColumn={openLastPanel}
               panels={[
                 {
                   id: 'plan',
@@ -5263,6 +5265,7 @@ export function DiscussionsPage({
               />
             )}
 
+            </div>{/* end utility column (strip + open panel) */}
             </div>{/* end flex row (messages + utility panel) */}
           </>
         ) : !showNewDiscussion && (

@@ -23,20 +23,38 @@ const panel = (over: Partial<SwitchablePanel> & { id: string }): SwitchablePanel
   ...over,
 });
 
-const renderSwitcher = (panels: SwitchablePanel[]) =>
-  render(<DiscussionPanelSwitcher panels={panels} groupLabel="panels" />);
+const renderSwitcher = (panels: SwitchablePanel[], onToggleColumn = vi.fn()) =>
+  render(
+    <DiscussionPanelSwitcher
+      panels={panels}
+      groupLabel="panels"
+      openLabel="open"
+      closeLabel="close"
+      onToggleColumn={onToggleColumn}
+    />,
+  );
 
 describe('DiscussionPanelSwitcher', () => {
-  it('renders nothing while every panel is closed', () => {
+  it('stays a narrow strip while every panel is closed', () => {
     renderSwitcher([panel({ id: 'plan' }), panel({ id: 'git' })]);
-    // Nothing open means nothing to switch between: the header's single
-    // control is what opens the first one.
-    expect(screen.queryByTestId('panel-switcher')).toBeNull();
+    // The strip is always there — it holds the control that opens the column,
+    // and that control has to sit against the panel it opens. Only the panel
+    // icons wait for a panel to move away from.
+    expect(screen.getByTestId('panel-open-toggle')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'plan' })).toBeNull();
   });
 
-  it('appears with the panel it switches', () => {
+  it('opens the column from the strip, not from the discussion header', () => {
+    const onToggleColumn = vi.fn();
+    renderSwitcher([panel({ id: 'plan' })], onToggleColumn);
+    fireEvent.click(screen.getByTestId('panel-open-toggle'));
+    expect(onToggleColumn).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows the panel icons once one is open', () => {
     renderSwitcher([panel({ id: 'plan', active: true }), panel({ id: 'git' })]);
-    expect(screen.getByTestId('panel-switcher')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'plan' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'git' })).toBeInTheDocument();
   });
 
   it('shows a pending count on the panel that has one', () => {

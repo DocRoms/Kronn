@@ -56,8 +56,8 @@ function renderHeader(
       isMobile={false}
       sending={false}
       onRequestTestMode={noop}
-      onOpenPanels={noop}
       onToggleSidebar={noop}
+      onToggleMessageSearch={noop}
       onDelete={noop}
       onDiscussionUpdated={noop}
       onAgentSwitch={noop}
@@ -102,17 +102,18 @@ describe('ChatHeader — pending files badge', () => {
   // KT-581 — the pending-file badge, its cap and its tooltip moved with the
   // panels themselves: they are asserted in DiscussionPanelSwitcher's spec.
   // What stays here is what the header still owns.
-  it('keeps a single control for the panel column instead of one per panel', () => {
+  it('carries no panel buttons at all', () => {
     renderHeader(0);
-    expect(screen.getByTestId('panel-open-toggle')).toBeInTheDocument();
-    // The six panel buttons are gone from the row; only search and this one
-    // remain, plus the export and delete actions.
+    // Every one of them, including the control that opens the column, now
+    // lives in the panel's own column: a button that opens a panel has to sit
+    // against it, and here a row of counters came between the two.
+    expect(screen.queryByTestId('panel-open-toggle')).toBeNull();
     expect(screen.queryByRole('button', { name: 'git.filesBtn' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'planning.openPlan' })).toBeNull();
   });
 
-  it('leaves the panel control closed while nothing is open', () => {
+  it('keeps message search, which is not a panel', () => {
     renderHeader(0);
-    expect(screen.getByTestId('panel-open-toggle')).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.getByRole('button', { name: 'disc.messageSearch.open' })).toBeInTheDocument();
   });
 });
