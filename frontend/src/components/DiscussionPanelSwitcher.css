@@ -33,7 +33,13 @@
   align-items: center;
   gap: 2px;
   flex-shrink: 0;
-  padding: var(--kr-sp-1);
+  /* Same height as the message-search bar it opens beside: two bars on one
+     row that do not line up read as a mistake, however small the gap. */
+  min-height: 38px;
+  /* Content-box on purpose: the search bar's own border sits outside its
+     38px, so including ours here left the two a pixel apart. */
+  box-sizing: content-box;
+  padding: 0 var(--kr-sp-1);
   background: var(--kr-bg-subtle);
 }
 
@@ -95,4 +101,23 @@
   align-self: stretch;
   margin: 2px 4px;
   background: var(--kr-border-ghost);
+}
+
+/* Delete keeps the colour it had in the header. A destructive action that
+   looks like its neighbours is one misplaced click away from being used. */
+.disc-panel-switcher-item[data-action='delete'] {
+  color: var(--kr-error);
+}
+
+.disc-panel-switcher-item[data-action='delete']:hover {
+  color: var(--kr-error);
+  background: rgba(var(--kr-error-rgb), 0.12);
+}
+
+/* The open control reads as pressed while a panel is showing, so the strip
+   says which of its buttons opened what is on screen. */
+.disc-panel-switcher-toggle[data-active='true'] {
+  border-color: var(--kr-accent);
+  background: var(--kr-bg-hover);
+  color: var(--kr-text-primary);
 }

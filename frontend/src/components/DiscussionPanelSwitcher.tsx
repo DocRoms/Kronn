@@ -40,8 +40,9 @@ export function DiscussionPanelSwitcher({
    *  after the panels, behind a separator, so a destructive one is never the
    *  neighbour of a panel someone meant to click. */
   actions?: SwitchablePanel[];
-  /** Rendered before the open control. Message search lives here: it is not a
-   *  panel, but it belongs to the same strip so the header keeps nothing. */
+  /** Rendered right after the open control, and always visible. Message
+   *  search lives here: it is not a panel, but it belongs to the same strip
+   *  so the header keeps nothing. */
   leading?: React.ReactNode;
   groupLabel: string;
   openLabel: string;
@@ -63,10 +64,10 @@ export function DiscussionPanelSwitcher({
       data-testid="panel-switcher"
       data-open={anyOpen}
     >
-      {leading}
       <button
         type="button"
         className="disc-panel-switcher-item disc-panel-switcher-toggle"
+        data-active={anyOpen}
         onClick={onToggleColumn}
         title={anyOpen ? closeLabel : openLabel}
         aria-label={anyOpen ? closeLabel : openLabel}
@@ -75,6 +76,9 @@ export function DiscussionPanelSwitcher({
       >
         {anyOpen ? <PanelRightClose size={14} /> : <PanelRightOpen size={14} />}
       </button>
+      {/* After the open control, not before: the first button in the strip is
+       *  the one that opens it, and search is a companion to that. */}
+      {leading}
       {/* The panel icons only make sense once there is a panel to move away
        *  from; before that the column stays a narrow strip. */}
       {anyOpen && panels.map(panel => (
