@@ -439,7 +439,11 @@ export function DiscussionsPage({
   // Keep the current id outside callback closures so a late response can
   // never replace the visible discussion's placeholders.
   const activeDiscussionIdRef = useRef(activeDiscussionId);
-  activeDiscussionIdRef.current = activeDiscussionId;
+  // KT-587 — synced in a layout effect, not during render. A ref written while
+  // rendering is what `react-hooks/refs` catches, and it is the same pattern
+  // `useWebSocket` already uses for its handlers. Every reader here is an
+  // async callback, so it fires long after this has run.
+  useLayoutEffect(() => { activeDiscussionIdRef.current = activeDiscussionId; }, [activeDiscussionId]);
   const [showNewDiscussion, setShowNewDiscussion] = useState(false);
   const [showGitPanel, setShowGitPanel] = useState(false);
   const [showTerminalPanel, setShowTerminalPanel] = useState(false);
@@ -744,9 +748,11 @@ export function DiscussionsPage({
   const streamingMapRef = useRef(streamingMap);
   const streamingTargetMapRef = useRef(streamingTargetMap);
   const streamingTurnMapRef = useRef(streamingTurnMap);
-  streamingMapRef.current = streamingMap;
-  streamingTargetMapRef.current = streamingTargetMap;
-  streamingTurnMapRef.current = streamingTurnMap;
+  useLayoutEffect(() => {
+    streamingMapRef.current = streamingMap;
+    streamingTargetMapRef.current = streamingTargetMap;
+    streamingTurnMapRef.current = streamingTurnMap;
+  }, [streamingMap, streamingTargetMap, streamingTurnMap]);
   const partialForcingRef = useRef(false);
   // Mirrors `partialPending` for the WebSocket handler, which reads it from a
   // closure created before the refusal happened.

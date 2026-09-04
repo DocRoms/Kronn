@@ -35,23 +35,28 @@ const RELIST_DEBOUNCE_MS = 250;
  */
 export function DiscussionAttachedRuns({ discussionId, runEvent }: { discussionId: string; runEvent?: RunEventHint }) {
   const { t } = useT();
-  const [runs, setRuns] = useState<SharedRun[]>([]);
+  // KT-587 — keyed by the discussion they belong to. Clearing them in an
+  // effect showed the previous room's runs for one render before the wipe.
+  const [loaded, setLoaded] = useState<{ discussionId: string; runs: SharedRun[] }>(
+    { discussionId, runs: [] },
+  );
+  const runs = loaded.discussionId === discussionId ? loaded.runs : [];
   const knownRunIds = useRef<Set<string>>(new Set());
   useEffect(() => { knownRunIds.current = new Set(runs.map(run => run.id)); }, [runs]);
 
   const reload = useCallback(() => {
     runsApi
       .list({ discussionId, limit: 20 })
-      .then(list => setRuns(list.filter(run => run.kind !== 'media')))
+      .then(list => setLoaded({
+        discussionId,
+        runs: list.filter(run => run.kind !== 'media'),
+      }))
       .catch(() => {
         /* Transient list failure — individual cards still self-hydrate. */
       });
   }, [discussionId]);
 
-  useEffect(() => {
-    setRuns([]);
-    reload();
-  }, [discussionId, reload]);
+  useEffect(() => { reload(); }, [discussionId, reload]);
 
   const debounceTimer = useRef<number | null>(null);
   const scheduleRelist = useCallback(() => {

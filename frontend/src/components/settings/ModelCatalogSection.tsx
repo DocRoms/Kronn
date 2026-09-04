@@ -50,7 +50,20 @@ export function ModelCatalogSection() {
     setSnapshot(value);
     return value;
   };
-  useEffect(() => { void load().catch(err => setError(String(err))); }, []);
+  // KT-587 — awaited before anything is written, and dropped if the section
+  // unmounted while the catalogue was in flight.
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const value = await modelCatalogApi.list();
+        if (!cancelled) setSnapshot(value);
+      } catch (err) {
+        if (!cancelled) setError(String(err));
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
 
   const models = useMemo(
     () => snapshot?.targets.flatMap(target => target.models) ?? [],
