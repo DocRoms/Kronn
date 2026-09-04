@@ -2450,19 +2450,8 @@ button.disc-contact-open {
     padding: 8px 10px;
   }
 
-  .disc-chat-header-top {
-    grid-template-columns: minmax(0, 1fr);
-    align-items: flex-start;
-    gap: 5px;
-  }
-
   .disc-chat-header-title {
-    width: 100%;
-  }
-
-  .disc-chat-header-invite {
-    width: 100%;
-    justify-content: flex-end;
+    min-width: 0;
   }
 
   .disc-chat-header-actions {

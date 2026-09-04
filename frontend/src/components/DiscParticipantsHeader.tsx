@@ -134,17 +134,6 @@ export function DiscParticipantsHeader({ discId, t, refreshKey = 0 }: DiscPartic
     ));
   }, []);
 
-  const fetchParticipants = useCallback(async () => {
-    try {
-      const list = await discussionsApi.participants(discId);
-      applyParticipants(list);
-    } catch (e) {
-      // Don't toast for fetch failures — the header just stays empty,
-      // less noisy than a popup every time the user opens a disc.
-      console.warn('[DiscParticipantsHeader] participants fetch failed:', e);
-    }
-  }, [applyParticipants, discId]);
-
   useEffect(() => {
     // The away threshold follows the server's poll policy — a single meta
     // fetch per disc; on ANY failure the fallback constant stays in place.
@@ -162,12 +151,6 @@ export function DiscParticipantsHeader({ discId, t, refreshKey = 0 }: DiscPartic
     })();
     return () => { cancelled = true; };
   }, [discId]);
-
-  useEffect(() => {
-    // An invite just landed: don't make the user wait out the poll interval to
-    // see the peer they invited.
-    if (refreshKey > 0) void fetchParticipants();
-  }, [fetchParticipants, refreshKey]);
 
   useEffect(() => {
     let active = true;
@@ -192,7 +175,9 @@ export function DiscParticipantsHeader({ discId, t, refreshKey = 0 }: DiscPartic
       active = false;
       clearInterval(id);
     };
-  }, [applyParticipants, discId]);
+    // refreshKey re-arms the effect, and arming it fetches: an invite shows its
+    // peer without waiting out the interval.
+  }, [applyParticipants, discId, refreshKey]);
 
   const selectedParticipant = participants.find(
     participant => participant.id === selectedParticipantId,

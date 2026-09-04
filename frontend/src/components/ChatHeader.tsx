@@ -227,6 +227,30 @@ export function ChatHeader({
     }
   };
 
+  // Narrow screens put these in the details fold instead of the title row:
+  // together they take 230px, and the title — which has to give way — was left
+  // with none.
+  const discIdentityPills = (
+    <>
+      <button
+        type="button"
+        className="disc-id-pill"
+        data-tour-id="discussion-id-pill"
+        data-copied={isDiscIdCopied}
+        onClick={(e) => {
+          e.stopPropagation();
+          void copyDiscussionId();
+        }}
+        title={t('disc.idPillTooltip', discussion.id)}
+        aria-label={t('disc.idPillTooltip', discussion.id)}
+      >
+        {isDiscIdCopied ? <Check size={8} /> : null}
+        #{discussion.id.slice(0, 8)}
+      </button>
+      <DiscussionSessionBinding discussionId={discussion.id} toast={toast} t={t} />
+    </>
+  );
+
   return (
     <div className="disc-chat-header collection-detail-header" data-tour-id="disc-header-controls">
       {isMobile && (
@@ -331,22 +355,7 @@ export function ChatHeader({
               matches id prefix in 0.8.5, so this works as a round-trip
               "agent quotes id → user finds disc in sidebar". Discreet
               ghost-text styling so it doesn't compete with the title. */}
-          <button
-            type="button"
-            className="disc-id-pill"
-            data-tour-id="discussion-id-pill"
-            data-copied={isDiscIdCopied}
-            onClick={(e) => {
-              e.stopPropagation();
-              void copyDiscussionId();
-            }}
-            title={t('disc.idPillTooltip', discussion.id)}
-            aria-label={t('disc.idPillTooltip', discussion.id)}
-          >
-            {isDiscIdCopied ? <Check size={8} /> : null}
-            #{discussion.id.slice(0, 8)}
-          </button>
-          <DiscussionSessionBinding discussionId={discussion.id} toast={toast} t={t} />
+          {!isMobile && discIdentityPills}
           <ContextHelp title={t('contextHelp.discussion.title')}>
             <p>{t('contextHelp.discussion.intro')}</p>
             <ul>
@@ -474,6 +483,7 @@ export function ChatHeader({
             controls they act on. */}
         {detailsOpen && (
           <div className="disc-chat-header-details" id="disc-chat-header-details">
+            {isMobile && discIdentityPills}
             {/* KT-254 — what this room cost, as two figures. Next to the project
                 name because that is where a reader looks for "what is this". */}
             <DiscussionTokenCost discussionId={discussion.id} t={t} />

@@ -98,6 +98,24 @@ function renderHeader(options: {
   return { onAgentSwitch, onDiscussionUpdated, toast };
 }
 
+function renderNarrow() {
+  return render(
+    <ChatHeader
+      discussion={makeDiscussion()}
+      projects={[]}
+      agents={[makeAgent('ClaudeCode')]}
+      isMobile
+      sending={false}
+      onRequestTestMode={noop}
+      onToggleSidebar={noop}
+      onDiscussionUpdated={vi.fn()}
+      onAgentSwitch={vi.fn()}
+      toast={vi.fn<ToastFn>()}
+      t={t}
+    />,
+  );
+}
+
 function renderWithHandle() {
   const view = render(
     <ChatHeader
@@ -448,6 +466,34 @@ describe('ChatHeader — shared agent switcher', () => {
       expect(document.querySelector('.disc-chat-header-details')).not.toBeNull();
       expect(screen.getByTestId('disc-header-details-toggle').getAttribute('aria-expanded'))
         .toBe('true');
+    });
+
+    /// At 400px the id pill and the session binding took 230px of the title
+    /// row between them, and the title — the one element that has to give way —
+    /// was left with zero. They belong to the fold on a narrow screen.
+    it('moves the id pill and the session binding into the fold on a narrow screen', async () => {
+      renderNarrow();
+      expect(document.querySelector('.disc-chat-header-top .disc-id-pill')).toBeNull();
+
+      await act(async () => {
+        fireEvent.click(screen.getByTestId('disc-header-details-toggle'));
+      });
+      const fold = document.querySelector('.disc-chat-header-details')!;
+      expect(fold.querySelector('.disc-id-pill')).not.toBeNull();
+    });
+
+    it('keeps them on the title row on a wide screen', () => {
+      renderHeader();
+      expect(document.querySelector('.disc-chat-header-top .disc-id-pill')).not.toBeNull();
+    });
+
+    /// The strip and the search bar sit on one row. The strip's border only
+    /// exists while a panel is open, so without a reserved pixel the two are
+    /// level in one state and off by one in the other.
+    it('reserves the strip border pixel in both states', () => {
+      const css = readFileSync('src/components/DiscussionPanelSwitcher.css', 'utf8');
+      const base = css.match(/\.disc-panel-switcher \{([^}]*)\}/g)?.join('') ?? '';
+      expect(base).toContain('border-bottom: 1px solid transparent');
     });
 
     it('pins the details toggle to the right of row 2', () => {

@@ -44,9 +44,14 @@
 }
 
 /* Open, it sits directly on the panel and shares its edge. Closed, it is a
-   narrow strip holding one control. */
+   narrow strip holding one control — but it keeps the border's pixel either
+   way, so it stays level with the search bar whatever state it is in. */
+.disc-panel-switcher {
+  border-bottom: 1px solid transparent;
+}
+
 .disc-panel-switcher[data-open='true'] {
-  border-bottom: 1px solid var(--kr-border-ghost);
+  border-bottom-color: var(--kr-border-ghost);
 }
 
 .disc-panel-switcher[data-open='false'] {
