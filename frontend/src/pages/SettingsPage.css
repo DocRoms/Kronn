@@ -2505,36 +2505,17 @@
   cursor: pointer;
 }
 
-.set-agent-configure-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  flex-shrink: 0;
-  padding: 2px 8px;
-  border: 1px solid var(--kr-border);
-  border-radius: 4px;
-  background: transparent;
-  color: var(--kr-text-tertiary);
-  font-size: 0.72rem;
-  cursor: pointer;
-}
-
-.set-agent-configure-btn:hover {
-  border-color: var(--kr-border-strong);
-  color: var(--kr-text-primary);
-}
-
-.set-agent-configure-btn[aria-expanded='true'] {
+/* The edit control reads as pressed while its panel is open — an icon button
+   alone would not say which card is being configured. */
+.set-agent-actions .set-icon-btn[aria-expanded='true'] {
   border-color: var(--agent-color, var(--kr-accent));
   color: var(--kr-text-primary);
 }
 
-.set-agent-configure-btn svg {
-  transition: transform 120ms ease;
-}
-
-.set-agent-configure-btn[aria-expanded='true'] svg {
-  transform: rotate(180deg);
+/* The three tiers as an external connection shows them: same markup, so it is
+   the same object in two places rather than two lookalikes. */
+.set-agent-tier-preview {
+  padding: 0 var(--kr-sp-6) var(--kr-sp-4);
 }
 
 .set-agent-row {

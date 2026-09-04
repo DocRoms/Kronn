@@ -916,6 +916,77 @@ describe('AgentsSection — CLI / Local / External zones', () => {
     expect(names).toEqual([['ClaudeCode', 'OpenCode'], ['Codex']]);
   });
 
+  /// The three tiers, as an external connection shows them: what runs, without
+  /// opening anything. The fold is where they change.
+  it('previews the three tiers on the card itself', async () => {
+    renderSection({
+      agents: [makeAgent({ name: 'AgentClaude', agent_type: 'ClaudeCode', installed: true, enabled: true })],
+    });
+    // The tiers arrive from configApi.getModelTiers, not from the props.
+    await act(async () => { await Promise.resolve(); });
+
+    const preview = screen.getByTestId('agent-tier-preview-ClaudeCode');
+    const tiers = [...preview.querySelectorAll('.set-ext-api-conn-tier')].map(tier => ({
+      tier: tier.getAttribute('data-tier'),
+      model: tier.querySelector('code')?.textContent,
+    }));
+    // The built-in defaults, so the line never claims a model that is not the
+    // one the backend will run.
+    expect(tiers).toEqual([
+      { tier: 'economy', model: 'haiku' },
+      { tier: 'default', model: 'sonnet' },
+      { tier: 'reasoning', model: 'opus' },
+    ]);
+    // Same markup as a connection card: one object shown in two places.
+    expect(preview).toHaveClass('set-ext-api-conn-tiers');
+  });
+
+  it('shows an override in the preview rather than the built-in default', async () => {
+    const blankTier = { economy: null, default: null, reasoning: null };
+    getModelTiersMock.mockResolvedValue({
+      claude_code: { economy: 'fable', default: null, reasoning: null },
+      codex: blankTier, gemini_cli: blankTier, kiro: blankTier,
+      vibe: blankTier, copilot_cli: blankTier, ollama: blankTier,
+      lite_llm: blankTier, nvidia: blankTier,
+    });
+    renderSection({
+      agents: [makeAgent({ name: 'AgentClaude', agent_type: 'ClaudeCode', installed: true, enabled: true })],
+    });
+    await act(async () => { await Promise.resolve(); });
+
+    const preview = screen.getByTestId('agent-tier-preview-ClaudeCode');
+    expect(preview.querySelector('[data-tier="economy"] code')?.textContent).toBe('fable');
+    // Untouched tiers still name the model that will actually run.
+    expect(preview.querySelector('[data-tier="reasoning"] code')?.textContent).toBe('opus');
+  });
+
+  /// An agent available through npx is not "installed", but it has settings —
+  /// and briefly lost the only way into them.
+  it('offers the edit control to a runtime-available agent too', () => {
+    renderSection({
+      agents: [makeAgent({
+        name: 'AgentGemini', agent_type: 'GeminiCli',
+        installed: false, runtime_available: true, enabled: true,
+      })],
+    });
+
+    const edit = screen.getByTestId('agent-configure-GeminiCli');
+    fireEvent.click(edit);
+    expect(document.querySelector('#agent-config-GeminiCli')).not.toBeNull();
+  });
+
+  /// Edit and delete side by side, as on an external connection.
+  it('pairs edit with delete the way a connection card does', () => {
+    renderSection({
+      agents: [makeAgent({ name: 'AgentClaude', agent_type: 'ClaudeCode', installed: true, enabled: true })],
+    });
+
+    const edit = screen.getByTestId('agent-configure-ClaudeCode');
+    expect(edit).toHaveClass('set-icon-btn');
+    expect(edit.nextElementSibling).toHaveClass('set-icon-btn');
+    expect(edit.nextElementSibling?.getAttribute('aria-label')).toBe('config.uninstall');
+  });
+
   it('gives each column its own vertical stack in CSS', () => {
     const css = readFileSync('src/pages/SettingsPage.css', 'utf8');
     const rule = css.match(/\.set-agent-mode-col\s*\{([^}]*)\}/)?.[1] ?? '';

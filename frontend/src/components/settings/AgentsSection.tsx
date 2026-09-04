@@ -47,7 +47,7 @@ import {
   Plus, Trash2, Download, Check,
   Loader2, RefreshCw, X, Eye, EyeOff, Play, StopCircle,
   ExternalLink, FolderSearch, ArrowUpCircle, Copy, Gauge, FileText, Palette, GitFork, Info, Layers,
-  ChevronDown, Terminal, HardDrive,
+  Pencil, Terminal, HardDrive,
 } from 'lucide-react';
 import {
   ALL_USAGE_FILTER,
@@ -87,6 +87,67 @@ interface AgentsSectionProps {
    *  the host-side `kronn` CLI instead. Default false (native/Tauri). */
   inDocker?: boolean;
 }
+
+// KT-586 — hoisted so the card can show a read-only tier preview outside the
+// fold and the fold can edit the same values: one source, two readers.
+const AGENT_TIER_KEY: Partial<Record<AgentType, string>> = {
+              ClaudeCode: 'claude_code',
+              Codex: 'codex',
+              GeminiCli: 'gemini_cli',
+              Kiro: 'kiro',
+              Vibe: 'vibe',
+              CopilotCli: 'copilot_cli',
+              // KT-337 — NVIDIA joins the generic tier block. Its catalogue is
+              // fetched, not hardcoded: ~100 ids across 25 vendors, several of
+              // which this account cannot call, so a baked-in list would lie.
+              Nvidia: 'nvidia',
+};
+
+const AGENT_TIER_MODELS: Record<string, {
+  options: string[];
+  fallbackEconomy: string | null; fallbackDefault: string | null; fallbackReasoning: string | null;
+  modelsUrl: string;
+}> = {
+  claude_code: {
+    options: ['haiku', 'sonnet', 'fable', 'opus'],
+    fallbackEconomy: 'haiku', fallbackDefault: 'sonnet', fallbackReasoning: 'opus',
+    modelsUrl: 'https://docs.anthropic.com/en/docs/about-claude/models',
+  },
+  codex: {
+    options: [
+      'gpt-5.6-luna', 'gpt-5.6-terra', 'gpt-5.6-sol',
+      'gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini', 'gpt-5-codex-mini',
+    ],
+    fallbackEconomy: 'gpt-5.6-luna', fallbackDefault: null, fallbackReasoning: 'gpt-5.6-sol',
+    modelsUrl: 'https://developers.openai.com/codex/models',
+  },
+  gemini_cli: {
+    options: [
+      'gemini-2.5-flash-lite', 'gemini-2.5-flash',
+      'gemini-3-flash-preview', 'gemini-2.5-pro', 'gemini-3.1-pro-preview',
+    ],
+    fallbackEconomy: 'gemini-2.5-flash', fallbackDefault: null, fallbackReasoning: 'gemini-3.1-pro-preview',
+    modelsUrl: 'https://ai.google.dev/gemini-api/docs/models',
+  },
+  kiro: { options: [], fallbackEconomy: null, fallbackDefault: null, fallbackReasoning: null, modelsUrl: '' },
+  vibe: { options: [], fallbackEconomy: null, fallbackDefault: null, fallbackReasoning: null, modelsUrl: '' },
+  nvidia: {
+    // Filled at runtime from /v1/models (see nvidiaCatalogue).
+    options: [],
+    // No built-in default on purpose: the backend refuses to guess
+    // an id, because a wrong one 404s or hangs.
+    fallbackEconomy: null, fallbackDefault: null, fallbackReasoning: null,
+    modelsUrl: 'https://build.nvidia.com/models',
+  },
+  copilot_cli: {
+    // Copilot's enabled models depend on the account and its
+    // policy. Keep only current CLI identifiers here; an empty
+    // tier lets Copilot choose an account-compatible model.
+    options: ['auto', 'claude-sonnet-4-5', 'claude-sonnet-4', 'gpt-5'],
+    fallbackEconomy: null, fallbackDefault: null, fallbackReasoning: null,
+    modelsUrl: 'https://docs.github.com/en/copilot',
+  },
+};
 
 export function AgentsSection({
   agents,
@@ -534,6 +595,43 @@ export function AgentsSection({
   // KT-586 — rendered from two independent columns rather than one grid, so
   // a tall card does not leave a hole beside it and expanding one never moves
   // the other column. Extracted for that reason alone: the markup is unchanged.
+  const renderTierPreview = (agent: AgentDetection) => {
+    const agentKey = AGENT_TIER_KEY[agent.agent_type];
+    if (!agentKey) return null;
+    const editing = tierEditing[agentKey];
+    const known = AGENT_TIER_MODELS[agentKey];
+    if (!editing || !known) return null;
+    const fallbacks = {
+      economy: known.fallbackEconomy,
+      default: known.fallbackDefault,
+      reasoning: known.fallbackReasoning,
+    } as const;
+    const icons = { economy: '\u26A1', default: '\uD83C\uDFAF', reasoning: '\uD83E\uDDE0' } as const;
+    return (
+      <div
+        className="set-ext-api-conn-tiers set-agent-tier-preview"
+        role="group"
+        aria-label={t('disc.modelTier')}
+        data-testid={`agent-tier-preview-${agent.agent_type}`}
+      >
+        {(['economy', 'default', 'reasoning'] as const).map(tier => {
+          // The override if there is one, else what the backend falls back to.
+          // "Par défaut" alone would hide which model actually runs.
+          const model = editing[tier] || fallbacks[tier] || t('config.defaultModel');
+          return (
+            <div key={tier} className="set-ext-api-conn-tier" data-tier={tier}>
+              <span className="set-ext-api-conn-tier-label">
+                <span aria-hidden="true">{icons[tier]}</span>
+                {t(`disc.tier.${tier}`)}
+              </span>
+              <code title={model}>{model}</code>
+            </div>
+          );
+        })}
+      </div>
+    );
+  };
+
   const renderAgentCard = (agent: AgentDetection) => {
           // KT-339 — LiteLLM, NVIDIA and any other OpenAI-compatible service are
           // now named connections in the unified External API zone below, so the
@@ -574,6 +672,23 @@ export function AgentsSection({
                     : agent.agent_type === 'CopilotCli'
                       ? agentAccess?.copilot_cli?.full_access ?? false
                       : false;
+
+          const configureButton = (agent.installed || agent.runtime_available) ? (
+            <button
+              type="button"
+              className="set-icon-btn"
+              data-testid={`agent-configure-${agent.agent_type}`}
+              onClick={() => toggleAgentExpanded(agent.agent_type)}
+              aria-expanded={expandedAgents.has(agent.agent_type)}
+              aria-controls={`agent-config-${agent.agent_type}`}
+              title={t(expandedAgents.has(agent.agent_type)
+                ? 'config.agentConfigureHide'
+                : 'config.agentConfigureShow')}
+              aria-label={t('config.agentConfigure')}
+            >
+              <Pencil size={11} />
+            </button>
+          ) : null;
 
           return (
           <React.Fragment key={agent.name}>
@@ -766,20 +881,6 @@ export function AgentsSection({
                   is "Activé". */}
               <div className="set-agent-actions">
                 {renderConcurrencyControl(agent.agent_type)}
-                <button
-                  type="button"
-                  className="set-agent-configure-btn"
-                  data-testid={`agent-configure-${agent.agent_type}`}
-                  onClick={() => toggleAgentExpanded(agent.agent_type)}
-                  aria-expanded={expandedAgents.has(agent.agent_type)}
-                  aria-controls={`agent-config-${agent.agent_type}`}
-                  title={t(expandedAgents.has(agent.agent_type)
-                    ? 'config.agentConfigureHide'
-                    : 'config.agentConfigureShow')}
-                >
-                  <ChevronDown size={11} />
-                  <span>{t('config.agentConfigure')}</span>
-                </button>
                 {agent.installed ? (
                   <>
                   <button
@@ -799,6 +900,7 @@ export function AgentsSection({
                   {agent.host_managed && (
                     <span className="text-2xs text-faint" style={{ marginLeft: 2 }} title={t('config.hostManaged')}>{agent.host_label ?? 'host'}</span>
                   )}
+                  {configureButton}
                   <button
                     className="set-icon-btn text-ghost"
                     title={t('config.uninstall')}
@@ -826,6 +928,8 @@ export function AgentsSection({
                   </button>
                   </>
                 ) : (
+                  <>
+                  {configureButton}
                   <button
                     className="set-install-btn set-agent-install-btn"
                     onClick={() => handleInstallAgent(agent)}
@@ -838,9 +942,11 @@ export function AgentsSection({
                       <><Download size={10} /> Installer</>
                     )}
                   </button>
+                  </>
                 )}
               </div>
             </div>
+            {renderTierPreview(agent)}
             {expandedAgents.has(agent.agent_type) && (
             <div className="set-agent-card-body" id={`agent-config-${agent.agent_type}`}>
             {perm && (agent.installed || agent.runtime_available) && (
@@ -1037,71 +1143,11 @@ export function AgentsSection({
             })()}
             {/* Model tier configuration */}
             {(agent.installed || agent.runtime_available) && (() => {
-              const agentKey = ({
-                ClaudeCode: 'claude_code',
-                Codex: 'codex',
-                GeminiCli: 'gemini_cli',
-                Kiro: 'kiro',
-                Vibe: 'vibe',
-                CopilotCli: 'copilot_cli',
-                // KT-337 — NVIDIA joins the generic tier block. Its catalogue is
-                // fetched, not hardcoded: ~100 ids across 25 vendors, several of
-                // which this account cannot call, so a baked-in list would lie.
-                Nvidia: 'nvidia',
-              } as Partial<Record<AgentType, string>>)[agent.agent_type];
+              const agentKey = AGENT_TIER_KEY[agent.agent_type];
               if (!agentKey) return null;
               const editing = tierEditing[agentKey];
               if (!editing) return null;
-
-              // `fallback*` = the backend's BUILT-IN model when no override is
-              // set (runner.rs::resolve_model_flag) — shown in the empty-value
-              // option label so "Par défaut (…)" never lies about what actually
-              // runs. `null` = the agent's own default (no --model flag).
-              const knownModels: Record<string, {
-                options: string[];
-                fallbackEconomy: string | null; fallbackDefault: string | null; fallbackReasoning: string | null;
-                modelsUrl: string;
-              }> = {
-                claude_code: {
-                  options: ['haiku', 'sonnet', 'fable', 'opus'],
-                  fallbackEconomy: 'haiku', fallbackDefault: 'sonnet', fallbackReasoning: 'opus',
-                  modelsUrl: 'https://docs.anthropic.com/en/docs/about-claude/models',
-                },
-                codex: {
-                  options: [
-                    'gpt-5.6-luna', 'gpt-5.6-terra', 'gpt-5.6-sol',
-                    'gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini', 'gpt-5-codex-mini',
-                  ],
-                  fallbackEconomy: 'gpt-5.6-luna', fallbackDefault: null, fallbackReasoning: 'gpt-5.6-sol',
-                  modelsUrl: 'https://developers.openai.com/codex/models',
-                },
-                gemini_cli: {
-                  options: [
-                    'gemini-2.5-flash-lite', 'gemini-2.5-flash',
-                    'gemini-3-flash-preview', 'gemini-2.5-pro', 'gemini-3.1-pro-preview',
-                  ],
-                  fallbackEconomy: 'gemini-2.5-flash', fallbackDefault: null, fallbackReasoning: 'gemini-3.1-pro-preview',
-                  modelsUrl: 'https://ai.google.dev/gemini-api/docs/models',
-                },
-                kiro: { options: [], fallbackEconomy: null, fallbackDefault: null, fallbackReasoning: null, modelsUrl: '' },
-                vibe: { options: [], fallbackEconomy: null, fallbackDefault: null, fallbackReasoning: null, modelsUrl: '' },
-                nvidia: {
-                  // Filled at runtime from /v1/models (see nvidiaCatalogue).
-                  options: [],
-                  // No built-in default on purpose: the backend refuses to guess
-                  // an id, because a wrong one 404s or hangs.
-                  fallbackEconomy: null, fallbackDefault: null, fallbackReasoning: null,
-                  modelsUrl: 'https://build.nvidia.com/models',
-                },
-                copilot_cli: {
-                  // Copilot's enabled models depend on the account and its
-                  // policy. Keep only current CLI identifiers here; an empty
-                  // tier lets Copilot choose an account-compatible model.
-                  options: ['auto', 'claude-sonnet-4-5', 'claude-sonnet-4', 'gpt-5'],
-                  fallbackEconomy: null, fallbackDefault: null, fallbackReasoning: null,
-                  modelsUrl: 'https://docs.github.com/en/copilot',
-                },
-              };
+              const knownModels = AGENT_TIER_MODELS;
               const models = knownModels[agentKey];
 
               const saveTiers = async (field: 'economy' | 'default' | 'reasoning', value: string) => {
