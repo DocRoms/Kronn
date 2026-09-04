@@ -1,0 +1,97 @@
+/* KT-581 — the panel list, unfolded from the header instead of laid out in it. */
+
+.disc-panel-rail {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+/* Folded, the control still names the open panel: hiding the list must not
+   hide which one is showing. */
+.disc-panel-rail-current {
+  margin-left: var(--kr-sp-1);
+  font-size: var(--kr-fs-xs);
+  color: var(--kr-text-secondary);
+  max-width: 10ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.disc-panel-rail-list {
+  position: absolute;
+  top: calc(100% + var(--kr-sp-1));
+  right: 0;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 200px;
+  max-height: 60vh;
+  overflow-y: auto;
+  padding: var(--kr-sp-1);
+  border: 1px solid var(--kr-border);
+  border-radius: var(--kr-r-lg);
+  background: var(--kr-bg-elevated);
+  box-shadow: var(--kr-shadow-lg);
+}
+
+.disc-panel-rail-item {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-2);
+  width: 100%;
+  padding: 6px 8px;
+  border: 1px solid transparent;
+  border-radius: var(--kr-r-sm);
+  background: none;
+  color: var(--kr-text-secondary);
+  font-size: var(--kr-fs-sm);
+  cursor: pointer;
+  text-align: left;
+}
+
+.disc-panel-rail-item:hover {
+  background: var(--kr-bg-hover);
+  color: var(--kr-text-primary);
+}
+
+.disc-panel-rail-item[data-active='true'] {
+  border-color: var(--kr-accent);
+  color: var(--kr-text-primary);
+  background: var(--kr-bg-hover);
+}
+
+.disc-panel-rail-icon {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.disc-panel-rail-label {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.disc-panel-rail-badge {
+  flex-shrink: 0;
+  padding: 0 6px;
+  border-radius: var(--kr-r-pill);
+  background: var(--kr-accent);
+  color: var(--kr-text-on-dark);
+  font-size: var(--kr-fs-xs);
+  font-weight: 600;
+}
+
+/* Folded, the rail still says something is waiting behind it. */
+.disc-panel-rail-dot {
+  margin-left: var(--kr-sp-1);
+  padding: 0 5px;
+  border-radius: var(--kr-r-pill);
+  background: var(--kr-accent);
+  color: var(--kr-text-on-dark);
+  font-size: var(--kr-fs-xs);
+  font-weight: 600;
+}

@@ -27,6 +27,7 @@ import {
   Terminal,
 } from 'lucide-react';
 import { MatrixText } from './MatrixText';
+import { DiscussionPanelRail, type RailPanel } from './DiscussionPanelRail';
 import { LearningsBadge } from './LearningsBadge';
 import { DiscParticipantsHeader } from './DiscParticipantsHeader';
 import { AgentSwitchPicker } from './AgentSwitchPicker';
@@ -132,6 +133,92 @@ export function ChatHeader({
   const [editingTitleText, setEditingTitleText] = useState('');
   const [isDiscIdCopied, setIsDiscIdCopied] = useState(false);
   const [exporting, setExporting] = useState(false);
+  // Built with plain `if`s rather than spreads inside the JSX: a guard carries
+  // through a statement, not through a conditional spread, and the alternative
+  // was a non-null assertion on every optional panel — which hides the real
+  // undefined the day a caller stops passing one.
+  const railPanels: RailPanel[] = [];
+  // Plan first: it is the one opened by habit, and the rail reads top down.
+  if (onTogglePlanPanel) {
+    railPanels.push({
+      id: 'plan',
+      label: t('planning.openPlan'),
+      icon: <ListTodo size={13} />,
+      active: showPlanPanel,
+      onToggle: onTogglePlanPanel,
+      // Both counters were on the old header button and stay here: the ratio
+      // of done work, and what is parked for later. Dropping either would be
+      // a silent loss, not a simplification.
+      trailing: (
+        <>
+          <span className="disc-plan-count">{planCompleted}/{planTotal}</span>
+          {planLater > 0 && <span className="disc-plan-later">+{planLater}</span>}
+        </>
+      ),
+      badge: pendingProposalItemCount > 0
+        ? (
+            <span
+              title={t(
+                'planning.pendingProposalTitle',
+                pendingProposalCount,
+                pendingProposalItemCount,
+              )}
+            >
+              {pendingProposalItemCount}
+            </span>
+          )
+        : undefined,
+    });
+  }
+  if (onToggleAssetsPanel) {
+    railPanels.push({
+      id: 'assets',
+      label: t('disc.assets.open', assetCount),
+      icon: <Images size={13} />,
+      active: showAssetsPanel,
+      onToggle: onToggleAssetsPanel,
+      badge: assetCount > 0 ? (assetCount > 99 ? '99+' : assetCount) : undefined,
+    });
+  }
+  railPanels.push({
+    id: 'git',
+    // The old header button said HOW MANY files were pending in its tooltip.
+    // Keeping only the plain label here would have quietly dropped that.
+    label: pendingFilesCount > 0
+      ? t('git.pendingFilesTooltip', pendingFilesCount)
+      : t('git.filesBtn'),
+    icon: <GitBranch size={13} />,
+    active: showGitPanel,
+    onToggle: onToggleGitPanel,
+    badge: pendingFilesCount > 0 ? (pendingFilesCount > 9 ? '9+' : pendingFilesCount) : undefined,
+  });
+  if (terminalEnabled && onToggleTerminalPanel) {
+    railPanels.push({
+      id: 'terminal',
+      label: t('git.terminal'),
+      icon: <Terminal size={13} />,
+      active: showTerminalPanel,
+      onToggle: onToggleTerminalPanel,
+    });
+  }
+  if (onToggleMessageSearch) {
+    railPanels.push({
+      id: 'search',
+      label: t('disc.messageSearch.open'),
+      icon: <Search size={13} />,
+      active: !!showMessageSearch,
+      onToggle: onToggleMessageSearch,
+    });
+  }
+  if (onToggleSettingsPanel) {
+    railPanels.push({
+      id: 'settings',
+      label: t('disc.settingsPanel'),
+      icon: <Settings size={13} />,
+      active: showSettingsPanel,
+      onToggle: onToggleSettingsPanel,
+    });
+  }
   const [nativeAgentMode, setNativeAgentMode] = useState<{
     discussionId: string;
     disabled: boolean;
@@ -551,6 +638,12 @@ export function ChatHeader({
       <div className="disc-chat-header-actions" data-tour-id="disc-output-controls">
         {/* 0.10.0 — pending-learnings badge (self-contained; hidden when 0). */}
         <LearningsBadge t={t} toast={toast} />
+        <DiscussionPanelRail
+          expandLabel={t('disc.panelRail.open')}
+          collapseLabel={t('disc.panelRail.close')}
+          groupLabel={t('disc.panelRail.group')}
+          panels={railPanels}
+        />
         {onToggleMessageSearch && (
           <button
             type="button"
@@ -618,63 +711,6 @@ export function ChatHeader({
           {exporting ? <Loader2 size={13} className="spin" /> : <Download size={13} />}
         </button>
 
-        <button
-          type="button"
-          className="disc-plan-btn"
-          data-active={showPlanPanel}
-          onClick={onTogglePlanPanel}
-          title={t('planning.openPlan')}
-          aria-label={t('planning.openPlan')}
-          aria-expanded={showPlanPanel}
-        >
-          <ListTodo size={13} />
-          <span>{t('planning.short')}</span>
-          <span className="disc-plan-count">{planCompleted}/{planTotal}</span>
-          {planLater > 0 && <span className="disc-plan-later">+{planLater}</span>}
-          {pendingProposalItemCount > 0 && (
-            <span
-              className="disc-plan-pending"
-              title={t(
-                'planning.pendingProposalTitle',
-                pendingProposalCount,
-                pendingProposalItemCount,
-              )}
-            >
-              {pendingProposalItemCount}
-            </span>
-          )}
-        </button>
-
-        <button
-          className="disc-icon-btn"
-          data-active={showGitPanel}
-          onClick={onToggleGitPanel}
-          title={pendingFilesCount > 0
-            ? t('git.pendingFilesTooltip', pendingFilesCount)
-            : t('git.filesBtn')}
-          aria-label={t('git.filesBtn')}
-          aria-expanded={showGitPanel}
-        >
-          <GitBranch size={13} />
-          {pendingFilesCount > 0 && (
-            <span className="disc-icon-btn-badge" aria-label={t('git.pendingFilesTooltip', pendingFilesCount)}>
-              {pendingFilesCount > 9 ? '9+' : pendingFilesCount}
-            </span>
-          )}
-        </button>
-        {terminalEnabled && onToggleTerminalPanel && (
-          <button
-            type="button"
-            className="disc-icon-btn"
-            data-active={showTerminalPanel}
-            onClick={onToggleTerminalPanel}
-            title={t('git.terminal')}
-            aria-label={t('git.terminal')}
-            aria-expanded={showTerminalPanel}
-          >
-            <Terminal size={13} />
-          </button>
-        )}
         <button
           className="disc-icon-btn" style={{ color: 'var(--kr-error)' }}
           onClick={() => onDelete(discussion.id)}

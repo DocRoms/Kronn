@@ -219,6 +219,10 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
+  // KT-581 — the rail remembers whether it was unfolded, and the test store
+  // is shared across specs in this file. Leaving it set makes a later spec
+  // pass or fail depending on what ran before it.
+  localStorage.removeItem('kronn:panelRailExpanded');
 });
 
 const wrap = async (ui: React.ReactElement) => {
@@ -385,6 +389,9 @@ describe('DiscussionsPage', () => {
       />,
     );
 
+    // KT-581 — the panels live in a rail that starts folded. What this test
+    // guards is unchanged: opening one closes the other.
+    fireEvent.click(await screen.findByTestId('panel-rail-toggle'));
     const terminalButton = await screen.findByRole('button', { name: 'Terminal' });
     expect(terminalButton).toHaveAttribute('aria-expanded', 'false');
     fireEvent.click(terminalButton);
@@ -1740,6 +1747,7 @@ describe('DiscussionsPage', () => {
   });
 
   it('refreshes the pending-proposal header count when a new Agent message lands', async () => {
+    localStorage.removeItem('kronn:panelRailExpanded');
     const first = makeListDiscussion('d1', 1);
     const withProposal = makeListDiscussion('d1', 2);
     vi.mocked(discussionsApi.get)
@@ -1775,7 +1783,11 @@ describe('DiscussionsPage', () => {
       />,
     );
     await waitFor(() => expect(planningApi.proposals).toHaveBeenCalledTimes(1));
-    expect(container.querySelector('.disc-plan-pending')).toBeNull();
+    // KT-581 — the counts moved into the rail, and the folded rail carries a
+    // marker when one of them is non-zero. Nothing pending means no marker.
+    // The rail remembers whether it was unfolded, and storage is shared across
+    // specs, so this one states the state it needs instead of inheriting it.
+    expect(container.querySelector('[data-testid="panel-rail-attention"]')).toBeNull();
 
     await act(async () => {
       rerender(
@@ -1799,7 +1811,11 @@ describe('DiscussionsPage', () => {
     });
 
     await waitFor(() => expect(planningApi.proposals).toHaveBeenCalledTimes(2));
-    expect(container.querySelector('.disc-plan-pending')?.textContent).toBe('1');
+    // The pending proposal is visible WITHOUT unfolding: the header used to
+    // show this count directly, and hiding it behind a click would be a loss.
+    expect(
+      container.querySelector('[data-testid="panel-rail-attention"]'),
+    ).not.toBeNull();
   });
 
   it('refetches and reloads on kronn:discussion-updated (auto-skill activation)', async () => {
