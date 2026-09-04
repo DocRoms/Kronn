@@ -10,6 +10,7 @@ import {
   FileCode2,
   Loader2,
   Play,
+  PlugZap,
   RefreshCw,
   RotateCw,
   ScrollText,
@@ -103,6 +104,25 @@ export function ProjectDockerPanel({
 
   const endpointLink = (endpoint: ProjectDockerEndpoint) => {
     const { label, Icon } = endpointStatus(endpoint);
+    // KT-585 — a stopped container publishes nothing, so the URL reaches
+    // whatever else holds the port. On shared infrastructure that is another
+    // project answering with a plausible error, which sends the reader hunting
+    // in the wrong place. Better to refuse the click.
+    if (!endpoint.live) {
+      return (
+        <span
+          key={endpoint.url}
+          className="project-docker-endpoint-offline"
+          data-host-status={endpoint.host_status}
+          data-testid="docker-endpoint-offline"
+          title={`${t('projects.docker.endpointOffline')} · ${label}`}
+        >
+          <Icon size={12} aria-label={label} />
+          <span>{endpoint.url}</span>
+          <PlugZap size={11} aria-hidden="true" />
+        </span>
+      );
+    }
     return (
       <a
         key={endpoint.url}

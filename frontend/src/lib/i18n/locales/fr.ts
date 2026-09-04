@@ -344,6 +344,7 @@ const fr: TranslationDict = {
   'projects.docker.notCreated': 'Pas encore créé',
   'projects.docker.health': 'Santé',
   'projects.docker.noPorts': 'Aucun port publié',
+  'projects.docker.endpointOffline': "Conteneur arrêté — ce port n'écoute pas ; l'ouvrir tomberait sur ce qui l'occupe",
   'projects.docker.openEndpoint': 'Ouvrir {0}',
   'projects.docker.hostConfigured': 'Ce domaine pointe vers cette machine',
   'projects.docker.hostMissing': 'Domaine absent du fichier hosts de la machine',

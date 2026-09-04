@@ -339,6 +339,7 @@ const zh: TranslationDict = {
   "projects.docker.notCreated": "尚未创建",
   "projects.docker.health": "健康状态",
   "projects.docker.noPorts": "无已发布端口",
+  "projects.docker.endpointOffline": "容器已停止 — 此端口无人监听；打开会访问到占用它的其他服务",
   "projects.docker.openEndpoint": "打开 {0}",
   "projects.docker.hostConfigured": "此域名指向本机",
   "projects.docker.hostMissing": "本机 hosts 文件中没有此域名",

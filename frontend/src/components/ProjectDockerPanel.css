@@ -261,7 +261,8 @@
   gap: 5px;
 }
 
-.project-docker-endpoints a {
+.project-docker-endpoints a,
+.project-docker-endpoint-offline {
   display: inline-flex;
   min-width: 0;
   max-width: 100%;
@@ -278,7 +279,18 @@
   text-decoration: none;
 }
 
-.project-docker-endpoints a > span {
+/* KT-585 — nothing is listening, so this is a fact about the project, not a
+   way into it. Muted and not clickable: the green of a live endpoint would be
+   an invitation to open something else. */
+.project-docker-endpoint-offline {
+  border-color: var(--kr-border);
+  background: var(--kr-bg-subtle);
+  color: var(--kr-text-tertiary);
+  cursor: default;
+}
+
+.project-docker-endpoints a > span,
+.project-docker-endpoint-offline > span {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

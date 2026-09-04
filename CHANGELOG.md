@@ -124,6 +124,17 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- A project's Docker link opens the port the container actually published.
+  Compose files routinely name that port through a variable, so several
+  projects on one machine take turns on 443 and the rest land on 8443 or 9443
+  — but Kronn read the compose file's default and sent the link to 443
+  regardless. It reached whichever project holds that port, which answers with
+  an error from an unrelated application: nothing says you are on the wrong
+  project, so the bug gets hunted in the wrong place. The running container's
+  own publisher is now the authority, the port is still omitted when it is the
+  scheme's default, each published host keeps its own, and an endpoint nothing
+  is listening on is shown as unreachable rather than offered as a link.
+
 - Kronn stopped telling agents to run linters the project does not have. A
   `composer.json` was enough to write `Lint: phpcs` into all eight generated
   instruction files, but phpcs is an optional Composer package, absent from

@@ -4345,7 +4345,20 @@ export type ProjectDockerActionRequest = { action: ProjectDockerAction, service?
 /**
  * Browser endpoint inferred from the resolved Compose configuration.
  */
-export type ProjectDockerEndpoint = { url: string, host: string, host_status: ProjectDockerHostStatus, };
+export type ProjectDockerEndpoint = { url: string, host: string, host_status: ProjectDockerHostStatus,
+/**
+ * KT-585 — the container port this URL reaches. The compose file may name
+ * the published one through a variable (`${HTTPS_PORT:-443}:443`), so the
+ * configured value is a default, not a fact; the running container's own
+ * publisher is matched against this to rewrite the URL.
+ */
+target_port: number | null,
+/**
+ * False while nothing is listening on it. Opening the link then reaches
+ * whatever else holds the port — on shared infrastructure, another
+ * project answering with a plausible error.
+ */
+live: boolean, };
 
 /**
  * Structured Docker Compose state for one configured project service.

@@ -344,6 +344,7 @@ const en: TranslationDict = {
   'projects.docker.notCreated': 'Not created yet',
   'projects.docker.health': 'Health',
   'projects.docker.noPorts': 'No published port',
+  'projects.docker.endpointOffline': 'Container stopped — nothing listens on this port; opening it would reach whatever else holds it',
   'projects.docker.openEndpoint': 'Open {0}',
   'projects.docker.hostConfigured': 'This domain points to this machine',
   'projects.docker.hostMissing': 'Domain missing from the machine hosts file',
