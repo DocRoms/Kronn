@@ -124,6 +124,19 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Changed
 
+- The discussion header reads as two lines instead of three. Inviting a peer
+  now sits at the right of the title's own line, where an action on the whole
+  discussion belongs, and the participant chips moved down to share the second
+  line with the control that decides whether the discussion answers by itself —
+  first position, since it changes what everything beside it means. What the
+  discussion IS rather than what it does — its project, its cost, its worktrees
+  — folds behind a "details" button at the right of that second line, and the
+  fold is remembered, so anyone who wants those figures permanently opens the
+  row once.
+- The panel strip lines up with the message-search bar beside it, its delete
+  keeps the red it had in the header, and search moved to the right of the
+  control that opens the strip. That control now shows an active state, so the
+  strip says which of its buttons put the panel on screen.
 - A discussion's header stopped acting on the discussion. Search, export and
   delete joined the panels in the strip that sits above the panel column, so
   the header only describes what the discussion IS — its title, its agent, its

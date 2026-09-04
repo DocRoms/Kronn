@@ -8,23 +8,21 @@ import {
   AWAY_MARGIN_MS,
 } from '../lib/discPresence';
 import type { HonestPresenceState } from '../lib/discPresence';
-import type { ToastFn } from '../hooks/useToast';
-import { UserPlus, Copy, Loader2, X } from 'lucide-react';
+import { Loader2, X } from 'lucide-react';
 import { CopyIdPill } from './CopyIdPill';
 import { AGENT_MENTIONS } from '../lib/constants';
 
 /// 0.8.6 phase 2 — discussion participants header.
 ///
 /// Renders the live list of CLI sessions bound to this disc (one row
-/// per active+paused `discussion_sessions`) + the `[+ Inviter]` button
-/// that opens a modal with a one-shot token. Companion to the
-/// `disc_join` MCP tool — the user copy-pastes the token into another
-/// CLI terminal and that CLI joins the same disc.
+/// per active+paused `discussion_sessions`). The `[+ Inviter]` button that
+/// mints the join token is `DiscInviteButton`, on the title row: an action on
+/// the whole discussion, not a member of the chip strip.
 ///
 /// Lifecycle :
 ///   * fetch on mount + when `discId` changes
 ///   * re-fetch every 5s to catch peer join/leave without SSE
-///   * re-fetch after every successful invite
+///   * re-fetch when `refreshKey` changes — an invite just succeeded
 ///
 /// Styling : all rules live in `styles/components.css` so the modal
 /// inherits the active Kronn theme (dark/light/neon). The earlier
@@ -34,8 +32,10 @@ import { AGENT_MENTIONS } from '../lib/constants';
 
 export interface DiscParticipantsHeaderProps {
   discId: string;
-  toast: ToastFn;
   t: (key: string, ...args: (string | number)[]) => string;
+  /** Bumped by the invite button so a fresh peer appears without waiting out
+   *  the 5s poll. */
+  refreshKey?: number;
 }
 
 // Light shape of the wire response (mirrors the Rust struct in
@@ -120,17 +120,10 @@ function presenceLabel(
   return t('disc.presenceDormantMinutes', Math.ceil(delay / 60));
 }
 
-export function DiscParticipantsHeader({ discId, toast, t }: DiscParticipantsHeaderProps) {
+export function DiscParticipantsHeader({ discId, t, refreshKey = 0 }: DiscParticipantsHeaderProps) {
   const [participants, setParticipants] = useState<ParticipantRow[]>([]);
   const [awayAfterMs, setAwayAfterMs] = useState(DEFAULT_AWAY_AFTER_MS);
-  const [inviting, setInviting] = useState(false);
-  const [showModal, setShowModal] = useState(false);
   const [selectedParticipantId, setSelectedParticipantId] = useState<number | null>(null);
-  const [invite, setInvite] = useState<{ token: string; instruction: string; instructionMinimal: string; expiresAt: string; ttlSecs: number } | null>(null);
-  // KT-52 — the enriched handoff is the default: an invited agent that reads
-  // only the pasted line still learns to read the plan and to stay. The bare
-  // call stays one click away for a human who just wants the token.
-  const [handoffMinimal, setHandoffMinimal] = useState(false);
 
   const applyParticipants = useCallback((list: ParticipantRow[]) => {
     setParticipants(list);
@@ -171,6 +164,12 @@ export function DiscParticipantsHeader({ discId, toast, t }: DiscParticipantsHea
   }, [discId]);
 
   useEffect(() => {
+    // An invite just landed: don't make the user wait out the poll interval to
+    // see the peer they invited.
+    if (refreshKey > 0) void fetchParticipants();
+  }, [fetchParticipants, refreshKey]);
+
+  useEffect(() => {
     let active = true;
     const pollParticipants = async () => {
       try {
@@ -195,33 +194,6 @@ export function DiscParticipantsHeader({ discId, toast, t }: DiscParticipantsHea
     };
   }, [applyParticipants, discId]);
 
-  const handleInvite = async () => {
-    if (inviting) return;
-    setInviting(true);
-    try {
-      const r = await discussionsApi.invitePeer(discId);
-      setInvite({
-        token: r.token,
-        instruction: r.instruction_text,
-        instructionMinimal: r.instruction_text_minimal,
-        expiresAt: r.expires_at,
-        ttlSecs: r.ttl_seconds,
-      });
-      setHandoffMinimal(false);
-      setShowModal(true);
-      // Refresh in case a previous peer just left.
-      fetchParticipants();
-    } catch (e) {
-      toast(t('disc.inviteFailed', String(e)), 'error');
-    } finally {
-      setInviting(false);
-    }
-  };
-
-  const shownHandoff = invite
-    ? (handoffMinimal ? invite.instructionMinimal : invite.instruction)
-    : '';
-
   const selectedParticipant = participants.find(
     participant => participant.id === selectedParticipantId,
   ) ?? null;
@@ -244,16 +216,6 @@ export function DiscParticipantsHeader({ discId, toast, t }: DiscParticipantsHea
     ? AGENT_MENTIONS.find(mention => mention.type === selectedParticipant.agent_type)?.trigger
       ?? selectedParticipant.agent_type
     : null;
-
-  const handleCopy = async () => {
-    if (!invite) return;
-    try {
-      await navigator.clipboard.writeText(shownHandoff);
-      toast(t('disc.inviteCopied'), 'success');
-    } catch {
-      toast(t('disc.inviteCopyFailed'), 'error');
-    }
-  };
 
   return (
     <div className="disc-participants-row" data-testid="disc-participants-row">
@@ -326,18 +288,6 @@ export function DiscParticipantsHeader({ discId, toast, t }: DiscParticipantsHea
           );
         })}
       </div>
-      <button
-        type="button"
-        className="disc-participants-invite-btn"
-        onClick={handleInvite}
-        disabled={inviting}
-        title={t('disc.invitePeerTooltip')}
-        aria-label={t('disc.invitePeerTooltip')}
-      >
-        <UserPlus size={11} />
-        {t('disc.invitePeer')}
-      </button>
-
       {selectedParticipant && selectedDisplayName && selectedPresenceLabel && (
           <section
             id={`disc-participant-details-${selectedParticipant.id}`}
@@ -398,58 +348,6 @@ export function DiscParticipantsHeader({ discId, toast, t }: DiscParticipantsHea
           </section>
       )}
 
-      {showModal && invite && (
-        <div
-          className="disc-invite-modal-overlay"
-          onClick={e => { if (e.target === e.currentTarget) setShowModal(false); }}
-          role="dialog"
-          aria-modal="true"
-        >
-          <div className="disc-invite-modal">
-            <div className="disc-invite-modal-header">
-              <h3>{t('disc.inviteModalTitle')}</h3>
-              <button
-                type="button"
-                className="disc-invite-modal-close"
-                onClick={() => setShowModal(false)}
-                aria-label={t('disc.inviteModalClose')}
-              >
-                <X size={14} />
-              </button>
-            </div>
-            <p className="disc-invite-modal-intro">
-              {t('disc.inviteModalIntro', Math.floor(invite.ttlSecs / 60))}
-            </p>
-            <pre className="disc-invite-instruction" data-testid="disc-invite-instruction">
-              {shownHandoff}
-            </pre>
-            <div className="disc-invite-modal-actions">
-              <label className="disc-invite-handoff-toggle">
-                <input
-                  type="checkbox"
-                  checked={!handoffMinimal}
-                  onChange={e => setHandoffMinimal(!e.target.checked)}
-                  data-testid="disc-invite-handoff-toggle"
-                />
-                {t('disc.inviteHandoffFull')}
-              </label>
-              <button
-                type="button"
-                className="disc-invite-copy-btn"
-                onClick={handleCopy}
-              >
-                <Copy size={11} /> {t('disc.inviteCopyBtn')}
-              </button>
-            </div>
-            <p className="disc-invite-handoff-hint">
-              {t(handoffMinimal ? 'disc.inviteHandoffMinimalHint' : 'disc.inviteHandoffFullHint')}
-            </p>
-            <p className="disc-invite-expires-hint">
-              {t('disc.inviteExpiresHint', invite.expiresAt)}
-            </p>
-          </div>
-        </div>
-      )}
     </div>
   );
 }

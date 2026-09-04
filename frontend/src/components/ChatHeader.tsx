@@ -19,10 +19,12 @@ import {
   Power,
   PowerOff,
   Loader2,
+  ChevronDown,
 } from 'lucide-react';
 import { MatrixText } from './MatrixText';
 import { LearningsBadge } from './LearningsBadge';
 import { DiscParticipantsHeader } from './DiscParticipantsHeader';
+import { DiscInviteButton } from './DiscInviteButton';
 import { AgentSwitchPicker } from './AgentSwitchPicker';
 import type { AgentSwitchTarget } from './AgentSwitchPicker';
 import { DiscussionSessionBinding } from './DiscussionSessionBinding';
@@ -32,6 +34,8 @@ import type { ExternalApiConnectionView } from '../lib/api';
 import {
   discussionConnectionId, externalAgentTargets, externalConnectionForDiscussion,
 } from '../lib/externalAgentIdentity';
+
+const HEADER_DETAILS_KEY = 'kronn:discHeaderDetails';
 
 export interface ChatHeaderProps {
   discussion: Discussion;
@@ -94,6 +98,19 @@ export function ChatHeader({
   } | null>(null);
   const [nativeAgentModeSaving, setNativeAgentModeSaving] = useState(false);
   const [sessionWorkspaces, setSessionWorkspaces] = useState<DiscussionWorkspace[]>([]);
+  // The third row is what the discussion IS — its project, its cost, its
+  // worktrees. Useful to check, not to keep on screen: folded, the header is
+  // two rows. The choice is remembered, so someone who wants those figures
+  // permanently opens the row once.
+  const [detailsOpen, setDetailsOpen] = useState(() => {
+    try {
+      return localStorage.getItem(HEADER_DETAILS_KEY) === '1';
+    } catch {
+      return false;
+    }
+  });
+  // An invite mints a peer; the row below has to go and look for it.
+  const [participantsRefresh, setParticipantsRefresh] = useState(0);
   const nativeAgentModeInFlight = useRef(false);
   const discIdResetTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -177,6 +194,18 @@ export function ChatHeader({
   const nativeAgentDisabled = nativeAgentMode?.discussionId === discussion.id
     ? nativeAgentMode.disabled
     : null;
+
+  const toggleDetails = () => {
+    setDetailsOpen(open => {
+      const next = !open;
+      try {
+        localStorage.setItem(HEADER_DETAILS_KEY, next ? '1' : '0');
+      } catch {
+        // A browser refusing storage still gets the toggle, just not the memory.
+      }
+      return next;
+    });
+  };
 
   const updateNativeAgentMode = async (disabled: boolean) => {
     if (nativeAgentModeInFlight.current || sending) return;
@@ -329,19 +358,21 @@ export function ChatHeader({
             <p className="kr-context-help-agent-note">{t('contextHelp.discussion.mcp')}</p>
           </ContextHelp>
           </div>
-          <div className="disc-chat-header-presence">
-            <DiscParticipantsHeader discId={discussion.id} toast={toast} t={t} />
+          {/* The invite acts on the discussion, so it sits on the discussion's
+              own row rather than at the end of the chip strip. */}
+          <div className="disc-chat-header-invite">
+            <DiscInviteButton
+              discId={discussion.id}
+              toast={toast}
+              t={t}
+              onInvited={() => setParticipantsRefresh(n => n + 1)}
+            />
           </div>
         </div>
         <div className="disc-chat-header-sub">
-          {/* KT-254 — what this room cost, as two figures. Next to the project
-              name because that is where a reader looks for "what is this". */}
-          <DiscussionTokenCost discussionId={discussion.id} t={t} />
-          <span className="disc-chat-context-project">
-            {discussion.project_id
-              ? (projects.find(p => p.id === discussion.project_id)?.name ?? '?')
-              : t('disc.general')}
-          </span>
+          {/* First position, as the row's subject: whether this discussion
+              answers by itself is the thing that changes what everything else
+              on the row means. */}
           <span className="disc-native-agent-control">
             {nativeAgentDisabled ? (
               <button
@@ -421,87 +452,118 @@ export function ChatHeader({
               </>
             )}
           </span>
-          {discussion.workspace_mode === 'Isolated' && discussion.worktree_branch && (
-            <span className="disc-worktree-badge" data-locked={!!discussion.workspace_path}>
-              <GitBranch size={8} /> {discussion.worktree_branch}
-              <span className="opacity-50 text-2xs">{discussion.workspace_path ? 'worktree' : t('disc.worktreeUnlocked')}</span>
-              <button
-                className="disc-worktree-lock-btn"
-                title={discussion.workspace_path ? t('disc.worktreeUnlock') : t('disc.worktreeLock')}
-                onClick={async (e) => {
-                  e.stopPropagation();
-                  try {
-                    if (discussion.workspace_path) {
-                      await discussionsApi.worktreeUnlock(discussion.id);
-                    } else {
-                      await discussionsApi.worktreeLock(discussion.id);
-                    }
-                    onDiscussionUpdated();
-                  } catch (err) {
-                    toast(String(err), 'error');
-                  }
-                }}
-              >
-                {discussion.workspace_path ? <Unlock size={9} /> : <Lock size={9} />}
-              </button>
-            </span>
-          )}
-          {sessionWorkspaces.map(workspace => (
-            <span
-              key={workspace.id}
-              className="disc-session-worktree-badge"
-              data-state={workspace.state}
-              title={[
-                workspace.session_agent_type,
-                workspace.workspace_path,
-                workspace.head_sha?.slice(0, 10),
-              ].filter(Boolean).join(' · ')}
-            >
-              <GitBranch size={8} />
-              <span>{workspace.branch}</span>
-              {workspace.task_reference && (
-                <span className="disc-session-worktree-task">
-                  {workspace.task_reference}
-                </span>
-              )}
-              <span className="disc-session-worktree-agent">
-                {workspace.session_agent_type ?? t('git.workspaceExternal')}
-              </span>
-            </span>
-          ))}
-          {/* Test-mode CTA — only while the worktree is active and we're
-              not already testing. Hidden in Direct mode (no branch to swap)
-              and while in test mode (global banner is the exit path). */}
-          {discussion.workspace_mode === 'Isolated'
-            && discussion.worktree_branch
-            && !!discussion.workspace_path
-            && !discussion.test_mode_restore_branch && (
-            <button
-              className="disc-test-mode-btn"
-              onClick={onRequestTestMode}
-              title={t('testMode.ctaTooltip')}
-            >
-              <FlaskConical size={11} />
-              <span>{t('testMode.cta')}</span>
-              <span className="disc-test-mode-btn-hint" aria-hidden="true">
-                <Info size={9} />
-              </span>
-            </button>
-          )}
-          {hasConfiguredContext && (
-            <button
-              type="button"
-              className="disc-chat-context-summary"
-              onClick={onToggleSettingsPanel}
-              title={t('disc.configuredContextSummary', profileCount, skillCount, directiveCount)}
-              aria-label={t('disc.configuredContextSummary', profileCount, skillCount, directiveCount)}
-            >
-              {profileCount > 0 && <span><UserCircle size={10} /> {profileCount}</span>}
-              {skillCount > 0 && <span><Zap size={10} /> {skillCount}</span>}
-              {directiveCount > 0 && <span><FileText size={10} /> {directiveCount}</span>}
-            </button>
-          )}
+          <DiscParticipantsHeader
+            discId={discussion.id}
+            t={t}
+            refreshKey={participantsRefresh}
+          />
+          <button
+            type="button"
+            className="disc-chat-header-details-toggle"
+            data-testid="disc-header-details-toggle"
+            onClick={toggleDetails}
+            aria-expanded={detailsOpen}
+            aria-controls="disc-chat-header-details"
+            title={t(detailsOpen ? 'disc.headerDetailsHide' : 'disc.headerDetailsShow')}
+          >
+            <ChevronDown size={11} />
+            <span>{t('disc.headerDetails')}</span>
+          </button>
         </div>
+        {/* Folded away by default: figures and badges a reader consults, not
+            controls they act on. */}
+        {detailsOpen && (
+          <div className="disc-chat-header-details" id="disc-chat-header-details">
+            {/* KT-254 — what this room cost, as two figures. Next to the project
+                name because that is where a reader looks for "what is this". */}
+            <DiscussionTokenCost discussionId={discussion.id} t={t} />
+            <span className="disc-chat-context-project">
+              {discussion.project_id
+                ? (projects.find(p => p.id === discussion.project_id)?.name ?? '?')
+                : t('disc.general')}
+            </span>
+            {discussion.workspace_mode === 'Isolated' && discussion.worktree_branch && (
+              <span className="disc-worktree-badge" data-locked={!!discussion.workspace_path}>
+                <GitBranch size={8} /> {discussion.worktree_branch}
+                <span className="opacity-50 text-2xs">{discussion.workspace_path ? 'worktree' : t('disc.worktreeUnlocked')}</span>
+                <button
+                  className="disc-worktree-lock-btn"
+                  title={discussion.workspace_path ? t('disc.worktreeUnlock') : t('disc.worktreeLock')}
+                  onClick={async (e) => {
+                    e.stopPropagation();
+                    try {
+                      if (discussion.workspace_path) {
+                        await discussionsApi.worktreeUnlock(discussion.id);
+                      } else {
+                        await discussionsApi.worktreeLock(discussion.id);
+                      }
+                      onDiscussionUpdated();
+                    } catch (err) {
+                      toast(String(err), 'error');
+                    }
+                  }}
+                >
+                  {discussion.workspace_path ? <Unlock size={9} /> : <Lock size={9} />}
+                </button>
+              </span>
+            )}
+            {sessionWorkspaces.map(workspace => (
+              <span
+                key={workspace.id}
+                className="disc-session-worktree-badge"
+                data-state={workspace.state}
+                title={[
+                  workspace.session_agent_type,
+                  workspace.workspace_path,
+                  workspace.head_sha?.slice(0, 10),
+                ].filter(Boolean).join(' · ')}
+              >
+                <GitBranch size={8} />
+                <span>{workspace.branch}</span>
+                {workspace.task_reference && (
+                  <span className="disc-session-worktree-task">
+                    {workspace.task_reference}
+                  </span>
+                )}
+                <span className="disc-session-worktree-agent">
+                  {workspace.session_agent_type ?? t('git.workspaceExternal')}
+                </span>
+              </span>
+            ))}
+            {/* Test-mode CTA — only while the worktree is active and we're
+                not already testing. Hidden in Direct mode (no branch to swap)
+                and while in test mode (global banner is the exit path). */}
+            {discussion.workspace_mode === 'Isolated'
+              && discussion.worktree_branch
+              && !!discussion.workspace_path
+              && !discussion.test_mode_restore_branch && (
+              <button
+                className="disc-test-mode-btn"
+                onClick={onRequestTestMode}
+                title={t('testMode.ctaTooltip')}
+              >
+                <FlaskConical size={11} />
+                <span>{t('testMode.cta')}</span>
+                <span className="disc-test-mode-btn-hint" aria-hidden="true">
+                  <Info size={9} />
+                </span>
+              </button>
+            )}
+            {hasConfiguredContext && (
+              <button
+                type="button"
+                className="disc-chat-context-summary"
+                onClick={onToggleSettingsPanel}
+                title={t('disc.configuredContextSummary', profileCount, skillCount, directiveCount)}
+                aria-label={t('disc.configuredContextSummary', profileCount, skillCount, directiveCount)}
+              >
+                {profileCount > 0 && <span><UserCircle size={10} /> {profileCount}</span>}
+                {skillCount > 0 && <span><Zap size={10} /> {skillCount}</span>}
+                {directiveCount > 0 && <span><FileText size={10} /> {directiveCount}</span>}
+              </button>
+            )}
+          </div>
+        )}
       </div>
       <div className="disc-chat-header-actions" data-tour-id="disc-output-controls">
         {/* 0.10.0 — pending-learnings badge (self-contained; hidden when 0). */}

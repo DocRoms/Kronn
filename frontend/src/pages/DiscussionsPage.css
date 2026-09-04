@@ -1934,12 +1934,20 @@ button.disc-contact-open {
   gap: 5px;
 }
 
+/* KT-581 — two columns, not two rows: the title takes what it needs and the
+   invite pins to the right of the same line. Stacked, it cost a header line. */
 .disc-chat-header-top {
   display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  align-items: start;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
   gap: 6px;
   min-width: 0;
+}
+
+.disc-chat-header-invite {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
 }
 
 .disc-chat-header-title {
@@ -1960,12 +1968,12 @@ button.disc-contact-open {
   white-space: nowrap;
 }
 
-.disc-chat-header-presence {
-  display: flex;
-  align-items: center;
+/* The chip strip shares row 2 with the agent control and the details toggle,
+   so it takes the space those two leave and scrolls inside it. */
+.disc-chat-header-sub > .disc-participants-row {
+  flex: 1 1 auto;
   min-width: 0;
-  width: 100%;
-  overflow: visible;
+  width: auto;
 }
 
 /* 0.8.5 — short disc-id pill in ChatHeader. Click → copy full UUID
@@ -2223,12 +2231,65 @@ button.disc-contact-open {
   align-items: center;
   gap: 6px;
   min-width: 0;
+  /* Visible, not scrollable: the participant popover opens downwards out of
+     this row, and an `overflow` here clipped it. The chip strip does its own
+     scrolling instead. */
+  overflow: visible;
+  white-space: nowrap;
+}
+
+/* Pinned right, opposite the invite above it, so the two toggles that open
+   something read as a pair down the right edge. */
+.disc-chat-header-details-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  margin-left: auto;
+  padding: 2px 8px;
+  font-size: 0.8em;
+  border: 1px solid var(--kr-border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--kr-text-tertiary);
+  cursor: pointer;
+}
+
+.disc-chat-header-details-toggle:hover {
+  border-color: var(--kr-border-strong);
+  color: var(--kr-text-primary);
+}
+
+.disc-chat-header-details-toggle[aria-expanded='true'] {
+  border-color: var(--kr-accent);
+  color: var(--kr-accent);
+}
+
+/* The chevron points at what the button does: down to open the row, up once
+   the row is open and the click would close it. */
+.disc-chat-header-details-toggle svg {
+  transition: transform 120ms ease;
+}
+
+.disc-chat-header-details-toggle[aria-expanded='true'] svg {
+  transform: rotate(180deg);
+}
+
+/* Row 3 — the fold. Same typography as row 2 so opening it reads as more of
+   the header rather than as a different surface. */
+.disc-chat-header-details {
+  font-size: var(--kr-fs-sm);
+  color: var(--kr-text-secondary);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
   overflow-x: auto;
   scrollbar-width: none;
   white-space: nowrap;
 }
 
-.disc-chat-header-sub::-webkit-scrollbar {
+.disc-chat-header-details::-webkit-scrollbar {
   display: none;
 }
 
@@ -2390,8 +2451,8 @@ button.disc-contact-open {
   }
 
   .disc-chat-header-top {
+    grid-template-columns: minmax(0, 1fr);
     align-items: flex-start;
-    flex-direction: column;
     gap: 5px;
   }
 
@@ -2399,8 +2460,9 @@ button.disc-contact-open {
     width: 100%;
   }
 
-  .disc-chat-header-presence {
+  .disc-chat-header-invite {
     width: 100%;
+    justify-content: flex-end;
   }
 
   .disc-chat-header-actions {
