@@ -149,6 +149,20 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Changed
 
+- Settings names the three ways of reaching a model. Config > Agents listed
+  seven full-width CLI cards, then Ollama as a special case inside the same
+  loop, then the external connections in a framed box of their own — one
+  undifferentiated list, 1 544px of it. There are three framed zones now, CLI /
+  Local / External API, built the same way so they read as three of a kind, and
+  the model catalogue moved below them: a catalogue is what the modes draw
+  from, not a fourth way of reaching a model.
+- An agent's card says its name once. The title and the mention-colour chip
+  beside it both carried it; the title is the colour control now, so picking a
+  colour happens on the name that colour applies to. What only matters while
+  configuring — the full-access switch, the API keys, the model tiers — folds
+  behind a "Configure" button, and a card at half the width stacks its header
+  instead of splitting it into a left and a right side.
+
 - The discussion header reads as two lines instead of three. Inviting a peer
   now sits at the right of the title's own line, where an action on the whole
   discussion belongs, and the participant chips moved down to share the second

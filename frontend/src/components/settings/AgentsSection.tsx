@@ -46,6 +46,7 @@ import {
   Plus, Trash2, Download, Check,
   Loader2, RefreshCw, X, Eye, EyeOff, Play, StopCircle,
   ExternalLink, FolderSearch, ArrowUpCircle, Copy, Gauge, FileText, Palette, GitFork, Info, Layers,
+  ChevronDown, Terminal, HardDrive,
 } from 'lucide-react';
 import {
   ALL_USAGE_FILTER,
@@ -100,6 +101,21 @@ export function AgentsSection({
   const [newKeyInputs, setNewKeyInputs] = useState<Record<string, { name: string; value: string }>>({});
   const [addingKeyFor, setAddingKeyFor] = useState<string | null>(null);
   const [tokenVisible, setTokenVisible] = useState<Set<string>>(new Set());
+  // KT-586 — a CLI agent's card carries its access flag, its API keys and its
+  // model tiers. Shown at once for seven agents that was 1 500px of settings to
+  // scroll past; folded, the fleet reads as a fleet and the configuring happens
+  // on the one card you came for.
+  const [expandedAgents, setExpandedAgents] = useState<Set<string>>(() => {
+    // A System CTA deep-links to one agent's tier picker, which lives in the
+    // fold. Opening it at mount means the focus effect below finds its target
+    // on the first try instead of retrying against a card that never renders.
+    try {
+      const target = JSON.parse(sessionStorage.getItem('kronn:model-config-target') ?? 'null');
+      return typeof target?.agentType === 'string' ? new Set([target.agentType]) : new Set();
+    } catch {
+      return new Set();
+    }
+  });
   const [tierEditing, setTierEditing] = useState<Record<string, { economy: string; default: string; reasoning: string }>>({});
   // KT-337 — NVIDIA's catalogue is fetched, never hardcoded: ~100 ids across 25
   // vendors, and several are listed but not callable by this account. Loaded on
@@ -149,6 +165,14 @@ export function AgentsSection({
     }
   });
   const [mentionColorOverrides, setMentionColorOverrides] = useState<AgentMentionColors>({});
+
+  const toggleAgentExpanded = (agentType: string) => {
+    setExpandedAgents(current => {
+      const next = new Set(current);
+      if (!next.delete(agentType)) next.add(agentType);
+      return next;
+    });
+  };
   const [usageReport, setUsageReport] = useState<UsageReport | null>(null);
   const [costDisplayMode, setCostDisplayMode] = useState<'absolute' | 'relative'>('absolute');
   const [costReferenceModel, setCostReferenceModel] = useState('');
@@ -457,16 +481,20 @@ export function AgentsSection({
     );
   };
 
-  const renderMentionColorControl = (agentType: AgentType) => {
+  // KT-586 — the card used to carry the agent's name twice: once as the title,
+  // once inside the colour chip beside it. The title IS the colour control now,
+  // so the name is said once and picking its mention colour is where you'd
+  // expect it — on the name that colour applies to.
+  const renderAgentNameControl = (agentType: AgentType, name: string) => {
     const color = agentColor(agentType, mentionColors);
     return (
       <label
-        className="set-agent-mention-control"
+        className="set-agent-title set-agent-title-color"
         style={{ '--mention-color': color } as CSSProperties}
         title={t('config.mentionColorFor', AGENT_LABELS[agentType])}
       >
-        <Palette size={12} aria-hidden="true" />
-        <span>@{AGENT_LABELS[agentType]}</span>
+        <span className="set-agent-title-text">{name}</span>
+        <Palette size={11} aria-hidden="true" />
         <input
           type="color"
           value={color}
@@ -483,6 +511,10 @@ export function AgentsSection({
   // them out of the CLI/agent fleet list so they stop appearing separately.
   const EXTERNAL_API_AGENTS: AgentType[] = ['LiteLlm', 'Nvidia'];
   const fleetAgents = agents.filter(agent => !EXTERNAL_API_AGENTS.includes(agent.agent_type));
+  // KT-586 — three ways of reaching a model, three zones. Ollama used to be a
+  // special case inside the CLI loop; it is not a CLI, it is the local one.
+  const cliAgents = fleetAgents.filter(agent => agent.agent_type !== 'Ollama');
+  const localAgents = fleetAgents.filter(agent => agent.agent_type === 'Ollama');
 
   const activeAgentCount = fleetAgents.filter(agent => agent.enabled && (agent.installed || agent.runtime_available)).length;
 
@@ -806,28 +838,19 @@ export function AgentsSection({
           </div>
         )}
 
-        {fleetAgents.map(agent => {
+        <section className="set-agent-mode" data-mode="cli" data-testid="agent-mode-cli">
+          <div className="set-agent-mode-head">
+            <span className="set-external-api-heading-icon" aria-hidden="true"><Terminal size={17} /></span>
+            <span className="set-external-api-heading-copy">
+              <strong>{t('config.modeCliTitle')}</strong>
+              <small>{t('config.modeCliHint')}</small>
+            </span>
+          </div>
+          <div className="set-agent-mode-grid">
+        {cliAgents.map(agent => {
           // KT-339 — LiteLLM, NVIDIA and any other OpenAI-compatible service are
           // now named connections in the unified External API zone below, so the
           // fleet loop never renders them as their own cards.
-
-          // Ollama gets its own dedicated card with health check + model picker
-          if (agent.agent_type === 'Ollama') {
-            return (
-              <div
-                key="ollama"
-                className="set-agent-row set-agent-row-ollama"
-                data-agent-type="Ollama"
-                style={{ '--agent-color': agentColor('Ollama', mentionColors) } as CSSProperties}
-              >
-                <OllamaCard
-                  t={t}
-                  modelCostSuffix={modelCostSuffix}
-                  headerAccessory={<>{renderMentionColorControl('Ollama')}{renderConcurrencyControl('Ollama')}</>}
-                />
-              </div>
-            );
-          }
           const permFlag: Record<string, { flag?: string; descKey: string }> = {
             ClaudeCode: { flag: '--dangerously-skip-permissions', descKey: 'config.fullAccess' },
             Codex: { flag: '--sandbox=danger-full-access', descKey: 'config.fullAccess' },
@@ -894,7 +917,7 @@ export function AgentsSection({
                 </span>
                 <div className="set-agent-heading">
                   <div className="set-agent-title-row">
-                  <span className="set-agent-title">{agent.name}</span>
+                  {renderAgentNameControl(agent.agent_type, agent.name)}
                   <span className="set-origin-badge">{agent.origin}</span>
                   {agent.version && <code className="set-code text-xs">v{agent.version}</code>}
                   {/* Lenient semver compare (mirror of backend `versions.rs`).
@@ -1055,8 +1078,21 @@ export function AgentsSection({
                   install, so the user isn't told an agent they never installed
                   is "Activé". */}
               <div className="set-agent-actions">
-                {renderMentionColorControl(agent.agent_type)}
                 {renderConcurrencyControl(agent.agent_type)}
+                <button
+                  type="button"
+                  className="set-agent-configure-btn"
+                  data-testid={`agent-configure-${agent.agent_type}`}
+                  onClick={() => toggleAgentExpanded(agent.agent_type)}
+                  aria-expanded={expandedAgents.has(agent.agent_type)}
+                  aria-controls={`agent-config-${agent.agent_type}`}
+                  title={t(expandedAgents.has(agent.agent_type)
+                    ? 'config.agentConfigureHide'
+                    : 'config.agentConfigureShow')}
+                >
+                  <ChevronDown size={11} />
+                  <span>{t('config.agentConfigure')}</span>
+                </button>
                 {agent.installed ? (
                   <>
                   <button
@@ -1118,7 +1154,8 @@ export function AgentsSection({
                 )}
               </div>
             </div>
-            <div className="set-agent-card-body">
+            {expandedAgents.has(agent.agent_type) && (
+            <div className="set-agent-card-body" id={`agent-config-${agent.agent_type}`}>
             {perm && (agent.installed || agent.runtime_available) && (
               <div className="set-agent-panel set-agent-panel-access">
                 <div className="set-agent-section-title">
@@ -1531,21 +1568,54 @@ export function AgentsSection({
               );
             })()}
             </div>
+            )}
           </div>
           </React.Fragment>
           );
         })}
+          </div>
+        </section>
 
-        <ModelCatalogSection />
+        <section className="set-agent-mode" data-mode="local" data-testid="agent-mode-local">
+          <div className="set-agent-mode-head">
+            <span className="set-external-api-heading-icon" aria-hidden="true"><HardDrive size={17} /></span>
+            <span className="set-external-api-heading-copy">
+              <strong>{t('config.modeLocalTitle')}</strong>
+              <small>{t('config.modeLocalHint')}</small>
+            </span>
+          </div>
+          <div className="set-agent-mode-grid">
+            {localAgents.map(agent => (
+              <div
+                key={agent.agent_type}
+                className="set-agent-row set-agent-row-ollama"
+                data-agent-type={agent.agent_type}
+                style={{ '--agent-color': agentColor('Ollama', mentionColors) } as CSSProperties}
+              >
+                <OllamaCard
+                  t={t}
+                  modelCostSuffix={modelCostSuffix}
+                  title={renderAgentNameControl('Ollama', 'Ollama')}
+                  headerAccessory={renderConcurrencyControl('Ollama')}
+                />
+              </div>
+            ))}
+          </div>
+        </section>
 
         {/* KT-339 — unified External API zone: LiteLLM, NVIDIA and any other
-            OpenAI-compatible service live here as named connections. */}
+            OpenAI-compatible service live here as named connections. KT-586 —
+            third of the three modes, so the three sit together. */}
         <ExternalApiSection
           t={t}
           toast={toast}
           modelCostSuffix={modelCostSuffix}
           onModelTiersChanged={refetchAgentAccess}
         />
+
+        {/* After the modes: a catalogue is what the modes draw from, not a
+            fourth way of reaching a model. */}
+        <ModelCatalogSection />
 
         {/* Best practices links */}
         <div className="set-best-practices">

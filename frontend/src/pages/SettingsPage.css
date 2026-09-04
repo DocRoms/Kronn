@@ -2400,6 +2400,132 @@
   margin-bottom: 0;
 }
 
+/* KT-586 — three ways of reaching a model, three framed zones. The external
+   API section already owned this shape; CLI and Local now read as its siblings
+   rather than as a loose list above it. */
+.set-agent-mode {
+  overflow: visible;
+  margin-top: var(--kr-sp-6);
+  border: 1px solid var(--kr-border-soft);
+  border-radius: var(--kr-r-lg);
+  background: var(--kr-bg-subtle);
+  box-shadow: var(--kr-shadow-sm);
+}
+
+.set-agent-mode-head {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--kr-sp-4);
+  padding: var(--kr-sp-5) var(--kr-sp-6);
+  border-bottom: 1px solid var(--kr-border-ghost);
+}
+
+/* Two columns, like the external connections: a CLI agent says roughly what a
+   connection says, and had the whole width to say it. Every card keeps its
+   column — one spanning both leaves a hole beside it. */
+.set-agent-mode-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
+  gap: var(--kr-sp-4);
+  padding: var(--kr-sp-5);
+}
+
+@media (max-width: 900px) {
+  .set-agent-mode-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* The grid owns the spacing now; the row keeping its own bottom margin left a
+   ragged gap between the two columns. */
+.set-agent-mode-grid > .set-agent-row {
+  margin-bottom: 0;
+}
+
+/* Ollama alone in its zone: no second column to line up with. */
+.set-agent-mode[data-mode='local'] .set-agent-mode-grid {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+/* Half the width it used to have, so the card stops being a row with a left
+   and a right side and becomes a stack. Identity, then state, then actions. */
+.set-agent-mode-grid .set-agent-card-header {
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--kr-sp-3);
+}
+
+.set-agent-mode-grid .set-agent-actions {
+  justify-content: flex-start;
+  flex-wrap: wrap;
+}
+
+/* The name IS the mention-colour control: one chip, said once. */
+.set-agent-title-color {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--kr-sp-2);
+  cursor: pointer;
+}
+
+.set-agent-title-color > svg {
+  flex-shrink: 0;
+  opacity: 0.45;
+}
+
+.set-agent-title-color:hover > svg {
+  opacity: 1;
+}
+
+.set-agent-title-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.set-agent-title-color > input[type='color'] {
+  width: 14px;
+  height: 14px;
+  padding: 0;
+  border: 1px solid color-mix(in srgb, var(--mention-color) 55%, transparent);
+  border-radius: 50%;
+  background: none;
+  cursor: pointer;
+}
+
+.set-agent-configure-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  padding: 2px 8px;
+  border: 1px solid var(--kr-border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--kr-text-tertiary);
+  font-size: 0.72rem;
+  cursor: pointer;
+}
+
+.set-agent-configure-btn:hover {
+  border-color: var(--kr-border-strong);
+  color: var(--kr-text-primary);
+}
+
+.set-agent-configure-btn[aria-expanded='true'] {
+  border-color: var(--agent-color, var(--kr-accent));
+  color: var(--kr-text-primary);
+}
+
+.set-agent-configure-btn svg {
+  transition: transform 120ms ease;
+}
+
+.set-agent-configure-btn[aria-expanded='true'] svg {
+  transform: rotate(180deg);
+}
+
 .set-agent-row {
   --agent-color: var(--kr-accent);
   margin-bottom: var(--kr-sp-5);

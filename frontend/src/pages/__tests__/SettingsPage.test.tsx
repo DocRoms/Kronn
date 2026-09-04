@@ -546,6 +546,10 @@ describe('SettingsPage', () => {
       agent_type: 'Vibe',
     };
     await wrap(<SettingsPage {...defaultProps} agents={[vibeAgent]} />);
+    // KT-586 — API keys live behind the agent's "Configurer" fold now.
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('agent-configure-Vibe'));
+    });
     const body = document.body.textContent!;
     expect(body).toContain('Vibe');
     expect(body).toContain('auth locale');
@@ -583,6 +587,10 @@ describe('SettingsPage', () => {
   it('shows add key form when clicking Ajouter une cle', async () => {
     // ClaudeCode has a token field (anthropic), so the "Ajouter une cle" button should appear
     await wrap(<SettingsPage {...defaultProps} agents={[sampleAgent]} />);
+    // KT-586 — API keys live behind the agent's "Configurer" fold now.
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('agent-configure-ClaudeCode'));
+    });
 
     // The "Ajouter une cle" button should be visible for ClaudeCode
     const addKeyBtn = screen.getByText('Ajouter une clé');

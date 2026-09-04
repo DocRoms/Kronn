@@ -17,6 +17,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, cleanup, act } from '@testing-library/react';
+import { readFileSync } from 'node:fs';
 import { buildApiMock } from '../../../test/apiMock';
 import type { AgentDetection, AgentsConfig, AgentType } from '../../../types/generated';
 
@@ -106,6 +107,13 @@ function renderSection(over: Partial<Props> = {}) {
     />,
   );
   return { refetchAgents, refetchAgentAccess, toastFn, ...result };
+}
+
+/// KT-586 — an agent's access switch, API keys and model tiers live behind a
+/// "Configurer" fold now, so a test that reaches for them opens it first. This
+/// is the click a user makes, not a test-only escape hatch.
+function openAgentConfig(agentType: string) {
+  fireEvent.click(screen.getByTestId(`agent-configure-${agentType}`));
 }
 
 beforeEach(() => {
@@ -395,6 +403,7 @@ describe('AgentsSection — full-access switch', () => {
       agents: [makeAgent({ name: 'AgentClaude', agent_type: 'ClaudeCode', installed: true, enabled: true })],
       agentAccess: accessConfig(),
     });
+    openAgentConfig('ClaudeCode');
     const sw = screen.getByRole('switch');
     expect(sw.getAttribute('aria-checked')).toBe('false');
   });
@@ -404,6 +413,7 @@ describe('AgentsSection — full-access switch', () => {
       agents: [makeAgent({ name: 'AgentClaude', agent_type: 'ClaudeCode', installed: true, enabled: true })],
       agentAccess: accessConfig({ claude_code: { path: null, installed: true, version: null, full_access: true } }),
     });
+    openAgentConfig('ClaudeCode');
     expect(screen.getByRole('switch').getAttribute('aria-checked')).toBe('true');
   });
 
@@ -412,6 +422,7 @@ describe('AgentsSection — full-access switch', () => {
       agents: [makeAgent({ name: 'AgentCodex', agent_type: 'Codex', installed: true, enabled: true })],
       agentAccess: accessConfig(),
     });
+    openAgentConfig('Codex');
     expect(screen.getByText('--sandbox=danger-full-access')).toBeTruthy();
     expect(screen.queryByText('--full-auto')).toBeNull();
   });
@@ -421,6 +432,7 @@ describe('AgentsSection — full-access switch', () => {
       agents: [makeAgent({ name: 'AgentOpenCode', agent_type: 'OpenCode', installed: true, enabled: true })],
       agentAccess: accessConfig(),
     });
+    openAgentConfig('OpenCode');
     const panel = container.querySelector('[data-agent-type="OpenCode"] .set-agent-panel-access');
     expect(panel).toBeTruthy();
     expect(screen.getByText('config.fullAccessAcp')).toBeTruthy();
@@ -432,6 +444,7 @@ describe('AgentsSection — full-access switch', () => {
       agents: [makeAgent({ name: 'AgentOpenCode', agent_type: 'OpenCode', installed: true, enabled: true })],
       agentAccess: accessConfig(),
     });
+    openAgentConfig('OpenCode');
     expect(screen.getByRole('switch').getAttribute('aria-checked')).toBe('false');
     fireEvent.click(screen.getByRole('switch'));
     await waitFor(() =>
@@ -445,6 +458,7 @@ describe('AgentsSection — full-access switch', () => {
       agents: [makeAgent({ name: 'AgentClaude', agent_type: 'ClaudeCode', installed: true, enabled: true })],
       agentAccess: accessConfig(),
     });
+    openAgentConfig('ClaudeCode');
     fireEvent.click(screen.getByRole('switch'));
     await waitFor(() =>
       expect(setAgentAccessMock).toHaveBeenCalledWith({ agent: 'ClaudeCode', full_access: true }),
@@ -457,6 +471,7 @@ describe('AgentsSection — full-access switch', () => {
       agents: [makeAgent({ name: 'AgentClaude', agent_type: 'ClaudeCode', installed: true, enabled: true })],
       agentAccess: accessConfig({ claude_code: { path: null, installed: true, version: null, full_access: true } }),
     });
+    openAgentConfig('ClaudeCode');
     fireEvent.keyDown(screen.getByRole('switch'), { key: ' ' });
     await waitFor(() =>
       expect(setAgentAccessMock).toHaveBeenCalledWith({ agent: 'ClaudeCode', full_access: false }),
@@ -471,6 +486,7 @@ describe('AgentsSection — full-access switch', () => {
       agents: [makeAgent({ name: 'AgentClaude', agent_type: 'ClaudeCode', installed: true, enabled: true })],
       agentAccess: accessConfig(),
     });
+    openAgentConfig('ClaudeCode');
     fireEvent.click(screen.getByRole('switch'));
     await waitFor(() => expect(refetchAgentAccess).toHaveBeenCalled());
     warnSpy.mockRestore();
@@ -528,6 +544,7 @@ describe('AgentsSection — observed model costs', () => {
         name: 'AgentClaude', agent_type: 'ClaudeCode', installed: true, enabled: true,
       })],
     });
+    openAgentConfig('ClaudeCode');
 
     await waitFor(() => expect(usageGetMock).toHaveBeenCalledWith('monthly'));
     for (const tier of ['economy', 'default', 'reasoning']) {
@@ -566,6 +583,7 @@ describe('AgentsSection — observed model costs', () => {
         name: 'AgentClaude', agent_type: 'ClaudeCode', installed: true, enabled: true,
       })],
     });
+    openAgentConfig('ClaudeCode');
 
     const expectedModels = ['', 'haiku', 'sonnet', 'fable', 'opus'];
     for (const tier of ['economy', 'default', 'reasoning']) {
@@ -598,6 +616,7 @@ describe('AgentsSection — configurable mention colors', () => {
       })],
       agentAccess,
     });
+    openAgentConfig('ClaudeCode');
 
     const card = container.querySelector<HTMLElement>('[data-agent-type="ClaudeCode"]');
     expect(card?.style.getPropertyValue('--agent-color')).toBe('#123abc');
@@ -625,7 +644,9 @@ describe('AgentsSection — configurable mention colors', () => {
     expect(card).toHaveClass('set-agent-row-ollama');
     expect(card?.style.getPropertyValue('--agent-color').toLowerCase()).toBe('#60a5fa');
     expect(card?.querySelector('.set-ollama-card')).toBeTruthy();
-    expect(card?.querySelector('.set-ollama-header-actions [data-testid="mention-color-Ollama"]')).toBeTruthy();
+    // KT-586 — the colour picker rides on the name now, not as a chip beside it.
+    expect(card?.querySelector('.set-ollama-header [data-testid="mention-color-Ollama"]')).toBeTruthy();
+    expect(card?.querySelectorAll('.set-agent-mention-control')).toHaveLength(0);
   });
 
   it('renders LiteLLM in the unified External API zone, not as its own fleet card', async () => {
@@ -758,5 +779,120 @@ describe('AgentsSection — runtime-available rendering', () => {
     expect(screen.getAllByText('config.agentAuthRequired')).toHaveLength(2);
     fireEvent.click(screen.getByText('vibe --setup').closest('button')!);
     expect(writeText).toHaveBeenCalledWith('vibe --setup');
+  });
+});
+
+/// KT-586 — Config > Agents listed seven full-width CLI cards, then Ollama as a
+/// special case inside the same loop, then the external connections. Three ways
+/// of reaching a model, one undifferentiated list.
+describe('AgentsSection — CLI / Local / External zones', () => {
+  it('separates the CLI agents from the local one', () => {
+    renderSection({
+      agents: [
+        makeAgent({ name: 'AgentClaude', agent_type: 'ClaudeCode', installed: true, enabled: true }),
+        makeAgent({ name: 'Ollama', agent_type: 'Ollama', installed: true, enabled: true }),
+      ],
+    });
+
+    const cli = screen.getByTestId('agent-mode-cli');
+    const local = screen.getByTestId('agent-mode-local');
+    expect(cli.querySelector('[data-agent-type="ClaudeCode"]')).not.toBeNull();
+    // Ollama is not a CLI: it used to be an `if` in the middle of the CLI loop.
+    expect(cli.querySelector('[data-agent-type="Ollama"]')).toBeNull();
+    expect(local.querySelector('[data-agent-type="Ollama"]')).not.toBeNull();
+  });
+
+  it('keeps an agent settings folded until asked', () => {
+    renderSection({
+      agents: [makeAgent({ name: 'AgentClaude', agent_type: 'ClaudeCode', installed: true, enabled: true })],
+      agentAccess: null,
+    });
+
+    expect(document.querySelector('.set-agent-card-body')).toBeNull();
+    const button = screen.getByTestId('agent-configure-ClaudeCode');
+    expect(button.getAttribute('aria-expanded')).toBe('false');
+
+    fireEvent.click(button);
+    expect(document.querySelector('.set-agent-card-body')).not.toBeNull();
+    expect(button.getAttribute('aria-expanded')).toBe('true');
+
+    fireEvent.click(button);
+    expect(document.querySelector('.set-agent-card-body')).toBeNull();
+  });
+
+  it('folds each agent on its own', () => {
+    renderSection({
+      agents: [
+        makeAgent({ name: 'AgentClaude', agent_type: 'ClaudeCode', installed: true, enabled: true }),
+        makeAgent({ name: 'AgentCodex', agent_type: 'Codex', installed: true, enabled: true }),
+      ],
+    });
+
+    fireEvent.click(screen.getByTestId('agent-configure-Codex'));
+    expect(document.querySelector('#agent-config-Codex')).not.toBeNull();
+    expect(document.querySelector('#agent-config-ClaudeCode')).toBeNull();
+  });
+
+  /// A System CTA deep-links straight to one tier picker, which lives in the
+  /// fold. Without this the focus effect retries against a card that never
+  /// renders, and the user lands on the settings page with nothing selected.
+  it('opens the fold the deep link points into, before any effect runs', () => {
+    sessionStorage.setItem(
+      'kronn:model-config-target',
+      JSON.stringify({ agentType: 'Codex', tier: 'reasoning' }),
+    );
+    renderSection({
+      agents: [makeAgent({ name: 'AgentCodex', agent_type: 'Codex', installed: true, enabled: true })],
+    });
+
+    expect(document.querySelector('#agent-config-Codex')).not.toBeNull();
+    expect(screen.getByTestId('agent-configure-Codex').getAttribute('aria-expanded')).toBe('true');
+    sessionStorage.removeItem('kronn:model-config-target');
+  });
+
+  /// The card carried its agent's name twice: as the title, and again inside
+  /// the colour chip beside it.
+  it('says an agent name once, and makes it the colour control', () => {
+    renderSection({
+      agents: [makeAgent({ name: 'AgentClaude', agent_type: 'ClaudeCode', installed: true, enabled: true })],
+    });
+
+    const card = document.querySelector('[data-agent-type="ClaudeCode"]')!;
+    expect(card.querySelector('.set-agent-title-text')?.textContent).toBe('AgentClaude');
+    // The old chip repeated the name; the picker rides on the title now.
+    expect(card.querySelectorAll('.set-agent-mention-control')).toHaveLength(0);
+    expect(card.querySelector('.set-agent-title [data-testid="mention-color-ClaudeCode"]')).not.toBeNull();
+  });
+
+  /// Half the width it had, so the card stops being a left side and a right
+  /// side and becomes a stack.
+  it('stacks the card header instead of splitting it in two', () => {
+    const css = readFileSync('src/pages/SettingsPage.css', 'utf8');
+    const rule = css.match(/\.set-agent-mode-grid \.set-agent-card-header\s*\{([^}]*)\}/)?.[1] ?? '';
+    expect(rule).toContain('flex-direction: column');
+  });
+
+  /// Every card keeps its column: one spanning both leaves a hole beside it.
+  it('lets no card span both columns', () => {
+    const css = readFileSync('src/pages/SettingsPage.css', 'utf8');
+    expect(css).not.toContain('.set-agent-mode-grid > .set-agent-row:has(.set-agent-runtime-state');
+  });
+
+  /// The three modes are framed the same way, so they read as three of a kind
+  /// rather than as a list with a boxed section under it.
+  it('frames a mode like the external API section', () => {
+    const css = readFileSync('src/pages/SettingsPage.css', 'utf8');
+    const mode = css.match(/\.set-agent-mode\s*\{([^}]*)\}/)?.[1] ?? '';
+    const ext = css.match(/\.set-ext-api-section\s*\{([^}]*)\}/)?.[1] ?? '';
+    for (const property of ['border:', 'border-radius:', 'background:', 'box-shadow:']) {
+      expect(mode).toContain(property);
+      expect(ext).toContain(property);
+    }
+  });
+
+  it('lays the CLI agents out in two columns', () => {
+    const css = readFileSync('src/pages/SettingsPage.css', 'utf8');
+    const rule = css.match(/\.set-agent-mode-grid\s*\{([^}]*)\}/)?.[1] ?? '';
+    expect(rule).toContain('grid-template-columns: repeat(2, minmax(0, 1fr))');
   });
 });
