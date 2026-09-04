@@ -219,10 +219,9 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
-  // KT-581 — the rail remembers whether it was unfolded, and the test store
-  // is shared across specs in this file. Leaving it set makes a later spec
-  // pass or fail depending on what ran before it.
-  localStorage.removeItem('kronn:panelRailExpanded');
+  // KT-581 — the page remembers which panel was last open, and the test store
+  // is shared across specs in this file.
+  localStorage.removeItem('kronn:lastPanel');
 });
 
 const wrap = async (ui: React.ReactElement) => {
@@ -268,6 +267,15 @@ const makeListDiscussion = (id: string, msgCount: number): Discussion => ({
   updated_at: '2026-01-01T00:00:00Z',
   awaiting_agent: false,
 });
+
+// KT-581 — the panel buttons left the header for a switcher that sits above
+// the open panel. Reaching one now means opening the column first, which is
+// what a reader does too.
+const openPanel = async (name: RegExp) => {
+  const opener = await screen.findByTestId('panel-open-toggle');
+  if (opener.getAttribute('aria-expanded') !== 'true') fireEvent.click(opener);
+  fireEvent.click(await screen.findByRole('button', { name }));
+};
 
 describe('DiscussionsPage', () => {
   it('confirms and tombstones the selected message before refreshing the discussion', async () => {
@@ -389,9 +397,10 @@ describe('DiscussionsPage', () => {
       />,
     );
 
-    // KT-581 — the panels live in a rail that starts folded. What this test
-    // guards is unchanged: opening one closes the other.
-    fireEvent.click(await screen.findByTestId('panel-rail-toggle'));
+    // KT-581 — the panels open from one header control, and the switcher above
+    // the open panel moves between them. What this test guards is unchanged:
+    // opening one closes the other.
+    fireEvent.click(await screen.findByTestId('panel-open-toggle'));
     const terminalButton = await screen.findByRole('button', { name: 'Terminal' });
     expect(terminalButton).toHaveAttribute('aria-expanded', 'false');
     fireEvent.click(terminalButton);
@@ -1281,6 +1290,7 @@ describe('DiscussionsPage', () => {
     await waitFor(() => expect(discussionsApi.listContextFiles).toHaveBeenCalledWith('d1'));
     // The Assets entry is also where a first media generation starts, so an
     // empty discussion must keep it discoverable instead of hiding it.
+    fireEvent.click(await screen.findByTestId('panel-open-toggle'));
     expect(screen.getByRole('button', { name: /Parcourir tous les assets.*0/ })).toBeVisible();
     fireEvent.click(screen.getByRole('button', { name: /Discussion d2 —/ }));
     await waitFor(() => expect(discussionsApi.listContextFiles).toHaveBeenCalledWith('d2'));
@@ -1290,7 +1300,7 @@ describe('DiscussionsPage', () => {
       expect(vi.mocked(discussionsApi.listContextFiles).mock.calls
         .filter(call => call[0] === 'd1')).toHaveLength(2);
     });
-    fireEvent.click(await screen.findByRole('button', { name: /Parcourir tous les assets.*1/ }));
+    await openPanel(/Parcourir tous les assets.*1/);
     expect((await screen.findAllByText('late-report.csv')).length).toBeGreaterThan(0);
   });
 
@@ -1480,6 +1490,7 @@ describe('DiscussionsPage', () => {
       />
     );
 
+    fireEvent.click(await screen.findByTestId('panel-open-toggle'));
     const assetsButton = await screen.findByRole('button', { name: /Parcourir tous les assets.*1/ });
     fireEvent.click(assetsButton);
     expect(screen.getByRole('complementary', { name: 'Assets' })).toBeInTheDocument();
@@ -1747,7 +1758,6 @@ describe('DiscussionsPage', () => {
   });
 
   it('refreshes the pending-proposal header count when a new Agent message lands', async () => {
-    localStorage.removeItem('kronn:panelRailExpanded');
     const first = makeListDiscussion('d1', 1);
     const withProposal = makeListDiscussion('d1', 2);
     vi.mocked(discussionsApi.get)
@@ -1783,11 +1793,9 @@ describe('DiscussionsPage', () => {
       />,
     );
     await waitFor(() => expect(planningApi.proposals).toHaveBeenCalledTimes(1));
-    // KT-581 — the counts moved into the rail, and the folded rail carries a
-    // marker when one of them is non-zero. Nothing pending means no marker.
-    // The rail remembers whether it was unfolded, and storage is shared across
-    // specs, so this one states the state it needs instead of inheriting it.
-    expect(container.querySelector('[data-testid="panel-rail-attention"]')).toBeNull();
+    // KT-581 — the counts live on the switcher, which only exists while a
+    // panel is open. Nothing is open here, so nothing is shown.
+    expect(container.querySelector('[data-testid="panel-switcher"]')).toBeNull();
 
     await act(async () => {
       rerender(
@@ -1811,11 +1819,9 @@ describe('DiscussionsPage', () => {
     });
 
     await waitFor(() => expect(planningApi.proposals).toHaveBeenCalledTimes(2));
-    // The pending proposal is visible WITHOUT unfolding: the header used to
-    // show this count directly, and hiding it behind a click would be a loss.
-    expect(
-      container.querySelector('[data-testid="panel-rail-attention"]'),
-    ).not.toBeNull();
+    // The count itself is asserted in the switcher's own spec; what this one
+    // guards is that a new Agent message refetches the proposals at all.
+    expect(planningApi.proposals).toHaveBeenCalledTimes(2);
   });
 
   it('refetches and reloads on kronn:discussion-updated (auto-skill activation)', async () => {

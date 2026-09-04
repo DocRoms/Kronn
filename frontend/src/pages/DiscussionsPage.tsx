@@ -21,6 +21,7 @@ import { BatchComparePanel } from '../components/BatchComparePanel';
 import { TestModeBanner } from '../components/TestModeBanner';
 import { TestModeModal } from '../components/TestModeModal';
 import type { TestModeBlocker } from '../types/extensions';
+import { DiscussionPanelSwitcher } from '../components/DiscussionPanelSwitcher';
 import { ChatHeader } from '../components/ChatHeader';
 import { DiscussionSidebar } from '../components/DiscussionSidebar';
 import { CollectionSidebarRail } from '../components/CollectionShell';
@@ -52,6 +53,11 @@ import {
   MessageSquare, AlertTriangle,
   ShieldCheck, Check, Rocket, Play, Zap,
   Menu, X, Clock, ExternalLink, Search, ChevronUp, ChevronDown, WifiOff, Square,
+  Images,
+  GitBranch,
+  Terminal,
+  Settings,
+  ListTodo,
 } from 'lucide-react';
 import { useIsMobile } from '../hooks/useMediaQuery';
 import {
@@ -474,7 +480,10 @@ export function DiscussionsPage({
   const [messageSearchIndex, setMessageSearchIndex] = useState(0);
   const messageSearchInputRef = useRef<HTMLInputElement>(null);
   const messageSearchRangesRef = useRef<Range[]>([]);
-  const [discussionPlan, setDiscussionPlan] = useState<DiscussionPlan | null>(null);
+  // Loaded for the plan panel itself. Its completed/total pair used to be
+  // shown in the header button too; the panel shows it, so the switcher does
+  // not repeat it — one number, one place.
+  const [, setDiscussionPlan] = useState<DiscussionPlan | null>(null);
   const [proposalInbox, setProposalInbox] = useState<ProposalListResponse | null>(null);
   const [proposalInboxDiscussionId, setProposalInboxDiscussionId] = useState<string | null>(null);
   const [discussionActions, setDiscussionActions] = useState<DiscussionAction[]>([]);
@@ -506,6 +515,50 @@ export function DiscussionsPage({
     }, 5_000);
     return () => window.clearInterval(interval);
   }, [allDiscussions.length, refreshExecutionDiscussionLinks]);
+
+  // One panel at a time, decided here rather than in the switcher: the rule
+  // already lived in this file (Escape closes them all), and splitting it in
+  // two is how the two halves drift apart.
+  type PanelId = 'plan' | 'assets' | 'git' | 'terminal' | 'settings';
+  const anyPanelOpen =
+    showGitPanel || showTerminalPanel || showPlanPanel || showSettingsPanel || showAssetsPanel;
+  // Same rule the header used: a terminal is only offered when at least one
+  // agent may actually run commands.
+  const terminalEnabled = agentAccess != null && [
+    agentAccess.claude_code,
+    agentAccess.codex,
+    agentAccess.gemini_cli,
+    agentAccess.kiro,
+    agentAccess.vibe,
+    agentAccess.copilot_cli,
+  ].some(config => config?.full_access);
+  const openOnlyPanel = useCallback((panel: PanelId | null, openState?: Record<PanelId, boolean>) => {
+    // Clicking the panel already showing closes it, as the header buttons did.
+    // Without this the column can only be dismissed with Escape, and a reader
+    // who clicks the same icon twice watches nothing happen.
+    const alreadyOpen = panel != null && openState?.[panel];
+    const target = alreadyOpen ? null : panel;
+    setShowGitPanel(target === 'git');
+    setShowTerminalPanel(target === 'terminal');
+    setShowPlanPanel(target === 'plan');
+    setShowSettingsPanel(target === 'settings');
+    setShowAssetsPanel(target === 'assets');
+    if (target) {
+      // Reopening the column lands on whatever was last read, not always on
+      // the plan: someone who works in Files does not want to re-pick it.
+      try { localStorage.setItem('kronn:lastPanel', target); } catch { /* non-fatal */ }
+    }
+  }, []);
+  const openLastPanel = useCallback(() => {
+    if (anyPanelOpen) {
+      openOnlyPanel(null);
+      return;
+    }
+    let last: string | null = null;
+    try { last = localStorage.getItem('kronn:lastPanel'); } catch { /* non-fatal */ }
+    const known: PanelId[] = ['plan', 'assets', 'git', 'terminal', 'settings'];
+    openOnlyPanel(known.includes(last as PanelId) ? (last as PanelId) : 'plan');
+  }, [anyPanelOpen, openOnlyPanel]);
 
   useEffect(() => {
     if (!showGitPanel && !showTerminalPanel && !showPlanPanel && !showSettingsPanel && !showAssetsPanel) return;
@@ -3704,71 +3757,18 @@ export function DiscussionsPage({
               agents={agents}
               modelTiers={agentAccess?.model_tiers}
               externalConnections={externalConnections}
-              showGitPanel={showGitPanel}
-              showTerminalPanel={showTerminalPanel}
-              terminalEnabled={agentAccess != null && [
-                agentAccess.claude_code,
-                agentAccess.codex,
-                agentAccess.gemini_cli,
-                agentAccess.kiro,
-                agentAccess.vibe,
-                agentAccess.copilot_cli,
-              ].some(config => config?.full_access)}
-              showPlanPanel={showPlanPanel}
-              showSettingsPanel={showSettingsPanel}
-              showAssetsPanel={showAssetsPanel}
-              assetCount={activeContextFiles.length}
-              planCompleted={discussionPlan?.discussion_id === activeDiscussion.id ? discussionPlan.completed_active : 0}
-              planTotal={discussionPlan?.discussion_id === activeDiscussion.id ? discussionPlan.total_active : 0}
-              planLater={discussionPlan?.discussion_id === activeDiscussion.id ? discussionPlan.later.length : 0}
-              pendingProposalCount={proposalInboxDiscussionId === activeDiscussion.id
-                ? proposalInbox?.pending_proposal_count ?? 0
-                : 0}
-              pendingProposalItemCount={proposalInboxDiscussionId === activeDiscussion.id
-                ? proposalInbox?.pending_item_count ?? 0
-                : 0}
               isMobile={isMobile}
               sending={sending}
-              pendingFilesCount={pendingFilesCount}
               onRequestTestMode={() => { void handleRequestTestMode(activeDiscussion.id); }}
-              onToggleGitPanel={() => {
-                setInitialGitWorkspaceId(undefined);
-                setShowPlanPanel(false);
-                setShowSettingsPanel(false);
-                setShowAssetsPanel(false);
-                setShowTerminalPanel(false);
-                setShowGitPanel(prev => !prev);
-              }}
-              onToggleTerminalPanel={() => {
-                setGitPanelExpanded(false);
-                setInitialGitWorkspaceId(undefined);
-                setShowGitPanel(false);
-                setShowPlanPanel(false);
-                setShowSettingsPanel(false);
-                setShowAssetsPanel(false);
-                setShowTerminalPanel(prev => !prev);
-              }}
-              onTogglePlanPanel={() => {
-                setShowGitPanel(false);
-                setShowTerminalPanel(false);
-                setShowSettingsPanel(false);
-                setShowAssetsPanel(false);
-                setShowPlanPanel(prev => !prev);
-              }}
-              onToggleSettingsPanel={() => {
-                setShowGitPanel(false);
-                setShowTerminalPanel(false);
-                setShowPlanPanel(false);
-                setShowAssetsPanel(false);
-                setShowSettingsPanel(prev => !prev);
-              }}
-              onToggleAssetsPanel={() => {
-                setShowGitPanel(false);
-                setShowTerminalPanel(false);
-                setShowPlanPanel(false);
-                setShowSettingsPanel(false);
-                setShowAssetsPanel(prev => !prev);
-              }}
+              onToggleSettingsPanel={() => openOnlyPanel('settings', {
+                plan: showPlanPanel,
+                assets: showAssetsPanel,
+                git: showGitPanel,
+                terminal: showTerminalPanel,
+                settings: showSettingsPanel,
+              })}
+              onOpenPanels={openLastPanel}
+              anyPanelOpen={anyPanelOpen}
               showMessageSearch={showMessageSearch}
               onToggleMessageSearch={() => {
                 if (showMessageSearch) {
@@ -5058,6 +5058,89 @@ export function DiscussionsPage({
             />
 
             </div>{/* end messages column */}
+
+            {/* KT-581 — switching panels, above the panel being switched.
+              *  Each panel draws its own header, so putting these icons in the
+              *  discussion header too showed every one of them twice. */}
+            <DiscussionPanelSwitcher
+              groupLabel={t('disc.panelRail.group')}
+              panels={[
+                {
+                  id: 'plan',
+                  label: t('planning.openPlan'),
+                  icon: <ListTodo size={14} />,
+                  active: showPlanPanel,
+                  onSelect: () => openOnlyPanel('plan', {
+                    plan: showPlanPanel,
+                    assets: showAssetsPanel,
+                    git: showGitPanel,
+                    terminal: showTerminalPanel,
+                    settings: showSettingsPanel,
+                  }),
+                  badge: proposalInboxDiscussionId === activeDiscussion.id
+                    && (proposalInbox?.pending_item_count ?? 0) > 0
+                    ? proposalInbox?.pending_item_count
+                    : undefined,
+                },
+                {
+                  id: 'assets',
+                  label: t('disc.assets.open', activeContextFiles.length),
+                  icon: <Images size={14} />,
+                  active: showAssetsPanel,
+                  onSelect: () => openOnlyPanel('assets', {
+                    plan: showPlanPanel,
+                    assets: showAssetsPanel,
+                    git: showGitPanel,
+                    terminal: showTerminalPanel,
+                    settings: showSettingsPanel,
+                  }),
+                },
+                {
+                  id: 'git',
+                  label: pendingFilesCount > 0
+                    ? t('git.pendingFilesTooltip', pendingFilesCount)
+                    : t('git.filesBtn'),
+                  icon: <GitBranch size={14} />,
+                  active: showGitPanel,
+                  onSelect: () => openOnlyPanel('git', {
+                    plan: showPlanPanel,
+                    assets: showAssetsPanel,
+                    git: showGitPanel,
+                    terminal: showTerminalPanel,
+                    settings: showSettingsPanel,
+                  }),
+                  badge: pendingFilesCount > 0 ? (pendingFilesCount > 9 ? '9+' : pendingFilesCount) : undefined,
+                },
+                ...(terminalEnabled
+                  ? [{
+                      id: 'terminal',
+                      label: t('git.terminal'),
+                      icon: <Terminal size={14} />,
+                      active: showTerminalPanel,
+                      onSelect: () => openOnlyPanel('terminal', {
+                    plan: showPlanPanel,
+                    assets: showAssetsPanel,
+                    git: showGitPanel,
+                    terminal: showTerminalPanel,
+                    settings: showSettingsPanel,
+                  }),
+                    }]
+                  : []),
+                {
+                  id: 'settings',
+                  label: t('disc.settingsPanel'),
+                  icon: <Settings size={14} />,
+                  active: showSettingsPanel,
+                  onSelect: () => openOnlyPanel('settings', {
+                    plan: showPlanPanel,
+                    assets: showAssetsPanel,
+                    git: showGitPanel,
+                    terminal: showTerminalPanel,
+                    settings: showSettingsPanel,
+                  }),
+                },
+              ]}
+            />
 
             {/* Git Panel (side panel) */}
             {showGitPanel && (

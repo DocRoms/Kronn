@@ -12,22 +12,19 @@ import type {
 import { AGENT_MENTIONS, isUsable, isValidationDisc, isBriefingDisc, isBootstrapDisc } from '../lib/constants';
 import type { ToastFn } from '../hooks/useToast';
 import {
+  PanelRight,
   GitBranch,
   Trash2,
-  Pencil, ShieldCheck, Check, Zap, FileText, Settings, Rocket,
+  Pencil, ShieldCheck, Check, Zap, FileText, Rocket,
   Menu, Lock, Unlock, Star,
   FlaskConical, Info, UserCircle,
-  ListTodo,
   Download,
   Loader2,
   Power,
   PowerOff,
   Search,
-  Images,
-  Terminal,
 } from 'lucide-react';
 import { MatrixText } from './MatrixText';
-import { DiscussionPanelRail, type RailPanel } from './DiscussionPanelRail';
 import { LearningsBadge } from './LearningsBadge';
 import { DiscParticipantsHeader } from './DiscParticipantsHeader';
 import { AgentSwitchPicker } from './AgentSwitchPicker';
@@ -47,34 +44,23 @@ export interface ChatHeaderProps {
   agents: AgentDetection[];
   modelTiers?: ModelTiersConfig | null;
   externalConnections?: ExternalApiConnectionView[];
-  showGitPanel: boolean;
-  showTerminalPanel?: boolean;
-  terminalEnabled?: boolean;
-  showPlanPanel?: boolean;
-  showSettingsPanel?: boolean;
   showMessageSearch?: boolean;
-  showAssetsPanel?: boolean;
-  assetCount?: number;
-  planCompleted?: number;
-  planTotal?: number;
-  planLater?: number;
-  pendingProposalCount?: number;
-  pendingProposalItemCount?: number;
   isMobile: boolean;
   sending: boolean;
   /// Number of uncommitted files in the discussion worktree (Isolated mode
   /// only — caller passes 0 for Direct mode). Drives the badge on the
   /// git-panel icon; nudges the user to commit when the agent didn't.
-  pendingFilesCount: number;
   /// User-friendly "Tester cette version" CTA: parent owns the call so it
   /// can open the preflight modal if the server returns a blocker.
   onRequestTestMode: () => void;
-  onToggleGitPanel: () => void;
-  onToggleTerminalPanel?: () => void;
-  onTogglePlanPanel?: () => void;
+  /** Opens the panel column. Which panel it lands on is the page's call. */
+  /** The configured-context summary opens the settings panel directly; it
+   *  is a shortcut on what it describes, not one of the panel buttons. */
   onToggleSettingsPanel?: () => void;
+  onOpenPanels?: () => void;
+  /** Any panel currently open — the control reads as expanded then. */
+  anyPanelOpen?: boolean;
   onToggleMessageSearch?: () => void;
-  onToggleAssetsPanel?: () => void;
   onToggleSidebar: () => void;
   onDelete: (discId: string) => void;
   onDiscussionUpdated: () => void;
@@ -89,29 +75,14 @@ export function ChatHeader({
   agents,
   modelTiers = null,
   externalConnections = [],
-  showGitPanel,
-  showTerminalPanel = false,
-  terminalEnabled = false,
-  showPlanPanel = false,
-  showSettingsPanel = false,
   showMessageSearch = false,
-  showAssetsPanel = false,
-  assetCount = 0,
-  planCompleted = 0,
-  planTotal = 0,
-  planLater = 0,
-  pendingProposalCount = 0,
-  pendingProposalItemCount = 0,
   isMobile,
   sending,
-  pendingFilesCount,
   onRequestTestMode,
-  onToggleGitPanel,
-  onToggleTerminalPanel,
-  onTogglePlanPanel,
   onToggleSettingsPanel,
+  onOpenPanels,
+  anyPanelOpen = false,
   onToggleMessageSearch,
-  onToggleAssetsPanel,
   onToggleSidebar,
   onDelete,
   onDiscussionUpdated,
@@ -133,92 +104,6 @@ export function ChatHeader({
   const [editingTitleText, setEditingTitleText] = useState('');
   const [isDiscIdCopied, setIsDiscIdCopied] = useState(false);
   const [exporting, setExporting] = useState(false);
-  // Built with plain `if`s rather than spreads inside the JSX: a guard carries
-  // through a statement, not through a conditional spread, and the alternative
-  // was a non-null assertion on every optional panel — which hides the real
-  // undefined the day a caller stops passing one.
-  const railPanels: RailPanel[] = [];
-  // Plan first: it is the one opened by habit, and the rail reads top down.
-  if (onTogglePlanPanel) {
-    railPanels.push({
-      id: 'plan',
-      label: t('planning.openPlan'),
-      icon: <ListTodo size={13} />,
-      active: showPlanPanel,
-      onToggle: onTogglePlanPanel,
-      // Both counters were on the old header button and stay here: the ratio
-      // of done work, and what is parked for later. Dropping either would be
-      // a silent loss, not a simplification.
-      trailing: (
-        <>
-          <span className="disc-plan-count">{planCompleted}/{planTotal}</span>
-          {planLater > 0 && <span className="disc-plan-later">+{planLater}</span>}
-        </>
-      ),
-      badge: pendingProposalItemCount > 0
-        ? (
-            <span
-              title={t(
-                'planning.pendingProposalTitle',
-                pendingProposalCount,
-                pendingProposalItemCount,
-              )}
-            >
-              {pendingProposalItemCount}
-            </span>
-          )
-        : undefined,
-    });
-  }
-  if (onToggleAssetsPanel) {
-    railPanels.push({
-      id: 'assets',
-      label: t('disc.assets.open', assetCount),
-      icon: <Images size={13} />,
-      active: showAssetsPanel,
-      onToggle: onToggleAssetsPanel,
-      badge: assetCount > 0 ? (assetCount > 99 ? '99+' : assetCount) : undefined,
-    });
-  }
-  railPanels.push({
-    id: 'git',
-    // The old header button said HOW MANY files were pending in its tooltip.
-    // Keeping only the plain label here would have quietly dropped that.
-    label: pendingFilesCount > 0
-      ? t('git.pendingFilesTooltip', pendingFilesCount)
-      : t('git.filesBtn'),
-    icon: <GitBranch size={13} />,
-    active: showGitPanel,
-    onToggle: onToggleGitPanel,
-    badge: pendingFilesCount > 0 ? (pendingFilesCount > 9 ? '9+' : pendingFilesCount) : undefined,
-  });
-  if (terminalEnabled && onToggleTerminalPanel) {
-    railPanels.push({
-      id: 'terminal',
-      label: t('git.terminal'),
-      icon: <Terminal size={13} />,
-      active: showTerminalPanel,
-      onToggle: onToggleTerminalPanel,
-    });
-  }
-  if (onToggleMessageSearch) {
-    railPanels.push({
-      id: 'search',
-      label: t('disc.messageSearch.open'),
-      icon: <Search size={13} />,
-      active: !!showMessageSearch,
-      onToggle: onToggleMessageSearch,
-    });
-  }
-  if (onToggleSettingsPanel) {
-    railPanels.push({
-      id: 'settings',
-      label: t('disc.settingsPanel'),
-      icon: <Settings size={13} />,
-      active: showSettingsPanel,
-      onToggle: onToggleSettingsPanel,
-    });
-  }
   const [nativeAgentMode, setNativeAgentMode] = useState<{
     discussionId: string;
     disabled: boolean;
@@ -638,12 +523,6 @@ export function ChatHeader({
       <div className="disc-chat-header-actions" data-tour-id="disc-output-controls">
         {/* 0.10.0 — pending-learnings badge (self-contained; hidden when 0). */}
         <LearningsBadge t={t} toast={toast} />
-        <DiscussionPanelRail
-          expandLabel={t('disc.panelRail.open')}
-          collapseLabel={t('disc.panelRail.close')}
-          groupLabel={t('disc.panelRail.group')}
-          panels={railPanels}
-        />
         {onToggleMessageSearch && (
           <button
             type="button"
@@ -657,35 +536,24 @@ export function ChatHeader({
             <Search size={13} />
           </button>
         )}
-        {onToggleAssetsPanel && (
+        {/* One control, not six. It opens the panel column; switching between
+         *  panels happens above the panel itself, where each one already draws
+         *  its own header — putting those icons here too showed every one of
+         *  them twice. */}
+        {onOpenPanels && (
           <button
             type="button"
-            className="disc-icon-btn disc-assets-header-btn"
-            data-testid="discussion-assets-toggle"
-            data-active={showAssetsPanel}
-            onClick={onToggleAssetsPanel}
-            title={t('disc.assets.open', assetCount)}
-            aria-label={t('disc.assets.open', assetCount)}
-            aria-expanded={showAssetsPanel}
+            className="disc-icon-btn"
+            data-active={anyPanelOpen}
+            onClick={onOpenPanels}
+            title={t('disc.panelRail.open')}
+            aria-label={t('disc.panelRail.open')}
+            aria-expanded={anyPanelOpen}
+            data-testid="panel-open-toggle"
           >
-            <Images size={13} />
-            <span className="disc-icon-btn-badge" aria-hidden="true">
-              {assetCount > 99 ? '99+' : assetCount}
-            </span>
+            <PanelRight size={13} />
           </button>
         )}
-        <button
-          type="button"
-          className="disc-icon-btn"
-          data-active={showSettingsPanel}
-          onClick={onToggleSettingsPanel}
-          title={t('disc.settingsPanel')}
-          aria-label={t('disc.settingsPanel')}
-          aria-expanded={showSettingsPanel}
-        >
-          <Settings size={13} />
-        </button>
-
         <button
           type="button"
           className="disc-icon-btn"

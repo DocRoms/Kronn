@@ -84,13 +84,9 @@ function renderHeader(options: {
       ]}
       modelTiers={options.modelTiers}
       externalConnections={options.externalConnections}
-      showGitPanel={false}
       isMobile={false}
       sending={sending}
-      pendingFilesCount={0}
       onRequestTestMode={noop}
-      onToggleGitPanel={noop}
-      onToggleSettingsPanel={noop}
       onToggleSidebar={noop}
       onDelete={noop}
       onDiscussionUpdated={onDiscussionUpdated}

@@ -125,13 +125,14 @@ Release notes for 0.9.3 and earlier are available in the
 ### Changed
 
 - A discussion's panels — plan, assets, code, terminal, settings and message
-  search — moved out of the header row into a rail that unfolds. The row also
-  carries the title, the agent, the tier and the counters, and every version
-  narrowed it further; adding a seventh panel now costs a line in a list rather
-  than width nobody has. Folded, the rail still names the panel currently open
-  and still marks that something is pending, because those counts were readable
-  at a glance and hiding them behind a click would trade a crowded header for a
-  blind one.
+  search — left the header row. It also carries the title, the agent, the tier
+  and the counters, and every version narrowed it further. One control now
+  opens the panel column, landing on whichever panel was last read, and moving
+  between them happens in a strip above the panel itself. Each panel already
+  draws its own header, so listing those same icons in the discussion header
+  showed every one of them twice; putting the strip where the panel is removes
+  the duplicate and keeps the control next to what it affects. Clicking the
+  panel already open closes it, as the header buttons did.
 - A turn no longer retells the whole discussion. Every message re-narrated the
   entire history to a brand-new process: on the four longest discussions in a
   real database, 1 288 Claude Code turns sent **436 million characters** where

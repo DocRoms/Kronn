@@ -1,0 +1,54 @@
+/* KT-581 — the switcher sits on top of the panel it switches, not adrift
+   under the discussion header. Same column, same width: the two read as one
+   object rather than as a menu that happens to change something elsewhere. */
+
+.disc-panel-switcher {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+  padding: var(--kr-sp-1);
+  border-bottom: 1px solid var(--kr-border-ghost);
+  background: var(--kr-bg-subtle);
+}
+
+.disc-panel-switcher-item {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 5px 7px;
+  border: 1px solid transparent;
+  border-radius: var(--kr-r-sm);
+  background: none;
+  color: var(--kr-text-tertiary);
+  cursor: pointer;
+}
+
+.disc-panel-switcher-item:hover {
+  background: var(--kr-bg-hover);
+  color: var(--kr-text-primary);
+}
+
+.disc-panel-switcher-item[data-active='true'] {
+  border-color: var(--kr-accent);
+  background: var(--kr-bg-hover);
+  color: var(--kr-text-primary);
+}
+
+/* Small enough to sit on the icon without covering it: the count is a hint
+   here, not the reason the button exists. */
+.disc-panel-switcher-badge {
+  position: absolute;
+  top: -2px;
+  right: -2px;
+  min-width: 14px;
+  padding: 0 3px;
+  border-radius: var(--kr-r-pill);
+  background: var(--kr-accent);
+  color: var(--kr-text-on-dark);
+  font-size: 9px;
+  line-height: 14px;
+  font-weight: 600;
+  text-align: center;
+}

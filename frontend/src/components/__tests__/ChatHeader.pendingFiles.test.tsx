@@ -2,7 +2,7 @@
 // finished a run in Isolated mode without a commit. Guards against silent
 // regression of the UX fix added alongside the disc_prompts worktree notice.
 
-import { describe, it, expect, vi, afterEach } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { buildApiMock } from '../../test/apiMock';
 
@@ -44,25 +44,19 @@ function makeDiscussion(overrides: Partial<Discussion> = {}): Discussion {
 }
 
 function renderHeader(
-  pendingFilesCount: number,
+  _pendingFilesCount: number,
   disc: Discussion = makeDiscussion(),
-  pendingProposalItemCount = 0,
+  _pendingProposalItemCount = 0,
 ) {
   return render(
     <ChatHeader
       discussion={disc}
       projects={[]}
       agents={[]}
-      showGitPanel={false}
       isMobile={false}
       sending={false}
-      pendingFilesCount={pendingFilesCount}
-      pendingProposalCount={pendingProposalItemCount > 0 ? 1 : 0}
-      pendingProposalItemCount={pendingProposalItemCount}
       onRequestTestMode={noop}
-      onToggleGitPanel={noop}
-      onToggleSettingsPanel={noop}
-      onTogglePlanPanel={noop}
+      onOpenPanels={noop}
       onToggleSidebar={noop}
       onDelete={noop}
       onDiscussionUpdated={noop}
@@ -72,12 +66,6 @@ function renderHeader(
     />
   );
 }
-
-afterEach(() => {
-  // The rail persists its folded state; without this, a spec inherits the
-  // rail left open by the previous one.
-  localStorage.removeItem('kronn:panelRailExpanded');
-});
 
 describe('ChatHeader — pending files badge', () => {
   it('exposes stable grouped tour anchors and durable discussion help', () => {
@@ -111,64 +99,20 @@ describe('ChatHeader — pending files badge', () => {
     expect(pill?.querySelector('svg')).not.toBeNull();
   });
 
-  // KT-581 — the panels moved into a rail that starts folded, so a test
-  // looking for one has to open it first. What each test guards is unchanged:
-  // the badge, its cap, and the tooltip that names the count.
-  // Idempotent on purpose: the rail remembers whether it was open, so a blind
-  // click would CLOSE it in every test after the first. Asserting on the state
-  // rather than clearing storage also matches what a returning reader sees.
-  const openRail = () => {
-    const toggle = screen.getByTestId('panel-rail-toggle');
-    if (toggle.getAttribute('aria-expanded') !== 'true') fireEvent.click(toggle);
-  };
-
-  it('keeps the Code action visible when pendingFilesCount is 0', () => {
+  // KT-581 — the pending-file badge, its cap and its tooltip moved with the
+  // panels themselves: they are asserted in DiscussionPanelSwitcher's spec.
+  // What stays here is what the header still owns.
+  it('keeps a single control for the panel column instead of one per panel', () => {
     renderHeader(0);
-    openRail();
-    expect(document.querySelector('.disc-panel-rail-badge')).toBeNull();
-    expect(screen.getByRole('button', { name: /git\.filesBtn/ })).toBeInTheDocument();
+    expect(screen.getByTestId('panel-open-toggle')).toBeInTheDocument();
+    // The six panel buttons are gone from the row; only search and this one
+    // remain, plus the export and delete actions.
+    expect(screen.queryByRole('button', { name: 'git.filesBtn' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'planning.openPlan' })).toBeNull();
   });
 
-  it('shows the count inside the badge when pendingFilesCount > 0', () => {
-    renderHeader(3);
-    openRail();
-    const badge = document.querySelector('[data-panel="git"] .disc-panel-rail-badge');
-    expect(badge).not.toBeNull();
-    expect(badge!.textContent).toBe('3');
-  });
-
-  it('caps the displayed count at 9+ to avoid overflow', () => {
-    renderHeader(27);
-    openRail();
-    expect(
-      document.querySelector('[data-panel="git"] .disc-panel-rail-badge')!.textContent,
-    ).toBe('9+');
-  });
-
-  it('uses the pending-files tooltip (with count) instead of the default label', () => {
-    renderHeader(5);
-    openRail();
-    // The count belongs in the name now: the rail renders its label as text,
-    // so a reader sees "5 files pending" instead of a bare "Code" whose
-    // tooltip they must hover to understand.
-    const btn = screen.getByRole('button', { name: /5 files pending/ });
-    expect(btn.getAttribute('title')).toBe('5 files pending');
-  });
-
-  it('remains available when the discussion has no direct project', () => {
-    renderHeader(5, makeDiscussion({ project_id: null }));
-    openRail();
-    expect(screen.getByRole('button', { name: /5 files pending/ })).toBeInTheDocument();
-    expect(
-      document.querySelector('[data-panel="git"] .disc-panel-rail-badge')?.textContent,
-    ).toBe('5');
-  });
-
-  it('shows pending planning items inside the plan button', () => {
-    renderHeader(0, makeDiscussion(), 3);
-    openRail();
-    expect(
-      document.querySelector('[data-panel="plan"] .disc-panel-rail-badge')?.textContent,
-    ).toBe('3');
+  it('leaves the panel control closed while nothing is open', () => {
+    renderHeader(0);
+    expect(screen.getByTestId('panel-open-toggle')).toHaveAttribute('aria-expanded', 'false');
   });
 });
