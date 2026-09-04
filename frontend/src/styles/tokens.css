@@ -125,6 +125,9 @@
   --kr-r-sm: 4px;
   --kr-r-md: 6px;
   --kr-r-lg: 8px;
+  /* Every discussion panel opens at the same width — the widest one — so
+     switching between them does not shift the conversation sideways. */
+  --kr-panel-w: min(430px, 42vw);
   --kr-r-xl: 10px;
   --kr-r-2xl: 12px;
   --kr-r-3xl: 16px;

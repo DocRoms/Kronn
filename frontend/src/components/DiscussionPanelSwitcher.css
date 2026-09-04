@@ -10,6 +10,22 @@
   flex-direction: column;
   min-height: 0;
   flex-shrink: 0;
+  /* The column owns the height; the panel takes what the strip leaves. Each
+     panel declares `height: 100%`, which inside a flex column means the full
+     column — so the strip was pushed out of view, and with a tall panel like
+     the terminal it disappeared entirely. */
+}
+
+.disc-utility-col > *:not(.disc-panel-switcher) {
+  flex: 1 1 auto;
+  min-height: 0;
+  height: auto;
+}
+
+/* The strip spans whatever the panel below it is: a panel that expands (the
+   code panel does) must not leave the strip narrower than what it controls. */
+.disc-panel-switcher {
+  width: 100%;
 }
 
 .disc-panel-switcher {

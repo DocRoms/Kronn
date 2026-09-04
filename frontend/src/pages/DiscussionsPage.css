@@ -4537,7 +4537,7 @@ button.disc-contact-open {
 /* Discussion-wide asset inventory. It shares the utility-panel column used by
    Git, Plan and Settings so opening it never covers or resizes the header. */
 .disc-assets-panel {
-  width: min(430px, 42vw);
+  width: var(--kr-panel-w);
   min-width: 340px;
   display: flex;
   flex-direction: column;
