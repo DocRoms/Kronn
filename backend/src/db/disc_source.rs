@@ -529,6 +529,10 @@ pub enum DiscSearchScope {
     All,
     Title,
     Content,
+    /// KT-580 — notes only. The other half of making notes findable: `all`
+    /// already reaches them, this is for when the note IS what you are after
+    /// and the transcript around it is noise.
+    Notes,
 }
 
 pub fn search_discussions(
@@ -543,8 +547,13 @@ pub fn search_discussions(
 
     // `?4 = 1` means "a title match counts". Kept as a bound parameter rather
     // than string-built SQL so the statement stays one prepared shape.
-    let title_allowed = !matches!(scope, DiscSearchScope::Content);
+    let notes_only = matches!(scope, DiscSearchScope::Notes);
+    // A note has no title of its own, so scoping to notes excludes title hits
+    // rather than silently widening back to the whole discussion.
+    let title_allowed = !matches!(scope, DiscSearchScope::Content) && !notes_only;
     let content_allowed = !matches!(scope, DiscSearchScope::Title);
+    // `include_notes` opens the note channel; `notes_only` closes every other.
+    let include_notes = include_notes || notes_only;
 
     let mut stmt = conn.prepare(
         "SELECT d.id, d.title, d.source_agent, d.source_session_id,
@@ -552,6 +561,7 @@ pub fn search_discussions(
                     (SELECT m.content FROM messages m
                      WHERE m.discussion_id = d.id
                        AND (?3 = 1 OR m.channel = 'main')
+                       AND (?6 = 0 OR m.channel = 'note')
                        AND m.content LIKE ?1 ESCAPE '\\'
                      ORDER BY m.sort_order ASC LIMIT 1),
                     d.title
@@ -563,13 +573,14 @@ pub fn search_discussions(
                 SELECT 1 FROM messages m
                 WHERE m.discussion_id = d.id
                   AND (?3 = 1 OR m.channel = 'main')
+                  AND (?6 = 0 OR m.channel = 'note')
                   AND m.content LIKE ?1 ESCAPE '\\'
             ))
          ORDER BY title_hit DESC, d.updated_at DESC
          LIMIT ?2",
     )?;
     let rows = stmt.query_map(
-        params![pattern, lim as i64, include_notes, title_allowed, content_allowed],
+        params![pattern, lim as i64, include_notes, title_allowed, content_allowed, notes_only],
         |row| {
             let raw_snip: String = row.get(4)?;
         let trimmed = if raw_snip.chars().count() > 80 {
@@ -688,12 +699,17 @@ pub fn search_messages(
     let lim = limit.clamp(1, 50) as i64;
     let off = offset.min(10_000) as i64;
 
+    // KT-580 — scoping to notes narrows to that channel. A note has no title
+    // of its own, so it also drops title matches rather than silently widening
+    // back to the whole discussion.
+    let notes_only = matches!(filters.scope, DiscSearchScope::Notes);
     let mut sql = String::from(
         "SELECT m.discussion_id, d.title, m.id, m.sort_order, m.role, m.timestamp,
                 m.content, m.agent_type, m.author_pseudo, d.project_id
            FROM messages m
            JOIN discussions d ON d.id = m.discussion_id
-          WHERE (
+          WHERE (?4 = 0 OR m.channel = 'note')
+            AND (
                 (?2 = 1 AND m.content LIKE ?1 ESCAPE '\\')
                 OR (?3 = 1 AND (
                     (d.title LIKE ?1 ESCAPE '\\'",
@@ -701,7 +717,8 @@ pub fn search_messages(
     let mut binds: Vec<Box<dyn rusqlite::ToSql>> = vec![
         Box::new(pattern.clone()),
         Box::new(!matches!(filters.scope, DiscSearchScope::Title)),
-        Box::new(!matches!(filters.scope, DiscSearchScope::Content)),
+        Box::new(!matches!(filters.scope, DiscSearchScope::Content) && !notes_only),
+        Box::new(notes_only),
     ];
     if let Some(id_pattern) = id_prefix_pattern {
         sql.push_str(" OR d.id LIKE ?");
@@ -1240,6 +1257,54 @@ mod tests {
             1,
             "explicit include_notes reveals note content"
         );
+        // KT-580 — scoping to notes opens the channel without the caller also
+        // having to say `include_notes`: asking for notes IS asking for notes.
+        assert_eq!(
+            search_discussions(&conn, "private-note-keyword", 10, false, DiscSearchScope::Notes)
+                .unwrap()
+                .len(),
+            1,
+            "the notes scope reaches them on its own"
+        );
+    }
+
+    /// KT-580 — searching notes only. `all` already reaches them; this is for
+    /// when the note IS what you are after and the transcript around it is
+    /// noise.
+    #[test]
+    fn the_notes_scope_returns_notes_and_nothing_else() {
+        let conn = search_conn();
+        conn.execute(
+            "INSERT INTO messages
+                 (id, discussion_id, role, channel, content, sort_order, timestamp)
+             VALUES ('a-note', 'd-alpha', 'User', 'note',
+                     'partagé entre les deux', 30, '2026-05-15T12:00:00Z'),
+                    ('a-turn', 'd-alpha', 'User', 'main',
+                     'partagé entre les deux', 31, '2026-05-15T12:01:00Z')",
+            [],
+        )
+        .unwrap();
+
+        let all = search_messages(
+            &conn,
+            "partagé entre les deux",
+            &MessageSearchFilters { scope: DiscSearchScope::All, ..Default::default() },
+            10,
+            0,
+        )
+        .unwrap();
+        assert_eq!(all.len(), 2, "the default reaches both");
+
+        let notes = search_messages(
+            &conn,
+            "partagé entre les deux",
+            &MessageSearchFilters { scope: DiscSearchScope::Notes, ..Default::default() },
+            10,
+            0,
+        )
+        .unwrap();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].message_id, "a-note");
     }
 
     // ─── KT-65 — message-level search ───────────────────────────────────────

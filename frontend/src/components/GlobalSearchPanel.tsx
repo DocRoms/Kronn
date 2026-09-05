@@ -73,7 +73,7 @@ export function GlobalSearchPanel({
   const [scope, setScope] = useState<DiscSearchScope>(() => {
     try {
       const saved = localStorage.getItem('kronn:searchScope');
-      return saved === 'title' || saved === 'content' ? saved : 'all';
+      return saved === 'title' || saved === 'content' || saved === 'notes' ? saved : 'all';
     } catch {
       return 'all';
     }
@@ -195,6 +195,9 @@ export function GlobalSearchPanel({
             <option value="all">{t('disc.globalSearch.scopeAll')}</option>
             <option value="title">{t('disc.globalSearch.scopeTitle')}</option>
             <option value="content">{t('disc.globalSearch.scopeContent')}</option>
+            {/* KT-580 — `all` already reaches notes; this is for when the note
+                IS what you are after and the transcript around it is noise. */}
+            <option value="notes">{t('disc.globalSearch.scopeNotes')}</option>
           </select>
           <select
             value={projectId}

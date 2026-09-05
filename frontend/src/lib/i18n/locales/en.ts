@@ -1279,6 +1279,7 @@ const en: TranslationDict = {
   'disc.globalSearch.filterScope': 'Search scope',
   'disc.globalSearch.scopeAll': 'Title and content',
   'disc.globalSearch.scopeTitle': 'Title only',
+  'disc.globalSearch.scopeNotes': 'Notes only',
   'disc.globalSearch.scopeContent': 'Content only',
   'disc.globalSearch.filterSince': 'From',
   'disc.globalSearch.filterUntil': 'To',

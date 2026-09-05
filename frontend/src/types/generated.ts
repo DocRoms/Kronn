@@ -1711,7 +1711,7 @@ scope?: DiscSearchScope, };
  * does not fix that — the reader wants to EXCLUDE, not to re-sort — so the
  * scope is a filter, and the ranking below is what handles the mixed case.
  */
-export type DiscSearchScope = "all" | "title" | "content";
+export type DiscSearchScope = "all" | "title" | "content" | "notes";
 
 export type DiscSessionStatusQuery = { source_agent: string, source_session_id: string, };
 

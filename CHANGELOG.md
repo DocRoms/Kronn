@@ -176,6 +176,12 @@ Release notes for 0.9.3 and earlier are available in the
   others: it lists them, writes them where the list already is, corrects one in
   place and deletes it through the tombstone Kronn already had. A room with
   months of notes loads them a page at a time rather than in one request.
+- Search can be pointed at notes alone. The scope filter gains a fourth
+  option beside title, content and both: "notes only", for when the note is
+  what you are after and the transcript around it is noise. Scoping to notes
+  drops title matches with it — a note has no title of its own, and keeping
+  them would quietly widen the search back to the whole discussion.
+
 - An edited note says so, with the date. Silently replacing what someone wrote
   for themselves is the one thing an editable note must not do, so the panel
   carries the moment of the last rewrite — and stays quiet on a note that was

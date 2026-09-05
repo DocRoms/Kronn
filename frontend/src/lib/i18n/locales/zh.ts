@@ -1261,6 +1261,7 @@ const zh: TranslationDict = {
   "disc.globalSearch.filterScope": "搜索范围",
   "disc.globalSearch.scopeAll": "标题和内容",
   "disc.globalSearch.scopeTitle": "仅标题",
+  "disc.globalSearch.scopeNotes": "仅备注",
   "disc.globalSearch.scopeContent": "仅内容",
   "disc.globalSearch.filterSince": "从",
   "disc.globalSearch.filterUntil": "至",
