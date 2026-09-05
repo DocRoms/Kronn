@@ -9,6 +9,7 @@ use uuid::Uuid;
 use crate::models::{
     AddPlanningBlockerRequest, CreatePlanningDodItem, CreatePlanningTaskLink,
     CreatePlanningTaskRequest, DiscussionPlan, LinkPlanningDiscussionRequest, PlanningActor,
+    UnlinkPlanningDiscussionRequest,
     PlanningActorKind, PlanningDependencySummary, PlanningDiscussionRelation, PlanningDodItem,
     PlanningPlacement, PlanningPlanStats, PlanningTaskChange, PlanningTaskDetail,
     PlanningTaskEvent, PlanningTaskLink, PlanningTaskListQuery, PlanningTaskListResponse,
@@ -1349,6 +1350,46 @@ pub fn link_discussion(
             "position": position,
         }),
     )?;
+    transaction.commit()?;
+    get_discussion_plan(conn, &request.discussion_id)
+}
+
+/// KT-594 — detach a task from one discussion's plan.
+///
+/// The counterpart of `link_discussion`, which had none: a task could be added
+/// to a plan and then only be moved between "active" and "later", never taken
+/// out. A room that has run for weeks accumulates work that belongs to the next
+/// release, and reading its plan means reading past all of it.
+///
+/// Removing the link removes nothing else. The task keeps its history, its
+/// other discussions and its own event trail — including the `discussion_linked`
+/// entry that says it was once here, now followed by its unlinking.
+pub fn unlink_discussion(
+    conn: &Connection,
+    task_reference: &str,
+    request: &UnlinkPlanningDiscussionRequest,
+) -> Result<DiscussionPlan> {
+    let task_id = resolve_task_id(conn, task_reference)?;
+    let task_id = task_id.as_str();
+    validate_actor(&request.actor)?;
+
+    let transaction = conn.unchecked_transaction()?;
+    let removed = transaction.execute(
+        "DELETE FROM planning_task_discussions
+         WHERE task_id = ?1 AND discussion_id = ?2",
+        params![task_id, request.discussion_id],
+    )?;
+    // Not an error: unlinking something already unlinked is the state asked
+    // for, and a retry after a lost response must not fail.
+    if removed > 0 {
+        insert_event(
+            &transaction,
+            task_id,
+            "discussion_unlinked",
+            &request.actor,
+            serde_json::json!({ "discussion_id": request.discussion_id }),
+        )?;
+    }
     transaction.commit()?;
     get_discussion_plan(conn, &request.discussion_id)
 }

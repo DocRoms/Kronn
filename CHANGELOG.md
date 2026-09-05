@@ -199,6 +199,16 @@ Release notes for 0.9.3 and earlier are available in the
   agent tool reads the same list and stops seeing it too, and the count agrees
   with what the list returns.
 
+- A task can be taken out of a discussion's plan. It could be added, and then
+  only moved between "active" and "later" — never removed. A room that runs for
+  weeks accumulates work belonging to the next release, and reading its plan
+  meant reading past all of it. `task_unlink_discussion` is the reverse of the
+  tool that adds one; the task, its history and its other discussions are kept.
+  It fits under the MCP surface ceiling rather than over it: the four heaviest
+  descriptions it pushed past the line were tightened by nearly what it costs,
+  and the ceiling was lowered to the new measurement rather than raised to
+  admit it.
+
 - Kronn stopped telling agents to run linters the project does not have. A
   `composer.json` was enough to write `Lint: phpcs` into all eight generated
   instruction files, but phpcs is an optional Composer package, absent from

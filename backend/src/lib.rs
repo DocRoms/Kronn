@@ -829,7 +829,7 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         )
         .route(
             "/api/planning/tasks/{id}/discussions",
-            post(api::planning::link_discussion),
+            post(api::planning::link_discussion).delete(api::planning::unlink_discussion),
         )
         .route(
             "/api/planning/tasks/{id}/blockers",

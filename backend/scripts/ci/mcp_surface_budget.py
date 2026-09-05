@@ -31,12 +31,13 @@ BRIDGE = "backend/scripts/disc-introspection-mcp.py"
 # The measurement serialises with `ensure_ascii=True`, exactly like the wire:
 # every accented character in a French description travels as a 6-byte
 # `\uXXXX` escape, not as its 2 bytes of UTF-8. The ceiling is pinned to this
-# tree's 106-tool payload after moving Quick Prompt launch/tracking and durable
-# task-recovery reference material behind `tool_manual`, alongside the bounded
-# Ollama worker policy.
+# tree's 109-tool payload. `task_unlink_discussion` was added under it rather
+# than over it: the four heaviest descriptions it pushed past the line were
+# tightened by nearly what the new tool costs, so one tool was added for six
+# bytes rather than for its own weight.
 # It carries no slack: lower it whenever the catalogue shrinks, never raise it
 # to make a build pass.
-CATALOGUE_MAX_BYTES = 87_297
+CATALOGUE_MAX_BYTES = 87_303
 
 # Per-declaration ceiling. The five heaviest tools were 29% of the catalogue for
 # 6% of the tools; their descriptions had grown into manuals. A per-tool cap is

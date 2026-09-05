@@ -6217,6 +6217,8 @@ export type TransformDataValueType = "string" | "number" | "boolean";
  */
 export type TriggerWorkflowRequest = { variables?: Record<string, string>, };
 
+export type UnlinkPlanningDiscussionRequest = { discussion_id: string, actor?: PlanningActor, };
+
 export type UpdateBatchCompareManualScoreRequest = {
 /**
  * `None` clears the human rating; otherwise the accepted range is 1..=5.
