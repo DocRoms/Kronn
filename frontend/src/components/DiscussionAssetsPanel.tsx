@@ -81,7 +81,9 @@ export function DiscussionAssetsPanel({
   // step. React's own shape for that is an adjustment during render: the reset
   // lands in the same pass, where an effect showed the old filter first and the
   // asset appeared to be missing for a frame.
-  const [answeredRequest, setAnsweredRequest] = useState(openAssetRequest);
+  // Unanswered at mount: the panel is often opened BY the request, so seeding
+  // this with it would swallow the very request that opened the panel.
+  const [answeredRequest, setAnsweredRequest] = useState<typeof openAssetRequest>(null);
   if (openAssetRequest && openAssetRequest !== answeredRequest) {
     setAnsweredRequest(openAssetRequest);
     setQuery('');

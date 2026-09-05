@@ -145,6 +145,16 @@ Release notes for 0.9.3 and earlier are available in the
   too, where ACP puts them, instead of being dropped with it — a reply that
   cost 7 946 tokens was recorded as costing nothing.
 
+- The frontend lint gate is green again, by fixing what it flagged rather than
+  by raising its ceiling. The release had added twenty-six warnings to a budget
+  that had four left; all twenty-six are gone, and the count is 64 against a
+  ceiling of 72. Nearly all described one habit — state written in an effect to
+  correct what the render before it already showed — so those values are
+  resolved where they are used, and the ones describing a particular thing now
+  carry which thing. Two genuine exceptions are declared at the line with their
+  reason: an image array whose identity changes every render, and the registry
+  of in-flight AbortControllers, which the rule would have held in state.
+
 - Kronn stopped telling agents to run linters the project does not have. A
   `composer.json` was enough to write `Lint: phpcs` into all eight generated
   instruction files, but phpcs is an optional Composer package, absent from

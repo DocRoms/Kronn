@@ -385,6 +385,9 @@ function getTtsWorker(): Worker {
   return ttsWorker;
 }
 
+const EMPTY_ACTIONS: DiscussionAction[] = [];
+
+
 export function DiscussionsPage({
   projects,
   agents,
@@ -492,8 +495,14 @@ export function DiscussionsPage({
   const [, setDiscussionPlan] = useState<DiscussionPlan | null>(null);
   const [proposalInbox, setProposalInbox] = useState<ProposalListResponse | null>(null);
   const [proposalInboxDiscussionId, setProposalInboxDiscussionId] = useState<string | null>(null);
-  const [discussionActions, setDiscussionActions] = useState<DiscussionAction[]>([]);
+  // KT-587 — keyed by the discussion they were fetched for, so switching rooms
+  // shows nothing rather than the previous room's actions for one render.
+  const [loadedActions, setLoadedActions] =
+    useState<{ discussionId: string; actions: DiscussionAction[] }>({ discussionId: '', actions: [] });
   const [executionDiscussionLinks, setExecutionDiscussionLinks] = useState<ExecutionDiscussionLink[]>([]);
+  const discussionActions = loadedActions.discussionId === activeDiscussionId
+    ? loadedActions.actions
+    : EMPTY_ACTIONS;
   const discussionActionsByMessageId = useMemo(() => {
     const byMessage = new Map<string, DiscussionAction[]>();
     discussionActions.forEach(action => {
@@ -504,8 +513,10 @@ export function DiscussionsPage({
     return byMessage;
   }, [discussionActions]);
   const handleDiscussionActionChanged = useCallback((changed: DiscussionAction) => {
-    setDiscussionActions(current => current.map(action =>
-      action.id === changed.id ? changed : action));
+    setLoadedActions(current => ({
+      ...current,
+      actions: current.actions.map(action => action.id === changed.id ? changed : action),
+    }));
   }, []);
 
   const refreshExecutionDiscussionLinks = useCallback(() => {
@@ -824,9 +835,6 @@ export function DiscussionsPage({
     setShowAssetsPanel(true);
     setAssetOpenRequest(current => ({ assetId, nonce: (current?.nonce ?? 0) + 1 }));
   }, []);
-  useEffect(() => {
-    if (!showAssetsPanel) setAssetOpenRequest(null);
-  }, [showAssetsPanel]);
   const mediaJobsRelistTimer = useRef<{ id: number; discId: string } | null>(null);
   const scheduleMediaJobsRelist = useCallback((discId: string) => {
     // Every event pushes the deadline back, so the relist always runs after
@@ -1295,14 +1303,12 @@ export function DiscussionsPage({
   }, [activeDiscussionId, activeDiscussion?.message_count]);
 
   useEffect(() => {
-    if (!activeDiscussionId) {
-      setDiscussionActions([]);
-      return;
-    }
+    if (!activeDiscussionId) return;
+    const discussionId = activeDiscussionId;
     let cancelled = false;
-    discussionActionsApi.list(activeDiscussionId)
-      .then(actions => { if (!cancelled) setDiscussionActions(actions); })
-      .catch(() => { if (!cancelled) setDiscussionActions([]); });
+    discussionActionsApi.list(discussionId)
+      .then(actions => { if (!cancelled) setLoadedActions({ discussionId, actions }); })
+      .catch(() => { if (!cancelled) setLoadedActions({ discussionId, actions: [] }); });
     return () => { cancelled = true; };
   }, [activeDiscussionId, activeDiscussion?.message_count]);
 
@@ -1496,7 +1502,12 @@ export function DiscussionsPage({
     return () => window.removeEventListener('kronn:profiles-changed', refetchProfiles);
   }, [refetchBatchSummaries]);
 
-  // WebSocket-based real-time events (presence, chat, invites)
+  // WebSocket-based real-time events (presence, chat, invites).
+  // The handler cancels in-flight sends through the `abortControllers` ref.
+  // The rule would have that registry held in state; it must not be — an
+  // AbortController is not render data, and storing it there re-renders the
+  // page for every request in flight. Declared here rather than worked around.
+  // eslint-disable-next-line react-hooks/immutability
   const handleWsMessage = useCallback((msg: WsMessage) => {
     if (msg.type === 'shared_run_updated') {
       // A brand-new media job (not yet in the by-message map) needs a relist
@@ -1968,12 +1979,18 @@ export function DiscussionsPage({
     return () => { cancelled = true; };
   }, [loadedActiveDiscussionId, activeDiscussion?.messages.length, sending]);
 
-  // Handle prefill from parent (e.g. "validate audit" button on Projects page)
-  useEffect(() => {
-    if (prefill) {
-      setShowNewDiscussion(true);
-    }
-  }, [prefill]);
+  // Handle prefill from parent (e.g. "validate audit" button on Projects page).
+  // KT-587 — an arriving prefill is an event: opening the dialog during the
+  // same render is React's own shape for that, and it saves the frame where
+  // the page had the prefill but not the dialog.
+  // Starts unanswered on purpose: a prefill already present at mount is the
+  // common case (the Projects page navigates here with one) and must open the
+  // dialog. Seeding this with `prefill` would mark it answered before it was.
+  const [answeredPrefill, setAnsweredPrefill] = useState<typeof prefill>(undefined);
+  if (prefill && prefill !== answeredPrefill) {
+    setAnsweredPrefill(prefill);
+    setShowNewDiscussion(true);
+  }
 
   // ─── Callbacks ───────────────────────────────────────────────────────────
 
@@ -2217,7 +2234,8 @@ export function DiscussionsPage({
     : '';
   useEffect(() => {
     if (!batchCompare || !batchCompareVersion) return;
-    void refreshBatchCompare(batchCompare.discIds);
+    const discIds = batchCompare.discIds;
+    void (async () => { await refreshBatchCompare(discIds); })();
   }, [batchCompareVersion, batchCompare, refreshBatchCompare]);
 
   const handleCreateDiscussion = async (config: NewDiscConfig) => {
@@ -2884,9 +2902,9 @@ export function DiscussionsPage({
   // predate an MCP upload performed while this tab was open; treating it as a
   // permanent cache hit hides historical attachments until a full page reload.
   useEffect(() => {
-    if (activeDiscussionId) {
-      loadContextFiles(activeDiscussionId);
-    }
+    if (!activeDiscussionId) return;
+    const discussionId = activeDiscussionId;
+    void (async () => { await loadContextFiles(discussionId); })();
   }, [activeDiscussionId, loadContextFiles]);
 
   // Same rehydration guarantee for the inline media placeholders: reopening a
@@ -5272,7 +5290,7 @@ export function DiscussionsPage({
                   }).catch(() => { /* the scheduled relist remains authoritative */ });
                   reloadDiscussion(activeDiscussion.id);
                 }}
-                openAssetRequest={assetOpenRequest}
+                openAssetRequest={showAssetsPanel ? assetOpenRequest : null}
                 onAssetDeleted={(fileId) => {
                   // Dropped from the discussion's own inventory, which every
                   // surface reads: the grid, the counters, the carousel and a

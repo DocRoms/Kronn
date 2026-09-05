@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { runsApi } from '../lib/api';
 import { useT } from '../lib/I18nContext';
 import { RunStatusCard } from './RunStatusCard';
@@ -33,6 +33,8 @@ const RELIST_DEBOUNCE_MS = 250;
  * in the attached list triggers a relist — and a burst of such events is
  * debounced into a single relist instead of one per event.
  */
+const EMPTY_RUNS: SharedRun[] = [];
+
 export function DiscussionAttachedRuns({ discussionId, runEvent }: { discussionId: string; runEvent?: RunEventHint }) {
   const { t } = useT();
   // KT-587 — keyed by the discussion they belong to. Clearing them in an
@@ -40,7 +42,10 @@ export function DiscussionAttachedRuns({ discussionId, runEvent }: { discussionI
   const [loaded, setLoaded] = useState<{ discussionId: string; runs: SharedRun[] }>(
     { discussionId, runs: [] },
   );
-  const runs = loaded.discussionId === discussionId ? loaded.runs : [];
+  const runs = useMemo(
+    () => (loaded.discussionId === discussionId ? loaded.runs : EMPTY_RUNS),
+    [loaded, discussionId],
+  );
   const knownRunIds = useRef<Set<string>>(new Set());
   useEffect(() => { knownRunIds.current = new Set(runs.map(run => run.id)); }, [runs]);
 
