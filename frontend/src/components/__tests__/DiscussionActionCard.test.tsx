@@ -45,6 +45,7 @@ function action(overrides: Partial<DiscussionAction> = {}): DiscussionAction {
     target_id: 'qp-1',
     target_name: 'Translate issue',
     project_id: 'project-1',
+    project_name: 'Kronn',
     state: 'proposed',
     values: [variable()],
     shared_run_id: null,
@@ -191,5 +192,36 @@ describe('DiscussionActionCard', () => {
     expect(screen.queryByTestId('run-card')).not.toBeInTheDocument();
     expand();
     expect(screen.getByTestId('run-card')).toHaveTextContent('run-42');
+  });
+});
+
+/// KT-582 — the guard that refused a card aimed at another project is gone.
+/// Naming the project it will run in is the condition for having lifted it.
+describe('DiscussionActionCard — where it runs', () => {
+  it('names the target project on the card', () => {
+    render(
+      <DiscussionActionCard
+        action={action({ project_name: 'DOCROMS_WEB' })}
+        onChanged={vi.fn()}
+        onOpenDiscussion={vi.fn()}
+      />,
+    );
+    expect(screen.getByTestId('action-card-project')).toHaveTextContent('DOCROMS_WEB');
+  });
+
+  /// A project deleted after the proposal returns no name. The card still
+  /// renders — losing the card would lose the trace of what was proposed.
+  it('renders without the chip when the project has no name', () => {
+    render(
+      <DiscussionActionCard
+        action={action({ project_name: null })}
+        onChanged={vi.fn()}
+        onOpenDiscussion={vi.fn()}
+      />,
+    );
+    expect(screen.queryByTestId('action-card-project')).toBeNull();
+    // The card itself survives: losing it would lose the trace of what was
+    // proposed, which is the opposite of the point.
+    expect(document.querySelector('.discussion-action-card__title-row')).not.toBeNull();
   });
 });

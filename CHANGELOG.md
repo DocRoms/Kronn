@@ -155,6 +155,19 @@ Release notes for 0.9.3 and earlier are available in the
   reason: an image array whose identity changes every render, and the registry
   of in-flight AbortControllers, which the rule would have held in state.
 
+- An action card aimed at another project's Quick Prompt launches, and says
+  where it will run. The preflight refused it outright, which made a proposal
+  unusable for the one thing it was for. The whole mechanism is human-gated —
+  the agent proposes, Kronn checks the target, a person decides by clicking —
+  and the checks that matter all still run: the target exists, its variables
+  match its contract, the proposed project is the target's own, and that
+  project exists. What the guard was refusing after all of those is a decision,
+  not a risk. The card now carries the target's project, quietly and always,
+  because lifting the guard without saying where the action goes would be worse
+  than the guard. Discussions and Live Pages changed together: the same gesture
+  cannot mean two things depending on where the card is drawn. Server-side
+  resolution of a Live Page's dataset-bound values is untouched.
+
 - Kronn stopped telling agents to run linters the project does not have. A
   `composer.json` was enough to write `Lint: phpcs` into all eight generated
   instruction files, but phpcs is an optional Composer package, absent from

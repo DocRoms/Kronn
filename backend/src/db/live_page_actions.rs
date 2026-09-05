@@ -45,6 +45,9 @@ pub struct LivePageAction {
     pub target_id: String,
     pub target_name: String,
     pub project_id: Option<String>,
+    /// KT-582 — the target's project, by name, for the same reason as the
+    /// discussion card: the guard is gone, so the card has to say where it runs.
+    pub project_name: Option<String>,
     pub state: DiscussionActionState,
     pub values: Vec<DiscussionActionValue>,
     pub shared_run_id: Option<String>,
@@ -318,9 +321,11 @@ pub fn ingest_page_actions(
         {
             diagnostic = Some("Le projet proposé ne correspond pas au projet de la cible.".into());
         }
-        if page_project.is_some() && project_id != page_project {
-            diagnostic = Some("Cette action n’est pas autorisée dans le projet de la Page.".into());
-        }
+        // KT-582 — lifted with the discussion one, and for the same reason. The
+        // two surfaces must behave alike: the same gesture cannot mean two
+        // things depending on where the card is drawn. Server-side resolution
+        // of dataset-bound values is untouched and still refuses anything the
+        // client declares on that path.
         if let Some(project_id) = project_id.as_deref() {
             let exists: bool = conn.query_row(
                 "SELECT EXISTS(SELECT 1 FROM projects WHERE id = ?1)",
@@ -410,8 +415,12 @@ const SELECT_LIVE_PAGE_ACTION: &str = "SELECT a.id, a.live_page_id, a.live_page_
     a.action_ref, a.kind, a.target_id, a.target_name, a.project_id, a.state, a.values_json,
     a.shared_run_id, a.result_discussion_id, a.deep_link, a.diagnostic, a.launched_at,
     a.finished_at, a.created_at, a.updated_at,
-    (a.live_page_revision_id != p.current_revision_id) AS stale_source
-    FROM live_page_actions a JOIN live_pages p ON p.id = a.live_page_id";
+    (a.live_page_revision_id != p.current_revision_id) AS stale_source,
+    proj.name
+    -- LEFT for the project: one deleted after the proposal must still return
+    -- the card, with no name rather than no card.
+    FROM live_page_actions a JOIN live_pages p ON p.id = a.live_page_id
+    LEFT JOIN projects proj ON proj.id = a.project_id";
 
 fn map_action(row: &rusqlite::Row<'_>) -> rusqlite::Result<LivePageAction> {
     let kind_raw = row.get::<_, String>(4)?;
@@ -455,6 +464,7 @@ fn map_action(row: &rusqlite::Row<'_>) -> rusqlite::Result<LivePageAction> {
         created_at: row.get(16)?,
         updated_at: row.get(17)?,
         stale_source: row.get(18)?,
+        project_name: row.get(19)?,
     })
 }
 
@@ -1039,7 +1049,10 @@ mod tests {
     }
 
     #[test]
-    fn a_cross_project_page_action_is_refused_before_launch() {
+    /// KT-582 — the twin of the discussion case, flipped for the same reason.
+    /// The two surfaces must agree: the same gesture cannot mean two things
+    /// depending on where the card is drawn.
+    fn a_cross_project_page_action_is_launchable() {
         let conn = connection();
         insert_target(&conn);
         let now = Utc::now().to_rfc3339();
@@ -1065,16 +1078,16 @@ mod tests {
         let action = get(&conn, "page-action:page-project:cross-project")
             .unwrap()
             .unwrap();
-        assert_eq!(action.state, DiscussionActionState::PreflightFailed);
-        assert!(action
-            .diagnostic
-            .as_deref()
-            .is_some_and(|text| text.contains("n’est pas autorisée")));
-        let outcome = claim_launch(&conn, &action.id, &HashMap::new(), &HashMap::new()).unwrap();
+        assert_eq!(action.state, DiscussionActionState::Proposed);
+        assert_eq!(action.diagnostic, None);
+        assert_eq!(action.project_id.as_deref(), Some("project-other"));
+        // With the variable the target's contract requires: that check must keep
+        // refusing, and does.
+        let variables = HashMap::from([("service".to_string(), "api".to_string())]);
+        let outcome = claim_launch(&conn, &action.id, &variables, &HashMap::new()).unwrap();
         assert!(matches!(
             outcome,
-            Some(LivePageActionClaimOutcome::Existing(existing))
-                if existing.state == DiscussionActionState::PreflightFailed
+            Some(LivePageActionClaimOutcome::Claimed { .. })
         ));
     }
 

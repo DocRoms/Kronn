@@ -184,3 +184,19 @@
   .discussion-action-card__actions { align-items: stretch; flex-direction: column-reverse; }
   .discussion-action-card__actions button { justify-content: center; width: 100%; }
 }
+
+/* KT-582 — where this card will run. Quiet, because it is context rather than
+   a warning; always shown, because the guard that used to refuse a card
+   pointing elsewhere is gone and this is what replaces it. */
+.discussion-action-card__project {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 6px;
+  border: 1px solid var(--kr-border-ghost);
+  border-radius: var(--kr-r-pill);
+  color: var(--kr-text-tertiary);
+  font-size: var(--kr-fs-2xs);
+  font-weight: 500;
+  white-space: nowrap;
+}

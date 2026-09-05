@@ -1863,7 +1863,14 @@ test_mode_restore_branch?: string | null,
  */
 test_mode_stash_ref?: string | null, created_at: string, updated_at: string, };
 
-export type DiscussionAction = { id: string, discussion_id: string, source_message_id: string, fence_index: number, kind: DiscussionActionKind, target_id: string, target_name: string, project_id: string | null, state: DiscussionActionState, values: Array<DiscussionActionValue>, shared_run_id: string | null, result_discussion_id: string | null, deep_link: string | null, diagnostic: string | null, launched_at: string | null, finished_at: string | null, created_at: string, updated_at: string, };
+export type DiscussionAction = { id: string, discussion_id: string, source_message_id: string, fence_index: number, kind: DiscussionActionKind, target_id: string, target_name: string, project_id: string | null,
+/**
+ * KT-582 — the target's project, by name. The card must say where it will
+ * run: lifting the guard without showing this would be worse than the
+ * guard. Resolved on read so the two surfaces get it without either
+ * needing a project list of its own.
+ */
+project_name: string | null, state: DiscussionActionState, values: Array<DiscussionActionValue>, shared_run_id: string | null, result_discussion_id: string | null, deep_link: string | null, diagnostic: string | null, launched_at: string | null, finished_at: string | null, created_at: string, updated_at: string, };
 
 export type DiscussionActionKind = "quick_prompt" | "quick_api" | "quick_exec" | "workflow" | "invalid";
 
@@ -3073,7 +3080,12 @@ pinned: boolean,
  */
 archived: boolean, };
 
-export type LivePageAction = { id: string, live_page_id: string, live_page_revision_id: string, action_ref: string, kind: DiscussionActionKind, target_id: string, target_name: string, project_id: string | null, state: DiscussionActionState, values: Array<DiscussionActionValue>, shared_run_id: string | null, result_discussion_id: string | null, deep_link: string | null, diagnostic: string | null, launched_at: string | null, finished_at: string | null, created_at: string, updated_at: string,
+export type LivePageAction = { id: string, live_page_id: string, live_page_revision_id: string, action_ref: string, kind: DiscussionActionKind, target_id: string, target_name: string, project_id: string | null,
+/**
+ * KT-582 — the target's project, by name, for the same reason as the
+ * discussion card: the guard is gone, so the card has to say where it runs.
+ */
+project_name: string | null, state: DiscussionActionState, values: Array<DiscussionActionValue>, shared_run_id: string | null, result_discussion_id: string | null, deep_link: string | null, diagnostic: string | null, launched_at: string | null, finished_at: string | null, created_at: string, updated_at: string,
 /**
  * True when `live_page_revision_id` no longer matches the Page's live
  * `current_revision_id`. The `(live_page_id, action_ref)` anchor itself

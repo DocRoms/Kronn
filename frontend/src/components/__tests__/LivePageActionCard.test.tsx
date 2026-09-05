@@ -33,6 +33,7 @@ function action(overrides: Partial<LivePageAction> = {}): LivePageAction {
     target_id: 'qe-1',
     target_name: 'Open ticket',
     project_id: 'project-1',
+    project_name: 'Kronn',
     state: 'proposed',
     values: [{
       name: 'ticket', label: 'Ticket', placeholder: '', description: null,

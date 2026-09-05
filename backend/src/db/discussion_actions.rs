@@ -140,6 +140,11 @@ pub struct DiscussionAction {
     pub target_id: String,
     pub target_name: String,
     pub project_id: Option<String>,
+    /// KT-582 — the target's project, by name. The card must say where it will
+    /// run: lifting the guard without showing this would be worse than the
+    /// guard. Resolved on read so the two surfaces get it without either
+    /// needing a project list of its own.
+    pub project_name: Option<String>,
     pub state: DiscussionActionState,
     pub values: Vec<DiscussionActionValue>,
     pub shared_run_id: Option<String>,
@@ -499,10 +504,13 @@ pub fn ingest_message_actions(
         {
             diagnostic = Some("Le projet proposé ne correspond pas au projet de la cible.".into());
         }
-        if discussion_project.is_some() && project_id != discussion_project {
-            diagnostic =
-                Some("Cette action n’est pas autorisée dans le projet de la discussion.".into());
-        }
+        // KT-582 — a target in another project is no longer refused here. The
+        // whole mechanism is human-gated: the agent proposes, Kronn checks the
+        // target, the human decides by clicking. What the three checks above
+        // leave — the target exists, its variables match its contract, and the
+        // proposed project is the target's own — is a decision, not a risk, and
+        // this guard was taking it for the human. The card names the target's
+        // project instead, so lifting the guard does not hide where it runs.
         if let Some(project_id) = project_id.as_deref() {
             let exists: bool = conn.query_row(
                 "SELECT EXISTS(SELECT 1 FROM projects WHERE id = ?1)",
@@ -599,6 +607,7 @@ fn map_action(row: &rusqlite::Row<'_>) -> rusqlite::Result<DiscussionAction> {
         target_id: row.get(5)?,
         target_name: row.get(6)?,
         project_id: row.get(7)?,
+        project_name: row.get(18)?,
         state: DiscussionActionState::from_db_str(&state_raw).ok_or_else(|| {
             rusqlite::Error::FromSqlConversionFailure(
                 8,
@@ -624,10 +633,13 @@ fn map_action(row: &rusqlite::Row<'_>) -> rusqlite::Result<DiscussionAction> {
     })
 }
 
-const SELECT_ACTION: &str = "SELECT id, discussion_id, source_message_id,
-    fence_index, kind, target_id, target_name, project_id, state, values_json,
-    shared_run_id, result_discussion_id, deep_link, diagnostic, launched_at,
-    finished_at, created_at, updated_at FROM discussion_actions";
+// A LEFT JOIN, never an inner one: a project deleted after the proposal must
+// still return the card, with no name rather than no card.
+const SELECT_ACTION: &str = "SELECT a.id, a.discussion_id, a.source_message_id,
+    a.fence_index, a.kind, a.target_id, a.target_name, a.project_id, a.state, a.values_json,
+    a.shared_run_id, a.result_discussion_id, a.deep_link, a.diagnostic, a.launched_at,
+    a.finished_at, a.created_at, a.updated_at, p.name
+    FROM discussion_actions a LEFT JOIN projects p ON p.id = a.project_id";
 
 fn refresh_from_shared_run(conn: &Connection, action: &mut DiscussionAction) -> Result<()> {
     let mut core = kronn_action_engine::ActionCore {
@@ -655,7 +667,7 @@ fn refresh_from_shared_run(conn: &Connection, action: &mut DiscussionAction) -> 
 
 pub fn get(conn: &Connection, id: &str) -> Result<Option<DiscussionAction>> {
     let mut action = conn
-        .query_row(&format!("{SELECT_ACTION} WHERE id = ?1"), [id], map_action)
+        .query_row(&format!("{SELECT_ACTION} WHERE a.id = ?1"), [id], map_action)
         .optional()?;
     if let Some(action) = action.as_mut() {
         refresh_from_shared_run(conn, action)?;
@@ -668,7 +680,7 @@ pub fn list_for_discussion(
     discussion_id: &str,
 ) -> Result<Vec<DiscussionAction>> {
     let mut statement = conn.prepare(&format!(
-        "{SELECT_ACTION} WHERE discussion_id = ?1 ORDER BY created_at, fence_index"
+        "{SELECT_ACTION} WHERE a.discussion_id = ?1 ORDER BY a.created_at, a.fence_index"
     ))?;
     let mut actions = statement
         .query_map([discussion_id], map_action)?
@@ -1013,7 +1025,11 @@ mod tests {
     }
 
     #[test]
-    fn an_action_aimed_at_another_project_is_refused_before_launch() {
+    /// KT-582 — this used to assert the opposite. The guard refused a card whose
+    /// target lives in another project, and Romuald called it a no-go: every
+    /// check that matters still runs, and what was left was a decision the
+    /// human makes by clicking. The card names the target's project instead.
+    fn an_action_aimed_at_another_project_is_launchable() {
         // An agent proposes the fence; the human clicks. Nothing but this check
         // stands between a discussion in one project and a Quick Exec that
         // belongs to another. Covered on the Live Page side, never here.
@@ -1039,21 +1055,17 @@ mod tests {
         ingest_message_actions(&conn, "disc-1", "msg-cross", content).unwrap();
 
         let action = get(&conn, "action:msg-cross:0").unwrap().unwrap();
-        assert_eq!(action.state, DiscussionActionState::PreflightFailed);
-        assert!(action
-            .diagnostic
-            .as_deref()
-            .is_some_and(|text| text.contains("n’est pas autorisée")));
+        assert_eq!(action.state, DiscussionActionState::Proposed);
+        assert_eq!(action.diagnostic, None);
+        // The project it will run in is recorded, so the card can say so.
+        assert_eq!(action.project_id.as_deref(), Some("project-other"));
 
-        // And the refusal must survive the click, not merely be displayed.
-        let outcome = claim_launch(&conn, &action.id, &std::collections::HashMap::new())
-            .unwrap()
-            .unwrap();
-        assert!(matches!(
-            outcome,
-            ClaimLaunchOutcome::Existing(existing)
-                if existing.state == DiscussionActionState::PreflightFailed
-        ));
+        // And the click goes through — with the variable the target's contract
+        // requires, which is one of the checks that must keep refusing.
+        let variables =
+            std::collections::HashMap::from([("service".to_string(), "api".to_string())]);
+        let outcome = claim_launch(&conn, &action.id, &variables).unwrap().unwrap();
+        assert!(matches!(outcome, ClaimLaunchOutcome::Claimed { .. }));
     }
 
     #[test]
