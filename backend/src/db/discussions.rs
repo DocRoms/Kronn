@@ -1241,6 +1241,64 @@ pub fn insert_user_message_with_pending_dispatches(
     )
 }
 
+/// KT-580 — rewrite a note in place.
+///
+/// Deliberately NOT `revise_message_with_dispatch`. That path is built for a
+/// conversational turn: it refuses anything but the last User message, archives
+/// the replies that followed, and creates a dispatch job so the agent answers
+/// again. A note has no replies, wakes nobody, and is worth correcting exactly
+/// where it sits — often a hundred messages back. Applying the turn rules to it
+/// would make every note but the newest uneditable.
+///
+/// What IS reused is the revision trail: the same `message_revision_events`
+/// row, so an edited note can say it was edited and when, and the previous
+/// content stays recoverable. The note's own `timestamp` is left alone — it is
+/// when the note was written, and an edit does not change that.
+pub fn revise_note_message(
+    conn: &Connection,
+    discussion_id: &str,
+    message_id: &str,
+    content: &str,
+) -> Result<String> {
+    let (previous, channel): (String, String) = conn
+        .query_row(
+            "SELECT content, channel FROM messages WHERE id = ?1 AND discussion_id = ?2",
+            params![message_id, discussion_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?
+        .ok_or_else(|| anyhow::anyhow!("note not found"))?;
+    if channel != "note" {
+        anyhow::bail!("revise_note_message only rewrites notes");
+    }
+
+    let revision = Utc::now().to_rfc3339();
+    conn.execute(
+        "UPDATE messages SET content = ?1 WHERE id = ?2 AND discussion_id = ?3",
+        params![content, message_id, discussion_id],
+    )?;
+    conn.execute(
+        "INSERT INTO message_revision_events (
+             id, discussion_id, target_message_id, previous_content_hash,
+             expected_revision, revision, content, target_agent_json,
+             idempotency_key, sort_order, dispatch_job_id, created_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, ?8, 0, NULL, ?6)",
+        params![
+            uuid::Uuid::new_v4().to_string(),
+            discussion_id,
+            message_id,
+            content_hash(&previous),
+            // A note carries no CAS token: nothing else writes it, and there is
+            // no reply projection to invalidate.
+            revision,
+            revision,
+            content,
+            uuid::Uuid::new_v4().to_string(),
+        ],
+    )?;
+    Ok(revision)
+}
+
 /// Persist a human-authored out-of-context note without consuming an agent
 /// handoff, creating a dispatch job or touching `awaiting_agent`.
 pub fn insert_note_message(

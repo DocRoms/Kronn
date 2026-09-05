@@ -4949,6 +4949,11 @@ export type ReviseMessageRequest = { message_id: string, content: string, expect
 target_agents?: Array<AgentType>, };
 
 /**
+ * DELETE /api/discussions/:id/messages/:message_id
+ */
+export type ReviseNoteRequest = { content: string, };
+
+/**
  * Rotation metrics — KT-193 DoD 6.
  *
  * "Show the gain and any loss of quality or continuity." Both halves matter: a

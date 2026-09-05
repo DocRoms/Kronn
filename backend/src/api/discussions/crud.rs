@@ -912,6 +912,56 @@ pub async fn delete_last_agent_messages(
 }
 
 /// DELETE /api/discussions/:id/messages/:message_id
+#[derive(Debug, serde::Deserialize, serde::Serialize, ts_rs::TS)]
+#[ts(export)]
+pub struct ReviseNoteRequest {
+    pub content: String,
+}
+
+/// KT-580 — `PATCH /api/discussions/{id}/notes/{message_id}`
+///
+/// Rewrites a note where it sits. Separate from the turn revision on purpose:
+/// that one refuses anything but the last User message and wakes the agent
+/// again, neither of which makes sense for a note.
+pub async fn revise_note(
+    State(state): State<AppState>,
+    Path((discussion_id, message_id)): Path<(String, String)>,
+    Json(request): Json<ReviseNoteRequest>,
+) -> Response {
+    let content = request.content.trim().to_string();
+    if content.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::<()>::err("An empty note says nothing")),
+        )
+            .into_response();
+    }
+    let result = state
+        .db
+        .with_conn(move |connection| {
+            Ok(crate::db::discussions::revise_note_message(
+                connection,
+                &discussion_id,
+                &message_id,
+                &content,
+            ))
+        })
+        .await;
+    match result {
+        Ok(Ok(revision)) => (StatusCode::OK, Json(ApiResponse::ok(revision))).into_response(),
+        Ok(Err(error)) => (
+            StatusCode::NOT_FOUND,
+            Json(ApiResponse::<()>::err(error.to_string())),
+        )
+            .into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiResponse::<()>::err(format!("DB error: {error}"))),
+        )
+            .into_response(),
+    }
+}
+
 pub async fn delete_message(
     State(state): State<AppState>,
     Path((discussion_id, message_id)): Path<(String, String)>,

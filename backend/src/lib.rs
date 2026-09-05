@@ -1792,6 +1792,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             get(api::disc_introspection::disc_note_list),
         )
         .route(
+            "/api/discussions/{id}/notes/{message_id}",
+            patch(api::discussions::crud::revise_note),
+        )
+        .route(
             "/api/discussions/{id}/summarize",
             post(api::disc_introspection::disc_summarize),
         )
