@@ -137,6 +137,35 @@ describe('GlobalSearchPanel', () => {
     }));
   });
 
+  // KT-579 / issue #204 — a term in one title and twenty transcripts drowns
+  // the room actually named after it, and ranking cannot fix that: the reader
+  // wants to exclude, not to re-sort.
+  it('sends the chosen scope and remembers it for the next visit', async () => {
+    // The scope persists on purpose, so it must be cleared per test or the
+    // previous one leaks into the next — which is exactly what happened here.
+    localStorage.removeItem('kronn:searchScope');
+    renderPanel();
+    fireEvent.change(document.querySelector('[data-testid="global-search-scope"]') as HTMLSelectElement, {
+      target: { value: 'title' },
+    });
+    await submit('Fastly');
+    expect(searchMessages()).toHaveBeenCalledWith(expect.objectContaining({ scope: 'title' }));
+
+    // Re-picking it on every visit is the friction the filter was meant to end.
+    cleanup();
+    searchMessages().mockClear();
+    renderPanel();
+    await submit('Fastly');
+    expect(searchMessages()).toHaveBeenCalledWith(expect.objectContaining({ scope: 'title' }));
+  });
+
+  it('searches title and content by default', async () => {
+    localStorage.removeItem('kronn:searchScope');
+    renderPanel();
+    await submit('Fastly');
+    expect(searchMessages()).toHaveBeenCalledWith(expect.objectContaining({ scope: 'all' }));
+  });
+
   it('pages with an offset instead of asking for the whole history', async () => {
     renderPanel();
     searchMessages().mockResolvedValue(Array.from({ length: 20 }, (_, i) => makeHit(`m${i}`)));

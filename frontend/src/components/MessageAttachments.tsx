@@ -304,18 +304,37 @@ export function MessageAttachments({
   // Two steps on purpose: this removes bytes from disk, and the control sits
   // next to "close". `error` is kept apart from the confirmation so a failure
   // stays on screen instead of being wiped by the next render.
-  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  // KT-587 — all three belong to ONE asset, so they carry its id rather than
+  // being wiped by an effect when the reader walks to the next picture. A
+  // confirmation surviving that walk would delete a file nobody asked about.
+  const [assetState, setAssetState] = useState<{
+    id: string | null; confirming: boolean; deleteError: string | null; extractError: string | null;
+  }>({ id: null, confirming: false, deleteError: null, extractError: null });
   const [deleting, setDeleting] = useState(false);
-  const [deleteError, setDeleteError] = useState<string | null>(null);
   const [extracting, setExtracting] = useState(false);
-  const [extractError, setExtractError] = useState<string | null>(null);
+  const patchAssetState = useCallback((patch: {
+    confirming?: boolean; deleteError?: string | null; extractError?: string | null;
+  }) => {
+    setAssetState(current => ({
+      id: selectedId,
+      confirming: false,
+      deleteError: null,
+      extractError: null,
+      // Anything already recorded for THIS asset survives the patch; a value
+      // left over from the previous one does not.
+      ...(current.id === selectedId ? current : {}),
+      ...patch,
+    }));
+  }, [selectedId]);
   const objectUrlsRef = useRef<Map<string, string>>(new Map());
   const inFlightRef = useRef<Set<string>>(new Set());
   const generationRef = useRef(0);
   const mountedRef = useRef(false);
   const discussionRef = useRef(discussionId);
   const cleanupSequenceRef = useRef(0);
-  const handledOpenNonceRef = useRef<number | null>(null);
+  // State rather than a ref: the request is answered during render, and a ref
+  // written there is exactly what `react-hooks/refs` exists to catch.
+  const [handledOpenNonce, setHandledOpenNonce] = useState<number | null>(null);
 
   const releaseMediaUrls = useCallback(() => {
     generationRef.current += 1;
@@ -344,7 +363,7 @@ export function MessageAttachments({
       setUrls({});
       setFailedIds(new Set());
       setSelectedId(null);
-      handledOpenNonceRef.current = null;
+      setHandledOpenNonce(null);
     }
     mountedRef.current = true;
     cleanupSequenceRef.current += 1;
@@ -388,13 +407,7 @@ export function MessageAttachments({
     }
   }, [imageFiles, loadMediaUrl]);
 
-  // A confirmation belongs to one asset. Walking to the next one with a live
-  // confirmation would delete a file the reader never asked about.
-  useEffect(() => {
-    setConfirmingDelete(false);
-    setDeleteError(null);
-    setExtractError(null);
-  }, [selectedId]);
+
 
   // KT-556 — keep the clip's last picture as a file of this discussion, so a
   // follow-up generation can start from it without a download and a re-upload.
@@ -402,7 +415,7 @@ export function MessageAttachments({
   // these clips at all.
   const keepLastFrame = useCallback(async (file: ContextFile, src: string) => {
     setExtracting(true);
-    setExtractError(null);
+    patchAssetState({ extractError: null });
     try {
       const frame = await extractLastFrame(src);
       const image = new File([frame.blob], lastFrameFilename(file.filename), { type: 'image/png' });
@@ -415,27 +428,36 @@ export function MessageAttachments({
       // sees the frame instead of a message claiming one exists.
       setSelectedId(uploaded.file.id);
     } catch (e) {
-      setExtractError(
-        e instanceof LastFrameError
+      patchAssetState({
+        extractError: e instanceof LastFrameError
           ? t(`disc.media.lastFrame.error.${e.cause_}`)
           : e instanceof Error ? e.message : String(e),
-      );
+      });
     } finally {
       setExtracting(false);
     }
-  }, [onExtracted, t]);
+  }, [onExtracted, patchAssetState, t]);
 
+  const forSelected = assetState.id === selectedId ? assetState : null;
+  const confirmingDelete = forSelected?.confirming ?? false;
+  const deleteError = forSelected?.deleteError ?? null;
+  const extractError = forSelected?.extractError ?? null;
   const selectedIndex = selectedId
     ? carouselFiles.findIndex(file => file.id === selectedId)
     : -1;
   const selectedFile = selectedIndex >= 0 ? carouselFiles[selectedIndex] : null;
 
-  useEffect(() => {
-    if (!openRequest || handledOpenNonceRef.current === openRequest.nonce) return;
-    if (!carouselFiles.some(file => file.id === openRequest.assetId)) return;
-    handledOpenNonceRef.current = openRequest.nonce;
+  // KT-587 — a request to open one asset is an event, not state to keep in
+  // step. Adjusting during render puts the carousel on it in the same pass;
+  // the effect showed the previous asset for one frame first.
+  if (
+    openRequest
+    && handledOpenNonce !== openRequest.nonce
+    && carouselFiles.some(file => file.id === openRequest.assetId)
+  ) {
+    setHandledOpenNonce(openRequest.nonce);
     setSelectedId(openRequest.assetId);
-  }, [carouselFiles, openRequest]);
+  }
 
   // A clip weighs megabytes, so its bytes are fetched only once it is the one
   // being looked at — never for the whole carousel.
@@ -541,19 +563,19 @@ export function MessageAttachments({
                   onClick={() => {
                     const fileId = selectedFile.id;
                     setDeleting(true);
-                    setDeleteError(null);
+                    patchAssetState({ deleteError: null });
                     discussionsApi.deleteContextFile(discussionId, fileId)
                       .then(() => {
                         // Closed rather than advanced: silently landing on the
                         // neighbouring media would look like the wrong file
                         // was deleted.
                         setSelectedId(null);
-                        setConfirmingDelete(false);
+                        patchAssetState({ confirming: false });
                         onDeleted(fileId);
                       })
                       // The asset stays on screen: it must never disappear
                       // from the UI without having been deleted on the server.
-                      .catch((e: unknown) => setDeleteError(e instanceof Error ? e.message : String(e)))
+                      .catch((e: unknown) => patchAssetState({ deleteError: e instanceof Error ? e.message : String(e) }))
                       .finally(() => setDeleting(false));
                   }}
                   aria-label={t('disc.attachmentDeleteConfirm')}
@@ -566,7 +588,7 @@ export function MessageAttachments({
                 <button
                   type="button"
                   className="disc-image-lightbox-action"
-                  onClick={() => { setConfirmingDelete(true); setDeleteError(null); }}
+                  onClick={() => patchAssetState({ confirming: true, deleteError: null })}
                   aria-label={t('disc.attachmentDelete')}
                   title={t('disc.attachmentDelete')}
                   data-testid="attachment-delete"

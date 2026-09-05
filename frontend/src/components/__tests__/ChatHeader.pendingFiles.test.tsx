@@ -44,26 +44,19 @@ function makeDiscussion(overrides: Partial<Discussion> = {}): Discussion {
 }
 
 function renderHeader(
-  pendingFilesCount: number,
+  _pendingFilesCount: number,
   disc: Discussion = makeDiscussion(),
-  pendingProposalItemCount = 0,
+  _pendingProposalItemCount = 0,
 ) {
   return render(
     <ChatHeader
       discussion={disc}
       projects={[]}
       agents={[]}
-      showGitPanel={false}
       isMobile={false}
       sending={false}
-      pendingFilesCount={pendingFilesCount}
-      pendingProposalCount={pendingProposalItemCount > 0 ? 1 : 0}
-      pendingProposalItemCount={pendingProposalItemCount}
       onRequestTestMode={noop}
-      onToggleGitPanel={noop}
-      onToggleSettingsPanel={noop}
       onToggleSidebar={noop}
-      onDelete={noop}
       onDiscussionUpdated={noop}
       onAgentSwitch={noop}
       toast={vi.fn()}
@@ -104,40 +97,24 @@ describe('ChatHeader — pending files badge', () => {
     expect(pill?.querySelector('svg')).not.toBeNull();
   });
 
-  it('keeps the Code action visible when pendingFilesCount is 0', () => {
+  // KT-581 — the pending-file badge, its cap and its tooltip moved with the
+  // panels themselves: they are asserted in DiscussionPanelSwitcher's spec.
+  // What stays here is what the header still owns.
+  it('carries no panel buttons at all', () => {
     renderHeader(0);
-    expect(document.querySelector('.disc-icon-btn-badge')).toBeNull();
-    expect(screen.getByRole('button', { name: 'git.filesBtn' })).toBeInTheDocument();
+    // Every one of them, including the control that opens the column, now
+    // lives in the panel's own column: a button that opens a panel has to sit
+    // against it, and here a row of counters came between the two.
+    expect(screen.queryByTestId('panel-open-toggle')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'git.filesBtn' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'planning.openPlan' })).toBeNull();
   });
 
-  it('shows the count inside the badge when pendingFilesCount > 0', () => {
-    renderHeader(3);
-    const badge = document.querySelector('.disc-icon-btn-badge');
-    expect(badge).not.toBeNull();
-    expect(badge!.textContent).toBe('3');
-  });
-
-  it('caps the displayed count at 9+ to avoid overflow', () => {
-    renderHeader(27);
-    expect(document.querySelector('.disc-icon-btn-badge')!.textContent).toBe('9+');
-  });
-
-  it('uses the pending-files tooltip (with count) instead of the default label', () => {
-    renderHeader(5);
-    // Select by aria-label (stable — identifies the git-panel icon among
-    // multiple .disc-icon-btn elements in the header).
-    const btn = screen.getByRole('button', { name: 'git.filesBtn' });
-    expect(btn.getAttribute('title')).toBe('5 files pending');
-  });
-
-  it('remains available when the discussion has no direct project', () => {
-    renderHeader(5, makeDiscussion({ project_id: null }));
-    expect(screen.getByRole('button', { name: 'git.filesBtn' })).toBeInTheDocument();
-    expect(document.querySelector('.disc-icon-btn-badge')?.textContent).toBe('5');
-  });
-
-  it('shows pending planning items inside the plan button', () => {
-    const { container } = renderHeader(0, makeDiscussion(), 3);
-    expect(container.querySelector('.disc-plan-pending')?.textContent).toBe('3');
+  it('carries no action either — export and delete moved with the panels', () => {
+    renderHeader(0);
+    // The header describes the discussion; it no longer performs anything on
+    // it. Search, export and delete all live in the panel column's strip.
+    expect(screen.queryByRole('button', { name: 'disc.messageSearch.open' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'disc.portability.export' })).toBeNull();
   });
 });

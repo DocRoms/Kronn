@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { runsApi } from '../lib/api';
 import { useT } from '../lib/I18nContext';
 import { RunStatusCard } from './RunStatusCard';
@@ -33,25 +33,35 @@ const RELIST_DEBOUNCE_MS = 250;
  * in the attached list triggers a relist — and a burst of such events is
  * debounced into a single relist instead of one per event.
  */
+const EMPTY_RUNS: SharedRun[] = [];
+
 export function DiscussionAttachedRuns({ discussionId, runEvent }: { discussionId: string; runEvent?: RunEventHint }) {
   const { t } = useT();
-  const [runs, setRuns] = useState<SharedRun[]>([]);
+  // KT-587 — keyed by the discussion they belong to. Clearing them in an
+  // effect showed the previous room's runs for one render before the wipe.
+  const [loaded, setLoaded] = useState<{ discussionId: string; runs: SharedRun[] }>(
+    { discussionId, runs: [] },
+  );
+  const runs = useMemo(
+    () => (loaded.discussionId === discussionId ? loaded.runs : EMPTY_RUNS),
+    [loaded, discussionId],
+  );
   const knownRunIds = useRef<Set<string>>(new Set());
   useEffect(() => { knownRunIds.current = new Set(runs.map(run => run.id)); }, [runs]);
 
   const reload = useCallback(() => {
     runsApi
       .list({ discussionId, limit: 20 })
-      .then(list => setRuns(list.filter(run => run.kind !== 'media')))
+      .then(list => setLoaded({
+        discussionId,
+        runs: list.filter(run => run.kind !== 'media'),
+      }))
       .catch(() => {
         /* Transient list failure — individual cards still self-hydrate. */
       });
   }, [discussionId]);
 
-  useEffect(() => {
-    setRuns([]);
-    reload();
-  }, [discussionId, reload]);
+  useEffect(() => { reload(); }, [discussionId, reload]);
 
   const debounceTimer = useRef<number | null>(null);
   const scheduleRelist = useCallback(() => {

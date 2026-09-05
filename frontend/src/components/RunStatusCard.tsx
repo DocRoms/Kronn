@@ -80,7 +80,11 @@ export function RunStatusCard({ model: initialModel, runId, compact = false, hid
     try { setHydrated(sharedRunStatusCardModel(await runsApi.get(runId), freshness)); }
     catch { setHydrated(current => current ? { ...current, freshness: 'unavailable' } : null); }
   }, [runId, visible]);
-  useEffect(() => { void hydrate('rehydrated'); }, [hydrate]);
+  // KT-587 — `hydrate` awaits its fetch before writing, and the call says so
+  // here rather than leaving the reader (and the linter) to trace it.
+  useEffect(() => {
+    void (async () => { await hydrate('rehydrated'); })();
+  }, [hydrate]);
   useWebSocket(message => {
     if (visible && runId && message.type === 'shared_run_updated' && message.run_id === runId) void hydrate('live');
   }, () => { if (visible && runId) void hydrate('rehydrated'); }, Boolean(runId && visible && active));

@@ -1,0 +1,166 @@
+/* KT-580 — the notes panel. Same column and same width as the other panels:
+   it is one of them, not a drawer of its own. */
+.disc-notes-panel {
+  display: flex;
+  width: var(--kr-panel-w);
+  height: 100%;
+  flex-direction: column;
+  min-height: 0;
+  border-left: 1px solid var(--kr-border-ghost);
+  background: var(--kr-bg-surface);
+}
+
+.disc-notes-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--kr-sp-3);
+  padding: var(--kr-sp-3) var(--kr-sp-4);
+  border-bottom: 1px solid var(--kr-border-ghost);
+}
+
+.disc-notes-panel-title {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--kr-sp-2);
+  color: var(--kr-text-primary);
+  font-size: var(--kr-fs-sm);
+  font-weight: 600;
+}
+
+.disc-notes-panel-title em {
+  color: var(--kr-text-ghost);
+  font-style: normal;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Writing sits above reading, because the reason to open this panel is
+   usually to add one. */
+.disc-notes-compose {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-sp-2);
+  padding: var(--kr-sp-3) var(--kr-sp-4);
+  border-bottom: 1px solid var(--kr-border-ghost);
+}
+
+.disc-notes-compose textarea,
+.disc-notes-item textarea {
+  width: 100%;
+  padding: var(--kr-sp-2) var(--kr-sp-3);
+  border: 1px solid var(--kr-border);
+  border-radius: var(--kr-r-md);
+  background: var(--kr-bg-raised);
+  color: var(--kr-text-primary);
+  font-family: inherit;
+  font-size: var(--kr-fs-sm);
+  resize: vertical;
+}
+
+.disc-notes-add {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--kr-sp-2);
+  align-self: flex-end;
+  padding: 4px 10px;
+  border: 1px solid var(--kr-accent);
+  border-radius: var(--kr-r-md);
+  background: transparent;
+  color: var(--kr-accent);
+  font-size: var(--kr-fs-xs);
+  cursor: pointer;
+}
+
+.disc-notes-add:disabled {
+  border-color: var(--kr-border);
+  color: var(--kr-text-ghost);
+  cursor: default;
+}
+
+.disc-notes-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-sp-2);
+  min-height: 0;
+  flex: 1;
+  margin: 0;
+  padding: var(--kr-sp-3) var(--kr-sp-4);
+  overflow-y: auto;
+  list-style: none;
+}
+
+.disc-notes-item {
+  padding: var(--kr-sp-3);
+  border: 1px solid var(--kr-border-ghost);
+  border-radius: var(--kr-r-md);
+  background: var(--kr-bg-raised);
+}
+
+.disc-notes-item-content {
+  margin: 0 0 var(--kr-sp-2);
+  color: var(--kr-text-primary);
+  font-size: var(--kr-fs-sm);
+  /* A note is written prose: its line breaks are the author's. */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.disc-notes-item-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--kr-sp-2);
+  color: var(--kr-text-ghost);
+  font-size: var(--kr-fs-2xs);
+}
+
+.disc-notes-item-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.disc-notes-empty,
+.disc-notes-loading,
+.disc-notes-error {
+  margin: 0;
+  padding: var(--kr-sp-4);
+  color: var(--kr-text-tertiary);
+  font-size: var(--kr-fs-sm);
+  text-align: center;
+}
+
+.disc-notes-error {
+  color: var(--kr-error);
+}
+
+/* One page at a time: a room with hundreds of notes must not be one request
+   the panel waits on. */
+.disc-notes-more {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--kr-sp-2);
+  width: 100%;
+  padding: var(--kr-sp-3);
+  border: none;
+  border-top: 1px solid var(--kr-border-ghost);
+  background: var(--kr-bg-subtle);
+  color: var(--kr-text-secondary);
+  font-size: var(--kr-fs-xs);
+  cursor: pointer;
+}
+
+/* Quiet but present: an edited note has to say so, not shout it. */
+.disc-notes-item-revised {
+  color: var(--kr-warning);
+  font-style: italic;
+}
+
+/* Whose note it is, shown only when it is not this machine's: on your own
+   notes the name would be noise. */
+.disc-notes-item-author {
+  color: var(--kr-text-tertiary);
+  font-style: italic;
+}

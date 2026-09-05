@@ -514,14 +514,46 @@ pub struct DiscSearchHit {
     pub source_session_id: Option<String>,
 }
 
+/// Where a search term is allowed to match.
+///
+/// Past a few dozen discussions, a term that appears in one title and in
+/// twenty transcripts drowns the room actually named after it. Ranking alone
+/// does not fix that — the reader wants to EXCLUDE, not to re-sort — so the
+/// scope is a filter, and the ranking below is what handles the mixed case.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum DiscSearchScope {
+    /// Title or transcript. The historical behaviour, and still the default.
+    #[default]
+    All,
+    Title,
+    Content,
+    /// KT-580 — notes only. The other half of making notes findable: `all`
+    /// already reaches them, this is for when the note IS what you are after
+    /// and the transcript around it is noise.
+    Notes,
+}
+
 pub fn search_discussions(
     conn: &Connection,
     q: &str,
     limit: u32,
     include_notes: bool,
+    scope: DiscSearchScope,
 ) -> Result<Vec<DiscSearchHit>> {
     let pattern = format!("%{}%", q.replace('%', "\\%").replace('_', "\\_"));
     let lim = limit.clamp(1, 50);
+
+    // `?4 = 1` means "a title match counts". Kept as a bound parameter rather
+    // than string-built SQL so the statement stays one prepared shape.
+    let notes_only = matches!(scope, DiscSearchScope::Notes);
+    // A note has no title of its own, so scoping to notes excludes title hits
+    // rather than silently widening back to the whole discussion.
+    let title_allowed = !matches!(scope, DiscSearchScope::Content) && !notes_only;
+    let content_allowed = !matches!(scope, DiscSearchScope::Title);
+    // `include_notes` opens the note channel; `notes_only` closes every other.
+    let include_notes = include_notes || notes_only;
 
     let mut stmt = conn.prepare(
         "SELECT d.id, d.title, d.source_agent, d.source_session_id,
@@ -529,23 +561,28 @@ pub fn search_discussions(
                     (SELECT m.content FROM messages m
                      WHERE m.discussion_id = d.id
                        AND (?3 = 1 OR m.channel = 'main')
+                       AND (?6 = 0 OR m.channel = 'note')
                        AND m.content LIKE ?1 ESCAPE '\\'
                      ORDER BY m.sort_order ASC LIMIT 1),
                     d.title
-                ) AS snippet
+                ) AS snippet,
+                (?4 = 1 AND d.title LIKE ?1 ESCAPE '\\') AS title_hit
          FROM discussions d
-         WHERE d.title LIKE ?1 ESCAPE '\\'
-            OR EXISTS (
+         WHERE (?4 = 1 AND d.title LIKE ?1 ESCAPE '\\')
+            OR (?5 = 1 AND EXISTS (
                 SELECT 1 FROM messages m
                 WHERE m.discussion_id = d.id
                   AND (?3 = 1 OR m.channel = 'main')
+                  AND (?6 = 0 OR m.channel = 'note')
                   AND m.content LIKE ?1 ESCAPE '\\'
-            )
-         ORDER BY d.updated_at DESC
+            ))
+         ORDER BY title_hit DESC, d.updated_at DESC
          LIMIT ?2",
     )?;
-    let rows = stmt.query_map(params![pattern, lim as i64, include_notes], |row| {
-        let raw_snip: String = row.get(4)?;
+    let rows = stmt.query_map(
+        params![pattern, lim as i64, include_notes, title_allowed, content_allowed, notes_only],
+        |row| {
+            let raw_snip: String = row.get(4)?;
         let trimmed = if raw_snip.chars().count() > 80 {
             let cutoff = raw_snip
                 .char_indices()
@@ -563,7 +600,8 @@ pub fn search_discussions(
             source_session_id: row.get(3)?,
             snippet: trimmed,
         })
-    })?;
+        },
+    )?;
     let mut out = Vec::new();
     for r in rows {
         out.push(r?);
@@ -600,6 +638,9 @@ pub struct MessageSearchHit {
 /// narrows the result set (AND semantics).
 #[derive(Debug, Clone, Default)]
 pub struct MessageSearchFilters<'a> {
+    /// Where the term may match. `All` keeps the historical behaviour, so a
+    /// caller that does not set it searches exactly as before.
+    pub scope: DiscSearchScope,
     pub discussion_id: Option<&'a str>,
     pub project_id: Option<&'a str>,
     /// Matches `messages.agent_type` OR `messages.author_pseudo`: from the
@@ -658,17 +699,27 @@ pub fn search_messages(
     let lim = limit.clamp(1, 50) as i64;
     let off = offset.min(10_000) as i64;
 
+    // KT-580 — scoping to notes narrows to that channel. A note has no title
+    // of its own, so it also drops title matches rather than silently widening
+    // back to the whole discussion.
+    let notes_only = matches!(filters.scope, DiscSearchScope::Notes);
     let mut sql = String::from(
         "SELECT m.discussion_id, d.title, m.id, m.sort_order, m.role, m.timestamp,
                 m.content, m.agent_type, m.author_pseudo, d.project_id
            FROM messages m
            JOIN discussions d ON d.id = m.discussion_id
-          WHERE (
-                m.content LIKE ?1 ESCAPE '\\'
-                OR (
+          WHERE (?4 = 0 OR m.channel = 'note')
+            AND (
+                (?2 = 1 AND m.content LIKE ?1 ESCAPE '\\')
+                OR (?3 = 1 AND (
                     (d.title LIKE ?1 ESCAPE '\\'",
     );
-    let mut binds: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(pattern.clone())];
+    let mut binds: Vec<Box<dyn rusqlite::ToSql>> = vec![
+        Box::new(pattern.clone()),
+        Box::new(!matches!(filters.scope, DiscSearchScope::Title)),
+        Box::new(!matches!(filters.scope, DiscSearchScope::Content) && !notes_only),
+        Box::new(notes_only),
+    ];
     if let Some(id_pattern) = id_prefix_pattern {
         sql.push_str(" OR d.id LIKE ?");
         sql.push_str(&(binds.len() + 1).to_string());
@@ -684,7 +735,7 @@ pub fn search_messages(
                          ORDER BY latest.sort_order DESC
                          LIMIT 1
                     )
-                )
+                ))
           )",
     );
 
@@ -717,7 +768,9 @@ pub fn search_messages(
         sql.push_str(&(binds.len() + 1).to_string());
         binds.push(Box::new(until.to_string()));
     }
-    sql.push_str(" ORDER BY m.timestamp DESC, m.sort_order DESC LIMIT ?");
+    // Under `all`, the room NAMED after the term comes before the twenty that
+    // merely mention it — the reader is looking for a place, not an occurrence.
+    sql.push_str(" ORDER BY (d.title LIKE ?1 ESCAPE '\\') DESC, m.timestamp DESC, m.sort_order DESC LIMIT ?");
     sql.push_str(&(binds.len() + 1).to_string());
     binds.push(Box::new(lim));
     sql.push_str(" OFFSET ?");
@@ -1107,14 +1160,79 @@ mod tests {
         );
     }
 
+    /// KT-579 / issue #204 — a term in one title and twenty transcripts drowns
+    /// the room actually named after it. The scope is what lets a reader
+    /// exclude, which ranking alone cannot do.
+    #[test]
+    fn search_scope_restricts_where_a_term_may_match() {
+        let conn = fresh_conn();
+        // "disc" is in both titles; "conversation" only in a d-beta message.
+        let titles_only =
+            search_discussions(&conn, "conversation", 10, false, DiscSearchScope::Title).unwrap();
+        assert!(
+            titles_only.is_empty(),
+            "a content-only match must not surface under the title scope"
+        );
+
+        let content_only =
+            search_discussions(&conn, "Second", 10, false, DiscSearchScope::Content).unwrap();
+        assert!(
+            content_only.is_empty(),
+            "a title-only match must not surface under the content scope"
+        );
+
+        // The same terms still resolve under their own scope, so the filter
+        // narrows rather than breaking the query.
+        assert_eq!(
+            search_discussions(&conn, "Second", 10, false, DiscSearchScope::Title)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            search_discussions(&conn, "conversation", 10, false, DiscSearchScope::Content)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    /// The mixed case Romu asked for: under `all`, a title match outranks a
+    /// content match even when the content match was touched more recently.
+    #[test]
+    fn a_title_match_outranks_a_content_match_under_the_all_scope() {
+        let conn = fresh_conn();
+        // d-alpha is the OLDER row, and carries the term in its title only.
+        // d-beta is newer and carries it in a message, so the historical
+        // `updated_at DESC` ordering alone would put the wrong one first.
+        conn.execute(
+            "UPDATE discussions SET title = 'Pelican notes' WHERE id = 'd-alpha'",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO messages (id, discussion_id, role, content, sort_order)
+             VALUES ('m4', 'd-beta', 'user', 'talking about a pelican here', 2)",
+            [],
+        )
+        .unwrap();
+
+        let hits = search_discussions(&conn, "pelican", 10, false, DiscSearchScope::All).unwrap();
+        assert_eq!(hits.len(), 2, "both rooms match, got {hits:?}");
+        assert_eq!(
+            hits[0].disc_id, "d-alpha",
+            "the room NAMED after the term comes first, even though the other was updated later"
+        );
+    }
+
     #[test]
     fn search_discussions_matches_title_and_content() {
         let conn = fresh_conn();
-        let hits = search_discussions(&conn, "ClaudeCode", 10, false).unwrap();
+        let hits = search_discussions(&conn, "ClaudeCode", 10, false, DiscSearchScope::All).unwrap();
         assert_eq!(hits.len(), 1, "matches the m1 content body");
         assert_eq!(hits[0].disc_id, "d-alpha");
 
-        let hits2 = search_discussions(&conn, "Second", 10, false).unwrap();
+        let hits2 = search_discussions(&conn, "Second", 10, false, DiscSearchScope::All).unwrap();
         assert_eq!(hits2.len(), 1, "matches the d-beta title");
         assert_eq!(hits2[0].disc_id, "d-beta");
 
@@ -1127,18 +1245,66 @@ mod tests {
         )
         .unwrap();
         assert!(
-            search_discussions(&conn, "private-note-keyword", 10, false)
+            search_discussions(&conn, "private-note-keyword", 10, false, DiscSearchScope::All)
                 .unwrap()
                 .is_empty(),
             "notes stay out of default agent search"
         );
         assert_eq!(
-            search_discussions(&conn, "private-note-keyword", 10, true)
+            search_discussions(&conn, "private-note-keyword", 10, true, DiscSearchScope::All)
                 .unwrap()
                 .len(),
             1,
             "explicit include_notes reveals note content"
         );
+        // KT-580 — scoping to notes opens the channel without the caller also
+        // having to say `include_notes`: asking for notes IS asking for notes.
+        assert_eq!(
+            search_discussions(&conn, "private-note-keyword", 10, false, DiscSearchScope::Notes)
+                .unwrap()
+                .len(),
+            1,
+            "the notes scope reaches them on its own"
+        );
+    }
+
+    /// KT-580 — searching notes only. `all` already reaches them; this is for
+    /// when the note IS what you are after and the transcript around it is
+    /// noise.
+    #[test]
+    fn the_notes_scope_returns_notes_and_nothing_else() {
+        let conn = search_conn();
+        conn.execute(
+            "INSERT INTO messages
+                 (id, discussion_id, role, channel, content, sort_order, timestamp)
+             VALUES ('a-note', 'd-alpha', 'User', 'note',
+                     'partagé entre les deux', 30, '2026-05-15T12:00:00Z'),
+                    ('a-turn', 'd-alpha', 'User', 'main',
+                     'partagé entre les deux', 31, '2026-05-15T12:01:00Z')",
+            [],
+        )
+        .unwrap();
+
+        let all = search_messages(
+            &conn,
+            "partagé entre les deux",
+            &MessageSearchFilters { scope: DiscSearchScope::All, ..Default::default() },
+            10,
+            0,
+        )
+        .unwrap();
+        assert_eq!(all.len(), 2, "the default reaches both");
+
+        let notes = search_messages(
+            &conn,
+            "partagé entre les deux",
+            &MessageSearchFilters { scope: DiscSearchScope::Notes, ..Default::default() },
+            10,
+            0,
+        )
+        .unwrap();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].message_id, "a-note");
     }
 
     // ─── KT-65 — message-level search ───────────────────────────────────────
@@ -1321,7 +1487,7 @@ mod tests {
             "INSERT INTO discussions (id, title, updated_at) VALUES ('d-pct', '100% coverage report', '2026-05-15T12:00:00Z')",
             [],
         ).unwrap();
-        let hits = search_discussions(&conn, "100%", 10, false).unwrap();
+        let hits = search_discussions(&conn, "100%", 10, false, DiscSearchScope::All).unwrap();
         assert!(
             hits.iter().any(|h| h.disc_id == "d-pct"),
             "must still find the literal-% disc"

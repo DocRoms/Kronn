@@ -137,6 +137,10 @@ pub struct DiscussionNote {
     pub sort_order: i64,
     pub message: DiscussionMessage,
     pub attachments: Vec<MessageAttachment>,
+    /// KT-580 — when this note was last rewritten, or `None` if it never was.
+    /// A corrected note must say so: silently replacing what someone wrote for
+    /// themselves is the one thing an editable note must not do.
+    pub revised_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -611,7 +615,15 @@ pub async fn disc_note_list(
                                 disk_path: file.disk_path,
                             })
                             .collect();
-                    Ok((sort_order, message, attachments))
+                    // MAX over an empty set is one NULL row, so this always
+                    // returns exactly one row and the Option is the answer.
+                    let revised_at: Option<String> = conn.query_row(
+                        "SELECT MAX(revision) FROM message_revision_events
+                         WHERE target_message_id = ?1",
+                        [&message.id],
+                        |row| row.get(0),
+                    )?;
+                    Ok((sort_order, message, attachments, revised_at))
                 })
                 .collect::<anyhow::Result<Vec<_>>>()?;
             Ok((total_notes, rows, next_cursor))
@@ -623,10 +635,11 @@ pub async fn disc_note_list(
             total_notes,
             notes: rows
                 .into_iter()
-                .map(|(sort_order, message, attachments)| DiscussionNote {
+                .map(|(sort_order, message, attachments, revised_at)| DiscussionNote {
                     sort_order,
                     message,
                     attachments,
+                    revised_at,
                 })
                 .collect(),
             next_cursor,

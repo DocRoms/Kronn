@@ -405,6 +405,14 @@ pub struct UpdatePlanningTaskRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
+pub struct UnlinkPlanningDiscussionRequest {
+    pub discussion_id: String,
+    #[serde(default)]
+    pub actor: PlanningActor,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
 pub struct LinkPlanningDiscussionRequest {
     pub discussion_id: String,
     #[serde(default)]

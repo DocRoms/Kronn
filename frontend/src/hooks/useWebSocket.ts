@@ -1,11 +1,16 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useSyncExternalStore } from 'react';
 import { getApiBase, getAuthToken } from '../lib/api';
 import type { WsMessage } from '../types/generated';
 
 export type WsEventHandler = (msg: WsMessage) => void;
 export type WsConnectionState = 'connecting' | 'connected' | 'reconnecting';
-type Subscriber = { message: () => WsEventHandler; connect: () => void; state: (value: WsConnectionState) => void };
+type Subscriber = { message: () => WsEventHandler; connect: () => void };
 const subscribers = new Set<Subscriber>();
+// KT-587 — the connection state is an external store, so consumers read it
+// through `useSyncExternalStore` instead of copying it into local state when
+// they subscribe. That copy was a synchronous write inside the effect, and it
+// could show a stale value for one render.
+const stateListeners = new Set<() => void>();
 let socket: WebSocket | null = null;
 let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
 let heartbeatTimer: ReturnType<typeof setInterval> | undefined;
@@ -16,7 +21,7 @@ let connectionState: WsConnectionState = 'connecting';
 
 function publishState(value: WsConnectionState) {
   connectionState = value;
-  subscribers.forEach(subscriber => subscriber.state(value));
+  stateListeners.forEach(notify => notify());
 }
 function stopSocket() {
   clearTimeout(reconnectTimer); clearTimeout(heartbeatTimeout); clearInterval(heartbeatTimer);
@@ -61,13 +66,20 @@ function connect() {
 /** One process-wide WebSocket fan-outs events to all mounted consumers. */
 export function useWebSocket(onMessage: WsEventHandler, onConnect?: () => void, enabled = true): { connected: boolean; connectionState: WsConnectionState } {
   const messageRef = useRef(onMessage); const connectRef = useRef(onConnect);
-  const [state, setState] = useState(connectionState);
   useLayoutEffect(() => { messageRef.current = onMessage; }, [onMessage]);
   useLayoutEffect(() => { connectRef.current = onConnect; }, [onConnect]);
+  // A disabled consumer subscribes to nothing and keeps reading the value it
+  // had, which is what copying it into local state used to achieve.
+  const subscribeToState = useCallback((notify: () => void) => {
+    if (!enabled) return () => {};
+    stateListeners.add(notify);
+    return () => { stateListeners.delete(notify); };
+  }, [enabled]);
+  const state = useSyncExternalStore(subscribeToState, () => connectionState, () => connectionState);
   useEffect(() => {
     if (!enabled) return;
-    const subscriber: Subscriber = { message: () => messageRef.current, connect: () => connectRef.current?.(), state: setState };
-    subscribers.add(subscriber); setState(connectionState); connect();
+    const subscriber: Subscriber = { message: () => messageRef.current, connect: () => connectRef.current?.() };
+    subscribers.add(subscriber); connect();
     return () => { subscribers.delete(subscriber); if (subscribers.size === 0) stopSocket(); };
   }, [enabled]);
   return { connected: state === 'connected', connectionState: state };

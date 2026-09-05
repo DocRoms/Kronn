@@ -829,7 +829,7 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         )
         .route(
             "/api/planning/tasks/{id}/discussions",
-            post(api::planning::link_discussion),
+            post(api::planning::link_discussion).delete(api::planning::unlink_discussion),
         )
         .route(
             "/api/planning/tasks/{id}/blockers",
@@ -1790,6 +1790,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route(
             "/api/discussions/{id}/notes",
             get(api::disc_introspection::disc_note_list),
+        )
+        .route(
+            "/api/discussions/{id}/notes/{message_id}",
+            patch(api::discussions::crud::revise_note),
         )
         .route(
             "/api/discussions/{id}/summarize",

@@ -35,6 +35,24 @@ const FALLBACK_RATIOS = ['16:9', '4:3', '1:1', '9:16'];
 /// Preferred whenever the model accepts it.
 const DEFAULT_RATIO = '16:9';
 
+/// Width in pixels, or null when the bytes cannot be decoded here. Unknown must
+/// never block: refusing on it would hide a source the provider accepts.
+async function measureWidth(blob: Blob): Promise<number | null> {
+  try {
+    const bitmap = await createImageBitmap(blob);
+    const { width } = bitmap;
+    bitmap.close();
+    return width;
+  } catch {
+    return null;
+  }
+}
+// Preferred when the model offers them. Falling back to whatever the catalogue
+// happens to list first gave a 3-second clip and a portrait frame nobody asked
+// for.
+const DEFAULT_DURATION = 5;
+const DEFAULT_RESOLUTION = '480p';
+
 /// Measured against OpenRouter on 02/09: a 8x8 source came back
 /// `400 InvalidParameter — expected the width to be at least 300px`. The
 /// refusal is synchronous and unbilled, but it costs the operator a launch
@@ -98,62 +116,73 @@ export function MediaGenerateForm({
   const slots = useMemo(() => slotsOf(connections), [connections]);
   const [selectedKey, setSelectedKey] = useState<string>('');
   const [prompt, setPrompt] = useState('');
-  const [durationSecs, setDurationSecs] = useState(5);
-  const [resolution, setResolution] = useState('480p');
-  const [aspectRatio, setAspectRatio] = useState<string>('16:9');
+  // What the operator picked, which the model in front of them may not accept.
+  // `null` means "never chose", so the model's own default applies.
+  const [storedDuration, setStoredDuration] = useState<number | null>(null);
+  const [storedResolution, setStoredResolution] = useState<string | null>(null);
+  const [storedRatio, setStoredRatio] = useState<string | null>(null);
   // Checked by default because that is what the providers already do when
   // nothing is sent. The box makes an existing behaviour visible and
   // switchable — a soundtrack nobody asked for is what got a generation
   // rejected for copyright, with no clue in the request that it existed.
   const [generateAudio, setGenerateAudio] = useState(true);
-  const [capabilities, setCapabilities] = useState<MediaModelCapabilities | null>(null);
+  const [fetchedCapabilities, setFetchedCapabilities] =
+    useState<MediaModelCapabilities | null>(null);
   // The pictures this generation starts from, chosen among the room's own
   // assets. Ids, never paths: the browser never learns where a file lives, and
   // the backend re-checks that each one belongs to this discussion. A clip
   // takes exactly one — a frame is one end of it; an illustration takes as
   // many references as its model advertises.
-  const [reference, setReference] = useState<{ assetIds: string[]; mode: MediaReferenceMode } | null>(null);
-  const [referenceUrl, setReferenceUrl] = useState<string | null>(null);
-  /// Width of the chosen picture, or null while unknown. A picture that could
-  /// not be measured never blocks: refusing on an unknown would hide a source
-  /// the provider would have accepted.
-  const [referenceWidth, setReferenceWidth] = useState<number | null>(null);
+  // What the operator attached. The model in front of them may take fewer
+  // pictures, or none — `reference` below is the part that actually applies.
+  const [storedReference, setReference] =
+    useState<{ assetIds: string[]; mode: MediaReferenceMode } | null>(null);
+  /// Keyed by the picture it belongs to: showing the previous thumbnail while
+  /// the new blob loads would be a lie about what is attached. The width is
+  /// null while unknown — a picture that could not be measured never blocks,
+  /// since refusing on an unknown would hide a source the provider accepts.
+  const [thumbnail, setThumbnail] =
+    useState<{ assetId: string; url: string | null; width: number | null } | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [attaching, setAttaching] = useState(false);
   const [launched, setLaunched] = useState<{ model: string } | null>(null);
-  const [estimate, setEstimate] = useState<{ usd: number | null; samples: number } | null>(null);
+  // Keyed by the model and duration it prices: a figure carried over from the
+  // previous model would be a wrong number on a paid click.
+  const [fetchedEstimate, setFetchedEstimate] =
+    useState<{ key: string; usd: number | null; samples: number } | null>(null);
   // A transport failure is ambiguous: the backend may have committed the job
   // even though its response never reached the browser. Reuse the same key
   // only for an identical retry, so it can never schedule a second charge.
   const pendingLaunchRef = useRef<{ signature: string; key: string } | null>(null);
 
-  useEffect(() => {
-    if (slots.length === 0) {
-      setSelectedKey('');
-      return;
-    }
-    if (!slots.some(slot => slot.key === selectedKey)) setSelectedKey(slots[0].key);
-  }, [slots, selectedKey]);
-
-  const selected = slots.find(slot => slot.key === selectedKey) ?? null;
+  // KT-587 — the stored key can name a slot that no longer exists: the
+  // catalogue reloads, a connection goes away. Resolving it at render falls
+  // back to the first slot in the same pass, where an effect repaired it one
+  // render late and made the form flicker through an invalid state.
+  const selected = slots.find(slot => slot.key === selectedKey) ?? slots[0] ?? null;
+  const activeKey = selected?.key ?? '';
   const isVideo = selected?.modality === 'video';
 
   // What this exact model accepts. Absent (an unreachable or catalogue-less
   // provider) keeps the fallback lists: an empty form would be worse than a
   // slightly wrong one, because it offers nothing at all.
   useEffect(() => {
-    if (!selected) {
-      setCapabilities(null);
-      return;
-    }
+    if (!selected) return;
     let cancelled = false;
     media
       .capabilities(selected.connectionId, selected.modality)
-      .then(result => { if (!cancelled) setCapabilities(result.capabilities); })
-      .catch(() => { if (!cancelled) setCapabilities(null); });
+      .then(result => { if (!cancelled) setFetchedCapabilities(result.capabilities); })
+      .catch(() => { if (!cancelled) setFetchedCapabilities(null); });
     return () => { cancelled = true; };
   }, [selected]);
+
+  // KT-587 — derived rather than cleared inside the effect. Deliberately NOT
+  // keyed to the current slot: the previous model's limits stand until the new
+  // ones arrive, because treating the gap as "no limits known" makes the trim
+  // below drop every attached picture for one render, and that is not
+  // recoverable.
+  const capabilities = selected ? fetchedCapabilities : null;
 
   const durations = capabilities?.durations_secs?.length
     ? capabilities.durations_secs
@@ -172,7 +201,13 @@ export function MediaGenerateForm({
   // Only what this model advertises. 15 of the 28 video models take both a
   // first and a last frame, 9 only a first, and 4 none at all — so an empty
   // list means the picker does not appear, not that it defaults to something.
-  const framePositions = isVideo ? (capabilities?.frame_positions ?? []) : [];
+  // Memoised so the effects below can depend on it honestly. Rebuilt inline it
+  // was a new array every render, which is why one of them had to leave it out
+  // of its dependencies and say so in a comment.
+  const framePositions = useMemo(
+    () => (isVideo ? (capabilities?.frame_positions ?? []) : []),
+    [isVideo, capabilities],
+  );
   // How many pictures an IMAGE model takes as references. The catalogue states
   // it per model and it ranges from 1 to 16, so a fixed number would be wrong
   // for nearly every provider. Absent means the model advertises none.
@@ -184,64 +219,54 @@ export function MediaGenerateForm({
   const canReference =
     (isVideo ? framePositions.length > 0 : maxReferences > 0)
     && (images.length > 0 || !!onImageAttached);
-  const pickedIds = reference?.assetIds ?? [];
+  // KT-587 — normalised at render, where an effect used to rewrite the state
+  // one render late. That render is the one a fast click submits, and it would
+  // have carried a picture the model refuses — after billing started.
+  const reference = useMemo(() => {
+    if (!storedReference || !canReference) return null;
+    if (isVideo) {
+      return framePositions.includes(storedReference.mode as MediaFramePosition)
+        ? storedReference
+        : null;
+    }
+    if (storedReference.mode !== 'reference') return null;
+    // Trimmed rather than dropped: the pictures already chosen stay, and only
+    // what the new model cannot take goes.
+    return storedReference.assetIds.length > referenceLimit
+      ? { ...storedReference, assetIds: storedReference.assetIds.slice(0, referenceLimit) }
+      : storedReference;
+  }, [storedReference, canReference, isVideo, framePositions, referenceLimit]);
+  const pickedIds = useMemo(() => reference?.assetIds ?? [], [reference]);
   const canPickMore = pickedIds.length < referenceLimit;
   const offeredImages = useMemo(
     () => images.filter(image => !pickedIds.includes(image.id)),
     [images, pickedIds],
   );
 
-  // A source image the newly selected model cannot take must be dropped, not
-  // carried into a submission it would fail.
-  useEffect(() => {
-    setReference(current => {
-      if (!current) return null;
-      if (!canReference) return null;
-      if (isVideo) return framePositions.includes(current.mode as MediaFramePosition) ? current : null;
-      if (current.mode !== 'reference') return null;
-      // Trimmed rather than dropped: the pictures already chosen stay, and
-      // only what the new model cannot take goes.
-      return current.assetIds.length > referenceLimit
-        ? { ...current, assetIds: current.assetIds.slice(0, referenceLimit) }
-        : current;
-    });
-    // `framePositions` is rebuilt on every render, so it cannot gate this.
-  }, [canReference, isVideo, referenceLimit, capabilities]);
-
   // Thumbnail of the chosen picture: what the operator picked must be visible
   // before paying for a clip built on it.
+  const firstAssetId = reference?.assetIds[0] ?? null;
   useEffect(() => {
-    const firstAssetId = reference?.assetIds[0];
-    if (!firstAssetId) {
-      setReferenceUrl(null);
-      setReferenceWidth(null);
-      return;
-    }
+    if (!firstAssetId) return;
     let objectUrl: string | null = null;
     let cancelled = false;
     discussionsApi.contextFileBlob(discussionId, firstAssetId)
       .then(async (blob: Blob) => {
         if (cancelled) return;
         objectUrl = URL.createObjectURL(blob);
-        setReferenceUrl(objectUrl);
         // Measured from the bytes already fetched for the thumbnail, so the
         // warning appears with the picture rather than after a failed launch.
-        try {
-          const bitmap = await createImageBitmap(blob);
-          if (!cancelled) setReferenceWidth(bitmap.width);
-          bitmap.close();
-        } catch {
-          if (!cancelled) setReferenceWidth(null);
-        }
+        const width = await measureWidth(blob);
+        if (!cancelled) setThumbnail({ assetId: firstAssetId, url: objectUrl, width });
       })
-      .catch(() => { if (!cancelled) { setReferenceUrl(null); setReferenceWidth(null); } });
+      .catch(() => {
+        if (!cancelled) setThumbnail({ assetId: firstAssetId, url: null, width: null });
+      });
     return () => {
       cancelled = true;
-      setReferenceUrl(null);
-      setReferenceWidth(null);
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [discussionId, reference]);
+  }, [discussionId, firstAssetId]);
 
   // Thumbnails of the room's pictures, so the list shows what each name means.
   // Loaded once per set of images and revoked together: a name alone makes the
@@ -278,6 +303,9 @@ export function MediaGenerateForm({
     // `files.filter(isImage)` on every render, so depending on the reference
     // re-ran this effect in a loop — revoking and recreating every object URL,
     // which is what made the open list flicker every few hundred milliseconds.
+    // `imageKey` IS the content of `images`; adding the array back would
+    // restore the loop, so the exception is declared rather than suffered.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [canReference, discussionId, imageKey]);
 
   const imageOptions: SearchableSelectOption[] = useMemo(
@@ -337,30 +365,24 @@ export function MediaGenerateForm({
     });
   }, []);
 
-  // A choice the provider does not accept must not survive a model change: it
-  // would be submitted as-is and refused after billing started.
-  useEffect(() => {
-    if (!durations.includes(durationSecs)) setDurationSecs(durations[0]);
-  }, [durationSecs, durations]);
-  useEffect(() => {
-    if (!resolutions.includes(resolution)) setResolution(resolutions[0]);
-  }, [resolution, resolutions]);
-  useEffect(() => {
-    // 16:9 when the model takes it — it is what most clips are wanted in, and
-    // falling back to whatever the catalogue happens to list first produced a
-    // portrait default nobody asked for.
-    if (!ratios.includes(aspectRatio)) {
-      setAspectRatio(ratios.includes(DEFAULT_RATIO) ? DEFAULT_RATIO : ratios[0]);
-    }
-  }, [aspectRatio, ratios]);
+  // KT-587 — a choice the provider does not accept must not survive a model
+  // change: it would be submitted as-is and refused after billing started.
+  // Resolved at render rather than repaired by an effect, so the invalid value
+  // never exists — an effect fixed it one render late, and that render is the
+  // one a fast click submits.
+  const pick = <T,>(stored: T | null, offered: T[], preferred: T): T =>
+    (stored !== null && offered.includes(stored))
+      ? stored
+      : (offered.includes(preferred) ? preferred : offered[0]);
+  const durationSecs = pick(storedDuration, durations, DEFAULT_DURATION);
+  const resolution = pick(storedResolution, resolutions, DEFAULT_RESOLUTION);
+  const aspectRatio = pick(storedRatio, ratios, DEFAULT_RATIO);
 
   // Price of the click, derived from what this model was actually billed
   // before. Absent on a first run, and said so rather than shown as free.
+  const estimateKey = selected ? `${selected.key}:${durationSecs}` : '';
   useEffect(() => {
-    if (!selected) {
-      setEstimate(null);
-      return;
-    }
+    if (!selected) return;
     let cancelled = false;
     media
       .estimate(
@@ -370,17 +392,27 @@ export function MediaGenerateForm({
       )
       .then(result => {
         if (!cancelled) {
-          setEstimate({ usd: result.estimated_usd ?? null, samples: result.samples });
+          setFetchedEstimate({
+            key: estimateKey,
+            usd: result.estimated_usd ?? null,
+            samples: result.samples,
+          });
         }
       })
       .catch(() => {
-        if (!cancelled) setEstimate(null);
+        if (!cancelled) setFetchedEstimate({ key: estimateKey, usd: null, samples: 0 });
       });
     return () => {
       cancelled = true;
     };
-  }, [selected, durationSecs]);
+  }, [selected, durationSecs, estimateKey]);
 
+  // Only the figure priced for what is on screen. Anything else reads as
+  // unknown, which the form already says rather than showing a zero.
+  const estimate = fetchedEstimate?.key === estimateKey ? fetchedEstimate : null;
+
+  const referenceUrl = thumbnail?.assetId === firstAssetId ? thumbnail.url : null;
+  const referenceWidth = thumbnail?.assetId === firstAssetId ? thumbnail.width : null;
   const referenceTooNarrow = referenceWidth !== null && referenceWidth < MIN_REFERENCE_WIDTH_PX;
 
   const submit = useCallback(async () => {
@@ -458,8 +490,8 @@ export function MediaGenerateForm({
               key={slot.key}
               type="button"
               role="radio"
-              aria-checked={slot.key === selectedKey}
-              data-active={slot.key === selectedKey}
+              aria-checked={slot.key === activeKey}
+              data-active={slot.key === activeKey}
               className="media-generate-slot"
               onClick={() => setSelectedKey(slot.key)}
               data-testid={`media-slot-${slot.key}`}
@@ -491,7 +523,7 @@ export function MediaGenerateForm({
             <span>{t('disc.media.duration')}</span>
             <select
               value={durationSecs}
-              onChange={event => setDurationSecs(Number(event.target.value))}
+              onChange={event => setStoredDuration(Number(event.target.value))}
             >
               {durations.map(value => (
                 <option key={value} value={value}>{t('disc.media.seconds', value)}</option>
@@ -500,7 +532,7 @@ export function MediaGenerateForm({
           </label>
           <label className="media-generate-field">
             <span>{t('disc.media.resolution')}</span>
-            <select value={resolution} onChange={event => setResolution(event.target.value)}>
+            <select value={resolution} onChange={event => setStoredResolution(event.target.value)}>
               {resolutions.map(value => <option key={value} value={value}>{value}</option>)}
             </select>
           </label>
@@ -642,7 +674,7 @@ export function MediaGenerateForm({
         <Dropdown
           value={aspectRatio}
           options={ratioOptions}
-          onChange={setAspectRatio}
+          onChange={setStoredRatio}
           ariaLabel={t('disc.media.aspectRatio')}
           className="media-generate-ratio-select"
           testId="media-ratio-select"

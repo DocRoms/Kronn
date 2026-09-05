@@ -52,6 +52,8 @@ const composeStatus: ProjectDockerStatus = {
           url: 'http://demo.local:8080',
           host: 'demo.local',
           host_status: 'missing',
+          target_port: 80,
+          live: true,
         },
       ],
       running: true,
@@ -116,6 +118,46 @@ describe('ProjectDockerPanel', () => {
     expect(screen.getByRole('button', { name: 'projects.docker.startAll' })).toBeEnabled();
     expect(screen.getByRole('button', { name: 'projects.docker.stopAll' })).toBeEnabled();
     expect(onRunningChange).toHaveBeenCalledWith(true);
+  });
+
+  /// KT-585 — a stopped container publishes nothing, so its URL reaches
+  /// whatever else holds the port. On shared infrastructure that is another
+  /// project answering with a plausible error, and the reader hunts the bug in
+  /// the wrong application.
+  it('refuses the click on an endpoint nothing is listening on', async () => {
+    vi.mocked(projects.dockerStatus).mockResolvedValue({
+      ...composeStatus,
+      services: [
+        {
+          ...composeStatus.services[0],
+          state: 'exited',
+          running: false,
+          endpoints: [
+            {
+              url: 'https://fr.docroms.me',
+              host: 'fr.docroms.me',
+              host_status: 'configured',
+              target_port: 443,
+              live: false,
+            },
+          ],
+        },
+      ],
+    } as ProjectDockerStatus);
+
+    render(
+      <ProjectDockerPanel
+        projectId="project-1"
+        toast={vi.fn()}
+        onOpenConfig={vi.fn()}
+        onRunningChange={vi.fn()}
+      />,
+    );
+
+    expect(await screen.findByTestId('docker-endpoint-offline')).toHaveTextContent(
+      'https://fr.docroms.me',
+    );
+    expect(screen.queryByRole('link', { name: /fr\.docroms\.me/ })).toBeNull();
   });
 
   it('opens recent logs for a running service', async () => {

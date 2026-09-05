@@ -1420,6 +1420,105 @@ mod tests {
         assert_eq!(pending.as_deref(), Some("ClaudeCode"));
     }
 
+    /// KT-580 — a deleted note leaves a tombstone in the timeline, where a gap
+    /// has to be explained. A list of notes is not a timeline: showing the
+    /// marker there would be listing something its author removed. The agent
+    /// tool reads the same function, so it stops seeing it too.
+    #[test]
+    fn a_deleted_note_leaves_the_notes_list() {
+        let conn = test_conn();
+        insert_discussion(&conn, &make_discussion("note-gone")).unwrap();
+
+        for (id, content) in [("keep", "celle-ci reste"), ("drop", "celle-ci part")] {
+            let mut note = make_message(id, MessageRole::User, None);
+            note.channel = crate::models::MessageChannel::Note;
+            note.content = content.into();
+            insert_note_message(&conn, "note-gone", &note).unwrap();
+        }
+        assert_eq!(count_notes(&conn, "note-gone").unwrap(), 2);
+
+        tombstone_message(&conn, "note-gone", "drop").unwrap();
+
+        let notes = list_notes(&conn, "note-gone", 0, 10).unwrap();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].1.content, "celle-ci reste");
+        // The count must agree with the list, or it promises rows nobody gets.
+        assert_eq!(count_notes(&conn, "note-gone").unwrap(), 1);
+    }
+
+    /// KT-580 — a note is worth correcting where it sits, which is often a
+    /// hundred messages back. The turn revision refuses anything but the last
+    /// User message; applying that rule here would make every note but the
+    /// newest uneditable.
+    #[test]
+    fn a_note_can_be_rewritten_even_with_later_messages_after_it() {
+        let conn = test_conn();
+        insert_discussion(&conn, &make_discussion("note-edit")).unwrap();
+
+        let mut note = make_message("note-1", MessageRole::User, None);
+        note.channel = crate::models::MessageChannel::Note;
+        note.content = "première rédaction".into();
+        insert_note_message(&conn, "note-edit", &note).unwrap();
+
+        // Everything the turn revision would refuse on: a later User turn.
+        let later = make_message("turn-later", MessageRole::User, None);
+        insert_message(&conn, "note-edit", &later).unwrap();
+
+        let revision = revise_note_message(&conn, "note-edit", "note-1", "rédaction corrigée")
+            .expect("a note behind later messages is still editable");
+        assert!(revision.ends_with('Z') || revision.contains('+'));
+
+        let notes = list_notes(&conn, "note-edit", 0, 10).unwrap();
+        assert_eq!(notes[0].1.content, "rédaction corrigée");
+    }
+
+    /// The edit is recorded, so the note can say it was edited and the previous
+    /// wording stays recoverable — the tombstone-and-trail rule, not a silent
+    /// overwrite.
+    #[test]
+    fn rewriting_a_note_leaves_a_revision_trail_and_keeps_its_written_at() {
+        let conn = test_conn();
+        insert_discussion(&conn, &make_discussion("note-trail")).unwrap();
+
+        let mut note = make_message("note-2", MessageRole::User, None);
+        note.channel = crate::models::MessageChannel::Note;
+        note.content = "avant".into();
+        insert_note_message(&conn, "note-trail", &note).unwrap();
+        let written_at: String = conn
+            .query_row("SELECT timestamp FROM messages WHERE id = 'note-2'", [], |row| row.get(0))
+            .unwrap();
+
+        revise_note_message(&conn, "note-trail", "note-2", "après").unwrap();
+
+        let events: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM message_revision_events WHERE target_message_id = 'note-2'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(events, 1, "the edit must be recorded");
+
+        // When it was written does not change because it was corrected.
+        let after: String = conn
+            .query_row("SELECT timestamp FROM messages WHERE id = 'note-2'", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(after, written_at);
+    }
+
+    /// The endpoint rewrites notes; pointing it at a conversation turn must not
+    /// bypass the rules that turn has.
+    #[test]
+    fn rewriting_refuses_anything_that_is_not_a_note() {
+        let conn = test_conn();
+        insert_discussion(&conn, &make_discussion("note-guard")).unwrap();
+        let turn = make_message("turn-1", MessageRole::User, None);
+        insert_message(&conn, "note-guard", &turn).unwrap();
+
+        revise_note_message(&conn, "note-guard", "turn-1", "réécrit")
+            .expect_err("a conversation turn is not a note");
+    }
+
     #[test]
     fn note_is_idempotent_visible_and_never_consumes_or_dispatches() {
         let conn = test_conn();

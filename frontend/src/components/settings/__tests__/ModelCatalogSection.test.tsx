@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { buildApiMock } from '../../../test/apiMock';
 
@@ -63,6 +63,28 @@ const snapshot = {
   ],
 };
 
+/// One catalogue entry, with only what the test cares about spelled out.
+function model(over: { id: string; model_id: string; display_name: string }) {
+  return {
+    runtime_target_id: 'http:one', agent_type: 'Custom' as const,
+    provenance: 'live' as const, availability: 'available' as const,
+    capabilities: ['chat'], reasoning_modes: [], manual_origin: false,
+    first_seen_at: '2026-09-01T00:00:00Z', last_seen_at: '2026-09-01T00:00:00Z',
+    last_checked_at: '2026-09-01T00:00:00Z', created_at: '2026-09-01T00:00:00Z',
+    updated_at: '2026-09-01T00:00:00Z',
+    ...over,
+  };
+}
+
+/// The source strip names each target once; the table's "belongs to" column
+/// names it again on every row. Tests that only need "the catalogue loaded"
+/// wait on the chip.
+async function findSourceChip(label: string) {
+  return within(
+    document.querySelector('.set-model-catalog-sources') as HTMLElement,
+  ).findByText(new RegExp(`^${label}`));
+}
+
 describe('ModelCatalogSection', () => {
   beforeEach(() => {
     listMock.mockReset().mockResolvedValue(snapshot);
@@ -73,15 +95,15 @@ describe('ModelCatalogSection', () => {
 
   it('keeps identical model ids separated by their named HTTP target', async () => {
     render(<ModelCatalogSection />);
-    expect(await screen.findByText('Router one')).toBeInTheDocument();
-    expect(screen.getByText('Router two')).toBeInTheDocument();
+    expect(await findSourceChip('Router one')).toBeInTheDocument();
+    expect(await findSourceChip('Router two')).toBeInTheDocument();
     expect(screen.getByText('Shared one')).toBeInTheDocument();
     expect(screen.getByText('Shared two')).toBeInTheDocument();
   });
 
   it('creates a manual model with the selected stable target identity', async () => {
     render(<ModelCatalogSection />);
-    await screen.findByText('Router one');
+    await findSourceChip('Router one');
     fireEvent.click(screen.getByText('modelCatalog.add'));
     fireEvent.change(screen.getByLabelText('modelCatalog.target'), { target: { value: 'http:two' } });
     fireEvent.change(screen.getByLabelText('modelCatalog.modelId'), { target: { value: 'new-model' } });
@@ -105,14 +127,14 @@ describe('ModelCatalogSection', () => {
 
   it('does not render a cost badge for a model with no cost_hint', async () => {
     render(<ModelCatalogSection />);
-    await screen.findByText('Router one');
+    await findSourceChip('Router one');
     expect(screen.queryByText('modelCatalog.costHint.free')).toBeNull();
     expect(screen.queryByText('modelCatalog.costHint.paid')).toBeNull();
   });
 
   it('sends the operator-chosen cost hint and privacy note when creating a manual model', async () => {
     render(<ModelCatalogSection />);
-    await screen.findByText('Router one');
+    await findSourceChip('Router one');
     fireEvent.click(screen.getByText('modelCatalog.add'));
     fireEvent.change(screen.getByLabelText('modelCatalog.modelId'), { target: { value: 'new-model' } });
     fireEvent.change(screen.getByLabelText('modelCatalog.displayName'), { target: { value: 'New model' } });
@@ -124,5 +146,98 @@ describe('ModelCatalogSection', () => {
       cost_hint: 'paid',
       privacy_note: 'Billed per token.',
     })));
+  });
+});
+
+/// KT-588 — 637 models across ten sources were ten stacked lists. Finding one
+/// meant scrolling past the other 636.
+describe('ModelCatalogSection — the table', () => {
+  const names = () => [...document.querySelectorAll(
+    '[data-testid="model-catalog-table"] tbody tr td:first-child span',
+  )].map(cell => cell.textContent);
+
+  const targets = () => [...document.querySelectorAll(
+    '[data-testid="model-catalog-table"] tbody tr td:nth-child(2)',
+  )].map(cell => cell.textContent);
+
+  beforeEach(() => {
+    listMock.mockResolvedValue({
+      targets: [
+        {
+          runtime_target_id: 'http:one', agent_type: 'Custom', target_label: 'Router one',
+          stale: false, models: [
+            model({ id: 'z', model_id: 'zeta', display_name: 'Zeta' }),
+            model({ id: 'a', model_id: 'alpha', display_name: 'Alpha' }),
+          ],
+        },
+        {
+          runtime_target_id: 'agent:codex', agent_type: 'Codex', target_label: 'Codex',
+          stale: false, models: [model({ id: 'm', model_id: 'mid', display_name: 'Mid' })],
+        },
+      ],
+    });
+  });
+
+  it('lists every source in one alphabetical table', async () => {
+    render(<ModelCatalogSection />);
+    await screen.findByTestId('model-catalog-table');
+    // Across sources, not grouped by them: Mid comes from Codex and still sits
+    // between Alpha and Zeta.
+    expect(names()).toEqual(['Alpha', 'Mid', 'Zeta']);
+  });
+
+  it('inverts the order on a second click of the same column', async () => {
+    render(<ModelCatalogSection />);
+    await screen.findByTestId('model-catalog-table');
+
+    fireEvent.click(screen.getByTestId('model-catalog-sort-model'));
+    expect(names()).toEqual(['Zeta', 'Mid', 'Alpha']);
+
+    fireEvent.click(screen.getByTestId('model-catalog-sort-model'));
+    expect(names()).toEqual(['Alpha', 'Mid', 'Zeta']);
+  });
+
+  /// Ties fall back to the model name, so sorting by source is alphabetical
+  /// inside each source rather than in whatever order the fetch returned.
+  it('sorts by source, and alphabetically within one', async () => {
+    render(<ModelCatalogSection />);
+    await screen.findByTestId('model-catalog-table');
+
+    fireEvent.click(screen.getByTestId('model-catalog-sort-target'));
+    expect(targets()).toEqual(['Codex', 'Router one', 'Router one']);
+    expect(names()).toEqual(['Mid', 'Alpha', 'Zeta']);
+  });
+
+  it('searches the exact id as well as the displayed name', async () => {
+    render(<ModelCatalogSection />);
+    await screen.findByTestId('model-catalog-table');
+
+    // The id is often the only thing the reader remembers: it is what gets
+    // pasted into a tier.
+    fireEvent.change(screen.getByTestId('model-catalog-search'), { target: { value: 'alpha' } });
+    expect(names()).toEqual(['Alpha']);
+
+    fireEvent.change(screen.getByTestId('model-catalog-search'), { target: { value: 'zeta' } });
+    expect(names()).toEqual(['Zeta']);
+  });
+
+  it('narrows to one source, and back', async () => {
+    render(<ModelCatalogSection />);
+    await screen.findByTestId('model-catalog-table');
+
+    fireEvent.click(await findSourceChip('Codex'));
+    expect(names()).toEqual(['Mid']);
+
+    fireEvent.click(screen.getByTestId('model-catalog-clear-filter'));
+    expect(names()).toEqual(['Alpha', 'Mid', 'Zeta']);
+  });
+
+  it('says so when nothing matches, rather than showing an empty table', async () => {
+    render(<ModelCatalogSection />);
+    await screen.findByTestId('model-catalog-table');
+
+    fireEvent.change(screen.getByTestId('model-catalog-search'), { target: { value: 'nothing' } });
+    expect(screen.queryByTestId('model-catalog-table')).toBeNull();
+    expect(screen.getByText('modelCatalog.noMatch')).toBeInTheDocument();
   });
 });

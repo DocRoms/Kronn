@@ -59,7 +59,7 @@ function pageAction(pageId: string, actionRef: string, overrides: Partial<LivePa
   return {
     id: `page-action:${pageId}:${actionRef}`, live_page_id: pageId, live_page_revision_id: `rev-${pageId}`,
     action_ref: actionRef, kind: 'workflow', target_id: 'wf-1', target_name: `Refresh ${pageId}`,
-    project_id: null, state: 'proposed', values: [], shared_run_id: null,
+    project_id: null, project_name: null, state: 'proposed', values: [], shared_run_id: null,
     result_discussion_id: null, deep_link: null, diagnostic: null, launched_at: null,
     finished_at: null, created_at: '2026-08-29T10:00:00Z', updated_at: '2026-08-29T10:00:00Z',
     stale_source: false,

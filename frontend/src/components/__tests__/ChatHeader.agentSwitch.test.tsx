@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { readFileSync } from 'node:fs';
 import { buildApiMock } from '../../test/apiMock';
 
 vi.mock('../../lib/api', () => buildApiMock());
@@ -84,15 +85,10 @@ function renderHeader(options: {
       ]}
       modelTiers={options.modelTiers}
       externalConnections={options.externalConnections}
-      showGitPanel={false}
       isMobile={false}
       sending={sending}
-      pendingFilesCount={0}
       onRequestTestMode={noop}
-      onToggleGitPanel={noop}
-      onToggleSettingsPanel={noop}
       onToggleSidebar={noop}
-      onDelete={noop}
       onDiscussionUpdated={onDiscussionUpdated}
       onAgentSwitch={onAgentSwitch}
       toast={toast}
@@ -100,6 +96,43 @@ function renderHeader(options: {
     />,
   );
   return { onAgentSwitch, onDiscussionUpdated, toast };
+}
+
+function renderNarrow() {
+  return render(
+    <ChatHeader
+      discussion={makeDiscussion()}
+      projects={[]}
+      agents={[makeAgent('ClaudeCode')]}
+      isMobile
+      sending={false}
+      onRequestTestMode={noop}
+      onToggleSidebar={noop}
+      onDiscussionUpdated={vi.fn()}
+      onAgentSwitch={vi.fn()}
+      toast={vi.fn<ToastFn>()}
+      t={t}
+    />,
+  );
+}
+
+function renderWithHandle() {
+  const view = render(
+    <ChatHeader
+      discussion={makeDiscussion()}
+      projects={[]}
+      agents={[makeAgent('ClaudeCode')]}
+      isMobile={false}
+      sending={false}
+      onRequestTestMode={noop}
+      onToggleSidebar={noop}
+      onDiscussionUpdated={vi.fn()}
+      onAgentSwitch={vi.fn()}
+      toast={vi.fn<ToastFn>()}
+      t={t}
+    />,
+  );
+  return view;
 }
 
 describe('ChatHeader — shared agent switcher', () => {
@@ -124,7 +157,7 @@ describe('ChatHeader — shared agent switcher', () => {
     expect(title?.nextElementSibling).toBe(edit);
     expect(edit.nextElementSibling).toBe(id);
     expect(edit.closest('.disc-chat-header-title')).not.toBeNull();
-    expect(edit.closest('.disc-chat-header-presence')).toBeNull();
+    expect(edit.closest('.disc-chat-header-invite')).toBeNull();
   });
 
   it('renders the durable OpenRouter alias instead of the Custom wire type', async () => {
@@ -288,6 +321,11 @@ describe('ChatHeader — shared agent switcher', () => {
 
     renderHeader();
 
+    // KT-581 — declared worktrees are part of the folded details row now.
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('disc-header-details-toggle'));
+    });
+
     expect(await screen.findByText('feature/kt140')).toBeInTheDocument();
     expect(screen.getByText('KT-140')).toBeInTheDocument();
     expect(screen.getByText('Codex')).toBeInTheDocument();
@@ -373,5 +411,95 @@ describe('ChatHeader — shared agent switcher', () => {
       'disc.nativeAgentDisabled',
     );
     expect(onAgentSwitch).not.toHaveBeenCalled();
+  });
+  /// KT-581 — the header was reading as three rows. Two now, with the third
+  /// behind a toggle. These pin the placement Romuald asked for, because a
+  /// later change that quietly puts a control back on its own row is exactly
+  /// the regression the rework was for.
+  describe('three-row layout', () => {
+    beforeEach(() => {
+      try { localStorage.removeItem('kronn:discHeaderDetails'); } catch { /* jsdom */ }
+    });
+
+    afterEach(() => {
+      try { localStorage.removeItem('kronn:discHeaderDetails'); } catch { /* jsdom */ }
+    });
+
+    it('puts the invite on the title row, not on a row of its own', () => {
+      renderHeader();
+      const invite = document.querySelector('.disc-participants-invite-btn');
+      expect(invite).not.toBeNull();
+      expect(invite!.closest('.disc-chat-header-top')).not.toBeNull();
+    });
+
+    it('gives the agent on/off control the first position on row 2', async () => {
+      renderHeader();
+      const sub = document.querySelector('.disc-chat-header-sub')!;
+      await waitFor(() => {
+        expect(sub.firstElementChild?.classList.contains('disc-native-agent-control')).toBe(true);
+      });
+    });
+
+    it('keeps the details row folded until the toggle is clicked', async () => {
+      renderHeader();
+      expect(document.querySelector('.disc-chat-header-details')).toBeNull();
+
+      const toggle = screen.getByTestId('disc-header-details-toggle');
+      expect(toggle.getAttribute('aria-expanded')).toBe('false');
+      await act(async () => { fireEvent.click(toggle); });
+
+      const details = document.querySelector('.disc-chat-header-details');
+      expect(details).not.toBeNull();
+      expect(toggle.getAttribute('aria-expanded')).toBe('true');
+      // The project name and the cost figures live in the fold now.
+      expect(details!.querySelector('.disc-chat-context-project')).not.toBeNull();
+    });
+
+    it('remembers the fold across mounts', async () => {
+      const { unmount } = renderWithHandle();
+      await act(async () => {
+        fireEvent.click(screen.getByTestId('disc-header-details-toggle'));
+      });
+      unmount();
+
+      renderHeader();
+      expect(document.querySelector('.disc-chat-header-details')).not.toBeNull();
+      expect(screen.getByTestId('disc-header-details-toggle').getAttribute('aria-expanded'))
+        .toBe('true');
+    });
+
+    /// At 400px the id pill and the session binding took 230px of the title
+    /// row between them, and the title — the one element that has to give way —
+    /// was left with zero. They belong to the fold on a narrow screen.
+    it('moves the id pill and the session binding into the fold on a narrow screen', async () => {
+      renderNarrow();
+      expect(document.querySelector('.disc-chat-header-top .disc-id-pill')).toBeNull();
+
+      await act(async () => {
+        fireEvent.click(screen.getByTestId('disc-header-details-toggle'));
+      });
+      const fold = document.querySelector('.disc-chat-header-details')!;
+      expect(fold.querySelector('.disc-id-pill')).not.toBeNull();
+    });
+
+    it('keeps them on the title row on a wide screen', () => {
+      renderHeader();
+      expect(document.querySelector('.disc-chat-header-top .disc-id-pill')).not.toBeNull();
+    });
+
+    /// The strip and the search bar sit on one row. The strip's border only
+    /// exists while a panel is open, so without a reserved pixel the two are
+    /// level in one state and off by one in the other.
+    it('reserves the strip border pixel in both states', () => {
+      const css = readFileSync('src/components/DiscussionPanelSwitcher.css', 'utf8');
+      const base = css.match(/\.disc-panel-switcher \{([^}]*)\}/g)?.join('') ?? '';
+      expect(base).toContain('border-bottom: 1px solid transparent');
+    });
+
+    it('pins the details toggle to the right of row 2', () => {
+      const css = readFileSync('src/pages/DiscussionsPage.css', 'utf8');
+      const rule = css.match(/\.disc-chat-header-details-toggle\s*\{([^}]*)\}/)?.[1] ?? '';
+      expect(rule).toContain('margin-left: auto');
+    });
   });
 });

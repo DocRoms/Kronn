@@ -396,19 +396,15 @@ TOOLS = [
     {
         "name": "task_create",
         "description": (
-            "Create one planning task. Keep quick creation compact: title is "
-            "required; status defaults to idea and priority to normal. The "
-            "new task is linked to the current discussion by default; pass "
-            "`discussion_id` to target another existing discussion. An "
-            "explicit target works even when this runtime has no bound "
-            "discussion or reports `rejoin_required`. The "
-            "bridge records this MCP client's agent identity in the event log. "
-            "Immediately before a direct create, call `plan_get` again so a "
-            "peer's recent write is visible. Use direct writes only when the "
-            "user's intent is unambiguous. Pass `idempotency_key` for a stable "
-            "retry identity; when it is omitted, `source_message_id` derives "
-            "one. Multiple tasks from one message need distinct explicit keys. "
-            "Titles are never identities."
+            "Create one planning task. Title is required; status defaults to "
+            "idea and priority to normal. It is linked to the current "
+            "discussion unless `discussion_id` targets another, which works "
+            "even with no bound discussion or `rejoin_required`. Call "
+            "`plan_get` again immediately before, so a peer's recent write is "
+            "visible, and write directly only on unambiguous intent. Pass "
+            "`idempotency_key` for a stable retry identity; omitted, "
+            "`source_message_id` derives one, so several tasks from one "
+            "message need distinct explicit keys. Titles are never identities."
         ),
         "inputSchema": {
             "type": "object",
@@ -498,10 +494,9 @@ TOOLS = [
     {
         "name": "task_link_discussion",
         "description": (
-            "Link a task to one discussion as active or later, optionally as "
-            "its single primary objective. Defaults to the current discussion. "
-            "Use after task_create when the user asks to add work to the "
-            "Discussion plan."
+            "Add a task to one discussion's plan, as active or later, "
+            "optionally as its single primary objective. Defaults to the "
+            "current discussion."
         ),
         "inputSchema": {
             "type": "object",
@@ -511,6 +506,23 @@ TOOLS = [
                 "placement": {"type": "string", "enum": ["active", "later"], "default": "active"},
                 "is_primary": {"type": "boolean", "default": False},
                 "position": {"type": "integer"},
+                "source_message_id": {"type": "string"},
+            },
+            "required": ["task_id"],
+        },
+    },
+    {
+        "name": "task_unlink_discussion",
+        "description": (
+            "The reverse: take a task out of a discussion's plan. The task, "
+            "its history and its other discussions are kept; unlinking twice "
+            "is not an error."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "string"},
+                "discussion_id": {"type": "string"},
                 "source_message_id": {"type": "string"},
             },
             "required": ["task_id"],
@@ -1594,10 +1606,10 @@ TOOLS = [
     {
         "name": "workflow_create_draft",
         "description": (
-            "Create a disabled draft for explicit user review. Discovery first: "
-            "resolve plugin/config ids with `mcp_list`, bindings with their list "
-            "tools, Quick APIs with `qa_list`, Quick Execs with `qe_list`, and Pages "
-            "with `page_list`; never guess. `step_type` is a tagged object and its "
+            "Create a disabled draft for explicit user review. Discovery first, "
+            "never guessing: plugin/config ids with `mcp_list`, bindings with "
+            "their list tools, Quick APIs with `qa_list`, Quick Execs with "
+            "`qe_list`, Pages with `page_list`. `step_type` is a tagged object, "
             "closed set is: **Agent · ApiCall · BatchApiCall · "
             "BatchQuickPrompt · Exec · Gate · Notify · JsonData · "
             "CollectApiData · TransformData · PublishPageData · SubWorkflow**. "
@@ -2187,14 +2199,14 @@ TOOLS = [
     {
         "name": "api_call",
         "description": (
-            "Invoke a configured API without exposing credentials. Reuse a matching "
-            "`qa_list`/`qa_run` first; otherwise discover real plugin/config ids with "
-            "`mcp_list` and pass either `api_plugin_slug` + `api_config_id`, or a "
-            "`quick_api_id`. Never place auth in path, query, headers or body. Returns "
-            "`{success,data,status,summary,http_status,error?}`. Project scope, "
-            "`${ENV.KEY}`, time expressions and safe persistence are documented by "
-            "`tool_manual({tool: \"api_call\"})`. Suggest `qa_create_draft` for a useful "
-            "recurring call instead of rebuilding it."
+            "Invoke a configured API without exposing credentials. Reuse a "
+            "matching `qa_list`/`qa_run` first; else discover real ids with "
+            "`mcp_list` and pass `api_plugin_slug` + `api_config_id`, or a "
+            "`quick_api_id`. Never put auth in path, query, headers or body. "
+            "Returns `{success,data,status,summary,http_status,error?}`. Scope, "
+            "`${ENV.KEY}`, time expressions and safe persistence: "
+            "`tool_manual({tool: \"api_call\"})`. Suggest `qa_create_draft` for a "
+            "recurring call rather than rebuilding it."
         ),
         "inputSchema": {
             "type": "object",
@@ -2260,13 +2272,13 @@ TOOLS = [
             "Generate an image or video on a configured HTTP connection. "
             "Returns `{job_id, status, model}`.\n\n"
             "**You do NOT choose the model**: it comes from the connection's "
-            "configured slot, so nothing can be billed on a model the human "
-            "did not pick. A modality with no slot is refused, naming what to "
+            "configured slot, so nothing is billed on a model the human did "
+            "not pick. A modality with no slot is refused, naming what to "
             "configure.\n\n"
-            "**Cost is real.** Video is billed per second (~0.07 USD for 5 s "
-            "at 480p), image per picture; a soundtrack — on unless you pass "
-            "`generate_audio: false` — raises that rate. Ask for the shortest "
-            "clip that works.\n\n"
+            "**Cost is real.** Video bills per second (~0.07 USD for 5 s at "
+            "480p), image per picture; a soundtrack — on unless you pass "
+            "`generate_audio: false` — raises that. Ask for the shortest clip "
+            "that works.\n\n"
             "**`wait` defaults to false** and should stay there: a video takes "
             "~100 s and lands in the discussion by itself, as a context file "
             "every agent sees. Pass `true` only when the media must appear in "
@@ -4570,6 +4582,20 @@ def call_task_link_discussion(args):
     encoded = urllib.parse.quote(task_id, safe="")
     return _task_ack(_unwrap(_http(
         "POST", f"/api/planning/tasks/{encoded}/discussions", body
+    )))
+
+
+def call_task_unlink_discussion(args):
+    task_id = (args.get("task_id") or "").strip()
+    if not task_id:
+        raise RuntimeError("task_unlink_discussion: task_id is required")
+    body = {
+        "discussion_id": _planning_discussion_id(args),
+        "actor": _planning_actor(args),
+    }
+    encoded = urllib.parse.quote(task_id, safe="")
+    return _task_ack(_unwrap(_http(
+        "DELETE", f"/api/planning/tasks/{encoded}/discussions", body
     )))
 
 
@@ -10103,6 +10129,7 @@ DISPATCH = {
     "task_update": call_task_update,
     "task_update_dod": call_task_update_dod,
     "task_link_discussion": call_task_link_discussion,
+    "task_unlink_discussion": call_task_unlink_discussion,
     "task_add_blocker": call_task_add_blocker,
     "task_remove_blocker": call_task_remove_blocker,
     # 0.8.4 (#294) cross-agent memory
@@ -10724,7 +10751,7 @@ def _handle(req):
                     "• Discussions (multi-agent threads): `disc_meta`/`disc_get_message`/`disc_search`/`disc_load_other`/`disc_create`/`disc_append`/`disc_join`/`disc_invite_peer`…\n"
                     "• **Working in a room:** a room is not a mailbox you empty at the end. After each real step — a commit, a green test run, a background task that finished, a milestone — call `disc_wait_for_peer` BEFORE starting the next one. Its cursor is durable, so re-checking never re-delivers what you already read, and a quiet return costs nothing. A peer's message routinely changes what you are about to build: a design review of the choice you just made, a file boundary, a decision the human already took. Long silent stretches of work are how two agents duplicate each other, or how one keeps building on a choice the other has already overturned. Messages flagged `awareness: true` are context to read, never turns to answer. Any tool result may also carry a `kronn_room` block: turns that arrived while you were working, attached to an answer you asked for. `attention_required` holds turns addressed to YOU — read them before continuing, because a peer announcing a scope is how duplicate work gets prevented; `context` is background you read without answering turn by turn. Seeing it does not replace calling `disc_wait_for_peer`: it appears only when you happen to call something else.\n"
                     "• Rich room output: messages are Markdown. A `mermaid` fence renders a diagram; `kronn-doc-preview` renders sandboxed HTML with PDF/DOCX actions (a plain `html` fence is only code); `kronn-doc-data` exposes CSV/XLSX/PPTX export. Use visual output only when it materially helps.\n"
-                    "• Planning: a discussion may have a shared plan made of prioritized, editable tasks. The user may refer to it naturally as “the plan”, “the tasks”, “what remains”, “the priority”, and similar wording. Use `plan_get` (compact current objective/plan) · `task_list` (compact filtered backlog) · `task_get` (FULL task) · `task_changes` (deltas) · `proposal_list`/`proposal_get` (durable proposals, read-only) · narrow writes `task_create`/`task_update`/`task_update_dod`/`task_link_discussion`/`task_add_blocker`/`task_remove_blocker`. Read the relevant plan first. Immediately before any direct `task_create`, call `plan_get` again so a peer's recent write is visible. Apply unambiguous intent directly; otherwise propose a human-gated `kronn-plan-action` fence (`create`, `create_many`, `status`, `complete`, `unblock`, `open`). You may read and propose, but only a human accepts, rejects or decides a durable proposal. Never replace a requested plan update with a prose-only summary. Whenever tracked work starts or materially changes, keep its status, DoD and priority honest in the plan. Write only on a real change: never reload or rewrite an unchanged task merely to report progress. If the announced Planning tools are missing from your MCP surface, use the read-only `plan_snapshot` from `disc_join`, ask @user to reconnect the Kronn MCP, and never fabricate an update.\n"
+                    "• Planning: a discussion may have a shared plan made of prioritized, editable tasks. The user may refer to it naturally as “the plan”, “the tasks”, “what remains”, “the priority”, and similar wording. Use `plan_get` (compact current objective/plan) · `task_list` (compact filtered backlog) · `task_get` (FULL task) · `task_changes` (deltas) · `proposal_list`/`proposal_get` (durable proposals, read-only) · narrow writes `task_create`/`task_update`/`task_update_dod`/`task_link_discussion`/`task_unlink_discussion`/`task_add_blocker`/`task_remove_blocker`. Read the relevant plan first. Immediately before any direct `task_create`, call `plan_get` again so a peer's recent write is visible. Apply unambiguous intent directly; otherwise propose a human-gated `kronn-plan-action` fence (`create`, `create_many`, `status`, `complete`, `unblock`, `open`). You may read and propose, but only a human accepts, rejects or decides a durable proposal. Never replace a requested plan update with a prose-only summary. Whenever tracked work starts or materially changes, keep its status, DoD and priority honest in the plan. Write only on a real change: never reload or rewrite an unchanged task merely to report progress. If the announced Planning tools are missing from your MCP surface, use the read-only `plan_snapshot` from `disc_join`, ask @user to reconnect the Kronn MCP, and never fabricate an update.\n"
                     "• Human-gated Automation proposals: after resolving a real QP/QA/QE/Workflow id and its declared variables through the catalogue/get tools, an agent may emit one `kronn-action` fence with `{\"kind\":\"quick_prompt|quick_api|quick_exec|workflow\",\"target_id\":\"<real id>\",\"project_id\":\"<optional id>\",\"values\":[{\"name\":\"<declared variable>\",\"value\":\"<editable suggestion>\",\"provenance\":\"agent_suggestion\",\"suggested_by\":\"<your alias>\"}]}`. This proposes only: Kronn validates and persists the card, and the human click launches it. Never invent ids/variables or include secret/resolved values.\n"
                     "• Workflows (multi-step pipelines): `workflow_list` (compact) · `workflow_get` (FULL, every step) · `workflow_step_schema` (CANONICAL step schema as an untruncatable result — the closed 12 `step_type`s, per-type fields, runtime contracts; call before authoring) · `workflow_create_draft` · `workflow_clone`/`workflow_update`/`workflow_set_enabled` · `workflow_trigger`/`workflow_run_status` · run history `workflow_runs`/`workflow_run_get` · `workflow_active_runs`/`workflow_cancel_run`. Agent-step bindings (full CRUD): `skills_list`/`profiles_list`/`directives_list` enumerate valid ids; `skill_get`/`profile_get`/`directive_get` read FULL bodies; `skill_create`/`skill_update`/`skill_delete` (+ `profile_*`/`directive_*`) author & edit custom ones.\n"
                     "• Quick Prompts (reusable prompt templates): `qp_list` (no body) · `qp_get` (FULL incl `prompt_template` — read this to know what a QP does, or to run it yourself) · `qp_create_draft`/`qp_update`/`qp_delete` · `qp_run`/`qp_batch_run`.\n"

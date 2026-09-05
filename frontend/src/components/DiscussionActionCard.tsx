@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { AlertTriangle, CheckCircle2, ChevronDown, ExternalLink, Loader2, Play, RotateCcw, X } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, ChevronDown, ExternalLink, FolderGit2, Loader2, Play, RotateCcw, X } from 'lucide-react';
 import { discussionActions as discussionActionsApi } from '../lib/api';
 import { useT } from '../lib/I18nContext';
 import type { DiscussionAction, DiscussionActionValue, LivePageAction, PromptVariable } from '../types/generated';
@@ -180,6 +180,15 @@ export function KronnActionCard<T extends KronnAction>({
             <span className="discussion-action-card__eyebrow">{t('disc.action.proposal')}</span>
             <span className="discussion-action-card__title-row">
               <strong>{kindLabel} · {current.target_name}</strong>
+              {/* KT-582 — a card may target another project's Quick Prompt now.
+                  Saying which one is the condition for having lifted the guard
+                  that used to refuse it outright. */}
+              {current.project_name && (
+                <span className="discussion-action-card__project" data-testid="action-card-project">
+                  <FolderGit2 size={10} aria-hidden />
+                  {current.project_name}
+                </span>
+              )}
             </span>
           </span>
           <span className="discussion-action-card__state" data-state={current.state}>
