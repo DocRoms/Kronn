@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Plus, RefreshCw, Trash2, X } from 'lucide-react';
+import { ArrowDown, ArrowUp, Plus, RefreshCw, Search, Trash2, X } from 'lucide-react';
 import { modelCatalogApi } from '../../lib/api';
 import { useT } from '../../lib/I18nContext';
 import type {
@@ -9,6 +9,16 @@ import type {
   ModelCostHint,
   ModelTier,
 } from '../../types/generated';
+
+const PAGE_SIZE = 60;
+
+type SortColumn = 'model' | 'target' | 'provenance' | 'availability' | 'cost';
+
+interface CatalogRow {
+  model: CatalogModelEntry;
+  targetId: string;
+  targetLabel: string;
+}
 
 interface ManualForm {
   runtimeTargetId: string;
@@ -44,6 +54,14 @@ export function ModelCatalogSection() {
   const [editing, setEditing] = useState<CatalogModelEntry | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // KT-588 — 637 models across 10 targets were rendered as ten stacked lists.
+  // Finding one meant scrolling past the other 636.
+  const [query, setQuery] = useState('');
+  const [targetFilter, setTargetFilter] = useState('');
+  const [sort, setSort] = useState<{ column: SortColumn; direction: 'asc' | 'desc' }>(
+    { column: 'model', direction: 'asc' },
+  );
+  const [paging, setPaging] = useState({ key: '', count: PAGE_SIZE });
 
   const load = async () => {
     const value = await modelCatalogApi.list();
@@ -69,6 +87,58 @@ export function ModelCatalogSection() {
     () => snapshot?.targets.flatMap(target => target.models) ?? [],
     [snapshot],
   );
+
+  // One row per model, carrying the target it belongs to: the table sorts and
+  // filters on that, and the reader needs to see it on the row.
+  const rows = useMemo<CatalogRow[]>(
+    () => snapshot?.targets.flatMap(target => target.models.map(model => ({
+      model,
+      targetId: target.runtime_target_id,
+      targetLabel: target.target_label ?? target.runtime_target_id,
+    }))) ?? [],
+    [snapshot],
+  );
+
+  const visibleRows = useMemo(() => {
+    const needle = query.trim().toLowerCase();
+    const filtered = rows.filter(row => {
+      if (targetFilter && row.targetId !== targetFilter) return false;
+      if (!needle) return true;
+      // The exact id matters as much as the label: it is what gets pasted into
+      // a tier, and it is often the only thing the reader remembers.
+      return `${row.model.display_alias ?? row.model.display_name} ${row.model.model_id} ${row.targetLabel}`
+        .toLowerCase()
+        .includes(needle);
+    });
+    const key = (row: CatalogRow) => {
+      switch (sort.column) {
+        case 'target': return row.targetLabel;
+        case 'provenance': return row.model.provenance;
+        case 'availability': return row.model.availability;
+        case 'cost': return row.model.cost_hint ?? '';
+        default: return row.model.display_alias ?? row.model.display_name;
+      }
+    };
+    const factor = sort.direction === 'asc' ? 1 : -1;
+    return [...filtered].sort((left, right) => {
+      const compared = key(left).localeCompare(key(right), undefined, { numeric: true });
+      // Ties fall back to the model name, so a sort by target is alphabetical
+      // inside each target rather than in insertion order.
+      if (compared !== 0) return compared * factor;
+      return (left.model.display_alias ?? left.model.display_name)
+        .localeCompare(right.model.display_alias ?? right.model.display_name);
+    });
+  }, [rows, query, targetFilter, sort]);
+
+  const pagingKey = `${query}\u0000${targetFilter}\u0000${sort.column}\u0000${sort.direction}`;
+  const shownCount = paging.key === pagingKey ? paging.count : PAGE_SIZE;
+  const shownRows = visibleRows.slice(0, shownCount);
+
+  const toggleSort = (column: SortColumn) => {
+    setSort(current => current.column === column
+      ? { column, direction: current.direction === 'asc' ? 'desc' : 'asc' }
+      : { column, direction: 'asc' });
+  };
 
   const openCreate = () => {
     setEditing(null);
@@ -141,9 +211,6 @@ export function ModelCatalogSection() {
           <h3>{t('modelCatalog.title')}</h3>
           <p className="set-hint">{t('modelCatalog.description')}</p>
         </div>
-        <button type="button" className="set-btn-secondary" onClick={openCreate}>
-          <Plus size={13} /> {t('modelCatalog.add')}
-        </button>
       </div>
 
       {error && <p className="set-hint" data-status="error">{error}</p>}
@@ -226,52 +293,165 @@ export function ModelCatalogSection() {
         </div>
       )}
 
-      <div className="set-model-catalog-targets">
+      {/* The sources, as one line each rather than as ten containers: what a
+          reader does here is re-check one of them, not browse it. */}
+      <div className="set-model-catalog-sources">
         {snapshot?.targets.map(target => (
-          <article key={target.runtime_target_id} className="set-ext-api-conn-card">
-            <div className="set-ext-api-conn-head">
-              <div>
-                <strong>{target.target_label ?? target.runtime_target_id}</strong>
-                <small>{target.stale ? t('modelCatalog.stale') : t('modelCatalog.current')}</small>
-              </div>
-              {!target.runtime_target_id.startsWith('http:') && (
-                <button type="button" className="set-icon-btn" disabled={busy} aria-label={t('modelCatalog.recheck')} onClick={async () => {
-                  setBusy(true);
-                  try {
-                    await modelCatalogApi.refresh({ runtime_target_id: target.runtime_target_id, agent_type: target.agent_type, force: true });
-                    await load();
-                  } catch (err) { setError(String(err)); } finally { setBusy(false); }
-                }}><RefreshCw size={12} /></button>
+          <span
+            key={target.runtime_target_id}
+            className="set-model-catalog-source"
+            data-stale={target.stale}
+            data-selected={targetFilter === target.runtime_target_id}
+          >
+            <button
+              type="button"
+              className="set-model-catalog-source-name"
+              onClick={() => setTargetFilter(
+                targetFilter === target.runtime_target_id ? '' : target.runtime_target_id,
               )}
-            </div>
-            <div className="set-ext-api-conn-models">
-              {target.models.length === 0 && <span className="set-hint">{t('modelCatalog.empty')}</span>}
-              {target.models.map(model => (
-                <div key={model.id} className="set-model-catalog-model" data-availability={model.availability}>
-                  <button type="button" className="set-model-catalog-model-open" onClick={() => openEdit(model)}>
-                    <span>{model.display_alias ?? model.display_name}</span>
-                    <small>{model.model_id} · {t(`modelCatalog.provenance.${model.provenance}`)}</small>
-                    {model.availability === 'unavailable' && <em>{t('modelCatalog.unavailable')}</em>}
-                    {model.cost_hint && (
-                      <span
-                        className="badge badge-muted"
-                        data-cost-hint={model.cost_hint}
-                        title={model.privacy_note ?? undefined}
-                      >
-                        {t(`modelCatalog.costHint.${model.cost_hint}`)}
-                      </span>
-                    )}
-                  </button>
-                  {(model.provenance === 'manual' || model.provenance === 'migrated') && (
-                    <button type="button" className="set-icon-btn" aria-label={t('common.delete')} onClick={() => void remove(model)}><Trash2 size={10} /></button>
-                  )}
-                </div>
-              ))}
-            </div>
-          </article>
+              title={target.stale ? t('modelCatalog.stale') : t('modelCatalog.current')}
+            >
+              {target.target_label ?? target.runtime_target_id}
+              <em>{target.models.length}</em>
+            </button>
+            {!target.runtime_target_id.startsWith('http:') && (
+              <button type="button" className="set-icon-btn" disabled={busy} aria-label={t('modelCatalog.recheck')} onClick={async () => {
+                setBusy(true);
+                try {
+                  await modelCatalogApi.refresh({ runtime_target_id: target.runtime_target_id, agent_type: target.agent_type, force: true });
+                  await load();
+                } catch (err) { setError(String(err)); } finally { setBusy(false); }
+              }}><RefreshCw size={11} /></button>
+            )}
+          </span>
         ))}
       </div>
-      {models.length > 0 && <p className="set-hint">{t('modelCatalog.count', models.length)}</p>}
+
+      <div className="set-model-catalog-toolbar">
+        <label className="set-model-catalog-search">
+          <Search size={13} aria-hidden="true" />
+          <input
+            type="search"
+            value={query}
+            onChange={event => setQuery(event.target.value)}
+            placeholder={t('modelCatalog.searchPlaceholder')}
+            aria-label={t('modelCatalog.searchPlaceholder')}
+            data-testid="model-catalog-search"
+          />
+        </label>
+        {targetFilter && (
+          <button
+            type="button"
+            className="set-model-catalog-clear-filter"
+            onClick={() => setTargetFilter('')}
+            data-testid="model-catalog-clear-filter"
+          >
+            <X size={11} /> {t('modelCatalog.allTargets')}
+          </button>
+        )}
+      </div>
+
+      {visibleRows.length === 0 ? (
+        <p className="set-hint">{models.length === 0 ? t('modelCatalog.empty') : t('modelCatalog.noMatch')}</p>
+      ) : (
+        <div className="set-model-catalog-table-wrap">
+          <table className="set-model-catalog-table" data-testid="model-catalog-table">
+            <thead>
+              <tr>
+                {([
+                  ['model', 'modelCatalog.columnModel'],
+                  ['target', 'modelCatalog.columnTarget'],
+                  ['provenance', 'modelCatalog.columnProvenance'],
+                  ['cost', 'modelCatalog.columnCost'],
+                ] as const).map(([column, label]) => (
+                  <th key={column} aria-sort={sort.column === column
+                    ? (sort.direction === 'asc' ? 'ascending' : 'descending')
+                    : 'none'}>
+                    <button
+                      type="button"
+                      onClick={() => toggleSort(column)}
+                      data-testid={`model-catalog-sort-${column}`}
+                    >
+                      {t(label)}
+                      {sort.column === column && (sort.direction === 'asc'
+                        ? <ArrowUp size={10} aria-hidden="true" />
+                        : <ArrowDown size={10} aria-hidden="true" />)}
+                    </button>
+                  </th>
+                ))}
+                <th aria-label={t('common.actions')} />
+              </tr>
+            </thead>
+            <tbody>
+              {shownRows.map(row => (
+                <tr
+                  key={row.model.id}
+                  data-availability={row.model.availability}
+                  data-testid={`model-catalog-row-${row.model.id}`}
+                >
+                  <td>
+                    <button type="button" className="set-model-catalog-model-open" onClick={() => openEdit(row.model)}>
+                      <span>{row.model.display_alias ?? row.model.display_name}</span>
+                      <small>{row.model.model_id}</small>
+                    </button>
+                  </td>
+                  <td><span className="set-model-catalog-target-cell">{row.targetLabel}</span></td>
+                  <td>
+                    {t(`modelCatalog.provenance.${row.model.provenance}`)}
+                    {row.model.availability === 'unavailable' && (
+                      <em className="set-model-catalog-unavailable">{t('modelCatalog.unavailable')}</em>
+                    )}
+                  </td>
+                  <td>
+                    {row.model.cost_hint && (
+                      <span
+                        className="badge badge-muted"
+                        data-cost-hint={row.model.cost_hint}
+                        title={row.model.privacy_note ?? undefined}
+                      >
+                        {t(`modelCatalog.costHint.${row.model.cost_hint}`)}
+                      </span>
+                    )}
+                  </td>
+                  <td>
+                    {(row.model.provenance === 'manual' || row.model.provenance === 'migrated') && (
+                      <button type="button" className="set-icon-btn" aria-label={t('common.delete')} onClick={() => void remove(row.model)}><Trash2 size={10} /></button>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {shownRows.length < visibleRows.length && (
+            <button
+              type="button"
+              className="set-model-catalog-more"
+              onClick={() => setPaging({ key: pagingKey, count: shownCount + PAGE_SIZE })}
+              data-testid="model-catalog-more"
+            >
+              {t('modelCatalog.showMore', visibleRows.length - shownRows.length)}
+            </button>
+          )}
+        </div>
+      )}
+      <div className="set-model-catalog-footer">
+        <button
+          type="button"
+          className="set-model-catalog-add"
+          onClick={openCreate}
+          title={t('modelCatalog.addHint')}
+          data-testid="model-catalog-add"
+        >
+          <Plus size={11} /> {t('modelCatalog.add')}
+        </button>
+        {models.length > 0 && (
+        <p className="set-hint">
+          {visibleRows.length === models.length
+            ? t('modelCatalog.count', models.length)
+            : t('modelCatalog.shown', visibleRows.length, models.length)}
+        </p>
+        )}
+      </div>
     </section>
   );
 }

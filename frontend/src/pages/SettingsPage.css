@@ -6678,3 +6678,213 @@
     grid-column: 1 / -1;
   }
 }
+
+/* KT-588 — 637 models across ten sources, shown as ten stacked lists. Finding
+   one meant scrolling past the other 636, so they are one sorted table with a
+   search over it. */
+.set-model-catalog-sources {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--kr-sp-2);
+  margin-bottom: var(--kr-sp-3);
+}
+
+.set-model-catalog-source {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 1px 2px 1px 0;
+  border: 1px solid var(--kr-border-soft);
+  border-radius: var(--kr-r-pill);
+  background: var(--kr-bg-raised);
+}
+
+/* A source that has not been re-checked says so, where the old cards spent a
+   whole line on it. */
+.set-model-catalog-source[data-stale='true'] {
+  border-color: color-mix(in srgb, var(--kr-warning) 40%, var(--kr-border-soft));
+}
+
+.set-model-catalog-source[data-selected='true'] {
+  border-color: var(--kr-accent);
+  background: color-mix(in srgb, var(--kr-accent) 10%, var(--kr-bg-raised));
+}
+
+.set-model-catalog-source-name {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--kr-sp-2);
+  padding: 3px 8px;
+  border: none;
+  border-radius: var(--kr-r-pill);
+  background: none;
+  color: var(--kr-text-secondary);
+  font-size: var(--kr-fs-xs);
+  cursor: pointer;
+}
+
+.set-model-catalog-source-name em {
+  color: var(--kr-text-ghost);
+  font-style: normal;
+  font-variant-numeric: tabular-nums;
+}
+
+.set-model-catalog-toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-3);
+  margin-bottom: var(--kr-sp-3);
+}
+
+.set-model-catalog-search {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-2);
+  flex: 1;
+  min-width: 0;
+  padding: 4px 10px;
+  border: 1px solid var(--kr-border);
+  border-radius: var(--kr-r-md);
+  background: var(--kr-bg-surface);
+  color: var(--kr-text-tertiary);
+}
+
+.set-model-catalog-search input {
+  min-width: 0;
+  flex: 1;
+  border: none;
+  background: none;
+  color: var(--kr-text-primary);
+  font-size: var(--kr-fs-sm);
+  outline: none;
+}
+
+.set-model-catalog-clear-filter {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  padding: 4px 8px;
+  border: 1px solid var(--kr-border);
+  border-radius: var(--kr-r-md);
+  background: none;
+  color: var(--kr-text-tertiary);
+  font-size: var(--kr-fs-xs);
+  cursor: pointer;
+}
+
+/* Bounded and scrolled: 637 rows must not push the rest of the page away. */
+.set-model-catalog-table-wrap {
+  max-height: 460px;
+  overflow: auto;
+  border: 1px solid var(--kr-border-soft);
+  border-radius: var(--kr-r-md);
+}
+
+.set-model-catalog-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--kr-fs-xs);
+}
+
+.set-model-catalog-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 0;
+  border-bottom: 1px solid var(--kr-border);
+  background: var(--kr-bg-subtle);
+  text-align: left;
+}
+
+.set-model-catalog-table th button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  width: 100%;
+  padding: 7px 10px;
+  border: none;
+  background: none;
+  color: var(--kr-text-secondary);
+  font-size: var(--kr-fs-xs);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.set-model-catalog-table th button:hover {
+  color: var(--kr-text-primary);
+}
+
+.set-model-catalog-table td {
+  padding: 5px 10px;
+  border-bottom: 1px solid var(--kr-border-ghost);
+  color: var(--kr-text-secondary);
+  vertical-align: middle;
+}
+
+.set-model-catalog-table tr:hover td {
+  background: var(--kr-bg-hover);
+}
+
+/* An unavailable model stays listed and stays readable: hiding it would leave
+   a tier pointing at something the page never mentions. */
+.set-model-catalog-table tr[data-availability='unavailable'] td {
+  opacity: 0.62;
+}
+
+.set-model-catalog-unavailable {
+  margin-left: var(--kr-sp-2);
+  color: var(--kr-warning);
+  font-style: normal;
+}
+
+.set-model-catalog-target-cell {
+  color: var(--kr-text-tertiary);
+  white-space: nowrap;
+}
+
+.set-model-catalog-more {
+  width: 100%;
+  padding: 7px;
+  border: none;
+  border-top: 1px solid var(--kr-border-ghost);
+  background: var(--kr-bg-subtle);
+  color: var(--kr-text-secondary);
+  font-size: var(--kr-fs-xs);
+  cursor: pointer;
+}
+
+/* The add control sits with the count, not in the header: measured on a real
+   install, 624 of 637 models were detected and none had been added by hand.
+   It stays because a target whose detection returns nothing — Kiro today — has
+   no other way to name one. */
+.set-model-catalog-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--kr-sp-3);
+  margin-top: var(--kr-sp-3);
+}
+
+.set-model-catalog-footer .set-hint {
+  margin: 0;
+}
+
+.set-model-catalog-add {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  padding: 3px 9px;
+  border: 1px solid var(--kr-border);
+  border-radius: var(--kr-r-md);
+  background: none;
+  color: var(--kr-text-tertiary);
+  font-size: var(--kr-fs-xs);
+  cursor: pointer;
+}
+
+.set-model-catalog-add:hover {
+  border-color: var(--kr-border-strong);
+  color: var(--kr-text-primary);
+}

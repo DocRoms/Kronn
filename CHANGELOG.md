@@ -169,6 +169,19 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Changed
 
+- The model catalogue is one sorted table instead of ten stacked lists. A real
+  install carries 637 models across ten sources — 502 from a single router — and
+  finding one meant scrolling past the other 636. They are now one alphabetical
+  table, sortable by name or by which source they belong to, invertible, with a
+  search that matches the exact model id as well as the displayed name, and a
+  click on a source narrows to it. The sources keep their re-check control on
+  one line each rather than one card each.
+- Adding a model by hand moved to the foot of that block. Measured on a real
+  install: 624 of the 637 models were detected, ten migrated from an older
+  configuration, three cached, and none had ever been added by hand — so it is
+  not the everyday act the header made it look like. It stays, because a target
+  whose detection returns nothing has no other way to name a model.
+
 - Settings names the three ways of reaching a model. Config > Agents listed
   seven full-width CLI cards, then Ollama as a special case inside the same
   loop, then the external connections in a framed box of their own — one
