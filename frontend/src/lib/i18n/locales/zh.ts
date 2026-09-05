@@ -1736,6 +1736,7 @@ const zh: TranslationDict = {
   "disc.archived": "归档",
   "disc.showMore": "更早的讨论",
   "disc.note.showMore": "再显示 {0} 条备注",
+  "disc.note.revisedAt": "于 {0} 修改",
   "disc.note.panelTitle": "备注",
   "disc.note.add": "添加",
   "disc.note.addPlaceholder": "写给自己的备注：不会进入代理的上下文。",

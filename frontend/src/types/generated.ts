@@ -2199,7 +2199,13 @@ pacing?: PacingState, project_id: string | null, };
 
 export type DiscussionNativeAgentMode = { disabled: boolean, };
 
-export type DiscussionNote = { sort_order: number, message: DiscussionMessage, attachments: Array<MessageAttachment>, };
+export type DiscussionNote = { sort_order: number, message: DiscussionMessage, attachments: Array<MessageAttachment>,
+/**
+ * KT-580 — when this note was last rewritten, or `None` if it never was.
+ * A corrected note must say so: silently replacing what someone wrote for
+ * themselves is the one thing an editable note must not do.
+ */
+revised_at: string | null, };
 
 export type DiscussionNoteListQuery = { cursor?: number | null, limit?: number | null, };
 

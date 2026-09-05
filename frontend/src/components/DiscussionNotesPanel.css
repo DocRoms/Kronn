@@ -151,3 +151,16 @@
   font-size: var(--kr-fs-xs);
   cursor: pointer;
 }
+
+/* Quiet but present: an edited note has to say so, not shout it. */
+.disc-notes-item-revised {
+  color: var(--kr-warning);
+  font-style: italic;
+}
+
+/* Whose note it is, shown only when it is not this machine's: on your own
+   notes the name would be noise. */
+.disc-notes-item-author {
+  color: var(--kr-text-tertiary);
+  font-style: italic;
+}

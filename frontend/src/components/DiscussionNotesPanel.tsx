@@ -7,7 +7,7 @@
 // none, with no way to list, correct or remove one.
 import { useCallback, useEffect, useState } from 'react';
 import { Loader2, NotebookPen, Pencil, Plus, Trash2, X, Check } from 'lucide-react';
-import { discussions as discussionsApi } from '../lib/api';
+import { config as configApi, discussions as discussionsApi } from '../lib/api';
 import type { DiscussionNote } from '../types/generated';
 import type { ToastFn } from '../hooks/useToast';
 import './DiscussionNotesPanel.css';
@@ -38,6 +38,28 @@ export function DiscussionNotesPanel({
   const [adding, setAdding] = useState(false);
   const [editing, setEditing] = useState<{ id: string; content: string } | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
+  /// KT-580 — this machine's declared pseudo, used to hide the edit and delete
+  /// controls on a note somebody else wrote.
+  ///
+  /// A GUARD RAIL IN THE INTERFACE, NOT AN AUTHORISATION. Kronn has no
+  /// multi-user authentication: the pseudo is declarative, and the endpoints
+  /// behind these buttons accept any caller. Hiding them keeps a shared room
+  /// from being tidied by accident; it prevents nothing.
+  const [localPseudo, setLocalPseudo] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const serverConfig = await configApi.getServerConfig();
+        if (!cancelled) setLocalPseudo(serverConfig.pseudo ?? null);
+      } catch {
+        // Unknown pseudo means every note reads as this machine's own, which
+        // is the behaviour before this guard existed.
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
 
   // Only the answer that belongs to the room on screen. Switching discussions
   // must not show the previous room's notes while the new ones load.
@@ -193,6 +215,11 @@ export function DiscussionNotesPanel({
         {notes?.map(note => {
           const isEditing = editing?.id === note.message.id;
           const busy = busyId === note.message.id;
+          // An unsigned note is this machine's own: nothing else writes notes
+          // here, so treating it as someone else's would lock the author out of
+          // every note they wrote before setting a pseudo.
+          const author = note.message.author_pseudo;
+          const mine = !author || !localPseudo || author === localPseudo;
           return (
             <li key={note.message.id} className="disc-notes-item" data-testid={`disc-note-${note.message.id}`}>
               {isEditing ? (
@@ -233,7 +260,18 @@ export function DiscussionNotesPanel({
                     <time dateTime={note.message.timestamp}>
                       {new Date(note.message.timestamp).toLocaleString()}
                     </time>
-                    <span className="disc-notes-item-actions">
+                    {/* KT-580 — a corrected note says so. Silently replacing
+                        what someone wrote for themselves is the one thing an
+                        editable note must not do. */}
+                    {note.revised_at && (
+                      <span className="disc-notes-item-revised" data-testid={`disc-note-revised-${note.message.id}`}>
+                        {t('disc.note.revisedAt', new Date(note.revised_at).toLocaleString())}
+                      </span>
+                    )}
+                    {author && !mine && (
+                      <span className="disc-notes-item-author">{author}</span>
+                    )}
+                    {mine && <span className="disc-notes-item-actions">
                       <button
                         type="button"
                         className="set-icon-btn"
@@ -253,7 +291,7 @@ export function DiscussionNotesPanel({
                       >
                         {busy ? <Loader2 size={11} className="spin" /> : <Trash2 size={11} />}
                       </button>
-                    </span>
+                    </span>}
                   </div>
                 </>
               )}

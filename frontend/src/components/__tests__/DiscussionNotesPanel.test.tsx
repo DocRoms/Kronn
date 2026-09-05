@@ -1,12 +1,14 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { notesMock, sendNoteMock, reviseNoteMock, deleteMessageMock } = vi.hoisted(() => ({
-  notesMock: vi.fn(),
-  sendNoteMock: vi.fn(),
-  reviseNoteMock: vi.fn(),
-  deleteMessageMock: vi.fn(),
-}));
+const { notesMock, sendNoteMock, reviseNoteMock, deleteMessageMock, serverConfigMock } =
+  vi.hoisted(() => ({
+    notesMock: vi.fn(),
+    sendNoteMock: vi.fn(),
+    reviseNoteMock: vi.fn(),
+    deleteMessageMock: vi.fn(),
+    serverConfigMock: vi.fn(),
+  }));
 
 vi.mock('../../lib/api', () => ({
   discussions: {
@@ -15,6 +17,7 @@ vi.mock('../../lib/api', () => ({
     reviseNote: reviseNoteMock,
     deleteMessage: deleteMessageMock,
   },
+  config: { getServerConfig: serverConfigMock },
 }));
 
 import { DiscussionNotesPanel } from '../DiscussionNotesPanel';
@@ -22,16 +25,23 @@ import { DiscussionNotesPanel } from '../DiscussionNotesPanel';
 const t = (key: string, ...args: (string | number)[]) =>
   args.length > 0 ? `${key}(${args.join(',')})` : key;
 
-function note(id: string, content: string, sortOrder = 1) {
+function note(
+  id: string,
+  content: string,
+  sortOrder = 1,
+  over: { author?: string | null; revisedAt?: string | null } = {},
+) {
   return {
     sort_order: sortOrder,
     attachments: [],
+    revised_at: over.revisedAt ?? null,
     message: {
       id,
       role: 'User',
       channel: 'note',
       content,
       agent_type: null,
+      author_pseudo: over.author ?? null,
       timestamp: '2026-09-05T08:00:00Z',
       tokens_used: 0,
     },
@@ -53,6 +63,7 @@ beforeEach(() => {
   sendNoteMock.mockResolvedValue(undefined);
   reviseNoteMock.mockResolvedValue('2026-09-05T09:00:00Z');
   deleteMessageMock.mockResolvedValue(undefined);
+  serverConfigMock.mockResolvedValue({ pseudo: 'Romu - mac' });
 });
 
 afterEach(() => {
@@ -178,5 +189,45 @@ describe('DiscussionNotesPanel', () => {
     renderPanel();
     expect(await screen.findByTestId('disc-notes-error')).toHaveTextContent('backend down');
     expect(screen.queryByTestId('disc-notes-empty')).toBeNull();
+  });
+  /// KT-580 — a corrected note says so. Silently replacing what someone wrote
+  /// for themselves is the one thing an editable note must not do.
+  it('says when a note was edited, and stays quiet when it was not', async () => {
+    notesMock.mockResolvedValue(page([
+      note('n-1', 'jamais touchée', 1),
+      note('n-2', 'reprise', 2, { revisedAt: '2026-09-05T09:30:00Z' }),
+    ]));
+    renderPanel();
+    await screen.findByText('reprise');
+
+    expect(screen.getByTestId('disc-note-revised-n-2')).toBeInTheDocument();
+    expect(screen.queryByTestId('disc-note-revised-n-1')).toBeNull();
+  });
+
+  /// A guard rail in the interface, not an authorisation: Kronn has no
+  /// multi-user authentication and the endpoints accept any caller. Hiding the
+  /// controls keeps a shared room from being tidied by accident.
+  it('hides the controls on a note somebody else wrote', async () => {
+    notesMock.mockResolvedValue(page([
+      note('mine', 'la mienne', 1, { author: 'Romu - mac' }),
+      note('theirs', 'celle d’un pair', 2, { author: 'Autre' }),
+    ]));
+    renderPanel();
+    await screen.findByText('celle d’un pair');
+
+    expect(screen.getByTestId('disc-note-edit-mine')).toBeInTheDocument();
+    expect(screen.queryByTestId('disc-note-edit-theirs')).toBeNull();
+    expect(screen.queryByTestId('disc-note-delete-theirs')).toBeNull();
+    // And it says whose it is, rather than showing nothing at all.
+    expect(screen.getByText('Autre')).toBeInTheDocument();
+  });
+
+  /// An unsigned note is this machine's own. Treating it as somebody else's
+  /// would lock the author out of every note written before they set a pseudo.
+  it('treats an unsigned note as this machine own', async () => {
+    notesMock.mockResolvedValue(page([note('n-1', 'sans signature', 1, { author: null })]));
+    renderPanel();
+    await screen.findByText('sans signature');
+    expect(screen.getByTestId('disc-note-edit-n-1')).toBeInTheDocument();
   });
 });

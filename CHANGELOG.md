@@ -176,6 +176,17 @@ Release notes for 0.9.3 and earlier are available in the
   others: it lists them, writes them where the list already is, corrects one in
   place and deletes it through the tombstone Kronn already had. A room with
   months of notes loads them a page at a time rather than in one request.
+- An edited note says so, with the date. Silently replacing what someone wrote
+  for themselves is the one thing an editable note must not do, so the panel
+  carries the moment of the last rewrite — and stays quiet on a note that was
+  never touched. On a note somebody else wrote, the edit and delete controls
+  are hidden and their author is named instead. That is a guard rail in the
+  interface, not an authorisation: Kronn has no multi-user authentication, the
+  pseudo is declarative, and the endpoints behind those buttons accept any
+  caller. It keeps a shared room from being tidied by accident; it prevents
+  nothing. An unsigned note counts as this machine's own, so nobody is locked
+  out of the notes they wrote before setting a pseudo.
+
 - A deleted note leaves the notes list. Its tombstone stays in the transcript,
   where a gap has to be explained, but a list of notes is not a transcript:
   showing the marker there would be listing something its author removed. The

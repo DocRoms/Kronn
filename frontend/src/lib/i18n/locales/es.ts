@@ -1756,6 +1756,7 @@ const es: TranslationDict = {
   'disc.delete': 'Eliminar',
   'disc.showMore': 'discusiones más antiguas',
   'disc.note.showMore': 'Mostrar {0} nota(s) más',
+  'disc.note.revisedAt': 'modificada el {0}',
   'disc.note.panelTitle': 'Notas',
   'disc.note.add': 'Añadir',
   'disc.note.addPlaceholder': 'Una nota para usted: queda fuera del contexto de los agentes.',

@@ -1767,6 +1767,7 @@ const fr: TranslationDict = {
   'disc.archived': 'Archives',
   'disc.showMore': 'discussions plus anciennes',
   'disc.note.showMore': 'Afficher {0} note(s) de plus',
+  'disc.note.revisedAt': 'modifiée le {0}',
   'disc.note.panelTitle': 'Notes',
   'disc.note.add': 'Ajouter',
   'disc.note.addPlaceholder': "Une note pour vous : elle reste hors du contexte des agents.",

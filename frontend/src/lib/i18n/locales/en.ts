@@ -1757,6 +1757,7 @@ const en: TranslationDict = {
   'disc.archived': 'Archives',
   'disc.showMore': 'older discussions',
   'disc.note.showMore': 'Show {0} more note(s)',
+  'disc.note.revisedAt': 'edited {0}',
   'disc.note.panelTitle': 'Notes',
   'disc.note.add': 'Add',
   'disc.note.addPlaceholder': 'A note for yourself: it stays out of the agents context.',
