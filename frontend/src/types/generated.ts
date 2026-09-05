@@ -1696,7 +1696,22 @@ export type DiscoverSourceError = { source_id: string, source_label: string, pro
  */
 export type DiscSearchHit = { disc_id: string, title: string, snippet: string, source_agent: string | null, source_session_id: string | null, };
 
-export type DiscSearchQuery = { q: string, limit?: number | null, include_notes?: boolean, };
+export type DiscSearchQuery = { q: string, limit?: number | null, include_notes?: boolean,
+/**
+ * Where the term may match. Absent means `all`, so an existing caller
+ * keeps the behaviour it had.
+ */
+scope?: DiscSearchScope, };
+
+/**
+ * Where a search term is allowed to match.
+ *
+ * Past a few dozen discussions, a term that appears in one title and in
+ * twenty transcripts drowns the room actually named after it. Ranking alone
+ * does not fix that — the reader wants to EXCLUDE, not to re-sort — so the
+ * scope is a filter, and the ranking below is what handles the mixed case.
+ */
+export type DiscSearchScope = "all" | "title" | "content" | "notes";
 
 export type DiscSessionStatusQuery = { source_agent: string, source_session_id: string, };
 
@@ -1848,7 +1863,14 @@ test_mode_restore_branch?: string | null,
  */
 test_mode_stash_ref?: string | null, created_at: string, updated_at: string, };
 
-export type DiscussionAction = { id: string, discussion_id: string, source_message_id: string, fence_index: number, kind: DiscussionActionKind, target_id: string, target_name: string, project_id: string | null, state: DiscussionActionState, values: Array<DiscussionActionValue>, shared_run_id: string | null, result_discussion_id: string | null, deep_link: string | null, diagnostic: string | null, launched_at: string | null, finished_at: string | null, created_at: string, updated_at: string, };
+export type DiscussionAction = { id: string, discussion_id: string, source_message_id: string, fence_index: number, kind: DiscussionActionKind, target_id: string, target_name: string, project_id: string | null,
+/**
+ * KT-582 — the target's project, by name. The card must say where it will
+ * run: lifting the guard without showing this would be worse than the
+ * guard. Resolved on read so the two surfaces get it without either
+ * needing a project list of its own.
+ */
+project_name: string | null, state: DiscussionActionState, values: Array<DiscussionActionValue>, shared_run_id: string | null, result_discussion_id: string | null, deep_link: string | null, diagnostic: string | null, launched_at: string | null, finished_at: string | null, created_at: string, updated_at: string, };
 
 export type DiscussionActionKind = "quick_prompt" | "quick_api" | "quick_exec" | "workflow" | "invalid";
 
@@ -2177,7 +2199,13 @@ pacing?: PacingState, project_id: string | null, };
 
 export type DiscussionNativeAgentMode = { disabled: boolean, };
 
-export type DiscussionNote = { sort_order: number, message: DiscussionMessage, attachments: Array<MessageAttachment>, };
+export type DiscussionNote = { sort_order: number, message: DiscussionMessage, attachments: Array<MessageAttachment>,
+/**
+ * KT-580 — when this note was last rewritten, or `None` if it never was.
+ * A corrected note must say so: silently replacing what someone wrote for
+ * themselves is the one thing an editable note must not do.
+ */
+revised_at: string | null, };
 
 export type DiscussionNoteListQuery = { cursor?: number | null, limit?: number | null, };
 
@@ -3058,7 +3086,12 @@ pinned: boolean,
  */
 archived: boolean, };
 
-export type LivePageAction = { id: string, live_page_id: string, live_page_revision_id: string, action_ref: string, kind: DiscussionActionKind, target_id: string, target_name: string, project_id: string | null, state: DiscussionActionState, values: Array<DiscussionActionValue>, shared_run_id: string | null, result_discussion_id: string | null, deep_link: string | null, diagnostic: string | null, launched_at: string | null, finished_at: string | null, created_at: string, updated_at: string,
+export type LivePageAction = { id: string, live_page_id: string, live_page_revision_id: string, action_ref: string, kind: DiscussionActionKind, target_id: string, target_name: string, project_id: string | null,
+/**
+ * KT-582 — the target's project, by name, for the same reason as the
+ * discussion card: the guard is gone, so the card has to say where it runs.
+ */
+project_name: string | null, state: DiscussionActionState, values: Array<DiscussionActionValue>, shared_run_id: string | null, result_discussion_id: string | null, deep_link: string | null, diagnostic: string | null, launched_at: string | null, finished_at: string | null, created_at: string, updated_at: string,
 /**
  * True when `live_page_revision_id` no longer matches the Page's live
  * `current_revision_id`. The `(live_page_id, action_ref)` anchor itself
@@ -3457,7 +3490,11 @@ snippet: string, agent_type: string | null, author_pseudo: string | null, projec
  * KT-65 — filters for the message-level search. Every field is optional and
  * they combine with AND, so the caller narrows instead of paging blindly.
  */
-export type MessageSearchQuery = { q: string, discussion_id?: string | null, project_id?: string | null,
+export type MessageSearchQuery = { q: string,
+/**
+ * Where the term may match: `all` (default), `title` or `content`.
+ */
+scope?: DiscSearchScope, discussion_id?: string | null, project_id?: string | null,
 /**
  * Agent type ("Codex") or federated human pseudo ("Romu - mac").
  */
@@ -4326,7 +4363,20 @@ export type ProjectDockerActionRequest = { action: ProjectDockerAction, service?
 /**
  * Browser endpoint inferred from the resolved Compose configuration.
  */
-export type ProjectDockerEndpoint = { url: string, host: string, host_status: ProjectDockerHostStatus, };
+export type ProjectDockerEndpoint = { url: string, host: string, host_status: ProjectDockerHostStatus,
+/**
+ * KT-585 — the container port this URL reaches. The compose file may name
+ * the published one through a variable (`${HTTPS_PORT:-443}:443`), so the
+ * configured value is a default, not a fact; the running container's own
+ * publisher is matched against this to rewrite the URL.
+ */
+target_port: number | null,
+/**
+ * False while nothing is listening on it. Opening the link then reaches
+ * whatever else holds the port — on shared infrastructure, another
+ * project answering with a plausible error.
+ */
+live: boolean, };
 
 /**
  * Structured Docker Compose state for one configured project service.
@@ -4903,6 +4953,11 @@ export type ReviseMessageRequest = { message_id: string, content: string, expect
  * Plural replacement for `target_agent`; empty preserves legacy clients.
  */
 target_agents?: Array<AgentType>, };
+
+/**
+ * DELETE /api/discussions/:id/messages/:message_id
+ */
+export type ReviseNoteRequest = { content: string, };
 
 /**
  * Rotation metrics — KT-193 DoD 6.
@@ -6161,6 +6216,8 @@ export type TransformDataValueType = "string" | "number" | "boolean";
  * triggers that don't need variables.
  */
 export type TriggerWorkflowRequest = { variables?: Record<string, string>, };
+
+export type UnlinkPlanningDiscussionRequest = { discussion_id: string, actor?: PlanningActor, };
 
 export type UpdateBatchCompareManualScoreRequest = {
 /**

@@ -59,7 +59,9 @@ export function DiscussionAssetsPanel({
 }) {
   const [query, setQuery] = useState('');
   const [filter, setFilter] = useState<AssetFilter>('all');
-  const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
+  // KT-587 — keyed by the filter it counts for, so a narrower search starts at
+  // one page again without an effect writing that reset one render late.
+  const [paging, setPaging] = useState({ key: '', count: PAGE_SIZE });
   // Floor imposed by a targeted open request, so the grid behind the viewer has
   // really scrolled to the asset. Kept apart from `visibleCount`: the same
   // request clears the query and filter, and their own reset would undo it.
@@ -70,21 +72,26 @@ export function DiscussionAssetsPanel({
   useEffect(() => {
     setQuery('');
     setFilter('all');
-    setVisibleCount(PAGE_SIZE);
+    setPaging({ key: '', count: PAGE_SIZE });
     setPinnedCount(0);
     setShowGenerate(false);
   }, [discussionId]);
 
-  useEffect(() => setVisibleCount(PAGE_SIZE), [query, filter]);
-
-  useEffect(() => {
-    if (!openAssetRequest) return;
+  // KT-587 — a request to reveal one asset is an event, not state to keep in
+  // step. React's own shape for that is an adjustment during render: the reset
+  // lands in the same pass, where an effect showed the old filter first and the
+  // asset appeared to be missing for a frame.
+  // Unanswered at mount: the panel is often opened BY the request, so seeding
+  // this with it would swallow the very request that opened the panel.
+  const [answeredRequest, setAnsweredRequest] = useState<typeof openAssetRequest>(null);
+  if (openAssetRequest && openAssetRequest !== answeredRequest) {
+    setAnsweredRequest(openAssetRequest);
     setQuery('');
     setFilter('all');
     const ordered = [...files].sort((left, right) => right.created_at.localeCompare(left.created_at));
     const index = ordered.findIndex(file => file.id === openAssetRequest.assetId);
     setPinnedCount(index >= 0 ? index + 1 : 0);
-  }, [files, openAssetRequest]);
+  }
 
   const counts = useMemo(() => ({
     all: files.length,
@@ -108,6 +115,8 @@ export function DiscussionAssetsPanel({
   }, [files, filter, query]);
 
   // The floor only ever widens the page, never narrows it.
+  const pagingKey = `${filter}\u0000${query}`;
+  const visibleCount = paging.key === pagingKey ? paging.count : PAGE_SIZE;
   const shownCount = Math.max(visibleCount, pinnedCount);
   const visibleFiles = filteredFiles.slice(0, shownCount);
   // The carousel walks the whole discussion, not the current page or filter:
@@ -234,7 +243,7 @@ export function DiscussionAssetsPanel({
               <button
                 type="button"
                 className="btn btn-sm disc-assets-load-more"
-                onClick={() => setVisibleCount(shownCount + PAGE_SIZE)}
+                onClick={() => setPaging({ key: pagingKey, count: shownCount + PAGE_SIZE })}
               >
                 {t('disc.assets.loadMore', filteredFiles.length - shownCount)}
               </button>

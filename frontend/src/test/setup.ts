@@ -74,6 +74,14 @@ for (const name of ['localStorage', 'sessionStorage'] as const) {
   });
 }
 
+// NOT cleared between tests, and that is a known weakness rather than a
+// choice. A component that remembers a choice carries it into the next test,
+// which then passes or fails depending on what ran before it. Clearing here
+// is the right fix, but it currently breaks specs that rely on state a
+// PREVIOUS test wrote (the sidebar collapse suite seeds a group that the
+// contacts specs then read). Untangling those is its own change; until then,
+// a spec whose component persists a choice clears that key itself.
+
 // Unit tests exercise the synchronous `t()` API directly and intentionally
 // validate every shipped dictionary. Production preloads only the active locale
 // in main.tsx; the test harness loads all chunks once before specs start.

@@ -2,7 +2,7 @@
 
 /* ── Panel shell ─────────────────────────────────────── */
 .git-panel {
-  width: min(400px, 42vw);
+  width: var(--kr-panel-w);
 }
 
 .git-panel[data-expanded="true"] {

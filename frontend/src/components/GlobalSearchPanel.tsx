@@ -13,7 +13,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { discussions as discussionsApi } from '../lib/api';
 import { formatRelativeTime } from '../lib/relativeTime';
 import { Search, X, Loader2 } from 'lucide-react';
-import type { MessageSearchHit, Project } from '../types/generated';
+import type { DiscSearchScope, MessageSearchHit, Project } from '../types/generated';
 
 const PAGE_SIZE = 20;
 
@@ -67,6 +67,17 @@ export function GlobalSearchPanel({
 }: GlobalSearchPanelProps) {
   const [query, setQuery] = useState(initialQuery);
   const [projectId, setProjectId] = useState('');
+  // Where the term may match. Kept in localStorage rather than reset per
+  // visit: someone who searches titles once usually searches titles again,
+  // and re-picking it every time is the friction the filter was meant to end.
+  const [scope, setScope] = useState<DiscSearchScope>(() => {
+    try {
+      const saved = localStorage.getItem('kronn:searchScope');
+      return saved === 'title' || saved === 'content' || saved === 'notes' ? saved : 'all';
+    } catch {
+      return 'all';
+    }
+  });
   const [author, setAuthor] = useState('');
   const [since, setSince] = useState('');
   const [until, setUntil] = useState('');
@@ -106,6 +117,7 @@ export function GlobalSearchPanel({
     try {
       const page = await discussionsApi.searchMessages({
         q: trimmed,
+        scope,
         projectId: projectId || undefined,
         author: author || undefined,
         // A date input gives a bare day; the backend compares RFC3339 strings,
@@ -170,6 +182,23 @@ export function GlobalSearchPanel({
           data-testid="global-search-input"
         />
         <div className="disc-global-search-filters">
+          <select
+            value={scope}
+            onChange={event => {
+              const next = event.target.value as DiscSearchScope;
+              setScope(next);
+              try { localStorage.setItem('kronn:searchScope', next); } catch { /* non-fatal */ }
+            }}
+            aria-label={t('disc.globalSearch.filterScope')}
+            data-testid="global-search-scope"
+          >
+            <option value="all">{t('disc.globalSearch.scopeAll')}</option>
+            <option value="title">{t('disc.globalSearch.scopeTitle')}</option>
+            <option value="content">{t('disc.globalSearch.scopeContent')}</option>
+            {/* KT-580 — `all` already reaches notes; this is for when the note
+                IS what you are after and the transcript around it is noise. */}
+            <option value="notes">{t('disc.globalSearch.scopeNotes')}</option>
+          </select>
           <select
             value={projectId}
             onChange={event => setProjectId(event.target.value)}

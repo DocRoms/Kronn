@@ -693,6 +693,13 @@ struct StackSignals {
     python: bool,
     go: bool,
     php: bool,
+    /// Linters that ship with their toolchain — clippy, `go vet` — can be
+    /// assumed from the language. These three cannot: they are optional
+    /// packages, and naming one the project does not have puts a command in
+    /// eight instruction files that every agent then tries to run.
+    phpcs: bool,
+    ruff: bool,
+    js_lint_script: bool,
     /// `pnpm` if `pnpm-lock.yaml`, `npm` if `package-lock.json`, etc.
     js_pm: Option<&'static str>,
 }
@@ -760,19 +767,27 @@ impl StackSignals {
             parts.push("cargo clippy --all-targets -- -D warnings".into());
         }
         if let Some(pm) = self.js_pm {
+            // `tsc` comes with the TypeScript the tsconfig implies; a `lint`
+            // script is whatever the project chose to write, and chaining it
+            // unconditionally made the whole command fail where none exists.
+            let mut js: Vec<String> = Vec::new();
             if self.typescript {
-                parts.push(format!("{} tsc --noEmit && {} lint", pm, pm));
-            } else if self.javascript {
-                parts.push(format!("{} lint", pm));
+                js.push(format!("{} tsc --noEmit", pm));
+            }
+            if (self.typescript || self.javascript) && self.js_lint_script {
+                js.push(format!("{} lint", pm));
+            }
+            if !js.is_empty() {
+                parts.push(js.join(" && "));
             }
         }
-        if self.python {
+        if self.python && self.ruff {
             parts.push("ruff check".into());
         }
         if self.go {
             parts.push("go vet ./...".into());
         }
-        if self.php {
+        if self.php && self.phpcs {
             parts.push("phpcs".into());
         }
         if parts.is_empty() {
@@ -819,6 +834,7 @@ fn detect_stack_signals(project_path: &Path) -> StackSignals {
             s.rust = true;
         }
         if p.join("package.json").is_file() {
+            s.js_lint_script = s.js_lint_script || js_lint_script_present(p);
             if p.join("tsconfig.json").is_file() || p.join("tsconfig.app.json").is_file() {
                 s.typescript = true;
             } else {
@@ -846,15 +862,86 @@ fn detect_stack_signals(project_path: &Path) -> StackSignals {
             || p.join("setup.py").is_file()
         {
             s.python = true;
+            s.ruff = s.ruff || ruff_present(p);
         }
         if p.join("go.mod").is_file() {
             s.go = true;
         }
         if p.join("composer.json").is_file() {
             s.php = true;
+            s.phpcs = s.phpcs || php_codesniffer_present(p);
         }
     }
     s
+}
+
+/// phpcs is a Composer package (`squizlabs/php_codesniffer`), not part of PHP.
+/// Look for the binary, a declared dependency, or a ruleset.
+fn php_codesniffer_present(dir: &Path) -> bool {
+    if dir.join("vendor").join("bin").join("phpcs").is_file() {
+        return true;
+    }
+    if ["phpcs.xml", "phpcs.xml.dist", ".phpcs.xml.dist"]
+        .iter()
+        .any(|name| dir.join(name).is_file())
+    {
+        return true;
+    }
+    std::fs::read_to_string(dir.join("composer.json"))
+        .map(|body| body.contains("squizlabs/php_codesniffer"))
+        .unwrap_or(false)
+}
+
+/// ruff is a package too, so the interpreter's presence says nothing. A config
+/// section or a declared dependency does.
+fn ruff_present(dir: &Path) -> bool {
+    if dir.join("ruff.toml").is_file() || dir.join(".ruff.toml").is_file() {
+        return true;
+    }
+    if let Ok(body) = std::fs::read_to_string(dir.join("pyproject.toml")) {
+        if body.contains("[tool.ruff]") || body.contains("[tool.ruff.") {
+            return true;
+        }
+        if declares_requirement(&body, "ruff") {
+            return true;
+        }
+    }
+    for name in ["requirements.txt", "requirements-dev.txt", "dev-requirements.txt"] {
+        if let Ok(body) = std::fs::read_to_string(dir.join(name)) {
+            if declares_requirement(&body, "ruff") {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// True when one line names this package — `ruff`, `ruff==0.5.0`, `"ruff>=1"`.
+/// A substring match would fire on any word containing it.
+fn declares_requirement(body: &str, package: &str) -> bool {
+    body.lines().any(|line| {
+        let line = line.trim().trim_start_matches(['"', '\'', '-']).trim();
+        let name = line
+            .split(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_')
+            .next()
+            .unwrap_or("");
+        name.eq_ignore_ascii_case(package)
+    })
+}
+
+/// A `lint` script is whatever the project wrote; many have none.
+fn js_lint_script_present(dir: &Path) -> bool {
+    let Ok(body) = std::fs::read_to_string(dir.join("package.json")) else {
+        return false;
+    };
+    serde_json::from_str::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|json| {
+            json.get("scripts")
+                .and_then(|scripts| scripts.get("lint"))
+                .map(|lint| lint.is_string())
+        })
+        .unwrap_or(false)
 }
 
 fn has_visible_files(dir: &Path) -> bool {
@@ -1543,7 +1630,13 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let root = tmp.path();
         std::fs::create_dir_all(root.join("frontend")).unwrap();
-        std::fs::write(root.join("frontend/package.json"), "{}").unwrap();
+        // A real `lint` script: this test is about the one-level walk, and
+        // without one the lint half is dropped on purpose (KT-584).
+        std::fs::write(
+            root.join("frontend/package.json"),
+            "{\"scripts\": {\"lint\": \"eslint src\"}}",
+        )
+        .unwrap();
         std::fs::write(root.join("frontend/tsconfig.json"), "{}").unwrap();
         std::fs::write(
             root.join("frontend/pnpm-lock.yaml"),
@@ -1572,10 +1665,17 @@ mod tests {
     fn prefill_chains_test_and_lint_commands_for_multi_stack() {
         // Rust + Python both detected → `cargo test && pytest`,
         // `cargo clippy … && ruff check`. Stack summary lists both.
+        // The pyproject declares ruff: without it the lint half is dropped,
+        // which is what `lint_cmd_omits_ruff_when_the_project_does_not_use_it`
+        // covers.
         let tmp = tempfile::TempDir::new().unwrap();
         let root = tmp.path();
         std::fs::write(root.join("Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
-        std::fs::write(root.join("pyproject.toml"), "[project]\nname = \"x\"\n").unwrap();
+        std::fs::write(
+            root.join("pyproject.toml"),
+            "[project]\nname = \"x\"\n\n[tool.ruff]\nline-length = 100\n",
+        )
+        .unwrap();
         std::fs::create_dir_all(root.join("docs")).unwrap();
         std::fs::write(
             root.join("docs/AGENTS.md"),
@@ -1589,6 +1689,148 @@ mod tests {
         assert!(body.contains("Stack: Rust + Python"), "got: {body}");
         assert!(body.contains("Test: cargo test && pytest"));
         assert!(body.contains("Lint: cargo clippy --all-targets -- -D warnings && ruff check"));
+    }
+
+    /// KT-584 — phpcs is a Composer package, not part of PHP. Kronn used to
+    /// conclude it existed from a composer.json alone, and wrote `Lint: phpcs`
+    /// into all eight instruction files of a project that cannot run it.
+    #[test]
+    fn lint_cmd_omits_phpcs_when_the_project_does_not_have_it() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path();
+        std::fs::write(root.join("composer.json"), "{\"name\": \"acme/site\"}").unwrap();
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::write(root.join("docs/AGENTS.md"), "Lint: {{LINT_CMD}}\n").unwrap();
+
+        prefill_all_for_tests(root);
+
+        let body = std::fs::read_to_string(root.join("docs/AGENTS.md")).unwrap();
+        assert!(!body.contains("phpcs"), "still claims phpcs: {body}");
+    }
+
+    #[test]
+    fn lint_cmd_keeps_phpcs_when_the_project_declares_it() {
+        for (name, contents) in [
+            ("composer.json", "{\"require-dev\": {\"squizlabs/php_codesniffer\": \"^3\"}}"),
+            ("phpcs.xml.dist", "<ruleset name=\"acme\"/>"),
+        ] {
+            let tmp = tempfile::TempDir::new().unwrap();
+            let root = tmp.path();
+            // composer.json is what marks the project as PHP at all.
+            std::fs::write(root.join("composer.json"), "{\"name\": \"acme/site\"}").unwrap();
+            std::fs::write(root.join(name), contents).unwrap();
+            std::fs::create_dir_all(root.join("docs")).unwrap();
+            std::fs::write(root.join("docs/AGENTS.md"), "Lint: {{LINT_CMD}}\n").unwrap();
+
+            prefill_all_for_tests(root);
+
+            let body = std::fs::read_to_string(root.join("docs/AGENTS.md")).unwrap();
+            assert!(body.contains("Lint: phpcs"), "via {name}, got: {body}");
+        }
+    }
+
+    /// The vendored binary counts too — a project can carry phpcs without
+    /// naming it in the manifest Kronn can read.
+    #[test]
+    fn lint_cmd_keeps_phpcs_when_the_binary_is_vendored() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path();
+        std::fs::write(root.join("composer.json"), "{\"name\": \"acme/site\"}").unwrap();
+        std::fs::create_dir_all(root.join("vendor/bin")).unwrap();
+        std::fs::write(root.join("vendor/bin/phpcs"), "#!/usr/bin/env php\n").unwrap();
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::write(root.join("docs/AGENTS.md"), "Lint: {{LINT_CMD}}\n").unwrap();
+
+        prefill_all_for_tests(root);
+
+        let body = std::fs::read_to_string(root.join("docs/AGENTS.md")).unwrap();
+        assert!(body.contains("Lint: phpcs"), "got: {body}");
+    }
+
+    /// Same class of assumption, same fix: ruff does not ship with Python.
+    #[test]
+    fn lint_cmd_omits_ruff_when_the_project_does_not_use_it() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path();
+        std::fs::write(root.join("pyproject.toml"), "[project]\nname = \"x\"\n").unwrap();
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::write(root.join("docs/AGENTS.md"), "Lint: {{LINT_CMD}}\n").unwrap();
+
+        prefill_all_for_tests(root);
+
+        let body = std::fs::read_to_string(root.join("docs/AGENTS.md")).unwrap();
+        assert!(!body.contains("ruff"), "still claims ruff: {body}");
+    }
+
+    #[test]
+    fn lint_cmd_keeps_ruff_when_a_requirements_file_declares_it() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path();
+        std::fs::write(root.join("requirements.txt"), "flask==3.0\nruff==0.5.0\n").unwrap();
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::write(root.join("docs/AGENTS.md"), "Lint: {{LINT_CMD}}\n").unwrap();
+
+        prefill_all_for_tests(root);
+
+        let body = std::fs::read_to_string(root.join("docs/AGENTS.md")).unwrap();
+        assert!(body.contains("ruff check"), "got: {body}");
+    }
+
+    /// A package merely containing the letters is not a declaration.
+    #[test]
+    fn a_lookalike_package_name_does_not_count_as_ruff() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path();
+        std::fs::write(root.join("requirements.txt"), "ruffus==2.8.4\n").unwrap();
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::write(root.join("docs/AGENTS.md"), "Lint: {{LINT_CMD}}\n").unwrap();
+
+        prefill_all_for_tests(root);
+
+        let body = std::fs::read_to_string(root.join("docs/AGENTS.md")).unwrap();
+        assert!(!body.contains("ruff check"), "got: {body}");
+    }
+
+    /// A TypeScript project without a `lint` script still type-checks; chaining
+    /// `&& pnpm lint` onto it made the whole command fail.
+    #[test]
+    fn lint_cmd_drops_the_js_lint_script_when_package_json_has_none() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path();
+        std::fs::write(
+            root.join("package.json"),
+            "{\"scripts\": {\"build\": \"vite build\"}}",
+        )
+        .unwrap();
+        std::fs::write(root.join("tsconfig.json"), "{}").unwrap();
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::write(root.join("docs/AGENTS.md"), "Lint: {{LINT_CMD}}\n").unwrap();
+
+        prefill_all_for_tests(root);
+
+        let body = std::fs::read_to_string(root.join("docs/AGENTS.md")).unwrap();
+        assert!(body.contains("tsc --noEmit"), "got: {body}");
+        assert!(!body.contains(" lint"), "still chains a missing script: {body}");
+    }
+
+    #[test]
+    fn lint_cmd_keeps_the_js_lint_script_when_it_exists() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path();
+        std::fs::write(
+            root.join("package.json"),
+            "{\"scripts\": {\"lint\": \"eslint src\"}}",
+        )
+        .unwrap();
+        std::fs::write(root.join("tsconfig.json"), "{}").unwrap();
+        std::fs::write(root.join("pnpm-lock.yaml"), "lockfileVersion: '9.0'\n").unwrap();
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::write(root.join("docs/AGENTS.md"), "Lint: {{LINT_CMD}}\n").unwrap();
+
+        prefill_all_for_tests(root);
+
+        let body = std::fs::read_to_string(root.join("docs/AGENTS.md")).unwrap();
+        assert!(body.contains("pnpm tsc --noEmit && pnpm lint"), "got: {body}");
     }
 
     #[test]

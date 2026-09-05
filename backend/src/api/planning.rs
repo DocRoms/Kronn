@@ -8,7 +8,7 @@ use crate::models::{
     AddPlanningBlockerRequest, ApiErrorCode, ApiResponse, CreatePlanningTaskRequest,
     DiscussionPlan, LinkPlanningDiscussionRequest, PlanningTaskChange, PlanningTaskDetail,
     PlanningTaskListQuery, PlanningTaskListResponse, RemovePlanningBlockerRequest,
-    UpdatePlanningDodItemRequest, UpdatePlanningTaskRequest,
+    UnlinkPlanningDiscussionRequest, UpdatePlanningDodItemRequest, UpdatePlanningTaskRequest,
 };
 use crate::AppState;
 
@@ -117,6 +117,27 @@ pub async fn link_discussion(
         .db
         .with_conn(move |connection| {
             crate::db::planning::link_discussion(connection, &id, &request)
+        })
+        .await
+    {
+        Ok(plan) => Json(ApiResponse::ok(plan)),
+        Err(error) => planning_error(error),
+    }
+}
+
+/// KT-594 — `DELETE /api/planning/tasks/{id}/discussions`
+///
+/// The counterpart of the POST above. A task could be added to a plan and then
+/// only moved between "active" and "later", never taken out.
+pub async fn unlink_discussion(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(request): Json<UnlinkPlanningDiscussionRequest>,
+) -> Json<ApiResponse<DiscussionPlan>> {
+    match state
+        .db
+        .with_conn(move |connection| {
+            crate::db::planning::unlink_discussion(connection, &id, &request)
         })
         .await
     {

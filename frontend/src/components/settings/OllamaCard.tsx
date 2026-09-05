@@ -18,6 +18,10 @@ interface OllamaCardProps {
   t: (key: string, ...args: (string | number)[]) => string;
   modelCostSuffix?: (model: string) => string;
   headerAccessory?: ReactNode;
+  /** KT-586 — lets the settings page pass the name-as-mention-colour control,
+   *  so the card says "Ollama" once instead of once as a title and again as a
+   *  colour chip beside it. */
+  title?: ReactNode;
 }
 
 interface ContextFeedback {
@@ -65,7 +69,7 @@ function CaniRunHint({ t }: { t: (key: string) => string }) {
   );
 }
 
-export function OllamaCard({ t, modelCostSuffix, headerAccessory }: OllamaCardProps) {
+export function OllamaCard({ t, modelCostSuffix, headerAccessory, title }: OllamaCardProps) {
   const [health, setHealth] = useState<OllamaHealthResponse | null>(null);
   const [models, setModels] = useState<OllamaModel[]>([]);
   const [loading, setLoading] = useState(true);
@@ -312,7 +316,7 @@ export function OllamaCard({ t, modelCostSuffix, headerAccessory }: OllamaCardPr
       <div className="set-ollama-header">
         <div className="flex-row gap-4" style={{ alignItems: 'center' }}>
           <div className="set-dot" data-on={health?.status === 'online'} aria-hidden="true" />
-          <span className="font-semibold text-base">Ollama</span>
+          {title ?? <span className="font-semibold text-base">Ollama</span>}
           <span className="set-ollama-status" style={{ color: statusColor }}>
             {loading ? <Loader2 size={10} className="spin" /> : statusLabel}
           </span>

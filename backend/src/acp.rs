@@ -710,6 +710,35 @@ fn session_id(result: &Value) -> Result<String, AcpError> {
         .ok_or(AcpError::InvalidSessionResponse)
 }
 
+/// The turn's usage as `session/prompt` reports it. ACP puts it on the
+/// response; only some runtimes also stream it.
+fn usage_from_prompt_result(result: &Value) -> Option<AcpSessionEvent> {
+    let usage = result.get("usage")?;
+    let input_tokens = usage
+        .get("inputTokens")
+        .and_then(Value::as_u64)
+        .unwrap_or_default();
+    let output_tokens = usage
+        .get("outputTokens")
+        .and_then(Value::as_u64)
+        .unwrap_or_default();
+    (input_tokens > 0 || output_tokens > 0).then_some(AcpSessionEvent::Usage {
+        input_tokens,
+        output_tokens,
+    })
+}
+
+/// A `{"type":"text","text":"…"}` content block, wherever it appears — on its
+/// own or inside an array.
+fn push_text_block(block: &Value, events: &mut Vec<AcpSessionEvent>) {
+    if block.get("type").and_then(Value::as_str) != Some("text") {
+        return;
+    }
+    if let Some(text) = block.get("text").and_then(Value::as_str) {
+        events.push(AcpSessionEvent::TextDelta(text.to_owned()));
+    }
+}
+
 fn events_from_notifications(messages: Vec<Value>, session_id: &str) -> Vec<AcpSessionEvent> {
     messages
         .into_iter()
@@ -730,18 +759,26 @@ fn events_from_notifications(messages: Vec<Value>, session_id: &str) -> Vec<AcpS
                 .get("update")
                 .or_else(|| params.get("sessionUpdate"))?;
             let mut events = Vec::new();
-            if let Some(content) = update.get("content") {
+            // Which kind of chunk this is. A runtime that does not say keeps the
+            // old behaviour — its text is the answer.
+            let kind = update.get("sessionUpdate").and_then(Value::as_str);
+            // The model's private reasoning, which several runtimes stream
+            // before the answer. It is deliberately never shown: it is a
+            // scratchpad, and concatenating it into the reply would leak it.
+            let is_thought = matches!(kind, Some("agent_thought_chunk"));
+            if let (Some(content), false) = (update.get("content"), is_thought) {
                 match content {
                     Value::String(text) => events.push(AcpSessionEvent::TextDelta(text.to_owned())),
                     Value::Array(blocks) => {
                         for block in blocks {
-                            if block.get("type").and_then(Value::as_str) == Some("text") {
-                                if let Some(text) = block.get("text").and_then(Value::as_str) {
-                                    events.push(AcpSessionEvent::TextDelta(text.to_owned()));
-                                }
-                            }
+                            push_text_block(block, &mut events);
                         }
                     }
+                    // A single block, unwrapped: `{"type":"text","text":"…"}`.
+                    // OpenCode streams every chunk this way, so the whole reply
+                    // fell through this match and the room showed nothing at
+                    // all — no text, and no reason for its absence.
+                    Value::Object(_) => push_text_block(content, &mut events),
                     _ => {}
                 }
             }
@@ -924,11 +961,18 @@ impl AcpTransport for AcpJsonRpcTransport {
         loop {
             tokio::select! {
                 result = &mut request => {
-                    result?;
+                    let outcome = result?;
                     while let Ok(frame) = notifications.try_recv() {
                         for event in events_from_notifications(vec![frame], &target.session_id) {
                             let _ = events.send(event).await;
                         }
+                    }
+                    // The turn's own token count lives on the response, not in
+                    // the stream: a runtime that reports usage only here left
+                    // the turn recorded at zero tokens, so a room showed a
+                    // reply that had apparently cost nothing.
+                    if let Some(usage) = usage_from_prompt_result(&outcome) {
+                        let _ = events.send(usage).await;
                     }
                     let _ = events.send(AcpSessionEvent::Completed).await;
                     return Ok(());
@@ -1594,6 +1638,89 @@ mod tests {
             "fixture-session",
         );
         assert_eq!(events, vec![AcpSessionEvent::TextDelta("ACP delta".into())]);
+    }
+
+    /// KT-543 — captured from a live `opencode acp` run. Every chunk arrives as
+    /// a bare content OBJECT, which the parser handled neither as a string nor
+    /// as an array: the whole reply fell through and the room showed nothing,
+    /// with no reason for the blank.
+    #[test]
+    fn a_single_content_block_is_read_as_text() {
+        let events = events_from_notifications(
+            vec![json!({
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "sessionId": "ses_live",
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "messageId": "msg_1",
+                        "content": {"type": "text", "text": "Bonjour"}
+                    }
+                }
+            })],
+            "ses_live",
+        );
+        assert_eq!(events, vec![AcpSessionEvent::TextDelta("Bonjour".into())]);
+    }
+
+    /// The same runtime streams its reasoning first, in the same shape. It is a
+    /// scratchpad: reading the block must not mean showing it.
+    #[test]
+    fn a_thought_chunk_is_never_forwarded_as_text() {
+        let events = events_from_notifications(
+            vec![json!({
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "sessionId": "ses_live",
+                    "update": {
+                        "sessionUpdate": "agent_thought_chunk",
+                        "messageId": "msg_1",
+                        "content": {"type": "text", "text": "The user is greeting me in French."}
+                    }
+                }
+            })],
+            "ses_live",
+        );
+        assert!(events.is_empty(), "reasoning leaked into the reply: {events:?}");
+    }
+
+    /// A runtime that does not label its chunks keeps the behaviour it had.
+    #[test]
+    fn an_unlabelled_chunk_is_still_treated_as_the_answer() {
+        let events = events_from_notifications(
+            vec![json!({
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {"sessionId": "s1", "update": {"content": "hello"}}
+            })],
+            "s1",
+        );
+        assert_eq!(events, vec![AcpSessionEvent::TextDelta("hello".into())]);
+    }
+
+    /// ACP reports the turn's tokens on the response. Dropping it recorded the
+    /// turn at zero — a reply that had apparently cost nothing.
+    #[test]
+    fn usage_is_taken_from_the_prompt_response() {
+        let result = json!({
+            "stopReason": "end_turn",
+            "usage": {"inputTokens": 6126, "outputTokens": 28, "totalTokens": 7946}
+        });
+        assert_eq!(
+            usage_from_prompt_result(&result),
+            Some(AcpSessionEvent::Usage { input_tokens: 6126, output_tokens: 28 }),
+        );
+    }
+
+    #[test]
+    fn a_response_without_usage_reports_none() {
+        assert_eq!(usage_from_prompt_result(&json!({"stopReason": "end_turn"})), None);
+        assert_eq!(
+            usage_from_prompt_result(&json!({"usage": {"inputTokens": 0, "outputTokens": 0}})),
+            None,
+        );
     }
 
     #[test]

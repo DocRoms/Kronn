@@ -1,0 +1,128 @@
+/* KT-581 — the switcher sits on top of the panel it switches, not adrift
+   under the discussion header. Same column, same width: the two read as one
+   object rather than as a menu that happens to change something elsewhere. */
+
+/* The utility column: the strip on top, the open panel below it. Without a
+   column here the strip becomes a sibling of the panel inside the page's flex
+   ROW, and lands beside it instead of above. */
+.disc-utility-col {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex-shrink: 0;
+  /* The column owns the height; the panel takes what the strip leaves. Each
+     panel declares `height: 100%`, which inside a flex column means the full
+     column — so the strip was pushed out of view, and with a tall panel like
+     the terminal it disappeared entirely. */
+}
+
+.disc-utility-col > *:not(.disc-panel-switcher) {
+  flex: 1 1 auto;
+  min-height: 0;
+  height: auto;
+}
+
+/* The strip spans whatever the panel below it is: a panel that expands (the
+   code panel does) must not leave the strip narrower than what it controls. */
+.disc-panel-switcher {
+  width: 100%;
+}
+
+.disc-panel-switcher {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+  /* Same height as the message-search bar it opens beside: two bars on one
+     row that do not line up read as a mistake, however small the gap. */
+  min-height: 38px;
+  /* Content-box on purpose: the search bar's own border sits outside its
+     38px, so including ours here left the two a pixel apart. */
+  box-sizing: content-box;
+  padding: 0 var(--kr-sp-1);
+  background: var(--kr-bg-subtle);
+}
+
+/* Open, it sits directly on the panel and shares its edge. Closed, it is a
+   narrow strip holding one control — but it keeps the border's pixel either
+   way, so it stays level with the search bar whatever state it is in. */
+.disc-panel-switcher {
+  border-bottom: 1px solid transparent;
+}
+
+.disc-panel-switcher[data-open='true'] {
+  border-bottom-color: var(--kr-border-ghost);
+}
+
+.disc-panel-switcher[data-open='false'] {
+  border-left: 1px solid var(--kr-border-ghost);
+}
+
+.disc-panel-switcher-item {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 5px 7px;
+  border: 1px solid transparent;
+  border-radius: var(--kr-r-sm);
+  background: none;
+  color: var(--kr-text-tertiary);
+  cursor: pointer;
+}
+
+.disc-panel-switcher-item:hover {
+  background: var(--kr-bg-hover);
+  color: var(--kr-text-primary);
+}
+
+.disc-panel-switcher-item[data-active='true'] {
+  border-color: var(--kr-accent);
+  background: var(--kr-bg-hover);
+  color: var(--kr-text-primary);
+}
+
+/* Small enough to sit on the icon without covering it: the count is a hint
+   here, not the reason the button exists. */
+.disc-panel-switcher-badge {
+  position: absolute;
+  top: -2px;
+  right: -2px;
+  min-width: 14px;
+  padding: 0 3px;
+  border-radius: var(--kr-r-pill);
+  background: var(--kr-accent);
+  color: var(--kr-text-on-dark);
+  font-size: 9px;
+  line-height: 14px;
+  font-weight: 600;
+  text-align: center;
+}
+
+/* Panels first, then what the discussion DOES. The rule keeps a destructive
+   action from sitting flush against a panel someone meant to open. */
+.disc-panel-switcher-sep {
+  width: 1px;
+  align-self: stretch;
+  margin: 2px 4px;
+  background: var(--kr-border-ghost);
+}
+
+/* Delete keeps the colour it had in the header. A destructive action that
+   looks like its neighbours is one misplaced click away from being used. */
+.disc-panel-switcher-item[data-action='delete'] {
+  color: var(--kr-error);
+}
+
+.disc-panel-switcher-item[data-action='delete']:hover {
+  color: var(--kr-error);
+  background: rgba(var(--kr-error-rgb), 0.12);
+}
+
+/* The open control reads as pressed while a panel is showing, so the strip
+   says which of its buttons opened what is on screen. */
+.disc-panel-switcher-toggle[data-active='true'] {
+  border-color: var(--kr-accent);
+  background: var(--kr-bg-hover);
+  color: var(--kr-text-primary);
+}

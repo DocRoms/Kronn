@@ -349,6 +349,53 @@ fn host_url(host: &str, port: Option<(u16, u16)>, tls_hint: bool) -> String {
     }
 }
 
+/// KT-585 — point the URL at the port the container actually published.
+///
+/// A compose file can name it through a variable, so several projects on one
+/// machine take turns on 443 and the rest land on 8443, 9443… Reading the
+/// configured default sent the link to whichever project holds 443, which
+/// answers with an error from an unrelated application — nothing says you are
+/// on the wrong project, so the bug gets hunted in the wrong place.
+fn republish(
+    endpoint: &ProjectDockerEndpoint,
+    mappings: &[(u16, u16)],
+    running: bool,
+) -> ProjectDockerEndpoint {
+    let mut updated = endpoint.clone();
+    updated.live = running;
+    let Some(target) = endpoint.target_port else {
+        return updated;
+    };
+    let Some((_, published)) = mappings.iter().find(|(port, _)| *port == target) else {
+        return updated;
+    };
+    if let Some(url) = with_port(&endpoint.url, *published) {
+        updated.url = url;
+    }
+    updated
+}
+
+/// Replace (or drop) an URL's port, keeping everything else byte for byte —
+/// the endpoint may carry a path from `APP_URL`, and re-deriving the URL would
+/// lose it.
+fn with_port(url: &str, published: u16) -> Option<String> {
+    let (scheme, rest) = url.split_once("://")?;
+    let (authority, path) = match rest.find('/') {
+        Some(index) => (&rest[..index], &rest[index..]),
+        None => (rest, ""),
+    };
+    let host = authority
+        .rsplit_once(':')
+        .filter(|(_, port)| port.parse::<u16>().is_ok())
+        .map_or(authority, |(host, _)| host);
+    let default_port = (scheme == "https" && published == 443) || (scheme == "http" && published == 80);
+    Some(if default_port {
+        format!("{scheme}://{host}{path}")
+    } else {
+        format!("{scheme}://{host}:{published}{path}")
+    })
+}
+
 fn service_endpoints(
     service: &Value,
     mappings: Option<&HostMappings>,
@@ -406,6 +453,7 @@ fn service_endpoints(
         }
     }
 
+    let target_port = web_port.map(|(target, _)| target);
     let mut seen = HashSet::new();
     urls.into_iter()
         .filter_map(|url| {
@@ -414,6 +462,10 @@ fn service_endpoints(
                 host_status: host_status(&host, mappings),
                 host,
                 url,
+                target_port,
+                // Nothing has been inspected yet: `parse_services` decides this
+                // against the running container.
+                live: false,
             })
         })
         .collect()
@@ -447,6 +499,21 @@ fn value_string(value: &Value, names: &[&str]) -> Option<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
+}
+
+/// The published/target pair, as the running container reports it. This is the
+/// authority: `docker compose config` only knows the compose file's default.
+fn publisher_mapping(value: &Value) -> Option<(u16, u16)> {
+    let target = value
+        .get("TargetPort")
+        .or_else(|| value.get("target_port"))
+        .and_then(Value::as_u64)?;
+    let published = value
+        .get("PublishedPort")
+        .or_else(|| value.get("published_port"))
+        .and_then(Value::as_u64)
+        .filter(|port| *port > 0)?;
+    Some((u16::try_from(target).ok()?, u16::try_from(published).ok()?))
 }
 
 fn publisher_port(value: &Value) -> Option<String> {
@@ -503,22 +570,38 @@ fn parse_services(
             let service = value_string(value, &["Service", "service"])?;
             let state =
                 value_string(value, &["State", "state"]).unwrap_or_else(|| "unknown".to_string());
-            let ports = value
+            let publishers = value
                 .get("Publishers")
                 .or_else(|| value.get("publishers"))
-                .and_then(Value::as_array)
+                .and_then(Value::as_array);
+            let ports = publishers
                 .map(|publishers| publishers.iter().filter_map(publisher_port).collect())
                 .unwrap_or_default();
+            let mappings = publishers
+                .map(|publishers| {
+                    publishers
+                        .iter()
+                        .filter_map(publisher_mapping)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let running = state.eq_ignore_ascii_case("running");
             Some(ProjectDockerService {
                 endpoints: configured
                     .iter()
                     .find(|entry| entry.name == service)
-                    .map(|entry| entry.endpoints.clone())
+                    .map(|entry| {
+                        entry
+                            .endpoints
+                            .iter()
+                            .map(|endpoint| republish(endpoint, &mappings, running))
+                            .collect()
+                    })
                     .unwrap_or_default(),
                 service,
                 container_name: value_string(value, &["Name", "name"]),
                 image: value_string(value, &["Image", "image"]),
-                running: state.eq_ignore_ascii_case("running"),
+                running,
                 state,
                 status: value_string(value, &["Status", "status"]),
                 health: value_string(value, &["Health", "health"]),
@@ -935,6 +1018,183 @@ mod tests {
         assert_eq!(services.len(), 2);
         assert!(!services[0].running);
         assert!(services[1].running);
+    }
+
+    /// KT-585 — a compose file naming its published port through a variable
+    /// (`${HTTPS_PORT:-443}:443`) makes the configured value a default, not a
+    /// fact. Several projects on one machine take turns on 443; the rest land
+    /// on 8443 and the link must follow.
+    fn configured_with(name: &str, urls: &[&str], target_port: Option<u16>)
+        -> ConfiguredDockerService
+    {
+        ConfiguredDockerService {
+            name: name.to_string(),
+            endpoints: urls
+                .iter()
+                .map(|url| ProjectDockerEndpoint {
+                    url: (*url).to_string(),
+                    host: url_host(url).unwrap_or_default(),
+                    host_status: ProjectDockerHostStatus::Configured,
+                    target_port,
+                    live: false,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn endpoint_follows_the_port_the_container_actually_published() {
+        // Compose defaulted to 443; the running container is on 8443.
+        let output = r#"[{"Service":"php","Name":"docroms-php-1","State":"running",
+          "Publishers":[{"URL":"0.0.0.0","TargetPort":443,"PublishedPort":8443,"Protocol":"tcp"}]}]"#;
+        let services = parse_services(
+            output,
+            &[configured_with("php", &["https://fr.docroms.me"], Some(443))],
+        )
+        .unwrap();
+
+        assert_eq!(services[0].endpoints[0].url, "https://fr.docroms.me:8443");
+        assert!(services[0].endpoints[0].live);
+    }
+
+    #[test]
+    fn the_default_port_stays_out_of_the_url() {
+        let output = r#"[{"Service":"php","Name":"demo-php-1","State":"running",
+          "Publishers":[{"URL":"0.0.0.0","TargetPort":443,"PublishedPort":443,"Protocol":"tcp"}]}]"#;
+        let services = parse_services(
+            output,
+            &[configured_with("php", &["https://fr.docroms.me"], Some(443))],
+        )
+        .unwrap();
+
+        assert_eq!(services[0].endpoints[0].url, "https://fr.docroms.me");
+    }
+
+    /// The port that moved is the one the URL carried, whatever it was.
+    /// The shape `docker compose ps` really emits, captured from the container
+    /// this bug was found on. Two things a hand-written fixture would miss:
+    /// the same target port appears once per address family, and unpublished
+    /// ports come through as `PublishedPort: 0` — including a second entry for
+    /// 443 itself. Taking the first match blindly would have produced
+    /// `https://host:0`.
+    #[test]
+    fn reads_the_shape_docker_compose_ps_actually_emits() {
+        let output = r#"[{"Service":"php","Name":"docroms-web-php-1","State":"running",
+          "Publishers":[
+            {"URL":"","TargetPort":80,"PublishedPort":0,"Protocol":"tcp"},
+            {"URL":"0.0.0.0","TargetPort":443,"PublishedPort":8443,"Protocol":"tcp"},
+            {"URL":"::","TargetPort":443,"PublishedPort":8443,"Protocol":"tcp"},
+            {"URL":"","TargetPort":443,"PublishedPort":0,"Protocol":"tcp"},
+            {"URL":"","TargetPort":2019,"PublishedPort":0,"Protocol":"tcp"},
+            {"URL":"0.0.0.0","TargetPort":9000,"PublishedPort":9000,"Protocol":"tcp"}
+          ]}]"#;
+        let services = parse_services(
+            output,
+            &[configured_with("php", &["https://fr.docroms.me"], Some(443))],
+        )
+        .unwrap();
+
+        assert_eq!(services[0].endpoints[0].url, "https://fr.docroms.me:8443");
+        assert!(services[0].endpoints[0].live);
+    }
+
+    /// An exposed-but-unpublished port reaches nothing, so it must not become
+    /// the URL's port.
+    #[test]
+    fn an_unpublished_port_never_lands_in_the_url() {
+        let output = r#"[{"Service":"php","Name":"demo-php-1","State":"running",
+          "Publishers":[{"URL":"","TargetPort":443,"PublishedPort":0,"Protocol":"tcp"}]}]"#;
+        let services = parse_services(
+            output,
+            &[configured_with("php", &["https://fr.docroms.me"], Some(443))],
+        )
+        .unwrap();
+
+        assert_eq!(services[0].endpoints[0].url, "https://fr.docroms.me");
+    }
+
+    #[test]
+    fn a_republished_port_replaces_the_one_the_url_already_had() {
+        let output = r#"[{"Service":"web","Name":"demo-web-1","State":"running",
+          "Publishers":[{"URL":"0.0.0.0","TargetPort":8080,"PublishedPort":3615,"Protocol":"tcp"}]}]"#;
+        let services = parse_services(
+            output,
+            &[configured_with("web", &["http://localhost:8080"], Some(8080))],
+        )
+        .unwrap();
+
+        assert_eq!(services[0].endpoints[0].url, "http://localhost:3615");
+    }
+
+    #[test]
+    fn every_published_host_keeps_its_own_port() {
+        let output = r#"[{"Service":"php","Name":"demo-php-1","State":"running",
+          "Publishers":[{"URL":"0.0.0.0","TargetPort":443,"PublishedPort":9443,"Protocol":"tcp"}]}]"#;
+        let services = parse_services(
+            output,
+            &[configured_with(
+                "php",
+                &["https://www.docroms.me", "https://fr.docroms.me"],
+                Some(443),
+            )],
+        )
+        .unwrap();
+
+        let urls = services[0]
+            .endpoints
+            .iter()
+            .map(|endpoint| endpoint.url.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            urls,
+            vec!["https://www.docroms.me:9443", "https://fr.docroms.me:9443"]
+        );
+    }
+
+    /// A stopped container publishes nothing, so the URL would reach whatever
+    /// else holds the port — on shared infrastructure, another project
+    /// answering with a plausible error.
+    #[test]
+    fn a_stopped_container_marks_its_endpoints_as_not_live() {
+        let output = r#"[{"Service":"php","Name":"demo-php-1","State":"exited"}]"#;
+        let services = parse_services(
+            output,
+            &[configured_with("php", &["https://fr.docroms.me"], Some(443))],
+        )
+        .unwrap();
+
+        assert!(!services[0].running);
+        assert!(!services[0].endpoints[0].live);
+    }
+
+    /// An URL taken verbatim from APP_URL can carry a path; rebuilding it from
+    /// host and port would drop it.
+    #[test]
+    fn republishing_keeps_the_path_an_env_url_carried() {
+        let output = r#"[{"Service":"php","Name":"demo-php-1","State":"running",
+          "Publishers":[{"URL":"0.0.0.0","TargetPort":443,"PublishedPort":8443,"Protocol":"tcp"}]}]"#;
+        let services = parse_services(
+            output,
+            &[configured_with("php", &["https://fr.docroms.me/app"], Some(443))],
+        )
+        .unwrap();
+
+        assert_eq!(services[0].endpoints[0].url, "https://fr.docroms.me:8443/app");
+    }
+
+    /// A publisher for another container port says nothing about this URL.
+    #[test]
+    fn an_unrelated_publisher_leaves_the_url_alone() {
+        let output = r#"[{"Service":"php","Name":"demo-php-1","State":"running",
+          "Publishers":[{"URL":"0.0.0.0","TargetPort":9000,"PublishedPort":9001,"Protocol":"tcp"}]}]"#;
+        let services = parse_services(
+            output,
+            &[configured_with("php", &["https://fr.docroms.me"], Some(443))],
+        )
+        .unwrap();
+
+        assert_eq!(services[0].endpoints[0].url, "https://fr.docroms.me");
+        assert!(services[0].endpoints[0].live);
     }
 
     #[test]

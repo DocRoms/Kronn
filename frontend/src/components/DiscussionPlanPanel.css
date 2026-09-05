@@ -1,5 +1,5 @@
 .plan-panel {
-  width: min(400px, 42vw);
+  width: var(--kr-panel-w);
 }
 
 .plan-panel-header {

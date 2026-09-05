@@ -14,13 +14,14 @@ import { GitPanel } from '../components/GitPanel';
 import { TerminalPanel } from '../components/TerminalPanel';
 import { DiscussionPlanPanel } from '../components/DiscussionPlanPanel';
 import { DiscussionSettingsPanel } from '../components/DiscussionSettingsPanel';
+import { DiscussionNotesPanel } from '../components/DiscussionNotesPanel';
 import { DiscussionAssetsPanel } from '../components/DiscussionAssetsPanel';
-import { DiscussionAttachedRuns } from '../components/DiscussionAttachedRuns';
 import { InlineMediaJob } from '../components/InlineMediaJob';
 import { BatchComparePanel } from '../components/BatchComparePanel';
 import { TestModeBanner } from '../components/TestModeBanner';
 import { TestModeModal } from '../components/TestModeModal';
 import type { TestModeBlocker } from '../types/extensions';
+import { DiscussionPanelSwitcher } from '../components/DiscussionPanelSwitcher';
 import { ChatHeader } from '../components/ChatHeader';
 import { DiscussionSidebar } from '../components/DiscussionSidebar';
 import { CollectionSidebarRail } from '../components/CollectionShell';
@@ -42,6 +43,7 @@ import { saveDraft } from '../lib/chat-drafts';
 import { clearReplyDraft, loadReplyDraft, saveReplyDraft } from '../lib/chat-reply-drafts';
 import { publishMessageSendSettled } from '../lib/messageSendLifecycle';
 import { findRenderedTextRanges } from '../lib/discussionMessageSearch';
+import { triggerDownload } from '../lib/downloadBlob';
 import { consumeDiscussionWorkspaceTarget } from '../lib/discussion-navigation';
 import { buildBatchTriageRows, buildContinuationDraft, type BatchTriageRow } from '../lib/batchTriage';
 import { useT } from '../lib/I18nContext';
@@ -52,6 +54,14 @@ import {
   MessageSquare, AlertTriangle,
   ShieldCheck, Check, Rocket, Play, Zap,
   Menu, X, Clock, ExternalLink, Search, ChevronUp, ChevronDown, WifiOff, Square,
+  Images,
+  NotebookPen,
+  GitBranch,
+  Terminal,
+  Settings,
+  ListTodo,
+  Download,
+  Trash2,
 } from 'lucide-react';
 import { useIsMobile } from '../hooks/useMediaQuery';
 import {
@@ -377,6 +387,9 @@ function getTtsWorker(): Worker {
   return ttsWorker;
 }
 
+const EMPTY_ACTIONS: DiscussionAction[] = [];
+
+
 export function DiscussionsPage({
   projects,
   agents,
@@ -431,7 +444,11 @@ export function DiscussionsPage({
   // Keep the current id outside callback closures so a late response can
   // never replace the visible discussion's placeholders.
   const activeDiscussionIdRef = useRef(activeDiscussionId);
-  activeDiscussionIdRef.current = activeDiscussionId;
+  // KT-587 — synced in a layout effect, not during render. A ref written while
+  // rendering is what `react-hooks/refs` catches, and it is the same pattern
+  // `useWebSocket` already uses for its handlers. Every reader here is an
+  // async callback, so it fires long after this has run.
+  useLayoutEffect(() => { activeDiscussionIdRef.current = activeDiscussionId; }, [activeDiscussionId]);
   const [showNewDiscussion, setShowNewDiscussion] = useState(false);
   const [showGitPanel, setShowGitPanel] = useState(false);
   const [showTerminalPanel, setShowTerminalPanel] = useState(false);
@@ -440,13 +457,18 @@ export function DiscussionsPage({
   const [showPlanPanel, setShowPlanPanel] = useState(false);
   const [showSettingsPanel, setShowSettingsPanel] = useState(false);
   const [showAssetsPanel, setShowAssetsPanel] = useState(false);
+  // KT-580 — the sixth panel, and the one KT-581 existed to make room for.
+  const [showNotesPanel, setShowNotesPanel] = useState(false);
+  // Bumped when a note is written from the composer, so an open panel shows it
+  // without waiting for a reopen.
+  const [notesRefresh, setNotesRefresh] = useState(0);
   const [assetOpenRequest, setAssetOpenRequest] = useState<{ assetId: string; nonce: number } | null>(null);
   // KT-243 — carries the target run_id of the latest `shared_run_updated` WS
   // event so <DiscussionAttachedRuns> can relist only for a run_id it does
   // not already know (a known run's own card self-hydrates) — this flows
   // through the page's single existing socket subscription instead of
   // opening a second one of its own.
-  const [attachedRunsEvent, setAttachedRunsEvent] = useState<{ runId: string; seq: number } | undefined>();
+
   const [showMessageSearch, setShowMessageSearch] = useState(false);
   const [showDiscussionNotes, setShowDiscussionNotes] = useState<boolean>(() => {
     try { return localStorage.getItem('kronn:showDiscussionNotes') !== 'false'; } catch { return true; }
@@ -474,11 +496,20 @@ export function DiscussionsPage({
   const [messageSearchIndex, setMessageSearchIndex] = useState(0);
   const messageSearchInputRef = useRef<HTMLInputElement>(null);
   const messageSearchRangesRef = useRef<Range[]>([]);
-  const [discussionPlan, setDiscussionPlan] = useState<DiscussionPlan | null>(null);
+  // Loaded for the plan panel itself. Its completed/total pair used to be
+  // shown in the header button too; the panel shows it, so the switcher does
+  // not repeat it — one number, one place.
+  const [, setDiscussionPlan] = useState<DiscussionPlan | null>(null);
   const [proposalInbox, setProposalInbox] = useState<ProposalListResponse | null>(null);
   const [proposalInboxDiscussionId, setProposalInboxDiscussionId] = useState<string | null>(null);
-  const [discussionActions, setDiscussionActions] = useState<DiscussionAction[]>([]);
+  // KT-587 — keyed by the discussion they were fetched for, so switching rooms
+  // shows nothing rather than the previous room's actions for one render.
+  const [loadedActions, setLoadedActions] =
+    useState<{ discussionId: string; actions: DiscussionAction[] }>({ discussionId: '', actions: [] });
   const [executionDiscussionLinks, setExecutionDiscussionLinks] = useState<ExecutionDiscussionLink[]>([]);
+  const discussionActions = loadedActions.discussionId === activeDiscussionId
+    ? loadedActions.actions
+    : EMPTY_ACTIONS;
   const discussionActionsByMessageId = useMemo(() => {
     const byMessage = new Map<string, DiscussionAction[]>();
     discussionActions.forEach(action => {
@@ -489,8 +520,10 @@ export function DiscussionsPage({
     return byMessage;
   }, [discussionActions]);
   const handleDiscussionActionChanged = useCallback((changed: DiscussionAction) => {
-    setDiscussionActions(current => current.map(action =>
-      action.id === changed.id ? changed : action));
+    setLoadedActions(current => ({
+      ...current,
+      actions: current.actions.map(action => action.id === changed.id ? changed : action),
+    }));
   }, []);
 
   const refreshExecutionDiscussionLinks = useCallback(() => {
@@ -507,8 +540,81 @@ export function DiscussionsPage({
     return () => window.clearInterval(interval);
   }, [allDiscussions.length, refreshExecutionDiscussionLinks]);
 
+  // Export and delete moved out of the header with the panel buttons: the
+  // header now carries nothing a discussion does, only what it is.
+  const [exportingDiscussion, setExportingDiscussion] = useState(false);
+  const exportInFlight = useRef(false);
+  const exportActiveDiscussion = useCallback(async (discId: string) => {
+    if (exportInFlight.current) return;
+    exportInFlight.current = true;
+    setExportingDiscussion(true);
+    try {
+      const { filename, blob } = await discussionsApi.exportDiscussion(discId);
+      triggerDownload(filename, blob);
+      toast(t('disc.portability.exportDone'), 'success');
+    } catch (error) {
+      toast(t('disc.portability.exportError', String(error)), 'error');
+    } finally {
+      exportInFlight.current = false;
+      setExportingDiscussion(false);
+    }
+  }, [toast, t]);
+  const deleteActiveDiscussion = useCallback(async (discId: string) => {
+    if (!confirm(t('disc.confirmDelete'))) return;
+    await discussionsApi.delete(discId);
+    setActiveDiscussionId(null);
+    refetchDiscussions();
+  }, [t, refetchDiscussions]);
+
+  // One panel at a time, decided here rather than in the switcher: the rule
+  // already lived in this file (Escape closes them all), and splitting it in
+  // two is how the two halves drift apart.
+  type PanelId = 'plan' | 'assets' | 'notes' | 'git' | 'terminal' | 'settings';
+  const anyPanelOpen =
+    showGitPanel || showTerminalPanel || showPlanPanel || showSettingsPanel || showAssetsPanel
+    || showNotesPanel;
+  // Same rule the header used: a terminal is only offered when at least one
+  // agent may actually run commands.
+  const terminalEnabled = agentAccess != null && [
+    agentAccess.claude_code,
+    agentAccess.codex,
+    agentAccess.gemini_cli,
+    agentAccess.kiro,
+    agentAccess.vibe,
+    agentAccess.copilot_cli,
+  ].some(config => config?.full_access);
+  const openOnlyPanel = useCallback((panel: PanelId | null, openState?: Record<PanelId, boolean>) => {
+    // Clicking the panel already showing closes it, as the header buttons did.
+    // Without this the column can only be dismissed with Escape, and a reader
+    // who clicks the same icon twice watches nothing happen.
+    const alreadyOpen = panel != null && openState?.[panel];
+    const target = alreadyOpen ? null : panel;
+    setShowGitPanel(target === 'git');
+    setShowTerminalPanel(target === 'terminal');
+    setShowPlanPanel(target === 'plan');
+    setShowSettingsPanel(target === 'settings');
+    setShowAssetsPanel(target === 'assets');
+    setShowNotesPanel(target === 'notes');
+    if (target) {
+      // Reopening the column lands on whatever was last read, not always on
+      // the plan: someone who works in Files does not want to re-pick it.
+      try { localStorage.setItem('kronn:lastPanel', target); } catch { /* non-fatal */ }
+    }
+  }, []);
+  const openLastPanel = useCallback(() => {
+    if (anyPanelOpen) {
+      openOnlyPanel(null);
+      return;
+    }
+    let last: string | null = null;
+    try { last = localStorage.getItem('kronn:lastPanel'); } catch { /* non-fatal */ }
+    const known: PanelId[] = ['plan', 'assets', 'notes', 'git', 'terminal', 'settings'];
+    openOnlyPanel(known.includes(last as PanelId) ? (last as PanelId) : 'plan');
+  }, [anyPanelOpen, openOnlyPanel]);
+
   useEffect(() => {
-    if (!showGitPanel && !showTerminalPanel && !showPlanPanel && !showSettingsPanel && !showAssetsPanel) return;
+    if (!showGitPanel && !showTerminalPanel && !showPlanPanel && !showSettingsPanel && !showAssetsPanel
+      && !showNotesPanel) return;
     const closePanel = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return;
       setShowGitPanel(false);
@@ -519,7 +625,7 @@ export function DiscussionsPage({
     };
     window.addEventListener('keydown', closePanel);
     return () => window.removeEventListener('keydown', closePanel);
-  }, [showGitPanel, showTerminalPanel, showPlanPanel, showSettingsPanel, showAssetsPanel]);
+  }, [showGitPanel, showTerminalPanel, showPlanPanel, showSettingsPanel, showAssetsPanel, showNotesPanel]);
 
   useEffect(() => {
     setInitialGitWorkspaceId(undefined);
@@ -663,9 +769,11 @@ export function DiscussionsPage({
   const streamingMapRef = useRef(streamingMap);
   const streamingTargetMapRef = useRef(streamingTargetMap);
   const streamingTurnMapRef = useRef(streamingTurnMap);
-  streamingMapRef.current = streamingMap;
-  streamingTargetMapRef.current = streamingTargetMap;
-  streamingTurnMapRef.current = streamingTurnMap;
+  useLayoutEffect(() => {
+    streamingMapRef.current = streamingMap;
+    streamingTargetMapRef.current = streamingTargetMap;
+    streamingTurnMapRef.current = streamingTurnMap;
+  }, [streamingMap, streamingTargetMap, streamingTurnMap]);
   const partialForcingRef = useRef(false);
   // Mirrors `partialPending` for the WebSocket handler, which reads it from a
   // closure created before the refusal happened.
@@ -737,9 +845,6 @@ export function DiscussionsPage({
     setShowAssetsPanel(true);
     setAssetOpenRequest(current => ({ assetId, nonce: (current?.nonce ?? 0) + 1 }));
   }, []);
-  useEffect(() => {
-    if (!showAssetsPanel) setAssetOpenRequest(null);
-  }, [showAssetsPanel]);
   const mediaJobsRelistTimer = useRef<{ id: number; discId: string } | null>(null);
   const scheduleMediaJobsRelist = useCallback((discId: string) => {
     // Every event pushes the deadline back, so the relist always runs after
@@ -1208,14 +1313,12 @@ export function DiscussionsPage({
   }, [activeDiscussionId, activeDiscussion?.message_count]);
 
   useEffect(() => {
-    if (!activeDiscussionId) {
-      setDiscussionActions([]);
-      return;
-    }
+    if (!activeDiscussionId) return;
+    const discussionId = activeDiscussionId;
     let cancelled = false;
-    discussionActionsApi.list(activeDiscussionId)
-      .then(actions => { if (!cancelled) setDiscussionActions(actions); })
-      .catch(() => { if (!cancelled) setDiscussionActions([]); });
+    discussionActionsApi.list(discussionId)
+      .then(actions => { if (!cancelled) setLoadedActions({ discussionId, actions }); })
+      .catch(() => { if (!cancelled) setLoadedActions({ discussionId, actions: [] }); });
     return () => { cancelled = true; };
   }, [activeDiscussionId, activeDiscussion?.message_count]);
 
@@ -1409,14 +1512,14 @@ export function DiscussionsPage({
     return () => window.removeEventListener('kronn:profiles-changed', refetchProfiles);
   }, [refetchBatchSummaries]);
 
-  // WebSocket-based real-time events (presence, chat, invites)
+  // WebSocket-based real-time events (presence, chat, invites).
+  // The handler cancels in-flight sends through the `abortControllers` ref.
+  // The rule would have that registry held in state; it must not be — an
+  // AbortController is not render data, and storing it there re-renders the
+  // page for every request in flight. Declared here rather than worked around.
+  // eslint-disable-next-line react-hooks/immutability
   const handleWsMessage = useCallback((msg: WsMessage) => {
-    // KT-243 — a run attached to some discussion changed; forward the exact
-    // run_id so the attached-runs strip only relists for a run it doesn't
-    // already track (a known run's own card self-hydrates via its own
-    // scoped subscription).
     if (msg.type === 'shared_run_updated') {
-      setAttachedRunsEvent(prev => ({ runId: msg.run_id, seq: (prev?.seq ?? 0) + 1 }));
       // A brand-new media job (not yet in the by-message map) needs a relist
       // so its placeholder appears; a known one's own RunStatusCard
       // self-hydrates via its own scoped subscription.
@@ -1886,12 +1989,18 @@ export function DiscussionsPage({
     return () => { cancelled = true; };
   }, [loadedActiveDiscussionId, activeDiscussion?.messages.length, sending]);
 
-  // Handle prefill from parent (e.g. "validate audit" button on Projects page)
-  useEffect(() => {
-    if (prefill) {
-      setShowNewDiscussion(true);
-    }
-  }, [prefill]);
+  // Handle prefill from parent (e.g. "validate audit" button on Projects page).
+  // KT-587 — an arriving prefill is an event: opening the dialog during the
+  // same render is React's own shape for that, and it saves the frame where
+  // the page had the prefill but not the dialog.
+  // Starts unanswered on purpose: a prefill already present at mount is the
+  // common case (the Projects page navigates here with one) and must open the
+  // dialog. Seeding this with `prefill` would mark it answered before it was.
+  const [answeredPrefill, setAnsweredPrefill] = useState<typeof prefill>(undefined);
+  if (prefill && prefill !== answeredPrefill) {
+    setAnsweredPrefill(prefill);
+    setShowNewDiscussion(true);
+  }
 
   // ─── Callbacks ───────────────────────────────────────────────────────────
 
@@ -2135,7 +2244,8 @@ export function DiscussionsPage({
     : '';
   useEffect(() => {
     if (!batchCompare || !batchCompareVersion) return;
-    void refreshBatchCompare(batchCompare.discIds);
+    const discIds = batchCompare.discIds;
+    void (async () => { await refreshBatchCompare(discIds); })();
   }, [batchCompareVersion, batchCompare, refreshBatchCompare]);
 
   const handleCreateDiscussion = async (config: NewDiscConfig) => {
@@ -2262,6 +2372,9 @@ export function DiscussionsPage({
     if (channel === 'note') {
       stopTts();
       revealDiscussionNotes();
+      // KT-580 — an open notes panel must show the note that was just written,
+      // not wait to be reopened.
+      setNotesRefresh(current => current + 1);
       const clientMessageId = newClientMessageId();
       optimisticMessageIdsRef.current.add(clientMessageId);
       setReplyToMessageId(null);
@@ -2802,9 +2915,9 @@ export function DiscussionsPage({
   // predate an MCP upload performed while this tab was open; treating it as a
   // permanent cache hit hides historical attachments until a full page reload.
   useEffect(() => {
-    if (activeDiscussionId) {
-      loadContextFiles(activeDiscussionId);
-    }
+    if (!activeDiscussionId) return;
+    const discussionId = activeDiscussionId;
+    void (async () => { await loadContextFiles(discussionId); })();
   }, [activeDiscussionId, loadContextFiles]);
 
   // Same rehydration guarantee for the inline media placeholders: reopening a
@@ -3412,7 +3525,6 @@ export function DiscussionsPage({
           onSelect={handleDiscSelect}
           onArchive={handleDiscArchive}
           onUnarchive={handleDiscUnarchive}
-          onDelete={handleDiscDelete}
           onBulkArchive={handleBulkArchive}
           onBulkDelete={handleBulkDelete}
           onCompareSelected={openSelectedComparison}
@@ -3537,6 +3649,7 @@ export function DiscussionsPage({
             if (next.has(runId)) next.delete(runId); else next.add(runId);
             return next;
           })}
+          onDelete={handleDiscDelete}
           onCollapse={() => {
             setFocusCollapsedSidebarRail(true);
             setSidebarCollapsed(true);
@@ -3704,86 +3817,18 @@ export function DiscussionsPage({
               agents={agents}
               modelTiers={agentAccess?.model_tiers}
               externalConnections={externalConnections}
-              showGitPanel={showGitPanel}
-              showTerminalPanel={showTerminalPanel}
-              terminalEnabled={agentAccess != null && [
-                agentAccess.claude_code,
-                agentAccess.codex,
-                agentAccess.gemini_cli,
-                agentAccess.kiro,
-                agentAccess.vibe,
-                agentAccess.copilot_cli,
-              ].some(config => config?.full_access)}
-              showPlanPanel={showPlanPanel}
-              showSettingsPanel={showSettingsPanel}
-              showAssetsPanel={showAssetsPanel}
-              assetCount={activeContextFiles.length}
-              planCompleted={discussionPlan?.discussion_id === activeDiscussion.id ? discussionPlan.completed_active : 0}
-              planTotal={discussionPlan?.discussion_id === activeDiscussion.id ? discussionPlan.total_active : 0}
-              planLater={discussionPlan?.discussion_id === activeDiscussion.id ? discussionPlan.later.length : 0}
-              pendingProposalCount={proposalInboxDiscussionId === activeDiscussion.id
-                ? proposalInbox?.pending_proposal_count ?? 0
-                : 0}
-              pendingProposalItemCount={proposalInboxDiscussionId === activeDiscussion.id
-                ? proposalInbox?.pending_item_count ?? 0
-                : 0}
               isMobile={isMobile}
               sending={sending}
-              pendingFilesCount={pendingFilesCount}
               onRequestTestMode={() => { void handleRequestTestMode(activeDiscussion.id); }}
-              onToggleGitPanel={() => {
-                setInitialGitWorkspaceId(undefined);
-                setShowPlanPanel(false);
-                setShowSettingsPanel(false);
-                setShowAssetsPanel(false);
-                setShowTerminalPanel(false);
-                setShowGitPanel(prev => !prev);
-              }}
-              onToggleTerminalPanel={() => {
-                setGitPanelExpanded(false);
-                setInitialGitWorkspaceId(undefined);
-                setShowGitPanel(false);
-                setShowPlanPanel(false);
-                setShowSettingsPanel(false);
-                setShowAssetsPanel(false);
-                setShowTerminalPanel(prev => !prev);
-              }}
-              onTogglePlanPanel={() => {
-                setShowGitPanel(false);
-                setShowTerminalPanel(false);
-                setShowSettingsPanel(false);
-                setShowAssetsPanel(false);
-                setShowPlanPanel(prev => !prev);
-              }}
-              onToggleSettingsPanel={() => {
-                setShowGitPanel(false);
-                setShowTerminalPanel(false);
-                setShowPlanPanel(false);
-                setShowAssetsPanel(false);
-                setShowSettingsPanel(prev => !prev);
-              }}
-              onToggleAssetsPanel={() => {
-                setShowGitPanel(false);
-                setShowTerminalPanel(false);
-                setShowPlanPanel(false);
-                setShowSettingsPanel(false);
-                setShowAssetsPanel(prev => !prev);
-              }}
-              showMessageSearch={showMessageSearch}
-              onToggleMessageSearch={() => {
-                if (showMessageSearch) {
-                  closeMessageSearch();
-                } else {
-                  setShowMessageSearch(true);
-                }
-              }}
+              onToggleSettingsPanel={() => openOnlyPanel('settings', {
+                plan: showPlanPanel,
+                assets: showAssetsPanel,
+                notes: showNotesPanel,
+                git: showGitPanel,
+                terminal: showTerminalPanel,
+                settings: showSettingsPanel,
+              })}
               onToggleSidebar={() => setSidebarOpen(true)}
-              onDelete={async (discId) => {
-                if (!confirm(t('disc.confirmDelete'))) return;
-                await discussionsApi.delete(discId);
-                setActiveDiscussionId(null);
-                refetchDiscussions();
-              }}
               onDiscussionUpdated={handleDiscussionUpdated}
               onAgentSwitch={handleAgentSwitch}
               toast={toast}
@@ -3793,6 +3838,70 @@ export function DiscussionsPage({
             {/* Messages + one shared utility panel side by side */}
             <div className="disc-messages-git-row">
             <div className="disc-messages-col" data-replying={!!replyTarget}>
+            {/* KT-581 — first in the column, so it opens level with the panel
+              *  strip rather than a few banners lower: the two controls belong
+              *  to the same row of the interface. */}
+            {showMessageSearch && (
+              <div className="disc-message-search" role="search" data-testid="disc-message-search">
+                <Search size={14} aria-hidden="true" />
+                <input
+                  ref={messageSearchInputRef}
+                  type="search"
+                  value={messageSearchQuery}
+                  onChange={event => {
+                    setMessageSearchQuery(event.target.value);
+                    setMessageSearchIndex(0);
+                    setStickToBottom(false);
+                  }}
+                  onKeyDown={event => {
+                    if (event.key === 'Escape') {
+                      event.preventDefault();
+                      closeMessageSearch();
+                    } else if (event.key === 'Enter') {
+                      event.preventDefault();
+                      moveMessageSearch(event.shiftKey ? -1 : 1);
+                    }
+                  }}
+                  placeholder={t('disc.messageSearch.placeholder')}
+                  aria-label={t('disc.messageSearch.placeholder')}
+                />
+                <span className="disc-message-search-position" aria-live="polite">
+                  {deferredMessageSearchQuery
+                    ? messageSearchMatches.length > 0
+                      ? `${messageSearchIndex + 1} / ${messageSearchMatches.length}`
+                      : t('disc.messageSearch.empty')
+                    : t('disc.messageSearch.hint')}
+                </span>
+                <div className="disc-message-search-nav">
+                  <button
+                    type="button"
+                    onClick={() => moveMessageSearch(-1)}
+                    disabled={messageSearchMatches.length === 0}
+                    title={t('disc.messageSearch.previous')}
+                    aria-label={t('disc.messageSearch.previous')}
+                  >
+                    <ChevronUp size={14} />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => moveMessageSearch(1)}
+                    disabled={messageSearchMatches.length === 0}
+                    title={t('disc.messageSearch.next')}
+                    aria-label={t('disc.messageSearch.next')}
+                  >
+                    <ChevronDown size={14} />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={closeMessageSearch}
+                    title={t('disc.messageSearch.close')}
+                    aria-label={t('disc.messageSearch.close')}
+                  >
+                    <X size={14} />
+                  </button>
+                </div>
+              </div>
+            )}
 
             {wsConnectionState === 'reconnecting' && (
               <div className="disc-realtime-status" role="status" aria-live="polite">
@@ -3802,12 +3911,6 @@ export function DiscussionsPage({
               </div>
             )}
 
-            {/* KT-243 — a run launched elsewhere (QP batch, QA/QE,
-                Workflow) that got attached to this discussion via its
-                discussion_id shows up here automatically, through the
-                shared RunStatusCard/SharedRun model. Self-hides when
-                there are no attached runs. */}
-            <DiscussionAttachedRuns discussionId={activeDiscussion.id} runEvent={attachedRunsEvent} />
 
             {/* 0.8.3 (#280) — Audit-running warning. When an audit
                 is in progress on the same project, Kronn has filtered
@@ -3913,67 +4016,6 @@ export function DiscussionsPage({
               </div>
             )}
 
-            {showMessageSearch && (
-              <div className="disc-message-search" role="search" data-testid="disc-message-search">
-                <Search size={14} aria-hidden="true" />
-                <input
-                  ref={messageSearchInputRef}
-                  type="search"
-                  value={messageSearchQuery}
-                  onChange={event => {
-                    setMessageSearchQuery(event.target.value);
-                    setMessageSearchIndex(0);
-                    setStickToBottom(false);
-                  }}
-                  onKeyDown={event => {
-                    if (event.key === 'Escape') {
-                      event.preventDefault();
-                      closeMessageSearch();
-                    } else if (event.key === 'Enter') {
-                      event.preventDefault();
-                      moveMessageSearch(event.shiftKey ? -1 : 1);
-                    }
-                  }}
-                  placeholder={t('disc.messageSearch.placeholder')}
-                  aria-label={t('disc.messageSearch.placeholder')}
-                />
-                <span className="disc-message-search-position" aria-live="polite">
-                  {deferredMessageSearchQuery
-                    ? messageSearchMatches.length > 0
-                      ? `${messageSearchIndex + 1} / ${messageSearchMatches.length}`
-                      : t('disc.messageSearch.empty')
-                    : t('disc.messageSearch.hint')}
-                </span>
-                <div className="disc-message-search-nav">
-                  <button
-                    type="button"
-                    onClick={() => moveMessageSearch(-1)}
-                    disabled={messageSearchMatches.length === 0}
-                    title={t('disc.messageSearch.previous')}
-                    aria-label={t('disc.messageSearch.previous')}
-                  >
-                    <ChevronUp size={14} />
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => moveMessageSearch(1)}
-                    disabled={messageSearchMatches.length === 0}
-                    title={t('disc.messageSearch.next')}
-                    aria-label={t('disc.messageSearch.next')}
-                  >
-                    <ChevronDown size={14} />
-                  </button>
-                  <button
-                    type="button"
-                    onClick={closeMessageSearch}
-                    title={t('disc.messageSearch.close')}
-                    aria-label={t('disc.messageSearch.close')}
-                  >
-                    <X size={14} />
-                  </button>
-                </div>
-              </div>
-            )}
 
             {/* Messages */}
             <div
@@ -5059,6 +5101,144 @@ export function DiscussionsPage({
 
             </div>{/* end messages column */}
 
+            <div className="disc-utility-col">
+            {/* KT-581 — switching panels, above the panel being switched.
+              *  Each panel draws its own header, so putting these icons in the
+              *  discussion header too showed every one of them twice. */}
+            <DiscussionPanelSwitcher
+              groupLabel={t('disc.panelRail.group')}
+              openLabel={t('disc.panelRail.open')}
+              closeLabel={t('disc.panelRail.close')}
+              onToggleColumn={openLastPanel}
+              leading={(
+                <button
+                  type="button"
+                  className="disc-panel-switcher-item"
+                  data-active={showMessageSearch}
+                  onClick={() => setShowMessageSearch(open => !open)}
+                  title={t('disc.messageSearch.open')}
+                  aria-label={t('disc.messageSearch.open')}
+                  aria-expanded={showMessageSearch}
+                  data-action="search"
+                >
+                  <Search size={14} />
+                </button>
+              )}
+              actions={[
+                {
+                  id: 'export',
+                  label: t('disc.portability.export'),
+                  icon: exportingDiscussion
+                    ? <Loader2 size={14} className="spin" />
+                    : <Download size={14} />,
+                  active: false,
+                  onSelect: () => { void exportActiveDiscussion(activeDiscussion.id); },
+                },
+                {
+                  id: 'delete',
+                  label: t('disc.deleteAction'),
+                  icon: <Trash2 size={14} />,
+                  active: false,
+                  onSelect: () => { void deleteActiveDiscussion(activeDiscussion.id); },
+                },
+              ]}
+              panels={[
+                {
+                  id: 'plan',
+                  label: t('planning.openPlan'),
+                  icon: <ListTodo size={14} />,
+                  active: showPlanPanel,
+                  onSelect: () => openOnlyPanel('plan', {
+                    plan: showPlanPanel,
+                    assets: showAssetsPanel,
+                    notes: showNotesPanel,
+                    git: showGitPanel,
+                    terminal: showTerminalPanel,
+                    settings: showSettingsPanel,
+                  }),
+                  badge: proposalInboxDiscussionId === activeDiscussion.id
+                    && (proposalInbox?.pending_item_count ?? 0) > 0
+                    ? proposalInbox?.pending_item_count
+                    : undefined,
+                },
+                {
+                  id: 'assets',
+                  label: t('disc.assets.open', activeContextFiles.length),
+                  icon: <Images size={14} />,
+                  active: showAssetsPanel,
+                  onSelect: () => openOnlyPanel('assets', {
+                    plan: showPlanPanel,
+                    assets: showAssetsPanel,
+                    notes: showNotesPanel,
+                    git: showGitPanel,
+                    terminal: showTerminalPanel,
+                    settings: showSettingsPanel,
+                  }),
+                },
+                {
+                  id: 'notes',
+                  label: t('disc.note.panelOpen'),
+                  icon: <NotebookPen size={14} />,
+                  active: showNotesPanel,
+                  onSelect: () => openOnlyPanel('notes', {
+                    plan: showPlanPanel,
+                    assets: showAssetsPanel,
+                    notes: showNotesPanel,
+                    git: showGitPanel,
+                    terminal: showTerminalPanel,
+                    settings: showSettingsPanel,
+                  }),
+                },
+                {
+                  id: 'git',
+                  label: pendingFilesCount > 0
+                    ? t('git.pendingFilesTooltip', pendingFilesCount)
+                    : t('git.filesBtn'),
+                  icon: <GitBranch size={14} />,
+                  active: showGitPanel,
+                  onSelect: () => openOnlyPanel('git', {
+                    plan: showPlanPanel,
+                    assets: showAssetsPanel,
+                    notes: showNotesPanel,
+                    git: showGitPanel,
+                    terminal: showTerminalPanel,
+                    settings: showSettingsPanel,
+                  }),
+                  badge: pendingFilesCount > 0 ? (pendingFilesCount > 9 ? '9+' : pendingFilesCount) : undefined,
+                },
+                ...(terminalEnabled
+                  ? [{
+                      id: 'terminal',
+                      label: t('git.terminal'),
+                      icon: <Terminal size={14} />,
+                      active: showTerminalPanel,
+                      onSelect: () => openOnlyPanel('terminal', {
+                    plan: showPlanPanel,
+                    assets: showAssetsPanel,
+                    notes: showNotesPanel,
+                    git: showGitPanel,
+                    terminal: showTerminalPanel,
+                    settings: showSettingsPanel,
+                  }),
+                    }]
+                  : []),
+                {
+                  id: 'settings',
+                  label: t('disc.settingsPanel'),
+                  icon: <Settings size={14} />,
+                  active: showSettingsPanel,
+                  onSelect: () => openOnlyPanel('settings', {
+                    plan: showPlanPanel,
+                    assets: showAssetsPanel,
+                    notes: showNotesPanel,
+                    git: showGitPanel,
+                    terminal: showTerminalPanel,
+                    settings: showSettingsPanel,
+                  }),
+                },
+              ]}
+            />
+
             {/* Git Panel (side panel) */}
             {showGitPanel && (
               <GitPanel
@@ -5126,6 +5306,16 @@ export function DiscussionsPage({
               />
             )}
 
+            {showNotesPanel && (
+              <DiscussionNotesPanel
+                discussionId={activeDiscussion.id}
+                refreshKey={notesRefresh}
+                onClose={() => setShowNotesPanel(false)}
+                toast={toast}
+                t={t}
+              />
+            )}
+
             {showAssetsPanel && (
               <DiscussionAssetsPanel
                 discussionId={activeDiscussion.id}
@@ -5143,7 +5333,7 @@ export function DiscussionsPage({
                   }).catch(() => { /* the scheduled relist remains authoritative */ });
                   reloadDiscussion(activeDiscussion.id);
                 }}
-                openAssetRequest={assetOpenRequest}
+                openAssetRequest={showAssetsPanel ? assetOpenRequest : null}
                 onAssetDeleted={(fileId) => {
                   // Dropped from the discussion's own inventory, which every
                   // surface reads: the grid, the counters, the carousel and a
@@ -5180,6 +5370,7 @@ export function DiscussionsPage({
               />
             )}
 
+            </div>{/* end utility column (strip + open panel) */}
             </div>{/* end flex row (messages + utility panel) */}
           </>
         ) : !showNewDiscussion && (

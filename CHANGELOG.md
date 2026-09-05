@@ -13,6 +13,13 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Added
 
+- Search can be told where to look. A term that appears in one discussion's
+  title and in twenty transcripts used to drown the room actually named after
+  it, and no amount of ranking fixes that — the reader wants to exclude, not to
+  re-sort. So the scope is a filter, title / content / both, and it is
+  remembered between visits. Under "both", a title match now comes before a
+  content match: someone searching for a name is looking for a place, not for
+  an occurrence. The MCP search agents use gained the same scope.
 - An approved delegation now publishes its report. The derivation and the
   store existed but nothing called them, so an accepted delivery produced
   nothing at all. Both approval paths publish it — the ordinary one, and a
@@ -115,8 +122,185 @@ Release notes for 0.9.3 and earlier are available in the
   agent type, with the same connection-mismatch validation Quick Prompts
   already apply. See `docs/operations/http-transport.md`.
 
+### Fixed
+
+- A project's Docker link opens the port the container actually published.
+  Compose files routinely name that port through a variable, so several
+  projects on one machine take turns on 443 and the rest land on 8443 or 9443
+  — but Kronn read the compose file's default and sent the link to 443
+  regardless. It reached whichever project holds that port, which answers with
+  an error from an unrelated application: nothing says you are on the wrong
+  project, so the bug gets hunted in the wrong place. The running container's
+  own publisher is now the authority, the port is still omitted when it is the
+  scheme's default, each published host keeps its own, and an endpoint nothing
+  is listening on is shown as unreachable rather than offered as a link.
+
+- OpenCode answers in the room again. Every chunk it streams carries its text
+  as a single content object, a shape the ACP reader handled neither as a
+  string nor as an array — so the whole reply fell through, the turn was
+  recorded as failed with no visible output, and the message offered two
+  guesses that were both wrong. Its private reasoning, which arrives the same
+  way, is read and deliberately not shown: it is a scratchpad, and folding it
+  into the answer would leak it. The turn's tokens are read from the response
+  too, where ACP puts them, instead of being dropped with it — a reply that
+  cost 7 946 tokens was recorded as costing nothing.
+
+- The frontend lint gate is green again, by fixing what it flagged rather than
+  by raising its ceiling. The release had added twenty-six warnings to a budget
+  that had four left; all twenty-six are gone, and the count is 64 against a
+  ceiling of 72. Nearly all described one habit — state written in an effect to
+  correct what the render before it already showed — so those values are
+  resolved where they are used, and the ones describing a particular thing now
+  carry which thing. Two genuine exceptions are declared at the line with their
+  reason: an image array whose identity changes every render, and the registry
+  of in-flight AbortControllers, which the rule would have held in state.
+
+- An action card aimed at another project's Quick Prompt launches, and says
+  where it will run. The preflight refused it outright, which made a proposal
+  unusable for the one thing it was for. The whole mechanism is human-gated —
+  the agent proposes, Kronn checks the target, a person decides by clicking —
+  and the checks that matter all still run: the target exists, its variables
+  match its contract, the proposed project is the target's own, and that
+  project exists. What the guard was refusing after all of those is a decision,
+  not a risk. The card now carries the target's project, quietly and always,
+  because lifting the guard without saying where the action goes would be worse
+  than the guard. Discussions and Live Pages changed together: the same gesture
+  cannot mean two things depending on where the card is drawn. Server-side
+  resolution of a Live Page's dataset-bound values is untouched.
+
+- Notes have a place of their own. An agent could already ask for a clean list
+  of a discussion's notes; the route that served it was never called from this
+  side, so the person who wrote them could not read them back — theirs were
+  mixed into the transcript, behind a switch that showed all or none, with no
+  way to list, correct or remove one. There is a Notes panel now, beside the
+  others: it lists them, writes them where the list already is, corrects one in
+  place and deletes it through the tombstone Kronn already had. A room with
+  months of notes loads them a page at a time rather than in one request.
+- Search can be pointed at notes alone. The scope filter gains a fourth
+  option beside title, content and both: "notes only", for when the note is
+  what you are after and the transcript around it is noise. Scoping to notes
+  drops title matches with it — a note has no title of its own, and keeping
+  them would quietly widen the search back to the whole discussion.
+
+- An edited note says so, with the date. Silently replacing what someone wrote
+  for themselves is the one thing an editable note must not do, so the panel
+  carries the moment of the last rewrite — and stays quiet on a note that was
+  never touched. On a note somebody else wrote, the edit and delete controls
+  are hidden and their author is named instead. That is a guard rail in the
+  interface, not an authorisation: Kronn has no multi-user authentication, the
+  pseudo is declarative, and the endpoints behind those buttons accept any
+  caller. It keeps a shared room from being tidied by accident; it prevents
+  nothing. An unsigned note counts as this machine's own, so nobody is locked
+  out of the notes they wrote before setting a pseudo.
+
+- A deleted note leaves the notes list. Its tombstone stays in the transcript,
+  where a gap has to be explained, but a list of notes is not a transcript:
+  showing the marker there would be listing something its author removed. The
+  agent tool reads the same list and stops seeing it too, and the count agrees
+  with what the list returns.
+
+- A task can be taken out of a discussion's plan. It could be added, and then
+  only moved between "active" and "later" — never removed. A room that runs for
+  weeks accumulates work belonging to the next release, and reading its plan
+  meant reading past all of it. `task_unlink_discussion` is the reverse of the
+  tool that adds one; the task, its history and its other discussions are kept.
+  It fits under the MCP surface ceiling rather than over it: the four heaviest
+  descriptions it pushed past the line were tightened by nearly what it costs,
+  and the ceiling was lowered to the new measurement rather than raised to
+  admit it.
+
+- Kronn stopped telling agents to run linters the project does not have. A
+  `composer.json` was enough to write `Lint: phpcs` into all eight generated
+  instruction files, but phpcs is an optional Composer package, absent from
+  most PHP projects — so every agent read a command that could not run, and
+  the contradiction propagated eight files at a time. It is now declared only
+  when something proves it: the vendored binary, a `require-dev` entry, or a
+  ruleset. Ruff had the same flaw, since it does not ship with Python either,
+  and a `lint` script was chained onto `tsc --noEmit` whether or not
+  `package.json` defined one — which made the whole command fail where it did
+  not. Linters that come with their toolchain, clippy and `go vet`, are still
+  assumed from the language.
+
 ### Changed
 
+- The model catalogue is one sorted table instead of ten stacked lists. A real
+  install carries 637 models across ten sources — 502 from a single router — and
+  finding one meant scrolling past the other 636. They are now one alphabetical
+  table, sortable by name or by which source they belong to, invertible, with a
+  search that matches the exact model id as well as the displayed name, and a
+  click on a source narrows to it. The sources keep their re-check control on
+  one line each rather than one card each.
+- Adding a model by hand moved to the foot of that block. Measured on a real
+  install: 624 of the 637 models were detected, ten migrated from an older
+  configuration, three cached, and none had ever been added by hand — so it is
+  not the everyday act the header made it look like. It stays, because a target
+  whose detection returns nothing has no other way to name a model.
+
+- Settings names the three ways of reaching a model. Config > Agents listed
+  seven full-width CLI cards, then Ollama as a special case inside the same
+  loop, then the external connections in a framed box of their own — one
+  undifferentiated list, 1 544px of it. There are three framed zones now, CLI /
+  Local / External API, built the same way so they read as three of a kind, and
+  the model catalogue moved below them: a catalogue is what the modes draw
+  from, not a fourth way of reaching a model.
+- A CLI agent's card shows which model each tier will actually run, the way an
+  external connection already did — economy, standard, reasoning, with the
+  configured override or the built-in fallback, never a bare "default" that
+  hides what runs. Configuring them stays behind the edit control, which now
+  sits next to delete as an icon pair, so a CLI agent and an API connection
+  offer the same two actions in the same place.
+
+- The agent cards sit in two independent columns. Laid out as a grid, a row
+  was as tall as its tallest card, so a short one left a hole beside a tall one
+  — and expanding either pushed both columns down, moving cards the reader was
+  not looking at. Each column is its own stack now: a card only ever moves the
+  cards under it, in its own column. Below the breakpoint the two collapse back
+  into one list in the original order.
+
+- An agent's card says its name once. The title and the mention-colour chip
+  beside it both carried it; the title is the colour control now, so picking a
+  colour happens on the name that colour applies to. What only matters while
+  configuring — the full-access switch, the API keys, the model tiers — folds
+  behind a "Configure" button, and a card at half the width stacks its header
+  instead of splitting it into a left and a right side.
+
+- The discussion header reads as two lines instead of three. Inviting a peer
+  now sits at the right of the title's own line, where an action on the whole
+  discussion belongs, and the participant chips moved down to share the second
+  line with the control that decides whether the discussion answers by itself —
+  first position, since it changes what everything beside it means. What the
+  discussion IS rather than what it does — its project, its cost, its worktrees
+  — folds behind a "details" button at the right of that second line, and the
+  fold is remembered, so anyone who wants those figures permanently opens the
+  row once.
+- The panel strip lines up with the message-search bar beside it in both
+  states — open and closed — its delete keeps the red it had in the header, and
+  search moved to the right of the control that opens the strip. That control
+  now shows an active state, so the strip says which of its buttons put the
+  panel on screen.
+- A discussion's title no longer vanishes on a narrow screen. The id pill and
+  the session binding took 230px of the title's own line between them, and the
+  title was the one element allowed to give way, so below 768px it was given
+  none at all. Those two move into the details fold there, and the title keeps
+  the width it needs.
+- A discussion's header stopped acting on the discussion. Search, export and
+  delete joined the panels in the strip that sits above the panel column, so
+  the header only describes what the discussion IS — its title, its agent, its
+  tier, its counters. Message search opens level with that strip rather than a
+  few banners lower, because the control and its field belong to the same row.
+- The attached-runs list is gone from the transcript. It repeated what the
+  Automations page already shows, and cost a slice of the conversation's height
+  to do it; a launched action is visible as its own card in the thread.
+- A discussion's panels — plan, assets, code, terminal, settings and message
+  search — left the header row. It also carries the title, the agent, the tier
+  and the counters, and every version narrowed it further. One control now
+  opens the panel column, landing on whichever panel was last read, and it
+  lives in that column rather than in the header: a control that opens a panel
+  has to sit against it, and a row of counters came between the two. Moving
+  between panels happens in the same strip, which widens into icons once a
+  panel is open. Each panel already draws its own header, so listing those same
+  icons up in the discussion header showed every one of them twice. Clicking
+  the panel already open closes it, as the header buttons did.
 - A turn no longer retells the whole discussion. Every message re-narrated the
   entire history to a brand-new process: on the four longest discussions in a
   real database, 1 288 Claude Code turns sent **436 million characters** where

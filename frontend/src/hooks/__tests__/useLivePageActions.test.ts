@@ -11,7 +11,7 @@ function action(overrides: Partial<LivePageAction> = {}): LivePageAction {
   return {
     id: 'page-action:page-1:refresh', live_page_id: 'page-1', live_page_revision_id: 'rev-1',
     action_ref: 'refresh', kind: 'workflow', target_id: 'wf-1', target_name: 'Refresh report',
-    project_id: null, state: 'proposed', values: [], shared_run_id: null,
+    project_id: null, project_name: null, state: 'proposed', values: [], shared_run_id: null,
     result_discussion_id: null, deep_link: null, diagnostic: null, launched_at: null,
     finished_at: null, created_at: '2026-09-01T08:00:00Z', updated_at: '2026-09-01T08:00:00Z',
     stale_source: false,

@@ -3,7 +3,7 @@
  * shell so every tool behaves the same across themes and breakpoints. */
 .disc-tool-panel {
   box-sizing: border-box;
-  width: min(400px, 42vw);
+  width: var(--kr-panel-w);
   height: 100%;
   display: flex;
   flex-direction: column;
