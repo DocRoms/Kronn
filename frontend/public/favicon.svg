@@ -1,12 +1,37 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" role="img" aria-label="Kronn">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Kronn">
+  <!-- Redrawn from the 0.13.0 logo rather than embedded as a raster: a favicon
+       is read at 16px, where a downscaled photo turns to mud and a path does
+       not. Same geometry as `desktop/src-tauri/icons/icon.svg`. -->
   <defs>
-    <linearGradient id="kf" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#ff2bb0"/>
-      <stop offset="0.55" stop-color="#c02bff"/>
-      <stop offset="1" stop-color="#6a3bff"/>
+    <linearGradient id="kronn-shield" x1="0.5" y1="0" x2="0.5" y2="1">
+      <stop offset="0" stop-color="#4ee2f7"/>
+      <stop offset="0.3" stop-color="#7f8bff"/>
+      <stop offset="1" stop-color="#b06cf5"/>
+    </linearGradient>
+    <linearGradient id="kronn-hub" x1="0.5" y1="0" x2="0.5" y2="1">
+      <stop offset="0" stop-color="#8fe8f6"/>
+      <stop offset="1" stop-color="#9a6cf0"/>
     </linearGradient>
   </defs>
-  <rect width="100" height="100" rx="22" fill="#0c0a14"/>
-  <rect x="24" y="24" width="52" height="52" rx="13" fill="none" stroke="url(#kf)" stroke-width="8"/>
-  <rect x="45" y="45" width="10" height="10" rx="1.5" fill="#ffd400"/>
+  <rect width="512" height="512" fill="#0b0f22"/>
+  <!-- Hexagonal shield: pointed crown, vertical flanks, tapered foot. -->
+  <path d="M256 96 L392 168 V300 L256 404 L120 300 V168 Z"
+        fill="none" stroke="url(#kronn-shield)" stroke-width="24"
+        stroke-linejoin="round"/>
+  <!-- The orbit it draws around the graph, broken where the nodes sit. -->
+  <g fill="none" stroke="#b98cf0" stroke-width="6" stroke-linecap="round" opacity="0.85">
+    <path d="M176.8 279.2 A 82 82 0 0 1 209.0 190.8"/>
+    <path d="M303.0 190.8 A 82 82 0 0 1 335.2 279.2"/>
+    <path d="M303.0 325.2 A 82 82 0 0 1 209.0 325.2"/>
+  </g>
+  <!-- The graph it guards: one hub, three peers, the links between them. -->
+  <g stroke="#c9a8f0" stroke-width="6" stroke-linecap="round" fill="none">
+    <path d="M256 262 V186"/>
+    <path d="M256 262 L188 290"/>
+    <path d="M256 262 L324 290"/>
+  </g>
+  <circle cx="256" cy="186" r="24" fill="#79e6f0"/>
+  <circle cx="188" cy="290" r="21" fill="#e6cdf8"/>
+  <circle cx="324" cy="290" r="21" fill="#e6cdf8"/>
+  <circle cx="256" cy="262" r="33" fill="url(#kronn-hub)"/>
 </svg>
