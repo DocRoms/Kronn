@@ -1420,6 +1420,32 @@ mod tests {
         assert_eq!(pending.as_deref(), Some("ClaudeCode"));
     }
 
+    /// KT-580 — a deleted note leaves a tombstone in the timeline, where a gap
+    /// has to be explained. A list of notes is not a timeline: showing the
+    /// marker there would be listing something its author removed. The agent
+    /// tool reads the same function, so it stops seeing it too.
+    #[test]
+    fn a_deleted_note_leaves_the_notes_list() {
+        let conn = test_conn();
+        insert_discussion(&conn, &make_discussion("note-gone")).unwrap();
+
+        for (id, content) in [("keep", "celle-ci reste"), ("drop", "celle-ci part")] {
+            let mut note = make_message(id, MessageRole::User, None);
+            note.channel = crate::models::MessageChannel::Note;
+            note.content = content.into();
+            insert_note_message(&conn, "note-gone", &note).unwrap();
+        }
+        assert_eq!(count_notes(&conn, "note-gone").unwrap(), 2);
+
+        tombstone_message(&conn, "note-gone", "drop").unwrap();
+
+        let notes = list_notes(&conn, "note-gone", 0, 10).unwrap();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].1.content, "celle-ci reste");
+        // The count must agree with the list, or it promises rows nobody gets.
+        assert_eq!(count_notes(&conn, "note-gone").unwrap(), 1);
+    }
+
     /// KT-580 — a note is worth correcting where it sits, which is often a
     /// hundred messages back. The turn revision refuses anything but the last
     /// User message; applying that rule here would make every note but the

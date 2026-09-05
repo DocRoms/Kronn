@@ -2340,6 +2340,12 @@ pub fn list_notes(
                 model, target_agent, reply_to_message_id
          FROM messages
          WHERE discussion_id = ?1 AND channel = 'note' AND sort_order > ?2
+           -- KT-580 — a deleted note is not a note. Its tombstone stays in the
+           -- timeline, where a gap has to be explained; a list of notes is not
+           -- a timeline, and showing the marker there would be listing
+           -- something the author removed. True for the agent tool too: it
+           -- reads this same function.
+           AND content NOT LIKE '[kronn:message-deleted]%'
          ORDER BY sort_order ASC
          LIMIT ?3",
     )?;
@@ -2390,7 +2396,10 @@ pub fn list_notes(
 pub fn count_notes(conn: &Connection, discussion_id: &str) -> Result<u32> {
     conn.query_row(
         "SELECT COUNT(*) FROM messages
-         WHERE discussion_id = ?1 AND channel = 'note'",
+         WHERE discussion_id = ?1 AND channel = 'note'
+           -- Same rule as `list_notes`: a count that includes deleted notes
+           -- would promise rows the list never returns.
+           AND content NOT LIKE '[kronn:message-deleted]%'",
         [discussion_id],
         |row| row.get(0),
     )

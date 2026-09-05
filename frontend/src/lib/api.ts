@@ -212,6 +212,7 @@ import type {
   ValidationSpec,
   ExternalApiConnectionPreset,
   SharedRun,
+  DiscussionNoteListResponse,
 } from '../types/generated';
 import type {
   CatalogModelEntry,
@@ -1743,6 +1744,36 @@ export const discussions = {
 
   /** Delete trailing agent/system messages (for retry/edit). */
   deleteLastAgentMessages: (id: string) => api<void>('DELETE', `/discussions/${id}/messages/last`),
+
+  /** KT-580 — the notes of a discussion, for a human. The route existed to
+   *  serve `disc_note_list` to agents; nothing on this side ever called it,
+   *  so an agent could read a room's notes properly and its author could not. */
+  notes: (id: string, cursor?: number) => api<DiscussionNoteListResponse>(
+    'GET',
+    `/discussions/${encodeURIComponent(id)}/notes${cursor == null ? '' : `?cursor=${cursor}`}`,
+  ),
+
+  /** KT-580 — write a note from the notes panel. Rides the ordinary send
+   *  endpoint with `channel: 'note'`, which is the path already proven not to
+   *  wake an agent or consume a handoff; the stream it returns carries nothing
+   *  for a note, so the callbacks resolve it and stop there. */
+  sendNote: (id: string, content: string) => new Promise<void>((resolve, reject) => {
+    discussions.sendMessageStream(
+      id,
+      { content, channel: 'note' } as SendMessageRequest,
+      () => {},
+      () => resolve(),
+      (error: string) => reject(new Error(error)),
+    );
+  }),
+
+  /** Rewrite a note in place. Deliberately not the turn revision: that one
+   *  refuses anything but the last User message and wakes the agent again. */
+  reviseNote: (id: string, messageId: string, content: string) => api<string>(
+    'PATCH',
+    `/discussions/${encodeURIComponent(id)}/notes/${encodeURIComponent(messageId)}`,
+    { content },
+  ),
 
   /** Remove one message payload while preserving its timeline tombstone. */
   deleteMessage: (id: string, messageId: string) => api<void>(

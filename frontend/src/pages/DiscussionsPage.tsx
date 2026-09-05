@@ -14,6 +14,7 @@ import { GitPanel } from '../components/GitPanel';
 import { TerminalPanel } from '../components/TerminalPanel';
 import { DiscussionPlanPanel } from '../components/DiscussionPlanPanel';
 import { DiscussionSettingsPanel } from '../components/DiscussionSettingsPanel';
+import { DiscussionNotesPanel } from '../components/DiscussionNotesPanel';
 import { DiscussionAssetsPanel } from '../components/DiscussionAssetsPanel';
 import { InlineMediaJob } from '../components/InlineMediaJob';
 import { BatchComparePanel } from '../components/BatchComparePanel';
@@ -54,6 +55,7 @@ import {
   ShieldCheck, Check, Rocket, Play, Zap,
   Menu, X, Clock, ExternalLink, Search, ChevronUp, ChevronDown, WifiOff, Square,
   Images,
+  NotebookPen,
   GitBranch,
   Terminal,
   Settings,
@@ -455,6 +457,11 @@ export function DiscussionsPage({
   const [showPlanPanel, setShowPlanPanel] = useState(false);
   const [showSettingsPanel, setShowSettingsPanel] = useState(false);
   const [showAssetsPanel, setShowAssetsPanel] = useState(false);
+  // KT-580 — the sixth panel, and the one KT-581 existed to make room for.
+  const [showNotesPanel, setShowNotesPanel] = useState(false);
+  // Bumped when a note is written from the composer, so an open panel shows it
+  // without waiting for a reopen.
+  const [notesRefresh, setNotesRefresh] = useState(0);
   const [assetOpenRequest, setAssetOpenRequest] = useState<{ assetId: string; nonce: number } | null>(null);
   // KT-243 — carries the target run_id of the latest `shared_run_updated` WS
   // event so <DiscussionAttachedRuns> can relist only for a run_id it does
@@ -562,9 +569,10 @@ export function DiscussionsPage({
   // One panel at a time, decided here rather than in the switcher: the rule
   // already lived in this file (Escape closes them all), and splitting it in
   // two is how the two halves drift apart.
-  type PanelId = 'plan' | 'assets' | 'git' | 'terminal' | 'settings';
+  type PanelId = 'plan' | 'assets' | 'notes' | 'git' | 'terminal' | 'settings';
   const anyPanelOpen =
-    showGitPanel || showTerminalPanel || showPlanPanel || showSettingsPanel || showAssetsPanel;
+    showGitPanel || showTerminalPanel || showPlanPanel || showSettingsPanel || showAssetsPanel
+    || showNotesPanel;
   // Same rule the header used: a terminal is only offered when at least one
   // agent may actually run commands.
   const terminalEnabled = agentAccess != null && [
@@ -586,6 +594,7 @@ export function DiscussionsPage({
     setShowPlanPanel(target === 'plan');
     setShowSettingsPanel(target === 'settings');
     setShowAssetsPanel(target === 'assets');
+    setShowNotesPanel(target === 'notes');
     if (target) {
       // Reopening the column lands on whatever was last read, not always on
       // the plan: someone who works in Files does not want to re-pick it.
@@ -599,12 +608,13 @@ export function DiscussionsPage({
     }
     let last: string | null = null;
     try { last = localStorage.getItem('kronn:lastPanel'); } catch { /* non-fatal */ }
-    const known: PanelId[] = ['plan', 'assets', 'git', 'terminal', 'settings'];
+    const known: PanelId[] = ['plan', 'assets', 'notes', 'git', 'terminal', 'settings'];
     openOnlyPanel(known.includes(last as PanelId) ? (last as PanelId) : 'plan');
   }, [anyPanelOpen, openOnlyPanel]);
 
   useEffect(() => {
-    if (!showGitPanel && !showTerminalPanel && !showPlanPanel && !showSettingsPanel && !showAssetsPanel) return;
+    if (!showGitPanel && !showTerminalPanel && !showPlanPanel && !showSettingsPanel && !showAssetsPanel
+      && !showNotesPanel) return;
     const closePanel = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return;
       setShowGitPanel(false);
@@ -615,7 +625,7 @@ export function DiscussionsPage({
     };
     window.addEventListener('keydown', closePanel);
     return () => window.removeEventListener('keydown', closePanel);
-  }, [showGitPanel, showTerminalPanel, showPlanPanel, showSettingsPanel, showAssetsPanel]);
+  }, [showGitPanel, showTerminalPanel, showPlanPanel, showSettingsPanel, showAssetsPanel, showNotesPanel]);
 
   useEffect(() => {
     setInitialGitWorkspaceId(undefined);
@@ -2362,6 +2372,9 @@ export function DiscussionsPage({
     if (channel === 'note') {
       stopTts();
       revealDiscussionNotes();
+      // KT-580 — an open notes panel must show the note that was just written,
+      // not wait to be reopened.
+      setNotesRefresh(current => current + 1);
       const clientMessageId = newClientMessageId();
       optimisticMessageIdsRef.current.add(clientMessageId);
       setReplyToMessageId(null);
@@ -3810,6 +3823,7 @@ export function DiscussionsPage({
               onToggleSettingsPanel={() => openOnlyPanel('settings', {
                 plan: showPlanPanel,
                 assets: showAssetsPanel,
+                notes: showNotesPanel,
                 git: showGitPanel,
                 terminal: showTerminalPanel,
                 settings: showSettingsPanel,
@@ -5137,6 +5151,7 @@ export function DiscussionsPage({
                   onSelect: () => openOnlyPanel('plan', {
                     plan: showPlanPanel,
                     assets: showAssetsPanel,
+                    notes: showNotesPanel,
                     git: showGitPanel,
                     terminal: showTerminalPanel,
                     settings: showSettingsPanel,
@@ -5154,6 +5169,21 @@ export function DiscussionsPage({
                   onSelect: () => openOnlyPanel('assets', {
                     plan: showPlanPanel,
                     assets: showAssetsPanel,
+                    notes: showNotesPanel,
+                    git: showGitPanel,
+                    terminal: showTerminalPanel,
+                    settings: showSettingsPanel,
+                  }),
+                },
+                {
+                  id: 'notes',
+                  label: t('disc.note.panelOpen'),
+                  icon: <NotebookPen size={14} />,
+                  active: showNotesPanel,
+                  onSelect: () => openOnlyPanel('notes', {
+                    plan: showPlanPanel,
+                    assets: showAssetsPanel,
+                    notes: showNotesPanel,
                     git: showGitPanel,
                     terminal: showTerminalPanel,
                     settings: showSettingsPanel,
@@ -5169,6 +5199,7 @@ export function DiscussionsPage({
                   onSelect: () => openOnlyPanel('git', {
                     plan: showPlanPanel,
                     assets: showAssetsPanel,
+                    notes: showNotesPanel,
                     git: showGitPanel,
                     terminal: showTerminalPanel,
                     settings: showSettingsPanel,
@@ -5184,6 +5215,7 @@ export function DiscussionsPage({
                       onSelect: () => openOnlyPanel('terminal', {
                     plan: showPlanPanel,
                     assets: showAssetsPanel,
+                    notes: showNotesPanel,
                     git: showGitPanel,
                     terminal: showTerminalPanel,
                     settings: showSettingsPanel,
@@ -5198,6 +5230,7 @@ export function DiscussionsPage({
                   onSelect: () => openOnlyPanel('settings', {
                     plan: showPlanPanel,
                     assets: showAssetsPanel,
+                    notes: showNotesPanel,
                     git: showGitPanel,
                     terminal: showTerminalPanel,
                     settings: showSettingsPanel,
@@ -5270,6 +5303,16 @@ export function DiscussionsPage({
                   }
                 }}
                 toast={toast}
+              />
+            )}
+
+            {showNotesPanel && (
+              <DiscussionNotesPanel
+                discussionId={activeDiscussion.id}
+                refreshKey={notesRefresh}
+                onClose={() => setShowNotesPanel(false)}
+                toast={toast}
+                t={t}
               />
             )}
 

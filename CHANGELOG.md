@@ -168,6 +168,20 @@ Release notes for 0.9.3 and earlier are available in the
   cannot mean two things depending on where the card is drawn. Server-side
   resolution of a Live Page's dataset-bound values is untouched.
 
+- Notes have a place of their own. An agent could already ask for a clean list
+  of a discussion's notes; the route that served it was never called from this
+  side, so the person who wrote them could not read them back — theirs were
+  mixed into the transcript, behind a switch that showed all or none, with no
+  way to list, correct or remove one. There is a Notes panel now, beside the
+  others: it lists them, writes them where the list already is, corrects one in
+  place and deletes it through the tombstone Kronn already had. A room with
+  months of notes loads them a page at a time rather than in one request.
+- A deleted note leaves the notes list. Its tombstone stays in the transcript,
+  where a gap has to be explained, but a list of notes is not a transcript:
+  showing the marker there would be listing something its author removed. The
+  agent tool reads the same list and stops seeing it too, and the count agrees
+  with what the list returns.
+
 - Kronn stopped telling agents to run linters the project does not have. A
   `composer.json` was enough to write `Lint: phpcs` into all eight generated
   instruction files, but phpcs is an optional Composer package, absent from
