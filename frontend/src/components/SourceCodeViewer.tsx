@@ -9,6 +9,7 @@ import { projects as projectsApi } from '../lib/api';
 import type { GitBlameLine, GitCommitDetail, SourceFileNode } from '../types/generated';
 import { useT } from '../lib/I18nContext';
 import { highlightLine as highlightSourceLine, languageForPath } from '../lib/diff-syntax';
+import { buildHtmlPreviewDocument } from '../lib/html-preview';
 import './SourceCodeViewer.css';
 
 interface SourceCodeViewerProps {
@@ -35,6 +36,7 @@ interface ContentResult {
   projectId: string;
   path: string;
   content: string | null;
+  error: boolean;
 }
 
 interface BlameResult {
@@ -59,12 +61,13 @@ interface SearchResult {
 }
 
 const EMPTY_SEARCH_RESULTS = new Map<string, number>();
-
+const HTML_FILE_PATH = /\.html?$/i;
 function SourceCodeViewerProject({ projectId, initialPath, onOpenCommit }: SourceCodeViewerProps) {
   const { t } = useT();
   const [tree, setTree] = useState<SourceFileNode[]>([]);
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [contentResult, setContentResult] = useState<ContentResult | null>(null);
+  const [contentView, setContentView] = useState<'code' | 'preview'>('code');
   const [treeLoading, setTreeLoading] = useState(true);
   const [treeHydrating, setTreeHydrating] = useState(false);
   /// KT-594 — the enrichment failed and will not be retried on its own. The
@@ -204,10 +207,10 @@ function SourceCodeViewerProject({ projectId, initialPath, onOpenCommit }: Sourc
     const path = selectedPath;
     projectsApi.readSourceFile(projectId, selectedPath)
       .then(file => {
-        if (alive) setContentResult({ projectId, path, content: file.content });
+        if (alive) setContentResult({ projectId, path, content: file.content, error: false });
       })
       .catch(() => {
-        if (alive) setContentResult({ projectId, path, content: null });
+        if (alive) setContentResult({ projectId, path, content: null, error: true });
       });
     return () => { alive = false; };
   }, [projectId, selectedPath]);
@@ -284,7 +287,9 @@ function SourceCodeViewerProject({ projectId, initialPath, onOpenCommit }: Sourc
   const contentIsCurrent = contentResult?.projectId === projectId
     && contentResult.path === selectedPath;
   const content = contentIsCurrent ? contentResult.content : null;
+  const contentError = contentIsCurrent && contentResult.error;
   const contentLoading = selectedPath !== null && !contentIsCurrent;
+  const isHtmlFile = Boolean(selectedPath && HTML_FILE_PATH.test(selectedPath));
   const blameIsCurrent = annotate
     && blameResult?.projectId === projectId
     && blameResult.path === selectedPath;
@@ -354,6 +359,7 @@ function SourceCodeViewerProject({ projectId, initialPath, onOpenCommit }: Sourc
     ];
     if (!previousFile) return;
     setSelectedPath(previousFile);
+    if (!HTML_FILE_PATH.test(previousFile)) setContentView('code');
     setCurrentMatchIdx((searchResults.get(previousFile) ?? 1) - 1);
   }, [currentMatchIdx, filesWithMatches, searchResults, selectedPath, totalMatches]);
 
@@ -370,6 +376,7 @@ function SourceCodeViewerProject({ projectId, initialPath, onOpenCommit }: Sourc
     ];
     if (!nextFile) return;
     setSelectedPath(nextFile);
+    if (!HTML_FILE_PATH.test(nextFile)) setContentView('code');
     setCurrentMatchIdx(0);
   }, [currentMatchIdx, filesWithMatches, searchResults, selectedPath, totalMatches]);
 
@@ -503,6 +510,7 @@ function SourceCodeViewerProject({ projectId, initialPath, onOpenCommit }: Sourc
               isSearching={searchQuery.trim().length > 0}
               onSelect={path => {
                 setSelectedPath(path);
+                if (!HTML_FILE_PATH.test(path)) setContentView('code');
                 setCurrentMatchIdx(0);
               }}
               onToggle={path => setExpandedDirs(previous => {
@@ -521,12 +529,35 @@ function SourceCodeViewerProject({ projectId, initialPath, onOpenCommit }: Sourc
           <header className="source-toolbar">
             <span className="source-path">{selectedPath}</span>
             {language && <span className="source-language">{language}</span>}
+            {isHtmlFile && (
+              <span className="source-content-mode" role="group" aria-label={t('projects.source.contentView')}>
+                <button type="button" aria-pressed={contentView === 'code'} data-active={contentView === 'code'} onClick={() => setContentView('code')}>
+                  {t('projects.source.code')}
+                </button>
+                <button type="button" aria-pressed={contentView === 'preview'} data-active={contentView === 'preview'} onClick={() => setContentView('preview')}>
+                  {t('projects.source.preview')}
+                </button>
+              </span>
+            )}
           </header>
         )}
         <div ref={contentRef} className="source-code-scroll">
           {contentLoading ? (
             <div className="source-state">
               <Loader2 size={15} className="spin" /> {t('projects.source.loadingFile')}
+            </div>
+          ) : contentError ? (
+            <div className="source-state source-state-error">{t('projects.source.fileError')}</div>
+          ) : contentView === 'preview' && content !== null ? (
+            <div className="source-html-preview">
+              <iframe
+                className="source-html-preview-frame"
+                data-testid="source-html-preview-frame"
+                sandbox=""
+                srcDoc={buildHtmlPreviewDocument(content)}
+                title={t('projects.source.previewFrameTitle', selectedPath ?? '')}
+              />
+              <p>{t('projects.source.previewLimitations')}</p>
             </div>
           ) : content !== null ? (
             <pre className="source-code">
