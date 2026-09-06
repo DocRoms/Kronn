@@ -290,10 +290,6 @@ function SourceCodeViewerProject({ projectId, initialPath, onOpenCommit }: Sourc
   const contentError = contentIsCurrent && contentResult.error;
   const contentLoading = selectedPath !== null && !contentIsCurrent;
   const isHtmlFile = Boolean(selectedPath && HTML_FILE_PATH.test(selectedPath));
-
-  useEffect(() => {
-    if (!isHtmlFile) setContentView('code');
-  }, [isHtmlFile]);
   const blameIsCurrent = annotate
     && blameResult?.projectId === projectId
     && blameResult.path === selectedPath;
@@ -363,6 +359,7 @@ function SourceCodeViewerProject({ projectId, initialPath, onOpenCommit }: Sourc
     ];
     if (!previousFile) return;
     setSelectedPath(previousFile);
+    if (!HTML_FILE_PATH.test(previousFile)) setContentView('code');
     setCurrentMatchIdx((searchResults.get(previousFile) ?? 1) - 1);
   }, [currentMatchIdx, filesWithMatches, searchResults, selectedPath, totalMatches]);
 
@@ -379,6 +376,7 @@ function SourceCodeViewerProject({ projectId, initialPath, onOpenCommit }: Sourc
     ];
     if (!nextFile) return;
     setSelectedPath(nextFile);
+    if (!HTML_FILE_PATH.test(nextFile)) setContentView('code');
     setCurrentMatchIdx(0);
   }, [currentMatchIdx, filesWithMatches, searchResults, selectedPath, totalMatches]);
 
@@ -512,6 +510,7 @@ function SourceCodeViewerProject({ projectId, initialPath, onOpenCommit }: Sourc
               isSearching={searchQuery.trim().length > 0}
               onSelect={path => {
                 setSelectedPath(path);
+                if (!HTML_FILE_PATH.test(path)) setContentView('code');
                 setCurrentMatchIdx(0);
               }}
               onToggle={path => setExpandedDirs(previous => {
