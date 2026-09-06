@@ -616,12 +616,18 @@ export function MessageAttachments({
                       key={slotKey}
                       type="button"
                       className="disc-image-lightbox-action"
-                      onClick={() => onGenerateFromImage({
-                        assetId: selectedFile.id,
-                        modality,
-                        slotKey,
-                        referenceMode,
-                      })}
+                      onClick={() => {
+                        onGenerateFromImage({
+                          assetId: selectedFile.id,
+                          modality,
+                          slotKey,
+                          referenceMode,
+                        });
+                        // The target form lives under the viewer in the panel.
+                        // Close this portal after the handoff so it is visible
+                        // and receives the focus requested by the action.
+                        setSelectedId(null);
+                      }}
                       aria-label={t(`disc.media.generateFromImage.${modality}`)}
                       title={t(`disc.media.generateFromImage.${modality}`)}
                       data-testid={`attachment-generate-${modality}`}

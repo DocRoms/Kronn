@@ -1093,6 +1093,7 @@ const en: TranslationDict = {
   'disc.media.lastFrame.error.decode': 'No frame was decoded. Nothing was saved, rather than a black picture presented as the last frame.',
   'disc.media.lastFrame.error.encode': 'The frame was decoded but could not be saved as a file.',
   'disc.media.referenceTooNarrow': 'This picture is {0} px wide. The provider requires at least {1}, so the generation would be refused.',
+  'disc.media.referenceCompatibilityPending': 'This source image remains selected. Generation is unavailable until the selected model confirms it can use it.',
   'disc.media.launched': 'Generation started on {0}',
   'disc.media.noSlot': 'No connection has a model configured for this modality (Settings → External APIs).',
   'disc.media.newAsset': 'Generate media',

@@ -196,11 +196,13 @@ describe('MessageAttachments — mixed carousel', () => {
       />,
     );
 
-    fireEvent.click(await screen.findByRole('button', { name: 'disc.attachmentImage:a.png' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'disc.attachmentImage|a.png' }));
     const imageAction = await screen.findByTestId('attachment-generate-image');
-    const videoAction = await screen.findByTestId('attachment-generate-video');
     fireEvent.click(imageAction);
-    fireEvent.click(videoAction);
+    // A successful handoff closes the portal; reopening the current asset is
+    // a separate, deliberate viewer action.
+    fireEvent.click(await screen.findByRole('button', { name: 'disc.attachmentImage|a.png' }));
+    fireEvent.click(await screen.findByTestId('attachment-generate-video'));
     expect(onGenerateFromImage).toHaveBeenNthCalledWith(1, {
       assetId: 'i1', modality: 'image', slotKey: 'conn-1:image', referenceMode: 'reference',
     });
@@ -216,7 +218,7 @@ describe('MessageAttachments — mixed carousel', () => {
       <MessageAttachments files={FILES} discussionId="d1" t={t} variant="library"
         generationConnections={[connection()]} onGenerateFromImage={vi.fn()} />,
     );
-    fireEvent.click(await screen.findByRole('button', { name: 'disc.attachmentImage:a.png' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'disc.attachmentImage|a.png' }));
     expect(screen.queryByTestId('attachment-generate-image')).toBeNull();
     expect(screen.queryByTestId('attachment-generate-video')).toBeNull();
 

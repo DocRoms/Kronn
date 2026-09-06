@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import type { ExternalApiConnectionView } from '../../lib/api';
 
 const { mediaApi } = vi.hoisted(() => ({
@@ -37,12 +37,6 @@ function visiblePictures(): string[] {
     document.querySelectorAll('.searchable-select-option[data-value]'),
     node => node.getAttribute('data-value') ?? '',
   ).filter(Boolean);
-}
-
-/** Same, opening the list first. */
-function offeredPictures(): string[] {
-  fireEvent.focus(screen.getByTestId('media-reference-select'));
-  return visiblePictures();
 }
 
 /** Open the ratio list and return the option node for one ratio. */
@@ -139,8 +133,10 @@ describe('MediaGenerateForm', () => {
     expect(mediaApi.generate).not.toHaveBeenCalled();
     fireEvent.change(screen.getByRole('textbox'), { target: { value: 'a lighthouse' } });
     const submit = screen.getByRole('button', { name: /disc\.media\.generate/ });
-    fireEvent.click(submit);
-    fireEvent.click(submit);
+    act(() => {
+      submit.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      submit.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
     expect(mediaApi.generate).toHaveBeenCalledTimes(1);
 
     resolveGeneration({
@@ -192,7 +188,7 @@ describe('MediaGenerateForm', () => {
     await waitFor(() => expect(screen.getByText('disc.media.duration')).toBeInTheDocument());
   });
 
-  it('keeps a viewer-selected image attached until the selected model capabilities arrive', async () => {
+  it('keeps a viewer-selected image attached and blocks billing until capabilities arrive', async () => {
     let resolveCapabilities!: (value: { model: string; capabilities: { max_input_references: number } }) => void;
     mediaApi.capabilities.mockReturnValue(new Promise(resolve => { resolveCapabilities = resolve; }));
     render(
@@ -206,9 +202,39 @@ describe('MediaGenerateForm', () => {
       />,
     );
 
-    expect(screen.queryByTestId('media-reference-picker')).toBeNull();
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'turn this into art' } });
+    expect(screen.getByTestId('media-reference-pending')).toHaveTextContent('source.png');
+    expect(screen.getByRole('button', { name: /disc\.media\.generate/ })).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: /disc\.media\.generate/ }));
+    expect(mediaApi.generate).not.toHaveBeenCalled();
     resolveCapabilities({ model: 'image-model', capabilities: { max_input_references: 1 } });
     expect(await screen.findByTestId('media-reference-picker')).toHaveTextContent('source.png');
+    fireEvent.click(screen.getByRole('button', { name: /disc\.media\.generate/ }));
+    await waitFor(() => expect(mediaApi.generate).toHaveBeenCalledWith(expect.objectContaining({
+      reference_asset_ids: ['asset-1'], reference_mode: 'reference',
+    })));
+  });
+
+  it.each([
+    ['fails', () => mediaApi.capabilities.mockRejectedValue(new Error('catalogue unavailable'))],
+    ['rejects the source', () => mediaApi.capabilities.mockResolvedValue({ model: 'image-model', capabilities: { max_input_references: 0 } })],
+  ])('does not bill when the selected model %s', async (_case, arrange) => {
+    arrange();
+    render(
+      <MediaGenerateForm
+        discussionId="d-1"
+        connections={[connection()]}
+        images={[{ id: 'asset-1', filename: 'source.png' } as never]}
+        initialSlotKey="conn-1:image"
+        initialReference={{ assetId: 'asset-1', mode: 'reference' }}
+        t={t}
+      />,
+    );
+
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'turn this into art' } });
+    expect(await screen.findByTestId('media-reference-pending')).toHaveTextContent('source.png');
+    fireEvent.click(screen.getByRole('button', { name: /disc\.media\.generate/ }));
+    expect(mediaApi.generate).not.toHaveBeenCalled();
   });
 
   it('shows each aspect ratio as a shape, not just as arithmetic', async () => {
@@ -649,7 +675,7 @@ describe('MediaGenerateForm', () => {
     expect(screen.queryByTestId('media-reference-picker')).toBeNull();
   });
 
-  it('drops a picked image the newly selected model cannot take', async () => {
+  it('keeps a picked image visible and blocks launch when the newly selected model cannot take it', async () => {
     mediaApi.capabilities.mockResolvedValue(videoCapabilities(['first_frame', 'last_frame']));
     const { rerender } = render(
       <MediaGenerateForm
@@ -675,10 +701,13 @@ describe('MediaGenerateForm', () => {
         t={t}
       />,
     );
-    // The picker briefly disappears while the new envelope is being read, so
-    // the choice has to be awaited rather than read on the next tick.
-    await waitFor(() => expect(offeredPictures()).toContain('asset-1'));
+    // The source remains visible and blocks launch rather than being silently
+    // downgraded to a text-only request when the new model rejects its mode.
+    expect(await screen.findByTestId('media-reference-pending')).toHaveTextContent('origami.png');
     expect(screen.queryByTestId('media-reference-mode-last_frame')).toBeNull();
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'keep the source' } });
+    fireEvent.click(screen.getByRole('button', { name: /disc\.media\.generate/ }));
+    expect(mediaApi.generate).not.toHaveBeenCalled();
   });
 
   it('explains itself when no connection has a media model', () => {

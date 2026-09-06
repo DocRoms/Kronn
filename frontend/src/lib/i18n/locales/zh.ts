@@ -1078,6 +1078,7 @@ const zh: TranslationDict = {
   "disc.media.lastFrame.error.decode": "未能解码出任何画面。因此没有保存任何内容，而不是把一张黑图当作最后一帧。",
   "disc.media.lastFrame.error.encode": "画面已解码，但无法保存为文件。",
   "disc.media.referenceTooNarrow": "该图片宽 {0} px。服务商要求至少 {1} px，否则生成会被拒绝。",
+  "disc.media.referenceCompatibilityPending": "此源图片仍处于选中状态。在所选模型确认可以使用它之前，无法生成。",
   "disc.media.launched": "已在 {0} 上开始生成",
   "disc.media.noSlot": "没有连接为此模态配置模型（设置 → 外部 API）。",
   "disc.media.newAsset": "生成媒体",

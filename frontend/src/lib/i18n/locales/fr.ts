@@ -1103,6 +1103,7 @@ const fr: TranslationDict = {
   'disc.media.lastFrame.error.decode': 'Aucune image n’a été décodée. Rien n’a été enregistré, plutôt qu’une image noire présentée comme la dernière.',
   'disc.media.lastFrame.error.encode': 'L’image a été décodée mais n’a pas pu être enregistrée en fichier.',
   'disc.media.referenceTooNarrow': 'Cette image fait {0} px de large. Le fournisseur en exige au moins {1} : la génération serait refusée.',
+  'disc.media.referenceCompatibilityPending': 'Cette image source reste sélectionnée. La génération est indisponible tant que le modèle sélectionné ne confirme pas pouvoir l’utiliser.',
   'disc.media.launched': 'Génération lancée sur {0}',
   'disc.media.noSlot': 'Aucune connexion n\'a de modèle configuré pour cette modalité (Réglages → API externes).',
   'disc.media.newAsset': 'Générer un média',

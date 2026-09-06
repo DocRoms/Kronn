@@ -4,13 +4,14 @@ import type { ContextFile } from '../../types/generated';
 import { LastFrameError } from '../../lib/lastFrame';
 import type * as LastFrameModule from '../../lib/lastFrame';
 
-const { discussionsApi, triggerDownload, extractLastFrame } = vi.hoisted(() => ({
+const { discussionsApi, mediaApi, triggerDownload, extractLastFrame } = vi.hoisted(() => ({
   discussionsApi: { contextFileBlob: vi.fn(), deleteContextFile: vi.fn(), uploadContextFile: vi.fn() },
+  mediaApi: { capabilities: vi.fn(), estimate: vi.fn(), generate: vi.fn() },
   triggerDownload: vi.fn(),
   extractLastFrame: vi.fn(),
 }));
 
-vi.mock('../../lib/api', () => ({ discussions: discussionsApi }));
+vi.mock('../../lib/api', () => ({ discussions: discussionsApi, media: mediaApi }));
 vi.mock('../../lib/downloadBlob', () => ({ triggerDownload }));
 // The decode itself is covered against a fake element in lastFrame.test.ts;
 // what this file owns is the trip from the click to the discussion's files.
@@ -47,6 +48,8 @@ describe('DiscussionAssetsPanel', () => {
     globalThis.URL.revokeObjectURL = vi.fn();
     discussionsApi.contextFileBlob.mockResolvedValue(new Blob(['image'], { type: 'image/png' }));
     discussionsApi.deleteContextFile.mockResolvedValue(undefined);
+    mediaApi.capabilities.mockResolvedValue({ model: 'image-model', capabilities: { max_input_references: 1 } });
+    mediaApi.estimate.mockResolvedValue({ model: 'image-model', estimated_usd: null, samples: 0 });
     extractLastFrame.mockResolvedValue({
       blob: new Blob(['png'], { type: 'image/png' }),
       width: 640,
@@ -179,6 +182,35 @@ describe('DiscussionAssetsPanel', () => {
     fireEvent.click(within(dialog).getByRole('button', { name: 'disc.media.carouselNext' }));
     expect(dialog).toHaveTextContent('1 / 2');
     expect(within(dialog).getByRole('img', { name: 'two.png' })).toBeInTheDocument();
+  });
+
+  it('reveals the image form with the current carousel asset after generation handoff', async () => {
+    const connections = [{
+      id: 'conn-1', display_name: 'OpenRouter', mention_alias: '@openrouter',
+      endpoint: 'https://openrouter.ai/api/v1', origin_preset: 'open_router', has_credential: true,
+      economy_model: null, default_model: null, reasoning_model: null,
+      image_model: 'image-model', video_model: null, media_endpoint: null,
+      created_at: '2026-08-31T10:00:00Z', updated_at: '2026-08-31T10:00:00Z',
+    }] as never;
+    render(
+      <DiscussionAssetsPanel
+        discussionId="disc-1"
+        files={[file(1, { filename: 'source.png', mime_type: 'image/png', disk_path: '/tmp/source.png' })]}
+        connections={connections}
+        onClose={vi.fn()}
+        onNavigateMessage={vi.fn()}
+        t={t}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole('button', { name: 'disc.attachmentImage:source.png' }));
+    fireEvent.click(await screen.findByTestId('attachment-generate-image'));
+    expect(screen.queryByRole('dialog', { name: 'disc.attachmentGallery' })).toBeNull();
+    const form = await screen.findByTestId('media-generate-form');
+    expect(screen.getByTestId('media-slot-conn-1:image')).toHaveAttribute('aria-checked', 'true');
+    expect(await screen.findByTestId('media-reference-picker')).toHaveTextContent('source.png');
+    expect(form).toHaveFocus();
+    expect(mediaApi.generate).not.toHaveBeenCalled();
   });
   it('opens the exact requested asset once and allows an explicit reopen', async () => {
     discussionsApi.contextFileBlob.mockResolvedValue(new Blob(['video'], { type: 'video/mp4' }));
