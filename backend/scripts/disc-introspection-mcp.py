@@ -589,13 +589,12 @@ TOOLS = [
     {
         "name": "disc_create",
         "description": (
-            "Create a new discussion in Kronn, optionally bound to the "
-            "current source session. When `source_agent` + "
-            "`source_session_id` are provided and a disc already exists "
-            "for that pair, returns the existing disc_id (idempotent — "
-            "safe to call on every CLI bootstrap). Use this once at the "
-            "start of a session to grab a stable Kronn disc_id you can "
-            "later append to."
+            "Create a Kronn discussion, optionally bound to current source "
+            "session. With `source_agent` + `source_session_id`, returns existing "
+            "disc_id (idempotent; safe at CLI bootstrap). Set "
+            "`no_agent:true` only for a peer-only room or a discussion "
+            "without a native responder; default false. Then append to its stable "
+            "disc_id."
         ),
         "inputSchema": {
             "type": "object",
@@ -1223,9 +1222,10 @@ TOOLS = [
     {
         "name": "disc_create_room",
         "description": (
-            "One-shot bootstrap of a multi-agent room: creates a fresh "
-            "discussion AND mints an invite token. Returns `{disc_id, title, "
-            "token, instruction_text, expires_at, next_step}`.\n\n"
+            "One-shot multi-agent room: creates a fresh peer-only discussion "
+            "(`no_agent` defaults true: no native responder) "
+            "and mints an invite token. Returns `{disc_id, title, token, "
+            "instruction_text, expires_at, next_step}`.\n\n"
             "⚠ This does NOT switch your own bridge binding — you stay in "
             "your current disc. Follow `next_step`, or diverge with a "
             "one-line rationale. Details: `tool_manual({tool: \"disc_create_room\"})`."

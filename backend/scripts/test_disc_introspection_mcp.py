@@ -304,6 +304,27 @@ class CallDiscCreateAutoInheritTests(unittest.TestCase):
         self.assertNotIn("source_session_id", body)
 
 
+class DiscussionCreationToolDescriptionsTests(unittest.TestCase):
+    """Public catalogue summaries must expose native-responder defaults."""
+
+    def setUp(self):
+        self.mod = _load_module()
+        self.tools = {tool["name"]: tool for tool in self.mod.TOOLS}
+
+    def test_disc_create_describes_peer_only_mode_without_changing_default(self):
+        description = self.tools["disc_create"]["description"]
+        self.assertIn("`no_agent:true`", description)
+        self.assertIn("peer-only", description)
+        self.assertIn("native responder", description)
+        self.assertIn("default false", description)
+
+    def test_disc_create_room_describes_its_peer_only_default(self):
+        description = self.tools["disc_create_room"]["description"]
+        self.assertIn("peer-only", description)
+        self.assertIn("`no_agent` defaults true", description)
+        self.assertIn("no native responder", description)
+
+
 class DiscSourceBindingToolTests(unittest.TestCase):
     def setUp(self):
         self.mod = _load_module()
