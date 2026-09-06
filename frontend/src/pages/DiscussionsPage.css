@@ -5757,6 +5757,29 @@ button.disc-contact-open {
   font-size: var(--kr-fs-xs);
 }
 
+.disc-new-entry-modes {
+  display: flex;
+  gap: 6px;
+  margin: 0 0 12px;
+}
+
+.disc-new-entry-mode {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--kr-border);
+  border-radius: var(--kr-r-md);
+  background: var(--kr-bg);
+  color: var(--kr-text-muted);
+  padding: 7px 10px;
+}
+
+.disc-new-entry-mode[data-active="true"] {
+  border-color: var(--kr-accent-border);
+  background: rgba(var(--kr-accent-rgb), 0.08);
+  color: var(--kr-text);
+}
+
 .disc-new-layout {
   display: grid;
   min-height: 0;

@@ -2360,6 +2360,24 @@ export function DiscussionsPage({
     );
   };
 
+  const handleCreateMediaDiscussion = async (
+    config: Pick<NewDiscConfig, 'title' | 'agent' | 'projectId' | 'tier'>,
+  ): Promise<string> => {
+    const disc = await discussionsApi.create({
+      project_id: config.projectId,
+      title: config.title,
+      agent: config.agent,
+      language: configLanguage ?? 'fr',
+      initial_prompt: '',
+      initial_targets: [],
+      tier: config.tier !== 'default' ? config.tier : undefined,
+      no_agent: true,
+    });
+    setActiveDiscussionId(disc.id);
+    refetchDiscussions();
+    return disc.id;
+  };
+
   const handleSendMessage = async (
     msg: string,
     targets: MessageTarget[] = [],
@@ -3702,6 +3720,7 @@ export function DiscussionsPage({
             externalConnections={externalConnections}
             prefill={prefill}
             onSubmit={handleCreateDiscussion}
+            onCreateMediaDiscussion={handleCreateMediaDiscussion}
             onClose={() => setShowNewDiscussion(false)}
             onPrefillConsumed={onPrefillConsumed}
             onNavigate={(page, opts) => {

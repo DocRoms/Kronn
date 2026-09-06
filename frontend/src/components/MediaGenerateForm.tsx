@@ -93,6 +93,8 @@ function slotsOf(connections: ExternalApiConnectionView[]): Slot[] {
 
 export function MediaGenerateForm({
   discussionId,
+  onCreateDiscussion,
+  onDiscussionCreated,
   connections,
   images = [],
   t,
@@ -101,7 +103,11 @@ export function MediaGenerateForm({
   initialSlotKey,
   initialReference,
 }: {
-  discussionId: string;
+  /** Existing room, or a creator used by the New discussion media entry. */
+  discussionId?: string;
+  /** Creates the room only after an explicit Generate click. */
+  onCreateDiscussion?: () => Promise<string>;
+  onDiscussionCreated?: (discussionId: string) => void;
   connections: ExternalApiConnectionView[];
   /** Images of THIS discussion, the only ones a generation may start from. */
   images?: ContextFile[];
@@ -171,6 +177,9 @@ export function MediaGenerateForm({
   // even though its response never reached the browser. Reuse the same key
   // only for an identical retry, so it can never schedule a second charge.
   const pendingLaunchRef = useRef<{ signature: string; key: string } | null>(null);
+  // A generation error is not a reason to create another room. Keep the
+  // successful creation independently from the billable request's receipt.
+  const createdDiscussionIdRef = useRef<string | null>(null);
   // React state does not change inside the same event turn. This ref closes
   // the gap where two synchronous submit clicks would otherwise bill twice.
   const submissionInFlightRef = useRef(false);
@@ -293,7 +302,7 @@ export function MediaGenerateForm({
     if (!firstAssetId) return;
     let objectUrl: string | null = null;
     let cancelled = false;
-    discussionsApi.contextFileBlob(discussionId, firstAssetId)
+    discussionsApi.contextFileBlob(discussionId ?? '', firstAssetId)
       .then(async (blob: Blob) => {
         if (cancelled) return;
         objectUrl = URL.createObjectURL(blob);
@@ -322,7 +331,7 @@ export function MediaGenerateForm({
     const created: string[] = [];
     Promise.all(
       images.map(image =>
-        discussionsApi.contextFileBlob(discussionId, image.id)
+        discussionsApi.contextFileBlob(discussionId ?? '', image.id)
           .then((blob: Blob) => {
             if (cancelled) return null;
             const url = URL.createObjectURL(blob);
@@ -387,7 +396,7 @@ export function MediaGenerateForm({
     setAttaching(true);
     setError(null);
     try {
-      const uploaded = await discussionsApi.uploadContextFile(discussionId, file);
+      const uploaded = await discussionsApi.uploadContextFile(discussionId ?? '', file);
       onImageAttached?.(uploaded.file);
       // Picked right away: attaching one here is asking to use it, and making
       // the operator find it again in the list would be the extra step this
@@ -467,11 +476,22 @@ export function MediaGenerateForm({
 
   const submit = useCallback(async () => {
     if (!selected || !prompt.trim() || busy || referenceTooNarrow || referenceIntentUnresolved || submissionInFlightRef.current) return;
+    submissionInFlightRef.current = true;
+    setBusy(true);
+    setError(null);
+    let targetDiscussionId = discussionId ?? createdDiscussionIdRef.current;
+    try {
+      if (!targetDiscussionId) {
+        if (!onCreateDiscussion) throw new Error('A discussion is required to generate media.');
+        targetDiscussionId = await onCreateDiscussion();
+        createdDiscussionIdRef.current = targetDiscussionId;
+        onDiscussionCreated?.(targetDiscussionId);
+      }
     const signature = JSON.stringify({
       connectionId: selected.connectionId,
       modality: selected.modality,
       prompt: prompt.trim(),
-      discussionId,
+      discussionId: targetDiscussionId,
       aspectRatio,
       durationSecs: selected.modality === 'video' ? durationSecs : null,
       resolution: selected.modality === 'video' ? resolution : null,
@@ -481,16 +501,12 @@ export function MediaGenerateForm({
     if (pendingLaunchRef.current?.signature !== signature) {
       pendingLaunchRef.current = { signature, key: crypto.randomUUID() };
     }
-    submissionInFlightRef.current = true;
-    setBusy(true);
-    setError(null);
-    try {
       const job = await media.generate({
         idempotency_key: pendingLaunchRef.current.key,
         connection_id: selected.connectionId,
         modality: selected.modality,
         prompt: prompt.trim(),
-        discussion_id: discussionId,
+        discussion_id: targetDiscussionId,
         aspect_ratio: aspectRatio,
         ...(selected.modality === 'video'
           // Sent explicitly, including the default: an absent field leaves the
@@ -513,7 +529,7 @@ export function MediaGenerateForm({
       submissionInFlightRef.current = false;
       setBusy(false);
     }
-  }, [aspectRatio, busy, discussionId, durationSecs, generateAudio, onLaunched, prompt, reference, referenceIntentUnresolved, referenceTooNarrow, resolution, selected]);
+  }, [aspectRatio, busy, discussionId, durationSecs, generateAudio, onCreateDiscussion, onDiscussionCreated, onLaunched, prompt, reference, referenceIntentUnresolved, referenceTooNarrow, resolution, selected]);
 
   if (slots.length === 0) {
     return (

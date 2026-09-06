@@ -16,6 +16,11 @@ vi.mock('../../lib/api', () => ({
   // KT-531 — AgentSwitchPicker reads the dynamic model catalog when its
   // popover opens.
   modelCatalogApi: { list: vi.fn().mockResolvedValue({ targets: [] }) },
+  media: {
+    capabilities: vi.fn().mockResolvedValue({ model: 'image-model', capabilities: null }),
+    estimate: vi.fn().mockResolvedValue({ model: 'image-model', estimated_usd: null, samples: 0 }),
+    generate: vi.fn(),
+  },
 }));
 
 vi.mock('../../lib/I18nContext', () => ({
@@ -83,6 +88,12 @@ const OPENROUTER_CONNECTION: ExternalApiConnectionView = {
   has_credential: true,
 };
 
+const MEDIA_CONNECTION: ExternalApiConnectionView = {
+  ...OPENROUTER_CONNECTION,
+  image_model: 'google/gemini-2.5-flash-image',
+  video_model: null,
+};
+
 const mount = (projects: Project[]) => {
   const onSubmit = vi.fn();
   return render(
@@ -104,6 +115,49 @@ beforeEach(() => {
 });
 
 describe('NewDiscussionForm — creation flow layout', () => {
+  it('only offers media mode for configured image or video slots, and cancel creates no room', async () => {
+    const onCreateMediaDiscussion = vi.fn().mockResolvedValue('d-media');
+    const onClose = vi.fn();
+    const { rerender } = render(
+      <NewDiscussionForm
+        projects={[]}
+        agents={[AGENT]}
+        configLanguage="fr"
+        agentAccess={null}
+        externalConnections={[]}
+        onSubmit={vi.fn()}
+        onCreateMediaDiscussion={onCreateMediaDiscussion}
+        onClose={onClose}
+        onNavigate={vi.fn()}
+        t={(key: string) => key}
+      />,
+    );
+    expect(screen.queryByTestId('new-disc-media-mode')).toBeNull();
+
+    rerender(
+      <NewDiscussionForm
+        projects={[]}
+        agents={[AGENT]}
+        configLanguage="fr"
+        agentAccess={null}
+        externalConnections={[MEDIA_CONNECTION]}
+        onSubmit={vi.fn()}
+        onCreateMediaDiscussion={onCreateMediaDiscussion}
+        onClose={onClose}
+        onNavigate={vi.fn()}
+        t={(key: string) => key}
+      />,
+    );
+    fireEvent.click(screen.getByTestId('new-disc-media-mode'));
+    expect(await screen.findByTestId('media-generate-form')).toBeInTheDocument();
+    expect(document.querySelector('.disc-create-btn')).toBeNull();
+    expect(onCreateMediaDiscussion).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(onCreateMediaDiscussion).not.toHaveBeenCalled();
+  });
+
   it('offers @openrouter with its configured models and submits the durable connection target', async () => {
     const onSubmit = vi.fn();
     render(
