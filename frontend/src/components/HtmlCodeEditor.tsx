@@ -1,6 +1,7 @@
-import { useMemo, useRef } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import type { ChangeEvent, KeyboardEvent, UIEvent } from 'react';
 import { highlightHtmlLine } from '../lib/html-syntax';
+import { buildHtmlPreviewDocument } from '../lib/html-preview';
 import { diffLines } from '../lib/qp-history-diff';
 
 interface HtmlCodeEditorProps {
@@ -71,6 +72,9 @@ interface HtmlRevisionDiffProps {
   current: string;
   previousLabel: string;
   currentLabel: string;
+  codeLabel: string;
+  previewLabel: string;
+  previewLimitations: string;
 }
 
 export function HtmlRevisionDiff({
@@ -78,25 +82,50 @@ export function HtmlRevisionDiff({
   current,
   previousLabel,
   currentLabel,
+  codeLabel,
+  previewLabel,
+  previewLimitations,
 }: HtmlRevisionDiffProps) {
   const rows = useMemo(() => diffLines(previous, current), [current, previous]);
+  const [view, setView] = useState<'code' | 'preview'>('code');
   return (
-    <div className="live-pages-html-diff" data-testid="live-page-html-diff">
-      <header><span>{previousLabel}</span><span>{currentLabel}</span></header>
-      <div className="live-pages-html-diff-body">
-        {rows.map((row, index) => (
-          <div key={index} className="live-pages-html-diff-row" data-kind={row.kind}>
-            <span className="live-pages-html-diff-line">
-              <i>{index + 1}</i>
-              <code dangerouslySetInnerHTML={{ __html: highlightHtmlLine(row.prev) || '&nbsp;' }} />
-            </span>
-            <span className="live-pages-html-diff-line">
-              <i>{index + 1}</i>
-              <code dangerouslySetInnerHTML={{ __html: highlightHtmlLine(row.next) || '&nbsp;' }} />
-            </span>
-          </div>
-        ))}
+    <div className="live-pages-revision-comparison" data-testid="live-page-html-comparison">
+      <div className="live-pages-revision-view-toggle" role="group" aria-label={codeLabel}>
+        <button type="button" aria-pressed={view === 'code'} onClick={() => setView('code')}>{codeLabel}</button>
+        <button type="button" aria-pressed={view === 'preview'} onClick={() => setView('preview')}>{previewLabel}</button>
       </div>
+      {view === 'code' ? (
+        <div className="live-pages-html-diff" data-testid="live-page-html-diff">
+          <header><span>{previousLabel}</span><span>{currentLabel}</span></header>
+          <div className="live-pages-html-diff-body">
+            {rows.map((row, index) => (
+              <div key={index} className="live-pages-html-diff-row" data-kind={row.kind}>
+                <span className="live-pages-html-diff-line">
+                  <i>{index + 1}</i>
+                  <code dangerouslySetInnerHTML={{ __html: highlightHtmlLine(row.prev) || '&nbsp;' }} />
+                </span>
+                <span className="live-pages-html-diff-line">
+                  <i>{index + 1}</i>
+                  <code dangerouslySetInnerHTML={{ __html: highlightHtmlLine(row.next) || '&nbsp;' }} />
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : (
+        <div className="live-pages-html-preview-diff" data-testid="live-page-html-preview-diff">
+          <section>
+            <header>{previousLabel}</header>
+            <iframe sandbox="" srcDoc={buildHtmlPreviewDocument(previous)} title={`${previewLabel}: ${previousLabel}`} />
+            <p>{previewLimitations}</p>
+          </section>
+          <section>
+            <header>{currentLabel}</header>
+            <iframe sandbox="" srcDoc={buildHtmlPreviewDocument(current)} title={`${previewLabel}: ${currentLabel}`} />
+            <p>{previewLimitations}</p>
+          </section>
+        </div>
+      )}
     </div>
   );
 }

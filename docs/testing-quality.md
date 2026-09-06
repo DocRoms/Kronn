@@ -16,6 +16,22 @@ and the runner's final summary is the source of truth.
   type source of truth; regenerate TypeScript with `make typegen`.
 - All commands in the release gate must pass before a tag is created.
 
+## Reviewing a worker delivery
+
+Record the exact delivered HEAD and run checks after the final test/fixture
+edits. A passing Vitest run does not type-check its fixtures: also run the
+frontend TypeScript build check (`tsc -b`) on that same HEAD. Locale parity
+alone cannot detect a key absent from every dictionary; the i18n lint also
+checks literal `t(...)` usages against the shipped keys. Reuse an existing
+label where its meaning matches instead of inventing a second spelling.
+`[src: file: frontend/scripts/lint-i18n.mjs:104-164]`
+
+With multiple worktrees sharing a Cargo target directory, verify the crate
+path and the selected regression-test count. A filtered command that succeeds
+with zero tests is not evidence for that regression; a prior worktree's result
+must not be attached to a different delivered HEAD. Resolve any stale-artifact
+ambiguity before approving, without deleting another worker's shared cache.
+
 ## Release gate
 
 Run from the repository root unless a working directory is shown.

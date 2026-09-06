@@ -107,6 +107,18 @@ added to every message. While open, the panel refreshes its compact plan and
 selected detail in the background so human and agent edits appear without a
 manual close/reopen cycle. `[src: user: 2026-07-24: discussion-panel decisions]`
 
+The view switch offers **Focus / In progress / All**. In progress selects the
+`in_progress` task status across both Active and Later relations, including
+tasks with unresolved dependencies; Focus retains its compact actionable
+projection. The status view reuses the searchable, virtualised full-plan list.
+The selected view is saved per discussion in session storage. A small spinner
+on in-progress rows reflects Planning status only, not a worker heartbeat; it
+stops animating when reduced motion is requested. Background plan refreshes
+update membership and indicators without resetting the selected view.
+`[src: file: frontend/src/components/DiscussionPlanPanel.tsx:383-423]`
+`[src: file: frontend/src/lib/orch-panel-state.ts:50-70]`
+`[src: file: frontend/src/components/DiscussionPlanPanel.css:163-182]`
+
 Agents may instead emit structured proposals that the UI renders as existing
 action-like cards. Initial actions are:
 

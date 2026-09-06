@@ -64,6 +64,23 @@ class DiscussionQuestionReadTests(unittest.TestCase):
     def setUp(self):
         self.mod = _load_module()
 
+    def test_manual_has_a_valid_numeric_version_example_and_readback_contract(self):
+        reader = next(tool for tool in self.mod.TOOLS if tool["name"] == "disc_question_list")
+        self.assertIn('numeric version 1, not string "1"', reader["description"])
+        self.assertIn("read back its exact key", reader["description"])
+        manual = self.mod.TOOL_MANUALS["disc_question_list"]
+        example = json.loads(manual.split("Example: `", 1)[1].split("`", 1)[0])
+        self.assertIs(type(example["version"]), int)
+        self.assertEqual(example["version"], 1)
+        self.assertTrue(example["key"])
+        self.assertTrue(example["question"])
+        for contract in [
+            "JSON number 1", 'the string "1" is INVALID', "After disc_append",
+            "read back this exact key", "NOT a pending or answered decision",
+            "republish with the same key", "neither a recorded card nor human consent",
+        ]:
+            self.assertIn(contract, manual)
+
     def test_pending_is_bounded_and_key_recovers_an_answer_without_writing(self):
         rows = [{"key": f"q-{i}", "state": "pending"} for i in range(55)]
         rows.append({"key": "resolved", "state": "answered", "answer": {"text": "Human choice"}})

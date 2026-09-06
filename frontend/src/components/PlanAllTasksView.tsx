@@ -11,6 +11,8 @@ export interface PlanAllTasksViewProps {
   later: PlanningDiscussionRelation[];
   /** Search text. Parent-owned so it survives a Focus↔All toggle. */
   query: string;
+  /** Accessible name for a filtered view; defaults to the full-plan label. */
+  label?: string;
   onQueryChange: (next: string) => void;
   /** The currently selected task, if any — reflected as `aria-selected`. */
   selectedTaskId: string | null;
@@ -59,6 +61,7 @@ export function PlanAllTasksView({
   active,
   later,
   query,
+  label,
   onQueryChange,
   selectedTaskId,
   onSelect,
@@ -196,7 +199,7 @@ export function PlanAllTasksView({
           className="plan-all-scroll"
           role="listbox"
           tabIndex={0}
-          aria-label={t('planning.allView')}
+          aria-label={label ?? t('planning.allView')}
           aria-activedescendant={activeTaskId ? optionId(activeTaskId) : undefined}
           onKeyDown={onKeyDown}
         >

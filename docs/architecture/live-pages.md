@@ -76,9 +76,12 @@ The HTML revision and data revision are independent. A cron run normally
 changes data only. Editing the presentation creates an immutable HTML revision
 and never rewrites the historical document used by a prior publication. The
 Page editor exposes that revision list, an HTML-highlighted line-numbered
-editor, a side-by-side line diff against any earlier revision and an explicit
-restore-to-draft action. Restoring does not mutate history: saving the restored
-draft creates another immutable revision.
+editor, and a code/preview comparison against any earlier revision. Preview
+renders the selected revision and the current draft side by side on wide screens
+using the same static isolated HTML policy as Project Code; it has no Live Page
+action bridge. An explicit restore-to-draft action remains separate from the
+comparison. Restoring does not mutate history: saving the restored draft creates
+another immutable revision. `[src: file: frontend/src/components/HtmlCodeEditor.tsx:70-131]`
 
 JSON is the dataset payload format. Snapshot and collection values are stored
 as one JSON value. Time-series observations are stored as individual rows so a
