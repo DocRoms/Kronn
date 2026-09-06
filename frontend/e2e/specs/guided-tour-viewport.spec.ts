@@ -278,7 +278,9 @@ for (const viewport of VIEWPORTS) {
               '[data-tour-id="settings-agents"]',
             )),
           }));
-          throw new Error(`${String(error)}\nTour diagnostics: ${JSON.stringify(diagnostics)}`);
+          throw new Error(`${String(error)}\nTour diagnostics: ${JSON.stringify(diagnostics)}`, {
+            cause: error,
+          });
         }
       }
 
