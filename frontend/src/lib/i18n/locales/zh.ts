@@ -4372,6 +4372,7 @@ const zh: TranslationDict = {
   "common.saving": "正在保存…",
   "common.delete": "删除",
   "common.close": "关闭",
+  "common.actions": "操作",
   "common.add": "添加",
   "common.copy": "复制",
   "common.copied": "已复制！",

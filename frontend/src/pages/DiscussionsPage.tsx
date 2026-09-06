@@ -5145,7 +5145,7 @@ export function DiscussionsPage({
                 },
                 {
                   id: 'delete',
-                  label: t('disc.deleteAction'),
+                  label: t('disc.delete'),
                   icon: <Trash2 size={14} />,
                   active: false,
                   onSelect: () => { void deleteActiveDiscussion(activeDiscussion.id); },
