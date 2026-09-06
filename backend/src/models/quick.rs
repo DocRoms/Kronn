@@ -272,6 +272,14 @@ pub fn render_quick_prompt_template(
         .into_iter()
         .map(|(variable_name, environment_name)| (environment_name, variable_name))
         .collect();
+    render_quick_prompt_template_with_environment_bindings(template, values, &environment_bindings)
+}
+
+fn render_quick_prompt_template_with_environment_bindings(
+    template: &str,
+    values: &std::collections::HashMap<String, String>,
+    environment_bindings: &HashMap<String, String>,
+) -> String {
     let mut rendered = String::with_capacity(template.len());
     let mut index = 0;
     while index < template.len() {
@@ -310,6 +318,34 @@ pub fn render_quick_prompt_template(
         index += character.len_utf8();
     }
     rendered
+}
+
+/// Render a Quick Prompt with the environment bindings recorded by its
+/// launch-time execution snapshot.  Unlike `render_quick_prompt_template`,
+/// this does not derive generated declaration names from mutable prompt
+/// declarations.
+pub fn render_quick_prompt_template_from_snapshot(
+    template: &str,
+    values: &std::collections::HashMap<String, String>,
+    provenance: &[crate::core::execution_variables::VariableProvenance],
+) -> String {
+    let environment_bindings = provenance
+        .iter()
+        .filter(|variable| {
+            variable.source == PromptVariableSource::ProjectEnv
+                && variable.name.starts_with(TEMPLATE_ENV_VARIABLE_PREFIX)
+        })
+        .filter_map(|variable| {
+            variable
+                .source_ref
+                .as_deref()
+                .and_then(|reference| reference.strip_prefix("<env."))
+                .and_then(|name| name.strip_suffix('>'))
+                .filter(|name| is_environment_name(name))
+                .map(|name| (name.to_string(), variable.name.clone()))
+        })
+        .collect::<HashMap<_, _>>();
+    render_quick_prompt_template_with_environment_bindings(template, values, &environment_bindings)
 }
 
 /// Pair each environment name in a template with a runtime-only declaration

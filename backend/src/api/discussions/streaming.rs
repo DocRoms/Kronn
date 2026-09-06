@@ -36,6 +36,59 @@ use crate::api::disc_helpers::{
 };
 use crate::api::disc_prompts::build_agent_prompt;
 
+type QuickPromptSnapshot = (
+    std::collections::HashMap<String, String>,
+    Vec<crate::core::execution_variables::VariableProvenance>,
+);
+
+fn load_quick_prompt_snapshot(
+    conn: &rusqlite::Connection,
+    discussion_id: &str,
+    workflow_run_id: Option<&str>,
+    key: &[u8; 32],
+) -> anyhow::Result<Option<QuickPromptSnapshot>> {
+    let load = |kind, id| -> anyhow::Result<Option<QuickPromptSnapshot>> {
+        let Some(values) = crate::db::execution_variable_snapshots::load_values(
+            conn,
+            kind,
+            id,
+            key,
+            chrono::Utc::now(),
+        )?
+        else {
+            return Ok(None);
+        };
+        let metadata = crate::db::execution_variable_snapshots::metadata(conn, kind, id)?
+            .ok_or_else(|| anyhow::anyhow!("Quick Prompt variable snapshot metadata missing"))?;
+        Ok(Some((values, metadata.provenance)))
+    };
+
+    for (kind, id) in [
+        ("quick_prompt", Some(discussion_id)),
+        ("quick_prompt_batch_item", Some(discussion_id)),
+        ("quick_prompt_compare", workflow_run_id),
+    ] {
+        if let Some(id) = id {
+            if let Some(snapshot) = load(kind, id)? {
+                return Ok(Some(snapshot));
+            }
+        }
+    }
+    if let Some(batch_run_id) = workflow_run_id {
+        let parent_id: Option<String> = conn
+            .query_row(
+                "SELECT parent_run_id FROM workflow_runs WHERE id=?1",
+                [batch_run_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(parent_id) = parent_id {
+            return load("workflow", &parent_id);
+        }
+    }
+    Ok(None)
+}
+
 /// Build the native HTTP tool executor from durable discussion lineage.
 ///
 /// The ordinary discussion path and the task-dispatch SSE path both end up in
@@ -894,8 +947,13 @@ mod awaiting_terminal_tests {
 
 #[cfg(test)]
 mod dispatch_prompt_snapshot_tests {
-    use super::{discussion_at_dispatch_trigger, independent_sibling_notice};
-    use crate::models::Discussion;
+    use super::{
+        discussion_at_dispatch_trigger, independent_sibling_notice, load_quick_prompt_snapshot,
+    };
+    use crate::{
+        core::execution_variables::VariableProvenance,
+        models::{Discussion, PromptVariableSource},
+    };
 
     fn discussion_with_turns() -> Discussion {
         serde_json::from_value(serde_json::json!({
@@ -980,6 +1038,178 @@ mod dispatch_prompt_snapshot_tests {
         assert!(notice.contains("ne le relance pas"));
         assert!(notice.contains("@codex, @ollama"));
         assert!(independent_sibling_notice("fr", "").is_empty());
+    }
+
+    #[test]
+    fn quick_prompt_dispatch_uses_snapshot_provenance_after_prompt_mutation_and_deletion() {
+        let conn = rusqlite::Connection::open_in_memory().expect("in-memory database");
+        crate::db::migrations::run(&conn).expect("schema");
+        let key = [7_u8; 32];
+        let now = chrono::Utc::now().to_rfc3339();
+        let launch_variables = serde_json::json!([{
+            "name": "__kronn_template_env__API_TOKEN",
+            "label": "ordinary",
+            "placeholder": "",
+            "required": true,
+            "source": "UserInput",
+            "allow_manual_override": false
+        }])
+        .to_string();
+        conn.execute(
+            "INSERT INTO quick_prompts
+             (id, name, icon, prompt_template, variables_json, agent, created_at, updated_at)
+             VALUES ('qp-before-mutation', 'Before mutation', 'x', 'unused', ?1, 'Codex', ?2, ?2)",
+            rusqlite::params![launch_variables, now],
+        )
+        .expect("Quick Prompt at launch");
+        let values = std::collections::HashMap::from([
+            (
+                "__kronn_template_env__API_TOKEN".to_string(),
+                "ordinary".to_string(),
+            ),
+            (
+                "__kronn_template_env__API_TOKEN#2".to_string(),
+                "environment".to_string(),
+            ),
+        ]);
+        let provenance = vec![
+            VariableProvenance {
+                name: "__kronn_template_env__API_TOKEN".to_string(),
+                source: PromptVariableSource::UserInput,
+                source_ref: None,
+                effective_source_ref: "user_input".to_string(),
+                overridden: false,
+            },
+            VariableProvenance {
+                name: "__kronn_template_env__API_TOKEN#2".to_string(),
+                source: PromptVariableSource::ProjectEnv,
+                source_ref: Some("<env.API_TOKEN>".to_string()),
+                effective_source_ref: "mcp_config:cfg:<env.API_TOKEN>".to_string(),
+                overridden: false,
+            },
+        ];
+        crate::db::execution_variable_snapshots::insert(
+            &conn,
+            crate::db::execution_variable_snapshots::NewSnapshot {
+                run_kind: "quick_prompt",
+                run_id: "discussion-after-delete",
+                project_id: None,
+                environment_ref: "project_mcp_configs",
+                resolved_at: chrono::Utc::now(),
+                retention_days: 30,
+                expires_at: None,
+                values: &values,
+                provenance: &provenance,
+            },
+            &key,
+        )
+        .expect("launch-time snapshot");
+        // The launch declaration made the synthetic name end in `#2`.  A later
+        // edit removes that declaration, so reading this mutable QP at dispatch
+        // would instead look for the unsuffixed value and leave env placeholders.
+        conn.execute(
+            "UPDATE quick_prompts SET variables_json='[]' WHERE id='qp-before-mutation'",
+            [],
+        )
+        .expect("mutate Quick Prompt after launch");
+
+        let (values, provenance) =
+            load_quick_prompt_snapshot(&conn, "discussion-after-delete", None, &key)
+                .expect("load snapshot after mutation")
+                .expect("snapshot remains after the Quick Prompt is edited");
+        assert_eq!(
+            crate::models::render_quick_prompt_template_from_snapshot(
+                "{{__kronn_template_env__API_TOKEN}} {{env.API_TOKEN}} <env.API_TOKEN>",
+                &values,
+                &provenance,
+            ),
+            "ordinary environment environment"
+        );
+
+        crate::db::quick_prompts::delete_quick_prompt(&conn, "qp-before-mutation")
+            .expect("delete Quick Prompt after launch");
+
+        let (values, provenance) =
+            load_quick_prompt_snapshot(&conn, "discussion-after-delete", None, &key)
+                .expect("load snapshot")
+                .expect("snapshot remains after the Quick Prompt is deleted");
+        assert_eq!(
+            crate::models::render_quick_prompt_template_from_snapshot(
+                "{{__kronn_template_env__API_TOKEN}} {{env.API_TOKEN}} <env.API_TOKEN>",
+                &values,
+                &provenance,
+            ),
+            "ordinary environment environment"
+        );
+    }
+
+    #[test]
+    fn quick_prompt_snapshot_lookup_keeps_batch_compare_and_workflow_parent_paths() {
+        let conn = rusqlite::Connection::open_in_memory().expect("in-memory database");
+        crate::db::migrations::run(&conn).expect("schema");
+        let key = [8_u8; 32];
+        let insert_snapshot = |kind: &str, run_id: &str, value: &str| {
+            let values = std::collections::HashMap::from([("source".to_string(), value.to_string())]);
+            crate::db::execution_variable_snapshots::insert(
+                &conn,
+                crate::db::execution_variable_snapshots::NewSnapshot {
+                    run_kind: kind,
+                    run_id,
+                    project_id: None,
+                    environment_ref: "project_mcp_configs",
+                    resolved_at: chrono::Utc::now(),
+                    retention_days: 30,
+                    expires_at: None,
+                    values: &values,
+                    provenance: &[],
+                },
+                &key,
+            )
+            .expect("snapshot");
+        };
+
+        insert_snapshot("quick_prompt_batch_item", "batch-discussion", "batch");
+        let (values, _) = load_quick_prompt_snapshot(&conn, "batch-discussion", None, &key)
+            .expect("load batch snapshot")
+            .expect("batch snapshot");
+        assert_eq!(values.get("source"), Some(&"batch".to_string()));
+
+        insert_snapshot("quick_prompt_compare", "compare-run", "compare");
+        let (values, _) =
+            load_quick_prompt_snapshot(&conn, "compare-discussion", Some("compare-run"), &key)
+                .expect("load comparison snapshot")
+                .expect("comparison snapshot");
+        assert_eq!(values.get("source"), Some(&"compare".to_string()));
+
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO workflows
+             (id, name, trigger_json, steps_json, actions_json, safety_json, enabled, created_at, updated_at)
+             VALUES ('workflow-for-snapshot', 'Workflow', '{}', '[]', '[]', '{}', 1, ?1, ?1)",
+            [&now],
+        )
+        .expect("workflow");
+        conn.execute(
+            "INSERT INTO workflow_runs
+             (id, workflow_id, status, step_results_json, started_at)
+             VALUES ('workflow-parent', 'workflow-for-snapshot', 'Running', '[]', ?1)",
+            [&now],
+        )
+        .expect("parent run");
+        conn.execute(
+            "INSERT INTO workflow_runs
+             (id, workflow_id, status, step_results_json, started_at, parent_run_id)
+             VALUES ('workflow-child', 'workflow-for-snapshot', 'Running', '[]', ?1, 'workflow-parent')",
+            [&now],
+        )
+        .expect("child run");
+        insert_snapshot("workflow", "workflow-parent", "parent");
+
+        let (values, _) =
+            load_quick_prompt_snapshot(&conn, "child-discussion", Some("workflow-child"), &key)
+                .expect("load parent workflow snapshot")
+                .expect("parent workflow snapshot");
+        assert_eq!(values.get("source"), Some(&"parent".to_string()));
     }
 }
 
@@ -2154,30 +2384,6 @@ async fn make_agent_stream_inner(
             .unwrap_or(false)
     };
     if qp_launch {
-        let discussion_id_for_qp = disc.id.clone();
-        let original_declarations = state
-            .db
-            .with_read_conn(move |conn| {
-                let qp_id: Option<String> = conn
-                    .query_row(
-                        "SELECT originating_qp_id FROM discussions WHERE id=?1",
-                        [discussion_id_for_qp],
-                        |row| row.get(0),
-                    )
-                    .optional()?;
-                Ok::<_, anyhow::Error>(
-                    qp_id
-                        .and_then(|id| {
-                            crate::db::quick_prompts::get_quick_prompt(conn, &id)
-                                .ok()
-                                .flatten()
-                        })
-                        .map(|prompt| prompt.variables)
-                        .unwrap_or_default(),
-                )
-            })
-            .await
-            .unwrap_or_default();
         let secret = match state.config.read().await.encryption_secret.clone() {
             Some(secret) => secret,
             None => {
@@ -2204,56 +2410,14 @@ async fn make_agent_stream_inner(
         };
         let disc_id = disc.id.clone();
         let workflow_run_id = disc.workflow_run_id.clone();
-        let values = state
+        let snapshot = state
             .db
             .with_conn(move |conn| {
-                for (kind, id) in [
-                    ("quick_prompt", Some(disc_id.as_str())),
-                    ("quick_prompt_batch_item", Some(disc_id.as_str())),
-                    ("quick_prompt_compare", workflow_run_id.as_deref()),
-                ] {
-                    if let Some(id) = id {
-                        if let Some(values) = crate::db::execution_variable_snapshots::load_values(
-                            conn,
-                            kind,
-                            id,
-                            &key,
-                            chrono::Utc::now(),
-                        )? {
-                            return Ok(Some(values));
-                        }
-                    }
-                }
-                // A BatchQuickPrompt child points at its child batch
-                // run. Environment variables are resolved once on the
-                // parent Workflow run, so follow that durable link and
-                // reuse the immutable parent snapshot on every child
-                // dispatch/resume.
-                if let Some(batch_run_id) = workflow_run_id.as_deref() {
-                    let parent_id: Option<String> = conn
-                        .query_row(
-                            "SELECT parent_run_id FROM workflow_runs WHERE id=?1",
-                            [batch_run_id],
-                            |row| row.get(0),
-                        )
-                        .optional()?;
-                    if let Some(parent_id) = parent_id {
-                        if let Some(values) = crate::db::execution_variable_snapshots::load_values(
-                            conn,
-                            "workflow",
-                            &parent_id,
-                            &key,
-                            chrono::Utc::now(),
-                        )? {
-                            return Ok(Some(values));
-                        }
-                    }
-                }
-                Ok::<_, anyhow::Error>(None)
+                load_quick_prompt_snapshot(conn, &disc_id, workflow_run_id.as_deref(), &key)
             })
             .await;
-        let values = match values {
-            Ok(Some(values)) => values,
+        let (values, provenance) = match snapshot {
+            Ok(Some(snapshot)) => snapshot,
             Ok(None) | Err(_) => {
                 // A QP dispatch may never fall through with placeholders: it
                 // would turn a failed preflight or expired snapshot into an
@@ -2268,10 +2432,10 @@ async fn make_agent_stream_inner(
             }
         };
         if let Some(first_message) = prompt_disc.messages.first_mut() {
-            first_message.content = crate::models::render_quick_prompt_template(
+            first_message.content = crate::models::render_quick_prompt_template_from_snapshot(
                 &first_message.content,
                 &values,
-                &original_declarations,
+                &provenance,
             );
         }
     }
