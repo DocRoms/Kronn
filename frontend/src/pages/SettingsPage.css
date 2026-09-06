@@ -2904,6 +2904,16 @@
   padding: 0 var(--kr-sp-5) var(--kr-sp-5);
 }
 
+/* KT-589 — the configured media slots, on the row below the three tiers.
+   Full width and auto-fit so one modality fills the row and two split it:
+   a slot left over from a 3-column grid would read as a missing tier. */
+.set-ext-api-conn-media {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-columns: repeat(auto-fit, minmax(0, 1fr));
+  gap: var(--kr-sp-3);
+}
+
 .set-ext-api-conn-tier {
   display: grid;
   min-width: 0;
