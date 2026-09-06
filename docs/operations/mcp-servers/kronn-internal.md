@@ -17,6 +17,17 @@ message sent with `disc_append`, never prose alone. First call
 ```
 ````
 
+`version` must be the JSON **number** `1`. The string `"1"` is invalid: do not
+copy the version type from delivery/review manifests, which use a different
+protocol. The example above is complete and valid, including the closed fence.
+
+After `disc_append`, call `disc_question_list({key: "quota-policy"})` with the
+exact published key and verify that a row exists. A successful message write
+receipt does not prove that its question was accepted. If absent, check the
+fence and JSON field types, then republish the corrected payload with the same
+key. An absent row is neither a pending nor an answered decision, and never
+permits execution of the affected lot.
+
 The stable `key` is unique within the room. Repeating it preserves one immutable
 card, not a second card or a silent change behind an already-open human form.
 Use a new key for a genuinely different question. Valid closed fences are

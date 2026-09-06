@@ -87,6 +87,32 @@ fn question_spec_is_bounded_and_rejects_unknown_or_duplicate_choices() {
 }
 
 #[test]
+fn invalid_version_types_do_not_persist_and_corrected_same_key_does() {
+    let conn = database();
+    for (index, version) in [
+        serde_json::json!("1"),
+        serde_json::json!(true),
+        serde_json::Value::Null,
+        serde_json::json!(1.5),
+        serde_json::json!(2),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut value = payload();
+        value["version"] = version;
+        insert(&conn, &format!("invalid-version-{index}"), value);
+        assert!(list(&conn, "d").unwrap().questions.is_empty());
+    }
+    insert(&conn, "corrected-version", payload());
+    let result = list(&conn, "d").unwrap();
+    assert_eq!(result.pending_count, 1);
+    assert_eq!(result.questions.len(), 1);
+    assert_eq!(result.questions[0].source_message_id, "corrected-version");
+    assert_eq!(result.questions[0].key, "quota-policy");
+}
+
+#[test]
 fn only_real_agent_main_fences_persist_and_same_key_deduplicates() {
     let conn = database();
     let fence = format!("```kronn-question\n{}\n```", payload());

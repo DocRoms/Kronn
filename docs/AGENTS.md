@@ -26,7 +26,13 @@
 
 **Blocking human decisions in a Kronn room (mandatory).** Use a `kronn-question`
 fence, not a prose-only question. First read `disc_question_list` to reuse an
-existing arbitration; its `tool_manual` gives the full creation contract. Do not
+existing arbitration; its `tool_manual` gives the full creation contract and a
+complete valid JSON example. Use `"version":1` (number), never `"version":"1"`
+(string): the question protocol differs from delivery/review manifests.
+After publication, read back the exact key with `disc_question_list` to verify
+that the card was recorded. If absent, correct the payload and republish with
+the same key; neither a message receipt nor a missing card is an arbitration.
+Do not
 execute, delegate or complete the affected lot while its question is pending.
 Wait with `disc_wait_for_peer`; independent work may continue. After a restart or
 handoff, read the durable answer by its stable key before resuming. Never answer
