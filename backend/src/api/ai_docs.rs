@@ -539,11 +539,11 @@ fn source_text_by_name(name: &str) -> Option<bool> {
     if matches!(
         extension,
         "png" | "jpg" | "jpeg" | "gif" | "bmp" | "tif" | "tiff" | "webp" | "avif"
-            | "ico" | "icns" | "heic" | "psd" | "eps" | "pdf"
+            | "ico" | "icns" | "heic" | "psd" | "pdf"
             | "zip" | "gz" | "bz2" | "xz" | "zst" | "7z" | "rar" | "tar" | "tgz"
             | "jar" | "war" | "ear" | "class" | "pyc" | "pyo"
             | "o" | "a" | "so" | "dylib" | "dll" | "exe" | "bin" | "wasm" | "node"
-            | "db" | "sqlite" | "sqlite3" | "mdb" | "pack" | "idx"
+            | "db" | "sqlite" | "sqlite3" | "mdb" | "pack"
             | "mp3" | "wav" | "flac" | "ogg" | "m4a" | "aac"
             | "mp4" | "mov" | "avi" | "mkv" | "webm" | "wmv" | "flv"
             | "woff" | "woff2" | "ttf" | "otf" | "eot"
@@ -1231,6 +1231,20 @@ mod tests {
         let binary = dir.path().join("payload.qzy");
         std::fs::write(&binary, [0x00, 0x01, 0x02, 0x00]).unwrap();
         assert!(!is_source_text_file("payload.qzy", &binary));
+    }
+
+    /// Some suffixes only look binary. EPS is PostScript, which is usually
+    /// text, and a VobSub `.idx` is a plain index. Refusing them by name would
+    /// have hidden real files; they cost one `open()` each and stay visible.
+    #[test]
+    fn a_suffix_that_only_looks_binary_is_left_to_the_bytes() {
+        assert_eq!(source_text_by_name("figure.eps"), None);
+        assert_eq!(source_text_by_name("subtitles.idx"), None);
+
+        let dir = tempfile::tempdir().unwrap();
+        let eps = dir.path().join("figure.eps");
+        std::fs::write(&eps, "%!PS-Adobe-3.0 EPSF-3.0\n").unwrap();
+        assert!(is_source_text_file("figure.eps", &eps));
     }
 
     /// The fallback must not be consulted when the name already answered: a
