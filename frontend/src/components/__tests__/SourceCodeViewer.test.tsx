@@ -154,7 +154,7 @@ describe('SourceCodeViewer', () => {
     expect(await screen.findByRole('button', { name: 'projects.source.preview' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'projects.source.code' })).toHaveAttribute('aria-pressed', 'true');
     expect(screen.getByRole('button', { name: 'projects.source.preview' })).toHaveAttribute('aria-pressed', 'false');
-    expect(screen.getByText(/Hello/)).toBeInTheDocument();
+    expect(await screen.findByText(/Hello/)).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: 'projects.source.preview' }));
     const frame = await screen.findByTestId('source-html-preview-frame');
