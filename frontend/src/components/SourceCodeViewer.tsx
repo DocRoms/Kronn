@@ -93,9 +93,15 @@ function SourceCodeViewerProject({ projectId, initialPath, onOpenCommit }: Sourc
   const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const treeLoadRef = useRef(0);
-  /// Folders already asked for. A second expand must not re-request what is
-  /// already on screen — that was the whole cost this change removes.
-  const loadedDirs = useRef(new Set<string>());
+  /// Folders already asked for, and the request that asked. A second expand
+  /// must not re-request what is already on screen — that is the cost this
+  /// change removes — but it must be able to WAIT for a request in flight.
+  ///
+  /// Review @codex-cli-4 — returning a resolved promise for a folder still
+  /// loading let a deep link fetch `src/nested` while `src` was suspended:
+  /// the child answered first, found no parent to attach to, and its contents
+  /// were dropped without a trace.
+  const loadedDirs = useRef(new Map<string, Promise<void>>());
 
   const readTreeRoot = useCallback(() => Promise.all([
     projectsApi.listSourceFiles(projectId, true),
@@ -115,11 +121,11 @@ function SourceCodeViewerProject({ projectId, initialPath, onOpenCommit }: Sourc
   /// stopped and had no way to say so, which is how `site/` went missing from
   /// this repository without a word. There is no bound left to hit.
   const loadDirectory = useCallback((path: string) => {
-    if (loadedDirs.current.has(path)) return Promise.resolve();
-    loadedDirs.current.add(path);
+    const inFlight = loadedDirs.current.get(path);
+    if (inFlight) return inFlight;
     const generation = treeLoadRef.current;
     setDirStatus(current => ({ ...current, [path]: 'loading' }));
-    return projectsApi.listSourceFiles(projectId, true, path)
+    const request = projectsApi.listSourceFiles(projectId, true, path)
       .then(children => {
         if (treeLoadRef.current !== generation) return;
         setTree(current => withLoadedChildren(current, path, children));
@@ -142,6 +148,8 @@ function SourceCodeViewerProject({ projectId, initialPath, onOpenCommit }: Sourc
         loadedDirs.current.delete(path);
         setDirStatus(current => ({ ...current, [path]: 'failed' }));
       });
+    loadedDirs.current.set(path, request);
+    return request;
   }, [projectId]);
 
   const applyTreeRoot = useCallback((

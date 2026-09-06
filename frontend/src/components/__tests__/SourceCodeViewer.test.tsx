@@ -159,6 +159,8 @@ describe('SourceCodeViewer', () => {
     expect(await screen.findByText(/Hello/)).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: 'projects.source.preview' }));
+    // KT-605 — the tree loads a folder at a time now, so the frame arrives on
+    // its own schedule rather than in the same tick as the click.
     const frame = await screen.findByTestId('source-html-preview-frame');
     expect(frame).toHaveAttribute('sandbox', '');
     expect(frame).toHaveAttribute('srcdoc', expect.stringContaining("default-src 'none'"));
@@ -278,6 +280,44 @@ describe('SourceCodeViewer', () => {
   /// children, so an unfinished folder used to open onto nothing at all: the
   /// interface said "empty" when it meant "not yet". Romuald clicked `site`,
   /// saw nothing, and watched its contents appear four seconds later.
+  /// KT-605, review @codex-cli-4 — a deep link into a folder that opens on
+  /// arrival. `src` is already being fetched when the chain reaches it; the
+  /// chain must WAIT for that request, not sail past it on a resolved promise.
+  /// Before the fix `src/nested` answered first, found no parent to attach to,
+  /// and its contents were dropped without a trace.
+  it('waits for an already loading default folder before fetching its descendants', async () => {
+    let resolveSrc!: (nodes: SourceFileNode[]) => void;
+    const asked: string[] = [];
+    vi.mocked(projects.listSourceFiles).mockImplementation(async (_id, _shallow, path) => {
+      if (!path) return [{ path: 'src', name: 'src', is_dir: true, children: [] }];
+      asked.push(path);
+      if (path === 'src') return new Promise<SourceFileNode[]>(r => { resolveSrc = r; });
+      if (path === 'src/nested') {
+        return [{ path: 'src/nested/deep.ts', name: 'deep.ts', is_dir: false }];
+      }
+      return [];
+    });
+    vi.mocked(projects.readSourceFile).mockResolvedValue({
+      path: 'src/nested/deep.ts',
+      content: 'export {};',
+    });
+
+    render(<SourceCodeViewer projectId="project-1" initialPath="src/nested/deep.ts" />);
+    await screen.findByText('src');
+
+    // `src` is suspended, so nothing below it may have been asked for yet.
+    await waitFor(() => expect(asked).toContain('src'));
+    expect(asked).not.toContain('src/nested');
+
+    await act(async () => {
+      resolveSrc([{ path: 'src/nested', name: 'nested', is_dir: true, children: [] }]);
+    });
+
+    // Only now, and the file it pointed at is really in the tree.
+    await waitFor(() => expect(asked).toContain('src/nested'));
+    expect(await screen.findByText('deep.ts')).toBeInTheDocument();
+  });
+
   it('says a folder is still loading instead of rendering it as empty', async () => {
     let resolveSite!: (nodes: SourceFileNode[]) => void;
     vi.mocked(projects.listSourceFiles).mockImplementation(async (_id, _shallow, path) => {

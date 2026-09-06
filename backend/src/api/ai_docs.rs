@@ -1033,8 +1033,21 @@ pub async fn list_source_files(
             Some(path) => (root.join(path), path.as_str()),
             None => (root.clone(), ""),
         };
-        if !dir.is_dir() {
+        // KT-605, review @codex-cli-4 — the name check above rejects `..` and
+        // absolute paths, but a SYMLINK named innocently resolves outside the
+        // project all the same. The walk below skips symlinked children; the
+        // directory it is pointed at was never checked, because it is the one
+        // the caller chose. Both halves are needed: refuse the link itself, and
+        // require the resolved directory to still be under the resolved root.
+        let Ok(metadata) = dir.symlink_metadata() else {
             return Err("Directory not found".to_string());
+        };
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            return Err("Directory not found".to_string());
+        }
+        match (dir.canonicalize(), root.canonicalize()) {
+            (Ok(real_dir), Ok(real_root)) if real_dir.starts_with(&real_root) => {}
+            _ => return Err("Directory not found".to_string()),
         }
         let mut file_count = 0;
         let excluded_paths = walk_exclusions_under(&root, &dir, rel_prefix, depth, exclusions);
@@ -1911,6 +1924,33 @@ mod tests {
         assert!(assets.children.is_empty());
         // And nothing from the sibling subtree was even considered.
         assert!(!names.iter().any(|path| path.starts_with("backend")));
+    }
+
+    /// Review @codex-cli-4 — the name check refuses `..` and absolute paths,
+    /// but a symlink with an innocent name resolves outside the project all the
+    /// same. The walk skips symlinked CHILDREN; the directory the caller points
+    /// at was never checked, because it is the one they chose.
+    #[test]
+    fn a_symlinked_directory_is_refused_however_it_is_named() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let outside = tempfile::TempDir::new().unwrap();
+        touch(&outside.path().join("secret.rs"));
+        touch(&tmp.path().join("site/en.html"));
+        std::os::unix::fs::symlink(outside.path(), tmp.path().join("escape")).unwrap();
+
+        // The name passes every rule: no `..`, no leading slash, not a skipped
+        // folder. Only the link itself gives it away.
+        assert!(safe_source_directory_path("escape"));
+
+        let link = tmp.path().join("escape");
+        let metadata = link.symlink_metadata().unwrap();
+        assert!(metadata.file_type().is_symlink(), "the setup must really be a link");
+
+        // And what the handler checks: the resolved directory has to stay under
+        // the resolved root.
+        let real_root = tmp.path().canonicalize().unwrap();
+        assert!(!link.canonicalize().unwrap().starts_with(&real_root));
+        assert!(tmp.path().join("site").canonicalize().unwrap().starts_with(&real_root));
     }
 
     /// A folder path is checked on every component, unlike a file path whose
