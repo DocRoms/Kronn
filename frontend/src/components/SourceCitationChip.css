@@ -1,0 +1,43 @@
+/* KT-609 — small enough to sit inside a sentence, distinct enough to be seen
+   as a reference rather than as words. */
+.disc-src-chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  max-width: 100%;
+  margin: 0 2px;
+  padding: 0 6px;
+  border: 1px solid var(--kr-border-ghost);
+  border-radius: var(--kr-r-pill);
+  background: var(--kr-bg-subtle);
+  color: var(--kr-text-secondary);
+  font-size: var(--kr-fs-2xs);
+  vertical-align: baseline;
+  cursor: help;
+}
+
+/* The kind, quieter than what it points at: `file` matters less than which
+   file. */
+.disc-src-chip-kind {
+  color: var(--kr-text-ghost);
+}
+
+.disc-src-chip-ref {
+  overflow: hidden;
+  font-family: var(--kr-font-mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Checked and found: the backend opened the file and the lines were there. */
+.disc-src-chip[data-state='verified'] {
+  border-color: rgba(var(--kr-success-rgb), 0.4);
+  color: var(--kr-text-primary);
+}
+
+/* Checked and wrong — a path that does not exist, lines past the end of the
+   file, a reference outside the project. Worth seeing at a glance. */
+.disc-src-chip[data-state='suspect'] {
+  border-color: var(--kr-error);
+  color: var(--kr-error);
+}

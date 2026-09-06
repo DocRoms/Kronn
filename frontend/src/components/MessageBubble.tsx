@@ -7,6 +7,7 @@ import {
   useEffect,
   useLayoutEffect,
   memo,
+  Fragment,
   type ReactNode,
 } from 'react';
 import ReactMarkdown from 'react-markdown';
@@ -18,13 +19,15 @@ import { DocPreview } from './DocPreview';
 import { DocDataExport } from './DocDataExport';
 import { PlanningActionCard } from './PlanningActionCard';
 import { DiscussionQuestionCard } from './DiscussionQuestionCard';
+import { SourceCitationChip } from './SourceCitationChip';
+import { hasSourceCitation, splitSourceCitations } from '../lib/sourceCitations';
 import { DiscussionActionCard } from './DiscussionActionCard';
 import { parsePlanningProposal } from '../lib/planningProposal';
 import { MermaidDiagram } from './MermaidDiagram';
 import remarkGfm from 'remark-gfm';
 import remarkEmoji from 'remark-emoji';
 import '../pages/DiscussionsPage.css';
-import type { DiscussionMessage, AgentType, QuickPrompt, ContextFile, MessageTarget, DiscussionAction } from '../types/generated';
+import type { DiscussionMessage, AgentType, QuickPrompt, ContextFile, SourceCheck, MessageTarget, DiscussionAction } from '../types/generated';
 import { MessageAttachments } from './MessageAttachments';
 import { AGENT_LABELS, AGENT_MENTIONS, MODEL_TIER_ICONS, USER_MENTION_TRIGGER, agentColor, agentTextColor } from '../lib/constants';
 import { gravatarUrl } from '../lib/gravatar';
@@ -1048,10 +1051,17 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
                           content={cleaned}
                           discussionId={discussionId}
                           sourceMessageId={msg.role === 'Agent' ? msg.id : undefined}
+                          sources={lint?.sources}
                         />
                       </MentionDiscussionAgentContext.Provider>
                     )
-                  : <MessageBody content={cleaned} discussionId={discussionId} />}
+                  : (
+                    <MessageBody
+                      content={cleaned}
+                      discussionId={discussionId}
+                      sources={lint?.sources}
+                    />
+                  )}
                 {seed && <KronnSeedToggle seed={seed} />}
               </>
             );
@@ -1419,6 +1429,57 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
   );
 });
 
+/// A `[src: url: https://…]` marker is torn in three by the markdown
+/// autolinker: the opener, an `<a>`, and the closing bracket. Put back
+/// together it is one marker again — otherwise the only citations that stay
+/// unreadable are the ones that name a source outside the code.
+function joinAutolinkedMarkers(nodes: ReactNode[]): ReactNode[] {
+  const OPENER = /\[src:[ \t]*[^\][\n]*$/;
+  const joined: ReactNode[] = [];
+  for (let index = 0; index < nodes.length; index += 1) {
+    const node = nodes[index];
+    const link = nodes[index + 1] as { props?: { href?: string } } | undefined;
+    const tail = nodes[index + 2];
+    if (
+      typeof node === 'string' && OPENER.test(node)
+      && typeof link?.props?.href === 'string'
+      && typeof tail === 'string' && tail.startsWith(']')
+    ) {
+      joined.push(`${node}${link.props.href}]`);
+      // The bracket is consumed with the link; the rest of that run is prose.
+      joined.push(tail.slice(1));
+      index += 2;
+      continue;
+    }
+    joined.push(node);
+  }
+  return joined;
+}
+
+/// Replace every `[src: …]` marker inside a run of rendered children with a
+/// chip. Only string children are touched: anything ReactMarkdown already
+/// turned into an element — a link, code, emphasis — is left exactly as it is.
+function withSourceChips(children: ReactNode, sources?: SourceCheck[]): ReactNode {
+  const nodes = joinAutolinkedMarkers(Array.isArray(children) ? children : [children]);
+  if (!nodes.some(node => typeof node === 'string' && hasSourceCitation(node))) {
+    return children;
+  }
+  return nodes.map((node, index) => {
+    if (typeof node !== 'string' || !hasSourceCitation(node)) return node;
+    return splitSourceCitations(node).map((part, partIndex) => (
+      'citation' in part
+        ? (
+          <SourceCitationChip
+            key={`${index}-${partIndex}`}
+            citation={part.citation}
+            sources={sources}
+          />
+        )
+        : <Fragment key={`${index}-${partIndex}`}>{part.text}</Fragment>
+    ));
+  });
+}
+
 // ─── MarkdownContent component ───────────────────────────────────────────────
 
 /** Extract plain text from a DOM node tree (for copy-to-clipboard). */
@@ -1634,11 +1695,15 @@ export const MarkdownContent = memo(({
   discussionId,
   sourceMessageId,
   agentMentions = false,
+  sources,
 }: {
   content: string;
   discussionId?: string;
   sourceMessageId?: string;
   agentMentions?: boolean;
+  /** KT-609 — what the backend already decided about this message's `[src:]`
+   *  markers, so a chip can carry its verdict instead of guessing at one. */
+  sources?: SourceCheck[];
 }) => {
   const proposalFenceLines = useMemo(() => {
     const lines: number[] = [];
@@ -1667,10 +1732,18 @@ export const MarkdownContent = memo(({
   // below) — a hook after an early return violates rules-of-hooks. It only
   // builds the components table, so running it for huge content is free; the
   // expensive markdown parse is gated by the guard.
+  // KT-609 — the marker left in the prose. Rebuilt here rather than in the
+  // module-level table because only this scope knows the message's verdicts.
+  const citationComponents = useMemo(() => ({
+    ...mdComponents,
+    p: ({ children }: MdProps) => <p>{withSourceChips(children, sources)}</p>,
+    li: ({ children }: MdProps) => <li>{withSourceChips(children, sources)}</li>,
+  }), [sources]);
+
   const components = useMemo(() => {
-    if (!discussionId) return mdComponents;
+    if (!discussionId) return citationComponents;
     return {
-      ...mdComponents,
+      ...citationComponents,
       pre: ({
         children,
         node,
@@ -1769,7 +1842,7 @@ export const MarkdownContent = memo(({
         );
       },
     };
-  }, [discussionId, proposalFenceLines, questionFenceLines, sourceMessageId]);
+  }, [citationComponents, discussionId, proposalFenceLines, questionFenceLines, sourceMessageId]);
 
   // Guard against multi-MB messages crashing the tab — see MAX_MARKDOWN_CHARS.
   // Placed AFTER all hooks (the useMemo above) to satisfy rules-of-hooks.
@@ -1829,11 +1902,13 @@ export const MessageBody = memo(({
   discussionId,
   sourceMessageId,
   agentMentions = false,
+  sources,
 }: {
   content: string;
   discussionId?: string;
   sourceMessageId?: string;
   agentMentions?: boolean;
+  sources?: SourceCheck[];
 }) => {
   const segs = useMemo(() => splitInjectedContext(content), [content]);
   if (segs.length === 1 && segs[0].kind === 'text') {
@@ -1843,6 +1918,7 @@ export const MessageBody = memo(({
         discussionId={discussionId}
         sourceMessageId={sourceMessageId}
         agentMentions={agentMentions}
+        sources={sources}
       />
     );
   }
@@ -1859,6 +1935,7 @@ export const MessageBody = memo(({
                     discussionId={discussionId}
                     sourceMessageId={sourceMessageId}
                     agentMentions={agentMentions}
+                    sources={sources}
                   />
                 )
               : null),
@@ -1871,10 +1948,12 @@ const MentionAwareMessageBody = memo(({
   content,
   discussionId,
   sourceMessageId,
+  sources,
 }: {
   content: string;
   discussionId?: string;
   sourceMessageId?: string;
+  sources?: SourceCheck[];
 }) => {
   return (
     <MessageBody
@@ -1882,6 +1961,7 @@ const MentionAwareMessageBody = memo(({
       discussionId={discussionId}
       sourceMessageId={sourceMessageId}
       agentMentions
+      sources={sources}
     />
   );
 });
