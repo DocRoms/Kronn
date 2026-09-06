@@ -328,6 +328,8 @@ export type AiFileNode = { path: string, name: string, is_dir: boolean, children
 
 export type AiSearchResult = { path: string, match_count: number, };
 
+export type AnswerDiscussionQuestionRequest = { selected_option_ids?: Array<string>, text?: string | null, idempotency_key: string, };
+
 export type ApiAuthKind = { "ApiKeyQuery": { param_name: string, env_key: string, } } | { "ApiKeyHeader": { header_name: string, env_key: string, } } | { "Bearer": { env_key: string, } } | { "Basic": { user_env: string, password_env: string, } } | { "BasicApiKey": { env_key: string, } } | { "CliToken": { command: string, args: Array<string>, inject: TokenInjection,
 /**
  * Optional encrypted config key used only if the local CLI cannot
@@ -2048,6 +2050,111 @@ export type DiscussionImportProvenance = { disc_id: string,
  */
 provenance_kind: string, imported_by_pseudo: string | null, imported_by_avatar_email: string | null, imported_at: string, };
 
+/**
+ * Read projection for sidebar polling; not part of a discussion's stored settings.
+ */
+export type DiscussionListItem = { pending_question_count: number, id: string, project_id: string | null, title: string, agent: AgentType,
+/**
+ * Named HTTP connection backing `agent` when it is `Custom` (or an
+ * explicit LiteLLM/NVIDIA connection). This is the durable "sticky"
+ * target an ordinary reply with no explicit @mention resolves to —
+ * without it, `canonical_targets`'s implicit discussion-agent routing
+ * has no connection to dispatch through (KT-545 DoD #4).
+ */
+connection_id?: string | null, language: string, participants: Array<AgentType>, messages: Array<DiscussionMessage>, message_count: number,
+/**
+ * Subset of `message_count` excluding `MessageRole::System` rows. The
+ * streaming layer persists every tool call + every cached-summary
+ * breadcrumb as its own System message, so `message_count` is inflated
+ * from the user's point of view ("2 réponses + 50 outils" comptait 52).
+ * The unread badge tracks this count instead, so System breadcrumbs
+ * don't show up as "messages à lire".
+ */
+non_system_message_count: number, skill_ids?: Array<string>, profile_ids?: Array<string>, directive_ids?: Array<string>, archived: boolean,
+/**
+ * User-pinned / favorite discussion — appears in a dedicated "Favorites"
+ * section at the top of the sidebar regardless of project grouping.
+ */
+pinned: boolean, workspace_mode: string, workspace_path?: string | null, worktree_branch?: string | null,
+/**
+ * Model capability tier for this discussion.
+ */
+tier: ModelTier,
+/**
+ * 0.8.10 — explicit model override for this discussion (e.g. inherited
+ * from the Quick Prompt that launched it). Wins over `tier` at run time
+ * (threaded to the agent as `model_override`). `None` = resolve from tier.
+ */
+model?: string | null,
+/**
+ * Pin the first message (protocol prompt) — always include it in agent prompts, never summarize it.
+ * Used for validation, bootstrap, and briefing discussions.
+ */
+pin_first_message: boolean,
+/**
+ * Cached summary of older messages (eco-design: avoids re-sending full history).
+ */
+summary_cache?: string | null,
+/**
+ * Index of the last message included in summary_cache (0-based).
+ */
+summary_up_to_msg_idx?: number | null,
+/**
+ * How summaries are produced for this discussion. See `SummaryStrategy`
+ * for the semantics. Default `Auto` keeps the historical behaviour
+ * (per-agent thresholds with auto-fire after every reply).
+ */
+summary_strategy: SummaryStrategy,
+/**
+ * Cumulative count of `kronn-internal` tool calls made by the agent
+ * on this discussion. Bumped each time `disc_meta`, `disc_get_message`
+ * or `disc_summarize` is hit. Surfaced in the ChatHeader as a small
+ * "🔧 N" pill so the user can see when the agent is actively
+ * querying its history.
+ */
+introspection_call_count: number,
+/**
+ * Shared discussion UUID (None = local-only, Some = replicated with peers).
+ */
+shared_id?: string | null,
+/**
+ * Contact IDs this discussion is shared with.
+ */
+shared_with?: Array<string>,
+/**
+ * ID of the batch WorkflowRun that spawned this discussion, if any.
+ * Used for sidebar grouping under the project ("Cadrage to-Frame — 10 avr").
+ * Null for manual discussions created outside of a batch workflow.
+ */
+workflow_run_id?: string | null,
+/**
+ * The disc is owed an agent run that hasn't produced a durable trace yet
+ * (queued batch child, or a reply in flight). DB-backed so the sidebar's
+ * "en file" state survives navigation, reloads and missed WS frames.
+ */
+awaiting_agent: boolean,
+/**
+ * A provider invocation for this discussion has actually started and is
+ * `Running` right now. Distinct from `awaiting_agent`, which stays true for
+ * the whole obligation — including while the job waits behind the
+ * per-agent concurrency cap.
+ */
+agent_running?: boolean,
+/**
+ * Test mode — branch the main repo was on before the user entered test
+ * mode. `Some` means the user is actively testing this discussion's
+ * branch in their main repo; `None` means normal worktree operation.
+ * Used by `test-mode/exit` to checkout back to the user's prior state.
+ */
+test_mode_restore_branch?: string | null,
+/**
+ * Test mode — if the main repo was dirty at enter time and the user opted
+ * in to auto-stash, this holds the stash message (e.g.
+ * `kronn:auto-<disc_id>`) so `exit` can pop the exact stash.
+ * `None` when the main repo was clean or the user declined the stash.
+ */
+test_mode_stash_ref?: string | null, created_at: string, updated_at: string, };
+
 export type DiscussionMessage = { id: string, role: MessageRole, channel: MessageChannel, content: string, agent_type: AgentType | null, timestamp: string, tokens_used: number,
 /**
  * KT-190 — what the JOINED CLI SESSION had spent by the time this message
@@ -2221,6 +2328,16 @@ completed_active: number, total_active: number,
  * KT-30 — bucketed Active counts + the Later count.
  */
 stats: PlanningPlanStats, };
+
+export type DiscussionQuestion = { id: string, discussion_id: string, source_message_id: string, fence_index: number, key: string, question: string, context: string | null, options: Array<DiscussionQuestionOption>, multiple: boolean, recommended_option_ids: Array<string>, task_ref: string | null, state: DiscussionQuestionState, answer: DiscussionQuestionAnswer | null, created_at: string, updated_at: string, };
+
+export type DiscussionQuestionAnswer = { selected_option_ids: Array<string>, text: string | null, author_pseudo: string, answered_at: string, message_id: string, };
+
+export type DiscussionQuestionList = { questions: Array<DiscussionQuestion>, pending_count: number, };
+
+export type DiscussionQuestionOption = { id: string, label: string, description: string | null, };
+
+export type DiscussionQuestionState = "pending" | "answered";
 
 /**
  * A row of `discussion_sessions` — one live (or historical)

@@ -639,6 +639,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "167_acp_session_last_seen",
         include_str!("sql/167_acp_session_last_seen.sql"),
     ),
+    (
+        "168_discussion_questions",
+        include_str!("sql/168_discussion_questions.sql"),
+    ),
 ];
 
 /// Apply one migration inside the caller-owned transaction.

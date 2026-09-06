@@ -13,6 +13,7 @@ use axum::{
 use chrono::Utc;
 use uuid::Uuid;
 
+use crate::db::discussion_questions::{with_pending_counts, DiscussionListItem};
 use crate::models::*;
 use crate::AppState;
 
@@ -21,7 +22,7 @@ use super::{MAX_CONTENT_LEN, MAX_TITLE_LEN};
 pub async fn list(
     State(state): State<AppState>,
     Query(pq): Query<PaginationQuery>,
-) -> Json<ApiResponse<Vec<Discussion>>> {
+) -> Json<ApiResponse<Vec<DiscussionListItem>>> {
     // page > 0 → paginated response; page == 0 (default) → return all
     // (backward compat for frontend polling). See PaginationQuery doc.
     if pq.page > 0 {
@@ -32,11 +33,12 @@ pub async fn list(
         return match state
             .db
             .with_read_conn(move |conn| {
-                crate::db::discussions::list_discussions_paginated(
+                let discussions = crate::db::discussions::list_discussions_paginated(
                     conn,
                     Some(per_page),
                     Some(offset),
-                )
+                )?;
+                with_pending_counts(conn, discussions)
             })
             .await
         {
@@ -46,7 +48,10 @@ pub async fn list(
     }
     match state
         .db
-        .with_read_conn(crate::db::discussions::list_discussions)
+        .with_read_conn(|conn| {
+            let discussions = crate::db::discussions::list_discussions(conn)?;
+            with_pending_counts(conn, discussions)
+        })
         .await
     {
         Ok(discussions) => Json(ApiResponse::ok(discussions)),

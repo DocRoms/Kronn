@@ -4,6 +4,51 @@
 **Source:** This repo. Auto-injected by Kronn into every supported CLI's MCP config (`.mcp.json`, `~/.codex/config.toml`, `.gemini/settings.json`, `.kiro/settings/mcp.json`, `.vibe/config.toml`).
 **Auth:** stdio itself is unauthenticated (local pipe), but the bridge authenticates to the Kronn backend over `KRONN_BACKEND_URL` (default `http://127.0.0.1:3140`): when the backend has a token configured, it exports `KRONN_AUTH_TOKEN` into the process env, the sidecar inherits it and sends `Authorization: Bearer <token>` on every call. On a loopback-only instance the backend's local-trust bypass makes the token optional; on a LAN-exposed instance (e.g. WSL backend / Mac frontend) it is required — otherwise the sidecar's own calls get a silent 401. `[src: file: backend/scripts/disc-introspection-mcp.py:1970-1994]` `[src: file: backend/src/main.rs:102-115]`
 
+## Human arbitration cards
+
+A blocking human decision must use a `kronn-question` fence in an Agent/main
+message sent with `disc_append`, never prose alone. First call
+`disc_question_list({})` to avoid asking for an existing decision twice. Read
+`tool_manual({tool: "disc_question_list"})` for field limits. Example:
+
+````markdown
+```kronn-question
+{"version":1,"key":"quota-policy","question":"How should a depleted provider be re-enabled?","context":"This decision blocks only KT-593.","options":[{"id":"manual","label":"Explicit re-enable"},{"id":"expiry","label":"Expiry policy"}],"recommended_option_ids":["manual"],"task_ref":"KT-593"}
+```
+````
+
+The stable `key` is unique within the room. Repeating it preserves one immutable
+card, not a second card or a silent change behind an already-open human form.
+Use a new key for a genuinely different question. Valid closed fences are
+ingested atomically with the source message; malformed, nested example, user
+and note fences do not create a card. `version`, `key`, and `question` are
+required; choices, context, recommendations, multiple selection and task
+reference are optional. Free-text answers are always available. A recommendation
+is not a preselected answer or consent.
+
+Pause execution, delegation and completion of the affected lot until the human
+answers. Continue unrelated tasks and keep listening with `disc_wait_for_peer`.
+This is a scoped agent protocol, not a global scheduler stop: `task_ref` does not
+rewrite Planning status or block unrelated executions. After handoff or restart,
+`disc_question_list({key: "quota-policy"})` returns the durable question and
+answer, independently of the original CLI session or its read cursor.
+
+Only the human UI submits an answer; there is no MCP answer tool. The authenticated
+HTTP endpoint atomically writes the answer, a User receipt replying to the source,
+and its routing intent. Exact replay is idempotent; a conflicting second answer
+returns 409. Offline CLI provenance stays exact without spawning a substitute
+native agent. Native answers enqueue one durable dispatch. Every room reader can
+still recover the decision if the requester is no longer present.
+
+API contract: `GET /api/discussions/{id}/questions` returns
+`{questions, pending_count}` including answered history;
+`POST /api/discussions/{id}/questions/{question_id}/answer` accepts
+`{selected_option_ids, text?, idempotency_key}` and returns the updated question.
+Discussion list items expose `pending_question_count`, including pagination.
+`[src: file: backend/src/db/discussion_questions.rs:1]`
+`[src: file: backend/src/api/discussion_questions.rs:1]`
+`[src: file: backend/src/db/sql/168_discussion_questions.sql:1]`
+
 ## What it does
 
 Bidirectional gateway between a CLI agent (Claude Code, Codex, Gemini, Kiro, Vibe in host-launched mode, …) and the Kronn backend. Three tool families :
