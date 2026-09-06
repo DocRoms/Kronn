@@ -1659,6 +1659,23 @@
   flex-shrink: 0;
 }
 
+/* KT-595 — a decision this room is waiting on. Red rather than accent, and
+   deliberately not the unread pill: unread means "there is something to read",
+   this means "nothing moves until you answer". */
+.disc-question-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+  min-width: 14px;
+  padding: 1px 5px;
+  border-radius: 6px;
+  background: var(--kr-error);
+  color: var(--kr-text-on-dark);
+  font-size: 8px;
+  font-weight: 800;
+}
+
 /* Unseen badge on collapsed GROUP headers — same accent pill style as the
    per-discussion badge above but positioned after the count. Lets users
    spot "which group has unread messages" without expanding everything. */

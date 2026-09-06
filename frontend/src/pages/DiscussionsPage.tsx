@@ -2,6 +2,7 @@ import { Fragment, useState, useRef, useEffect, useLayoutEffect, useCallback, us
 import './DiscussionsPage.css';
 import { MessageBubble, MarkdownContent } from '../components/MessageBubble';
 import { DiscussionNote } from '../components/DiscussionNote';
+import { DiscussionQuestionBanner } from '../components/DiscussionQuestionBanner';
 import { unseenBasis } from '../lib/discussionUiUtils';
 import { ToolCallsGroup } from '../components/ToolCallsGroup';
 import { MessageDateSeparator } from '../components/MessageDateSeparator';
@@ -4016,6 +4017,11 @@ export function DiscussionsPage({
               </div>
             )}
 
+
+            {/* KT-595 — a decision the room is waiting on, above the thread
+                rather than inside it: the message that asked scrolls away, the
+                need does not. */}
+            <DiscussionQuestionBanner discussionId={activeDiscussion.id} />
 
             {/* Messages */}
             <div

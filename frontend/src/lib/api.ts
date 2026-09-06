@@ -213,6 +213,10 @@ import type {
   ExternalApiConnectionPreset,
   SharedRun,
   DiscussionNoteListResponse,
+  DiscussionListItem,
+  DiscussionQuestion,
+  DiscussionQuestionList,
+  AnswerDiscussionQuestionRequest,
 } from '../types/generated';
 import type {
   CatalogModelEntry,
@@ -1450,7 +1454,9 @@ function webSessionId(): string {
 }
 
 export const discussions = {
-  list: () => api<Discussion[]>('GET', '/discussions'),
+  /** KT-595 — `DiscussionListItem` is `Discussion` plus `pending_question_count`,
+   *  so a room waiting on a decision says so in the list, before it is opened. */
+  list: () => api<DiscussionListItem[]>('GET', '/discussions'),
   /** 2026-06-24 — disc ids with an in-flight agent run RIGHT NOW, server-side
    *  (incl. background/batch children). Polled so a run still working after you
    *  navigate away keeps showing as running, instead of looking dead. */
@@ -1775,6 +1781,28 @@ export const discussions = {
     'PATCH',
     `/discussions/${encodeURIComponent(id)}/notes/${encodeURIComponent(messageId)}`,
     { content },
+  ),
+
+  /** KT-595 — the arbitration questions of a discussion, pending and past.
+   *  Polled, so the backend checks the room exists without loading its
+   *  transcript. */
+  questions: (id: string) => api<DiscussionQuestionList>(
+    'GET',
+    `/discussions/${encodeURIComponent(id)}/questions`,
+  ),
+
+  /** KT-595 — answer one. `idempotency_key` makes a retry after a lost
+   *  response return the same answer instead of writing a second one: this
+   *  posts a durable message in the room, and a decision must not be recorded
+   *  twice because a click was repeated. */
+  answerQuestion: (
+    id: string,
+    questionId: string,
+    request: AnswerDiscussionQuestionRequest,
+  ) => api<DiscussionQuestion>(
+    'POST',
+    `/discussions/${encodeURIComponent(id)}/questions/${encodeURIComponent(questionId)}/answer`,
+    request,
   ),
 
   /** Remove one message payload while preserving its timeline tombstone. */

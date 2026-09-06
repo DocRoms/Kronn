@@ -93,7 +93,7 @@ vi.mock('../../lib/api', () => ({
 
 import { discussions as discussionsApi, projects as projectsApi } from '../../lib/api';
 import { Dashboard } from '../Dashboard';
-import type { Discussion, Project } from '../../types/generated';
+import type { DiscussionListItem, Project } from '../../types/generated';
 
 beforeEach(() => {
   vi.useFakeTimers({ shouldAdvanceTime: true });
@@ -124,7 +124,9 @@ const wrap = async (ui: React.ReactElement) => {
   return result!;
 };
 
-const makeDiscussion = (id: string, msgCount: number): Discussion => ({
+const makeDiscussion = (id: string, msgCount: number): DiscussionListItem => ({
+  // KT-595 — the list carries the pending-decision count now.
+  pending_question_count: 0,
   id,
   project_id: null,
   title: `Discussion ${id}`,

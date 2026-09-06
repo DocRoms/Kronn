@@ -284,10 +284,10 @@ fn render_quick_prompt_template_with_environment_bindings(
     let mut index = 0;
     while index < template.len() {
         let remaining = &template[index..];
-        let environment_reference = if remaining.starts_with("{{env.") {
-            remaining[6..].find("}}").map(|end| (6, end + 6, end + 8))
-        } else if remaining.starts_with("<env.") {
-            remaining[5..].find('>').map(|end| (5, end + 5, end + 6))
+        let environment_reference = if let Some(rest) = remaining.strip_prefix("{{env.") {
+            rest.find("}}").map(|end| (6, end + 6, end + 8))
+        } else if let Some(rest) = remaining.strip_prefix("<env.") {
+            rest.find('>').map(|end| (5, end + 5, end + 6))
         } else {
             None
         };
@@ -964,6 +964,36 @@ mod tests {
             render_quick_prompt_template("{{env.API_TOKEN}} / <env.LEGACY_TOKEN>", &values, &[]),
             "recommended / legacy"
         );
+    }
+
+    #[test]
+    fn template_environment_rendering_preserves_unicode_and_unresolved_references() {
+        let values = std::collections::HashMap::from([
+            ("__kronn_template_env__API_TOKEN".into(), "été 🦀".into()),
+            ("__kronn_template_env__LEGACY_TOKEN".into(), "héritage".into()),
+        ]);
+        assert_eq!(
+            render_quick_prompt_template(
+                "é {{env.API_TOKEN}} 🦀 <env.LEGACY_TOKEN> fin",
+                &values,
+                &[],
+            ),
+            "é été 🦀 🦀 héritage fin"
+        );
+        for unresolved in [
+            "{{env.MISSING}}",
+            "<env.MISSING>",
+            "{{env.ÉTÉ}}",
+            "<env.ÉTÉ>",
+            "{{env.API_TOKEN}",
+            "<env.LEGACY_TOKEN",
+        ] {
+            let template = format!("é {unresolved} 🦀");
+            assert_eq!(
+                render_quick_prompt_template(&template, &values, &[]),
+                template
+            );
+        }
     }
 
     #[test]

@@ -605,6 +605,68 @@ fn safe_source_relative_path(path: &str) -> bool {
         .is_some_and(|name| !is_sensitive_source_name(name))
 }
 
+/// Every directory the walk would enter, so git can be asked about them all at
+/// once. Descendants of an already-excluded directory are not collected.
+fn collect_source_dirs(
+    dir: &std::path::Path,
+    rel_prefix: &str,
+    root: &std::path::Path,
+    excluded_paths: &std::collections::HashSet<String>,
+    out: &mut Vec<String>,
+) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let Ok(metadata) = entry.path().symlink_metadata() else {
+            continue;
+        };
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        if is_skipped_source_dir(&name, dir == root) {
+            continue;
+        }
+        let path = if rel_prefix.is_empty() {
+            name
+        } else {
+            format!("{rel_prefix}/{name}")
+        };
+        if excluded_paths.contains(&path) {
+            continue;
+        }
+        collect_source_dirs(&entry.path(), &path, root, excluded_paths, out);
+        out.push(path);
+    }
+}
+
+/// What the walk must not enter: the folders the human excluded, plus the ones
+/// git already ignores.
+///
+/// KT-594 — `is_skipped_source_dir` is a hand-maintained guess at "machine
+/// output", and it will always be one name behind. Here the name it lacked was
+/// `frontend/.pnpm-store`: that one content-addressable store filled the
+/// 10 000-file budget on its own, so the walk stopped before reaching `site/`
+/// and those files were simply absent, with nothing in the answer to say why.
+///
+/// Git already knows what is generated. Asking it costs one process and one
+/// pass over the DIRECTORIES — 0.19 s on this repository — and takes the tree
+/// from over 10 000 files down to 2 088.
+///
+/// Ignored FILES inside a kept directory are untouched: they still appear,
+/// still badged. It is entering an ignored directory that has no upside.
+fn walk_exclusions(
+    root: &std::path::Path,
+    user_exclusions: Vec<String>,
+) -> std::collections::HashSet<String> {
+    let mut excluded: std::collections::HashSet<String> = user_exclusions.into_iter().collect();
+    let mut candidates = Vec::new();
+    collect_source_dirs(root, "", root, &excluded, &mut candidates);
+    excluded.extend(git_ignored_paths(root, &candidates));
+    excluded
+}
+
 fn git_ignored_paths(
     root: &std::path::Path,
     candidates: &[String],
@@ -841,7 +903,7 @@ pub(crate) fn compute_source_language_stats(
     exclusions: &[String],
 ) -> Vec<ProjectLanguageStat> {
     let mut file_count = 0;
-    let excluded_paths = exclusions.iter().cloned().collect();
+    let excluded_paths = walk_exclusions(root, exclusions.to_vec());
     let tree = build_source_tree(root, "", root, &mut file_count, &excluded_paths);
     let mut paths = Vec::with_capacity(file_count);
     flatten_source_paths(&tree, &mut paths);
@@ -908,7 +970,7 @@ pub async fn list_source_files(
     let result = tokio::task::spawn_blocking(move || {
         let root = scanner::resolve_host_path(&project_path);
         let mut file_count = 0;
-        let excluded_paths = exclusions.into_iter().collect();
+        let excluded_paths = walk_exclusions(&root, exclusions);
         let mut tree = if query.shallow {
             build_source_tree_with_depth(
                 &root,
@@ -1078,7 +1140,7 @@ pub async fn search_source_files(
     let results = tokio::task::spawn_blocking(move || {
         let root = scanner::resolve_host_path(&project_path);
         let mut file_count = 0;
-        let excluded_paths = exclusions.into_iter().collect();
+        let excluded_paths = walk_exclusions(&root, exclusions);
         let tree = build_source_tree(&root, "", &root, &mut file_count, &excluded_paths);
         let mut paths = Vec::with_capacity(file_count);
         flatten_source_paths(&tree, &mut paths);
@@ -1682,6 +1744,75 @@ mod tests {
 
         assert!(local.git_ignored);
         assert!(!tracked.git_ignored);
+    }
+
+    /// KT-594 — the bug @user hit: `frontend/.pnpm-store` is not in the name
+    /// deny-list, and its content-addressable store filled the 10 000-file
+    /// budget on its own. The walk stopped before `site/`, and those files were
+    /// absent from the tree with nothing in the answer to say why.
+    ///
+    /// The deny-list will always be one name behind. Git already knows.
+    #[test]
+    fn a_git_ignored_folder_is_never_walked_however_it_is_named() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(tmp.path())
+            .status()
+            .unwrap();
+        std::fs::write(tmp.path().join(".gitignore"), ".pnpm-store/\n").unwrap();
+        touch(&tmp.path().join(".pnpm-store/v11/deadbeef.rs"));
+        // Alphabetically after the store, which is exactly what got lost.
+        touch(&tmp.path().join("site/en.html"));
+
+        let excluded = walk_exclusions(tmp.path(), Vec::new());
+        let mut count = 0;
+        let tree = build_source_tree(tmp.path(), "", tmp.path(), &mut count, &excluded);
+
+        assert!(tree.iter().any(|node| node.path == "site"), "site/ must be reachable");
+        assert!(
+            !tree.iter().any(|node| node.path == ".pnpm-store"),
+            "an ignored folder has no business in a source tree",
+        );
+    }
+
+    /// Only FOLDERS. An ignored file inside a kept folder stays visible, badged
+    /// as before — hiding it would remove something the author can see today.
+    #[test]
+    fn an_ignored_file_in_a_kept_folder_is_still_listed() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(tmp.path())
+            .status()
+            .unwrap();
+        std::fs::write(tmp.path().join(".gitignore"), "application/local.rules\n").unwrap();
+        touch(&tmp.path().join("application/local.rules"));
+        touch(&tmp.path().join("application/tracked.rules"));
+
+        let excluded = walk_exclusions(tmp.path(), Vec::new());
+        let mut count = 0;
+        let tree = build_source_tree(tmp.path(), "", tmp.path(), &mut count, &excluded);
+        let application = tree.iter().find(|node| node.path == "application").unwrap();
+
+        assert!(application.children.iter().any(|node| node.name == "local.rules"));
+        assert!(application.children.iter().any(|node| node.name == "tracked.rules"));
+    }
+
+    /// A folder the human excluded by hand still wins, and its subtree is not
+    /// even offered to git — there is nothing to ask about.
+    #[test]
+    fn a_hand_excluded_folder_stays_excluded() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        touch(&tmp.path().join("keep/main.rs"));
+        touch(&tmp.path().join("drop/main.rs"));
+
+        let excluded = walk_exclusions(tmp.path(), vec!["drop".to_string()]);
+        let mut count = 0;
+        let tree = build_source_tree(tmp.path(), "", tmp.path(), &mut count, &excluded);
+
+        assert!(tree.iter().any(|node| node.path == "keep"));
+        assert!(!tree.iter().any(|node| node.path == "drop"));
     }
 
     // ── 0.8.6 — doc-asset image serving (relative <img> in README/docs) ───

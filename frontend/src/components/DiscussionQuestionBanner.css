@@ -1,0 +1,45 @@
+/* KT-595 — pinned above the thread while a decision is pending. Red, because
+   it is the one thing here that stops other people working; one line, because
+   it must not become another thing to scroll past. */
+.disc-question-banner {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-3);
+  flex-shrink: 0;
+  padding: var(--kr-sp-2) var(--kr-sp-4);
+  border-bottom: 1px solid var(--kr-error);
+  background: rgba(var(--kr-error-rgb), 0.1);
+  color: var(--kr-error);
+  font-size: var(--kr-fs-xs);
+}
+
+.disc-question-banner-count {
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+/* The question, truncated rather than wrapped: a second line here would push
+   the conversation down on every render. */
+.disc-question-banner-text {
+  overflow: hidden;
+  color: var(--kr-text-primary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.disc-question-banner button {
+  margin-left: auto;
+  flex-shrink: 0;
+  padding: 3px 10px;
+  border: 1px solid var(--kr-error);
+  border-radius: var(--kr-r-md);
+  background: transparent;
+  color: var(--kr-error);
+  font-size: var(--kr-fs-2xs);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.disc-question-banner button:hover {
+  background: rgba(var(--kr-error-rgb), 0.14);
+}
