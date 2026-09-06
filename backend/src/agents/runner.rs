@@ -3747,10 +3747,13 @@ async fn run_acp_session(
 }
 
 fn acp_failure_diagnostic(operation: &str, error: &str) -> String {
-    let redacted = crate::core::redact::redact_secrets(error);
+    // ACP diagnostics are surfaced through AgentProcess. Use the stricter
+    // audit-artifact pass as well as vendor-token masking so bare secret
+    // assignments from adapter or transport errors cannot reach the user.
+    let redacted = crate::core::redact::redact_for_audit_artifact(error).0;
     let mut excerpt: String = redacted.chars().take(ACP_DIAGNOSTIC_MAX_CHARS).collect();
     if redacted.chars().nth(ACP_DIAGNOSTIC_MAX_CHARS).is_some() {
-        excerpt.push_str("…");
+        excerpt.push('…');
     }
     format!("ACP {operation} failed: {excerpt}")
 }
@@ -10061,13 +10064,11 @@ mod acp_resume_tests {
 
     #[tokio::test]
     async fn run_acp_session_reports_redacted_prompt_and_persistence_failures() {
-        let secret = "sk-abcdefghijklmnopqrstuvwxyz1234567890";
         let prompt_failure = transport(
             false,
-            PromptOutcome::Fail(format!(
-                "prompt exploded: {secret}{}",
-                "x".repeat(ACP_DIAGNOSTIC_MAX_CHARS + 1)
-            )),
+            PromptOutcome::Fail(
+                "prompt exploded: APP_SECRET=fixture-value api_key: fixture-key".into(),
+            ),
         );
         let mut prompt_process =
             run_fixture(prompt_failure, &AgentType::OpenCode, None, None, None).await;
@@ -10082,10 +10083,11 @@ mod acp_resume_tests {
         assert!(prompt_diagnostics
             .iter()
             .any(|line| line.contains("ACP prompt failed")));
-        assert!(prompt_diagnostics.iter().all(|line| !line.contains(secret)));
-        assert!(prompt_diagnostics.iter().all(|line| {
-            line.chars().count()
-                <= "ACP prompt failed: ".chars().count() + ACP_DIAGNOSTIC_MAX_CHARS + 1
+        assert!(prompt_diagnostics
+            .iter()
+            .all(|line| !line.contains("fixture-value") && !line.contains("fixture-key")));
+        assert!(prompt_diagnostics.iter().any(|line| {
+            line.contains("APP_SECRET=***REDACTED***") && line.contains("api_key: ***REDACTED***")
         }));
 
         let persistence_failure = Arc::new(RunnerTransport {
@@ -10113,5 +10115,24 @@ mod acp_resume_tests {
             .captured_stderr()
             .iter()
             .any(|line| line.contains("ACP session persistence failed")));
+    }
+
+    #[test]
+    fn acp_failure_diagnostic_redacts_assignments_and_bounds_unicode() {
+        let long_error = format!("non-secret 😀{}", "é".repeat(ACP_DIAGNOSTIC_MAX_CHARS));
+        let diagnostic = acp_failure_diagnostic("prompt", &long_error);
+        let expected_excerpt: String = long_error.chars().take(ACP_DIAGNOSTIC_MAX_CHARS).collect();
+        assert_eq!(
+            diagnostic,
+            format!("ACP prompt failed: {expected_excerpt}…")
+        );
+        assert_eq!(
+            diagnostic.chars().count(),
+            "ACP prompt failed: ".chars().count() + ACP_DIAGNOSTIC_MAX_CHARS + 1
+        );
+
+        let short = acp_failure_diagnostic("prompt", "short 🦀 non-secret error");
+        assert_eq!(short, "ACP prompt failed: short 🦀 non-secret error");
+        assert!(!short.ends_with('…'));
     }
 }

@@ -81,6 +81,20 @@ the same job.
 - **Kronn spawns one process per turn** on every route. Nothing here keeps a
   CLI warm between turns; that is 0.14 work (KT-577).
 
+## ACP runtime diagnostics (KT-600)
+
+After an ACP session has started, prompt and session-persistence failures are
+recorded in the existing `AgentProcess` diagnostic capture. Before publishing,
+Kronn masks vendor tokens and secret-like assignments, then limits the excerpt
+by characters; cancellation remains unsuccessful rather than becoming a
+successful run. The runner tests exercise this path with a fake ACP transport
+for creation, resume and its existing fallback, streaming, usage, cancellation,
+and prompt/persistence failures. They do not invoke an agent CLI, and ACP token
+usage still has no implied price.
+[src: file: backend/src/agents/runner.rs:3523-3758]
+[src: file: backend/src/agents/runner.rs:10020-10133]
+[src: file: backend/src/core/redact.rs:232-240]
+
 ## Settings catalogue diagnostic (KT-597)
 
 The dynamic catalogue and the model-tier editor on an agent card are currently
