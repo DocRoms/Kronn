@@ -2,6 +2,7 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { projects } from '../../lib/api';
 import { SourceCodeViewer } from '../SourceCodeViewer';
+import { buildHtmlPreviewDocument } from '../../lib/html-preview';
 import type { SourceFileNode } from '../../types/generated';
 
 function deferred<T>() {
@@ -137,6 +138,71 @@ describe('SourceCodeViewer', () => {
     });
     expect(screen.getAllByText('compose.yaml').length).toBeGreaterThan(0);
     expect(await screen.findByText(/services:/)).toBeInTheDocument();
+  });
+
+  it('renders an uppercase HTML file in an isolated preview and restores its source', async () => {
+    vi.mocked(projects.listSourceFiles).mockResolvedValue([
+      { path: 'site/INDEX.HTM', name: 'INDEX.HTM', is_dir: false },
+    ]);
+    vi.mocked(projects.readSourceFile).mockResolvedValue({
+      path: 'site/INDEX.HTM',
+      content: '<!doctype html><html><head><style>p { color: red; }</style></head><body><p>Hello</p></body></html>',
+    });
+
+    render(<SourceCodeViewer projectId="project-1" initialPath="site/INDEX.HTM" />);
+
+    expect(await screen.findByRole('button', { name: 'projects.source.preview' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'projects.source.code' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('button', { name: 'projects.source.preview' })).toHaveAttribute('aria-pressed', 'false');
+    expect(await screen.findByText(/Hello/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'projects.source.preview' }));
+    const frame = await screen.findByTestId('source-html-preview-frame');
+    expect(frame).toHaveAttribute('sandbox', '');
+    expect(frame).toHaveAttribute('srcdoc', expect.stringContaining("default-src 'none'"));
+    expect(frame).toHaveAttribute('srcdoc', expect.stringContaining('color: red'));
+    expect(screen.getByRole('button', { name: 'projects.source.code' })).toHaveAttribute('aria-pressed', 'false');
+    expect(screen.getByRole('button', { name: 'projects.source.preview' })).toHaveAttribute('aria-pressed', 'true');
+
+    fireEvent.click(screen.getByRole('button', { name: 'projects.source.code' }));
+    expect(screen.queryByTestId('source-html-preview-frame')).not.toBeInTheDocument();
+    expect(screen.getByText(/Hello/)).toBeInTheDocument();
+  });
+
+  it('parses malformed markup, removes navigation and retains data images in the static preview', () => {
+    const preview = buildHtmlPreviewDocument(`<!-- <head> --><html><head>
+      <meta http-equiv="refresh" content="0; url=https://preview-probe.invalid/refresh"><base href="https://preview-probe.invalid/">
+    </head><body><img SRC="data:image/png;base64,AAAA"><a/href="https://preview-probe.invalid/slash-navigation">Open</a>
+      <form action="https://preview-probe.invalid/form"><button formaction="https://preview-probe.invalid/button">Submit</button></form>
+      <div><template shadowrootmode="open"><a href="https://preview-probe.invalid/template">Template link</a></template></div>
+      <img src="https://preview-probe.invalid/comment-head"></body></html>`);
+
+    expect(preview).toMatch(/^<!doctype html><html><head><meta http-equiv="Content-Security-Policy"/i);
+    expect(preview).toContain("default-src 'none'");
+    expect(preview).not.toContain('https://preview-probe.invalid');
+    expect(preview).toContain('src="data:image/png;base64,AAAA"');
+    expect(preview).toContain('Open');
+    expect(preview).not.toContain('Template link');
+  });
+
+  it('returns to code and displays a loading error when a non-HTML file is selected', async () => {
+    vi.mocked(projects.listSourceFiles).mockResolvedValue([
+      { path: 'index.html', name: 'index.html', is_dir: false },
+      { path: 'notes.txt', name: 'notes.txt', is_dir: false },
+    ]);
+    vi.mocked(projects.readSourceFile).mockImplementation(async (_id, path) => {
+      if (path === 'notes.txt') throw new Error('unreadable');
+      return { path, content: '<p>Preview source</p>' };
+    });
+
+    render(<SourceCodeViewer projectId="project-1" initialPath="index.html" />);
+    fireEvent.click(await screen.findByRole('button', { name: 'projects.source.preview' }));
+    expect(await screen.findByTestId('source-html-preview-frame')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByText('notes.txt'));
+    expect(screen.queryByRole('button', { name: 'projects.source.preview' })).not.toBeInTheDocument();
+    expect(await screen.findByText('projects.source.fileError')).toBeInTheDocument();
+    expect(screen.queryByTestId('source-html-preview-frame')).not.toBeInTheDocument();
   });
 
   it('renders repository-root entries before the complete tree finishes loading', async () => {

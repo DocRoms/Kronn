@@ -1154,6 +1154,9 @@ export function PagesPage({
                       current={htmlDraft}
                       previousLabel={`r${comparisonRevision.revision}`}
                       currentLabel={t('pages.currentDraft', detail.revision.revision)}
+                      codeLabel={t('pages.code')}
+                      previewLabel={t('pages.preview')}
+                      previewLimitations={t('pages.previewLimitations')}
                     />
                   </div>
                 ) : (

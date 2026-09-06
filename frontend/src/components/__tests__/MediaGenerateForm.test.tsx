@@ -145,6 +145,70 @@ describe('MediaGenerateForm', () => {
     await waitFor(() => expect(screen.getByText('disc.media.launched:image-model')).toBeInTheDocument());
   });
 
+  it('creates at most one room for synchronous Generate clicks', async () => {
+    let resolveCreation!: (discussionId: string) => void;
+    const createDiscussion = vi.fn().mockReturnValue(new Promise<string>(resolve => {
+      resolveCreation = resolve;
+    }));
+    render(<MediaGenerateForm connections={[connection({ video_model: null })]} t={t} onCreateDiscussion={createDiscussion} />);
+
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'a lighthouse' } });
+    const submit = screen.getByRole('button', { name: /disc\.media\.generate/ });
+    act(() => {
+      submit.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      submit.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(createDiscussion).toHaveBeenCalledTimes(1);
+    expect(mediaApi.generate).not.toHaveBeenCalled();
+
+    await act(async () => { resolveCreation('d-new'); });
+    await waitFor(() => expect(mediaApi.generate).toHaveBeenCalledTimes(1));
+    expect(mediaApi.generate).toHaveBeenCalledWith(expect.objectContaining({ discussion_id: 'd-new' }));
+  });
+
+  it('creates a no-agent room only on Generate and reuses it after a generation error', async () => {
+    const createDiscussion = vi.fn().mockResolvedValue('d-new');
+    mediaApi.generate
+      .mockRejectedValueOnce(new Error('generation response lost'))
+      .mockResolvedValueOnce({
+        job_id: 'job-2', status: 'pending', model: 'image-model', discussion_id: 'd-new', message_id: 'msg-2',
+      });
+    render(<MediaGenerateForm connections={[connection({ video_model: null })]} t={t} onCreateDiscussion={createDiscussion} />);
+
+    expect(createDiscussion).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'a lighthouse' } });
+    const submit = screen.getByRole('button', { name: /disc\.media\.generate/ });
+    await act(async () => { fireEvent.click(submit); });
+
+    await waitFor(() => expect(mediaApi.generate).toHaveBeenCalledTimes(1));
+    expect(createDiscussion).toHaveBeenCalledTimes(1);
+    expect(mediaApi.generate).toHaveBeenLastCalledWith(expect.objectContaining({ discussion_id: 'd-new' }));
+    expect(await screen.findByText('generation response lost')).toBeInTheDocument();
+
+    await act(async () => { fireEvent.click(submit); });
+    await waitFor(() => expect(mediaApi.generate).toHaveBeenCalledTimes(2));
+    expect(createDiscussion).toHaveBeenCalledTimes(1);
+    expect(mediaApi.generate.mock.calls[1][0].idempotency_key)
+      .toBe(mediaApi.generate.mock.calls[0][0].idempotency_key);
+  });
+
+  it('does not send a billable request when room creation fails', async () => {
+    const createDiscussion = vi.fn()
+      .mockRejectedValueOnce(new Error('room creation failed'))
+      .mockResolvedValueOnce('d-retry');
+    render(<MediaGenerateForm connections={[connection({ video_model: null })]} t={t} onCreateDiscussion={createDiscussion} />);
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'a lighthouse' } });
+    const submit = screen.getByRole('button', { name: /disc\.media\.generate/ });
+
+    await act(async () => { fireEvent.click(submit); });
+    expect(await screen.findByText('room creation failed')).toBeInTheDocument();
+    expect(mediaApi.generate).not.toHaveBeenCalled();
+
+    await act(async () => { fireEvent.click(submit); });
+    await waitFor(() => expect(mediaApi.generate).toHaveBeenCalledTimes(1));
+    expect(createDiscussion).toHaveBeenCalledTimes(2);
+  });
+
   it('shows the price of the click, and says so when there is none', async () => {
     const { unmount } = render(
       <MediaGenerateForm discussionId="d-1" connections={[connection()]} t={t} />,

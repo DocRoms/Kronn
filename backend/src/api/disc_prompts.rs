@@ -408,6 +408,21 @@ pub fn build_agent_prompt(
         _ => "Kronn rich output — reply in Markdown. When a visual materially helps, use a `mermaid` fence (flowchart/graph, sequenceDiagram, classDiagram, stateDiagram, erDiagram, journey, gantt, pie, gitGraph, C4*, requirementDiagram, mindmap, timeline, sankey-beta, xychart-beta, block-beta or packet-beta). For a sandboxed HTML preview with PDF/DOCX buttons, use `kronn-doc-preview`, not a normal `html` fence. For CSV/XLSX/PPTX data export, use `kronn-doc-data` JSON in the shape documented by the Kronn Docs skill.\n\n",
     };
 
+    // Every runtime can publish a fence, even when it has no question reader.
+    let human_question_notice = concat!(
+        "Blocking human decision — use a closed `kronn-question` JSON fence, never prose alone.\n",
+        "`version` MUST be the JSON number 1; the string \"1\" is INVALID (do not copy the version type from delivery/review manifests).\n",
+        "Complete minimal example (replace key/question with this real decision):\n",
+        "```kronn-question\n",
+        "{\"version\":1,\"key\":\"decision-key\",\"question\":\"Which option should we use?\",\"options\":[{\"id\":\"a\",\"label\":\"Option A\"},{\"id\":\"b\",\"label\":\"Option B\"}]}\n",
+        "```\n",
+        "Only the human answers; recommendations are never consent. Reuse the stable key on retry.\n",
+        "If `disc_question_list` is available, read pending questions first, then read back this exact key after publication and verify that it was recorded.\n",
+        "An absent row is NOT a pending or answered decision: correct the invalid JSON and republish with the same key.\n",
+        "If the reader is unavailable, do not invent a tool call or claim verification; wait for the durable human answer.\n",
+        "Do not execute, delegate or complete the affected lot before that answer; independent work may continue.\n\n",
+    );
+
     // Planning is useful durable context even on turn one. Keep the notice
     // compact and inject no task body: agents pull `plan_get` only when the
     // request concerns tracked work. The explicit id makes CLI writes robust
@@ -573,7 +588,7 @@ pub fn build_agent_prompt(
         // Language instruction at end only — LLMs weight recent text more heavily,
         // and MCP context is injected via --append-system-prompt (separate from prompt).
         return format!(
-            "{}{}{}{}{}{}{}{}\n\n{}",
+            "{}{}{}{}{}{}{}{}{}\n\n{}",
             title_ctx,
             worktree_notice,
             planning_notice,
@@ -581,6 +596,7 @@ pub fn build_agent_prompt(
             task_execution_notice,
             continuation_notice,
             rich_output_notice,
+            human_question_notice,
             content,
             lang_instr
         );
@@ -640,7 +656,7 @@ pub fn build_agent_prompt(
         ""
     };
     let header = format!(
-        "{}{}{}{}{}{}{}{}{}{}",
+        "{}{}{}{}{}{}{}{}{}{}{}",
         title_ctx,
         worktree_notice,
         planning_notice,
@@ -648,6 +664,7 @@ pub fn build_agent_prompt(
         task_execution_notice,
         continuation_notice,
         rich_output_notice,
+        human_question_notice,
         intro_block,
         interactive_hint,
         prev_conv_label
@@ -998,6 +1015,55 @@ mod tests {
         let disc = disc_with_messages(vec![user_msg("Assign and run KT-324")], "en");
         let vibe = build_agent_prompt(&disc, &AgentType::Vibe, 0);
         assert!(!vibe.contains("task_exec_launch"));
+    }
+
+    #[test]
+    fn every_runtime_gets_a_valid_question_example_and_human_gate_on_every_turn() {
+        for agent in [
+            AgentType::ClaudeCode,
+            AgentType::Codex,
+            AgentType::OpenCode,
+            AgentType::Vibe,
+            AgentType::GeminiCli,
+            AgentType::Kiro,
+            AgentType::CopilotCli,
+            AgentType::Ollama,
+            AgentType::LiteLlm,
+            AgentType::Nvidia,
+            AgentType::Custom,
+        ] {
+            for language in ["fr", "en", "es", "zh"] {
+                for turns in [1, 4] {
+                    let messages = (0..turns).map(|_| user_msg("Choose a policy")).collect();
+                    let disc = disc_with_messages(messages, language);
+                    let prompt = build_agent_prompt(&disc, &agent, 0);
+                    let example = prompt
+                        .split_once("```kronn-question\n")
+                        .unwrap()
+                        .1
+                        .split_once("\n```")
+                        .unwrap()
+                        .0;
+                    let value: serde_json::Value = serde_json::from_str(example).unwrap();
+                    assert_eq!(value["version"].as_u64(), Some(1));
+                    assert!(!value["key"].as_str().unwrap().is_empty());
+                    assert!(!value["question"].as_str().unwrap().is_empty());
+                    for contract in [
+                        "the string \"1\" is INVALID",
+                        "Only the human answers",
+                        "read back this exact key after publication",
+                        "An absent row is NOT a pending or answered decision",
+                        "If the reader is unavailable, do not invent a tool call",
+                        "Do not execute, delegate or complete the affected lot before that answer",
+                    ] {
+                        assert!(
+                            prompt.contains(contract),
+                            "{agent:?}/{language}/{turns}: {contract}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]

@@ -11,7 +11,7 @@ const PLAN_STATE_PREFIX = 'kronn:plan-orchestration:';
 
 export interface PlanOrchestrationState {
   selectedTaskId: string | null;
-  viewMode: 'focus' | 'all';
+  viewMode: 'focus' | 'in_progress' | 'all';
 }
 
 export function collapsedKey(runId: string): string {
@@ -49,7 +49,8 @@ export function readPlanOrchestrationState(discussionId: string): PlanOrchestrat
     const parsed = JSON.parse(sessionStorage.getItem(`${PLAN_STATE_PREFIX}${discussionId}`) ?? '{}') as Partial<PlanOrchestrationState>;
     return {
       selectedTaskId: typeof parsed.selectedTaskId === 'string' ? parsed.selectedTaskId : null,
-      viewMode: parsed.viewMode === 'all' ? 'all' : 'focus',
+      viewMode: parsed.viewMode === 'all' || parsed.viewMode === 'in_progress'
+        ? parsed.viewMode : 'focus',
     };
   } catch {
     return { selectedTaskId: null, viewMode: 'focus' };

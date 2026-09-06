@@ -174,7 +174,7 @@ TOOLS = [
     },
     {
         "name": "disc_question_list",
-        "description": "Read pending human arbitrations (latest 50), or the durable answer for an exact key. Never answers for the human. Creation protocol: tool_manual({tool: \"disc_question_list\"}).",
+        "description": "Read pending human arbitrations (latest 50), or the durable answer for an exact key. Never answers for the human. A kronn-question requires numeric version 1, not string \"1\". After publication, read back its exact key to verify recording; absence is not consent. Complete valid example and recovery protocol: tool_manual({tool: \"disc_question_list\"}).",
         "inputSchema": {"type": "object", "properties": {"key": {"type": "string", "maxLength": 100}}, "additionalProperties": False},
     },
     {
@@ -9347,13 +9347,19 @@ TOOL_MANUALS = {
         '`{"version":1,"key":"quota-policy","question":"Which policy?",'
         '"options":[{"id":"retry","label":"Retry"},{"id":"wait","label":"Wait"}],'
         '"recommended_option_ids":["retry"],"task_ref":"KT-593"}`. '
-        "Required: version 1, stable key (ASCII letters/digits/-_.; <=100), question "
+        'Required: version MUST be the JSON number 1; the string "1" is INVALID '
+        "(unlike delivery/review manifests). Required: stable key (ASCII letters/digits/-_.; <=100), question "
         "(<=1000). Optional: context (<=4000), task_ref, multiple (default false), "
         "0-8 options with unique id, label (<=250), description (<=1000). "
         "Free text is always allowed. Recommendations never select or approve. "
         "Same key in a room keeps ONE immutable card; reuse it on retry. "
         "Read pending cards before asking; pass key to recover a prior answer "
-        "after reconnect or handoff. Wait with disc_wait_for_peer; do not "
+        "after reconnect or handoff. After disc_append, read back this exact key "
+        "with disc_question_list and verify that the card was recorded. An absent "
+        "row is NOT a pending or answered decision: check the closed fence and "
+        "JSON field types, correct the payload and republish with the same key. "
+        "A message write receipt is neither a recorded card nor human consent. "
+        "Wait with disc_wait_for_peer; do not "
         "execute/delegate/complete the affected lot until state=answered. "
         "Independent tasks may continue. Only the human UI can answer. The "
         "answer and its User reply remain durable even if the original CLI is offline."
@@ -10775,7 +10781,7 @@ def _handle(req):
                     "• Opaque IDs: when the user pastes an ID without naming its type, call `resolve_id` FIRST; it returns compact routing context and the object-specific tool to use next.\n"
                     "• Discussions (multi-agent threads): `disc_meta`/`disc_get_message`/`disc_search`/`disc_load_other`/`disc_create`/`disc_append`/`disc_join`/`disc_invite_peer`…\n"
                     "• **Working in a room:** a room is not a mailbox you empty at the end. After each real step — a commit, a green test run, a background task that finished, a milestone — call `disc_wait_for_peer` BEFORE starting the next one. Its cursor is durable, so re-checking never re-delivers what you already read, and a quiet return costs nothing. A peer's message routinely changes what you are about to build: a design review of the choice you just made, a file boundary, a decision the human already took. Long silent stretches of work are how two agents duplicate each other, or how one keeps building on a choice the other has already overturned. Messages flagged `awareness: true` are context to read, never turns to answer. Any tool result may also carry a `kronn_room` block: turns that arrived while you were working, attached to an answer you asked for. `attention_required` holds turns addressed to YOU — read them before continuing, because a peer announcing a scope is how duplicate work gets prevented; `context` is background you read without answering turn by turn. Seeing it does not replace calling `disc_wait_for_peer`: it appears only when you happen to call something else.\n"
-                    "• Blocking human decisions MUST use a `kronn-question` fence, never prose alone. Read `disc_question_list` first; its tool_manual defines the protocol. Wait for a durable human answer before advancing the affected lot; independent work can continue. Agents cannot answer for humans.\n"
+                    '• Blocking human decisions MUST use a closed `kronn-question` JSON fence, never prose alone. `version` MUST be the JSON number 1, never the string "1". Read `disc_question_list` first; its tool_manual has a complete valid example. After publication, read back the exact key to verify recording; if absent, correct the payload and republish with the same key. Wait for a durable human answer before advancing the affected lot; independent work can continue. Agents cannot answer for humans.\n'
                     "• Rich room output: messages are Markdown. A `mermaid` fence renders a diagram; `kronn-doc-preview` renders sandboxed HTML with PDF/DOCX actions (a plain `html` fence is only code); `kronn-doc-data` exposes CSV/XLSX/PPTX export. Use visual output only when it materially helps.\n"
                     "• Planning: a discussion may have a shared plan made of prioritized, editable tasks. The user may refer to it naturally as “the plan”, “the tasks”, “what remains”, “the priority”, and similar wording. Use `plan_get` (compact current objective/plan) · `task_list` (compact filtered backlog) · `task_get` (FULL task) · `task_changes` (deltas) · `proposal_list`/`proposal_get` (durable proposals, read-only) · narrow writes `task_create`/`task_update`/`task_update_dod`/`task_link_discussion`/`task_unlink_discussion`/`task_add_blocker`/`task_remove_blocker`. Read the relevant plan first. Immediately before any direct `task_create`, call `plan_get` again so a peer's recent write is visible. Apply unambiguous intent directly; otherwise propose a human-gated `kronn-plan-action` fence (`create`, `create_many`, `status`, `complete`, `unblock`, `open`). You may read and propose, but only a human accepts, rejects or decides a durable proposal. Never replace a requested plan update with a prose-only summary. Whenever tracked work starts or materially changes, keep its status, DoD and priority honest in the plan. Write only on a real change: never reload or rewrite an unchanged task merely to report progress. If the announced Planning tools are missing from your MCP surface, use the read-only `plan_snapshot` from `disc_join`, ask @user to reconnect the Kronn MCP, and never fabricate an update.\n"
                     "• Human-gated Automation proposals: after resolving a real QP/QA/QE/Workflow id and its declared variables through the catalogue/get tools, an agent may emit one `kronn-action` fence with `{\"kind\":\"quick_prompt|quick_api|quick_exec|workflow\",\"target_id\":\"<real id>\",\"project_id\":\"<optional id>\",\"values\":[{\"name\":\"<declared variable>\",\"value\":\"<editable suggestion>\",\"provenance\":\"agent_suggestion\",\"suggested_by\":\"<your alias>\"}]}`. This proposes only: Kronn validates and persists the card, and the human click launches it. Never invent ids/variables or include secret/resolved values.\n"
