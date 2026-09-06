@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 
 const mocks = vi.hoisted(() => ({
@@ -762,6 +762,116 @@ describe('DiscussionPlanPanel', () => {
     expect(screen.queryByPlaceholderText('planning.allSearchPlaceholder')).not.toBeInTheDocument();
     fireEvent.click(screen.getByText('planning.allView'));
     expect(screen.getByPlaceholderText('planning.allSearchPlaceholder')).toHaveValue('KT-1');
+  });
+
+  describe('in-progress view', () => {
+    beforeEach(() => {
+      // Give the real virtual list a viewport: jsdom has no layout by default.
+      vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
+        const height = this.classList.contains('plan-all-scroll') ? 480 : 60;
+        return { height, width: 320, top: 0, left: 0, right: 320, bottom: height, x: 0, y: 0, toJSON: () => ({}) };
+      });
+      vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockReturnValue(480);
+      vi.stubGlobal('ResizeObserver', class {
+        constructor(private callback: ResizeObserverCallback) {}
+        observe(element: Element) {
+          this.callback([{ target: element, contentRect: element.getBoundingClientRect() } as ResizeObserverEntry], this as unknown as ResizeObserver);
+        }
+        unobserve() {}
+        disconnect() {}
+      });
+    });
+
+    afterEach(() => {
+      vi.restoreAllMocks();
+      vi.unstubAllGlobals();
+    });
+
+    it('shows an accessible activity indicator only for in-progress tasks in Focus and All', async () => {
+      const active = ['in_progress', 'todo', 'blocked', 'done', 'archived', 'idea'].map((status, index) => relation({
+        id: `status-${index}`, title: `Task ${status}`, status: status as PlanningTaskSummary['status'],
+      }));
+      mocks.discussionPlan.mockResolvedValue(plan({ primary_objective: null, active }));
+      render(<DiscussionPlanPanel discussionId="disc-1" onClose={vi.fn()} toast={vi.fn()} />);
+
+      await screen.findByText('Task in_progress');
+      expect(screen.getAllByRole('img', { name: 'planning.status.in_progress' })).toHaveLength(1);
+      fireEvent.click(screen.getByRole('button', { name: 'planning.allView' }));
+      const rows = await screen.findAllByRole('option');
+      expect(rows).toHaveLength(6);
+      for (const row of rows) {
+        expect(within(row).queryAllByRole('img', { name: 'planning.status.in_progress' }))
+          .toHaveLength(row.textContent?.includes('Task in_progress') ? 1 : 0);
+      }
+    });
+
+    it('includes all ongoing tasks, including blocked and Later relations, independently of summary chips', async () => {
+      const current = Array.from({ length: 4 }, (_, index) => relation({
+        id: `current-${index}`, title: `Current ${index}`, status: 'in_progress',
+      }));
+      current[0].active_blockers = [task({ id: 'dependency' })];
+      current[0].task.blocker_count = 1;
+      const later = relation({ id: 'later-current', title: 'Later current', status: 'in_progress' }, { placement: 'later' });
+      mocks.discussionPlan.mockResolvedValue(plan({
+        primary_objective: null,
+        active: [...current, relation({ title: 'Unstarted task' })],
+        later: [later, relation({ id: 'later-todo', title: 'Later todo' }, { placement: 'later' })],
+        stats: { ready: 1, blocked: 1, in_progress: 3, ideas: 0, done: 0, later: 2 },
+      }));
+      render(<DiscussionPlanPanel discussionId="disc-1" onClose={vi.fn()} toast={vi.fn()} />);
+      fireEvent.click(await screen.findByLabelText('planning.filterBlocked'));
+      const ongoing = screen.getByRole('button', { name: 'planning.status.in_progress' });
+      fireEvent.click(ongoing);
+
+      expect(ongoing).toHaveAttribute('aria-pressed', 'true');
+      expect(screen.getByLabelText('planning.filterBlocked')).toHaveAttribute('aria-pressed', 'false');
+      const list = screen.getByRole('listbox', { name: 'planning.status.in_progress' });
+      expect(within(list).getAllByRole('option')).toHaveLength(5);
+      expect(within(list).getByText('Current 0')).toBeInTheDocument();
+      expect(within(list).getByText('Current 3')).toBeInTheDocument();
+      expect(within(list).getByText('Later current')).toBeInTheDocument();
+      expect(screen.queryByText('Unstarted task')).not.toBeInTheDocument();
+      expect(screen.queryByText('Later todo')).not.toBeInTheDocument();
+
+      fireEvent.change(screen.getByRole('searchbox'), { target: { value: 'Later current' } });
+      expect(within(list).getAllByRole('option')).toHaveLength(1);
+      fireEvent.click(within(list).getByRole('option'));
+      await waitFor(() => expect(mocks.get).toHaveBeenCalledWith('later-current'));
+    });
+
+    it('restores the selected view after reopening and does not share it with another room', async () => {
+      const props = { onClose: vi.fn(), toast: vi.fn() };
+      const first = render(<DiscussionPlanPanel discussionId="disc-1" {...props} />);
+      fireEvent.click(await screen.findByRole('button', { name: 'planning.status.in_progress' }));
+      first.unmount();
+      const second = render(<DiscussionPlanPanel discussionId="disc-1" {...props} />);
+      expect(await screen.findByRole('button', { name: 'planning.status.in_progress' })).toHaveAttribute('aria-pressed', 'true');
+      expect(screen.getByText('planning.allEmpty')).toBeInTheDocument();
+      second.unmount();
+      render(<DiscussionPlanPanel discussionId="disc-2" {...props} />);
+      expect(await screen.findByRole('button', { name: 'planning.focusView' })).toHaveAttribute('aria-pressed', 'true');
+    });
+
+    it('updates membership and indicators on refresh while keeping an empty status filter selected', async () => {
+      const running = relation({ id: 'running', title: 'Finishing task', status: 'in_progress' });
+      mocks.discussionPlan.mockResolvedValue(plan({ primary_objective: null, active: [running] }));
+      render(<DiscussionPlanPanel discussionId="disc-1" onClose={vi.fn()} toast={vi.fn()} />);
+      fireEvent.click(await screen.findByRole('button', { name: 'planning.status.in_progress' }));
+      expect(screen.getByText('Finishing task')).toBeInTheDocument();
+      mocks.discussionPlan.mockResolvedValue(plan({
+        primary_objective: null, active: [relation({ id: 'running', title: 'Finishing task', status: 'done' })],
+      }));
+      act(() => window.dispatchEvent(new CustomEvent('kronn:plan-proposals-changed', { detail: { discussionId: 'disc-1' } })));
+      expect(await screen.findByText('planning.allEmpty')).toBeInTheDocument();
+      expect(screen.queryByText('Finishing task')).not.toBeInTheDocument();
+      expect(screen.queryByRole('img', { name: 'planning.status.in_progress' })).not.toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'planning.status.in_progress' })).toHaveAttribute('aria-pressed', 'true');
+
+      mocks.discussionPlan.mockResolvedValue(plan({ primary_objective: null, active: [running] }));
+      act(() => window.dispatchEvent(new CustomEvent('kronn:plan-proposals-changed', { detail: { discussionId: 'disc-1' } })));
+      expect(await screen.findByText('Finishing task')).toBeInTheDocument();
+      expect(screen.getByRole('img', { name: 'planning.status.in_progress' })).toBeInTheDocument();
+    });
   });
 
   it('uses summary chips as reversible filters for the complete plan', async () => {
