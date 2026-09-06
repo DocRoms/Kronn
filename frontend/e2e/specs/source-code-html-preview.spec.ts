@@ -18,12 +18,12 @@ test.describe('Source-code HTML preview isolation', () => {
         <img src="https://preview-probe.invalid/comment-head">
         <a id="go" href="https://preview-probe.invalid/self-navigation">Go</a>
         <a/href="https://preview-probe.invalid/slash-navigation">Malformed link</a>
+        <div><template shadowrootmode="open"><a href="https://preview-probe.invalid/template">Template link</a></template></div>
         <img id="data-image" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9JQX8AAAAASUVORK5CYII=">
         <meta http-equiv="refresh" content="0; url=https://preview-probe.invalid/refresh"><base href="https://preview-probe.invalid/">
         <form action="https://example.test/submit"><button id="submit">Submit</button></form>
       </body></html>
     `);
-    requests.length = 0;
     await page.setContent(`
       <script>window.__scriptRan = false; addEventListener('message', () => { window.__scriptRan = true; });</script>
       <iframe title="HTML preview" sandbox=""></iframe>
@@ -43,6 +43,9 @@ test.describe('Source-code HTML preview isolation', () => {
     expect(preview).not.toContain('https://preview-probe.invalid');
     await expect(rendered.locator('#go')).not.toHaveAttribute('href');
     await expect(rendered.locator('#submit')).toHaveCount(0);
+    await expect(rendered.locator('template')).toHaveCount(0);
+    await expect(rendered.getByText('Template link')).toHaveCount(0);
+    await rendered.locator('#go').click();
     await expect(rendered.locator('#safe')).toHaveText('Safe preview');
     expect(requests).toEqual([]);
   });

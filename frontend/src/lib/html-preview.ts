@@ -8,7 +8,7 @@ const PREVIEW_CSP = "default-src 'none'; base-uri 'none'; form-action 'none'; sc
 
 const BLOCKED_ELEMENTS = new Set([
   'base', 'embed', 'fencedframe', 'form', 'frame', 'iframe', 'link', 'meta',
-  'object', 'portal', 'script',
+  'object', 'portal', 'script', 'template',
 ]);
 
 const URL_ATTRIBUTES = new Set([

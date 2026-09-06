@@ -174,6 +174,7 @@ describe('SourceCodeViewer', () => {
       <meta http-equiv="refresh" content="0; url=https://preview-probe.invalid/refresh"><base href="https://preview-probe.invalid/">
     </head><body><img SRC="data:image/png;base64,AAAA"><a/href="https://preview-probe.invalid/slash-navigation">Open</a>
       <form action="https://preview-probe.invalid/form"><button formaction="https://preview-probe.invalid/button">Submit</button></form>
+      <div><template shadowrootmode="open"><a href="https://preview-probe.invalid/template">Template link</a></template></div>
       <img src="https://preview-probe.invalid/comment-head"></body></html>`);
 
     expect(preview).toMatch(/^<!doctype html><html><head><meta http-equiv="Content-Security-Policy"/i);
@@ -181,6 +182,7 @@ describe('SourceCodeViewer', () => {
     expect(preview).not.toContain('https://preview-probe.invalid');
     expect(preview).toContain('src="data:image/png;base64,AAAA"');
     expect(preview).toContain('Open');
+    expect(preview).not.toContain('Template link');
   });
 
   it('returns to code and displays a loading error when a non-HTML file is selected', async () => {
