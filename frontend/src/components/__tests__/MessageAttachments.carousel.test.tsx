@@ -232,4 +232,28 @@ describe('MessageAttachments — mixed carousel', () => {
     );
     await waitFor(() => expect(screen.queryByTestId('attachment-generate-video')).toBeNull());
   });
+
+  it('withholds prior capability evidence when the configured model changes', async () => {
+    let resolveReplacement!: (value: { capabilities: { max_input_references: number } }) => void;
+    capabilities
+      .mockResolvedValueOnce({ capabilities: { max_input_references: 1 } })
+      .mockReturnValueOnce(new Promise(resolve => { resolveReplacement = resolve; }));
+    const { rerender } = render(
+      <MessageAttachments files={FILES} discussionId="d1" t={t} variant="library"
+        generationConnections={[connection({ video_model: null })]} onGenerateFromImage={vi.fn()} />,
+    );
+
+    fireEvent.click(await screen.findByRole('button', { name: 'disc.attachmentImage|a.png' }));
+    expect(await screen.findByTestId('attachment-generate-image')).toBeInTheDocument();
+
+    rerender(
+      <MessageAttachments files={FILES} discussionId="d1" t={t} variant="library"
+        generationConnections={[connection({ image_model: 'replacement-image-model', video_model: null })]}
+        onGenerateFromImage={vi.fn()} />,
+    );
+    expect(screen.queryByTestId('attachment-generate-image')).toBeNull();
+
+    resolveReplacement({ capabilities: { max_input_references: 1 } });
+    expect(await screen.findByTestId('attachment-generate-image')).toBeInTheDocument();
+  });
 });

@@ -132,17 +132,16 @@ export function MediaGenerateForm({
   // switchable — a soundtrack nobody asked for is what got a generation
   // rejected for copyright, with no clue in the request that it existed.
   const [generateAudio, setGenerateAudio] = useState(true);
-  const [fetchedCapabilities, setFetchedCapabilities] =
-    useState<MediaModelCapabilities | null>(null);
   // A viewer handoff is an explicit request to generate FROM a picture.  Keep
   // the capability request's lifecycle separately from its value: `null` can
   // mean either a provider that advertised no envelope or a request that has
   // not answered yet, and those two states must never have the same billing
   // behaviour.
-  const [capabilityState, setCapabilityState] = useState<{
+  const [capabilityResult, setCapabilityResult] = useState<{
     key: string;
     status: 'loading' | 'resolved' | 'error';
-  }>({ key: '', status: 'loading' });
+    capabilities: MediaModelCapabilities | null;
+  }>({ key: '', status: 'loading', capabilities: null });
   // The pictures this generation starts from, chosen among the room's own
   // assets. Ids, never paths: the browser never learns where a file lives, and
   // the backend re-checks that each one belongs to this discussion. A clip
@@ -186,6 +185,12 @@ export function MediaGenerateForm({
     ?? slots[0]
     ?? null;
   const activeKey = selected?.key ?? '';
+  // The endpoint is addressed by connection and modality, but its answer
+  // describes the configured model. Include that model in the identity so a
+  // response for the previous configured model cannot authorise a new one.
+  const capabilityKey = selected
+    ? `${selected.connectionId}:${selected.modality}:${selected.model}`
+    : '';
   const isVideo = selected?.modality === 'video';
 
   // What this exact model accepts. Absent (an unreachable or catalogue-less
@@ -194,18 +199,16 @@ export function MediaGenerateForm({
   useEffect(() => {
     if (!selected) return;
     let cancelled = false;
-    setCapabilityState({ key: selected.key, status: 'loading' });
+    const requestKey = `${selected.connectionId}:${selected.modality}:${selected.model}`;
     media
       .capabilities(selected.connectionId, selected.modality)
       .then(result => {
         if (cancelled) return;
-        setFetchedCapabilities(result.capabilities);
-        setCapabilityState({ key: selected.key, status: 'resolved' });
+        setCapabilityResult({ key: requestKey, status: 'resolved', capabilities: result.capabilities });
       })
       .catch(() => {
         if (cancelled) return;
-        setFetchedCapabilities(null);
-        setCapabilityState({ key: selected.key, status: 'error' });
+        setCapabilityResult({ key: requestKey, status: 'error', capabilities: null });
       });
     return () => { cancelled = true; };
   }, [selected]);
@@ -215,7 +218,9 @@ export function MediaGenerateForm({
   // ones arrive, because treating the gap as "no limits known" makes the trim
   // below drop every attached picture for one render, and that is not
   // recoverable.
-  const capabilities = selected ? fetchedCapabilities : null;
+  const capabilitiesResolvedForSelected = capabilityResult.key === capabilityKey
+    && capabilityResult.status === 'resolved';
+  const capabilities = capabilitiesResolvedForSelected ? capabilityResult.capabilities : null;
 
   const durations = capabilities?.durations_secs?.length
     ? capabilities.durations_secs
@@ -269,8 +274,6 @@ export function MediaGenerateForm({
       ? { ...storedReference, assetIds: storedReference.assetIds.slice(0, referenceLimit) }
       : storedReference;
   }, [storedReference, canReference, isVideo, framePositions, referenceLimit]);
-  const capabilitiesResolvedForSelected = capabilityState.key === activeKey
-    && capabilityState.status === 'resolved';
   // Do not silently downgrade a viewer handoff to text-to-media.  The stored
   // source remains available for an explicit removal, but a click cannot
   // reach the paid endpoint until this selected model has accepted it.

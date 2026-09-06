@@ -173,6 +173,13 @@ and persisting them would make a stale row authoritative over the provider.
 
 ## Generating from images already in the room
 
+The Assets carousel may hand its currently viewed image to the existing media
+form for a compatible configured slot. This is an explicit handoff: it closes
+the viewer and reveals the form with the source attached, but never starts a
+generation on its own. Until the selected model's input capability resolves,
+the preserved source blocks submission rather than being silently downgraded
+to a text-only paid request.
+
 A video may start from — or end on — a picture the discussion already holds,
 and an image may be drawn from several of them. The request names them by
 context-file id (`reference_asset_ids`) plus a mode (`first_frame`,

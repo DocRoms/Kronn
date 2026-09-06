@@ -349,7 +349,28 @@ export function MessageAttachments({
   // State rather than a ref: the request is answered during render, and a ref
   // written there is exactly what `react-hooks/refs` exists to catch.
   const [handledOpenNonce, setHandledOpenNonce] = useState<number | null>(null);
-  const [inputModes, setInputModes] = useState<Record<string, MediaReferenceMode | null>>({});
+  const generationSlots = useMemo(() => generationConnections.flatMap(connection => (
+    (['image', 'video'] as const).flatMap(modality => {
+      const model = modality === 'image' ? connection.image_model : connection.video_model;
+      return model?.trim()
+        ? [{ key: `${connection.id}:${modality}`, connectionId: connection.id, modality, model: model.trim() }]
+        : [];
+    })
+  )), [generationConnections]);
+  // A capability answer belongs to a complete catalogue snapshot. Keeping its
+  // identity lets render hide stale actions while a new configured model is
+  // being checked, without a synchronous effect reset.
+  const generationCatalogKey = generationSlots
+    .map(slot => `${slot.key}:${slot.model}`)
+    .join('|');
+  const [inputModeResult, setInputModeResult] = useState<{
+    catalogKey: string;
+    modes: Record<string, MediaReferenceMode | null>;
+  }>({ catalogKey: '', modes: {} });
+  const inputModes = useMemo(
+    () => inputModeResult.catalogKey === generationCatalogKey ? inputModeResult.modes : {},
+    [inputModeResult, generationCatalogKey],
+  );
   const generationActions = useMemo(() => {
     const actions: Array<{ modality: MediaModality; slotKey: string; referenceMode: MediaReferenceMode }> = [];
     for (const connection of generationConnections) {
@@ -367,14 +388,8 @@ export function MessageAttachments({
   // after it fails), the viewer offers no paid-generation action at all.
   useEffect(() => {
     let cancelled = false;
-    const slots = generationConnections.flatMap(connection => (
-      (['image', 'video'] as const).flatMap(modality => {
-        const model = modality === 'image' ? connection.image_model : connection.video_model;
-        return model?.trim() ? [{ key: `${connection.id}:${modality}`, connectionId: connection.id, modality }] : [];
-      })
-    ));
-    setInputModes({});
-    void Promise.all(slots.map(async slot => {
+    const requestCatalogKey = generationCatalogKey;
+    void Promise.all(generationSlots.map(async slot => {
       try {
         const result = await media.capabilities(slot.connectionId, slot.modality);
         const mode = slot.modality === 'image'
@@ -385,10 +400,12 @@ export function MessageAttachments({
         return [slot.key, null] as const;
       }
     })).then(entries => {
-      if (!cancelled) setInputModes(Object.fromEntries(entries));
+      if (!cancelled) {
+        setInputModeResult({ catalogKey: requestCatalogKey, modes: Object.fromEntries(entries) });
+      }
     });
     return () => { cancelled = true; };
-  }, [generationConnections]);
+  }, [generationCatalogKey, generationSlots]);
 
   const releaseMediaUrls = useCallback(() => {
     generationRef.current += 1;
