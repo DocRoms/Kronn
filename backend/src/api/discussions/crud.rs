@@ -218,7 +218,10 @@ pub async fn create(
             };
             (secret, config.server.execution_variable_retention_days)
         };
-        let declarations = qp.variables.clone();
+        let declarations = crate::models::declarations_with_template_environment_variables(
+            &qp.prompt_template,
+            &qp.variables,
+        );
         let supplied = req.launch_variables.clone();
         let project_id = req.project_id.clone().or(qp.project_id.clone());
         let run_id = discussion_id.clone();

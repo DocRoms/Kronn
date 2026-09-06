@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect } from 'react';
 import { useT } from '../../lib/I18nContext';
 import { MarkdownEditor } from '../MarkdownComposerTools';
-import { config as configApi, ollama as ollamaApi } from '../../lib/api';
+import { config as configApi, mcps as mcpsApi, ollama as ollamaApi } from '../../lib/api';
 import { AgentSwitchPicker } from '../AgentSwitchPicker';
 import type { AgentSwitchTarget } from '../AgentSwitchPicker';
 import { SearchableSelect } from '../SearchableSelect';
@@ -63,6 +63,7 @@ export function QuickPromptForm({
   const [agent, setAgent] = useState<AgentType>(editPrompt?.agent ?? 'ClaudeCode');
   const [connectionId, setConnectionId] = useState(editPrompt?.connection_id ?? '');
   const [projectId, setProjectId] = useState(editPrompt?.project_id ?? '');
+  const [environmentVariableNames, setEnvironmentVariableNames] = useState<string[]>([]);
   // 0.8.6 phase 4 — tier carried through across edits. New QPs start
   // with 'default' then the effect below replaces it with the user's
   // `ServerConfig.default_model_tier` on mount (strict semantic — only
@@ -103,6 +104,23 @@ export function QuickPromptForm({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  useEffect(() => {
+    if (!projectId) {
+      setEnvironmentVariableNames([]);
+      return;
+    }
+    let active = true;
+    mcpsApi.projectEnvironmentNames(projectId)
+      .then(names => {
+        if (!active) return;
+        setEnvironmentVariableNames([...new Set(names)].sort());
+      })
+      .catch(() => {
+        if (active) setEnvironmentVariableNames([]);
+      });
+    return () => { active = false; };
+  }, [projectId]);
+
   // Auto-sync variables from template. We preserve any description /
   // required flag / label the user already set — only the `name` field
   // is authoritative from the template.
@@ -131,6 +149,18 @@ export function QuickPromptForm({
       el.focus();
       const newPos = pos + insert.length;
       el.setSelectionRange(newPos, newPos);
+    });
+  };
+
+  const insertEnvironmentVariable = (environmentName: string) => {
+    const el = textareaRef.current;
+    if (!el) return;
+    const insert = `{{env.${environmentName}}}`;
+    const pos = el.selectionStart;
+    setTemplate(template.slice(0, pos) + insert + template.slice(pos));
+    requestAnimationFrame(() => {
+      el.focus();
+      el.setSelectionRange(pos + insert.length, pos + insert.length);
     });
   };
 
@@ -240,6 +270,25 @@ export function QuickPromptForm({
           />
         </div>
       </div>
+
+      {projectId && environmentVariableNames.length > 0 && (
+        <div className="qp-environment-variables mb-4" data-testid="qp-environment-variables">
+          <label className="wf-label">{t('qp.environmentVariables')}</label>
+          <p className="text-xs text-ghost mt-0 mb-2">{t('qp.environmentVariablesHint')}</p>
+          <div className="disc-advanced-chips">
+            {environmentVariableNames.map(environmentName => (
+              <button
+                key={environmentName}
+                type="button"
+                className="disc-chip"
+                onClick={() => insertEnvironmentVariable(environmentName)}
+              >
+                {`{{env.${environmentName}}}`}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* 0.8.10 — optional explicit model, wins over the tier at run time.
           Free text (any tag / remote host); pulled Ollama models offered as

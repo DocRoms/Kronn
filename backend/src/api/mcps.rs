@@ -73,6 +73,38 @@ pub async fn overview(State(state): State<AppState>) -> Json<ApiResponse<McpOver
     }
 }
 
+/// GET /api/mcps/project-environment-names/{project_id}
+///
+/// Returns only the names of environment variables available to a project.
+/// This deliberately reads the stored declarations without decrypting or
+/// serializing the corresponding values, so authoring interfaces can offer
+/// safe template completions.
+pub async fn project_environment_names(
+    State(state): State<AppState>,
+    Path(project_id): Path<String>,
+) -> Json<ApiResponse<Vec<String>>> {
+    match state
+        .db
+        .with_conn(move |conn| {
+            let configs = db::mcps::configs_for_project(conn, &project_id)?;
+            Ok::<_, anyhow::Error>(project_environment_names_from_configs(&configs))
+        })
+        .await
+    {
+        Ok(names) => Json(ApiResponse::ok(names)),
+        Err(error) => Json(ApiResponse::err(format!("DB error: {error}"))),
+    }
+}
+
+fn project_environment_names_from_configs(configs: &[McpConfig]) -> Vec<String> {
+    configs
+        .iter()
+        .flat_map(|config| config.env_keys.iter().cloned())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
 /// POST /api/mcps/configs/{id}/probe — prove that a configured plugin can
 /// actually authenticate and speak its declared protocol.
 pub async fn probe_config(
@@ -2649,6 +2681,40 @@ pub async fn import_custom_plugin_file(
 mod tests {
     use super::*;
     use crate::core::mcp_scanner::McpServerEntry;
+
+    fn environment_config(
+        id: &str,
+        keys: &[&str],
+        is_global: bool,
+        project_ids: &[&str],
+    ) -> McpConfig {
+        McpConfig {
+            id: id.into(),
+            server_id: "server".into(),
+            label: id.into(),
+            env_keys: keys.iter().map(|key| (*key).into()).collect(),
+            env_encrypted: "must-not-be-read".into(),
+            args_override: None,
+            is_global,
+            include_general: false,
+            config_hash: id.into(),
+            project_ids: project_ids
+                .iter()
+                .map(|project_id| (*project_id).into())
+                .collect(),
+            host_sync: HostSyncMode::None,
+        }
+    }
+
+    #[test]
+    fn project_environment_names_are_sorted_unique_and_do_not_read_values() {
+        let names = project_environment_names_from_configs(&[
+            environment_config("project", &["Z_TOKEN", "API_TOKEN"], false, &["project-1"]),
+            environment_config("global", &["API_TOKEN", "GLOBAL_TOKEN"], true, &[]),
+        ]);
+
+        assert_eq!(names, ["API_TOKEN", "GLOBAL_TOKEN", "Z_TOKEN"]);
+    }
 
     #[test]
     fn probe_response_is_ready_when_every_required_check_passes() {

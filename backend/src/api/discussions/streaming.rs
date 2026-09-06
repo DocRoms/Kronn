@@ -2244,11 +2244,8 @@ async fn make_agent_stream_inner(
             }
         };
         if let Some(first_message) = prompt_disc.messages.first_mut() {
-            first_message.content = values
-                .iter()
-                .fold(first_message.content.clone(), |rendered, (name, value)| {
-                    rendered.replace(&format!("{{{{{name}}}}}"), value)
-                });
+            first_message.content =
+                crate::models::render_quick_prompt_template(&first_message.content, &values);
         }
     }
     let prompt = build_agent_prompt(&prompt_disc, &agent_type, extra_context_len);
@@ -3834,7 +3831,6 @@ async fn make_agent_stream_inner(
                         });
                     }
                 }
-
 
                 let done = serde_json::json!({ "message_id": agent_msg.id, "success": success, "tokens_used": tokens_used });
                 let _ = tx.send(AgentStreamEvent::Done { data: done }).await;

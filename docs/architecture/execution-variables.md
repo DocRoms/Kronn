@@ -12,6 +12,19 @@ Templates, versions, clones and exports store the declaration and reference,
 never the resolved project value. A launcher without the required project or
 trusted runtime context fails its preflight instead of inventing a value.
 
+## Quick Prompt environment syntax
+
+In a Quick Prompt template, write a project environment variable as
+`{{env.NAME}}`. This is the recommended form and is resolved only at dispatch.
+Existing templates written as `<env.NAME>` remain supported for compatibility.
+The editor lists only the names available to the selected project and inserts
+the recommended form; it never receives or displays their values.
+
+[src: file: backend/src/models/quick.rs:241]
+[src: file: backend/src/api/discussions/streaming.rs:2250]
+[src: file: backend/src/api/mcps.rs:82]
+[src: file: frontend/src/components/workflows/QuickPromptForm.tsx:276]
+
 ## Launch contract
 
 The launch form separates values the operator must enter from values provided

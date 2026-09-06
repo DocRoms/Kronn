@@ -38,6 +38,33 @@ const sampleDirectives: Directive[] = [
 beforeEach(() => { vi.clearAllMocks(); });
 
 describe('QuickPromptForm bindings (0.8.5)', () => {
+  it('lists only project-available environment names and inserts the recommended syntax', async () => {
+    const apiMod = await import('../../../lib/api');
+    (apiMod.mcps.projectEnvironmentNames as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce(['API_TOKEN', 'GLOBAL_TOKEN']);
+    wrap(
+      <QuickPromptForm
+        editPrompt={{
+          id: 'qp-env', name: 'Environment', icon: '⚡', prompt_template: 'Inspect ',
+          pinned: false, variables: [], agent: 'ClaudeCode', project_id: 'project-1',
+          skill_ids: [], profile_ids: [], directive_ids: [], tier: 'default', description: '',
+          created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+        }}
+        projects={[]}
+        onSave={vi.fn()}
+        onCancel={() => {}}
+      />
+    );
+
+    await waitFor(() => expect(screen.getByTestId('qp-environment-variables')).toBeInTheDocument());
+    expect(screen.getByRole('button', { name: '{{env.API_TOKEN}}' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '{{env.GLOBAL_TOKEN}}' })).toBeInTheDocument();
+    expect(apiMod.mcps.projectEnvironmentNames).toHaveBeenCalledWith('project-1');
+
+    fireEvent.click(screen.getByRole('button', { name: '{{env.API_TOKEN}}' }));
+    expect(screen.getByDisplayValue('Inspect {{env.API_TOKEN}}')).toBeInTheDocument();
+  });
+
   it('hides the bindings block when no catalogs are provided', () => {
     wrap(
       <QuickPromptForm

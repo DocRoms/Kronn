@@ -549,7 +549,10 @@ pub async fn batch_run(
             "Isolated workspace mode requires a project_id (the Quick Prompt or the batch request must target a git-backed project)"
         ));
     }
-    let declarations = qp.variables.clone();
+    let declarations = crate::models::declarations_with_template_environment_variables(
+        &qp.prompt_template,
+        &qp.variables,
+    );
     let template = qp.prompt_template.clone();
     let raw_items = req.items;
     let prepared_inputs: Vec<_> = raw_items
@@ -906,7 +909,10 @@ pub async fn compare_agents(
         };
         (secret, config.server.execution_variable_retention_days)
     };
-    let declarations = qp.variables.clone();
+    let declarations = crate::models::declarations_with_template_environment_variables(
+        &qp.prompt_template,
+        &qp.variables,
+    );
     let supplied = req.variables.clone();
     let effective_project = req.project_id.clone().or(qp.project_id.clone());
     let execution_id = Uuid::new_v4().to_string();

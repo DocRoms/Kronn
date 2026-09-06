@@ -4,6 +4,7 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use ts_rs::TS;
 
 use super::{AgentSettings, AgentType, ExtractSpec, ModelTier, PaginationSpec};
@@ -226,6 +227,113 @@ pub fn validate_prompt_variables(variables: &[PromptVariable]) -> Result<(), Str
         variable.validate_control()?;
     }
     Ok(())
+}
+
+const TEMPLATE_ENV_VARIABLE_PREFIX: &str = "__kronn_template_env__";
+
+/// Add internal declarations for environment references written directly in a
+/// Quick Prompt template. `{{env.NAME}}` is the author-facing syntax; the
+/// older `<env.NAME>` form stays executable for existing templates.
+///
+/// The generated declarations are runtime-only: they are never persisted in
+/// the Quick Prompt and therefore cannot turn an environment value into an
+/// editor-visible field.
+pub fn declarations_with_template_environment_variables(
+    template: &str,
+    declarations: &[PromptVariable],
+) -> Vec<PromptVariable> {
+    let mut result = declarations.to_vec();
+    let mut names: HashSet<String> = result
+        .iter()
+        .map(|variable| variable.name.clone())
+        .collect();
+    let mut references = template_environment_references(template);
+    references.sort();
+    references.dedup();
+
+    for environment_name in references {
+        let mut variable_name = format!("{TEMPLATE_ENV_VARIABLE_PREFIX}{environment_name}");
+        let mut suffix = 2;
+        while names.contains(&variable_name) {
+            variable_name = format!("{TEMPLATE_ENV_VARIABLE_PREFIX}{environment_name}#{suffix}");
+            suffix += 1;
+        }
+        names.insert(variable_name.clone());
+        result.push(PromptVariable {
+            name: variable_name,
+            label: format!("Environment {environment_name}"),
+            placeholder: String::new(),
+            description: None,
+            required: true,
+            pattern: None,
+            source: Some(PromptVariableSource::ProjectEnv),
+            source_ref: Some(format!("<env.{environment_name}>")),
+            allow_manual_override: false,
+            control: None,
+        });
+    }
+    result
+}
+
+/// Render values prepared for a Quick Prompt without persisting them in the
+/// prompt body. Internal template-environment names intentionally map to both
+/// supported authoring forms.
+pub fn render_quick_prompt_template(
+    template: &str,
+    values: &std::collections::HashMap<String, String>,
+) -> String {
+    values
+        .iter()
+        .fold(template.to_string(), |rendered, (name, value)| {
+            if let Some(environment_name) = name.strip_prefix(TEMPLATE_ENV_VARIABLE_PREFIX) {
+                let environment_name = environment_name
+                    .rsplit_once('#')
+                    .and_then(|(base, suffix)| suffix.parse::<u32>().ok().map(|_| base))
+                    .unwrap_or(environment_name);
+                rendered
+                    .replace(&format!("{{{{env.{environment_name}}}}}"), value)
+                    .replace(&format!("<env.{environment_name}>"), value)
+            } else {
+                rendered.replace(&format!("{{{{{name}}}}}"), value)
+            }
+        })
+}
+
+fn template_environment_references(template: &str) -> Vec<String> {
+    let mut references = Vec::new();
+    let mut index = 0;
+    while index < template.len() {
+        let (prefix, suffix) = if template[index..].starts_with("{{env.") {
+            ("{{env.", "}}")
+        } else if template[index..].starts_with("<env.") {
+            ("<env.", ">")
+        } else {
+            index += template[index..]
+                .chars()
+                .next()
+                .map(char::len_utf8)
+                .unwrap_or(1);
+            continue;
+        };
+        let start = index + prefix.len();
+        let Some(end_offset) = template[start..].find(suffix) else {
+            index = start;
+            continue;
+        };
+        let end = start + end_offset;
+        let name = &template[start..end];
+        if is_environment_name(name) {
+            references.push(name.to_string());
+        }
+        index = end + suffix.len();
+    }
+    references
+}
+
+fn is_environment_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    matches!(chars.next(), Some(first) if first.is_ascii_alphabetic() || first == '_')
+        && chars.all(|character| character.is_ascii_alphanumeric() || character == '_')
 }
 
 fn default_variable_required() -> bool {
@@ -748,6 +856,81 @@ mod tests {
         assert!(validate_prompt_variables(&[first.clone(), second]).is_err());
         first.source_ref = Some("<env.123bad>".into());
         assert!(validate_prompt_variables(&[first]).is_err());
+    }
+
+    #[test]
+    fn template_environment_references_use_the_recommended_syntax_and_keep_legacy_support() {
+        let declarations = declarations_with_template_environment_variables(
+            "é {{env.API_TOKEN}} then <env.LEGACY_TOKEN> and {{env.API_TOKEN}}",
+            &[],
+        );
+        assert_eq!(declarations.len(), 2);
+        assert!(declarations.iter().all(|variable| {
+            variable.source == Some(PromptVariableSource::ProjectEnv)
+                && variable
+                    .source_ref
+                    .as_deref()
+                    .is_some_and(|reference| reference.starts_with("<env."))
+        }));
+
+        let values = std::collections::HashMap::from([
+            (
+                "__kronn_template_env__API_TOKEN".into(),
+                "recommended".into(),
+            ),
+            ("__kronn_template_env__LEGACY_TOKEN".into(), "legacy".into()),
+        ]);
+        assert_eq!(
+            render_quick_prompt_template("{{env.API_TOKEN}} / <env.LEGACY_TOKEN>", &values,),
+            "recommended / legacy"
+        );
+    }
+
+    #[test]
+    fn template_environment_references_ignore_invalid_names_and_do_not_overwrite_regular_variables()
+    {
+        let declarations = declarations_with_template_environment_variables(
+            "{{env.123BAD}} {{env.OK_NAME}} {{name}}",
+            &[variable(PromptVariableSource::UserInput, None)],
+        );
+        assert_eq!(declarations.len(), 2);
+        let values = std::collections::HashMap::from([
+            ("name".into(), "manual".into()),
+            ("__kronn_template_env__OK_NAME".into(), "environment".into()),
+        ]);
+        assert_eq!(
+            render_quick_prompt_template("{{name}} {{env.OK_NAME}} {{env.123BAD}}", &values),
+            "manual environment {{env.123BAD}}"
+        );
+    }
+
+    #[test]
+    fn template_environment_names_ending_in_digits_render_without_truncation() {
+        let declarations =
+            declarations_with_template_environment_variables("{{env.SERVICE_2}}", &[]);
+        let generated_name = &declarations[0].name;
+        let values = std::collections::HashMap::from([(generated_name.clone(), "resolved".into())]);
+        assert_eq!(
+            render_quick_prompt_template("{{env.SERVICE_2}}", &values),
+            "resolved"
+        );
+    }
+
+    #[test]
+    fn template_environment_reference_without_a_project_value_fails_preflight() {
+        let declarations =
+            declarations_with_template_environment_variables("{{env.API_TOKEN}}", &[]);
+        let failures = crate::core::execution_variables::resolve(
+            &declarations,
+            &std::collections::HashMap::new(),
+            &std::collections::HashMap::new(),
+            &std::collections::HashMap::new(),
+            None,
+            "project_mcp_configs",
+        )
+        .unwrap_err();
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].cause, "missing_source");
     }
 
     #[test]
