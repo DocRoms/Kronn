@@ -5777,7 +5777,7 @@ button.disc-contact-open {
 .disc-new-entry-mode[data-active="true"] {
   border-color: var(--kr-accent-border);
   background: rgba(var(--kr-accent-rgb), 0.08);
-  color: var(--kr-text);
+  color: var(--kr-text-primary);
 }
 
 .disc-new-layout {
