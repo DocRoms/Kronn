@@ -484,13 +484,24 @@ describe('PagesPage', () => {
     click.mockRestore();
   });
 
-  it('compares an older HTML revision and can restore it into the editor', async () => {
+  it('compares an older HTML revision in isolated previews without mutating the draft', async () => {
     render(<PagesPage />);
     await screen.findByTestId('live-page-frame');
     fireEvent.click(screen.getByText('pages.editHtml'));
 
+    fireEvent.change(screen.getByLabelText('pages.htmlTitle'), { target: { value: '<h1>Current draft</h1>' } });
     fireEvent.change(screen.getByLabelText('pages.compareRevision'), { target: { value: 'rev-1' } });
     expect(screen.getByTestId('live-page-html-diff')).toHaveTextContent('Adobe legacy');
+    fireEvent.click(screen.getByRole('button', { name: 'pages.preview' }));
+    const previews = screen.getByTestId('live-page-html-preview-diff').querySelectorAll('iframe');
+    expect(previews).toHaveLength(2);
+    expect(previews[0]).toHaveAttribute('sandbox', '');
+    expect(previews[0]).toHaveAttribute('srcdoc', expect.stringContaining('Adobe legacy'));
+    expect(previews[1]).toHaveAttribute('srcdoc', expect.stringContaining('Current draft'));
+    expect(pagesApi.updateHtml).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('button', { name: 'pages.code' }));
+    expect(screen.getByTestId('live-page-html-diff')).toHaveTextContent('Current draft');
     fireEvent.click(screen.getByText('pages.restoreRevision:1'));
     expect(screen.getByLabelText('pages.htmlTitle')).toHaveValue('<h1>Adobe legacy</h1>');
   });
