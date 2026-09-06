@@ -101,10 +101,18 @@ describe('TaskLaunchDialog', () => {
     await waitFor(() => expect(props.onLaunched).toHaveBeenCalled());
     expect(mocks.createCampaign).toHaveBeenCalledWith(expect.objectContaining({
       allowed_agents: expect.arrayContaining(['OpenCode']),
-      default_worker: expect.objectContaining({ target: expect.objectContaining({ agent_type: 'OpenCode' }) }),
+      default_worker: expect.objectContaining({
+        target: expect.objectContaining({
+          kind: 'agent', agent_type: 'OpenCode', cli_session_id: null,
+        }),
+      }),
     }));
     expect(mocks.launch).toHaveBeenCalledWith('campaign-1', 'KT-323', expect.objectContaining({
-      worker: expect.objectContaining({ target: expect.objectContaining({ agent_type: 'OpenCode' }) }),
+      worker: expect.objectContaining({
+        target: expect.objectContaining({
+          kind: 'agent', agent_type: 'OpenCode', cli_session_id: null,
+        }),
+      }),
     }));
   });
 
