@@ -139,6 +139,51 @@ describe('SourceCodeViewer', () => {
     expect(await screen.findByText(/services:/)).toBeInTheDocument();
   });
 
+  it('renders an uppercase HTML file in an isolated preview and restores its source', async () => {
+    vi.mocked(projects.listSourceFiles).mockResolvedValue([
+      { path: 'site/INDEX.HTM', name: 'INDEX.HTM', is_dir: false },
+    ]);
+    vi.mocked(projects.readSourceFile).mockResolvedValue({
+      path: 'site/INDEX.HTM',
+      content: '<!doctype html><html><head><style>p { color: red; }</style></head><body><p>Hello</p></body></html>',
+    });
+
+    render(<SourceCodeViewer projectId="project-1" initialPath="site/INDEX.HTM" />);
+
+    expect(await screen.findByRole('button', { name: 'projects.source.preview' })).toBeInTheDocument();
+    expect(screen.getByText(/Hello/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'projects.source.preview' }));
+    const frame = await screen.findByTestId('source-html-preview-frame');
+    expect(frame).toHaveAttribute('sandbox', '');
+    expect(frame).toHaveAttribute('srcdoc', expect.stringContaining("default-src 'none'"));
+    expect(frame).toHaveAttribute('srcdoc', expect.stringContaining('color: red'));
+
+    fireEvent.click(screen.getByRole('button', { name: 'projects.source.code' }));
+    expect(screen.queryByTestId('source-html-preview-frame')).not.toBeInTheDocument();
+    expect(screen.getByText(/Hello/)).toBeInTheDocument();
+  });
+
+  it('returns to code and displays a loading error when a non-HTML file is selected', async () => {
+    vi.mocked(projects.listSourceFiles).mockResolvedValue([
+      { path: 'index.html', name: 'index.html', is_dir: false },
+      { path: 'notes.txt', name: 'notes.txt', is_dir: false },
+    ]);
+    vi.mocked(projects.readSourceFile).mockImplementation(async (_id, path) => {
+      if (path === 'notes.txt') throw new Error('unreadable');
+      return { path, content: '<p>Preview source</p>' };
+    });
+
+    render(<SourceCodeViewer projectId="project-1" initialPath="index.html" />);
+    fireEvent.click(await screen.findByRole('button', { name: 'projects.source.preview' }));
+    expect(await screen.findByTestId('source-html-preview-frame')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByText('notes.txt'));
+    expect(screen.queryByRole('button', { name: 'projects.source.preview' })).not.toBeInTheDocument();
+    expect(await screen.findByText('projects.source.fileError')).toBeInTheDocument();
+    expect(screen.queryByTestId('source-html-preview-frame')).not.toBeInTheDocument();
+  });
+
   it('renders repository-root entries before the complete tree finishes loading', async () => {
     let resolveFull!: (nodes: SourceFileNode[]) => void;
     const fullTree = new Promise<SourceFileNode[]>(resolve => { resolveFull = resolve; });

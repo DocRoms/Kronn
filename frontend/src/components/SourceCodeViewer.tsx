@@ -35,6 +35,7 @@ interface ContentResult {
   projectId: string;
   path: string;
   content: string | null;
+  error: boolean;
 }
 
 interface BlameResult {
@@ -59,12 +60,24 @@ interface SearchResult {
 }
 
 const EMPTY_SEARCH_RESULTS = new Map<string, number>();
+const HTML_FILE_PATH = /\.html?$/i;
+// The sandbox removes the frame's access to Kronn. This CSP additionally
+// prevents network requests (including relative API URLs), while allowing
+// inline CSS and data-URL assets for a self-contained document.
+const HTML_PREVIEW_CSP = '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; style-src \'unsafe-inline\'; img-src data:; font-src data:">';
+
+export function buildHtmlPreviewDocument(html: string): string {
+  return /<head(?:\s[^>]*)?>/i.test(html)
+    ? html.replace(/<head(?:\s[^>]*)?>/i, match => `${match}${HTML_PREVIEW_CSP}`)
+    : `${HTML_PREVIEW_CSP}${html}`;
+}
 
 function SourceCodeViewerProject({ projectId, initialPath, onOpenCommit }: SourceCodeViewerProps) {
   const { t } = useT();
   const [tree, setTree] = useState<SourceFileNode[]>([]);
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [contentResult, setContentResult] = useState<ContentResult | null>(null);
+  const [contentView, setContentView] = useState<'code' | 'preview'>('code');
   const [treeLoading, setTreeLoading] = useState(true);
   const [treeHydrating, setTreeHydrating] = useState(false);
   /// KT-594 — the enrichment failed and will not be retried on its own. The
@@ -204,10 +217,10 @@ function SourceCodeViewerProject({ projectId, initialPath, onOpenCommit }: Sourc
     const path = selectedPath;
     projectsApi.readSourceFile(projectId, selectedPath)
       .then(file => {
-        if (alive) setContentResult({ projectId, path, content: file.content });
+        if (alive) setContentResult({ projectId, path, content: file.content, error: false });
       })
       .catch(() => {
-        if (alive) setContentResult({ projectId, path, content: null });
+        if (alive) setContentResult({ projectId, path, content: null, error: true });
       });
     return () => { alive = false; };
   }, [projectId, selectedPath]);
@@ -284,7 +297,13 @@ function SourceCodeViewerProject({ projectId, initialPath, onOpenCommit }: Sourc
   const contentIsCurrent = contentResult?.projectId === projectId
     && contentResult.path === selectedPath;
   const content = contentIsCurrent ? contentResult.content : null;
+  const contentError = contentIsCurrent && contentResult.error;
   const contentLoading = selectedPath !== null && !contentIsCurrent;
+  const isHtmlFile = Boolean(selectedPath && HTML_FILE_PATH.test(selectedPath));
+
+  useEffect(() => {
+    if (!isHtmlFile) setContentView('code');
+  }, [isHtmlFile]);
   const blameIsCurrent = annotate
     && blameResult?.projectId === projectId
     && blameResult.path === selectedPath;
@@ -521,12 +540,35 @@ function SourceCodeViewerProject({ projectId, initialPath, onOpenCommit }: Sourc
           <header className="source-toolbar">
             <span className="source-path">{selectedPath}</span>
             {language && <span className="source-language">{language}</span>}
+            {isHtmlFile && (
+              <span className="source-content-mode" role="group" aria-label={t('projects.source.contentView')}>
+                <button type="button" data-active={contentView === 'code'} onClick={() => setContentView('code')}>
+                  {t('projects.source.code')}
+                </button>
+                <button type="button" data-active={contentView === 'preview'} onClick={() => setContentView('preview')}>
+                  {t('projects.source.preview')}
+                </button>
+              </span>
+            )}
           </header>
         )}
         <div ref={contentRef} className="source-code-scroll">
           {contentLoading ? (
             <div className="source-state">
               <Loader2 size={15} className="spin" /> {t('projects.source.loadingFile')}
+            </div>
+          ) : contentError ? (
+            <div className="source-state source-state-error">{t('projects.source.fileError')}</div>
+          ) : contentView === 'preview' && content !== null ? (
+            <div className="source-html-preview">
+              <iframe
+                className="source-html-preview-frame"
+                data-testid="source-html-preview-frame"
+                sandbox=""
+                srcDoc={buildHtmlPreviewDocument(content)}
+                title={t('projects.source.previewFrameTitle', selectedPath ?? '')}
+              />
+              <p>{t('projects.source.previewLimitations')}</p>
             </div>
           ) : content !== null ? (
             <pre className="source-code">
