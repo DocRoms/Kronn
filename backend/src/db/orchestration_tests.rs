@@ -1363,20 +1363,75 @@ fn escalate_with_reason(conn: &Connection, exec_id: &str, reason: &str) {
     )
     .unwrap();
     let now = Utc::now().to_rfc3339();
+    let signal_generation = reason
+        .strip_prefix("quota_exhausted:")
+        .map(|provider| {
+            conn.execute(
+                "INSERT INTO provider_quota_generations (provider, latest_generation) VALUES (?1, 1) \
+                 ON CONFLICT(provider) DO UPDATE SET latest_generation = MAX(latest_generation, 1)",
+                [provider],
+            )
+            .unwrap();
+            1
+        })
+        .unwrap_or(0);
     conn.execute(
         "INSERT INTO task_execution_recovery (
              task_execution_id, recovery_action, recovery_reason, last_activity_at,
              assignment_generation, watchdog_redispatches, human_wait_started_at,
-             pending, updated_at
-         ) VALUES (?1, 'await_human', ?2, ?3, 0, 0, ?3, 0, ?3)
+             pending, updated_at, quota_signal_generation
+         ) VALUES (?1, 'await_human', ?2, ?3, 0, 0, ?3, 0, ?3, ?4)
          ON CONFLICT(task_execution_id) DO UPDATE SET
              recovery_action = 'await_human', recovery_reason = excluded.recovery_reason,
              activity_deadline_at = NULL, review_deadline_at = NULL,
              total_deadline_at = NULL, human_wait_started_at = ?3,
-             pending = 0, updated_at = ?3",
-        params![exec_id, reason, now],
+             pending = 0, updated_at = ?3,
+             quota_signal_generation = excluded.quota_signal_generation",
+        params![exec_id, reason, now, signal_generation],
     )
     .unwrap();
+}
+
+fn attach_quota_dispatch(conn: &Connection, execution_id: &str, provider: AgentType) -> String {
+    let now = Utc::now().to_rfc3339();
+    let discussion_id = format!("quota-child-{execution_id}");
+    let dispatch_id = format!("quota-dispatch-{execution_id}");
+    conn.execute(
+        "INSERT INTO discussions (id, title, agent, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?4)",
+        params![
+            discussion_id,
+            "Quota worker",
+            agent_type_to_db(&provider),
+            now
+        ],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO messages (id, discussion_id, role, content, timestamp, sort_order, received_at) \
+         VALUES (?1, ?2, 'User', 'work', ?3, 1, ?3)",
+        params![format!("quota-trigger-{execution_id}"), discussion_id, now],
+    )
+    .unwrap();
+    crate::db::agent_dispatch::enqueue_for_latest_user(
+        conn,
+        crate::db::agent_dispatch::NewLatestUserDispatch {
+            id: &dispatch_id,
+            discussion_id: &discussion_id,
+            dedupe_key: &format!("quota:{execution_id}"),
+            agent_override: Some(&provider),
+            chain_prompt_ids: &[],
+            batch_item: None,
+            group_id: None,
+            group_concurrency_limit: None,
+        },
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE task_executions SET sub_discussion_id = ?2, dispatch_job_id = ?3 WHERE id = ?1",
+        params![execution_id, discussion_id, dispatch_id],
+    )
+    .unwrap();
+    dispatch_id
 }
 
 #[test]
@@ -1467,8 +1522,22 @@ fn human_rearm_is_idempotent_isolated_and_a_new_quota_failure_blocks_again() {
     assert!(provider_has_open_quota_exhaustion(&conn, "Codex", None).unwrap());
     assert!(provider_has_open_quota_exhaustion(&conn, "ClaudeCode", None).unwrap());
 
-    assert!(rearm_provider_quota(&conn, "Codex", "human-confirmation-1").unwrap());
-    assert!(!rearm_provider_quota(&conn, "Codex", "human-confirmation-1").unwrap());
+    assert!(rearm_provider_quota(
+        &conn,
+        "Codex",
+        "human-confirmation-1",
+        "human",
+        Some("operator")
+    )
+    .unwrap());
+    assert!(!rearm_provider_quota(
+        &conn,
+        "Codex",
+        "human-confirmation-1",
+        "human",
+        Some("operator")
+    )
+    .unwrap());
     assert!(!provider_has_open_quota_exhaustion(&conn, "Codex", None).unwrap());
     assert!(provider_has_open_quota_exhaustion(&conn, "ClaudeCode", None).unwrap());
     assert_eq!(
@@ -1487,13 +1556,40 @@ fn human_rearm_is_idempotent_isolated_and_a_new_quota_failure_blocks_again() {
         "re-arming must not restart or rewrite the historical execution"
     );
 
-    let after_rearm = (Utc::now() + chrono::Duration::seconds(1)).to_rfc3339();
-    conn.execute(
-        "UPDATE task_execution_recovery SET updated_at = ?2 WHERE task_execution_id = ?1",
-        params![codex, after_rearm],
-    )
-    .unwrap();
+    clear_execution_recovery(&conn, &codex, "generic_reconciliation").unwrap();
+    assert!(
+        !provider_has_open_quota_exhaustion(&conn, "Codex", None).unwrap(),
+        "generic recovery maintenance must not turn acknowledged evidence into a new quota signal"
+    );
+
+    let dispatch_id = attach_quota_dispatch(&conn, &codex, AgentType::Codex);
+    escalate_execution_for_dispatch_quota(&conn, &dispatch_id, "Codex").unwrap();
     assert!(provider_has_open_quota_exhaustion(&conn, "Codex", None).unwrap());
+}
+
+#[test]
+fn same_rearm_key_is_independent_per_provider() {
+    let conn = setup();
+    assert!(
+        rearm_provider_quota(&conn, "Codex", "shared-click", "human", Some("operator")).unwrap()
+    );
+    assert!(rearm_provider_quota(
+        &conn,
+        "ClaudeCode",
+        "shared-click",
+        "human",
+        Some("operator")
+    )
+    .unwrap());
+    assert_eq!(
+        conn.query_row(
+            "SELECT COUNT(*) FROM provider_quota_rearm_events",
+            [],
+            |row| row.get::<_, i64>(0)
+        )
+        .unwrap(),
+        2,
+    );
 }
 
 #[test]

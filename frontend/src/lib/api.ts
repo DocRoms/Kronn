@@ -217,9 +217,9 @@ import type {
   DiscussionQuestion,
   DiscussionQuestionList,
   AnswerDiscussionQuestionRequest,
+  ProviderQuotaState,
 } from '../types/generated';
 
-type ProviderQuotaState = { provider: AgentType; blocked: boolean };
 import type {
   CatalogModelEntry,
   DeleteManualModelRequest,

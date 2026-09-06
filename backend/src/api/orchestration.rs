@@ -8183,7 +8183,13 @@ pub async fn rearm_provider_quota(
     match state
         .db
         .with_conn(move |conn| {
-            crate::db::orchestration::rearm_provider_quota(conn, &provider, &key)
+            crate::db::orchestration::rearm_provider_quota(
+                conn,
+                &provider,
+                &key,
+                PlanningActorKind::Human.as_str(),
+                Some("web-operator"),
+            )
         })
         .await
     {

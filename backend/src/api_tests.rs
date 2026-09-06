@@ -207,6 +207,68 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn provider_quota_rearm_http_requires_operator_auth_and_confirmation() {
+        let state = test_state_with_token("quota-rearm-token");
+        state.config.write().await.server.auth_enabled = false;
+        let uri = "/api/orchestration/provider-quotas/Codex/rearm";
+        let request = |confirmed: bool, authorization: Option<&str>| {
+            let mut builder = Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header("content-type", "application/json");
+            if let Some(authorization) = authorization {
+                builder = builder.header("authorization", authorization);
+            }
+            builder
+                .body(Body::from(
+                    serde_json::json!({
+                        "confirmed": confirmed,
+                        "idempotency_key": "quota-rearm-http-test"
+                    })
+                    .to_string(),
+                ))
+                .unwrap()
+        };
+
+        assert_eq!(
+            send(state.clone(), true, request(true, None)).await.0,
+            StatusCode::UNAUTHORIZED,
+            "a remote caller remains denied while global auth is off"
+        );
+        let (status, unconfirmed) = send(
+            state.clone(),
+            true,
+            request(false, Some("Bearer quota-rearm-token")),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(unconfirmed["success"], false);
+
+        let (status, confirmed) = send(
+            state.clone(),
+            true,
+            request(true, Some("Bearer quota-rearm-token")),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(confirmed["data"], true);
+        state
+            .db
+            .with_conn(|conn| {
+                let actor: String = conn.query_row(
+                    "SELECT actor_kind FROM provider_quota_rearm_events \
+                     WHERE provider = 'Codex' AND idempotency_key = 'quota-rearm-http-test'",
+                    [],
+                    |row| row.get(0),
+                )?;
+                assert_eq!(actor, "human");
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
     // ─── GET /api/resolve/:id ───────────────────────────────────────────────
 
     #[tokio::test]

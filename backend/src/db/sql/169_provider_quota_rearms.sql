@@ -9,6 +9,9 @@ CREATE TABLE IF NOT EXISTS provider_quota_rearms (
 CREATE TABLE IF NOT EXISTS provider_quota_rearm_events (
     id TEXT PRIMARY KEY,
     provider TEXT NOT NULL,
-    idempotency_key TEXT NOT NULL UNIQUE,
-    rearmed_at TEXT NOT NULL
+    idempotency_key TEXT NOT NULL,
+    actor_kind TEXT NOT NULL,
+    actor_id TEXT,
+    rearmed_at TEXT NOT NULL,
+    UNIQUE(provider, idempotency_key)
 );

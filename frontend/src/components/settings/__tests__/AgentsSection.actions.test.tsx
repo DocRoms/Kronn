@@ -32,6 +32,8 @@ const {
   setAgentConcurrencyMock,
   usageGetMock,
   getModelTiersMock,
+  quotaStatesMock,
+  rearmQuotaMock,
 } = vi.hoisted(() => ({
   getServerConfigMock: vi.fn(),
   installMock: vi.fn(),
@@ -43,6 +45,8 @@ const {
   setAgentConcurrencyMock: vi.fn(),
   usageGetMock: vi.fn(),
   getModelTiersMock: vi.fn(),
+  quotaStatesMock: vi.fn(),
+  rearmQuotaMock: vi.fn(),
 }));
 
 vi.mock('../../../lib/api', () => buildApiMock({
@@ -58,6 +62,8 @@ vi.mock('../../../lib/api', () => buildApiMock({
     uninstall: uninstallMock as never,
     toggle: toggleMock as never,
     detect: detectMock as never,
+    quotaStates: quotaStatesMock as never,
+    rearmQuota: rearmQuotaMock as never,
   },
   usage: {
     get: usageGetMock as never,
@@ -161,6 +167,10 @@ beforeEach(() => {
     lite_llm: { ...emptyTier },
     nvidia: { ...emptyTier },
   });
+  quotaStatesMock.mockReset();
+  quotaStatesMock.mockResolvedValue([]);
+  rearmQuotaMock.mockReset();
+  rearmQuotaMock.mockResolvedValue(true);
   sessionStorage.removeItem('kronn:model-config-target');
 });
 
@@ -195,6 +205,44 @@ describe('AgentsSection — model-error deep link', () => {
       expect(select?.classList.contains('set-model-tier-focus')).toBe(true);
     });
     expect(sessionStorage.getItem('kronn:model-config-target')).toBeNull();
+  });
+});
+
+describe('AgentsSection — provider quota re-arm', () => {
+  const blockedCodex = () => makeAgent({
+    name: 'Codex', agent_type: 'Codex', installed: true, enabled: true,
+  });
+
+  it('does not post when the operator cancels confirmation', async () => {
+    quotaStatesMock.mockResolvedValue([{ provider: 'Codex', blocked: true }]);
+    vi.stubGlobal('confirm', vi.fn().mockReturnValue(false));
+    renderSection({ agents: [blockedCodex()] });
+    fireEvent.click(await screen.findByRole('button', { name: 'config.quotaRearm' }));
+    expect(rearmQuotaMock).not.toHaveBeenCalled();
+  });
+
+  it('uses one request for two synchronous clicks and refreshes the displayed state', async () => {
+    quotaStatesMock.mockResolvedValue([{ provider: 'Codex', blocked: true }]);
+    vi.stubGlobal('confirm', vi.fn().mockReturnValue(true));
+    renderSection({ agents: [blockedCodex()] });
+    const rearm = await screen.findByRole('button', { name: 'config.quotaRearm' });
+    fireEvent.click(rearm);
+    fireEvent.click(rearm);
+    await waitFor(() => expect(rearmQuotaMock).toHaveBeenCalledTimes(1));
+    expect(rearmQuotaMock).toHaveBeenCalledWith('Codex', expect.any(String));
+    await waitFor(() => expect(quotaStatesMock.mock.calls.length).toBeGreaterThanOrEqual(2));
+  });
+
+  it('shows an error when the confirmed re-arm is rejected', async () => {
+    quotaStatesMock.mockResolvedValue([{ provider: 'Codex', blocked: true }]);
+    rearmQuotaMock.mockRejectedValue(new Error('quota re-arm denied'));
+    vi.stubGlobal('confirm', vi.fn().mockReturnValue(true));
+    const { toastFn } = renderSection({ agents: [blockedCodex()] });
+    fireEvent.click(await screen.findByRole('button', { name: 'config.quotaRearm' }));
+    await waitFor(() => expect(toastFn).toHaveBeenCalledWith(
+      'common.actionFailed:quota re-arm denied',
+      'error',
+    ));
   });
 });
 

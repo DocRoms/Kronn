@@ -467,6 +467,7 @@ const DESTRUCTIVE_POSTS: &[&str] = &[
     "/api/debug/logs/clear",
     "/api/agents/uninstall",
     "/api/rtk/deactivate",
+    "/api/orchestration/provider-quotas/{provider}/rearm",
 ];
 
 /// Passe D — the destructive-request criterion: every DELETE (no benign DELETE
@@ -475,6 +476,9 @@ const DESTRUCTIVE_POSTS: &[&str] = &[
 fn is_destructive(method: &axum::http::Method, path: &str) -> bool {
     method == axum::http::Method::DELETE
         || DESTRUCTIVE_POSTS.contains(&path)
+        || (method == axum::http::Method::POST
+            && path.starts_with("/api/orchestration/provider-quotas/")
+            && path.ends_with("/rearm"))
         || path.ends_with("/cleanup-orphan-env")
         || path.ends_with("/context-audit/baseline")
         || path.ends_with("/audit-attestation")
@@ -2424,6 +2428,7 @@ mod auth_tests {
             "/api/debug/logs/clear",
             "/api/agents/uninstall",
             "/api/rtk/deactivate",
+            "/api/orchestration/provider-quotas/Codex/rearm",
             "/api/mcps/custom/srv-1/cleanup-orphan-env",
             "/api/projects/p1/context-audit/baseline",
             "/api/projects/p1/audit-attestation",
