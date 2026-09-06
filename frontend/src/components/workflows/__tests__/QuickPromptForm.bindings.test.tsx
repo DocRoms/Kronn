@@ -110,7 +110,8 @@ describe('QuickPromptForm bindings (0.8.5)', () => {
     fireEvent.focus(picker);
     fireEvent.click(screen.getByRole('option', { name: 'Project A' }));
     await act(async () => { resolveDelayedB(['B_TOKEN']); });
-    expect(screen.queryByTestId('qp-environment-variables')).toBeNull();
+    expect(screen.getByRole('button', { name: '{{env.A_TOKEN}}' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '{{env.B_TOKEN}}' })).toBeNull();
     await act(async () => { resolveLatestA(['A_TOKEN']); });
     await waitFor(() => expect(screen.getByRole('button', { name: '{{env.A_TOKEN}}' })).toBeInTheDocument());
     expect(screen.queryByRole('button', { name: '{{env.B_TOKEN}}' })).toBeNull();

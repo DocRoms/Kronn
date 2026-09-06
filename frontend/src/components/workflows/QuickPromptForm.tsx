@@ -63,7 +63,10 @@ export function QuickPromptForm({
   const [agent, setAgent] = useState<AgentType>(editPrompt?.agent ?? 'ClaudeCode');
   const [connectionId, setConnectionId] = useState(editPrompt?.connection_id ?? '');
   const [projectId, setProjectId] = useState(editPrompt?.project_id ?? '');
-  const [environmentVariableNames, setEnvironmentVariableNames] = useState<string[]>([]);
+  const [environmentVariableNamesResult, setEnvironmentVariableNamesResult] = useState<{
+    projectId: string;
+    names: string[];
+  } | null>(null);
   // 0.8.6 phase 4 — tier carried through across edits. New QPs start
   // with 'default' then the effect below replaces it with the user's
   // `ServerConfig.default_model_tier` on mount (strict semantic — only
@@ -105,9 +108,6 @@ export function QuickPromptForm({
   }, []);
 
   useEffect(() => {
-    // Do not expose names from the previously selected project while the next
-    // request is pending. The active flag still rejects stale responses.
-    setEnvironmentVariableNames([]);
     if (!projectId) {
       return;
     }
@@ -115,13 +115,22 @@ export function QuickPromptForm({
     mcpsApi.projectEnvironmentNames(projectId)
       .then(names => {
         if (!active) return;
-        setEnvironmentVariableNames([...new Set(names)].sort());
+        setEnvironmentVariableNamesResult({
+          projectId,
+          names: [...new Set(names)].sort(),
+        });
       })
       .catch(() => {
-        if (active) setEnvironmentVariableNames([]);
+        if (active) setEnvironmentVariableNamesResult({ projectId, names: [] });
       });
     return () => { active = false; };
   }, [projectId]);
+
+  // A result belongs to the project that fetched it. Matching in render hides
+  // the prior project's names synchronously when the selection changes.
+  const environmentVariableNames = environmentVariableNamesResult?.projectId === projectId
+    ? environmentVariableNamesResult.names
+    : [];
 
   // Auto-sync variables from template. We preserve any description /
   // required flag / label the user already set — only the `name` field
