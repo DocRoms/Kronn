@@ -5680,6 +5680,23 @@ raw: string, kind: SourceKind, status: SourceStatus,
 detail: string, };
 
 /**
+ * One directory of the project source browser, and whether it is all of it.
+ *
+ * KT-605 — the listing keeps a safety bound on how many entries one answer
+ * carries, and until now that bound was silent: past it the walk simply
+ * stopped and the missing files were indistinguishable from files that did
+ * not exist. That is the failure Romuald spent a morning on. A bound is
+ * defensible; hiding that it was reached is not.
+ */
+export type SourceDirectoryListing = { entries: Array<SourceFileNode>,
+/**
+ * Some entries were left out. Reported when the walk reached its bound,
+ * which it may do on a directory holding exactly the limit — erring
+ * towards "there may be more" rather than towards silence.
+ */
+truncated: boolean, };
+
+/**
  * A file-system node exposed by the project source browser.
  *
  * Kept separate from `AiFileNode` because source entries also carry Git

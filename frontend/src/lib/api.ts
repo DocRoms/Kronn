@@ -109,7 +109,6 @@ import type {
   CreateDirectiveRequest,
   ServerConfigPublic,
   AiFileNode,
-  SourceFileNode,
   AiFileContent,
   AiSearchResult,
   GitBlameResponse,
@@ -214,6 +213,7 @@ import type {
   SharedRun,
   DiscussionNoteListResponse,
   DiscussionListItem,
+  SourceDirectoryListing,
   DiscussionQuestion,
   DiscussionQuestionList,
   AnswerDiscussionQuestionRequest,
@@ -1012,7 +1012,7 @@ export const projects = {
     if (shallow) query.set('shallow', 'true');
     if (path) query.set('path', path);
     const suffix = query.toString();
-    return api<SourceFileNode[]>(
+    return api<SourceDirectoryListing>(
       'GET',
       `/projects/${id}/source-files${suffix ? `?${suffix}` : ''}`,
     );

@@ -3,7 +3,21 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { projects } from '../../lib/api';
 import { SourceCodeViewer } from '../SourceCodeViewer';
 import { buildHtmlPreviewDocument } from '../../lib/html-preview';
-import type { SourceFileNode } from '../../types/generated';
+import type { SourceDirectoryListing, SourceFileNode } from '../../types/generated';
+
+// KT-605 — the endpoint answers with the directory AND whether it is all of
+// it, so the bound it keeps stops being silent. Tests say what they mean and
+// the wrapper carries the rest.
+function listing(entries: SourceFileNode[], truncated = false): SourceDirectoryListing {
+  return { entries, truncated };
+}
+
+/** Say what each directory holds; the wrapper carries the rest of the shape. */
+function mockDirectories(impl: (path?: string) => SourceFileNode[] | Promise<SourceFileNode[]>) {
+  vi.mocked(projects.listSourceFiles).mockImplementation(async (_id, _shallow, path) => (
+    listing(await impl(path))
+  ));
+}
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -36,7 +50,7 @@ describe('SourceCodeViewer', () => {
     vi.clearAllMocks();
     // KT-605 — the endpoint answers for ONE directory. The root lists `src`
     // without its contents; `src` is fetched because it opens on arrival.
-    vi.mocked(projects.listSourceFiles).mockImplementation(async (_id, _shallow, path) => {
+    mockDirectories(async path => {
       if (!path) return [{ path: 'src', name: 'src', is_dir: true, children: [] }];
       if (path === 'src') {
         return [
@@ -119,7 +133,7 @@ describe('SourceCodeViewer', () => {
   });
 
   it('selects a deep-linked root configuration file instead of the default source', async () => {
-    vi.mocked(projects.listSourceFiles).mockResolvedValue([
+    mockDirectories(() => [
       { path: 'compose.yaml', name: 'compose.yaml', is_dir: false },
       {
         path: 'src',
@@ -143,7 +157,7 @@ describe('SourceCodeViewer', () => {
   });
 
   it('renders an uppercase HTML file in an isolated preview and restores its source', async () => {
-    vi.mocked(projects.listSourceFiles).mockResolvedValue([
+    mockDirectories(() => [
       { path: 'site/INDEX.HTM', name: 'INDEX.HTM', is_dir: false },
     ]);
     vi.mocked(projects.readSourceFile).mockResolvedValue({
@@ -190,7 +204,7 @@ describe('SourceCodeViewer', () => {
   });
 
   it('returns to code and displays a loading error when a non-HTML file is selected', async () => {
-    vi.mocked(projects.listSourceFiles).mockResolvedValue([
+    mockDirectories(() => [
       { path: 'index.html', name: 'index.html', is_dir: false },
       { path: 'notes.txt', name: 'notes.txt', is_dir: false },
     ]);
@@ -214,7 +228,7 @@ describe('SourceCodeViewer', () => {
   /// this listing, bounded at 10 000 files, and went silent past that bound.
   it('shows the root at once and fetches a folder only when it is opened', async () => {
     let resolveScripts!: (nodes: SourceFileNode[]) => void;
-    vi.mocked(projects.listSourceFiles).mockImplementation(async (_id, _shallow, path) => {
+    mockDirectories(async path => {
       if (!path) {
         return [
           { path: 'scripts', name: 'scripts', is_dir: true, children: [] },
@@ -255,7 +269,7 @@ describe('SourceCodeViewer', () => {
   /// A deep link names a file several folders down. Its ancestors have to be
   /// fetched, in order, or the tree has nowhere to put it.
   it('opens the folders a deep link passes through', async () => {
-    vi.mocked(projects.listSourceFiles).mockImplementation(async (_id, _shallow, path) => {
+    mockDirectories(async path => {
       if (!path) return [{ path: 'site', name: 'site', is_dir: true, children: [] }];
       if (path === 'site') return [{ path: 'site/assets', name: 'assets', is_dir: true, children: [] }];
       if (path === 'site/assets') return [{ path: 'site/assets/logo.svg', name: 'logo.svg', is_dir: false }];
@@ -288,7 +302,7 @@ describe('SourceCodeViewer', () => {
   it('waits for an already loading default folder before fetching its descendants', async () => {
     let resolveSrc!: (nodes: SourceFileNode[]) => void;
     const asked: string[] = [];
-    vi.mocked(projects.listSourceFiles).mockImplementation(async (_id, _shallow, path) => {
+    mockDirectories(async path => {
       if (!path) return [{ path: 'src', name: 'src', is_dir: true, children: [] }];
       asked.push(path);
       if (path === 'src') return new Promise<SourceFileNode[]>(r => { resolveSrc = r; });
@@ -318,9 +332,45 @@ describe('SourceCodeViewer', () => {
     expect(await screen.findByText('deep.ts')).toBeInTheDocument();
   });
 
+  /// KT-605, review @codex-cli-4 — removing the ceiling from the TREE left it
+  /// on one ANSWER: a folder with more direct entries than the bound still
+  /// stopped, and stopped in silence. That is the failure Romuald spent a
+  /// morning on, in a rarer shape. A limit is defensible; hiding it is not.
+  it('says a folder is showing less than it holds', async () => {
+    vi.mocked(projects.listSourceFiles).mockImplementation(async (_id, _shallow, path) => {
+      if (!path) return listing([{ path: 'huge', name: 'huge', is_dir: true, children: [] }]);
+      if (path === 'huge') {
+        return listing([{ path: 'huge/a.rs', name: 'a.rs', is_dir: false }], true);
+      }
+      return listing([]);
+    });
+
+    render(<SourceCodeViewer projectId="project-1" />);
+    fireEvent.click(await screen.findByText('huge'));
+
+    // The entries it did return are there…
+    expect(await screen.findByText('a.rs')).toBeInTheDocument();
+    // …and so is the fact that they are not all of them.
+    const cut = await screen.findByTestId('source-tree-truncated-huge');
+    expect(cut).toHaveTextContent('projects.source.folderTruncated');
+  });
+
+  /// The repository root is a directory like any other, and can reach the
+  /// bound too. Looking complete would be the same lie one level up.
+  it('says the root itself is showing less than it holds', async () => {
+    vi.mocked(projects.listSourceFiles).mockImplementation(async (_id, _shallow, path) => {
+      if (!path) return listing([{ path: 'a.rs', name: 'a.rs', is_dir: false }], true);
+      return listing([]);
+    });
+
+    render(<SourceCodeViewer projectId="project-1" />);
+    expect(await screen.findByTestId('source-tree-truncated-root'))
+      .toHaveTextContent('projects.source.folderTruncated');
+  });
+
   it('says a folder is still loading instead of rendering it as empty', async () => {
     let resolveSite!: (nodes: SourceFileNode[]) => void;
-    vi.mocked(projects.listSourceFiles).mockImplementation(async (_id, _shallow, path) => {
+    mockDirectories(async path => {
       if (!path) return [{ path: 'site', name: 'site', is_dir: true, children: [] }];
       if (path === 'site') return new Promise<SourceFileNode[]>(r => { resolveSite = r; });
       return [];
@@ -347,7 +397,7 @@ describe('SourceCodeViewer', () => {
   /// saying nothing during the wait — with no second request coming to undo it.
   it('says a folder is unreachable when its own request fails, and lets it be retried', async () => {
     let attempts = 0;
-    vi.mocked(projects.listSourceFiles).mockImplementation(async (_id, _shallow, path) => {
+    mockDirectories(async path => {
       if (!path) return [{ path: 'site', name: 'site', is_dir: true, children: [] }];
       if (path === 'site') {
         attempts += 1;
@@ -377,12 +427,12 @@ describe('SourceCodeViewer', () => {
   it('recovers from a transient source-tree failure when Retry succeeds', async () => {
     vi.mocked(projects.listSourceFiles)
       .mockRejectedValueOnce(new Error('temporary failure'))
-      .mockResolvedValue([{
+      .mockResolvedValue(listing([{
         path: 'src',
         name: 'src',
         is_dir: true,
         children: [{ path: 'src/main.rs', name: 'main.rs', is_dir: false }],
-      }]);
+      }]));
 
     render(<SourceCodeViewer projectId="project-1" />);
     expect(await screen.findByText('projects.source.error')).toBeInTheDocument();

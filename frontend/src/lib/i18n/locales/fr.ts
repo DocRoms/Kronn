@@ -528,6 +528,7 @@ const fr: TranslationDict = {
   'projects.source.loadingTreeBackground': 'Chargement du reste du projet en arrière-plan',
   'projects.source.loadingFolder': 'Chargement du dossier…',
   'projects.source.folderUnavailable': 'Contenu indisponible — rechargez le projet',
+  'projects.source.folderTruncated': 'Dossier trop grand — toutes les entrées ne sont pas affichées',
   'disc.question.bannerPending': '{0} arbitrage(s) en attente',
   'disc.question.bannerGo': 'Voir',
   'disc.question.invalidTitle': 'Notation d’arbitrage invalide',

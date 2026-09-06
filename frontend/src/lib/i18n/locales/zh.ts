@@ -522,6 +522,7 @@ const zh: TranslationDict = {
   "projects.source.loadingTreeBackground": "在后台加载项目其余部分",
   "projects.source.loadingFolder": "正在加载此文件夹…",
   "projects.source.folderUnavailable": "内容不可用 — 请重新加载项目",
+  "projects.source.folderTruncated": "文件夹过大 — 并非所有条目都已显示",
   "disc.question.bannerPending": "{0} 项决定待处理",
   "disc.question.bannerGo": "查看",
   "disc.question.invalidTitle": "决定标记无效",

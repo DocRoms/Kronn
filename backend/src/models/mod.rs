@@ -112,6 +112,23 @@ pub struct SourceFileNode {
     pub git_ignored: bool,
 }
 
+/// One directory of the project source browser, and whether it is all of it.
+///
+/// KT-605 — the listing keeps a safety bound on how many entries one answer
+/// carries, and until now that bound was silent: past it the walk simply
+/// stopped and the missing files were indistinguishable from files that did
+/// not exist. That is the failure Romuald spent a morning on. A bound is
+/// defensible; hiding that it was reached is not.
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+pub struct SourceDirectoryListing {
+    pub entries: Vec<SourceFileNode>,
+    /// Some entries were left out. Reported when the walk reached its bound,
+    /// which it may do on a directory holding exactly the limit — erring
+    /// towards "there may be more" rather than towards silence.
+    pub truncated: bool,
+}
+
 #[derive(Debug, Clone, Serialize, TS)]
 #[ts(export)]
 pub struct AiFileContent {

@@ -528,6 +528,7 @@ const es: TranslationDict = {
   'projects.source.loadingTreeBackground': 'Cargando el resto del proyecto en segundo plano',
   'projects.source.loadingFolder': 'Cargando la carpeta…',
   'projects.source.folderUnavailable': 'Contenido no disponible — recarga el proyecto',
+  'projects.source.folderTruncated': 'Carpeta demasiado grande — no se muestran todas las entradas',
   'disc.question.bannerPending': '{0} decisión(es) pendiente(s)',
   'disc.question.bannerGo': 'Ver',
   'disc.question.invalidTitle': 'Notación de decisión no válida',

@@ -1002,7 +1002,7 @@ pub async fn list_source_files(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Query(query): Query<SourceFilesQuery>,
-) -> Json<ApiResponse<Vec<SourceFileNode>>> {
+) -> Json<ApiResponse<SourceDirectoryListing>> {
     let project_and_exclusions = match state
         .db
         .with_read_conn(move |conn| {
@@ -1027,7 +1027,7 @@ pub async fn list_source_files(
         }
     }
     let depth = if query.shallow { Some(0) } else { None };
-    let result = tokio::task::spawn_blocking(move || -> Result<Vec<SourceFileNode>, String> {
+    let result = tokio::task::spawn_blocking(move || -> Result<SourceDirectoryListing, String> {
         let root = scanner::resolve_host_path(&project_path);
         let (dir, rel_prefix) = match &requested {
             Some(path) => (root.join(path), path.as_str()),
@@ -1063,7 +1063,12 @@ pub async fn list_source_files(
         flatten_source_paths(&tree, &mut paths);
         let ignored_paths = git_ignored_paths(&root, &paths);
         mark_git_ignored(&mut tree, &ignored_paths);
-        Ok(tree)
+        // The bound was reached, so entries were left out. Saying so is the
+        // whole difference between a limit and a lie.
+        Ok(SourceDirectoryListing {
+            entries: tree,
+            truncated: file_count >= MAX_SOURCE_FILES,
+        })
     })
     .await
     .unwrap_or_else(|error| Err(format!("Source listing failed: {error}")));

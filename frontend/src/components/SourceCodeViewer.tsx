@@ -6,7 +6,9 @@ import {
   Loader2, Search, X,
 } from 'lucide-react';
 import { projects as projectsApi } from '../lib/api';
-import type { GitBlameLine, GitCommitDetail, SourceFileNode } from '../types/generated';
+import type {
+  GitBlameLine, GitCommitDetail, SourceDirectoryListing, SourceFileNode,
+} from '../types/generated';
 import { useT } from '../lib/I18nContext';
 import { highlightLine as highlightSourceLine, languageForPath } from '../lib/diff-syntax';
 import { buildHtmlPreviewDocument } from '../lib/html-preview';
@@ -72,7 +74,9 @@ function SourceCodeViewerProject({ projectId, initialPath, onOpenCommit }: Sourc
   /// KT-605 — what each opened folder is doing, keyed by its path. A folder
   /// that finished simply has its children; only the ones still travelling or
   /// refused need to say anything.
-  const [dirStatus, setDirStatus] = useState<Record<string, 'loading' | 'failed'>>({});
+  const [dirStatus, setDirStatus] = useState<
+    Record<string, 'loading' | 'failed' | 'truncated'>
+  >({});
   const [treeError, setTreeError] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResult, setSearchResult] = useState<SearchResult | null>(null);
@@ -107,6 +111,9 @@ function SourceCodeViewerProject({ projectId, initialPath, onOpenCommit }: Sourc
     projectsApi.listSourceFiles(projectId, true),
     projectsApi.getSourceExclusions(projectId),
   ]), [projectId]);
+  /// The repository root is a directory like any other: it can reach the
+  /// answer's bound too, and must say so rather than look complete.
+  const ROOT_KEY = '';
 
   const rejectTreeRoot = useCallback((generation: number) => {
     if (treeLoadRef.current !== generation) return;
@@ -126,8 +133,9 @@ function SourceCodeViewerProject({ projectId, initialPath, onOpenCommit }: Sourc
     const generation = treeLoadRef.current;
     setDirStatus(current => ({ ...current, [path]: 'loading' }));
     const request = projectsApi.listSourceFiles(projectId, true, path)
-      .then(children => {
+      .then(listing => {
         if (treeLoadRef.current !== generation) return;
+        const children = listing.entries;
         setTree(current => withLoadedChildren(current, path, children));
         // KT-605 — which file the panel opens on arrival used to be picked
         // from the whole tree, which no longer exists. The rule is now stated
@@ -137,7 +145,10 @@ function SourceCodeViewerProject({ projectId, initialPath, onOpenCommit }: Sourc
         setSelectedPath(previous => previous ?? findPreferredSourceFile(children)?.path ?? null);
         setDirStatus(current => {
           const next = { ...current };
-          delete next[path];
+          // A folder that hit the answer's bound keeps a state, because it is
+          // showing less than it holds and has to say so.
+          if (listing.truncated) next[path] = 'truncated';
+          else delete next[path];
           return next;
         });
       })
@@ -153,12 +164,14 @@ function SourceCodeViewerProject({ projectId, initialPath, onOpenCommit }: Sourc
   }, [projectId]);
 
   const applyTreeRoot = useCallback((
-    rootFiles: SourceFileNode[],
+    root: SourceDirectoryListing,
     savedExclusions: string[],
     generation: number,
   ) => {
     if (treeLoadRef.current !== generation) return Promise.resolve();
+    const rootFiles = root.entries;
     setTree(rootFiles);
+    if (root.truncated) setDirStatus(current => ({ ...current, [ROOT_KEY]: 'truncated' }));
     setExclusions(savedExclusions);
     setSelectedPath(previous => {
       if (previous) return previous;
@@ -568,6 +581,17 @@ function SourceCodeViewerProject({ projectId, initialPath, onOpenCommit }: Sourc
               exclusionSaving={exclusionSaving}
             />
           ))}
+          {/* The repository root reached the bound too. */}
+          {dirStatus[ROOT_KEY] === 'truncated' && (
+            <div
+              className="source-tree-row source-tree-pending"
+              data-truncated="true"
+              data-testid="source-tree-truncated-root"
+            >
+              <AlertTriangle size={11} />
+              <span>{t('projects.source.folderTruncated')}</span>
+            </div>
+          )}
         </div>
       </aside>
       <section className="source-content-panel">
@@ -779,7 +803,7 @@ function SourceTreeNode({
   node: SourceFileNode;
   depth: number;
   /** What each opened folder is doing, by path. Absent means it is done. */
-  dirStatus: Record<string, 'loading' | 'failed'>;
+  dirStatus: Record<string, 'loading' | 'failed' | 'truncated'>;
   selectedPath: string | null;
   expandedDirs: Set<string>;
   searchResults: Map<string, number>;
@@ -842,6 +866,20 @@ function SourceTreeNode({
                 ? 'projects.source.folderUnavailable'
                 : 'projects.source.loadingFolder')}
             </span>
+          </div>
+        )}
+        {/* KT-605 — the answer stopped at its bound, so this folder is showing
+            less than it holds. A limit is defensible; hiding that it was
+            reached is what cost a morning of looking for `site/en.html`. */}
+        {expanded && status === 'truncated' && (
+          <div
+            className="source-tree-row source-tree-pending"
+            data-truncated="true"
+            data-testid={`source-tree-truncated-${node.path}`}
+            style={{ paddingLeft: 21 + (depth + 1) * 14 }}
+          >
+            <AlertTriangle size={11} />
+            <span>{t('projects.source.folderTruncated')}</span>
           </div>
         )}
         {expanded && (node.children ?? []).map(child => (
