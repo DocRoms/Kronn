@@ -28,6 +28,11 @@ const EMPTY: QuestionsSnapshot = {
 const snapshots = new Map<string, QuestionsSnapshot>();
 const listeners = new Map<string, Set<() => void>>();
 const inFlight = new Set<string>();
+/// KT-595 — bumped whenever an answer is recorded locally. A read that started
+/// BEFORE that answer and lands after it is older than what is on screen, and
+/// publishing it would put an answered card back to pending and revive the
+/// count. The generation lets such a read recognise itself as stale.
+const generations = new Map<string, number>();
 
 function publish(discussionId: string, next: QuestionsSnapshot) {
   snapshots.set(discussionId, next);
@@ -39,18 +44,26 @@ function publish(discussionId: string, next: QuestionsSnapshot) {
 export function refreshDiscussionQuestions(discussionId: string) {
   if (inFlight.has(discussionId)) return;
   inFlight.add(discussionId);
+  const generation = generations.get(discussionId) ?? 0;
+  const isStale = () => (generations.get(discussionId) ?? 0) !== generation;
   discussionsApi.questions(discussionId)
-    .then(list => publish(discussionId, {
-      questions: list.questions,
-      pendingCount: list.pending_count,
-      loading: false,
-      error: '',
-    }))
-    .catch(cause => publish(discussionId, {
-      ...(snapshots.get(discussionId) ?? EMPTY),
-      loading: false,
-      error: userError(cause),
-    }))
+    .then(list => {
+      if (isStale()) return;
+      publish(discussionId, {
+        questions: list.questions,
+        pendingCount: list.pending_count,
+        loading: false,
+        error: '',
+      });
+    })
+    .catch(cause => {
+      if (isStale()) return;
+      publish(discussionId, {
+        ...(snapshots.get(discussionId) ?? EMPTY),
+        loading: false,
+        error: userError(cause),
+      });
+    })
     .finally(() => { inFlight.delete(discussionId); });
 }
 
@@ -86,6 +99,7 @@ export function useDiscussionQuestions(discussionId: string | null): QuestionsSn
  *  endpoint returns the updated row, and the card that posted it already has
  *  the answer on screen. */
 export function applyAnsweredQuestion(discussionId: string, answered: DiscussionQuestion) {
+  generations.set(discussionId, (generations.get(discussionId) ?? 0) + 1);
   const current = snapshots.get(discussionId) ?? EMPTY;
   const questions = current.questions.some(question => question.id === answered.id)
     ? current.questions.map(question => (question.id === answered.id ? answered : question))
@@ -104,4 +118,5 @@ export function resetDiscussionQuestions() {
   snapshots.clear();
   listeners.clear();
   inFlight.clear();
+  generations.clear();
 }
