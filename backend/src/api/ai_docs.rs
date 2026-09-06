@@ -449,6 +449,117 @@ fn is_sensitive_source_name(name: &str) -> bool {
         )
 }
 
+/// Extensions and bare names whose verdict is settled without opening the file.
+///
+/// KT-594 — deciding by content meant reading 8 KiB of every candidate: on this
+/// repository that was 4.10 s of the 4.19 s a full listing took, against 0.05 s
+/// for the directory walk itself. Almost everything in a source tree carries an
+/// extension that answers the question outright, so the read is now a fallback
+/// for the remainder rather than the rule.
+///
+/// `None` means "the name does not say", and only those files are opened.
+fn source_text_by_name(name: &str) -> Option<bool> {
+    let lower = name.to_ascii_lowercase();
+
+    // Names that carry no extension, or whose whole name IS the extension.
+    // `Path::extension` reads `.gitignore` as a stem, not a suffix.
+    if matches!(
+        lower.as_str(),
+        "makefile"
+            | "dockerfile"
+            | "containerfile"
+            | "rakefile"
+            | "gemfile"
+            | "brewfile"
+            | "justfile"
+            | "procfile"
+            | "vagrantfile"
+            | "jenkinsfile"
+            | "cname"
+            | "license"
+            | "licence"
+            | "readme"
+            | "changelog"
+            | "notice"
+            | "authors"
+            | "contributors"
+            | "copying"
+            | "codeowners"
+            | ".gitignore"
+            | ".gitattributes"
+            | ".gitmodules"
+            | ".mailmap"
+            | ".editorconfig"
+            | ".dockerignore"
+            | ".npmignore"
+            | ".eslintignore"
+            | ".prettierignore"
+            | ".nvmrc"
+            | ".node-version"
+            | ".python-version"
+            | ".ruby-version"
+            | ".tool-versions"
+            | ".browserslistrc"
+            | ".gitkeep"
+    ) {
+        return Some(true);
+    }
+
+    // macOS drops one of these in every directory it has ever displayed.
+    if lower == ".ds_store" {
+        return Some(false);
+    }
+
+    let extension = std::path::Path::new(&lower)
+        .extension()
+        .and_then(|ext| ext.to_str())?;
+
+    if matches!(
+        extension,
+        "rs" | "toml" | "lock"
+            | "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" | "mts" | "cts"
+            | "json" | "jsonc" | "json5" | "map"
+            | "css" | "scss" | "sass" | "less" | "styl"
+            | "html" | "htm" | "xml" | "xhtml" | "xsl" | "xslt"
+            | "svg" | "vue" | "svelte" | "astro"
+            | "md" | "mdx" | "markdown" | "rst" | "adoc" | "txt" | "text"
+            | "yml" | "yaml" | "ini" | "cfg" | "conf" | "properties" | "editorconfig"
+            | "py" | "pyi" | "pyx" | "rb" | "go" | "java" | "kt" | "kts" | "scala"
+            | "swift" | "m" | "mm" | "c" | "h" | "cc" | "cpp" | "cxx" | "hpp" | "hh"
+            | "cs" | "php" | "pl" | "pm" | "lua" | "r" | "jl" | "ex" | "exs"
+            | "erl" | "hrl" | "clj" | "cljs" | "cljc" | "dart" | "hs" | "elm" | "nim"
+            | "sh" | "bash" | "zsh" | "fish" | "ps1" | "bat" | "cmd" | "bats"
+            | "sql" | "graphql" | "gql" | "proto" | "thrift"
+            | "tf" | "tfvars" | "hcl" | "nix" | "gradle" | "groovy" | "cmake" | "mk"
+            | "patch" | "diff" | "csv" | "tsv" | "log" | "srt" | "vtt" | "po" | "pot"
+    ) {
+        return Some(true);
+    }
+
+    if matches!(
+        extension,
+        "png" | "jpg" | "jpeg" | "gif" | "bmp" | "tif" | "tiff" | "webp" | "avif"
+            | "ico" | "icns" | "heic" | "psd" | "eps" | "pdf"
+            | "zip" | "gz" | "bz2" | "xz" | "zst" | "7z" | "rar" | "tar" | "tgz"
+            | "jar" | "war" | "ear" | "class" | "pyc" | "pyo"
+            | "o" | "a" | "so" | "dylib" | "dll" | "exe" | "bin" | "wasm" | "node"
+            | "db" | "sqlite" | "sqlite3" | "mdb" | "pack" | "idx"
+            | "mp3" | "wav" | "flac" | "ogg" | "m4a" | "aac"
+            | "mp4" | "mov" | "avi" | "mkv" | "webm" | "wmv" | "flv"
+            | "woff" | "woff2" | "ttf" | "otf" | "eot"
+    ) {
+        return Some(false);
+    }
+
+    None
+}
+
+/// Whether a file belongs in the source tree, by name where the name suffices
+/// and by content otherwise.
+fn is_source_text_file(name: &str, path: &std::path::Path) -> bool {
+    source_text_by_name(name).unwrap_or_else(|| is_probably_text_file(path))
+}
+
 fn is_probably_text_file(path: &std::path::Path) -> bool {
     use std::io::Read;
 
@@ -628,7 +739,7 @@ fn build_source_tree_with_depth(
         } else if metadata.is_file()
             && metadata.len() <= MAX_SOURCE_FILE_BYTES
             && !is_sensitive_source_name(&name)
-            && is_probably_text_file(&entry.path())
+            && is_source_text_file(&name, &entry.path())
         {
             *file_count += 1;
             nodes.push(SourceFileNode {
@@ -1071,6 +1182,66 @@ pub async fn read_doc_asset(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// KT-594 — the listing used to open and read 8 KiB of every candidate to
+    /// decide whether it was text. The name settles almost all of them, and
+    /// only what it cannot settle is worth an `open()`.
+    #[test]
+    fn the_name_settles_the_common_cases_without_opening_anything() {
+        for name in ["main.rs", "Cargo.toml", "index.tsx", "README.md", "styles.scss"] {
+            assert_eq!(source_text_by_name(name), Some(true), "{name}");
+        }
+        for name in ["logo.png", "icon.icns", "bundle.wasm", "archive.tar.gz", "font.woff2"] {
+            assert_eq!(source_text_by_name(name), Some(false), "{name}");
+        }
+    }
+
+    /// `Path::extension` reads `.gitignore` as a stem, so a suffix lookup alone
+    /// would send every dotfile and every `Makefile` to the slow path — which is
+    /// precisely the set a source tree is full of.
+    #[test]
+    fn a_name_without_a_suffix_is_still_answerable() {
+        for name in ["Makefile", "Dockerfile", ".gitignore", ".editorconfig", "LICENSE"] {
+            assert_eq!(source_text_by_name(name), Some(true), "{name}");
+        }
+        // macOS leaves one of these in every directory it has ever displayed.
+        assert_eq!(source_text_by_name(".DS_Store"), Some(false));
+    }
+
+    /// Case is not a signal: `README.MD` is the same file as `readme.md`.
+    #[test]
+    fn the_verdict_ignores_case() {
+        assert_eq!(source_text_by_name("README.MD"), Some(true));
+        assert_eq!(source_text_by_name("LOGO.PNG"), Some(false));
+        assert_eq!(source_text_by_name("MAKEFILE"), Some(true));
+    }
+
+    /// An unknown suffix must stay undecided rather than guess. Guessing "text"
+    /// would put binaries in the tree; guessing "binary" would hide real files.
+    #[test]
+    fn an_unknown_name_falls_back_to_reading_the_file() {
+        assert_eq!(source_text_by_name("payload.qzx"), None);
+        assert_eq!(source_text_by_name("noextension"), None);
+
+        let dir = tempfile::tempdir().unwrap();
+        let text = dir.path().join("payload.qzx");
+        std::fs::write(&text, "des octets parfaitement lisibles").unwrap();
+        assert!(is_source_text_file("payload.qzx", &text));
+
+        let binary = dir.path().join("payload.qzy");
+        std::fs::write(&binary, [0x00, 0x01, 0x02, 0x00]).unwrap();
+        assert!(!is_source_text_file("payload.qzy", &binary));
+    }
+
+    /// The fallback must not be consulted when the name already answered: a
+    /// `.png` is excluded without the read, even if its bytes happen to be text.
+    #[test]
+    fn a_known_name_wins_over_what_the_bytes_say() {
+        let dir = tempfile::tempdir().unwrap();
+        let misnamed = dir.path().join("not-really.png");
+        std::fs::write(&misnamed, "je suis du texte").unwrap();
+        assert!(!is_source_text_file("not-really.png", &misnamed));
+    }
 
     // 0.8.3 UX regression — verrouille l'ordre dirs-first puis files.
     // Avant : tri alphabétique pur mélangeait `architecture/`,

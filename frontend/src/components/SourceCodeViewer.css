@@ -649,3 +649,25 @@
 .source-commit-open-patch:hover {
   border-color: var(--kr-accent);
 }
+
+/* KT-594 — a folder whose children have not arrived yet. It is a statement,
+   not a target: no hover, no pointer, nothing to click. */
+.source-tree-pending {
+  color: var(--kr-text-ghost);
+  font-style: italic;
+  cursor: default;
+}
+
+.source-tree-pending:hover {
+  background: transparent;
+  color: var(--kr-text-ghost);
+}
+
+.source-tree-pending[data-failed] {
+  color: var(--kr-warning);
+  font-style: normal;
+}
+
+.source-tree-pending[data-failed]:hover {
+  color: var(--kr-warning);
+}

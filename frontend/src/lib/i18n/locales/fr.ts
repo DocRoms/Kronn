@@ -523,6 +523,8 @@ const fr: TranslationDict = {
   'projects.master.overview.dependencyCheckFailed': 'Vérification impossible',
   'projects.source.loading': 'Chargement du code source…',
   'projects.source.loadingTreeBackground': 'Chargement du reste du projet en arrière-plan',
+  'projects.source.loadingFolder': 'Chargement du dossier…',
+  'projects.source.folderUnavailable': 'Contenu indisponible — rechargez le projet',
   'projects.source.loadingFile': 'Chargement du fichier…',
   'projects.source.error': 'Impossible de charger le code source.',
   'projects.source.empty': 'Aucun fichier source lisible détecté.',

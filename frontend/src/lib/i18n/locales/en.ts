@@ -523,6 +523,8 @@ const en: TranslationDict = {
   'projects.master.overview.dependencyCheckFailed': 'Check failed',
   'projects.source.loading': 'Loading source code…',
   'projects.source.loadingTreeBackground': 'Loading the rest of the project in the background',
+  'projects.source.loadingFolder': 'Loading this folder…',
+  'projects.source.folderUnavailable': 'Contents unavailable — reload the project',
   'projects.source.loadingFile': 'Loading file…',
   'projects.source.error': 'Unable to load source code.',
   'projects.source.empty': 'No readable source file detected.',
