@@ -176,9 +176,9 @@
 .set-nav-version {
   display: flex;
   align-items: center;
-  justify-content: center;
-  gap: var(--kr-sp-2);
-  flex-wrap: wrap;
+  /* Against the left edge, like every other row of this column. Centring it
+     read as a stray caption rather than as the app saying its own name. */
+  justify-content: flex-start;
   margin-top: var(--kr-sp-3);
   padding: var(--kr-sp-4);
   border: 1px solid var(--kr-border-light);
@@ -187,7 +187,23 @@
   color: var(--kr-text-faint);
   font-size: var(--kr-fs-xs);
   line-height: 1.45;
-  text-align: center;
+}
+
+/* The mark labels the two lines, so it sits beside them, not above: one block
+   that reads left to right. Inline-flex so the page footer can still centre
+   the whole thing while its lines stay left-aligned. */
+.set-version-card {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--kr-sp-3);
+  text-align: left;
+}
+
+.set-version-card-lines {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
 }
 
 .set-nav-version a {

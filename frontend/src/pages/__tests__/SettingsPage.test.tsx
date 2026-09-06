@@ -415,6 +415,23 @@ describe('SettingsPage', () => {
     expect(links[1].textContent).toBe('Source code (AGPL-3.0)');
   });
 
+  /// The bolt beside the version was a lucide icon, not a logo. The card now
+  /// reads left to right: the mark, then the two lines it labels.
+  it('puts the Kronn mark to the left of the version and the licence', async () => {
+    await wrap(<SettingsPage {...defaultProps} />);
+
+    const nav = screen.getByRole('navigation', { name: 'Sections' });
+    const card = nav.querySelector('[data-testid="settings-nav-version"] .set-version-card');
+    expect(card).toBeTruthy();
+    // The mark comes first, the stacked lines second — order is the layout.
+    expect(card!.children[0].tagName.toLowerCase()).toBe('svg');
+    const lines = card!.children[1];
+    expect(lines).toHaveClass('set-version-card-lines');
+    expect(lines.querySelectorAll('a')).toHaveLength(2);
+    // Two lines, so the em dash that joined them on one line is gone.
+    expect(card!.textContent).not.toContain('—');
+  });
+
   it('shows a fully-clickable guided-tour progress CTA below the version card', async () => {
     await wrap(<SettingsPage {...defaultProps} />);
 

@@ -119,12 +119,18 @@
     }
     header .left { color: var(--lila); }
     header .center {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.4em;
       font-family: var(--display);
       font-size: clamp(22px, 3vw, 30px);
       color: var(--text);
       letter-spacing: 0.08em;
       text-transform: uppercase;
     }
+    /* Sized in em so the mark follows the clamped wordmark instead of being
+       pinned to one viewport width. Transparent: the page is its ground. */
+    header .center .brand-mark { width: 1.45em; height: 1.45em; flex: none; }
     header .center .ac { color: var(--magenta); }
     header .right { color: var(--electric-bright); }
     header .lang-switcher { font-family: var(--terminal); font-size: 18px; letter-spacing: 0.1em; }
@@ -1311,7 +1317,35 @@
 
   <header>
     <span class="left">1UP · KRONN</span>
-    <span class="center">KRONN</span>
+    <span class="center"><svg class="brand-mark" viewBox="38 48 436 436" aria-hidden="true" focusable="false">
+        <defs>
+          <linearGradient id="hdr-frame" gradientUnits="userSpaceOnUse" x1="441" y1="60" x2="84" y2="470">
+            <stop offset="0" stop-color="#2ad6f0"/><stop offset="0.45" stop-color="#7b6cf5"/><stop offset="1" stop-color="#cc4df2"/>
+          </linearGradient>
+          <linearGradient id="hdr-top" x1="0.2" y1="0" x2="0.8" y2="1">
+            <stop offset="0" stop-color="#7ceef2"/><stop offset="1" stop-color="#22c4e2"/>
+          </linearGradient>
+          <linearGradient id="hdr-hub" x1="0.2" y1="0" x2="0.8" y2="1">
+            <stop offset="0" stop-color="#c9aef2"/><stop offset="1" stop-color="#4a86e8"/>
+          </linearGradient>
+          <linearGradient id="hdr-peer" x1="0.2" y1="0" x2="0.8" y2="1">
+            <stop offset="0" stop-color="#f4cbee"/><stop offset="1" stop-color="#9b6ef0"/>
+          </linearGradient>
+        </defs>
+        <path d="M256 60 L429 152 V380 L256 470 L84 380 V152 Z" fill="none" stroke="url(#hdr-frame)" stroke-width="25" stroke-linejoin="round"/>
+        <g fill="none" stroke="url(#hdr-frame)" stroke-width="12" stroke-linecap="round">
+          <path d="M148.4 257.6 A 108 108 0 0 1 210.4 169.1"/>
+          <path d="M301.6 169.1 A 108 108 0 0 1 363.6 257.6"/>
+          <path d="M318 355.5 A 108 108 0 0 1 194 355.5"/>
+        </g>
+        <g fill="none" stroke="url(#hdr-frame)" stroke-width="9" stroke-linecap="round">
+          <path d="M256 273 V165"/><path d="M256 273 L157 316"/><path d="M256 273 L356 316"/>
+        </g>
+        <circle cx="256" cy="165" r="33" fill="url(#hdr-top)"/>
+        <circle cx="157" cy="316" r="29" fill="url(#hdr-peer)"/>
+        <circle cx="356" cy="316" r="29" fill="url(#hdr-peer)"/>
+        <circle cx="256" cy="273" r="50" fill="url(#hdr-hub)"/>
+      </svg>KRONN</span>
     <span class="right lang-switcher"><a href="index.html">FR</a> · <a class="lang-active" href="en.html">EN</a> · <a href="es.html">ES</a></span>
   </header>
 

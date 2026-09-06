@@ -70,22 +70,32 @@ import { ContextHelp } from '../components/ContextHelp';
 import { DebugSection } from '../components/settings/DebugSection';
 import { UserContextEditor } from '../components/UserContextEditor';
 import { MatrixText } from '../components/MatrixText';
+import { KronnMark } from '../components/KronnMark';
 import './SettingsPage.css';
 
 const KRONN_REPOSITORY_URL = 'https://github.com/DocRoms/Kronn';
 const KRONN_RELEASES_URL = `${KRONN_REPOSITORY_URL}/releases`;
 
+/** The mark, then the version and the licence it labels.
+ *
+ *  One inline-flex group rather than three loose inline children, so each
+ *  place that shows it decides where the whole block sits without the two
+ *  lines drifting apart: the sidebar puts it against its left edge, the page
+ *  footer keeps it centred. The em dash that separated them on one line is
+ *  gone with the line it lived on. */
 function KronnVersionLinks({ sourceLabel }: { sourceLabel: string }) {
   return (
-    <>
-      <a href={KRONN_RELEASES_URL} target="_blank" rel="noopener noreferrer">
-        Kronn v{appVersion}
-      </a>
-      <span aria-hidden="true">—</span>
-      <a href={KRONN_REPOSITORY_URL} target="_blank" rel="noopener noreferrer">
-        {sourceLabel}
-      </a>
-    </>
+    <span className="set-version-card">
+      <KronnMark size={30} />
+      <span className="set-version-card-lines">
+        <a href={KRONN_RELEASES_URL} target="_blank" rel="noopener noreferrer">
+          Kronn v{appVersion}
+        </a>
+        <a href={KRONN_REPOSITORY_URL} target="_blank" rel="noopener noreferrer">
+          {sourceLabel}
+        </a>
+      </span>
+    </span>
   );
 }
 
