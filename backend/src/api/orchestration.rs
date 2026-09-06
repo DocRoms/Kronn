@@ -15505,9 +15505,9 @@ mod tests {
     }
 
     /// KT-515 — puts an unrelated Codex execution in `Escalated` with the exact
-    /// `quota_exhausted:Codex` marker, mirroring what
-    /// `escalate_execution_for_dispatch_quota` leaves behind after a real
-    /// dispatch failure, without needing a live dispatch job.
+    /// quota marker and generation consumed by
+    /// `escalate_execution_for_dispatch_quota`, without needing a live dispatch
+    /// job.
     async fn seed_open_codex_quota_escalation(
         db: &Database,
         project_id: &str,
@@ -15548,13 +15548,19 @@ mod tests {
             )?;
             let now = chrono::Utc::now().to_rfc3339();
             conn.execute(
+                "INSERT INTO provider_quota_generations (provider, latest_generation) VALUES ('Codex', 1) \
+                 ON CONFLICT(provider) DO UPDATE SET latest_generation = MAX(latest_generation, 1)",
+                [],
+            )?;
+            conn.execute(
                 "INSERT INTO task_execution_recovery (
                      task_execution_id, recovery_action, recovery_reason, last_activity_at,
                      assignment_generation, watchdog_redispatches, human_wait_started_at,
-                     pending, updated_at
-                 ) VALUES (?1, 'await_human', 'quota_exhausted:Codex', ?2, 0, 0, ?2, 0, ?2)
+                     pending, updated_at, quota_signal_generation
+                 ) VALUES (?1, 'await_human', 'quota_exhausted:Codex', ?2, 0, 0, ?2, 0, ?2, 1)
                  ON CONFLICT(task_execution_id) DO UPDATE SET
-                     recovery_reason = excluded.recovery_reason, pending = 0, updated_at = ?2",
+                     recovery_reason = excluded.recovery_reason, pending = 0, updated_at = ?2,
+                     quota_signal_generation = excluded.quota_signal_generation",
                 rusqlite::params![execution.id, now],
             )?;
             Ok(execution.id)

@@ -214,15 +214,20 @@ it('confirms and re-arms only the provider reported as quota-blocked', async () 
     { provider: 'ClaudeCode', blocked: true },
     { provider: 'Codex', blocked: false },
   ]);
-  vi.spyOn(window, 'confirm').mockReturnValue(true);
-  await wrap(<SettingsPage {...defaultProps} agents={[sampleAgent]} />);
+  const originalConfirm = window.confirm;
+  window.confirm = vi.fn().mockReturnValue(true);
+  try {
+    await wrap(<SettingsPage {...defaultProps} agents={[sampleAgent]} />);
 
-  const button = await screen.findByRole('button', { name: /réarmer le fournisseur/i });
-  fireEvent.click(button);
-  fireEvent.click(button);
-  await waitFor(() => expect(agentsApi.rearmQuota).toHaveBeenCalledWith('ClaudeCode', expect.any(String)));
-  expect(agentsApi.rearmQuota).toHaveBeenCalledTimes(1);
-  expect(agentsApi.rearmQuota).not.toHaveBeenCalledWith('Codex', expect.any(String));
+    const button = await screen.findByRole('button', { name: /réarmer le fournisseur/i });
+    fireEvent.click(button);
+    fireEvent.click(button);
+    await waitFor(() => expect(agentsApi.rearmQuota).toHaveBeenCalledWith('ClaudeCode', expect.any(String)));
+    expect(agentsApi.rearmQuota).toHaveBeenCalledTimes(1);
+    expect(agentsApi.rearmQuota).not.toHaveBeenCalledWith('Codex', expect.any(String));
+  } finally {
+    window.confirm = originalConfirm;
+  }
 });
 
 const wrap = async (ui: React.ReactElement) => {
