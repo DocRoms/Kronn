@@ -63,6 +63,21 @@ Resume and permissions ARE answerable, so they are asked, and an explicit
 | Credentials over the wire | never — inherited from the spawned process | never — placeholders in the config | server-side only |
 | File and terminal callbacks | refused with a JSON-RPC error | n/a | n/a |
 
+OpenCode's native ACP session receives the same `kronn-internal` bridge as the
+other MCP-enabled CLIs. Its discussion prompt therefore exposes Planning,
+human-gated Automation proposals and the task-delegation lifecycle from the
+first turn; history-tool discovery remains deferred until the third user
+message. This instruction contract does not imply a live provider validation
+or change session-resume and pricing limitations.
+[src: file: backend/src/api/disc_prompts.rs:391]
+[src: file: backend/src/agents/runner.rs:3764]
+
+The orchestration database must also read back every native provider name it
+writes. OpenCode launch, reload and idempotent replay are covered as one native
+execution, with no fallback to Custom; unknown provider strings remain errors.
+[src: file: backend/src/db/orchestration.rs:244]
+[src: file: backend/src/db/orchestration_tests.rs:3029]
+
 ## Known asymmetries
 
 These are real, deliberate, and the reason two agents can behave differently on
@@ -80,3 +95,32 @@ the same job.
   through its own tools, outside Kronn's audit trail.
 - **Kronn spawns one process per turn** on every route. Nothing here keeps a
   CLI warm between turns; that is 0.14 work (KT-577).
+
+## ACP runtime diagnostics (KT-600)
+
+After an ACP session has started, prompt and session-persistence failures are
+recorded in the existing `AgentProcess` diagnostic capture. Before publishing,
+Kronn masks vendor tokens and secret-like assignments, then limits the excerpt
+by characters; cancellation remains unsuccessful rather than becoming a
+successful run. The runner tests exercise this path with a fake ACP transport
+for creation, resume and its existing fallback, streaming, usage, cancellation,
+and prompt/persistence failures. They do not invoke an agent CLI, and ACP token
+usage still has no implied price.
+[src: file: backend/src/agents/runner.rs:3523-3758]
+[src: file: backend/src/agents/runner.rs:10020-10133]
+[src: file: backend/src/core/redact.rs:232-240]
+
+## Settings catalogue diagnostic (KT-597)
+
+The dynamic catalogue and the model-tier editor on an agent card are currently
+different consumers. `ModelCatalogSection` reads `/api/model-catalogs`, and
+Codex discovery calls its own `codex app-server` / `model/list`. However, the
+Codex card in `AgentsSection` still supplies `SearchableSelect` from the static
+`AGENT_TIER_MODELS.codex.options` array. A newly available model absent from that
+array will not appear there even after a catalogue refresh. Updating OpenCode
+or an OpenRouter connection cannot change this array. This is a remaining UI
+integration gap, not evidence that the Codex account lacks access to the model.
+[src: file: frontend/src/components/settings/AgentsSection.tsx:106-123]
+[src: file: frontend/src/components/settings/AgentsSection.tsx:1233-1253]
+[src: file: frontend/src/components/settings/ModelCatalogSection.tsx:67]
+[src: file: backend/src/core/model_catalog/codex_discovery.rs:75-158]

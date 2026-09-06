@@ -245,6 +245,7 @@ pub(crate) fn agent_type_from_db(s: &str) -> Result<AgentType> {
     Ok(match s {
         "ClaudeCode" => AgentType::ClaudeCode,
         "Codex" => AgentType::Codex,
+        "OpenCode" => AgentType::OpenCode,
         "Vibe" => AgentType::Vibe,
         "GeminiCli" => AgentType::GeminiCli,
         "Kiro" => AgentType::Kiro,
@@ -1836,20 +1837,38 @@ pub fn escalate_execution_for_dispatch_quota(
             }),
         )?;
     }
+    let transaction = conn.unchecked_transaction()?;
+    transaction.execute(
+        "INSERT INTO provider_quota_generations (provider, latest_generation) VALUES (?1, 1) \
+         ON CONFLICT(provider) DO UPDATE SET latest_generation = latest_generation + 1",
+        [provider],
+    )?;
+    let generation: i64 = transaction.query_row(
+        "SELECT latest_generation FROM provider_quota_generations WHERE provider = ?1",
+        [provider],
+        |row| row.get(0),
+    )?;
     let now = Utc::now().to_rfc3339();
-    conn.execute(
+    transaction.execute(
         "INSERT INTO task_execution_recovery (
              task_execution_id, recovery_action, recovery_reason, last_activity_at,
              assignment_generation, watchdog_redispatches, human_wait_started_at,
-             pending, updated_at
-         ) VALUES (?1, 'await_human', ?2, ?3, 0, 0, ?3, 0, ?3)
+             pending, updated_at, quota_signal_generation
+         ) VALUES (?1, 'await_human', ?2, ?3, 0, 0, ?3, 0, ?3, ?4)
          ON CONFLICT(task_execution_id) DO UPDATE SET
              recovery_action = 'await_human', recovery_reason = excluded.recovery_reason,
              activity_deadline_at = NULL, review_deadline_at = NULL,
              total_deadline_at = NULL, human_wait_started_at = ?3,
-             pending = 0, updated_at = ?3",
-        params![execution.id, format!("quota_exhausted:{provider}"), now,],
+             pending = 0, updated_at = ?3,
+             quota_signal_generation = excluded.quota_signal_generation",
+        params![
+            execution.id,
+            format!("quota_exhausted:{provider}"),
+            now,
+            generation
+        ],
     )?;
+    transaction.commit()?;
     Ok(Some((execution.id, execution.parent_discussion_id)))
 }
 
@@ -1883,15 +1902,63 @@ pub fn provider_has_open_quota_exhaustion(
         "SELECT EXISTS(
              SELECT 1 FROM task_execution_recovery r
              JOIN task_executions e ON e.id = r.task_execution_id
+             JOIN planning_tasks t ON t.id = e.task_id
              WHERE e.worker_agent_type = ?1
                AND r.recovery_reason = ?2
                AND e.status = 'Escalated'
+               AND t.status NOT IN ('done', 'archived')
+               AND r.quota_signal_generation > COALESCE(
+                   (SELECT acknowledged_generation FROM provider_quota_rearms WHERE provider = ?1),
+                   0
+               )
                AND (?3 IS NULL OR e.id <> ?3)
          )",
         params![provider, marker, exclude_exec_id],
         |row| row.get(0),
     )
     .map_err(Into::into)
+}
+
+/// Records a human-confirmed provider re-arm without mutating historical
+/// executions or recovery rows. Replaying the same key is a no-op.
+pub fn rearm_provider_quota(
+    conn: &Connection,
+    provider: &str,
+    idempotency_key: &str,
+    actor_kind: &str,
+    actor_id: Option<&str>,
+) -> Result<bool> {
+    let transaction = conn.unchecked_transaction()?;
+    let now = Utc::now().to_rfc3339();
+    let inserted = transaction.execute(
+        "INSERT OR IGNORE INTO provider_quota_rearm_events \
+         (id, provider, idempotency_key, actor_kind, actor_id, rearmed_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            Uuid::new_v4().to_string(),
+            provider,
+            idempotency_key,
+            actor_kind,
+            actor_id,
+            now
+        ],
+    )?;
+    if inserted > 0 {
+        let acknowledged_generation: i64 = transaction.query_row(
+            "SELECT COALESCE((SELECT latest_generation FROM provider_quota_generations WHERE provider = ?1), 0)",
+            [provider],
+            |row| row.get(0),
+        )?;
+        transaction.execute(
+            "INSERT INTO provider_quota_rearms \
+             (provider, rearmed_at, idempotency_key, acknowledged_generation) VALUES (?1, ?2, ?3, ?4) \
+             ON CONFLICT(provider) DO UPDATE SET rearmed_at = excluded.rearmed_at, \
+                 idempotency_key = excluded.idempotency_key, acknowledged_generation = excluded.acknowledged_generation",
+            params![provider, now, idempotency_key, acknowledged_generation],
+        )?;
+    }
+    transaction.commit()?;
+    Ok(inserted > 0)
 }
 
 /// Move an execution to `Blocked` and stamp a human-readable reason plus a structured

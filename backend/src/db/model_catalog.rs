@@ -1167,7 +1167,11 @@ mod tests {
     fn opencode_zen_overlay_is_structural_not_a_model_list() {
         // Positive: any `opencode/<anything>` id under the OpenCode runtime
         // target — never a hardcoded model name.
-        for model_id in ["opencode/big-pickle", "opencode/claude-sonnet-5", "opencode/whatever-ships-next"] {
+        for model_id in [
+            "opencode/big-pickle",
+            "opencode/claude-sonnet-5",
+            "opencode/whatever-ships-next",
+        ] {
             let (cost, note) = derive_opencode_zen_overlay("agent:opencode", model_id);
             assert_eq!(cost, Some(ModelCostHint::Unknown), "{model_id}");
             assert!(note.is_some(), "{model_id}");

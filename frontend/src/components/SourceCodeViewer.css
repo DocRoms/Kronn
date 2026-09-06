@@ -291,11 +291,63 @@
   text-transform: uppercase;
 }
 
+.source-content-mode {
+  display: inline-flex;
+  flex: 0 0 auto;
+  margin-left: auto;
+  padding: 2px;
+  border: 1px solid var(--kr-border);
+  border-radius: var(--kr-r-sm);
+  background: var(--kr-bg);
+}
+
+.source-content-mode button {
+  padding: 3px 7px;
+  border: 0;
+  border-radius: calc(var(--kr-r-sm) - 1px);
+  background: transparent;
+  color: var(--kr-text-dim);
+  font: inherit;
+  font-size: var(--kr-fs-2xs);
+  cursor: pointer;
+}
+
+.source-content-mode button[data-active='true'] {
+  background: var(--kr-bg-raised);
+  color: var(--kr-text-primary);
+  box-shadow: 0 1px 3px rgb(0 0 0 / 12%);
+}
+
 .source-code-scroll {
   min-height: 0;
   flex: 1;
   overflow: auto;
   background: var(--kr-bg-code);
+}
+
+.source-html-preview {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+  background: var(--kr-bg);
+}
+
+.source-html-preview-frame {
+  display: block;
+  width: 100%;
+  min-height: 360px;
+  flex: 1;
+  border: 0;
+  background: #fff;
+}
+
+.source-html-preview p {
+  margin: 0;
+  padding: 7px 12px;
+  border-top: 1px solid var(--kr-border-ghost);
+  color: var(--kr-text-faint);
+  font-size: var(--kr-fs-2xs);
 }
 
 .source-code {
@@ -648,4 +700,26 @@
 
 .source-commit-open-patch:hover {
   border-color: var(--kr-accent);
+}
+
+/* KT-594 — a folder whose children have not arrived yet. It is a statement,
+   not a target: no hover, no pointer, nothing to click. */
+.source-tree-pending {
+  color: var(--kr-text-ghost);
+  font-style: italic;
+  cursor: default;
+}
+
+.source-tree-pending:hover {
+  background: transparent;
+  color: var(--kr-text-ghost);
+}
+
+.source-tree-pending[data-failed] {
+  color: var(--kr-warning);
+  font-style: normal;
+}
+
+.source-tree-pending[data-failed]:hover {
+  color: var(--kr-warning);
 }

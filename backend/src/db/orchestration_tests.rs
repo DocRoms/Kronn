@@ -1363,20 +1363,75 @@ fn escalate_with_reason(conn: &Connection, exec_id: &str, reason: &str) {
     )
     .unwrap();
     let now = Utc::now().to_rfc3339();
+    let signal_generation = reason
+        .strip_prefix("quota_exhausted:")
+        .map(|provider| {
+            conn.execute(
+                "INSERT INTO provider_quota_generations (provider, latest_generation) VALUES (?1, 1) \
+                 ON CONFLICT(provider) DO UPDATE SET latest_generation = MAX(latest_generation, 1)",
+                [provider],
+            )
+            .unwrap();
+            1
+        })
+        .unwrap_or(0);
     conn.execute(
         "INSERT INTO task_execution_recovery (
              task_execution_id, recovery_action, recovery_reason, last_activity_at,
              assignment_generation, watchdog_redispatches, human_wait_started_at,
-             pending, updated_at
-         ) VALUES (?1, 'await_human', ?2, ?3, 0, 0, ?3, 0, ?3)
+             pending, updated_at, quota_signal_generation
+         ) VALUES (?1, 'await_human', ?2, ?3, 0, 0, ?3, 0, ?3, ?4)
          ON CONFLICT(task_execution_id) DO UPDATE SET
              recovery_action = 'await_human', recovery_reason = excluded.recovery_reason,
              activity_deadline_at = NULL, review_deadline_at = NULL,
              total_deadline_at = NULL, human_wait_started_at = ?3,
-             pending = 0, updated_at = ?3",
-        params![exec_id, reason, now],
+             pending = 0, updated_at = ?3,
+             quota_signal_generation = excluded.quota_signal_generation",
+        params![exec_id, reason, now, signal_generation],
     )
     .unwrap();
+}
+
+fn attach_quota_dispatch(conn: &Connection, execution_id: &str, provider: AgentType) -> String {
+    let now = Utc::now().to_rfc3339();
+    let discussion_id = format!("quota-child-{execution_id}");
+    let dispatch_id = format!("quota-dispatch-{execution_id}");
+    conn.execute(
+        "INSERT INTO discussions (id, title, agent, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?4)",
+        params![
+            discussion_id,
+            "Quota worker",
+            agent_type_to_db(&provider),
+            now
+        ],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO messages (id, discussion_id, role, content, timestamp, sort_order, received_at) \
+         VALUES (?1, ?2, 'User', 'work', ?3, 1, ?3)",
+        params![format!("quota-trigger-{execution_id}"), discussion_id, now],
+    )
+    .unwrap();
+    crate::db::agent_dispatch::enqueue_for_latest_user(
+        conn,
+        crate::db::agent_dispatch::NewLatestUserDispatch {
+            id: &dispatch_id,
+            discussion_id: &discussion_id,
+            dedupe_key: &format!("quota:{execution_id}"),
+            agent_override: Some(&provider),
+            chain_prompt_ids: &[],
+            batch_item: None,
+            group_id: None,
+            group_concurrency_limit: None,
+        },
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE task_executions SET sub_discussion_id = ?2, dispatch_job_id = ?3 WHERE id = ?1",
+        params![execution_id, discussion_id, dispatch_id],
+    )
+    .unwrap();
+    dispatch_id
 }
 
 #[test]
@@ -1432,6 +1487,109 @@ fn quota_signal_clears_once_the_escalated_execution_is_reassigned_away() {
     clear_execution_recovery(&conn, &exec_id, "worker_reassigned").unwrap();
 
     assert!(!provider_has_open_quota_exhaustion(&conn, "Codex", None).unwrap());
+}
+
+#[test]
+fn quota_signal_ignores_terminal_tasks_but_keeps_non_terminal_tasks_blocking() {
+    let conn = setup();
+    let done = launch_working_execution_for(&conn, "t-quota-done", 1224, "Codex");
+    let active = launch_working_execution_for(&conn, "t-quota-active", 1225, "Codex");
+    escalate_with_reason(&conn, &done, "quota_exhausted:Codex");
+    escalate_with_reason(&conn, &active, "quota_exhausted:Codex");
+
+    conn.execute(
+        "UPDATE planning_tasks SET status = 'done' WHERE id = 't-quota-done'",
+        [],
+    )
+    .unwrap();
+    assert!(provider_has_open_quota_exhaustion(&conn, "Codex", None).unwrap());
+
+    conn.execute(
+        "UPDATE planning_tasks SET status = 'archived' WHERE id = 't-quota-active'",
+        [],
+    )
+    .unwrap();
+    assert!(!provider_has_open_quota_exhaustion(&conn, "Codex", None).unwrap());
+}
+
+#[test]
+fn human_rearm_is_idempotent_isolated_and_a_new_quota_failure_blocks_again() {
+    let conn = setup();
+    let codex = launch_working_execution_for(&conn, "t-quota-rearm", 1226, "Codex");
+    let claude = launch_working_execution_for(&conn, "t-quota-other", 1227, "ClaudeCode");
+    escalate_with_reason(&conn, &codex, "quota_exhausted:Codex");
+    escalate_with_reason(&conn, &claude, "quota_exhausted:ClaudeCode");
+    assert!(provider_has_open_quota_exhaustion(&conn, "Codex", None).unwrap());
+    assert!(provider_has_open_quota_exhaustion(&conn, "ClaudeCode", None).unwrap());
+
+    assert!(rearm_provider_quota(
+        &conn,
+        "Codex",
+        "human-confirmation-1",
+        "human",
+        Some("operator")
+    )
+    .unwrap());
+    assert!(!rearm_provider_quota(
+        &conn,
+        "Codex",
+        "human-confirmation-1",
+        "human",
+        Some("operator")
+    )
+    .unwrap());
+    assert!(!provider_has_open_quota_exhaustion(&conn, "Codex", None).unwrap());
+    assert!(provider_has_open_quota_exhaustion(&conn, "ClaudeCode", None).unwrap());
+    assert_eq!(
+        conn.query_row(
+            "SELECT COUNT(*) FROM provider_quota_rearm_events",
+            [],
+            |row| row.get::<_, i64>(0)
+        )
+        .unwrap(),
+        1,
+        "the replay must leave one audit event"
+    );
+    assert_eq!(
+        get_task_execution(&conn, &codex).unwrap().unwrap().status,
+        TaskExecutionStatus::Escalated,
+        "re-arming must not restart or rewrite the historical execution"
+    );
+
+    clear_execution_recovery(&conn, &codex, "generic_reconciliation").unwrap();
+    assert!(
+        !provider_has_open_quota_exhaustion(&conn, "Codex", None).unwrap(),
+        "generic recovery maintenance must not turn acknowledged evidence into a new quota signal"
+    );
+
+    let dispatch_id = attach_quota_dispatch(&conn, &codex, AgentType::Codex);
+    escalate_execution_for_dispatch_quota(&conn, &dispatch_id, "Codex").unwrap();
+    assert!(provider_has_open_quota_exhaustion(&conn, "Codex", None).unwrap());
+}
+
+#[test]
+fn same_rearm_key_is_independent_per_provider() {
+    let conn = setup();
+    assert!(
+        rearm_provider_quota(&conn, "Codex", "shared-click", "human", Some("operator")).unwrap()
+    );
+    assert!(rearm_provider_quota(
+        &conn,
+        "ClaudeCode",
+        "shared-click",
+        "human",
+        Some("operator")
+    )
+    .unwrap());
+    assert_eq!(
+        conn.query_row(
+            "SELECT COUNT(*) FROM provider_quota_rearm_events",
+            [],
+            |row| row.get::<_, i64>(0)
+        )
+        .unwrap(),
+        2,
+    );
 }
 
 #[test]
@@ -2866,6 +3024,62 @@ fn planning_task_events_accept_backend_actor_after_widening() {
 }
 
 // ─── KT-318 socle: worker identity contract + attempt_no ──────────────────────
+
+#[test]
+fn every_worker_provider_db_name_round_trips_without_custom_fallback() {
+    for agent in [
+        AgentType::ClaudeCode,
+        AgentType::Codex,
+        AgentType::OpenCode,
+        AgentType::Vibe,
+        AgentType::GeminiCli,
+        AgentType::Kiro,
+        AgentType::CopilotCli,
+        AgentType::Ollama,
+        AgentType::LiteLlm,
+        AgentType::Nvidia,
+        AgentType::Custom,
+    ] {
+        let stored = agent_type_to_db(&agent);
+        assert_eq!(agent_type_from_db(&stored).unwrap(), agent, "{stored}");
+    }
+    assert!(agent_type_from_db("unrecognised-provider").is_err());
+}
+
+#[test]
+fn opencode_worker_launch_reload_and_replay_keep_one_native_execution() {
+    let conn = setup();
+    seed_task(&conn, "t-opencode", 1);
+    let mut input = LaunchSingleTaskInput::new("t-opencode", DISC);
+    input.worker_target_kind = Some(MessageTargetKind::Agent);
+    input.worker_agent_type = Some(agent_type_to_db(&AgentType::OpenCode));
+    input.idempotency_key = Some("opencode-launch".into());
+
+    let first = launch_single_task(&conn, &input, &backend_actor()).unwrap();
+    let loaded = get_task_execution(&conn, &first.execution.id)
+        .unwrap()
+        .unwrap();
+    let active = get_active_execution_for_task(&conn, "t-opencode")
+        .unwrap()
+        .unwrap();
+    let replay = launch_single_task(&conn, &input, &backend_actor()).unwrap();
+
+    assert_eq!(loaded.worker_agent_type.as_deref(), Some("OpenCode"));
+    assert_eq!(loaded.worker_target_kind, Some(MessageTargetKind::Agent));
+    assert_eq!(loaded.worker_cli_session_id, None);
+    assert_eq!(loaded.worker_connection_id, None);
+    assert_eq!(loaded.id, active.id);
+    assert_eq!(loaded.id, replay.execution.id);
+    assert_eq!(first.run.id, replay.run.id);
+    assert!(!first.deduplicated);
+    assert!(replay.deduplicated);
+    let counts: (i64, i64) = conn.query_row(
+        "SELECT (SELECT COUNT(*) FROM orchestration_runs), (SELECT COUNT(*) FROM task_executions)",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    ).unwrap();
+    assert_eq!(counts, (1, 1));
+}
 
 #[test]
 fn worker_identity_round_trips_all_kinds_and_two_clis_stay_distinct() {

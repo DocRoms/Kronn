@@ -7,14 +7,14 @@ import {
 describe('plan orchestration panel persistence', () => {
   beforeEach(() => sessionStorage.clear());
 
-  it('restores the selected task and view mode after a reload', () => {
+  it.each(['focus', 'in_progress', 'all'] as const)('restores the selected task and %s view after a reload', viewMode => {
     writePlanOrchestrationState('disc-1', {
       selectedTaskId: 'task-323',
-      viewMode: 'all',
+      viewMode,
     });
     expect(readPlanOrchestrationState('disc-1')).toEqual({
       selectedTaskId: 'task-323',
-      viewMode: 'all',
+      viewMode,
     });
   });
 
@@ -25,5 +25,10 @@ describe('plan orchestration panel persistence', () => {
       viewMode: 'focus',
     });
     expect(readPlanOrchestrationState('disc-2').selectedTaskId).toBeNull();
+  });
+
+  it('falls back to Focus for an unknown view', () => {
+    sessionStorage.setItem('kronn:plan-orchestration:disc-1', JSON.stringify({ viewMode: 'unknown' }));
+    expect(readPlanOrchestrationState('disc-1').viewMode).toBe('focus');
   });
 });

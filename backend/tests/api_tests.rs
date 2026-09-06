@@ -2039,6 +2039,107 @@ fn test_app() -> Router {
     build_router_with_auth(test_state(), false)
 }
 
+#[tokio::test]
+async fn project_environment_names_endpoint_scopes_and_masks_config_values() {
+    let state = test_state();
+    state
+        .db
+        .with_conn(move |connection| {
+            let now = chrono::Utc::now().to_rfc3339();
+            for (id, name) in [("env-project-a", "Project A"), ("env-project-b", "Project B")] {
+                connection.execute(
+                    "INSERT INTO projects (id, name, path, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?4)",
+                    rusqlite::params![id, name, format!("/tmp/{id}"), now],
+                )?;
+            }
+            kronn::db::mcps::upsert_server(
+                connection,
+                &kronn::models::McpServer {
+                    id: "environment-names-server".into(),
+                    name: "Environment names server".into(),
+                    description: String::new(),
+                    transport: kronn::models::McpTransport::Stdio { command: "server".into(), args: vec![] },
+                    source: kronn::models::McpSource::Registry,
+                    api_spec: None,
+                },
+            )?;
+            for (id, keys, is_global, project_ids) in [
+                ("environment-names-global", vec!["GLOBAL_TOKEN", "API_TOKEN"], true, vec![]),
+                ("environment-names-a", vec!["A_TOKEN", "API_TOKEN"], false, vec!["env-project-a"]),
+                ("environment-names-b", vec!["B_TOKEN"], false, vec!["env-project-b"]),
+            ] {
+                kronn::db::mcps::insert_config(
+                    connection,
+                    &kronn::models::McpConfig {
+                        id: id.into(),
+                        server_id: "environment-names-server".into(),
+                        label: id.into(),
+                        env_keys: keys.into_iter().map(str::to_owned).collect(),
+                        env_encrypted: "encrypted-value-must-not-appear".into(),
+                        args_override: None,
+                        is_global,
+                        include_general: false,
+                        config_hash: format!("hash-{id}"),
+                        project_ids: project_ids.into_iter().map(str::to_owned).collect(),
+                        host_sync: kronn::models::HostSyncMode::None,
+                    },
+                )?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    let (status, response) = get_json(
+        build_router_with_auth(state.clone(), false),
+        "/api/mcps/project-environment-names/env-project-a",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        response["data"],
+        serde_json::json!(["API_TOKEN", "A_TOKEN", "GLOBAL_TOKEN"])
+    );
+    assert!(response.pointer("/data/2").is_some());
+    assert!(!response
+        .to_string()
+        .contains("encrypted-value-must-not-appear"));
+    assert!(!response.to_string().contains("B_TOKEN"));
+
+    // A missing project follows the existing config-selection convention:
+    // global configurations remain available while project-scoped ones do not.
+    let (status, missing_project) = get_json(
+        build_router_with_auth(state, false),
+        "/api/mcps/project-environment-names/missing-project",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        missing_project["data"],
+        serde_json::json!(["API_TOKEN", "GLOBAL_TOKEN"])
+    );
+
+    // The route remains behind the router's normal bearer middleware.
+    let auth_state = test_state();
+    {
+        let mut config = auth_state.config.write().await;
+        config.server.auth_enabled = true;
+        config.server.auth_strict_localhost = true;
+        config.server.auth_token = Some("environment-names-token".into());
+    }
+    let unauthorized = build_router_with_auth(auth_state, true)
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/mcps/project-environment-names/env-project-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+}
+
 /// Send a GET request and return (status, parsed JSON body).
 async fn get_json(app: Router, uri: &str) -> (StatusCode, Value) {
     let req = Request::builder()
@@ -7170,7 +7271,10 @@ async fn external_api_nvidia_catalogue_without_modality_metadata_is_capability_u
     // pickers are affected by "capability unknown".
     assert_eq!(
         response["data"]["models"],
-        serde_json::json!(["meta/llama-3.1-70b-instruct", "black-forest-labs/flux.1-dev"])
+        serde_json::json!([
+            "meta/llama-3.1-70b-instruct",
+            "black-forest-labs/flux.1-dev"
+        ])
     );
 }
 
@@ -16924,8 +17028,22 @@ async fn media_generate_refuses_a_source_image_it_cannot_vouch_for() {
         })
         .await
         .unwrap();
-    seed_reference_image(&state, "asset-elsewhere", "disc-other", "image/png", Some("/tmp/x.png")).await;
-    seed_reference_image(&state, "asset-not-image", "disc-media", "text/csv", Some("/tmp/x.csv")).await;
+    seed_reference_image(
+        &state,
+        "asset-elsewhere",
+        "disc-other",
+        "image/png",
+        Some("/tmp/x.png"),
+    )
+    .await;
+    seed_reference_image(
+        &state,
+        "asset-not-image",
+        "disc-media",
+        "text/csv",
+        Some("/tmp/x.csv"),
+    )
+    .await;
     seed_reference_image(&state, "asset-no-file", "disc-media", "image/png", None).await;
     let app = build_router_with_auth(state, false);
 
@@ -17023,7 +17141,14 @@ async fn media_generate_refuses_a_source_image_on_a_provider_that_takes_none() {
         })
         .await
         .unwrap();
-    seed_reference_image(&state, "asset-src", "disc-media", "image/png", Some("/tmp/src.png")).await;
+    seed_reference_image(
+        &state,
+        "asset-src",
+        "disc-media",
+        "image/png",
+        Some("/tmp/src.png"),
+    )
+    .await;
     let app = build_router_with_auth(state.clone(), false);
 
     let (status, body) = post_json(
@@ -17054,7 +17179,10 @@ async fn media_generate_refuses_a_source_image_on_a_provider_that_takes_none() {
         })
         .await
         .unwrap();
-    assert_eq!(queued, 0, "a refused generation must not leave a job behind");
+    assert_eq!(
+        queued, 0,
+        "a refused generation must not leave a job behind"
+    );
 }
 
 /// KT-555 — several reference images reach the job, in the order chosen.
@@ -17062,8 +17190,22 @@ async fn media_generate_refuses_a_source_image_on_a_provider_that_takes_none() {
 async fn media_generate_records_every_reference_image_for_an_image() {
     let state = test_state();
     seed_media_connection(&state, Some("google/gemini-3-pro-image"), None).await;
-    seed_reference_image(&state, "asset-a", "disc-media", "image/png", Some("/tmp/a.png")).await;
-    seed_reference_image(&state, "asset-b", "disc-media", "image/jpeg", Some("/tmp/b.jpg")).await;
+    seed_reference_image(
+        &state,
+        "asset-a",
+        "disc-media",
+        "image/png",
+        Some("/tmp/a.png"),
+    )
+    .await;
+    seed_reference_image(
+        &state,
+        "asset-b",
+        "disc-media",
+        "image/jpeg",
+        Some("/tmp/b.jpg"),
+    )
+    .await;
     let app = build_router_with_auth(state.clone(), false);
 
     let (status, body) = post_json(
@@ -17083,9 +17225,7 @@ async fn media_generate_records_every_reference_image_for_an_image() {
 
     let stored = state
         .db
-        .with_read_conn(move |connection| {
-            kronn::db::media_jobs::get(connection, &job_id)
-        })
+        .with_read_conn(move |connection| kronn::db::media_jobs::get(connection, &job_id))
         .await
         .unwrap()
         .expect("the job was written");
@@ -17145,7 +17285,14 @@ async fn deleting_a_generated_asset_stops_its_bubble_offering_it() {
     // reload rather than being patched in the UI.
     let state = test_state();
     seed_media_connection(&state, Some("meta/muse-image"), None).await;
-    seed_reference_image(&state, "asset-produced", "disc-media", "image/png", Some("/tmp/out.png")).await;
+    seed_reference_image(
+        &state,
+        "asset-produced",
+        "disc-media",
+        "image/png",
+        Some("/tmp/out.png"),
+    )
+    .await;
     state
         .db
         .with_conn(|connection| {
@@ -17188,7 +17335,10 @@ async fn deleting_a_generated_asset_stops_its_bubble_offering_it() {
         })
         .await
         .unwrap();
-    assert_eq!(linked, None, "the job must no longer point at a deleted file");
+    assert_eq!(
+        linked, None,
+        "the job must no longer point at a deleted file"
+    );
 }
 
 #[tokio::test]

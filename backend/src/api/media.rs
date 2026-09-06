@@ -172,14 +172,7 @@ pub async fn generate(
     // its mode must be one the chosen model actually advertises. Every one of
     // those failures costs nothing here and would cost a billed submission
     // there.
-    let references = match resolve_references(
-        &state,
-        &req,
-        &connection,
-        &model,
-    )
-    .await
-    {
+    let references = match resolve_references(&state, &req, &connection, &model).await {
         Ok(references) => references,
         Err(message) => return Json(ApiResponse::err(message)),
     };
@@ -895,7 +888,8 @@ mod tests {
                         rusqlite::params![id],
                     )?;
                 }
-                let (source_id, source) = build_prompt_message("source intacte", now, None, "job-source");
+                let (source_id, source) =
+                    build_prompt_message("source intacte", now, None, "job-source");
                 crate::db::discussions::insert_message(conn, "disc-source", &source)?;
                 Ok(source_id)
             })
@@ -1232,7 +1226,11 @@ async fn resolve_references(
             asset_ids.len()
         ));
     }
-    let Some(discussion_id) = req.discussion_id.as_deref().map(str::trim).filter(|id| !id.is_empty())
+    let Some(discussion_id) = req
+        .discussion_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
     else {
         // Without a room there is nothing to check membership against, and a
         // generation that creates its own discussion cannot already hold an

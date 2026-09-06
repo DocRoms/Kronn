@@ -3441,8 +3441,11 @@ pub fn build_mcp_server_listing(project_path: &str) -> String {
     }
 
     let mut result = String::from("## MCP Servers available\n\n");
-    result.push_str("You have access to external tools via MCP (Model Context Protocol) servers.\n");
-    result.push_str("Each server exposes tools with the naming convention `mcp__<server>__<tool>`.\n");
+    result
+        .push_str("You have access to external tools via MCP (Model Context Protocol) servers.\n");
+    result.push_str(
+        "Each server exposes tools with the naming convention `mcp__<server>__<tool>`.\n",
+    );
     result.push_str("Use these tools instead of Bash workarounds when a matching tool exists.\n\n");
     result.push_str("Available servers:\n");
     for name in &server_names {
@@ -3472,7 +3475,6 @@ pub fn build_mcp_server_listing(project_path: &str) -> String {
 
     result
 }
-
 
 /// Substitute `{ENV_KEY}` placeholders in a template with values from the
 /// config's env map. Used by:

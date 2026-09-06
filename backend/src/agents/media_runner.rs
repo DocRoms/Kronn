@@ -163,21 +163,22 @@ async fn submit(
                     return Ok(MediaJobStatus::Failed);
                 }
             };
-            let body = match ctx
-                .codec
-                .video_body(&job.model, &job.prompt, &job.params, reference.as_ref())
-            {
-                Ok(body) => body,
-                // A provider that cannot take this source image must fail
-                // BEFORE the submission: a text-to-video billed in place of
-                // the requested image-to-video is a charge for something
-                // nobody asked for.
-                Err(e) => {
-                    settle_failure(db, &job.id, MediaJobStatus::Failed, &e.to_string(), now)
-                        .await?;
-                    return Ok(MediaJobStatus::Failed);
-                }
-            };
+            let body =
+                match ctx
+                    .codec
+                    .video_body(&job.model, &job.prompt, &job.params, reference.as_ref())
+                {
+                    Ok(body) => body,
+                    // A provider that cannot take this source image must fail
+                    // BEFORE the submission: a text-to-video billed in place of
+                    // the requested image-to-video is a charge for something
+                    // nobody asked for.
+                    Err(e) => {
+                        settle_failure(db, &job.id, MediaJobStatus::Failed, &e.to_string(), now)
+                            .await?;
+                        return Ok(MediaJobStatus::Failed);
+                    }
+                };
             mark_attempt(db, &job.id, now).await?;
             let text = send_json(ctx.client, &url, ctx.api_key, &body).await?;
             let ack = match ctx.codec.parse_submit_response(&text) {
@@ -717,7 +718,9 @@ async fn load_references(
     for asset_id in asset_ids {
         let lookup = asset_id.clone();
         let file = db
-            .with_read_conn(move |conn| Ok(crate::db::discussions::get_context_file(conn, &lookup)?))
+            .with_read_conn(move |conn| {
+                Ok(crate::db::discussions::get_context_file(conn, &lookup)?)
+            })
             .await?
             .ok_or_else(|| anyhow!("a source image of this generation no longer exists"))?;
         // Re-checked here and not only at request time: the file could have
@@ -798,7 +801,9 @@ mod tests {
     async fn a_source_image_is_re_read_from_its_id_at_each_attempt() {
         let dir = tempfile::tempdir().expect("temp dir");
         let path = dir.path().join("frame.png");
-        tokio::fs::write(&path, b"first-bytes").await.expect("write");
+        tokio::fs::write(&path, b"first-bytes")
+            .await
+            .expect("write");
 
         let db = Database::open_in_memory().expect("in-memory db");
         let disk_path = path.to_string_lossy().to_string();

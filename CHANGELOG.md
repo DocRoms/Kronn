@@ -13,6 +13,43 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Added
 
+- An agent can put a decision to the human and stop, without the question
+  scrolling away. A `kronn-question` block becomes a card that stays pinned
+  while it waits: the question, what it blocks, the options with their
+  consequences, the agent's recommendation — marked, never pre-selected — and
+  free text, because the right answer is regularly one nobody listed. The
+  answer is a durable message, so whoever picks the work up later reads the
+  decision instead of asking again. A malformed block says which field refused
+  it rather than vanishing in silence.
+
+- A discussion can be opened for a media generation alone. New discussion
+  offers `Generate media` when a compatible model is configured; the room is an
+  ordinary one with no agent, and nothing is generated until the form is
+  explicitly submitted.
+
+- An image in the assets carousel can become another image or a video. The
+  actions appear only for what the configured models can actually do, and the
+  source image is carried into the generation form rather than re-attached by
+  hand.
+
+- HTML source files preview in place. Projects > Code switches between the
+  source and a sandboxed static render — no scripts, no navigation, no network
+  — and Live Pages revision diffs offer the same before/after view.
+
+- A provider whose quota escalation was never closed can be re-armed. Tasks
+  that reached a terminal state stop holding the lock, and an audited manual
+  re-arm releases the rest without replaying any old work.
+
+- Quick Prompts read `{{env.NAME}}` like every other placeholder, and their
+  editor offers the project's own environment names rather than a blank field.
+
+- The discussion plan filters on what is running. `Focus / In progress / All`,
+  with an indicator on tasks that are actually working, and the choice is
+  remembered.
+
+- Kronn accepts support through Ko-fi, from the GitHub funding metadata and a
+  card under the version in Settings.
+
 - Search can be told where to look. A term that appears in one discussion's
   title and in twenty transcripts used to drown the room actually named after
   it, and no amount of ranking fixes that — the reader wants to exclude, not to
@@ -122,106 +159,28 @@ Release notes for 0.9.3 and earlier are available in the
   agent type, with the same connection-mismatch validation Quick Prompts
   already apply. See `docs/operations/http-transport.md`.
 
-### Fixed
-
-- A project's Docker link opens the port the container actually published.
-  Compose files routinely name that port through a variable, so several
-  projects on one machine take turns on 443 and the rest land on 8443 or 9443
-  — but Kronn read the compose file's default and sent the link to 443
-  regardless. It reached whichever project holds that port, which answers with
-  an error from an unrelated application: nothing says you are on the wrong
-  project, so the bug gets hunted in the wrong place. The running container's
-  own publisher is now the authority, the port is still omitted when it is the
-  scheme's default, each published host keeps its own, and an endpoint nothing
-  is listening on is shown as unreachable rather than offered as a link.
-
-- OpenCode answers in the room again. Every chunk it streams carries its text
-  as a single content object, a shape the ACP reader handled neither as a
-  string nor as an array — so the whole reply fell through, the turn was
-  recorded as failed with no visible output, and the message offered two
-  guesses that were both wrong. Its private reasoning, which arrives the same
-  way, is read and deliberately not shown: it is a scratchpad, and folding it
-  into the answer would leak it. The turn's tokens are read from the response
-  too, where ACP puts them, instead of being dropped with it — a reply that
-  cost 7 946 tokens was recorded as costing nothing.
-
-- The frontend lint gate is green again, by fixing what it flagged rather than
-  by raising its ceiling. The release had added twenty-six warnings to a budget
-  that had four left; all twenty-six are gone, and the count is 64 against a
-  ceiling of 72. Nearly all described one habit — state written in an effect to
-  correct what the render before it already showed — so those values are
-  resolved where they are used, and the ones describing a particular thing now
-  carry which thing. Two genuine exceptions are declared at the line with their
-  reason: an image array whose identity changes every render, and the registry
-  of in-flight AbortControllers, which the rule would have held in state.
-
-- An action card aimed at another project's Quick Prompt launches, and says
-  where it will run. The preflight refused it outright, which made a proposal
-  unusable for the one thing it was for. The whole mechanism is human-gated —
-  the agent proposes, Kronn checks the target, a person decides by clicking —
-  and the checks that matter all still run: the target exists, its variables
-  match its contract, the proposed project is the target's own, and that
-  project exists. What the guard was refusing after all of those is a decision,
-  not a risk. The card now carries the target's project, quietly and always,
-  because lifting the guard without saying where the action goes would be worse
-  than the guard. Discussions and Live Pages changed together: the same gesture
-  cannot mean two things depending on where the card is drawn. Server-side
-  resolution of a Live Page's dataset-bound values is untouched.
-
-- Notes have a place of their own. An agent could already ask for a clean list
-  of a discussion's notes; the route that served it was never called from this
-  side, so the person who wrote them could not read them back — theirs were
-  mixed into the transcript, behind a switch that showed all or none, with no
-  way to list, correct or remove one. There is a Notes panel now, beside the
-  others: it lists them, writes them where the list already is, corrects one in
-  place and deletes it through the tombstone Kronn already had. A room with
-  months of notes loads them a page at a time rather than in one request.
-- Search can be pointed at notes alone. The scope filter gains a fourth
-  option beside title, content and both: "notes only", for when the note is
-  what you are after and the transcript around it is noise. Scoping to notes
-  drops title matches with it — a note has no title of its own, and keeping
-  them would quietly widen the search back to the whole discussion.
-
-- An edited note says so, with the date. Silently replacing what someone wrote
-  for themselves is the one thing an editable note must not do, so the panel
-  carries the moment of the last rewrite — and stays quiet on a note that was
-  never touched. On a note somebody else wrote, the edit and delete controls
-  are hidden and their author is named instead. That is a guard rail in the
-  interface, not an authorisation: Kronn has no multi-user authentication, the
-  pseudo is declarative, and the endpoints behind those buttons accept any
-  caller. It keeps a shared room from being tidied by accident; it prevents
-  nothing. An unsigned note counts as this machine's own, so nobody is locked
-  out of the notes they wrote before setting a pseudo.
-
-- A deleted note leaves the notes list. Its tombstone stays in the transcript,
-  where a gap has to be explained, but a list of notes is not a transcript:
-  showing the marker there would be listing something its author removed. The
-  agent tool reads the same list and stops seeing it too, and the count agrees
-  with what the list returns.
-
-- A task can be taken out of a discussion's plan. It could be added, and then
-  only moved between "active" and "later" — never removed. A room that runs for
-  weeks accumulates work belonging to the next release, and reading its plan
-  meant reading past all of it. `task_unlink_discussion` is the reverse of the
-  tool that adds one; the task, its history and its other discussions are kept.
-  It fits under the MCP surface ceiling rather than over it: the four heaviest
-  descriptions it pushed past the line were tightened by nearly what it costs,
-  and the ceiling was lowered to the new measurement rather than raised to
-  admit it.
-
-- Kronn stopped telling agents to run linters the project does not have. A
-  `composer.json` was enough to write `Lint: phpcs` into all eight generated
-  instruction files, but phpcs is an optional Composer package, absent from
-  most PHP projects — so every agent read a command that could not run, and
-  the contradiction propagated eight files at a time. It is now declared only
-  when something proves it: the vendored binary, a `require-dev` entry, or a
-  ruleset. Ruff had the same flaw, since it does not ship with Python either,
-  and a `lint` script was chained onto `tsc --noEmit` whether or not
-  `package.json` defined one — which made the whole command fail where it did
-  not. Linters that come with their toolchain, clippy and `go vet`, are still
-  assumed from the language.
-
 ### Changed
+
+- Projects > Code fetches one folder when it is opened, instead of the whole
+  repository up front. Opening the tab went from 4.19 s to about 0.10 s on this
+  repository, and the cost no longer grows with it. The 10 000-file ceiling that
+  used to cut the tree — silently, with the missing files indistinguishable from
+  files that do not exist — is gone; what remains bounds a single answer and
+  says so when it is reached.
+
+- A `[src: …]` citation reads as a chip rather than as notation. The file's name
+  and lines instead of its whole path, a sha cut to seven characters, a URL by
+  its host — with the exact reference on the chip, because a citation exists to
+  be checked. It carries the verdict the backend already reached: verified,
+  suspect, or honestly unknown.
+
+- The panel strip floats over the conversation instead of holding a column.
+  Closed, it reserved its width down the whole height for two buttons sitting at
+  the top of it; only the message-search bar now steps aside for it.
+
+- The Kronn mark is drawn rather than resampled, at every size it appears —
+  browser tab, desktop icon, app header, share card — and the startup screen
+  turns it slowly instead of showing a generic spinner.
 
 - The model catalogue is one sorted table instead of ten stacked lists. A real
   install carries 637 models across ten sources — 502 from a single router — and
@@ -348,6 +307,120 @@ Release notes for 0.9.3 and earlier are available in the
   is not in the thread.
 
 ### Fixed
+
+- Projects > Code listed nothing under folders that came late in the alphabet.
+  pnpm's content-addressable store is not a name the hand-written skip list
+  knew, and it filled the 10 000-file budget on its own, so the walk stopped
+  before reaching `site/`. Git already knows what is generated: the walk asks it
+  once and does not enter what it ignores, which takes this repository from over
+  10 000 files to 2 088.
+
+- A folder that had not loaded yet was drawn exactly like an empty one. It
+  opened onto nothing and its contents turned up seconds later; it now says it
+  is loading, and says so differently when the request failed.
+
+- A directory reached through a symlink could serve files from outside the
+  project. Symlinked children were skipped, but the directory the caller named
+  never was — precisely because it was the one they chose.
+
+- The global search re-ran the same term without noticing the scope had changed.
+
+- A project's Docker link opens the port the container actually published.
+  Compose files routinely name that port through a variable, so several
+  projects on one machine take turns on 443 and the rest land on 8443 or 9443
+  — but Kronn read the compose file's default and sent the link to 443
+  regardless. It reached whichever project holds that port, which answers with
+  an error from an unrelated application: nothing says you are on the wrong
+  project, so the bug gets hunted in the wrong place. The running container's
+  own publisher is now the authority, the port is still omitted when it is the
+  scheme's default, each published host keeps its own, and an endpoint nothing
+  is listening on is shown as unreachable rather than offered as a link.
+
+- OpenCode answers in the room again. Every chunk it streams carries its text
+  as a single content object, a shape the ACP reader handled neither as a
+  string nor as an array — so the whole reply fell through, the turn was
+  recorded as failed with no visible output, and the message offered two
+  guesses that were both wrong. Its private reasoning, which arrives the same
+  way, is read and deliberately not shown: it is a scratchpad, and folding it
+  into the answer would leak it. The turn's tokens are read from the response
+  too, where ACP puts them, instead of being dropped with it — a reply that
+  cost 7 946 tokens was recorded as costing nothing.
+
+- The frontend lint gate is green again, by fixing what it flagged rather than
+  by raising its ceiling. The release had added twenty-six warnings to a budget
+  that had four left; all twenty-six are gone, and the count is 64 against a
+  ceiling of 72. Nearly all described one habit — state written in an effect to
+  correct what the render before it already showed — so those values are
+  resolved where they are used, and the ones describing a particular thing now
+  carry which thing. Two genuine exceptions are declared at the line with their
+  reason: an image array whose identity changes every render, and the registry
+  of in-flight AbortControllers, which the rule would have held in state.
+
+- An action card aimed at another project's Quick Prompt launches, and says
+  where it will run. The preflight refused it outright, which made a proposal
+  unusable for the one thing it was for. The whole mechanism is human-gated —
+  the agent proposes, Kronn checks the target, a person decides by clicking —
+  and the checks that matter all still run: the target exists, its variables
+  match its contract, the proposed project is the target's own, and that
+  project exists. What the guard was refusing after all of those is a decision,
+  not a risk. The card now carries the target's project, quietly and always,
+  because lifting the guard without saying where the action goes would be worse
+  than the guard. Discussions and Live Pages changed together: the same gesture
+  cannot mean two things depending on where the card is drawn. Server-side
+  resolution of a Live Page's dataset-bound values is untouched.
+
+- Notes have a place of their own. An agent could already ask for a clean list
+  of a discussion's notes; the route that served it was never called from this
+  side, so the person who wrote them could not read them back — theirs were
+  mixed into the transcript, behind a switch that showed all or none, with no
+  way to list, correct or remove one. There is a Notes panel now, beside the
+  others: it lists them, writes them where the list already is, corrects one in
+  place and deletes it through the tombstone Kronn already had. A room with
+  months of notes loads them a page at a time rather than in one request.
+- Search can be pointed at notes alone. The scope filter gains a fourth
+  option beside title, content and both: "notes only", for when the note is
+  what you are after and the transcript around it is noise. Scoping to notes
+  drops title matches with it — a note has no title of its own, and keeping
+  them would quietly widen the search back to the whole discussion.
+
+- An edited note says so, with the date. Silently replacing what someone wrote
+  for themselves is the one thing an editable note must not do, so the panel
+  carries the moment of the last rewrite — and stays quiet on a note that was
+  never touched. On a note somebody else wrote, the edit and delete controls
+  are hidden and their author is named instead. That is a guard rail in the
+  interface, not an authorisation: Kronn has no multi-user authentication, the
+  pseudo is declarative, and the endpoints behind those buttons accept any
+  caller. It keeps a shared room from being tidied by accident; it prevents
+  nothing. An unsigned note counts as this machine's own, so nobody is locked
+  out of the notes they wrote before setting a pseudo.
+
+- A deleted note leaves the notes list. Its tombstone stays in the transcript,
+  where a gap has to be explained, but a list of notes is not a transcript:
+  showing the marker there would be listing something its author removed. The
+  agent tool reads the same list and stops seeing it too, and the count agrees
+  with what the list returns.
+
+- A task can be taken out of a discussion's plan. It could be added, and then
+  only moved between "active" and "later" — never removed. A room that runs for
+  weeks accumulates work belonging to the next release, and reading its plan
+  meant reading past all of it. `task_unlink_discussion` is the reverse of the
+  tool that adds one; the task, its history and its other discussions are kept.
+  It fits under the MCP surface ceiling rather than over it: the four heaviest
+  descriptions it pushed past the line were tightened by nearly what it costs,
+  and the ceiling was lowered to the new measurement rather than raised to
+  admit it.
+
+- Kronn stopped telling agents to run linters the project does not have. A
+  `composer.json` was enough to write `Lint: phpcs` into all eight generated
+  instruction files, but phpcs is an optional Composer package, absent from
+  most PHP projects — so every agent read a command that could not run, and
+  the contradiction propagated eight files at a time. It is now declared only
+  when something proves it: the vendored binary, a `require-dev` entry, or a
+  ruleset. Ruff had the same flaw, since it does not ship with Python either,
+  and a `lint` script was chained onto `tsc --noEmit` whether or not
+  `package.json` defined one — which made the whole command fail where it did
+  not. Linters that come with their toolchain, clippy and `go vet`, are still
+  assumed from the language.
 
 - Codex and OpenCode list their models again. Both had moved to shapes the
   catalogue reader did not know — Codex now describes each reasoning effort as

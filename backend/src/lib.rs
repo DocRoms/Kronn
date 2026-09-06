@@ -467,6 +467,7 @@ const DESTRUCTIVE_POSTS: &[&str] = &[
     "/api/debug/logs/clear",
     "/api/agents/uninstall",
     "/api/rtk/deactivate",
+    "/api/orchestration/provider-quotas/{provider}/rearm",
 ];
 
 /// Passe D — the destructive-request criterion: every DELETE (no benign DELETE
@@ -475,6 +476,9 @@ const DESTRUCTIVE_POSTS: &[&str] = &[
 fn is_destructive(method: &axum::http::Method, path: &str) -> bool {
     method == axum::http::Method::DELETE
         || DESTRUCTIVE_POSTS.contains(&path)
+        || (method == axum::http::Method::POST
+            && path.starts_with("/api/orchestration/provider-quotas/")
+            && path.ends_with("/rearm"))
         || path.ends_with("/cleanup-orphan-env")
         || path.ends_with("/context-audit/baseline")
         || path.ends_with("/audit-attestation")
@@ -1230,6 +1234,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         )
         // ── MCPs ──
         .route("/api/mcps", get(api::mcps::overview))
+        .route(
+            "/api/mcps/project-environment-names/{project_id}",
+            get(api::mcps::project_environment_names),
+        )
         .route("/api/mcps/registry", get(api::mcps::list_registry))
         .route("/api/mcps/refresh", post(api::mcps::refresh))
         .route(
@@ -1563,10 +1571,7 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             "/api/quick-apis/{id}/export",
             get(api::quick_apis::export_qa),
         )
-        .route(
-            "/api/quick-apis/{id}/usage",
-            get(api::quick_apis::usage),
-        )
+        .route("/api/quick-apis/{id}/usage", get(api::quick_apis::usage))
         .route("/api/quick-apis/import", post(api::quick_apis::import_qa))
         // ── Quick Execs (reusable shell-free CLI collectors) ──
         .route(
@@ -1582,6 +1587,14 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route("/api/quick-execs/{id}/run", post(api::quick_execs::run))
         .route("/api/runs", get(api::shared_runs::list))
         .route("/api/runs/{id}", get(api::shared_runs::get))
+        .route(
+            "/api/discussions/{id}/questions",
+            get(api::discussion_questions::list),
+        )
+        .route(
+            "/api/discussions/{id}/questions/{question_id}/answer",
+            post(api::discussion_questions::answer),
+        )
         .route(
             "/api/discussions/{id}/actions",
             get(api::discussion_actions::list_for_discussion),
@@ -1840,6 +1853,14 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route(
             "/api/orchestration/provision",
             post(api::orchestration::provision),
+        )
+        .route(
+            "/api/orchestration/provider-quotas",
+            get(api::orchestration::provider_quota_states),
+        )
+        .route(
+            "/api/orchestration/provider-quotas/{provider}/rearm",
+            post(api::orchestration::rearm_provider_quota),
         )
         .route(
             "/api/orchestration/tool/workers",
@@ -2404,6 +2425,7 @@ mod auth_tests {
             "/api/debug/logs/clear",
             "/api/agents/uninstall",
             "/api/rtk/deactivate",
+            "/api/orchestration/provider-quotas/Codex/rearm",
             "/api/mcps/custom/srv-1/cleanup-orphan-env",
             "/api/projects/p1/context-audit/baseline",
             "/api/projects/p1/audit-attestation",

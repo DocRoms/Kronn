@@ -1,7 +1,7 @@
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { I18nProvider } from '../../lib/I18nContext';
-import type { Discussion } from '../../types/generated';
+import type { DiscussionListItem } from '../../types/generated';
 
 vi.mock('../../hooks/useWebSocket', () => ({
   useWebSocket: vi.fn(() => ({ connected: false, connectionState: 'connecting' })),
@@ -63,7 +63,9 @@ vi.mock('../../lib/api', () => ({
 import { discussions as discussionsApi, pages as pagesApi } from '../../lib/api';
 import { Dashboard } from '../Dashboard';
 
-const makeDiscussion = (id: string): Discussion => ({
+const makeDiscussion = (id: string): DiscussionListItem => ({
+  // KT-595 — the list carries the pending-decision count now.
+  pending_question_count: 0,
   id,
   project_id: null,
   title: `Discussion ${id}`,

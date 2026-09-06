@@ -28,7 +28,7 @@ import {
 import { queueDiscussionWorkspaceTarget } from '../lib/discussion-navigation';
 import { useT } from '../lib/I18nContext';
 import { userError } from '../lib/userError';
-import { readPlanOrchestrationState, writePlanOrchestrationState } from '../lib/orch-panel-state';
+import { readPlanOrchestrationState, writePlanOrchestrationState, type PlanOrchestrationState } from '../lib/orch-panel-state';
 import { CopyIdPill } from './CopyIdPill';
 import { PlanAllTasksView } from './PlanAllTasksView';
 import { PlanningProposalReview } from './PlanningProposalReview';
@@ -85,7 +85,7 @@ export function DiscussionPlanPanel({
   const [quickTitle, setQuickTitle] = useState('');
   const [creating, setCreating] = useState(false);
   const [primaryOpen, setPrimaryOpen] = useState(true);
-  const [viewMode, setViewMode] = useState<'focus' | 'all'>(initialPanelState.viewMode);
+  const [viewMode, setViewMode] = useState<PlanOrchestrationState['viewMode']>(initialPanelState.viewMode);
   const [currentExpandedFor, setCurrentExpandedFor] = useState<string | null>(null);
   const [upcomingExpandedFor, setUpcomingExpandedFor] = useState<string | null>(null);
   const [allQuery, setAllQuery] = useState('');
@@ -380,6 +380,13 @@ export function DiscussionPlanPanel({
   };
   const filteredAllRelations = useMemo(() => {
     if (!plan) return { active: [], later: [] };
+    // Unlike Focus, this status view includes blocked and later-plan tasks.
+    if (viewMode === 'in_progress') {
+      return {
+        active: plan.active.filter(relation => relation.task.status === 'in_progress'),
+        later: plan.later.filter(relation => relation.task.status === 'in_progress'),
+      };
+    }
     if (planFilter === 'ready') {
       return {
         active: plan.active.filter(relation => relation.actionable),
@@ -404,7 +411,12 @@ export function DiscussionPlanPanel({
       return { active: [], later: plan.later };
     }
     return { active: plan.active, later: plan.later };
-  }, [plan, planFilter]);
+  }, [plan, planFilter, viewMode]);
+
+  const selectView = (view: PlanOrchestrationState['viewMode']) => {
+    setViewMode(view);
+    setPlanFilter(null);
+  };
 
   const togglePlanFilter = (filter: PlanFilter) => {
     setPlanFilter(previous => previous === filter ? null : filter);
@@ -502,6 +514,12 @@ export function DiscussionPlanPanel({
     }
   };
 
+  const renderProgress = (status: PlanningTaskStatus) => status === 'in_progress' ? (
+    <span className="plan-task-progress" role="img" aria-label={t('planning.status.in_progress')}>
+      <Loader2 size={12} aria-hidden="true" />
+    </span>
+  ) : null;
+
   const renderTask = (relation: PlanningDiscussionRelation) => {
     const done = relation.task.status === 'done';
     const blocked = relation.task.status === 'blocked' || relation.task.blocker_count > 0;
@@ -536,6 +554,7 @@ export function DiscussionPlanPanel({
             <span className="plan-task-title">{relation.task.title}</span>
           </button>
           <span className="plan-task-meta">
+            {renderProgress(relation.task.status)}
             <CopyIdPill
               id={relation.task.id}
               label={relation.task.reference}
@@ -594,6 +613,7 @@ export function DiscussionPlanPanel({
       <div className="plan-all-task-content" data-selected={selected}>
         <span className="plan-all-task-title">{relation.task.title}</span>
         <span className="plan-all-task-meta">
+          {renderProgress(relation.task.status)}
           <span>{relation.task.reference}</span>
           <span data-status={relation.task.status}>
             {t(`planning.status.${relation.task.status}`)}
@@ -769,15 +789,26 @@ export function DiscussionPlanPanel({
               <button
                 type="button"
                 data-active={viewMode === 'focus'}
-                onClick={() => setViewMode('focus')}
+                aria-pressed={viewMode === 'focus'}
+                onClick={() => selectView('focus')}
               >
                 <Focus size={12} />
                 {t('planning.focusView')}
               </button>
               <button
                 type="button"
+                data-active={viewMode === 'in_progress'}
+                aria-pressed={viewMode === 'in_progress'}
+                onClick={() => selectView('in_progress')}
+              >
+                <Circle size={12} />
+                {t('planning.status.in_progress')}
+              </button>
+              <button
+                type="button"
                 data-active={viewMode === 'all'}
-                onClick={() => setViewMode('all')}
+                aria-pressed={viewMode === 'all'}
+                onClick={() => selectView('all')}
               >
                 <List size={12} />
                 {t('planning.allView')}
@@ -900,10 +931,11 @@ export function DiscussionPlanPanel({
             </div>
           )}
 
-          {viewMode === 'all' && plan && (
+          {viewMode !== 'focus' && plan && (
             <PlanAllTasksView
               active={filteredAllRelations.active}
               later={filteredAllRelations.later}
+              label={viewMode === 'in_progress' ? t('planning.status.in_progress') : undefined}
               query={allQuery}
               onQueryChange={setAllQuery}
               selectedTaskId={selectedTask?.id ?? null}

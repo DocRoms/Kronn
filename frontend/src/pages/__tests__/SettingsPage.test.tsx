@@ -89,6 +89,8 @@ vi.mock('../../lib/api', () => ({
   },
   agents: {
     detect: vi.fn(),
+    quotaStates: vi.fn().mockResolvedValue([]),
+    rearmQuota: vi.fn().mockResolvedValue(true),
     install: vi.fn(),
     uninstall: vi.fn(),
     toggle: vi.fn(),
@@ -179,7 +181,8 @@ vi.mock('../../lib/api', () => ({
 }));
 
 import { SettingsPage } from '../SettingsPage';
-import { config as configApi } from '../../lib/api';
+import { agents as agentsApi, config as configApi } from '../../lib/api';
+import { dictionaries } from '../../lib/i18n/testing';
 import type { AgentsConfig, AgentDetection } from '../../types/generated';
 import type { ToastFn } from '../../hooks/useToast';
 
@@ -204,6 +207,27 @@ const sampleAgent: AgentDetection = {
 afterEach(() => {
   cleanup();
   localStorage.clear();
+});
+
+it('confirms and re-arms only the provider reported as quota-blocked', async () => {
+  vi.mocked(agentsApi.quotaStates).mockResolvedValueOnce([
+    { provider: 'ClaudeCode', blocked: true },
+    { provider: 'Codex', blocked: false },
+  ]);
+  const originalConfirm = window.confirm;
+  window.confirm = vi.fn().mockReturnValue(true);
+  try {
+    await wrap(<SettingsPage {...defaultProps} agents={[sampleAgent]} />);
+
+    const button = await screen.findByRole('button', { name: /réarmer le fournisseur/i });
+    fireEvent.click(button);
+    fireEvent.click(button);
+    await waitFor(() => expect(agentsApi.rearmQuota).toHaveBeenCalledWith('ClaudeCode', expect.any(String)));
+    expect(agentsApi.rearmQuota).toHaveBeenCalledTimes(1);
+    expect(agentsApi.rearmQuota).not.toHaveBeenCalledWith('Codex', expect.any(String));
+  } finally {
+    window.confirm = originalConfirm;
+  }
 });
 
 const wrap = async (ui: React.ReactElement) => {
@@ -400,7 +424,7 @@ describe('SettingsPage', () => {
     expect(document.body.textContent).toContain('Short answers');
   });
 
-  it('shows the current version under the settings menu with stable release links', async () => {
+  it('shows the current version and local Ko-fi support card under the settings menu', async () => {
     await wrap(<SettingsPage {...defaultProps} />);
 
     const nav = screen.getByRole('navigation', { name: 'Sections' });
@@ -409,10 +433,37 @@ describe('SettingsPage', () => {
     expect(versionCard!.textContent).toContain('Kronn v');
 
     const links = [...versionCard!.querySelectorAll<HTMLAnchorElement>('a')];
-    expect(links).toHaveLength(2);
+    expect(links).toHaveLength(3);
     expect(links[0].href).toBe('https://github.com/DocRoms/Kronn/releases');
     expect(links[1].href).toBe('https://github.com/DocRoms/Kronn');
     expect(links[1].textContent).toBe('Source code (AGPL-3.0)');
+    expect(links[2].href).toBe('https://ko-fi.com/docroms');
+    expect(links[2].textContent).toBe('Soutenir Kronn');
+    expect(links[2].querySelector('img')).toHaveAttribute('src', '/kofi.svg');
+  });
+
+  it('translates the Ko-fi support label in every UI locale', () => {
+    expect(dictionaries.fr['config.supportKronn']).toBe('Soutenir Kronn');
+    expect(dictionaries.en['config.supportKronn']).toBe('Support Kronn');
+    expect(dictionaries.es['config.supportKronn']).toBe('Apoyar a Kronn');
+    expect(dictionaries.zh['config.supportKronn']).toBe('支持 Kronn');
+  });
+
+  /// The bolt beside the version was a lucide icon, not a logo. The card now
+  /// reads left to right: the mark, then the two lines it labels.
+  it('puts the Kronn mark to the left of the version and the licence', async () => {
+    await wrap(<SettingsPage {...defaultProps} />);
+
+    const nav = screen.getByRole('navigation', { name: 'Sections' });
+    const card = nav.querySelector('[data-testid="settings-nav-version"] .set-version-card');
+    expect(card).toBeTruthy();
+    // The mark comes first, the stacked lines second — order is the layout.
+    expect(card!.children[0].tagName.toLowerCase()).toBe('svg');
+    const lines = card!.children[1];
+    expect(lines).toHaveClass('set-version-card-lines');
+    expect(lines.querySelectorAll('a')).toHaveLength(2);
+    // Two lines, so the em dash that joined them on one line is gone.
+    expect(card!.textContent).not.toContain('—');
   });
 
   it('shows a fully-clickable guided-tour progress CTA below the version card', async () => {

@@ -139,7 +139,7 @@ export function GlobalSearchPanel({
     } finally {
       if (runId === runIdRef.current) setLoading(false);
     }
-  }, [query, projectId, author, since, until]);
+  }, [query, scope, projectId, author, since, until]);
 
   useEffect(() => {
     if (initialSearchStartedRef.current || !initialQuery.trim()) return;

@@ -166,30 +166,24 @@ TOOLS = [
     {
         "name": "disc_meta",
         "description": (
-            "Return metadata about the current discussion (message_count, "
-            "agent, tier, has_cached_summary, msgs_since_last_summary, "
-            "summary_strategy, language, project_id), plus `addressable`: the "
-            "exact @mention for every identity reachable in this room, each with "
-            "its kind (`discussion_agent` = the room's own agent, `cli` = one "
-            "joined session). `ambiguous_aliases` names the providers present as "
-            "BOTH — for those, a bare @alias is refused, so read this BEFORE "
-            "writing a mention rather than discovering it in a refusal. Call this "
-            "FIRST when you need to decide whether to fetch context. Cheap."
+            "Read room metadata before fetching context or mentioning peers. "
+            "`addressable` gives exact aliases and kinds (discussion_agent vs cli); "
+            "bare aliases in `ambiguous_aliases` are refused."
         ),
         "inputSchema": {"type": "object", "properties": {}, "required": []},
     },
     {
+        "name": "disc_question_list",
+        "description": "Read pending human arbitrations (latest 50), or the durable answer for an exact key. Never answers for the human. A kronn-question requires numeric version 1, not string \"1\". After publication, read back its exact key to verify recording; absence is not consent. Complete valid example and recovery protocol: tool_manual({tool: \"disc_question_list\"}).",
+        "inputSchema": {"type": "object", "properties": {"key": {"type": "string", "maxLength": 100}}, "additionalProperties": False},
+    },
+    {
         "name": "disc_get_message",
         "description": (
-            "Return one message by either 0-indexed position (`idx`) or its "
-            "copyable `MSG-xxxxxxxx` / full UUID (`message_id`). Negative idx "
-            "counts from the end (-1 = last). Optional `before` / `after` "
-            "return a bounded surrounding window (maximum 10 each). Replies "
-            "expose their durable `reply_to_message_id`; locally-authored CLI "
-            "messages also expose `reply_target`, the exact joined session to "
-            "answer without guessing from the provider name. Use this "
-            "when you need verbatim local context without loading or "
-            "summarising the whole discussion. Cheap."
+            "Read a message by `idx` (0-based, -1 = last) or `message_id` "
+            "(MSG-xxxxxxxx / full UUID). `before`/`after` add at most 10 neighbours "
+            "each. Reply using `reply_to_message_id` and the exact CLI `reply_target`, "
+            "never guess its session from the provider."
         ),
         "inputSchema": {
             "type": "object",
@@ -589,13 +583,12 @@ TOOLS = [
     {
         "name": "disc_create",
         "description": (
-            "Create a new discussion in Kronn, optionally bound to the "
-            "current source session. When `source_agent` + "
-            "`source_session_id` are provided and a disc already exists "
-            "for that pair, returns the existing disc_id (idempotent — "
-            "safe to call on every CLI bootstrap). Use this once at the "
-            "start of a session to grab a stable Kronn disc_id you can "
-            "later append to."
+            "Create a Kronn discussion, optionally bound to current source "
+            "session. With `source_agent` + `source_session_id`, returns existing "
+            "disc_id (idempotent; safe at CLI bootstrap). Set "
+            "`no_agent:true` only for a peer-only room or a discussion "
+            "without a native responder; default false. Then append to its stable "
+            "disc_id."
         ),
         "inputSchema": {
             "type": "object",
@@ -1223,9 +1216,10 @@ TOOLS = [
     {
         "name": "disc_create_room",
         "description": (
-            "One-shot bootstrap of a multi-agent room: creates a fresh "
-            "discussion AND mints an invite token. Returns `{disc_id, title, "
-            "token, instruction_text, expires_at, next_step}`.\n\n"
+            "One-shot multi-agent room: creates a fresh peer-only discussion "
+            "(`no_agent` defaults true: no native responder) "
+            "and mints an invite token. Returns `{disc_id, title, token, "
+            "instruction_text, expires_at, next_step}`.\n\n"
             "⚠ This does NOT switch your own bridge binding — you stay in "
             "your current disc. Follow `next_step`, or diverge with a "
             "one-line rationale. Details: `tool_manual({tool: \"disc_create_room\"})`."
@@ -2269,20 +2263,14 @@ TOOLS = [
     {
         "name": "media_generate",
         "description": (
-            "Generate an image or video on a configured HTTP connection. "
-            "Returns `{job_id, status, model}`.\n\n"
-            "**You do NOT choose the model**: it comes from the connection's "
-            "configured slot, so nothing is billed on a model the human did "
-            "not pick. A modality with no slot is refused, naming what to "
-            "configure.\n\n"
-            "**Cost is real.** Video bills per second (~0.07 USD for 5 s at "
-            "480p), image per picture; a soundtrack — on unless you pass "
-            "`generate_audio: false` — raises that. Ask for the shortest clip "
-            "that works.\n\n"
-            "**`wait` defaults to false** and should stay there: a video takes "
-            "~100 s and lands in the discussion by itself, as a context file "
-            "every agent sees. Pass `true` only when the media must appear in "
-            "the answer you are writing now."
+            "Generate an image/video on a configured HTTP connection; returns "
+            "`{job_id, status, model}`. The human's configured modality slot fixes "
+            "the model; a missing slot is refused with setup guidance. "
+            "Billed operation: video per second, image per picture; audio "
+            "(on unless `generate_audio: false`) adds cost. Use the shortest useful clip. "
+            "Keep `wait: false` (default): the asset arrives in the discussion "
+            "automatically as a context file for all agents. Use `true` only if "
+            "needed in your current answer."
         ),
         "inputSchema": {
             "type": "object",
@@ -4287,6 +4275,19 @@ def _attach_files_to_appended_message(disc_id, message_id, paths, duplicate):
 
 
 # ─── Tool dispatch ─────────────────────────────────────────────────────────
+
+def call_disc_question_list(args):
+    key = args.get("key")
+    if key is not None and (not isinstance(key, str) or not key or len(key) > 100):
+        raise RuntimeError("key must be a non-empty string of at most 100 characters")
+    data = _unwrap(_http("GET", f"/api/discussions/{_disc_id()}/questions"))
+    if not isinstance(data, dict) or not isinstance(data.get("questions"), list):
+        raise RuntimeError("Invalid discussion questions response")
+    matches = [q for q in data["questions"] if
+               (q.get("key") == key if key is not None else q.get("state") == "pending")]
+    return {"questions": matches[-50:], "matching_count": len(matches),
+            "pending_count": data.get("pending_count", 0), "truncated": len(matches) > 50}
+
 
 def call_disc_meta(_args):
     """Room metadata, plus who can actually be addressed in it (KT-372 DoD-4).
@@ -9334,6 +9335,29 @@ def call_kronn_intro(_args):
 # always. What stays in a tool's own description is what fails at RUN time if
 # guessed — traps, closed sets, binding rules — never the methodology.
 TOOL_MANUALS = {
+    "disc_question_list": (
+        "A blocking human decision MUST be a `kronn-question` JSON fence posted "
+        "with disc_append (Agent/main), not a prose-only question. Example: "
+        '`{"version":1,"key":"quota-policy","question":"Which policy?",'
+        '"options":[{"id":"retry","label":"Retry"},{"id":"wait","label":"Wait"}],'
+        '"recommended_option_ids":["retry"],"task_ref":"KT-593"}`. '
+        'Required: version MUST be the JSON number 1; the string "1" is INVALID '
+        "(unlike delivery/review manifests). Required: stable key (ASCII letters/digits/-_.; <=100), question "
+        "(<=1000). Optional: context (<=4000), task_ref, multiple (default false), "
+        "0-8 options with unique id, label (<=250), description (<=1000). "
+        "Free text is always allowed. Recommendations never select or approve. "
+        "Same key in a room keeps ONE immutable card; reuse it on retry. "
+        "Read pending cards before asking; pass key to recover a prior answer "
+        "after reconnect or handoff. After disc_append, read back this exact key "
+        "with disc_question_list and verify that the card was recorded. An absent "
+        "row is NOT a pending or answered decision: check the closed fence and "
+        "JSON field types, correct the payload and republish with the same key. "
+        "A message write receipt is neither a recorded card nor human consent. "
+        "Wait with disc_wait_for_peer; do not "
+        "execute/delegate/complete the affected lot until state=answered. "
+        "Independent tasks may continue. Only the human UI can answer. The "
+        "answer and its User reply remain durable even if the original CLI is offline."
+    ),
     "agent_list": (
         "Use `agent_list()` before `task_exec_prepare` when the worker identity is not "
         "already known. Copy one entry's `worker` object unchanged; it is the same typed "
@@ -10115,6 +10139,7 @@ DISPATCH = {
     "audit_launch": call_audit_launch,
     "audit_status": call_audit_status,
     "disc_meta": call_disc_meta,
+    "disc_question_list": call_disc_question_list,
     "disc_get_message": call_disc_get_message,
     "disc_note_list": call_disc_note_list,
     "disc_summarize": call_disc_summarize,
@@ -10750,6 +10775,7 @@ def _handle(req):
                     "• Opaque IDs: when the user pastes an ID without naming its type, call `resolve_id` FIRST; it returns compact routing context and the object-specific tool to use next.\n"
                     "• Discussions (multi-agent threads): `disc_meta`/`disc_get_message`/`disc_search`/`disc_load_other`/`disc_create`/`disc_append`/`disc_join`/`disc_invite_peer`…\n"
                     "• **Working in a room:** a room is not a mailbox you empty at the end. After each real step — a commit, a green test run, a background task that finished, a milestone — call `disc_wait_for_peer` BEFORE starting the next one. Its cursor is durable, so re-checking never re-delivers what you already read, and a quiet return costs nothing. A peer's message routinely changes what you are about to build: a design review of the choice you just made, a file boundary, a decision the human already took. Long silent stretches of work are how two agents duplicate each other, or how one keeps building on a choice the other has already overturned. Messages flagged `awareness: true` are context to read, never turns to answer. Any tool result may also carry a `kronn_room` block: turns that arrived while you were working, attached to an answer you asked for. `attention_required` holds turns addressed to YOU — read them before continuing, because a peer announcing a scope is how duplicate work gets prevented; `context` is background you read without answering turn by turn. Seeing it does not replace calling `disc_wait_for_peer`: it appears only when you happen to call something else.\n"
+                    '• Blocking human decisions MUST use a closed `kronn-question` JSON fence, never prose alone. `version` MUST be the JSON number 1, never the string "1". Read `disc_question_list` first; its tool_manual has a complete valid example. After publication, read back the exact key to verify recording; if absent, correct the payload and republish with the same key. Wait for a durable human answer before advancing the affected lot; independent work can continue. Agents cannot answer for humans.\n'
                     "• Rich room output: messages are Markdown. A `mermaid` fence renders a diagram; `kronn-doc-preview` renders sandboxed HTML with PDF/DOCX actions (a plain `html` fence is only code); `kronn-doc-data` exposes CSV/XLSX/PPTX export. Use visual output only when it materially helps.\n"
                     "• Planning: a discussion may have a shared plan made of prioritized, editable tasks. The user may refer to it naturally as “the plan”, “the tasks”, “what remains”, “the priority”, and similar wording. Use `plan_get` (compact current objective/plan) · `task_list` (compact filtered backlog) · `task_get` (FULL task) · `task_changes` (deltas) · `proposal_list`/`proposal_get` (durable proposals, read-only) · narrow writes `task_create`/`task_update`/`task_update_dod`/`task_link_discussion`/`task_unlink_discussion`/`task_add_blocker`/`task_remove_blocker`. Read the relevant plan first. Immediately before any direct `task_create`, call `plan_get` again so a peer's recent write is visible. Apply unambiguous intent directly; otherwise propose a human-gated `kronn-plan-action` fence (`create`, `create_many`, `status`, `complete`, `unblock`, `open`). You may read and propose, but only a human accepts, rejects or decides a durable proposal. Never replace a requested plan update with a prose-only summary. Whenever tracked work starts or materially changes, keep its status, DoD and priority honest in the plan. Write only on a real change: never reload or rewrite an unchanged task merely to report progress. If the announced Planning tools are missing from your MCP surface, use the read-only `plan_snapshot` from `disc_join`, ask @user to reconnect the Kronn MCP, and never fabricate an update.\n"
                     "• Human-gated Automation proposals: after resolving a real QP/QA/QE/Workflow id and its declared variables through the catalogue/get tools, an agent may emit one `kronn-action` fence with `{\"kind\":\"quick_prompt|quick_api|quick_exec|workflow\",\"target_id\":\"<real id>\",\"project_id\":\"<optional id>\",\"values\":[{\"name\":\"<declared variable>\",\"value\":\"<editable suggestion>\",\"provenance\":\"agent_suggestion\",\"suggested_by\":\"<your alias>\"}]}`. This proposes only: Kronn validates and persists the card, and the human click launches it. Never invent ids/variables or include secret/resolved values.\n"

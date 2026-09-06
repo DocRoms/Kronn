@@ -23,6 +23,7 @@ const MAX_WORKER_SEARCH_TEXT_CALLS: usize = 24;
 pub(crate) const MAX_READ_FILE_CALLS: usize = 48;
 const MAX_ERRORS_PER_TOOL: usize = 3;
 const MAX_ERROR_ONLY_TOOL_ROUNDS: usize = 6;
+const ACP_DIAGNOSTIC_MAX_CHARS: usize = 1_024;
 const WORKER_EXPLORATION_NUDGE_AT: usize = 24;
 const WORKER_FINALIZATION_ITERATIONS: usize = 12;
 const WORKER_FINALIZATION_READ_FILE_CALLS: usize = 3;
@@ -1345,7 +1346,6 @@ fn cli_authored_error_text(json: &serde_json::Value) -> Option<String> {
     };
     (!text.trim().is_empty()).then_some(text)
 }
-
 
 /// Result of parsing a single stream-json line
 #[derive(Debug)]
@@ -3628,6 +3628,7 @@ async fn run_acp_session(
         .unwrap_or_default();
     let task_cancel = cancel.clone();
     let task_usage = usage.clone();
+    let task_stderr = stderr_capture.clone();
     let process_agent_type = agent_type.clone();
     let event_agent_label = format!("{agent_type:?}");
     let event_agent_type = agent_type.clone();
@@ -3705,13 +3706,21 @@ async fn run_acp_session(
         let persistence_error = persistence_error.lock().unwrap().take();
         let ok = match (&result, persistence_error.as_ref()) {
             (_, Some(error)) => {
-                tracing::error!(agent = %event_agent_label, "ACP session persistence failed: {error}");
+                let diagnostic = acp_failure_diagnostic("session persistence", error);
+                tracing::error!(agent = %event_agent_label, "{diagnostic}");
+                if let Ok(mut capture) = task_stderr.lock() {
+                    capture.push(diagnostic);
+                }
                 false
             }
             (Ok(()), None) if !cancelled => true,
             (Ok(()), None) => false,
             (Err(error), None) => {
-                tracing::warn!(agent = %event_agent_label, "ACP session failed: {error}");
+                let diagnostic = acp_failure_diagnostic("prompt", &error.to_string());
+                tracing::warn!(agent = %event_agent_label, "{diagnostic}");
+                if let Ok(mut capture) = task_stderr.lock() {
+                    capture.push(diagnostic);
+                }
                 false
             }
         };
@@ -3734,6 +3743,18 @@ async fn run_acp_session(
         http_cancel: Some(cancel),
         pgid: None,
     })
+}
+
+fn acp_failure_diagnostic(operation: &str, error: &str) -> String {
+    // ACP diagnostics are surfaced through AgentProcess. Use the stricter
+    // audit-artifact pass as well as vendor-token masking so bare secret
+    // assignments from adapter or transport errors cannot reach the user.
+    let redacted = crate::core::redact::redact_for_audit_artifact(error).0;
+    let mut excerpt: String = redacted.chars().take(ACP_DIAGNOSTIC_MAX_CHARS).collect();
+    if redacted.chars().nth(ACP_DIAGNOSTIC_MAX_CHARS).is_some() {
+        excerpt.push('…');
+    }
+    format!("ACP {operation} failed: {excerpt}")
 }
 
 /// ACP receives only command-only MCP declarations from Kronn's canonical
@@ -8912,9 +8933,7 @@ fn nul_byte_offender(command: &tokio::process::Command) -> Option<String> {
     // have broken every other spawn on the host.
     command
         .get_envs()
-        .find(|(key, value)| {
-            os_str_is_nul_bearing(key) || value.is_some_and(os_str_is_nul_bearing)
-        })
+        .find(|(key, value)| os_str_is_nul_bearing(key) || value.is_some_and(os_str_is_nul_bearing))
         .map(|(key, _)| format!("environment variable {}", key.to_string_lossy()))
 }
 
@@ -9800,34 +9819,57 @@ fn read_gemini_settings_api_key() -> Option<String> {
 mod acp_resume_tests {
     use super::*;
     use crate::acp::{
-        AcpConfigOption, AcpError, AcpInitialize, AcpNegotiatedCapabilities, AcpSessionEvent,
-        AcpSessionTarget, AcpTransport,
+        AcpAgent, AcpCapability, AcpConfigOption, AcpError, AcpInitialize,
+        AcpNegotiatedCapabilities, AcpSessionEvent, AcpSessionTarget, AcpTransport,
     };
+    use std::collections::BTreeSet;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    /// Answers every call, and records whether a fresh session had to be made.
-    struct ResumeTransport {
+    enum PromptOutcome {
+        Complete,
+        Fail(String),
+        WaitForCancel,
+    }
+
+    struct RunnerTransport {
         resume_ok: bool,
+        prompt_outcome: PromptOutcome,
+        native_session_id: Option<String>,
         created: AtomicUsize,
         resumed: AtomicUsize,
+        cancelled: AtomicUsize,
     }
 
     #[async_trait::async_trait]
-    impl AcpTransport for ResumeTransport {
+    impl AcpTransport for RunnerTransport {
         async fn initialize(
             &self,
             _: AcpInitialize,
         ) -> Result<AcpNegotiatedCapabilities, AcpError> {
-            unimplemented!("the resume decision is taken after negotiation")
+            Ok(AcpNegotiatedCapabilities {
+                protocol_version: 1,
+                capabilities: BTreeSet::from([
+                    AcpCapability::Sessions,
+                    AcpCapability::Resume,
+                    AcpCapability::Streaming,
+                    AcpCapability::Cancellation,
+                    AcpCapability::McpInjection,
+                ]),
+            })
         }
         async fn create_session(&self) -> Result<AcpSessionTarget, AcpError> {
             self.created.fetch_add(1, Ordering::SeqCst);
-            AcpSessionTarget::new(crate::acp::AcpAgent::OpenCode, "fresh-session")
+            AcpSessionTarget::new(AcpAgent::OpenCode, "fresh-session")
         }
         async fn config_options(&self) -> Vec<AcpConfigOption> {
             Vec::new()
         }
-        async fn set_config_option(&self, _: &AcpSessionTarget, _: &str, _: &str) -> Result<(), AcpError> {
+        async fn set_config_option(
+            &self,
+            _: &AcpSessionTarget,
+            _: &str,
+            _: &str,
+        ) -> Result<(), AcpError> {
             Ok(())
         }
         async fn resume_session(&self, _: &AcpSessionTarget) -> Result<(), AcpError> {
@@ -9842,16 +9884,92 @@ mod acp_resume_tests {
             &self,
             _: &AcpSessionTarget,
             _: &str,
-            _: tokio::sync::mpsc::Sender<AcpSessionEvent>,
+            events: tokio::sync::mpsc::Sender<AcpSessionEvent>,
         ) -> Result<(), AcpError> {
-            Ok(())
+            match &self.prompt_outcome {
+                PromptOutcome::Complete => {
+                    events
+                        .send(AcpSessionEvent::TextDelta("first chunk".into()))
+                        .await
+                        .unwrap();
+                    events
+                        .send(AcpSessionEvent::ToolCall {
+                            name: "read_file".into(),
+                        })
+                        .await
+                        .unwrap();
+                    events
+                        .send(AcpSessionEvent::Usage {
+                            input_tokens: 3,
+                            output_tokens: 5,
+                        })
+                        .await
+                        .unwrap();
+                    if let Some(session_id) = &self.native_session_id {
+                        events
+                            .send(AcpSessionEvent::NativeSessionId(session_id.clone()))
+                            .await
+                            .unwrap();
+                    }
+                    events.send(AcpSessionEvent::Completed).await.unwrap();
+                    Ok(())
+                }
+                PromptOutcome::Fail(error) => Err(AcpError::Transport(error.clone())),
+                PromptOutcome::WaitForCancel => std::future::pending().await,
+            }
         }
         async fn cancel(&self, _: &AcpSessionTarget) -> Result<(), AcpError> {
+            self.cancelled.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
         async fn shutdown(&self) -> Result<(), AcpError> {
             Ok(())
         }
+    }
+
+    fn transport(resume_ok: bool, prompt_outcome: PromptOutcome) -> Arc<RunnerTransport> {
+        Arc::new(RunnerTransport {
+            resume_ok,
+            prompt_outcome,
+            native_session_id: None,
+            created: AtomicUsize::new(0),
+            resumed: AtomicUsize::new(0),
+            cancelled: AtomicUsize::new(0),
+        })
+    }
+
+    async fn run_fixture(
+        transport: Arc<RunnerTransport>,
+        agent_type: &AgentType,
+        resume_id: Option<&str>,
+        parent_cancel: Option<&tokio_util::sync::CancellationToken>,
+        session_store: Option<AcpSessionStore>,
+    ) -> AgentProcess {
+        run_acp_session(
+            AcpSessionRequest {
+                agent_type,
+                work_dir: Path::new("."),
+                prompt: "fixture prompt",
+                system_context: "",
+                project_path: "",
+                model_flag: None,
+                parent_cancel,
+                discussion_id: None,
+                resume_id,
+                session_store,
+            },
+            transport,
+        )
+        .await
+        .expect("run ACP fixture")
+    }
+
+    async fn collect_output(process: &mut AgentProcess) -> String {
+        let mut output = String::new();
+        while let Some(line) = process.next_line().await {
+            output.push_str(&line);
+        }
+        output
     }
 
     #[test]
@@ -9867,21 +9985,151 @@ mod acp_resume_tests {
     }
 
     #[tokio::test]
-    async fn a_recorded_session_that_no_longer_exists_starts_a_new_one() {
-        // An ACP session lives in the CLI's memory, so a recorded id dies with
-        // the process that issued it. Refusing the turn would strand the agent
-        // for good: the dead id stays recorded, so every later turn fails too.
-        let transport = Arc::new(ResumeTransport {
+    async fn run_acp_session_streams_usage_through_agent_process() {
+        let transport = transport(false, PromptOutcome::Complete);
+        let mut process =
+            run_fixture(transport.clone(), &AgentType::OpenCode, None, None, None).await;
+
+        assert_eq!(
+            collect_output(&mut process).await,
+            "first chunk[OpenCode tool: read_file]"
+        );
+        assert!(process.child.wait().await.expect("lifeline").success());
+        assert_eq!(process.reported_token_usage(), Some(8));
+        assert_eq!(transport.created.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn run_acp_session_uses_resume_and_keeps_the_existing_fallback() {
+        let resumed = transport(true, PromptOutcome::Complete);
+        let mut resumed_process = run_fixture(
+            resumed.clone(),
+            &AgentType::OpenCode,
+            Some("recorded-session"),
+            None,
+            None,
+        )
+        .await;
+        collect_output(&mut resumed_process).await;
+        assert!(resumed_process
+            .child
+            .wait()
+            .await
+            .expect("lifeline")
+            .success());
+        assert_eq!(resumed.resumed.load(Ordering::SeqCst), 1);
+        assert_eq!(resumed.created.load(Ordering::SeqCst), 0);
+
+        let fallback = transport(false, PromptOutcome::Complete);
+        let mut fallback_process = run_fixture(
+            fallback.clone(),
+            &AgentType::OpenCode,
+            Some("stale-session"),
+            None,
+            None,
+        )
+        .await;
+        collect_output(&mut fallback_process).await;
+        assert!(fallback_process
+            .child
+            .wait()
+            .await
+            .expect("lifeline")
+            .success());
+        assert_eq!(fallback.resumed.load(Ordering::SeqCst), 1);
+        assert_eq!(fallback.created.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn run_acp_session_cancellation_is_not_reported_as_success() {
+        let transport = transport(false, PromptOutcome::WaitForCancel);
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        let mut process = run_fixture(
+            transport.clone(),
+            &AgentType::OpenCode,
+            None,
+            Some(&cancellation),
+            None,
+        )
+        .await;
+
+        cancellation.cancel();
+        assert_eq!(collect_output(&mut process).await, "");
+        assert!(!process.child.wait().await.expect("lifeline").success());
+        assert_eq!(transport.cancelled.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn run_acp_session_reports_redacted_prompt_and_persistence_failures() {
+        let prompt_failure = transport(
+            false,
+            PromptOutcome::Fail(
+                "prompt exploded: APP_SECRET=fixture-value api_key: fixture-key".into(),
+            ),
+        );
+        let mut prompt_process =
+            run_fixture(prompt_failure, &AgentType::OpenCode, None, None, None).await;
+        collect_output(&mut prompt_process).await;
+        assert!(!prompt_process
+            .child
+            .wait()
+            .await
+            .expect("lifeline")
+            .success());
+        let prompt_diagnostics = prompt_process.captured_stderr();
+        assert!(prompt_diagnostics
+            .iter()
+            .any(|line| line.contains("ACP prompt failed")));
+        assert!(prompt_diagnostics
+            .iter()
+            .all(|line| !line.contains("fixture-value") && !line.contains("fixture-key")));
+        assert!(prompt_diagnostics.iter().any(|line| {
+            line.contains("APP_SECRET=***REDACTED***") && line.contains("api_key: ***REDACTED***")
+        }));
+
+        let persistence_failure = Arc::new(RunnerTransport {
             resume_ok: false,
+            prompt_outcome: PromptOutcome::Complete,
+            native_session_id: Some("runtime-session".into()),
             created: AtomicUsize::new(0),
             resumed: AtomicUsize::new(0),
+            cancelled: AtomicUsize::new(0),
         });
-        let target = AcpSessionTarget::new(crate::acp::AcpAgent::OpenCode, "stale-session").unwrap();
-        let outcome = transport.resume_session(&target).await;
-        assert!(outcome.is_err(), "the fixture must refuse the stale id");
-        let session = transport.create_session().await.expect("a fresh session");
-        assert_eq!(session.session_id, "fresh-session");
-        assert_eq!(transport.resumed.load(Ordering::SeqCst), 1);
-        assert_eq!(transport.created.load(Ordering::SeqCst), 1);
+        let mut process = run_fixture(
+            persistence_failure,
+            &AgentType::GeminiCli,
+            None,
+            None,
+            Some(AcpSessionStore::new(
+                Arc::new(crate::db::Database::open_in_memory().expect("test database")),
+                "fixture-discussion",
+            )),
+        )
+        .await;
+        collect_output(&mut process).await;
+        assert!(!process.child.wait().await.expect("lifeline").success());
+        assert!(process
+            .captured_stderr()
+            .iter()
+            .any(|line| line.contains("ACP session persistence failed")));
+    }
+
+    #[test]
+    fn acp_failure_diagnostic_redacts_assignments_and_bounds_unicode() {
+        let long_error = format!("non-secret 😀{}", "é".repeat(ACP_DIAGNOSTIC_MAX_CHARS));
+        let diagnostic = acp_failure_diagnostic("prompt", &long_error);
+        let expected_excerpt: String = long_error.chars().take(ACP_DIAGNOSTIC_MAX_CHARS).collect();
+        assert_eq!(
+            diagnostic,
+            format!("ACP prompt failed: {expected_excerpt}…")
+        );
+        assert_eq!(
+            diagnostic.chars().count(),
+            "ACP prompt failed: ".chars().count() + ACP_DIAGNOSTIC_MAX_CHARS + 1
+        );
+
+        let short = acp_failure_diagnostic("prompt", "short 🦀 non-secret error");
+        assert_eq!(short, "ACP prompt failed: short 🦀 non-secret error");
+        assert!(!short.ends_with('…'));
     }
 }

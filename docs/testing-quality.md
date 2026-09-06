@@ -16,6 +16,27 @@ and the runner's final summary is the source of truth.
   type source of truth; regenerate TypeScript with `make typegen`.
 - All commands in the release gate must pass before a tag is created.
 
+## Reviewing a worker delivery
+
+Record the exact delivered HEAD and run checks after the final test/fixture
+edits. A passing Vitest run does not type-check its fixtures: also run the
+frontend TypeScript build check (`tsc -b`) on that same HEAD. Locale parity
+alone cannot detect a key absent from every dictionary; the i18n lint also
+checks literal `t(...)` usages against the shipped keys. Reuse an existing
+label where its meaning matches instead of inventing a second spelling.
+`[src: file: frontend/scripts/lint-i18n.mjs:104-164]`
+
+With multiple worktrees sharing a Cargo target directory, verify the crate
+path and the selected regression-test count. A filtered command that succeeds
+with zero tests is not evidence for that regression; a prior worktree's result
+must not be attached to a different delivered HEAD. Resolve any stale-artifact
+ambiguity before approving, without deleting another worker's shared cache.
+
+For filter controls used by a memoized request callback, test changing only
+that filter while keeping the query and other inputs unchanged. Changing the
+query as well can rebuild the callback and hide a missing filter dependency.
+`[src: file: frontend/src/components/__tests__/GlobalSearchPanel.test.tsx:169-190]`
+
 ## Release gate
 
 Run from the repository root unless a working directory is shown.
@@ -165,6 +186,35 @@ Use `frontend/src/test/apiMock.ts` for the shared frontend API mock. Its
 completeness guard fails when a new API export is missing. Use the extended
 Playwright fixture in `frontend/e2e/fixtures/kronn-fixture.ts` unless the test
 explicitly owns boot/setup behavior.
+
+Agent access and tier controls are mounted only when their settings card is
+expanded. Browser specs should call `SettingsPage.openAgentConfiguration()`
+before inspecting those controls; it waits for the mounted body and leaves an
+already-open card open without changing any setting.
+[src: file: frontend/e2e/pages/SettingsPage.ts:16]
+
+Media browser specs use `openMediaLauncher()` to open the current panel rail
+and explicitly select the test's local provider slot. Restoring an already-open
+panel must not toggle it closed; relying on the default provider could launch a
+real generation instead of the test stub.
+
+Discussion run-card coverage drives the four inline source-message actions,
+not the removed attached-runs strip. Read each expanded card inside the viewport:
+off-screen cards intentionally defer hydration. A real wheel gesture cancels
+the initial bottom-settling window before walking earlier messages.
+
+The Settings axe scan supplies a populated, typed usage report at the external
+collector boundary and waits for its cost and filter controls before scanning.
+It tests the rendered usage UI, not the `ccusage` process or private operator
+history; collector timeout behavior needs separate backend coverage.
+
+When a disposable backend runs in a container, run browser specs with local
+provider stubs in the same network namespace. Their loopback callbacks then
+reach the stubs, and destructive fixture cleanup uses the backend's real local
+trust boundary. Do not spoof forwarding headers or weaken authentication to
+make a remote runner look local. Keep this stack free of host credentials and
+production data, serialize suites sharing its database, and collect artifacts
+from a dedicated output directory.
 
 ## 0.9.4 interaction regression map
 

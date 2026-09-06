@@ -667,7 +667,11 @@ fn refresh_from_shared_run(conn: &Connection, action: &mut DiscussionAction) -> 
 
 pub fn get(conn: &Connection, id: &str) -> Result<Option<DiscussionAction>> {
     let mut action = conn
-        .query_row(&format!("{SELECT_ACTION} WHERE a.id = ?1"), [id], map_action)
+        .query_row(
+            &format!("{SELECT_ACTION} WHERE a.id = ?1"),
+            [id],
+            map_action,
+        )
         .optional()?;
     if let Some(action) = action.as_mut() {
         refresh_from_shared_run(conn, action)?;
@@ -1064,7 +1068,9 @@ mod tests {
         // requires, which is one of the checks that must keep refusing.
         let variables =
             std::collections::HashMap::from([("service".to_string(), "api".to_string())]);
-        let outcome = claim_launch(&conn, &action.id, &variables).unwrap().unwrap();
+        let outcome = claim_launch(&conn, &action.id, &variables)
+            .unwrap()
+            .unwrap();
         assert!(matches!(outcome, ClaimLaunchOutcome::Claimed { .. }));
     }
 
@@ -1087,7 +1093,8 @@ mod tests {
         conn.execute("DELETE FROM quick_execs WHERE id = 'qe-1'", [])
             .unwrap();
 
-        let supplied = std::collections::HashMap::from([("service".to_string(), "api".to_string())]);
+        let supplied =
+            std::collections::HashMap::from([("service".to_string(), "api".to_string())]);
         let outcome = claim_launch(&conn, "action:msg-gone:0", &supplied).unwrap();
         assert!(
             !matches!(outcome, Some(ClaimLaunchOutcome::Claimed { .. })),

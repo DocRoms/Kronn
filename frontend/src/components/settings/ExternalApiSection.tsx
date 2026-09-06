@@ -59,6 +59,12 @@ const PRESET_ENDPOINTS: Record<ExternalApiPreset, string> = {
 const TIERS = ['economy', 'default', 'reasoning'] as const;
 type Tier = (typeof TIERS)[number];
 const TIER_ICON: Record<Tier, string> = { economy: '⚡', default: '🎯', reasoning: '🧠' };
+// Media slots are modalities, not quality tiers — hence their own list and
+// their own icons, shared by the form that sets them and the card that reads
+// them back so the two surfaces cannot drift apart.
+const MEDIA_MODALITIES = ['image', 'video'] as const;
+type MediaModality = (typeof MEDIA_MODALITIES)[number];
+const MEDIA_ICON: Record<MediaModality, string> = { image: '🖼', video: '🎬' };
 
 interface FormState {
   display_name: string;
@@ -391,7 +397,7 @@ function ConnectionForm({
             <small>{t('config.extApi.mediaOptional')}</small>
           </div>
           <div className="set-ext-api-tiers">
-            {(['image', 'video'] as const).map(modality => {
+            {MEDIA_MODALITIES.map(modality => {
               const value = modality === 'image' ? form.image_model : form.video_model;
               const setValue = (next: string) =>
                 setForm(prev =>
@@ -426,7 +432,7 @@ function ConnectionForm({
               return (
                 <div className="set-ext-api-tier" key={modality} data-tier={modality} data-media-state={mediaState}>
                   <span className="set-ext-api-tier-label">
-                    <span aria-hidden="true">{modality === 'image' ? '🖼' : '🎬'}</span>{' '}
+                    <span aria-hidden="true">{MEDIA_ICON[modality]}</span>{' '}
                     {t(`config.extApi.media.${modality}`)}
                   </span>
                   {isUnknown ? (
@@ -712,6 +718,16 @@ export function ExternalApiSection({ t, toast, modelCostSuffix, onModelTiersChan
       default: c.default_model,
       reasoning: c.reasoning_model,
     };
+    // KT-589 — the media slots read on the card too, but as modalities, not as
+    // a fourth tier: image and video are not a level of reasoning. Only the
+    // ones actually configured are drawn — an empty row says nothing, an
+    // absent row says there is none.
+    const mediaSlots = MEDIA_MODALITIES
+      .map(modality => ({
+        modality,
+        model: (modality === 'image' ? c.image_model : c.video_model)?.trim() || null,
+      }))
+      .filter((slot): slot is { modality: MediaModality; model: string } => slot.model !== null);
     return (
       <div className="set-ext-api-conn-tiers" role="group" aria-label={t('disc.modelTier')}>
         {TIERS.map(tier => (
@@ -725,6 +741,29 @@ export function ExternalApiSection({ t, toast, modelCostSuffix, onModelTiersChan
             </code>
           </div>
         ))}
+        {mediaSlots.length > 0 && (
+          <div
+            className="set-ext-api-conn-media"
+            role="group"
+            aria-label={t('config.extApi.mediaTitle')}
+            data-testid={`ext-api-conn-media-${c.id}`}
+          >
+            {mediaSlots.map(({ modality, model }) => (
+              <div
+                key={modality}
+                className="set-ext-api-conn-tier"
+                data-tier={modality}
+                data-testid={`ext-api-conn-media-${modality}-${c.id}`}
+              >
+                <span className="set-ext-api-conn-tier-label">
+                  <span aria-hidden="true">{MEDIA_ICON[modality]}</span>
+                  {t(`config.extApi.media.${modality}`)}
+                </span>
+                <code title={model}>{model}</code>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
     );
   };

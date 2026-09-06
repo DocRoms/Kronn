@@ -799,4 +799,40 @@ describe('ExternalApiSection', () => {
     expect(mediaPanel.querySelector('[data-testid="ext-api-media-video"]')).toBeTruthy();
   });
 
+  /// KT-589 — the media slot is part of what a connection is, so it reads on
+  /// the card next to the three tiers instead of only inside the form.
+  it('shows the configured media models on the connection card', async () => {
+    listMock.mockResolvedValue([
+      conn({
+        id: 'c-media',
+        display_name: 'NVIDIA',
+        economy_model: 'model-a',
+        image_model: 'flux-1-dev',
+        video_model: 'wan-2-2',
+      }),
+    ]);
+    renderSection();
+
+    const image = await screen.findByTestId('ext-api-conn-media-image-c-media');
+    expect(image).toHaveTextContent('flux-1-dev');
+    expect(screen.getByTestId('ext-api-conn-media-video-c-media')).toHaveTextContent('wan-2-2');
+    // Still labelled as a modality, never as a fourth quality tier.
+    expect(image.getAttribute('data-tier')).toBe('image');
+  });
+
+  /// An absent row says there is no media model; an empty one would say
+  /// nothing at all while still taking the space.
+  it('draws no media row when nothing is configured, and only the one that is', async () => {
+    listMock.mockResolvedValue([
+      conn({ id: 'c-none', display_name: 'Text only', default_model: 'model-a' }),
+      conn({ id: 'c-img', display_name: 'Images', image_model: 'flux-1-dev', video_model: '  ' }),
+    ]);
+    renderSection();
+
+    await screen.findByTestId('ext-api-conn-media-image-c-img');
+    expect(screen.queryByTestId('ext-api-conn-media-c-none')).toBeNull();
+    // A blank string is not a configured model.
+    expect(screen.queryByTestId('ext-api-conn-media-video-c-img')).toBeNull();
+  });
+
 });

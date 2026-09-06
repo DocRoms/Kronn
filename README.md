@@ -19,7 +19,7 @@
   <a href="https://github.com/DocRoms/Kronn/commits/main"><img src="https://img.shields.io/github/last-commit/DocRoms/Kronn?label=last%20commit" alt="Last commit" /></a>
 </p>
 
-**Run Claude Code, Codex, OpenCode, Gemini, Ollama (100% local), LiteLLM and 3 other AI coding agents from one self-hosted dashboard, with shared MCPs, secrets, and repeatable workflows.**
+**Run your CLI coding agents (Claude Code, Codex, Gemini CLI, OpenCode…), local models with Ollama, and HTTP providers such as LiteLLM, NVIDIA and OpenRouter from one self-hosted dashboard, with shared MCPs, secrets and repeatable workflows.**
 
 **Smaller prompts, more code where code is enough: fewer hallucinations, lower token bill, eco-design by default.**
 

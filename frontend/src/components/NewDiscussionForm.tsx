@@ -1,6 +1,7 @@
 import { useState, useEffect, useLayoutEffect, useMemo, useRef } from 'react';
 import '../pages/DiscussionsPage.css';
 import { ProfileTooltip } from './ProfileTooltip';
+import { MediaGenerateForm } from './MediaGenerateForm';
 import { AgentSwitchPicker, type AgentSwitchTarget } from './AgentSwitchPicker';
 import { MarkdownEditor } from './MarkdownComposerTools';
 import { SearchableSelect } from './SearchableSelect';
@@ -24,7 +25,7 @@ import {
   Folder, ChevronRight, GitBranch,
   MessageSquare, X, AlertTriangle,
   Settings, Check, Zap, UserCircle, FileText, Paperclip, Image,
-  Cpu,
+  Clapperboard, Cpu,
 } from 'lucide-react';
 
 const MENTION_TIER_CHOICES: ModelTier[] = ['economy', 'default', 'reasoning'];
@@ -105,6 +106,9 @@ export interface NewDiscussionFormProps {
   externalConnections?: ExternalApiConnectionView[];
   prefill?: { projectId: string; title: string; prompt: string; locked?: boolean } | null;
   onSubmit: (config: NewDiscConfig) => void;
+  onCreateMediaDiscussion?: (config: Pick<NewDiscConfig, 'title' | 'agent' | 'projectId' | 'tier'> & {
+    connectionId: string | null;
+  }) => Promise<string>;
   onClose: () => void;
   onPrefillConsumed?: () => void;
   onNavigate: (page: string, opts?: { scrollTo?: string }) => void;
@@ -120,6 +124,7 @@ export function NewDiscussionForm({
   externalConnections = [],
   prefill,
   onSubmit,
+  onCreateMediaDiscussion,
   onClose,
   onPrefillConsumed,
   onNavigate,
@@ -156,6 +161,7 @@ export function NewDiscussionForm({
   // via the `[+ Inviter]` header button. Default `true` keeps the
   // legacy "create + run" flow for the 80% common case.
   const [launchAgentNow, setLaunchAgentNow] = useState(true);
+  const [entryMode, setEntryMode] = useState<'conversation' | 'media'>('conversation');
   const [newDiscBranchName, setNewDiscBranchName] = useState('');
   const [newDiscBaseBranch, setNewDiscBaseBranch] = useState('main');
   const [pendingFiles, setPendingFiles] = useState<File[]>([]);
@@ -223,6 +229,11 @@ export function NewDiscussionForm({
     || (promptLaunchTargets.length > 0 && unavailablePromptTargets.length === 0);
   const launchReady = Boolean(newDiscPrompt.trim())
     && (agentLaunchMode === 'prompt' ? promptModeReady : Boolean(newDiscAgent));
+  const hasConfiguredMediaSlot = useMemo(
+    () => externalConnections.some(connection =>
+      Boolean(connection.image_model?.trim() || connection.video_model?.trim())),
+    [externalConnections],
+  );
 
   const isAgentRestricted = (agentType: AgentType): boolean =>
     isAgentRestrictedUtil(agentAccess ?? undefined, agentType);
@@ -348,6 +359,27 @@ export function NewDiscussionForm({
     onClose();
   };
 
+  const createMediaDiscussion = async (): Promise<string> => {
+    if (!onCreateMediaDiscussion) throw new Error(t('disc.media.unavailable'));
+    // Media-only connections deliberately do not appear in `launchTargets`:
+    // they cannot receive chat. The legacy column still needs an agent value,
+    // so use the same no-agent placeholder choice as ordinary disc-first
+    // creation without treating it as a selected chat participant.
+    const placeholderAgent = (
+      newDiscAgent
+      || installedAgentsList[0]?.agent_type
+      || 'ClaudeCode'
+    ) as AgentType;
+    const discussionId = await onCreateMediaDiscussion({
+      title: newDiscTitle.trim() || t('disc.media.newDiscussionTitle'),
+      agent: placeholderAgent,
+      projectId: newDiscProjectId || null,
+      tier: newDiscTier,
+      connectionId: newDiscConnectionId,
+    });
+    return discussionId;
+  };
+
   const [creating, setCreating] = useState(false);
   const creatingRef = useRef(false);
 
@@ -465,6 +497,11 @@ export function NewDiscussionForm({
   };
 
   const handleCreate = async () => {
+    // Media owns its explicit Generate action.  Letting the modal footer use
+    // the ordinary discussion path here would create an empty room without a
+    // generation, which is neither a conversation nor a recoverable media
+    // launch.
+    if (entryMode === 'media') return;
     // Submit gate :
     //   - launch mode  → prompt + agent both required (legacy contract)
     //   - no-launch    → prompt OR title required so the empty disc has
@@ -577,7 +614,7 @@ export function NewDiscussionForm({
           // transcripts as a blank line at the bottom of the first
           // message. Suppress the default keypress so only the submit
           // path fires.
-          if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && !e.nativeEvent.isComposing && newDiscPrompt.trim()) {
+          if (entryMode === 'conversation' && e.key === 'Enter' && (e.ctrlKey || e.metaKey) && !e.nativeEvent.isComposing && newDiscPrompt.trim()) {
             e.preventDefault();
             handleCreate();
           }
@@ -606,8 +643,42 @@ export function NewDiscussionForm({
               </span>
             </div>
 
-            <label className="disc-form-label">{t('disc.prompt')}</label>
+            {hasConfiguredMediaSlot && (
+              <div className="disc-new-entry-modes" role="radiogroup" aria-label={t('disc.entryMode')}>
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked={entryMode === 'conversation'}
+                  className="disc-new-entry-mode"
+                  data-active={entryMode === 'conversation'}
+                  onClick={() => setEntryMode('conversation')}
+                >
+                  <MessageSquare size={14} /> {t('disc.entryMode.conversation')}
+                </button>
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked={entryMode === 'media'}
+                  className="disc-new-entry-mode"
+                  data-active={entryMode === 'media'}
+                  onClick={() => setEntryMode('media')}
+                  data-testid="new-disc-media-mode"
+                >
+                  <Clapperboard size={14} /> {t('disc.entryMode.media')}
+                </button>
+              </div>
+            )}
+
+            {entryMode === 'conversation' && <label className="disc-form-label">{t('disc.prompt')}</label>}
             <div className="disc-new-prompt-wrap">
+              {entryMode === 'media' ? (
+                <MediaGenerateForm
+                  connections={externalConnections}
+                  onCreateDiscussion={createMediaDiscussion}
+                  onLaunched={() => handleClose()}
+                  t={t}
+                />
+              ) : <>
               {mentionQuery !== null && (() => {
                 const matching = launchTargets.filter(target => (
                   target.trigger.slice(1).startsWith(mentionQuery)
@@ -849,6 +920,7 @@ export function NewDiscussionForm({
                   autoFocus={!newDiscPrefilled}
                 />
               </MarkdownEditor>
+              </>}
             </div>
 
             <label className="disc-form-label" style={{ marginTop: 12 }}>{t('disc.title')}</label>
@@ -934,7 +1006,7 @@ export function NewDiscussionForm({
             active RTK hook, shell output isn't compressed → more tokens burned.
             Red, pinned at the top. Skipped for non-RTK agents (Kiro/Copilot/
             Vibe/Ollama) and when RTK is active. */}
-        {launchAgentNow && effectiveLaunchAgents.some(agent => RTK_APPLICABLE.has(agent)) && (() => {
+        {entryMode === 'conversation' && launchAgentNow && effectiveLaunchAgents.some(agent => RTK_APPLICABLE.has(agent)) && (() => {
           const warnedAgent = effectiveLaunchAgents.find(agent => {
             if (!RTK_APPLICABLE.has(agent)) return false;
             const detection = agents.find(candidate => candidate.agent_type === agent);
@@ -989,7 +1061,7 @@ export function NewDiscussionForm({
               </label>
             )}
           </div>
-          <div>
+          {entryMode === 'conversation' && <div>
             <label className="disc-form-label disc-launch-control">
               <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
                 <input
@@ -1068,10 +1140,10 @@ export function NewDiscussionForm({
                 {t('disc.discFirstHint')}
               </div>
             )}
-          </div>
+          </div>}
         </div>
 
-        {launchAgentNow && agentLaunchMode === 'prompt' && (
+        {entryMode === 'conversation' && launchAgentNow && agentLaunchMode === 'prompt' && (
           <div className="disc-prompt-agent-summary" data-testid="prompt-agent-summary">
             <span className="disc-form-hint">{t('disc.promptAgentsDetected')}</span>
             <div className="disc-prompt-agent-chips">
@@ -1376,26 +1448,28 @@ export function NewDiscussionForm({
           </section>
         </div>
 
-        <div className="disc-new-footer">
-          <span className="disc-new-footer-hint">{t('disc.createHint')}</span>
-          <button
-            className="disc-create-btn"
-            data-ready={launchAgentNow ? launchReady : (!!newDiscPrompt.trim() || !!newDiscTitle.trim())}
-            onClick={handleCreate}
-            // 0.8.6 phase 2 — disc-first mode allows submitting WITHOUT a
-            // prompt (just a title) since the agent will be invited later.
-            // Launch mode keeps the legacy gates.
-            disabled={
-              creating ||
-              (launchAgentNow
-                ? !launchReady
-                : !newDiscPrompt.trim() && !newDiscTitle.trim())
-            }
-          >
-            <MessageSquare size={14} /> {launchAgentNow ? t('disc.start') : t('disc.createEmpty')}
-            <span className="disc-create-shortcut">Ctrl+Enter</span>
-          </button>
-        </div>
+        {entryMode === 'conversation' && (
+          <div className="disc-new-footer">
+            <span className="disc-new-footer-hint">{t('disc.createHint')}</span>
+            <button
+              className="disc-create-btn"
+              data-ready={launchAgentNow ? launchReady : (!!newDiscPrompt.trim() || !!newDiscTitle.trim())}
+              onClick={handleCreate}
+              // 0.8.6 phase 2 — disc-first mode allows submitting WITHOUT a
+              // prompt (just a title) since the agent will be invited later.
+              // Launch mode keeps the legacy gates.
+              disabled={
+                creating ||
+                (launchAgentNow
+                  ? !launchReady
+                  : !newDiscPrompt.trim() && !newDiscTitle.trim())
+              }
+            >
+              <MessageSquare size={14} /> {launchAgentNow ? t('disc.start') : t('disc.createEmpty')}
+              <span className="disc-create-shortcut">Ctrl+Enter</span>
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );

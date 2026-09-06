@@ -1251,13 +1251,7 @@ pub async fn disc_search(
     let result = state
         .db
         .with_conn(move |conn| {
-            crate::db::disc_source::search_discussions(
-                conn,
-                &q.q,
-                limit,
-                q.include_notes,
-                q.scope,
-            )
+            crate::db::disc_source::search_discussions(conn, &q.q, limit, q.include_notes, q.scope)
         })
         .await;
     match result {

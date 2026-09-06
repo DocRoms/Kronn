@@ -68,6 +68,243 @@ mod tests {
         (status, json)
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn source_directory_http_refuses_a_symlink_outside_the_project() {
+        let root = tempfile::TempDir::new().unwrap();
+        let outside = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            outside.path().join("private-source.rs"),
+            "fn outside() {}\n",
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.path().join("linked")).unwrap();
+        let state = test_state();
+        let path = root.path().to_string_lossy().into_owned();
+        state
+            .db
+            .with_conn(move |conn| {
+                conn.execute(
+                    "INSERT INTO projects (id,name,path,created_at,updated_at)
+                     VALUES ('source-jail','Source jail',?1,'now','now')",
+                    [path],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let request = Request::builder()
+            .uri("/api/projects/source-jail/source-files?shallow=true&path=linked")
+            .body(Body::empty())
+            .unwrap();
+        let (_, response) = send(state, false, request).await;
+        assert_eq!(
+            response["success"], false,
+            "the requested directory must obey the project jail: {response}"
+        );
+    }
+
+    #[tokio::test]
+    async fn discussion_questions_http_answer_is_durable_idempotent_and_counted() {
+        let state = test_state();
+        insert_test_discussion(&state, "question-room", "Arbitration").await;
+        insert_test_discussion(&state, "other-room", "Independent").await;
+        insert_test_message(&state, "question-room", "Agent", r#"```kronn-question
+{"version":1,"key":"policy","question":"Which policy?","options":[{"id":"a","label":"First"},{"id":"b","label":"Second"}]}
+```"#).await;
+        let get = |uri: &str| Request::builder().uri(uri).body(Body::empty()).unwrap();
+        assert_eq!(
+            send(
+                state.clone(),
+                false,
+                get("/api/discussions/missing/questions")
+            )
+            .await
+            .0,
+            StatusCode::NOT_FOUND,
+        );
+        let (status, body) = send(
+            state.clone(),
+            false,
+            get("/api/discussions/question-room/questions"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["data"]["pending_count"], 1);
+        let id = body["data"]["questions"][0]["id"].as_str().unwrap();
+        let uri = format!("/api/discussions/question-room/questions/{id}/answer");
+        let post = |uri: &str, body: Value| {
+            Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap()
+        };
+        for path in ["/api/discussions", "/api/discussions?page=1&per_page=10"] {
+            let (_, rows) = send(state.clone(), false, get(path)).await;
+            let rooms = rows["data"].as_array().unwrap();
+            assert_eq!(
+                rooms.iter().find(|r| r["id"] == "question-room").unwrap()
+                    ["pending_question_count"],
+                1
+            );
+            assert_eq!(
+                rooms.iter().find(|r| r["id"] == "other-room").unwrap()["pending_question_count"],
+                0
+            );
+        }
+        let answer = serde_json::json!({"selected_option_ids":["a"],"text":"Because it is bounded","idempotency_key":"click-1"});
+        let (status, _) = send(
+            state.clone(),
+            false,
+            post(&uri, serde_json::json!({"idempotency_key":"empty"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let other_uri = format!("/api/discussions/other-room/questions/{id}/answer");
+        assert_eq!(
+            send(state.clone(), false, post(&other_uri, answer.clone()))
+                .await
+                .0,
+            StatusCode::NOT_FOUND
+        );
+        let (status, first) = send(state.clone(), false, post(&uri, answer.clone())).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(first["data"]["state"], "answered");
+        let (status, replay) = send(state.clone(), false, post(&uri, answer)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(first, replay);
+        assert_eq!(
+            send(
+                state.clone(),
+                false,
+                post(
+                    &uri,
+                    serde_json::json!({"selected_option_ids":["b"],"idempotency_key":"click-2"})
+                )
+            )
+            .await
+            .0,
+            StatusCode::CONFLICT
+        );
+        let (_, list) = send(
+            state.clone(),
+            false,
+            get("/api/discussions/question-room/questions"),
+        )
+        .await;
+        assert_eq!(list["data"]["pending_count"], 0);
+        assert_eq!(list["data"]["questions"][0], first["data"]);
+        let (_, rows) = send(state.clone(), false, get("/api/discussions")).await;
+        assert!(rows["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row["pending_question_count"] == 0));
+        state
+            .db
+            .with_conn(|conn| {
+                assert_eq!(
+                    conn.query_row("SELECT COUNT(*) FROM messages WHERE role='User'", [], |r| r
+                        .get::<_, i64>(0))?,
+                    1
+                );
+                assert_eq!(
+                    conn.query_row("SELECT COUNT(*) FROM agent_dispatch_jobs", [], |r| r
+                        .get::<_, i64>(0))?,
+                    1
+                );
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn discussion_questions_http_requires_authentication() {
+        let state = test_state_with_token("question-test-token");
+        for (method, uri) in [
+            ("GET", "/api/discussions/room/questions"),
+            ("POST", "/api/discussions/room/questions/q/answer"),
+        ] {
+            let request = Request::builder()
+                .method(method)
+                .uri(uri)
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"text":"Do not impersonate a human","idempotency_key":"x"}"#,
+                ))
+                .unwrap();
+            assert_eq!(
+                send(state.clone(), true, request).await.0,
+                StatusCode::UNAUTHORIZED
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn provider_quota_rearm_http_requires_operator_auth_and_confirmation() {
+        let state = test_state_with_token("quota-rearm-token");
+        state.config.write().await.server.auth_enabled = false;
+        let uri = "/api/orchestration/provider-quotas/Codex/rearm";
+        let request = |confirmed: bool, authorization: Option<&str>| {
+            let mut builder = Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header("content-type", "application/json");
+            if let Some(authorization) = authorization {
+                builder = builder.header("authorization", authorization);
+            }
+            builder
+                .body(Body::from(
+                    serde_json::json!({
+                        "confirmed": confirmed,
+                        "idempotency_key": "quota-rearm-http-test"
+                    })
+                    .to_string(),
+                ))
+                .unwrap()
+        };
+
+        assert_eq!(
+            send(state.clone(), true, request(true, None)).await.0,
+            StatusCode::UNAUTHORIZED,
+            "a remote caller remains denied while global auth is off"
+        );
+        let (status, unconfirmed) = send(
+            state.clone(),
+            true,
+            request(false, Some("Bearer quota-rearm-token")),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(unconfirmed["success"], false);
+
+        let (status, confirmed) = send(
+            state.clone(),
+            true,
+            request(true, Some("Bearer quota-rearm-token")),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(confirmed["data"], true);
+        state
+            .db
+            .with_conn(|conn| {
+                let actor: String = conn.query_row(
+                    "SELECT actor_kind FROM provider_quota_rearm_events \
+                     WHERE provider = 'Codex' AND idempotency_key = 'quota-rearm-http-test'",
+                    [],
+                    |row| row.get(0),
+                )?;
+                assert_eq!(actor, "human");
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
     // ─── GET /api/resolve/:id ───────────────────────────────────────────────
 
     #[tokio::test]

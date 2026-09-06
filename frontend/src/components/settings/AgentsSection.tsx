@@ -245,6 +245,8 @@ export function AgentsSection({
   const [updateModalFor, setUpdateModalFor] = useState<AgentDetection | null>(null);
 
   const { data: tokenConfig, refetch: refetchTokens } = useApi(() => configApi.getTokens(), []);
+  const { data: providerQuotaStates, refetch: refetchProviderQuotaStates } = useApi(() => agentsApi.quotaStates(), []);
+  const [rearmingProvider, setRearmingProvider] = useState<AgentType | null>(null);
 
   // The model tier is a creation-time default for new discussions / QPs /
   // workflow Agent steps. The summary strategy seeds new discussions too,
@@ -340,6 +342,20 @@ export function AgentsSection({
       toast(t('config.saveError'), 'error');
     }
   };
+
+  const rearmProviderQuota = useAsyncGuard(async (provider: AgentType) => {
+    if (!confirm(t('config.quotaRearmConfirm', AGENT_LABELS[provider]))) return;
+    setRearmingProvider(provider);
+    try {
+      await agentsApi.rearmQuota(provider, crypto.randomUUID());
+      await refetchProviderQuotaStates();
+      toast(t('config.quotaRearmed', AGENT_LABELS[provider]), 'success');
+    } catch (error) {
+      toast(t('common.actionFailed', userError(error)), 'error');
+    } finally {
+      setRearmingProvider(null);
+    }
+  });
 
   const saveDefaultTier = async (tier: 'economy' | 'default' | 'reasoning') => {
     // Optimistic update so the dropdown feels snappy ; revert on error.
@@ -659,6 +675,7 @@ export function AgentsSection({
           };
           const tf = tokenField[agent.agent_type];
           const authReady = agent.auth_ready !== false;
+          const quotaBlocked = providerQuotaStates?.some(state => state.provider === agent.agent_type && state.blocked) ?? false;
           const isFullAccess = agent.agent_type === 'ClaudeCode'
             ? agentAccess?.claude_code?.full_access ?? false
             : agent.agent_type === 'Codex'
@@ -845,6 +862,19 @@ export function AgentsSection({
                     {agent.runtime_warning && (
                       <div className="set-agent-runtime-warning" role="note">
                         ⚠️ {t(`agentRuntimeWarning.${agent.runtime_warning}`)}
+                      </div>
+                    )}
+                    {quotaBlocked && (
+                      <div className="set-agent-runtime-warning" role="alert">
+                        <span>{t('config.quotaBlocked')}</span>
+                        <button
+                          type="button"
+                          className="set-compression-copy-btn"
+                          onClick={() => void rearmProviderQuota(agent.agent_type)}
+                          disabled={rearmingProvider === agent.agent_type}
+                        >
+                          {rearmingProvider === agent.agent_type ? t('common.loading') : t('config.quotaRearm')}
+                        </button>
                       </div>
                     )}
                     {!authReady && agent.enabled && (

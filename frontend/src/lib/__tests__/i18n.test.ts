@@ -3,6 +3,16 @@ import { t, getUILocale, setUILocale, detectBrowserLocale, UI_LOCALES, type UILo
 
 describe('i18n', () => {
   describe('t() — translation function', () => {
+    it.each([
+      ['fr', 'Actions', 'Supprimer'],
+      ['en', 'Actions', 'Delete'],
+      ['es', 'Acciones', 'Eliminar'],
+      ['zh', '操作', '删除'],
+    ] as const)('localises model actions and discussion deletion in %s', (locale, actions, deletion) => {
+      expect(t(locale, 'common.actions')).toBe(actions);
+      expect(t(locale, 'disc.delete')).toBe(deletion);
+    });
+
     it('returns French translation by default', () => {
       expect(t('fr', 'nav.projects')).toBe('Projets');
     });

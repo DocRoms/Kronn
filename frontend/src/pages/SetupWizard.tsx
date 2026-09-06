@@ -6,6 +6,7 @@ import {
   Cpu, FolderSearch, Scan, ChevronRight, Check, Download, Loader2, RefreshCw,
   GitBranch, FolderOpen, Eye, Copy,
 } from 'lucide-react';
+import { KronnMark } from '../components/KronnMark';
 import './SetupWizard.css';
 
 interface Props {
@@ -161,7 +162,7 @@ export function SetupWizard({ initialStatus, onComplete, inDocker = false }: Pro
       <div className="setup-card">
         {/* Header */}
         <div className="setup-header">
-          <div className="setup-logo">&#x26A1;</div>
+          <div className="setup-logo"><KronnMark size={40} /></div>
           <h1 className="setup-title">Kronn</h1>
           <p className="setup-subtitle">{t('setup.subtitle')}</p>
         </div>

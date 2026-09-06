@@ -13,6 +13,7 @@
 import { createServer, type Server } from 'node:http';
 import { expect, test } from '../fixtures/kronn-fixture';
 import { DashboardPage } from '../pages/DashboardPage';
+import { openMediaLauncher } from '../pages/MediaLauncher';
 
 const ONE_PIXEL_PNG_B64 =
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
@@ -124,12 +125,7 @@ test('a picture attached in the launcher reaches the provider inline, and the bu
   await dashboard.goto();
   await dashboard.openDiscussion(discussionId);
 
-  await page.getByTestId('discussion-assets-toggle').click();
-  const panel = page.getByRole('complementary', { name: 'Assets' });
-  await expect(panel).toBeVisible();
-  await panel.getByTestId('assets-generate-toggle').click();
-  const form = panel.getByTestId('media-generate-form');
-  await expect(form).toBeVisible();
+  const form = await openMediaLauncher(page, connectionId);
 
   // Wide enough for the provider: measured on 02/09, a source under 300 px
   // comes back `400 InvalidParameter`, and the launcher blocks it before the

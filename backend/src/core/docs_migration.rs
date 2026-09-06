@@ -906,7 +906,11 @@ fn ruff_present(dir: &Path) -> bool {
             return true;
         }
     }
-    for name in ["requirements.txt", "requirements-dev.txt", "dev-requirements.txt"] {
+    for name in [
+        "requirements.txt",
+        "requirements-dev.txt",
+        "dev-requirements.txt",
+    ] {
         if let Ok(body) = std::fs::read_to_string(dir.join(name)) {
             if declares_requirement(&body, "ruff") {
                 return true;
@@ -1711,7 +1715,10 @@ mod tests {
     #[test]
     fn lint_cmd_keeps_phpcs_when_the_project_declares_it() {
         for (name, contents) in [
-            ("composer.json", "{\"require-dev\": {\"squizlabs/php_codesniffer\": \"^3\"}}"),
+            (
+                "composer.json",
+                "{\"require-dev\": {\"squizlabs/php_codesniffer\": \"^3\"}}",
+            ),
             ("phpcs.xml.dist", "<ruleset name=\"acme\"/>"),
         ] {
             let tmp = tempfile::TempDir::new().unwrap();
@@ -1810,7 +1817,10 @@ mod tests {
 
         let body = std::fs::read_to_string(root.join("docs/AGENTS.md")).unwrap();
         assert!(body.contains("tsc --noEmit"), "got: {body}");
-        assert!(!body.contains(" lint"), "still chains a missing script: {body}");
+        assert!(
+            !body.contains(" lint"),
+            "still chains a missing script: {body}"
+        );
     }
 
     #[test]
@@ -1830,7 +1840,10 @@ mod tests {
         prefill_all_for_tests(root);
 
         let body = std::fs::read_to_string(root.join("docs/AGENTS.md")).unwrap();
-        assert!(body.contains("pnpm tsc --noEmit && pnpm lint"), "got: {body}");
+        assert!(
+            body.contains("pnpm tsc --noEmit && pnpm lint"),
+            "got: {body}"
+        );
     }
 
     #[test]

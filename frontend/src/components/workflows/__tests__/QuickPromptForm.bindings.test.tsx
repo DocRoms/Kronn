@@ -13,7 +13,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import { I18nProvider } from '../../../lib/I18nContext';
 import type { ReactElement } from 'react';
-import type { Skill, AgentProfile, Directive } from '../../../types/generated';
+import type { Skill, AgentProfile, Directive, Project } from '../../../types/generated';
 
 vi.mock('../../../lib/api', async () => {
   const { buildApiMock } = await import('../../../test/apiMock');
@@ -38,6 +38,94 @@ const sampleDirectives: Directive[] = [
 beforeEach(() => { vi.clearAllMocks(); });
 
 describe('QuickPromptForm bindings (0.8.5)', () => {
+  it('lists only project-available environment names and inserts the recommended syntax', async () => {
+    const apiMod = await import('../../../lib/api');
+    (apiMod.mcps.projectEnvironmentNames as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce(['API_TOKEN', 'GLOBAL_TOKEN']);
+    wrap(
+      <QuickPromptForm
+        editPrompt={{
+          id: 'qp-env', name: 'Environment', icon: '⚡', prompt_template: 'Inspect ',
+          pinned: false, variables: [], agent: 'ClaudeCode', project_id: 'project-1',
+          skill_ids: [], profile_ids: [], directive_ids: [], tier: 'default', description: '',
+          created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+        }}
+        projects={[]}
+        onSave={vi.fn()}
+        onCancel={() => {}}
+      />
+    );
+
+    await waitFor(() => expect(screen.getByTestId('qp-environment-variables')).toBeInTheDocument());
+    expect(screen.getByRole('button', { name: '{{env.API_TOKEN}}' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '{{env.GLOBAL_TOKEN}}' })).toBeInTheDocument();
+    expect(apiMod.mcps.projectEnvironmentNames).toHaveBeenCalledWith('project-1');
+
+    fireEvent.click(screen.getByRole('button', { name: '{{env.API_TOKEN}}' }));
+    expect(screen.getByDisplayValue('Inspect {{env.API_TOKEN}}')).toBeInTheDocument();
+  });
+
+  it('clears stale environment names across project changes, clears, and failed requests', async () => {
+    const apiMod = await import('../../../lib/api');
+    let resolveInitialA!: (names: string[]) => void;
+    let resolveDelayedB!: (names: string[]) => void;
+    let resolveLatestA!: (names: string[]) => void;
+    let rejectB!: (reason?: unknown) => void;
+    const initialA = new Promise<string[]>(resolve => { resolveInitialA = resolve; });
+    const delayedB = new Promise<string[]>(resolve => { resolveDelayedB = resolve; });
+    const latestA = new Promise<string[]>(resolve => { resolveLatestA = resolve; });
+    const failedB = new Promise<string[]>((_resolve, reject) => { rejectB = reject; });
+    (apiMod.mcps.projectEnvironmentNames as ReturnType<typeof vi.fn>)
+      .mockImplementationOnce(() => initialA)
+      .mockImplementationOnce(() => delayedB)
+      .mockImplementationOnce(() => latestA)
+      .mockImplementationOnce(() => failedB);
+    wrap(
+      <QuickPromptForm
+        editPrompt={{
+          id: 'qp-env-race', name: 'Environment', icon: '⚡', prompt_template: '',
+          pinned: false, variables: [], agent: 'ClaudeCode', project_id: 'project-a',
+          skill_ids: [], profile_ids: [], directive_ids: [], tier: 'default', description: '',
+          created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+        }}
+        projects={[
+          { id: 'project-a', name: 'Project A', path: '/tmp/a' } as Project,
+          { id: 'project-b', name: 'Project B', path: '/tmp/b' } as Project,
+        ]}
+        onSave={vi.fn()}
+        onCancel={() => {}}
+      />
+    );
+
+    await act(async () => { resolveInitialA(['A_TOKEN']); });
+    await waitFor(() => expect(screen.getByRole('button', { name: '{{env.A_TOKEN}}' })).toBeInTheDocument());
+
+    const picker = screen.getByTestId('qp-project-picker');
+    fireEvent.focus(picker);
+    fireEvent.click(screen.getByRole('option', { name: 'Project B' }));
+    expect(screen.queryByTestId('qp-environment-variables')).toBeNull();
+
+    // Switch back before B settles. Its late response must not repopulate
+    // the current A project.
+    fireEvent.focus(picker);
+    fireEvent.click(screen.getByRole('option', { name: 'Project A' }));
+    await act(async () => { resolveDelayedB(['B_TOKEN']); });
+    expect(screen.getByRole('button', { name: '{{env.A_TOKEN}}' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '{{env.B_TOKEN}}' })).toBeNull();
+    await act(async () => { resolveLatestA(['A_TOKEN']); });
+    await waitFor(() => expect(screen.getByRole('button', { name: '{{env.A_TOKEN}}' })).toBeInTheDocument());
+    expect(screen.queryByRole('button', { name: '{{env.B_TOKEN}}' })).toBeNull();
+
+    fireEvent.click(screen.getByTestId('qp-project-picker').parentElement!.querySelector('button')!);
+    expect(screen.queryByTestId('qp-environment-variables')).toBeNull();
+
+    fireEvent.focus(picker);
+    fireEvent.click(screen.getByRole('option', { name: 'Project B' }));
+    expect(screen.queryByTestId('qp-environment-variables')).toBeNull();
+    await act(async () => { rejectB(new Error('request failed')); });
+    expect(screen.queryByTestId('qp-environment-variables')).toBeNull();
+  });
+
   it('hides the bindings block when no catalogs are provided', () => {
     wrap(
       <QuickPromptForm

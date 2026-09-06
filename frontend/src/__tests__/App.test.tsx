@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor, fireEvent } from '@testing-library/react';
+import { render, screen, waitFor, fireEvent, act } from '@testing-library/react';
 import { App } from '../App';
 import { setRetryDelay, setStatusTimeout } from '../lib/appBoot';
 
@@ -80,6 +80,29 @@ describe('App', () => {
     // starts with "Entering the grid". The trailing character is a
     // unicode ellipsis (…), not three dots.
     expect(screen.getByText(/^Entering the grid…?$/)).toBeDefined();
+    const status = screen.getByRole('status');
+    const mark = status.querySelector('svg');
+    expect(mark).toHaveAttribute('width', '100');
+    expect(mark).toHaveAttribute('height', '100');
+    expect(mark).toHaveAttribute('aria-hidden', 'true');
+    expect(mark?.querySelectorAll('circle')).toHaveLength(4);
+  });
+
+  it('keeps advancing startup hints with the loading mark', async () => {
+    vi.useFakeTimers();
+    setStatusTimeout(20_000);
+    vi.mocked(setupApi.getStatus).mockReturnValue(new Promise(() => {}));
+    const view = render(<App />);
+    try {
+      for (const hint of ['Loading config…', 'Detecting agents…', 'Almost ready…', 'Almost ready…']) {
+        await act(() => vi.advanceTimersByTimeAsync(1500));
+        expect(screen.getByRole('status')).toHaveTextContent(hint);
+        expect(screen.getByRole('status').querySelector('svg')).toBeInTheDocument();
+      }
+    } finally {
+      view.unmount();
+      vi.useRealTimers();
+    }
   });
 
   it('shows SetupWizard when setup is incomplete', async () => {
@@ -150,6 +173,8 @@ describe('App', () => {
 
     await waitFor(() => expect(screen.getByText('Cannot connect to backend')).toBeDefined());
     expect(screen.queryByTestId('setup-wizard')).toBeNull();
+    expect(screen.queryByRole('status')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeEnabled();
     // 1 initial + 5 retries = 6 calls
     expect(setupApi.getStatus).toHaveBeenCalledTimes(6);
   });

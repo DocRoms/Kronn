@@ -60,6 +60,59 @@ def _load_module():
     return module
 
 
+class DiscussionQuestionReadTests(unittest.TestCase):
+    def setUp(self):
+        self.mod = _load_module()
+
+    def test_manual_has_a_valid_numeric_version_example_and_readback_contract(self):
+        reader = next(tool for tool in self.mod.TOOLS if tool["name"] == "disc_question_list")
+        self.assertIn('numeric version 1, not string "1"', reader["description"])
+        self.assertIn("read back its exact key", reader["description"])
+        manual = self.mod.TOOL_MANUALS["disc_question_list"]
+        example = json.loads(manual.split("Example: `", 1)[1].split("`", 1)[0])
+        self.assertIs(type(example["version"]), int)
+        self.assertEqual(example["version"], 1)
+        self.assertTrue(example["key"])
+        self.assertTrue(example["question"])
+        for contract in [
+            "JSON number 1", 'the string "1" is INVALID', "After disc_append",
+            "read back this exact key", "NOT a pending or answered decision",
+            "republish with the same key", "neither a recorded card nor human consent",
+        ]:
+            self.assertIn(contract, manual)
+
+    def test_pending_is_bounded_and_key_recovers_an_answer_without_writing(self):
+        rows = [{"key": f"q-{i}", "state": "pending"} for i in range(55)]
+        rows.append({"key": "resolved", "state": "answered", "answer": {"text": "Human choice"}})
+        with mock.patch.object(self.mod, "_disc_id", return_value="room"), mock.patch.object(
+            self.mod, "_http", return_value={"success": True, "data": {"questions": rows, "pending_count": 55}}
+        ) as http:
+            pending = self.mod.call_disc_question_list({})
+            self.assertEqual(len(pending["questions"]), 50)
+            self.assertEqual(pending["matching_count"], 55)
+            self.assertTrue(pending["truncated"])
+            answered = self.mod.call_disc_question_list({"key": "resolved"})
+            self.assertEqual(answered["questions"], [rows[-1]])
+            self.assertFalse(answered["truncated"])
+            self.assertEqual(self.mod.call_disc_question_list({"key": "absent"})["questions"], [])
+            self.assertTrue(all(call == mock.call("GET", "/api/discussions/room/questions") for call in http.call_args_list))
+
+    def test_invalid_key_is_rejected_before_http(self):
+        with mock.patch.object(self.mod, "_http") as http:
+            for key in [False, 5, "", "x" * 101]:
+                with self.assertRaises(RuntimeError):
+                    self.mod.call_disc_question_list({"key": key})
+            http.assert_not_called()
+
+    def test_catalogue_manual_and_dispatch_expose_only_the_reader(self):
+        names = {tool["name"] for tool in self.mod.TOOLS}
+        self.assertIn("disc_question_list", names)
+        self.assertIn("disc_question_list", self.mod.TOOL_MANUALS)
+        self.assertNotIn("disc_question_answer", names)
+        self.assertIn("kronn-question", self.mod.TOOL_MANUALS["disc_question_list"])
+        self.assertIn("state=answered", self.mod.TOOL_MANUALS["disc_question_list"])
+
+
 class CurrentDiscMetaCacheTests(unittest.TestCase):
     """Behaviour of `_current_disc_meta()` and its cache."""
 
@@ -302,6 +355,27 @@ class CallDiscCreateAutoInheritTests(unittest.TestCase):
         self.assertNotIn("project_id", body)
         self.assertNotIn("source_agent", body)
         self.assertNotIn("source_session_id", body)
+
+
+class DiscussionCreationToolDescriptionsTests(unittest.TestCase):
+    """Public catalogue summaries must expose native-responder defaults."""
+
+    def setUp(self):
+        self.mod = _load_module()
+        self.tools = {tool["name"]: tool for tool in self.mod.TOOLS}
+
+    def test_disc_create_describes_peer_only_mode_without_changing_default(self):
+        description = self.tools["disc_create"]["description"]
+        self.assertIn("`no_agent:true`", description)
+        self.assertIn("peer-only", description)
+        self.assertIn("native responder", description)
+        self.assertIn("default false", description)
+
+    def test_disc_create_room_describes_its_peer_only_default(self):
+        description = self.tools["disc_create_room"]["description"]
+        self.assertIn("peer-only", description)
+        self.assertIn("`no_agent` defaults true", description)
+        self.assertIn("no native responder", description)
 
 
 class DiscSourceBindingToolTests(unittest.TestCase):

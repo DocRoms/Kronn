@@ -84,6 +84,31 @@ describe('tour anchors exist in the app', () => {
     expect(conditional, 'anchor on the container, not on a list row').toEqual([]);
   });
 
+  it('opens the collapsed header details before requiring the copyable-ID anchor', () => {
+    const step = TOUR_STEPS.find(candidate => candidate.id === 'copyable-ids');
+    expect(step?.optionalWhenMissing).not.toBe(true);
+
+    document.body.innerHTML = [
+      '<button data-testid="disc-header-details-toggle" aria-expanded="false"></button>',
+      '<button data-tour-id="message-id-pill"></button>',
+    ].join('');
+    const disclosure = document.querySelector<HTMLElement>(
+      '[data-testid="disc-header-details-toggle"]',
+    )!;
+    disclosure.addEventListener('click', () => {
+      disclosure.setAttribute('aria-expanded', 'true');
+      document.body.insertAdjacentHTML(
+        'beforeend',
+        '<button data-tour-id="discussion-id-pill"></button>',
+      );
+    });
+
+    step?.beforeStep?.();
+
+    expect(disclosure).toHaveAttribute('aria-expanded', 'true');
+    expect(document.querySelector('[data-tour-id="discussion-id-pill"]')).not.toBeNull();
+  });
+
   it('teaches every Automation category in the same order as the sidebar', () => {
     const automationSteps = TOUR_STEPS
       .filter(step => step.id.startsWith('automation-'))
