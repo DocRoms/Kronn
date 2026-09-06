@@ -578,6 +578,36 @@ describe('WorkflowsPage — QP launch double-click race', () => {
     expect(payload.targets).toContainEqual({ agent: 'ClaudeCode', tier: 'default' });
   });
 
+  it('offers usable OpenCode as a compare target and sends that native target unchanged', async () => {
+    mockQuickPromptsApi.list.mockResolvedValue([sampleQpNoVar]);
+    mockQuickPromptsApi.compareAgents.mockResolvedValue({
+      run_id: 'run-opencode',
+      batch_total: 1,
+      discussion_ids: ['d-opencode'],
+    });
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response('{"success":true,"data":null,"error":null}', { status: 200 }),
+    );
+
+    await wrap(
+      <WorkflowsPage projects={[]} installedAgentTypes={['ClaudeCode', 'OpenCode']} agentAccess={fullConfig} />,
+    );
+    await act(async () => { fireEvent.click(await screen.findByText(/Quick Prompts/)); });
+    await act(async () => { fireEvent.click(await screen.findByTestId('qp-compare-agents-btn')); });
+
+    const target = screen.getByTestId('qp-compare-chip-OpenCode');
+    expect(target).toHaveAttribute('aria-pressed', 'true');
+    await act(async () => { fireEvent.click(screen.getByTestId('qp-compare-agents-launch')); });
+
+    expect(mockQuickPromptsApi.compareAgents).toHaveBeenCalledWith(sampleQpNoVar.id, expect.objectContaining({
+      targets: [
+        { agent: 'ClaudeCode', tier: 'default' },
+        { agent: 'OpenCode', tier: 'default' },
+      ],
+    }));
+    fetchMock.mockRestore();
+  });
+
   it('compare-agents — selecting "None" then clicking Compare bails out (CTA disabled)', async () => {
     mockQuickPromptsApi.list.mockResolvedValue([sampleQpNoVar]);
 

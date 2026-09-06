@@ -87,6 +87,27 @@ describe('TaskLaunchDialog', () => {
     }));
   });
 
+  it('selects usable OpenCode and keeps it in the orchestration worker payload', async () => {
+    mocks.detect.mockResolvedValue([{
+      name: 'OpenCode', agent_type: 'OpenCode', installed: true, enabled: true,
+      runtime_available: false, auth_ready: true,
+    }]);
+    const props = renderDialog();
+    await waitFor(() => expect(screen.getByRole('option', { name: 'OpenCode' })).toBeInTheDocument());
+
+    fireEvent.change(screen.getByLabelText('orch.config.agent'), { target: { value: 'OpenCode' } });
+    fireEvent.click(screen.getByRole('button', { name: 'orch.launch' }));
+
+    await waitFor(() => expect(props.onLaunched).toHaveBeenCalled());
+    expect(mocks.createCampaign).toHaveBeenCalledWith(expect.objectContaining({
+      allowed_agents: expect.arrayContaining(['OpenCode']),
+      default_worker: expect.objectContaining({ target: expect.objectContaining({ agent_type: 'OpenCode' }) }),
+    }));
+    expect(mocks.launch).toHaveBeenCalledWith('campaign-1', 'KT-323', expect.objectContaining({
+      worker: expect.objectContaining({ target: expect.objectContaining({ agent_type: 'OpenCode' }) }),
+    }));
+  });
+
   it('closes with Escape without starting work', () => {
     const props = renderDialog();
     fireEvent.keyDown(window, { key: 'Escape' });
