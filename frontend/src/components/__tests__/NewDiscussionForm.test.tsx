@@ -158,6 +158,51 @@ describe('NewDiscussionForm — creation flow layout', () => {
     expect(onCreateMediaDiscussion).not.toHaveBeenCalled();
   });
 
+  it('uses a no-agent placeholder for a media-only connection and hides chat launch controls', async () => {
+    const onCreateMediaDiscussion = vi.fn().mockResolvedValue('d-media');
+    const apiMod = await import('../../lib/api');
+    (apiMod.media.generate as ReturnType<typeof vi.fn>).mockResolvedValue({
+      job_id: 'job-media',
+      message_id: 'message-media',
+      model: MEDIA_CONNECTION.image_model,
+    });
+
+    render(
+      <NewDiscussionForm
+        projects={[]}
+        agents={[]}
+        configLanguage="fr"
+        agentAccess={null}
+        externalConnections={[{
+          ...MEDIA_CONNECTION,
+          economy_model: null,
+          default_model: null,
+          reasoning_model: null,
+        }]}
+        onSubmit={vi.fn()}
+        onCreateMediaDiscussion={onCreateMediaDiscussion}
+        onClose={vi.fn()}
+        onNavigate={vi.fn()}
+        t={(key: string) => key}
+      />,
+    );
+
+    fireEvent.click(screen.getByTestId('new-disc-media-mode'));
+    expect(screen.queryByRole('checkbox', { name: 'disc.launchAgentNow' })).toBeNull();
+    fireEvent.change(document.querySelector('.media-generate-form textarea') as HTMLTextAreaElement, {
+      target: { value: 'an ink wash landscape' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'disc.media.generate' }));
+
+    await waitFor(() => expect(onCreateMediaDiscussion).toHaveBeenCalledWith({
+      title: 'disc.media.newDiscussionTitle',
+      agent: 'ClaudeCode',
+      projectId: null,
+      tier: 'default',
+      connectionId: null,
+    }));
+  });
+
   it('offers @openrouter with its configured models and submits the durable connection target', async () => {
     const onSubmit = vi.fn();
     render(

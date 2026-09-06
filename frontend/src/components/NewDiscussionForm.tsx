@@ -106,7 +106,9 @@ export interface NewDiscussionFormProps {
   externalConnections?: ExternalApiConnectionView[];
   prefill?: { projectId: string; title: string; prompt: string; locked?: boolean } | null;
   onSubmit: (config: NewDiscConfig) => void;
-  onCreateMediaDiscussion?: (config: Pick<NewDiscConfig, 'title' | 'agent' | 'projectId' | 'tier'>) => Promise<string>;
+  onCreateMediaDiscussion?: (config: Pick<NewDiscConfig, 'title' | 'agent' | 'projectId' | 'tier'> & {
+    connectionId: string | null;
+  }) => Promise<string>;
   onClose: () => void;
   onPrefillConsumed?: () => void;
   onNavigate: (page: string, opts?: { scrollTo?: string }) => void;
@@ -358,13 +360,22 @@ export function NewDiscussionForm({
   };
 
   const createMediaDiscussion = async (): Promise<string> => {
-    if (!newDiscAgent) throw new Error(t('disc.media.agentRequired'));
     if (!onCreateMediaDiscussion) throw new Error(t('disc.media.unavailable'));
+    // Media-only connections deliberately do not appear in `launchTargets`:
+    // they cannot receive chat. The legacy column still needs an agent value,
+    // so use the same no-agent placeholder choice as ordinary disc-first
+    // creation without treating it as a selected chat participant.
+    const placeholderAgent = (
+      newDiscAgent
+      || installedAgentsList[0]?.agent_type
+      || 'ClaudeCode'
+    ) as AgentType;
     const discussionId = await onCreateMediaDiscussion({
       title: newDiscTitle.trim() || t('disc.media.newDiscussionTitle'),
-      agent: newDiscAgent,
+      agent: placeholderAgent,
       projectId: newDiscProjectId || null,
       tier: newDiscTier,
+      connectionId: newDiscConnectionId,
     });
     return discussionId;
   };
@@ -995,7 +1006,7 @@ export function NewDiscussionForm({
             active RTK hook, shell output isn't compressed → more tokens burned.
             Red, pinned at the top. Skipped for non-RTK agents (Kiro/Copilot/
             Vibe/Ollama) and when RTK is active. */}
-        {launchAgentNow && effectiveLaunchAgents.some(agent => RTK_APPLICABLE.has(agent)) && (() => {
+        {entryMode === 'conversation' && launchAgentNow && effectiveLaunchAgents.some(agent => RTK_APPLICABLE.has(agent)) && (() => {
           const warnedAgent = effectiveLaunchAgents.find(agent => {
             if (!RTK_APPLICABLE.has(agent)) return false;
             const detection = agents.find(candidate => candidate.agent_type === agent);
@@ -1050,7 +1061,7 @@ export function NewDiscussionForm({
               </label>
             )}
           </div>
-          <div>
+          {entryMode === 'conversation' && <div>
             <label className="disc-form-label disc-launch-control">
               <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
                 <input
@@ -1129,10 +1140,10 @@ export function NewDiscussionForm({
                 {t('disc.discFirstHint')}
               </div>
             )}
-          </div>
+          </div>}
         </div>
 
-        {launchAgentNow && agentLaunchMode === 'prompt' && (
+        {entryMode === 'conversation' && launchAgentNow && agentLaunchMode === 'prompt' && (
           <div className="disc-prompt-agent-summary" data-testid="prompt-agent-summary">
             <span className="disc-form-hint">{t('disc.promptAgentsDetected')}</span>
             <div className="disc-prompt-agent-chips">

@@ -2361,12 +2361,15 @@ export function DiscussionsPage({
   };
 
   const handleCreateMediaDiscussion = async (
-    config: Pick<NewDiscConfig, 'title' | 'agent' | 'projectId' | 'tier'>,
+    config: Pick<NewDiscConfig, 'title' | 'agent' | 'projectId' | 'tier'> & {
+      connectionId: string | null;
+    },
   ): Promise<string> => {
     const disc = await discussionsApi.create({
       project_id: config.projectId,
       title: config.title,
       agent: config.agent,
+      connection_id: config.connectionId,
       language: configLanguage ?? 'fr',
       initial_prompt: '',
       initial_targets: [],

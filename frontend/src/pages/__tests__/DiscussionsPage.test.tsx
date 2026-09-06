@@ -171,6 +171,11 @@ vi.mock('../../lib/api', () => ({
     // 0.8.6 phase 4 — NewDiscussionForm fetches the default tier on mount.
     getServerConfig: vi.fn().mockResolvedValue({ default_model_tier: 'default' }),
   },
+  media: {
+    capabilities: vi.fn().mockResolvedValue({ model: 'image-model', capabilities: null }),
+    estimate: vi.fn().mockResolvedValue({ model: 'image-model', estimated_usd: null, samples: 0 }),
+    generate: vi.fn(),
+  },
   // KT-531 — AgentSwitchPicker reads the dynamic model catalog when its
   // popover opens.
   modelCatalogApi: {
@@ -186,6 +191,7 @@ vi.mock('../../hooks/useWebSocket', () => ({
 import {
   discussions as discussionsApi,
   externalApi as externalApiConnections,
+  media,
   planning as planningApi,
   projects as projectsApi,
   runsApi,
@@ -193,6 +199,7 @@ import {
 import { DiscussionsPage } from '../DiscussionsPage';
 import { findRenderedTextRanges } from '../../lib/discussionMessageSearch';
 import type { AgentDetection, AgentType, AgentsConfig, AiAuditStatus, ContextFile, Discussion, Project, SharedRun } from '../../types/generated';
+import type { ExternalApiConnectionView } from '../../lib/api';
 import type { ToastFn } from '../../hooks/useToast';
 
 const noop = () => {};
@@ -3147,6 +3154,131 @@ describe('DiscussionsPage', () => {
       expect(successToast, 'expected a success toast').toBeDefined();
       expect(successToast![0]).toContain('Discussion créée');
     }, { timeout: 1000 });
+  });
+
+  it('creates one no-agent room for a media-only connection before launching media', async () => {
+    const connection: ExternalApiConnectionView = {
+      id: 'media-only',
+      display_name: 'Visual provider',
+      mention_alias: 'visual',
+      endpoint: 'https://visual.example.test',
+      credential_slug: 'visual-provider',
+      origin_preset: 'custom',
+      economy_model: null,
+      default_model: null,
+      reasoning_model: null,
+      image_model: 'configured-image',
+      video_model: null,
+      created_at: '2026-09-06T00:00:00Z',
+      updated_at: '2026-09-06T00:00:00Z',
+      has_credential: true,
+    };
+    const created = { ...makeListDiscussion('media-only-room', 0), messages: [] };
+    vi.mocked(externalApiConnections.list).mockResolvedValue([connection]);
+    vi.mocked(discussionsApi.create).mockReset();
+    vi.mocked(discussionsApi.create).mockResolvedValue(created);
+    vi.mocked(discussionsApi.get).mockResolvedValue(created);
+    vi.mocked(discussionsApi.runAgent).mockClear();
+    vi.mocked(media.generate).mockReset();
+    vi.mocked(media.generate).mockResolvedValue({
+      job_id: 'media-job', message_id: 'media-message', model: 'configured-image',
+    });
+
+    await wrap(
+      <DiscussionsPage
+        projects={[]}
+        agents={[]}
+        allDiscussions={[]}
+        configLanguage="fr"
+        agentAccess={null}
+        refetchDiscussions={noop}
+        refetchProjects={noop}
+        onNavigate={noop}
+        toast={vi.fn()}
+        {...liftedProps()}
+      />,
+    );
+
+    await act(async () => { fireEvent.click(screen.getAllByText(/Nouvelle/)[0]); });
+    fireEvent.click(await screen.findByTestId('new-disc-media-mode'));
+    expect(screen.queryByRole('checkbox')).toBeNull();
+    fireEvent.change(document.querySelector('.media-generate-form textarea') as HTMLTextAreaElement, {
+      target: { value: 'a paper-cut moonlit forest' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /Générer/ }));
+
+    await waitFor(() => expect(vi.mocked(discussionsApi.create)).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(discussionsApi.create)).toHaveBeenCalledWith(expect.objectContaining({
+      agent: 'ClaudeCode',
+      connection_id: null,
+      initial_prompt: '',
+      initial_targets: [],
+      no_agent: true,
+    }));
+    await waitFor(() => expect(vi.mocked(media.generate)).toHaveBeenCalledWith(expect.objectContaining({
+      discussion_id: 'media-only-room',
+      connection_id: 'media-only',
+      prompt: 'a paper-cut moonlit forest',
+    })));
+    expect(vi.mocked(discussionsApi.runAgent)).not.toHaveBeenCalled();
+  });
+
+  it('keeps the selected Custom connection on a media-created room', async () => {
+    const connection: ExternalApiConnectionView = {
+      id: 'chat-and-media',
+      display_name: 'Configured provider',
+      mention_alias: 'configured',
+      endpoint: 'https://configured.example.test',
+      credential_slug: 'configured-provider',
+      origin_preset: 'other',
+      economy_model: null,
+      default_model: 'configured-chat',
+      reasoning_model: null,
+      image_model: 'configured-image',
+      video_model: null,
+      created_at: '2026-09-06T00:00:00Z',
+      updated_at: '2026-09-06T00:00:00Z',
+      has_credential: true,
+    };
+    const created = { ...makeListDiscussion('custom-media-room', 0), agent: 'Custom' as const, messages: [] };
+    vi.mocked(externalApiConnections.list).mockResolvedValue([connection]);
+    vi.mocked(discussionsApi.create).mockReset();
+    vi.mocked(discussionsApi.create).mockResolvedValue(created);
+    vi.mocked(discussionsApi.get).mockResolvedValue(created);
+    vi.mocked(media.generate).mockReset();
+    vi.mocked(media.generate).mockResolvedValue({
+      job_id: 'custom-media-job', message_id: 'custom-media-message', model: 'configured-image',
+    });
+
+    await wrap(
+      <DiscussionsPage
+        projects={[]}
+        agents={[]}
+        allDiscussions={[]}
+        configLanguage="fr"
+        agentAccess={null}
+        refetchDiscussions={noop}
+        refetchProjects={noop}
+        onNavigate={noop}
+        toast={vi.fn()}
+        {...liftedProps()}
+      />,
+    );
+
+    await act(async () => { fireEvent.click(screen.getAllByText(/Nouvelle/)[0]); });
+    fireEvent.click(await screen.findByTestId('new-disc-media-mode'));
+    fireEvent.change(document.querySelector('.media-generate-form textarea') as HTMLTextAreaElement, {
+      target: { value: 'a watercolor lighthouse' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /Générer/ }));
+
+    await waitFor(() => expect(vi.mocked(discussionsApi.create)).toHaveBeenCalledWith(expect.objectContaining({
+      agent: 'Custom',
+      connection_id: 'chat-and-media',
+      initial_prompt: '',
+      initial_targets: [],
+      no_agent: true,
+    })));
   });
 
   it('launches every agent mentioned in a new-discussion prompt as independent replies', async () => {
