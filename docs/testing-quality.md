@@ -32,6 +32,11 @@ with zero tests is not evidence for that regression; a prior worktree's result
 must not be attached to a different delivered HEAD. Resolve any stale-artifact
 ambiguity before approving, without deleting another worker's shared cache.
 
+For filter controls used by a memoized request callback, test changing only
+that filter while keeping the query and other inputs unchanged. Changing the
+query as well can rebuild the callback and hide a missing filter dependency.
+`[src: file: frontend/src/components/__tests__/GlobalSearchPanel.test.tsx:169-190]`
+
 ## Release gate
 
 Run from the repository root unless a working directory is shown.

@@ -49,6 +49,7 @@ const searchMessages = () => discussionsApi.searchMessages as ReturnType<typeof 
 
 beforeEach(() => {
   vi.clearAllMocks();
+  localStorage.removeItem('kronn:searchScope');
   searchMessages().mockResolvedValue([]);
 });
 afterEach(cleanup);
@@ -164,6 +165,28 @@ describe('GlobalSearchPanel', () => {
     renderPanel();
     await submit('Fastly');
     expect(searchMessages()).toHaveBeenCalledWith(expect.objectContaining({ scope: 'all' }));
+  });
+
+  it('uses the new scope when the query and other filters stay unchanged', async () => {
+    renderPanel();
+    await submit('Fastly');
+    expect(searchMessages()).toHaveBeenLastCalledWith(expect.objectContaining({
+      q: 'Fastly', scope: 'all', offset: 0,
+    }));
+
+    for (const scope of ['title', 'content', 'notes', 'all']) {
+      const calls = searchMessages().mock.calls.length;
+      fireEvent.change(document.querySelector('[data-testid="global-search-scope"]') as HTMLSelectElement, {
+        target: { value: scope },
+      });
+      // A filter edit is not an implicit search; the explicit submit uses it.
+      expect(searchMessages()).toHaveBeenCalledTimes(calls);
+      await submit('Fastly');
+      expect(searchMessages()).toHaveBeenCalledTimes(calls + 1);
+      expect(searchMessages()).toHaveBeenLastCalledWith(expect.objectContaining({
+        q: 'Fastly', scope, offset: 0,
+      }));
+    }
   });
 
   it('pages with an offset instead of asking for the whole history', async () => {
