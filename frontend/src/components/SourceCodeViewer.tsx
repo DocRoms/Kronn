@@ -9,6 +9,7 @@ import { projects as projectsApi } from '../lib/api';
 import type { GitBlameLine, GitCommitDetail, SourceFileNode } from '../types/generated';
 import { useT } from '../lib/I18nContext';
 import { highlightLine as highlightSourceLine, languageForPath } from '../lib/diff-syntax';
+import { buildHtmlPreviewDocument } from '../lib/html-preview';
 import './SourceCodeViewer.css';
 
 interface SourceCodeViewerProps {
@@ -61,17 +62,6 @@ interface SearchResult {
 
 const EMPTY_SEARCH_RESULTS = new Map<string, number>();
 const HTML_FILE_PATH = /\.html?$/i;
-// The sandbox removes the frame's access to Kronn. This CSP additionally
-// prevents network requests (including relative API URLs), while allowing
-// inline CSS and data-URL assets for a self-contained document.
-const HTML_PREVIEW_CSP = '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; style-src \'unsafe-inline\'; img-src data:; font-src data:">';
-
-export function buildHtmlPreviewDocument(html: string): string {
-  return /<head(?:\s[^>]*)?>/i.test(html)
-    ? html.replace(/<head(?:\s[^>]*)?>/i, match => `${match}${HTML_PREVIEW_CSP}`)
-    : `${HTML_PREVIEW_CSP}${html}`;
-}
-
 function SourceCodeViewerProject({ projectId, initialPath, onOpenCommit }: SourceCodeViewerProps) {
   const { t } = useT();
   const [tree, setTree] = useState<SourceFileNode[]>([]);
@@ -542,10 +532,10 @@ function SourceCodeViewerProject({ projectId, initialPath, onOpenCommit }: Sourc
             {language && <span className="source-language">{language}</span>}
             {isHtmlFile && (
               <span className="source-content-mode" role="group" aria-label={t('projects.source.contentView')}>
-                <button type="button" data-active={contentView === 'code'} onClick={() => setContentView('code')}>
+                <button type="button" aria-pressed={contentView === 'code'} data-active={contentView === 'code'} onClick={() => setContentView('code')}>
                   {t('projects.source.code')}
                 </button>
-                <button type="button" data-active={contentView === 'preview'} onClick={() => setContentView('preview')}>
+                <button type="button" aria-pressed={contentView === 'preview'} data-active={contentView === 'preview'} onClick={() => setContentView('preview')}>
                   {t('projects.source.preview')}
                 </button>
               </span>

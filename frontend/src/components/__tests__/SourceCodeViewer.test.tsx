@@ -2,6 +2,7 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { projects } from '../../lib/api';
 import { SourceCodeViewer } from '../SourceCodeViewer';
+import { buildHtmlPreviewDocument } from '../../lib/html-preview';
 import type { SourceFileNode } from '../../types/generated';
 
 function deferred<T>() {
@@ -151,6 +152,8 @@ describe('SourceCodeViewer', () => {
     render(<SourceCodeViewer projectId="project-1" initialPath="site/INDEX.HTM" />);
 
     expect(await screen.findByRole('button', { name: 'projects.source.preview' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'projects.source.code' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('button', { name: 'projects.source.preview' })).toHaveAttribute('aria-pressed', 'false');
     expect(screen.getByText(/Hello/)).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: 'projects.source.preview' }));
@@ -158,10 +161,20 @@ describe('SourceCodeViewer', () => {
     expect(frame).toHaveAttribute('sandbox', '');
     expect(frame).toHaveAttribute('srcdoc', expect.stringContaining("default-src 'none'"));
     expect(frame).toHaveAttribute('srcdoc', expect.stringContaining('color: red'));
+    expect(screen.getByRole('button', { name: 'projects.source.code' })).toHaveAttribute('aria-pressed', 'false');
+    expect(screen.getByRole('button', { name: 'projects.source.preview' })).toHaveAttribute('aria-pressed', 'true');
 
     fireEvent.click(screen.getByRole('button', { name: 'projects.source.code' }));
     expect(screen.queryByTestId('source-html-preview-frame')).not.toBeInTheDocument();
     expect(screen.getByText(/Hello/)).toBeInTheDocument();
+  });
+
+  it('places the static preview policy before source markup and removes navigation URLs', () => {
+    const preview = buildHtmlPreviewDocument('<!-- <head> --><html><head></head><body><img src="https://preview-probe.invalid/comment-head"><a href="https://preview-probe.invalid/self-navigation">Go</a></body></html>');
+
+    expect(preview).toMatch(/^<!doctype html><html><head><meta http-equiv="Content-Security-Policy"/i);
+    expect(preview).toContain("default-src 'none'");
+    expect(preview).not.toContain('https://preview-probe.invalid');
   });
 
   it('returns to code and displays a loading error when a non-HTML file is selected', async () => {
