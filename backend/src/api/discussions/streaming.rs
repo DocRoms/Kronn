@@ -1149,7 +1149,8 @@ mod dispatch_prompt_snapshot_tests {
         crate::db::migrations::run(&conn).expect("schema");
         let key = [8_u8; 32];
         let insert_snapshot = |kind: &str, run_id: &str, value: &str| {
-            let values = std::collections::HashMap::from([("source".to_string(), value.to_string())]);
+            let values =
+                std::collections::HashMap::from([("source".to_string(), value.to_string())]);
             crate::db::execution_variable_snapshots::insert(
                 &conn,
                 crate::db::execution_variable_snapshots::NewSnapshot {
