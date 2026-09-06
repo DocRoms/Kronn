@@ -17,6 +17,7 @@ import { MatrixText } from './MatrixText';
 import { DocPreview } from './DocPreview';
 import { DocDataExport } from './DocDataExport';
 import { PlanningActionCard } from './PlanningActionCard';
+import { DiscussionQuestionCard } from './DiscussionQuestionCard';
 import { DiscussionActionCard } from './DiscussionActionCard';
 import { parsePlanningProposal } from '../lib/planningProposal';
 import { MermaidDiagram } from './MermaidDiagram';
@@ -1647,6 +1648,17 @@ export const MarkdownContent = memo(({
     return lines;
   }, [content]);
 
+  // KT-595 — same trick as the proposals above: the durable question row is
+  // addressed by (message, which fence within it), so the card needs to know
+  // its own rank among this message's question fences.
+  const questionFenceLines = useMemo(() => {
+    const lines: number[] = [];
+    content.split('\n').forEach((line, index) => {
+      if (/^\s*`{3,}\s*kronn-question\s*$/.test(line)) lines.push(index + 1);
+    });
+    return lines;
+  }, [content]);
+
   // Override the `pre` handler when we have a discussion id: fenced
   // blocks tagged `kronn-doc-preview` get replaced with the DocPreview
   // component (sandboxed iframe + export buttons). Everything else
@@ -1706,6 +1718,22 @@ export const MarkdownContent = memo(({
             // fall through to raw code render
           }
         }
+        // KT-595 — an arbitration the room is waiting on. The card renders
+        // the DURABLE row, not the fence: the fence is what the agent wrote,
+        // the row is what was recorded and what the answer attaches to.
+        if (className.includes('language-kronn-question')) {
+          const line = node?.position?.start?.line;
+          const fenceIndex = line === undefined
+            ? undefined
+            : questionFenceLines.indexOf(line);
+          return (
+            <DiscussionQuestionCard
+              discussionId={discussionId}
+              sourceMessageId={sourceMessageId}
+              fenceIndex={fenceIndex !== undefined && fenceIndex >= 0 ? fenceIndex : undefined}
+            />
+          );
+        }
         if (className.includes('language-kronn-plan-action')) {
           const raw = codeEl?.props?.children;
           const text = Array.isArray(raw) ? raw.join('') : String(raw ?? '');
@@ -1736,7 +1764,7 @@ export const MarkdownContent = memo(({
         );
       },
     };
-  }, [discussionId, proposalFenceLines, sourceMessageId]);
+  }, [discussionId, proposalFenceLines, questionFenceLines, sourceMessageId]);
 
   // Guard against multi-MB messages crashing the tab — see MAX_MARKDOWN_CHARS.
   // Placed AFTER all hooks (the useMemo above) to satisfy rules-of-hooks.

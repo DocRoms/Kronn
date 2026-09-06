@@ -66,6 +66,9 @@ vi.mock('../../lib/api', () => ({
     contextFileBlob: vi.fn(),
     // 0.9.2 — the composer lists joined CLI sessions to offer their `-cli` aliases.
     participants: vi.fn().mockResolvedValue([]),
+    // KT-595 — the arbitration banner reads the room's questions on mount.
+    questions: vi.fn().mockResolvedValue({ questions: [], pending_count: 0 }),
+    answerQuestion: vi.fn(),
   },
   projects: {
     list: vi.fn().mockResolvedValue([]),
