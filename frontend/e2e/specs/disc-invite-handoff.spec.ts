@@ -111,6 +111,6 @@ test('enriched handoff carries the plan and the task appears in Focus', async ({
   await dashboard.openDiscussion(discId);
   const panelRail = page.getByRole('group', { name: 'Panneaux de la discussion' });
   await panelRail.getByRole('button', { name: 'Ouvrir les panneaux' }).click();
-  await panelRail.getByRole('button', { name: 'Ouvrir le plan de discussion' }).click();
+  await expect(panelRail.getByRole('button', { name: 'Fermer les panneaux' })).toBeVisible();
   await expect(page.locator('.plan-timeline-section[data-kind="upcoming"]')).toContainText(taskTitle);
 });
