@@ -180,6 +180,7 @@ vi.mock('../../lib/api', () => ({
 
 import { SettingsPage } from '../SettingsPage';
 import { config as configApi } from '../../lib/api';
+import { dictionaries } from '../../lib/i18n/testing';
 import type { AgentsConfig, AgentDetection } from '../../types/generated';
 import type { ToastFn } from '../../hooks/useToast';
 
@@ -400,7 +401,7 @@ describe('SettingsPage', () => {
     expect(document.body.textContent).toContain('Short answers');
   });
 
-  it('shows the current version under the settings menu with stable release links', async () => {
+  it('shows the current version and local Ko-fi support card under the settings menu', async () => {
     await wrap(<SettingsPage {...defaultProps} />);
 
     const nav = screen.getByRole('navigation', { name: 'Sections' });
@@ -409,10 +410,20 @@ describe('SettingsPage', () => {
     expect(versionCard!.textContent).toContain('Kronn v');
 
     const links = [...versionCard!.querySelectorAll<HTMLAnchorElement>('a')];
-    expect(links).toHaveLength(2);
+    expect(links).toHaveLength(3);
     expect(links[0].href).toBe('https://github.com/DocRoms/Kronn/releases');
     expect(links[1].href).toBe('https://github.com/DocRoms/Kronn');
     expect(links[1].textContent).toBe('Source code (AGPL-3.0)');
+    expect(links[2].href).toBe('https://ko-fi.com/docroms');
+    expect(links[2].textContent).toBe('Soutenir Kronn');
+    expect(links[2].querySelector('img')).toHaveAttribute('src', '/kofi.svg');
+  });
+
+  it('translates the Ko-fi support label in every UI locale', () => {
+    expect(dictionaries.fr['config.supportKronn']).toBe('Soutenir Kronn');
+    expect(dictionaries.en['config.supportKronn']).toBe('Support Kronn');
+    expect(dictionaries.es['config.supportKronn']).toBe('Apoyar a Kronn');
+    expect(dictionaries.zh['config.supportKronn']).toBe('支持 Kronn');
   });
 
   /// The bolt beside the version was a lucide icon, not a logo. The card now

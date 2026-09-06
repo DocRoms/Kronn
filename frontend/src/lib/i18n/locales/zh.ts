@@ -2243,6 +2243,7 @@ const zh: TranslationDict = {
   "config.summary": "配置摘要",
   "config.sections": "部分",
   "config.sourceCodeLicense": "源代码（AGPL-3.0）",
+  "config.supportKronn": "支持 Kronn",
   "config.languages": "语言",
   "config.languagesHint": "界面语言和智能体回复语言是独立的。",
   "config.scan": "项目扫描",

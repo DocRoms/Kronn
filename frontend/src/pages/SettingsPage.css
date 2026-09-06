@@ -199,6 +199,13 @@
   text-align: left;
 }
 
+.set-version-card-wrap {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--kr-sp-2);
+}
+
 .set-version-card-lines {
   display: flex;
   min-width: 0;
@@ -215,6 +222,26 @@
 .set-nav-version a:hover,
 .set-nav-version a:focus-visible {
   text-decoration: underline;
+}
+
+.set-kofi-card {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px var(--kr-sp-2);
+  border: 1px solid var(--kr-border-light);
+  border-radius: var(--kr-r-sm);
+  color: var(--kr-text-secondary);
+  font-size: var(--kr-fs-2xs);
+  font-weight: 650;
+  text-decoration: none;
+}
+
+.set-kofi-card:hover,
+.set-kofi-card:focus-visible {
+  border-color: var(--kr-accent);
+  color: var(--kr-accent-text);
+  text-decoration: none;
 }
 
 .set-nav-tour-progress {

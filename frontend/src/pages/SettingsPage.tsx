@@ -75,6 +75,7 @@ import './SettingsPage.css';
 
 const KRONN_REPOSITORY_URL = 'https://github.com/DocRoms/Kronn';
 const KRONN_RELEASES_URL = `${KRONN_REPOSITORY_URL}/releases`;
+const KRONN_KOFI_URL = 'https://ko-fi.com/docroms';
 
 /** The mark, then the version and the licence it labels.
  *
@@ -83,18 +84,24 @@ const KRONN_RELEASES_URL = `${KRONN_REPOSITORY_URL}/releases`;
  *  lines drifting apart: the sidebar puts it against its left edge, the page
  *  footer keeps it centred. The em dash that separated them on one line is
  *  gone with the line it lived on. */
-function KronnVersionLinks({ sourceLabel }: { sourceLabel: string }) {
+function KronnVersionLinks({ sourceLabel, supportLabel }: { sourceLabel: string; supportLabel: string }) {
   return (
-    <span className="set-version-card">
-      <KronnMark size={30} />
-      <span className="set-version-card-lines">
-        <a href={KRONN_RELEASES_URL} target="_blank" rel="noopener noreferrer">
-          Kronn v{appVersion}
-        </a>
-        <a href={KRONN_REPOSITORY_URL} target="_blank" rel="noopener noreferrer">
-          {sourceLabel}
-        </a>
+    <span className="set-version-card-wrap">
+      <span className="set-version-card">
+        <KronnMark size={30} />
+        <span className="set-version-card-lines">
+          <a href={KRONN_RELEASES_URL} target="_blank" rel="noopener noreferrer">
+            Kronn v{appVersion}
+          </a>
+          <a href={KRONN_REPOSITORY_URL} target="_blank" rel="noopener noreferrer">
+            {sourceLabel}
+          </a>
+        </span>
       </span>
+      <a className="set-kofi-card" href={KRONN_KOFI_URL} target="_blank" rel="noopener noreferrer">
+        <img src="/kofi.svg" width="16" height="16" alt="" aria-hidden="true" />
+        {supportLabel}
+      </a>
     </span>
   );
 }
@@ -469,7 +476,7 @@ export function SettingsPage({
           </Fragment>
         ))}
           <div className="set-nav-version" data-testid="settings-nav-version">
-            <KronnVersionLinks sourceLabel={t('config.sourceCodeLicense')} />
+            <KronnVersionLinks sourceLabel={t('config.sourceCodeLicense')} supportLabel={t('config.supportKronn')} />
           </div>
           <div className="set-nav-tour-progress">
             <TourProgressCta />
@@ -2008,7 +2015,7 @@ export function SettingsPage({
         </div>
       </div>
       <div className="set-footer">
-        <KronnVersionLinks sourceLabel={t('config.sourceCodeLicense')} />
+        <KronnVersionLinks sourceLabel={t('config.sourceCodeLicense')} supportLabel={t('config.supportKronn')} />
       </div>
     </div>
   );

@@ -2283,6 +2283,7 @@ const fr: TranslationDict = {
   'config.summary': 'Résumé de la configuration',
   'config.sections': 'Sections',
   'config.sourceCodeLicense': 'Source code (AGPL-3.0)',
+  'config.supportKronn': 'Soutenir Kronn',
   'config.languages': 'Langues',
   'config.languagesHint': 'La langue de l’interface et la langue de réponse des agents sont indépendantes.',
   'config.scan': 'Scan des projets',
