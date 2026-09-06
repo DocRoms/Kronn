@@ -4,7 +4,7 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use ts_rs::TS;
 
 use super::{AgentSettings, AgentType, ExtractSpec, ModelTier, PaginationSpec};
@@ -243,22 +243,7 @@ pub fn declarations_with_template_environment_variables(
     declarations: &[PromptVariable],
 ) -> Vec<PromptVariable> {
     let mut result = declarations.to_vec();
-    let mut names: HashSet<String> = result
-        .iter()
-        .map(|variable| variable.name.clone())
-        .collect();
-    let mut references = template_environment_references(template);
-    references.sort();
-    references.dedup();
-
-    for environment_name in references {
-        let mut variable_name = format!("{TEMPLATE_ENV_VARIABLE_PREFIX}{environment_name}");
-        let mut suffix = 2;
-        while names.contains(&variable_name) {
-            variable_name = format!("{TEMPLATE_ENV_VARIABLE_PREFIX}{environment_name}#{suffix}");
-            suffix += 1;
-        }
-        names.insert(variable_name.clone());
+    for (variable_name, environment_name) in template_environment_bindings(template, declarations) {
         result.push(PromptVariable {
             name: variable_name,
             label: format!("Environment {environment_name}"),
@@ -281,22 +266,81 @@ pub fn declarations_with_template_environment_variables(
 pub fn render_quick_prompt_template(
     template: &str,
     values: &std::collections::HashMap<String, String>,
+    declarations: &[PromptVariable],
 ) -> String {
-    values
-        .iter()
-        .fold(template.to_string(), |rendered, (name, value)| {
-            if let Some(environment_name) = name.strip_prefix(TEMPLATE_ENV_VARIABLE_PREFIX) {
-                let environment_name = environment_name
-                    .rsplit_once('#')
-                    .and_then(|(base, suffix)| suffix.parse::<u32>().ok().map(|_| base))
-                    .unwrap_or(environment_name);
-                rendered
-                    .replace(&format!("{{{{env.{environment_name}}}}}"), value)
-                    .replace(&format!("<env.{environment_name}>"), value)
-            } else {
-                rendered.replace(&format!("{{{{{name}}}}}"), value)
+    let environment_bindings: HashMap<_, _> = template_environment_bindings(template, declarations)
+        .into_iter()
+        .map(|(variable_name, environment_name)| (environment_name, variable_name))
+        .collect();
+    let mut rendered = String::with_capacity(template.len());
+    let mut index = 0;
+    while index < template.len() {
+        let remaining = &template[index..];
+        let environment_reference = if remaining.starts_with("{{env.") {
+            remaining[6..].find("}}").map(|end| (6, end + 6, end + 8))
+        } else if remaining.starts_with("<env.") {
+            remaining[5..].find('>').map(|end| (5, end + 5, end + 6))
+        } else {
+            None
+        };
+        if let Some((name_start, name_end, placeholder_end)) = environment_reference {
+            let environment_name = &remaining[name_start..name_end];
+            if is_environment_name(environment_name) {
+                if let Some(variable_name) = environment_bindings.get(environment_name) {
+                    if let Some(value) = values.get(variable_name) {
+                        rendered.push_str(value);
+                        index += placeholder_end;
+                        continue;
+                    }
+                }
             }
+        }
+        if let Some(name) = remaining
+            .strip_prefix("{{")
+            .and_then(|rest| rest.find("}}").map(|end| &rest[..end]))
+        {
+            if let Some(value) = values.get(name) {
+                rendered.push_str(value);
+                index += name.len() + 4;
+                continue;
+            }
+        }
+        let character = remaining.chars().next().expect("index is in bounds");
+        rendered.push(character);
+        index += character.len_utf8();
+    }
+    rendered
+}
+
+/// Pair each environment name in a template with a runtime-only declaration
+/// name. The collision-free name is derived from the persisted declarations,
+/// so rendering can distinguish it from a user variable with the same prefix.
+fn template_environment_bindings(
+    template: &str,
+    declarations: &[PromptVariable],
+) -> Vec<(String, String)> {
+    let mut names: HashSet<String> = declarations
+        .iter()
+        .map(|variable| variable.name.clone())
+        .collect();
+    let mut references = template_environment_references(template);
+    references.sort();
+    references.dedup();
+
+    references
+        .into_iter()
+        .map(|environment_name| {
+            let mut variable_name = format!("{TEMPLATE_ENV_VARIABLE_PREFIX}{environment_name}");
+            let mut suffix = 2;
+            while names.contains(&variable_name) {
+                variable_name =
+                    format!("{TEMPLATE_ENV_VARIABLE_PREFIX}{environment_name}#{suffix}");
+                suffix += 1;
+            }
+            names.insert(variable_name.clone());
+            (variable_name, environment_name)
         })
+        .collect()
 }
 
 fn template_environment_references(template: &str) -> Vec<String> {
@@ -881,7 +925,7 @@ mod tests {
             ("__kronn_template_env__LEGACY_TOKEN".into(), "legacy".into()),
         ]);
         assert_eq!(
-            render_quick_prompt_template("{{env.API_TOKEN}} / <env.LEGACY_TOKEN>", &values,),
+            render_quick_prompt_template("{{env.API_TOKEN}} / <env.LEGACY_TOKEN>", &values, &[]),
             "recommended / legacy"
         );
     }
@@ -899,7 +943,11 @@ mod tests {
             ("__kronn_template_env__OK_NAME".into(), "environment".into()),
         ]);
         assert_eq!(
-            render_quick_prompt_template("{{name}} {{env.OK_NAME}} {{env.123BAD}}", &values),
+            render_quick_prompt_template(
+                "{{name}} {{env.OK_NAME}} {{env.123BAD}}",
+                &values,
+                &[variable(PromptVariableSource::UserInput, None)]
+            ),
             "manual environment {{env.123BAD}}"
         );
     }
@@ -911,8 +959,42 @@ mod tests {
         let generated_name = &declarations[0].name;
         let values = std::collections::HashMap::from([(generated_name.clone(), "resolved".into())]);
         assert_eq!(
-            render_quick_prompt_template("{{env.SERVICE_2}}", &values),
+            render_quick_prompt_template("{{env.SERVICE_2}}", &values, &[]),
             "resolved"
+        );
+    }
+
+    #[test]
+    fn template_environment_rendering_preserves_prefix_named_user_variables() {
+        let user_variable = PromptVariable {
+            name: "__kronn_template_env__API_TOKEN".into(),
+            label: "ordinary".into(),
+            placeholder: String::new(),
+            description: None,
+            required: true,
+            pattern: None,
+            source: Some(PromptVariableSource::UserInput),
+            source_ref: None,
+            allow_manual_override: false,
+            control: None,
+        };
+        let declarations = declarations_with_template_environment_variables(
+            "{{__kronn_template_env__API_TOKEN}} {{env.API_TOKEN}} <env.API_TOKEN>",
+            std::slice::from_ref(&user_variable),
+        );
+        let environment_name = declarations[1].name.clone();
+        assert_eq!(environment_name, "__kronn_template_env__API_TOKEN#2");
+        let values = std::collections::HashMap::from([
+            (user_variable.name.clone(), "ordinary".into()),
+            (environment_name, "environment".into()),
+        ]);
+        assert_eq!(
+            render_quick_prompt_template(
+                "{{__kronn_template_env__API_TOKEN}} {{env.API_TOKEN}} <env.API_TOKEN>",
+                &values,
+                &[user_variable],
+            ),
+            "ordinary environment environment"
         );
     }
 

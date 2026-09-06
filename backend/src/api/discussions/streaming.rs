@@ -2154,6 +2154,30 @@ async fn make_agent_stream_inner(
             .unwrap_or(false)
     };
     if qp_launch {
+        let discussion_id_for_qp = disc.id.clone();
+        let original_declarations = state
+            .db
+            .with_read_conn(move |conn| {
+                let qp_id: Option<String> = conn
+                    .query_row(
+                        "SELECT originating_qp_id FROM discussions WHERE id=?1",
+                        [discussion_id_for_qp],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                Ok::<_, anyhow::Error>(
+                    qp_id
+                        .and_then(|id| {
+                            crate::db::quick_prompts::get_quick_prompt(conn, &id)
+                                .ok()
+                                .flatten()
+                        })
+                        .map(|prompt| prompt.variables)
+                        .unwrap_or_default(),
+                )
+            })
+            .await
+            .unwrap_or_default();
         let secret = match state.config.read().await.encryption_secret.clone() {
             Some(secret) => secret,
             None => {
@@ -2244,8 +2268,11 @@ async fn make_agent_stream_inner(
             }
         };
         if let Some(first_message) = prompt_disc.messages.first_mut() {
-            first_message.content =
-                crate::models::render_quick_prompt_template(&first_message.content, &values);
+            first_message.content = crate::models::render_quick_prompt_template(
+                &first_message.content,
+                &values,
+                &original_declarations,
+            );
         }
     }
     let prompt = build_agent_prompt(&prompt_disc, &agent_type, extra_context_len);

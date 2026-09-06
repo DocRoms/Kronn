@@ -105,8 +105,10 @@ export function QuickPromptForm({
   }, []);
 
   useEffect(() => {
+    // Do not expose names from the previously selected project while the next
+    // request is pending. The active flag still rejects stale responses.
+    setEnvironmentVariableNames([]);
     if (!projectId) {
-      setEnvironmentVariableNames([]);
       return;
     }
     let active = true;
