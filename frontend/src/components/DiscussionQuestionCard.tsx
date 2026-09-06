@@ -14,12 +14,16 @@ import {
   useDiscussionQuestions,
 } from '../lib/discussionQuestions';
 import { useT } from '../lib/I18nContext';
+import { findFenceProblem } from '../lib/questionFence';
 import { userError } from '../lib/userError';
 import type { DiscussionQuestion, DiscussionQuestionAnswer } from '../types/generated';
 import './DiscussionQuestionCard.css';
 
 export interface DiscussionQuestionCardProps {
   discussionId: string;
+  /** KT-607 — the fence exactly as it was written. Read only when no durable
+   *  row matches, to say WHICH field kept it from being recorded. */
+  source?: string;
   /** The message the fence sits in, and which fence within it — together they
    *  identify the durable row the backend wrote when the message landed. */
   sourceMessageId?: string;
@@ -28,6 +32,7 @@ export interface DiscussionQuestionCardProps {
 
 export function DiscussionQuestionCard({
   discussionId,
+  source,
   sourceMessageId,
   fenceIndex,
 }: DiscussionQuestionCardProps) {
@@ -40,20 +45,47 @@ export function DiscussionQuestionCard({
     ) ?? null;
 
   if (question) return <QuestionBody discussionId={discussionId} question={question} />;
-  // Still reading, or the row has not been written yet. Either way the fence
-  // itself is not worth showing as code: it is machine notation.
-  return <QuestionPlaceholder loading={loading} />;
+  // Still reading, or nothing was ever recorded. Either way the fence itself
+  // is not worth showing as code: it is machine notation.
+  return <QuestionPlaceholder loading={loading} source={source} />;
 }
 
-function QuestionPlaceholder({ loading }: { loading: boolean }) {
+function QuestionPlaceholder({ loading, source }: { loading: boolean; source?: string }) {
   const { t } = useT();
+  if (loading) {
+    return (
+      <div className="disc-question-card" data-state="loading" data-testid="disc-question-loading">
+        <Loader2 size={13} className="spin" />
+        <span>{t('disc.question.loading')}</span>
+      </div>
+    );
+  }
+
+  // KT-607 — nothing was recorded, and until now that was all anyone was told.
+  // The notation is right here; if it is what refused the question, say which
+  // field, so the author can fix it instead of guessing.
+  const problem = findFenceProblem(source);
+  if (!problem) {
+    return (
+      <div className="disc-question-card" data-state="loading" data-testid="disc-question-loading">
+        <AlertOctagon size={13} />
+        <span>{t('disc.question.missing')}</span>
+      </div>
+    );
+  }
   return (
-    <div className="disc-question-card" data-state="loading" data-testid="disc-question-loading">
-      {loading
-        ? <Loader2 size={13} className="spin" />
-        : <AlertOctagon size={13} />}
-      <span>{loading ? t('disc.question.loading') : t('disc.question.missing')}</span>
-    </div>
+    <section
+      className="disc-question-card"
+      data-state="invalid"
+      data-testid="disc-question-invalid"
+    >
+      <header className="disc-question-head">
+        <AlertOctagon size={13} />
+        <span className="disc-question-kind">{t('disc.question.invalidTitle')}</span>
+      </header>
+      <p className="disc-question-text">{t(problem.key)}</p>
+      <p className="disc-question-context">{t('disc.question.invalidHint')}</p>
+    </section>
   );
 }
 

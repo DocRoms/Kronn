@@ -204,3 +204,16 @@
   color: var(--kr-text-ghost);
   font-size: var(--kr-fs-2xs);
 }
+
+/* KT-607 — the notation was refused, so there is nothing to decide here. Amber
+   rather than red: red is "the room is waiting on you", this is "an agent made
+   a mistake". */
+.disc-question-card[data-state='invalid'] {
+  border-color: var(--kr-warning);
+  border-left-color: var(--kr-warning);
+  background: var(--kr-bg-subtle);
+}
+
+.disc-question-card[data-state='invalid'] .disc-question-head {
+  color: var(--kr-warning);
+}

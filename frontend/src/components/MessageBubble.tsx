@@ -1722,6 +1722,10 @@ export const MarkdownContent = memo(({
         // the DURABLE row, not the fence: the fence is what the agent wrote,
         // the row is what was recorded and what the answer attaches to.
         if (className.includes('language-kronn-question')) {
+          const rawQuestion = codeEl?.props?.children;
+          const questionSource = Array.isArray(rawQuestion)
+            ? rawQuestion.join('')
+            : String(rawQuestion ?? '');
           const line = node?.position?.start?.line;
           const fenceIndex = line === undefined
             ? undefined
@@ -1729,6 +1733,7 @@ export const MarkdownContent = memo(({
           return (
             <DiscussionQuestionCard
               discussionId={discussionId}
+              source={questionSource.trim()}
               sourceMessageId={sourceMessageId}
               fenceIndex={fenceIndex !== undefined && fenceIndex >= 0 ? fenceIndex : undefined}
             />

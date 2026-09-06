@@ -381,6 +381,44 @@ describe('DiscussionQuestionCard', () => {
       .toHaveTextContent('disc.question.missing'));
   });
 
+  /// KT-607 — when the notation is what refused the question, saying only
+  /// "not recorded" leaves the author hunting. The real case was one character.
+  it('names the field that kept the question from being recorded', async () => {
+    questionsMock.mockResolvedValue({ questions: [], pending_count: 0 });
+    render(
+      <DiscussionQuestionCard
+        discussionId="d-1"
+        sourceMessageId="m-1"
+        fenceIndex={0}
+        source={JSON.stringify({ version: '1', key: 'k', question: 'Une question ?' })}
+      />,
+    );
+
+    const card = await screen.findByTestId('disc-question-invalid');
+    expect(card).toHaveTextContent('disc.question.invalidVersionString');
+    expect(card).toHaveTextContent('disc.question.invalidHint');
+    // Not a decision to take: there is no form here.
+    expect(screen.queryByTestId('disc-question-send')).toBeNull();
+  });
+
+  /// And a fence that is fine must never be blamed for an absence it did not
+  /// cause — that would send its author looking for a mistake they did not make.
+  it('does not blame a valid fence for a row that is missing anyway', async () => {
+    questionsMock.mockResolvedValue({ questions: [], pending_count: 0 });
+    render(
+      <DiscussionQuestionCard
+        discussionId="d-1"
+        sourceMessageId="m-1"
+        fenceIndex={0}
+        source={JSON.stringify({ version: 1, key: 'k', question: 'Une question ?' })}
+      />,
+    );
+
+    await waitFor(() => expect(screen.getByTestId('disc-question-loading'))
+      .toHaveTextContent('disc.question.missing'));
+    expect(screen.queryByTestId('disc-question-invalid')).toBeNull();
+  });
+
   /// Several cards in one room read one answer between them: the endpoint is
   /// polled, and one request per card would repeat that cost for the same list.
   it('reads the room once however many cards are on screen', async () => {
