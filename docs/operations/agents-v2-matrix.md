@@ -80,3 +80,18 @@ the same job.
   through its own tools, outside Kronn's audit trail.
 - **Kronn spawns one process per turn** on every route. Nothing here keeps a
   CLI warm between turns; that is 0.14 work (KT-577).
+
+## Settings catalogue diagnostic (KT-597)
+
+The dynamic catalogue and the model-tier editor on an agent card are currently
+different consumers. `ModelCatalogSection` reads `/api/model-catalogs`, and
+Codex discovery calls its own `codex app-server` / `model/list`. However, the
+Codex card in `AgentsSection` still supplies `SearchableSelect` from the static
+`AGENT_TIER_MODELS.codex.options` array. A newly available model absent from that
+array will not appear there even after a catalogue refresh. Updating OpenCode
+or an OpenRouter connection cannot change this array. This is a remaining UI
+integration gap, not evidence that the Codex account lacks access to the model.
+[src: file: frontend/src/components/settings/AgentsSection.tsx:106-123]
+[src: file: frontend/src/components/settings/AgentsSection.tsx:1233-1253]
+[src: file: frontend/src/components/settings/ModelCatalogSection.tsx:67]
+[src: file: backend/src/core/model_catalog/codex_discovery.rs:75-158]
