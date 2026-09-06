@@ -18,6 +18,7 @@
 
 import { test, expect } from '../fixtures/kronn-fixture';
 import { DashboardPage } from '../pages/DashboardPage';
+import { SettingsPage } from '../pages/SettingsPage';
 
 const openCodeAgent = {
   name: 'OpenCode',
@@ -100,8 +101,11 @@ test('OpenCode full-access panel describes ACP permission scope, not a fabricate
   await dashboard.goto();
   await dashboard.clickSettings();
 
-  const agents = page.locator('#settings-agent-config');
-  const panel = agents.locator('.set-agent-row[data-agent-type="OpenCode"] .set-agent-panel-access');
+  const settings = new SettingsPage(page);
+  const configuration = await settings.openAgentConfiguration('OpenCode');
+  // Opening an already-open card must not close it again.
+  await settings.openAgentConfiguration('OpenCode');
+  const panel = configuration.locator('.set-agent-panel-access');
   await expect(panel).toBeVisible();
   await expect(panel.locator('code')).toHaveCount(0);
   await expect(panel.getByRole('switch')).toBeVisible();

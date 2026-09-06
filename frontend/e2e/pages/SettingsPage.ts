@@ -12,6 +12,18 @@ import type { Page, Locator } from '@playwright/test';
 export class SettingsPage {
   constructor(private readonly page: Page) {}
 
+  /** Agent settings live in a folded card; opening it never changes access. */
+  async openAgentConfiguration(agentType: string): Promise<Locator> {
+    const toggle = this.page.getByTestId(`agent-configure-${agentType}`);
+    await toggle.waitFor({ state: 'visible' });
+    if ((await toggle.getAttribute('aria-expanded')) !== 'true') {
+      await toggle.click();
+    }
+    const body = this.page.locator(`[id="agent-config-${agentType}"]`);
+    await body.waitFor({ state: 'visible' });
+    return body;
+  }
+
   // ─── Accordion toggles ──────────────────────────────────────────────
   get skillsAccordionHeader(): Locator {
     return this.page.locator('#settings-skills .set-accordion-header');
