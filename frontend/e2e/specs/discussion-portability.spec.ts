@@ -38,15 +38,17 @@ test('exports, imports and replays a discussion idempotently', async ({ page, re
   await dashboard.goto();
   await dashboard.openDiscussion(sourceId);
 
+  const panelRail = page.getByRole('group', { name: 'Panneaux de la discussion' });
+  await panelRail.getByRole('button', { name: 'Ouvrir les panneaux' }).click();
   const downloadPromise = page.waitForEvent('download');
-  await page.getByRole('button', { name: 'Exporter la discussion' }).click();
+  await panelRail.getByRole('button', { name: 'Exporter la discussion' }).click();
   const download = await downloadPromise;
   expect(download.suggestedFilename()).toMatch(/\.kronn-discussion\.json$/);
   const bundlePath = await download.path();
   expect(bundlePath).toBeTruthy();
   if (!bundlePath) throw new Error('Playwright returned no downloaded bundle path');
 
-  // The header actions panel is a disclosure of plain buttons, not an ARIA menu:
+  // The sidebar's "Other actions" panel is a disclosure of plain buttons, not an ARIA menu:
   // it never implemented arrow-key navigation, so the menu/menuitem roles were
   // dropped rather than left as a contract the widget did not honour.
   const openImportPicker = async () => {
