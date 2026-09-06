@@ -535,6 +535,7 @@ const es: TranslationDict = {
   'disc.question.invalidHint': 'No se registró nada. Corrige la notación y publícala de nuevo con la misma clave.',
   'disc.question.invalidEmpty': 'El bloque está vacío.',
   'disc.question.invalidJson': 'El bloque no es JSON válido.',
+  'disc.question.invalidUnknownField': 'Un campo desconocido basta para que se rechace todo el bloque: revisa los nombres de los campos.',
   'disc.question.invalidVersionString': '«version» debe ser el número 1, no el texto "1".',
   'disc.question.invalidVersion': '«version» debe ser 1.',
   'disc.question.invalidKey': '«key» debe ser un identificador estable: letras, dígitos, - _ . (100 máx.).',
