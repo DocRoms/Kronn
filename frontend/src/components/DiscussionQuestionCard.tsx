@@ -8,7 +8,11 @@
 import { useRef, useState } from 'react';
 import { AlertOctagon, CheckCircle2, Loader2 } from 'lucide-react';
 import { discussions as discussionsApi } from '../lib/api';
-import { applyAnsweredQuestion, useDiscussionQuestions } from '../lib/discussionQuestions';
+import {
+  applyAnsweredQuestion,
+  refreshDiscussionQuestions,
+  useDiscussionQuestions,
+} from '../lib/discussionQuestions';
 import { useT } from '../lib/I18nContext';
 import { userError } from '../lib/userError';
 import type { DiscussionQuestion, DiscussionQuestionAnswer } from '../types/generated';
@@ -70,11 +74,18 @@ function QuestionBody({
   // failed send and is renewed the moment the answer itself changes.
   const idempotencyKey = useRef(crypto.randomUUID());
   const renewKey = () => { idempotencyKey.current = crypto.randomUUID(); };
+  /// The `sending` state cannot hold this door: two clicks in the same tick
+  /// both read it as false and both post. A decision is not something to send
+  /// twice because a mouse bounced.
+  const inFlight = useRef(false);
 
   const answered = question.state === 'answered' && question.answer !== null;
   const canSend = selected.length > 0 || text.trim().length > 0;
 
   const toggle = (optionId: string) => {
+    // Frozen while in flight: the key was minted for the answer as it stood,
+    // and letting it change under the request would decouple the two.
+    if (inFlight.current) return;
     renewKey();
     setError('');
     setSelected(current => {
@@ -86,7 +97,8 @@ function QuestionBody({
   };
 
   const send = async () => {
-    if (!canSend || sending) return;
+    if (!canSend || inFlight.current) return;
+    inFlight.current = true;
     setSending(true);
     setError('');
     try {
@@ -98,7 +110,13 @@ function QuestionBody({
       applyAnsweredQuestion(discussionId, updated);
     } catch (cause) {
       setError(userError(cause));
+      // The server may have recorded the decision and lost the response, or
+      // refused this one because another had already been recorded. Either way
+      // the durable row is the truth: read it back rather than leave the card
+      // offering to decide something that is already decided.
+      refreshDiscussionQuestions(discussionId);
     } finally {
+      inFlight.current = false;
       setSending(false);
     }
   };
@@ -140,6 +158,7 @@ function QuestionBody({
                         name={`question-${question.id}`}
                         checked={selected.includes(option.id)}
                         onChange={() => toggle(option.id)}
+                        disabled={sending}
                         data-testid={`disc-question-option-${option.id}`}
                       />
                       <span className="disc-question-option-label">
@@ -168,6 +187,7 @@ function QuestionBody({
             className="disc-question-text-input"
             value={text}
             onChange={event => { renewKey(); setText(event.target.value); }}
+            disabled={sending}
             placeholder={t('disc.question.freeTextPlaceholder')}
             aria-label={t('disc.question.freeTextPlaceholder')}
             data-testid="disc-question-text"

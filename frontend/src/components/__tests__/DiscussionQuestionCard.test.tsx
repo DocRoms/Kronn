@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const { questionsMock, answerMock } = vi.hoisted(() => ({
@@ -18,7 +18,7 @@ vi.mock('../../lib/I18nContext', () => ({
 }));
 
 import { DiscussionQuestionCard } from '../DiscussionQuestionCard';
-import { resetDiscussionQuestions } from '../../lib/discussionQuestions';
+import { refreshDiscussionQuestions, resetDiscussionQuestions } from '../../lib/discussionQuestions';
 
 function question(over: Partial<Record<string, unknown>> = {}) {
   return {
@@ -199,6 +199,97 @@ describe('DiscussionQuestionCard', () => {
     const [, , firstBody] = answerMock.mock.calls[0];
     const [, , secondBody] = answerMock.mock.calls[1];
     expect(secondBody.idempotency_key).not.toBe(firstBody.idempotency_key);
+  });
+
+  /// Review @codex-cli-2 — `sending` is state: two clicks in the same tick both
+  /// read it as false and both post. A decision must not be recorded twice
+  /// because a mouse bounced.
+  it('posts once when the button is clicked twice in the same tick', async () => {
+    let release!: (value: unknown) => void;
+    answerMock.mockReturnValue(new Promise(resolve => { release = resolve; }));
+
+    renderCard();
+    await screen.findByTestId('disc-question-q-1');
+    fireEvent.click(screen.getByTestId('disc-question-option-a'));
+
+    // Dispatched directly, twice, with no render in between — the shape the
+    // `sending` state cannot catch, because neither click has seen it change.
+    const send = screen.getByTestId('disc-question-send');
+    send.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    send.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+
+    expect(answerMock).toHaveBeenCalledTimes(1);
+    release(question({ state: 'answered', answer: {
+      selected_option_ids: ['a'], text: null, author_pseudo: 'Romu - mac',
+      answered_at: '2026-09-06T09:00:00Z', message_id: 'm-2',
+    } }));
+    await screen.findByTestId('disc-question-answer');
+  });
+
+  /// The answer is frozen while it travels: the idempotency key was minted for
+  /// the answer as it stood, and letting the choice change under the request
+  /// would decouple the two.
+  it('refuses to change the answer while it is being sent', async () => {
+    answerMock.mockReturnValue(new Promise(() => {}));
+    renderCard();
+    await screen.findByTestId('disc-question-q-1');
+    fireEvent.click(screen.getByTestId('disc-question-option-a'));
+    fireEvent.click(screen.getByTestId('disc-question-send'));
+
+    expect(screen.getByTestId('disc-question-option-b')).toBeDisabled();
+    expect(screen.getByTestId('disc-question-text')).toBeDisabled();
+  });
+
+  /// Review @codex-cli-2 — a read that started BEFORE the answer and lands
+  /// after it is older than what is on screen. Publishing it would put the
+  /// answered card back to pending and revive the count.
+  it('ignores a read that was already in flight when the answer landed', async () => {
+    let releaseRead!: (value: unknown) => void;
+    questionsMock.mockReturnValueOnce(new Promise(resolve => { releaseRead = resolve; }));
+    answerMock.mockResolvedValue(question({ state: 'answered', answer: {
+      selected_option_ids: ['a'], text: null, author_pseudo: 'Romu - mac',
+      answered_at: '2026-09-06T09:00:00Z', message_id: 'm-2',
+    } }));
+
+    renderCard();
+    // The first read is still travelling; let it resolve so the card appears.
+    await act(async () => { releaseRead({ questions: [question()], pending_count: 1 }); });
+    await screen.findByTestId('disc-question-q-1');
+
+    // A second read leaves, then the answer is recorded before it returns.
+    questionsMock.mockReturnValueOnce(new Promise(resolve => { releaseRead = resolve; }));
+    refreshDiscussionQuestions('d-1');
+    fireEvent.click(screen.getByTestId('disc-question-option-a'));
+    fireEvent.click(screen.getByTestId('disc-question-send'));
+    await screen.findByTestId('disc-question-answer');
+
+    // The stale read lands, still saying "pending". It must change nothing.
+    await act(async () => { releaseRead({ questions: [question()], pending_count: 1 }); });
+    expect(screen.getByTestId('disc-question-q-1')).toHaveAttribute('data-state', 'answered');
+    expect(screen.queryByTestId('disc-question-send')).toBeNull();
+  });
+
+  /// A refusal ("someone already decided this") or a lost response must not
+  /// leave the card offering to decide something already decided.
+  it('reads the durable decision back when the send is refused', async () => {
+    answerMock.mockRejectedValue(new Error('Discussion question already answered'));
+    questionsMock
+      .mockResolvedValueOnce({ questions: [question()], pending_count: 1 })
+      .mockResolvedValue({
+        questions: [question({ state: 'answered', answer: {
+          selected_option_ids: ['b'], text: null, author_pseudo: 'Quelqu’un d’autre',
+          answered_at: '2026-09-06T09:00:00Z', message_id: 'm-9',
+        } })],
+        pending_count: 0,
+      });
+
+    renderCard();
+    await screen.findByTestId('disc-question-q-1');
+    fireEvent.click(screen.getByTestId('disc-question-option-a'));
+    fireEvent.click(screen.getByTestId('disc-question-send'));
+
+    expect(await screen.findByTestId('disc-question-answer')).toHaveTextContent('Quelqu’un d’autre');
+    expect(screen.queryByTestId('disc-question-send')).toBeNull();
   });
 
   it('shows an answered question as settled, with no form', async () => {
