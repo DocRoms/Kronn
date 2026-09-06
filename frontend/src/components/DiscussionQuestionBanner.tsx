@@ -5,13 +5,20 @@
 // of sight within the hour. This strip stays at the top of the conversation
 // while anything is pending, and takes the reader to it.
 import { AlertOctagon } from 'lucide-react';
-import { useDiscussionQuestions } from '../lib/discussionQuestions';
+import { useEffect } from 'react';
+import { refreshDiscussionQuestions, useDiscussionQuestions } from '../lib/discussionQuestions';
 import { useT } from '../lib/I18nContext';
 import './DiscussionQuestionBanner.css';
 
-export function DiscussionQuestionBanner({ discussionId }: { discussionId: string }) {
+export function DiscussionQuestionBanner({ discussionId, messageRevision }: {
+  discussionId: string;
+  messageRevision?: string;
+}) {
   const { t } = useT();
   const { questions, pendingCount } = useDiscussionQuestions(discussionId);
+  useEffect(() => {
+    refreshDiscussionQuestions(discussionId);
+  }, [discussionId, messageRevision]);
   if (pendingCount === 0) return null;
 
   const first = questions.find(question => question.state === 'pending');

@@ -28,6 +28,8 @@ const EMPTY: QuestionsSnapshot = {
 const snapshots = new Map<string, QuestionsSnapshot>();
 const listeners = new Map<string, Set<() => void>>();
 const inFlight = new Set<string>();
+const stopRefreshing = new Map<string, () => void>();
+let resetGeneration = 0;
 /// KT-595 — bumped whenever an answer is recorded locally. A read that started
 /// BEFORE that answer and lands after it is older than what is on screen, and
 /// publishing it would put an answered card back to pending and revive the
@@ -45,7 +47,9 @@ export function refreshDiscussionQuestions(discussionId: string) {
   if (inFlight.has(discussionId)) return;
   inFlight.add(discussionId);
   const generation = generations.get(discussionId) ?? 0;
-  const isStale = () => (generations.get(discussionId) ?? 0) !== generation;
+  const reset = resetGeneration;
+  const isStale = () => reset !== resetGeneration
+    || (generations.get(discussionId) ?? 0) !== generation;
   discussionsApi.questions(discussionId)
     .then(list => {
       if (isStale()) return;
@@ -64,7 +68,28 @@ export function refreshDiscussionQuestions(discussionId: string) {
         error: userError(cause),
       });
     })
-    .finally(() => { inFlight.delete(discussionId); });
+    .finally(() => {
+      if (reset === resetGeneration) inFlight.delete(discussionId);
+    });
+}
+
+function watchDiscussionQuestions(discussionId: string) {
+  const refresh = () => refreshDiscussionQuestions(discussionId);
+  const refreshVisible = () => {
+    if (document.visibilityState !== 'hidden') refresh();
+  };
+  // One timer per subscribed room, never one per question. Polling also catches
+  // an answer on another device and a fence completed inside a streamed message.
+  const timer = window.setInterval(refreshVisible, 5000);
+  window.addEventListener('focus', refresh);
+  window.addEventListener('online', refresh);
+  document.addEventListener('visibilitychange', refreshVisible);
+  stopRefreshing.set(discussionId, () => {
+    window.clearInterval(timer);
+    window.removeEventListener('focus', refresh);
+    window.removeEventListener('online', refresh);
+    document.removeEventListener('visibilitychange', refreshVisible);
+  });
 }
 
 export function useDiscussionQuestions(discussionId: string | null): QuestionsSnapshot {
@@ -73,15 +98,20 @@ export function useDiscussionQuestions(discussionId: string | null): QuestionsSn
     const forRoom = listeners.get(discussionId) ?? new Set();
     forRoom.add(listener);
     listeners.set(discussionId, forRoom);
-    // The first subscriber for a room it has never read triggers the read.
-    // Later ones join whatever is already there.
-    if (!snapshots.has(discussionId)) {
-      snapshots.set(discussionId, EMPTY);
+    // Returning to a cached room must revalidate it too: it may have acquired
+    // its first question while there were no subscribers.
+    if (forRoom.size === 1) {
+      if (!snapshots.has(discussionId)) snapshots.set(discussionId, EMPTY);
       refreshDiscussionQuestions(discussionId);
+      watchDiscussionQuestions(discussionId);
     }
     return () => {
       forRoom.delete(listener);
-      if (forRoom.size === 0) listeners.delete(discussionId);
+      if (forRoom.size === 0) {
+        listeners.delete(discussionId);
+        stopRefreshing.get(discussionId)?.();
+        stopRefreshing.delete(discussionId);
+      }
     };
   }, [discussionId]);
 
@@ -115,6 +145,9 @@ export function applyAnsweredQuestion(discussionId: string, answered: Discussion
 /** Test seam: the store outlives a component, so a suite that renders two
  *  discussions in a row must be able to start from nothing. */
 export function resetDiscussionQuestions() {
+  resetGeneration += 1;
+  stopRefreshing.forEach(stop => stop());
+  stopRefreshing.clear();
   snapshots.clear();
   listeners.clear();
   inFlight.clear();

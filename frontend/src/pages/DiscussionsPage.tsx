@@ -3837,7 +3837,7 @@ export function DiscussionsPage({
             />
 
             {/* Messages + one shared utility panel side by side */}
-            <div className="disc-messages-git-row" data-rail-floating={!anyPanelOpen}>
+            <div className="disc-messages-git-row" data-rail-floating={!anyPanelOpen} data-search-open={showMessageSearch}>
             <div className="disc-messages-col" data-replying={!!replyTarget}>
             {/* KT-581 — first in the column, so it opens level with the panel
               *  strip rather than a few banners lower: the two controls belong
@@ -4021,7 +4021,10 @@ export function DiscussionsPage({
             {/* KT-595 — a decision the room is waiting on, above the thread
                 rather than inside it: the message that asked scrolls away, the
                 need does not. */}
-            <DiscussionQuestionBanner discussionId={activeDiscussion.id} />
+            <DiscussionQuestionBanner
+              discussionId={activeDiscussion.id}
+              messageRevision={activeDiscussion.messages.at(-1)?.id}
+            />
 
             {/* Messages */}
             <div

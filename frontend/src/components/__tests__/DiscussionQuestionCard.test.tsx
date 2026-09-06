@@ -18,6 +18,7 @@ vi.mock('../../lib/I18nContext', () => ({
 }));
 
 import { DiscussionQuestionCard } from '../DiscussionQuestionCard';
+import { DiscussionQuestionBanner } from '../DiscussionQuestionBanner';
 import { refreshDiscussionQuestions, resetDiscussionQuestions } from '../../lib/discussionQuestions';
 
 function question(over: Partial<Record<string, unknown>> = {}) {
@@ -57,6 +58,58 @@ const renderCard = (fenceIndex: number | undefined = 0, messageId = 'm-1') => re
 );
 
 describe('DiscussionQuestionCard', () => {
+  it('refreshes an initially empty room when its first question message arrives', async () => {
+    questionsMock.mockResolvedValueOnce({ questions: [], pending_count: 0 });
+    const view = render(<DiscussionQuestionBanner discussionId="d-1" messageRevision="m-0" />);
+    await act(async () => {});
+    expect(questionsMock).toHaveBeenCalledTimes(1);
+
+    view.rerender(<>
+      <DiscussionQuestionBanner discussionId="d-1" messageRevision="m-1" />
+      <DiscussionQuestionCard discussionId="d-1" sourceMessageId="m-1" fenceIndex={0} />
+    </>);
+
+    expect(await screen.findByTestId('disc-question-q-1')).toHaveAttribute('data-state', 'pending');
+    expect(screen.getByTestId('disc-question-banner')).toHaveTextContent('disc.question.bannerPending 1');
+    expect(questionsMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('revalidates the cached room after its last subscriber leaves and returns', async () => {
+    questionsMock.mockResolvedValueOnce({ questions: [], pending_count: 0 });
+    const first = renderCard();
+    await waitFor(() => expect(screen.getByTestId('disc-question-loading')).toHaveTextContent('disc.question.missing'));
+    first.unmount();
+
+    renderCard();
+    expect(await screen.findByTestId('disc-question-q-1')).toBeInTheDocument();
+    expect(questionsMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('shares one refresh timer and focus listener, and stops them with the last subscriber', async () => {
+    vi.useFakeTimers();
+    try {
+      const view = render(<>
+        <DiscussionQuestionCard discussionId="d-1" sourceMessageId="m-1" fenceIndex={0} />
+        <DiscussionQuestionCard discussionId="d-1" sourceMessageId="m-1" fenceIndex={1} />
+      </>);
+      await act(async () => {});
+      expect(questionsMock).toHaveBeenCalledTimes(1);
+      await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+      expect(questionsMock).toHaveBeenCalledTimes(2);
+      await act(async () => { window.dispatchEvent(new Event('focus')); });
+      expect(questionsMock).toHaveBeenCalledTimes(3);
+      view.unmount();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(10000);
+        window.dispatchEvent(new Event('focus'));
+        window.dispatchEvent(new Event('online'));
+      });
+      expect(questionsMock).toHaveBeenCalledTimes(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   /// KT-595 — the whole point: a decision that stays put. It renders the
   /// durable row, not the fence, so it survives a reload and a restart.
   it('shows the pending question, what it blocks, and its options', async () => {
@@ -215,14 +268,18 @@ describe('DiscussionQuestionCard', () => {
     // Dispatched directly, twice, with no render in between — the shape the
     // `sending` state cannot catch, because neither click has seen it change.
     const send = screen.getByTestId('disc-question-send');
-    send.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-    send.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    act(() => {
+      send.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      send.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
 
     expect(answerMock).toHaveBeenCalledTimes(1);
-    release(question({ state: 'answered', answer: {
-      selected_option_ids: ['a'], text: null, author_pseudo: 'Romu - mac',
-      answered_at: '2026-09-06T09:00:00Z', message_id: 'm-2',
-    } }));
+    await act(async () => {
+      release(question({ state: 'answered', answer: {
+        selected_option_ids: ['a'], text: null, author_pseudo: 'Romu - mac',
+        answered_at: '2026-09-06T09:00:00Z', message_id: 'm-2',
+      } }));
+    });
     await screen.findByTestId('disc-question-answer');
   });
 
