@@ -403,6 +403,7 @@ fn is_skipped_source_dir(name: &str, is_root_child: bool) -> bool {
             | ".next"
             | ".nuxt"
             | ".output"
+            | ".pnpm-store"
             | ".turbo"
             | ".venv"
             | "cache"
@@ -1578,6 +1579,28 @@ mod tests {
         flatten_source_paths(&tree, &mut paths);
         assert_eq!(count, MAX_SOURCE_FILES);
         assert_eq!(paths.len(), 1);
+    }
+
+    #[test]
+    fn source_tree_skips_nested_pnpm_store_before_applying_file_cap() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path();
+        touch(&root.join("frontend/.pnpm-store/v11/files/29/cached-file.js"));
+        touch(&root.join("site/en.html"));
+        let mut count = MAX_SOURCE_FILES - 1;
+
+        let tree = build_source_tree(
+            root,
+            "",
+            root,
+            &mut count,
+            &std::collections::HashSet::new(),
+        );
+        let mut paths = Vec::new();
+        flatten_source_paths(&tree, &mut paths);
+
+        assert_eq!(count, MAX_SOURCE_FILES);
+        assert_eq!(paths, vec!["site/en.html"]);
     }
 
     #[test]
