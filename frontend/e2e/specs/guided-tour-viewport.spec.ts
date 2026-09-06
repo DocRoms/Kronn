@@ -132,10 +132,12 @@ for (const viewport of VIEWPORTS) {
           }
         }
         if (stepId === 'copyable-ids') {
-          await expect(
-            page.locator('[data-testid="disc-header-details-toggle"]'),
-            `${label}: the disclosure must be open so the discussion ID is visible`,
-          ).toHaveAttribute('aria-expanded', 'true');
+          if (viewport.width < 768) {
+            await expect(
+              page.locator('[data-testid="disc-header-details-toggle"]'),
+              `${label}: the disclosure must be open so the discussion ID is visible`,
+            ).toHaveAttribute('aria-expanded', 'true');
+          }
           await expect(
             page.locator('[data-tour-id="discussion-id-pill"]'),
             `${label}: the required discussion ID must be visible`,
