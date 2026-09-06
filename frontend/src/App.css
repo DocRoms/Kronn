@@ -49,13 +49,20 @@
 }
 
 /* ── Loading screen ──────────────────────────────────── */
-.app-spinner {
-  width: 32px;
-  height: 32px;
-  border: 3px solid rgba(var(--kr-accent-rgb), 0.2);
-  border-top-color: var(--kr-accent);
-  border-radius: 50%;
-  animation: spin 0.8s linear infinite;
+.app-loading-mark {
+  flex-shrink: 0;
+  transform-origin: center;
+  animation: kronn-startup-rotate 6s linear infinite;
+}
+
+@keyframes kronn-startup-rotate {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .app-loading-mark {
+    animation: none;
+  }
 }
 
 .app-loading-text {

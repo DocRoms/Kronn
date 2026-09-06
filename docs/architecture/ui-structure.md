@@ -2,6 +2,13 @@
 
 Canonical description of the app's pages, tabs and component layout.
 
+The initial React loading screen and lazy-route fallback reuse `KronnMark` at
+100 px, rotating the whole mark once every six seconds. Reduced-motion users
+see a static mark. Startup hints and backend timeout/retry recovery remain
+independent of that decorative animation; other spinners are unchanged.
+`[src: file: frontend/src/App.tsx:208]`
+`[src: file: frontend/src/App.css:52-69]`
+
 Moved out of `docs/AGENTS.md` (KT-191): it weighed 53 167 bytes — 63,6 % of a
 file every session reads in full — while being needed only when actually
 touching the UI. The content below is unchanged; load it on demand.
