@@ -534,6 +534,7 @@ const en: TranslationDict = {
   'disc.question.invalidTitle': 'Invalid decision notation',
   'disc.question.invalidHint': 'Nothing was recorded. Fix the notation and post it again under the same key.',
   'disc.question.invalidEmpty': 'The block is empty.',
+  'disc.question.invalidTooLong': 'The block is over 24 000 bytes: the limit counts bytes, not characters.',
   'disc.question.invalidJson': 'The block is not valid JSON.',
   'disc.question.invalidUnknownField': 'One unknown field is enough to have the whole block refused: check the field names.',
   'disc.question.invalidVersionString': '“version” must be the number 1, not the text "1".',

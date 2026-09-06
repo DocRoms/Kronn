@@ -86,6 +86,37 @@ describe('findFenceProblem', () => {
     expect(findFenceProblem(fence({ context: null, task_ref: null }))).toBeNull();
   });
 
+  /// Review @codex-cli-4, second pass — a field literally named "" is falsy,
+  /// so the check that went looking for it waved it straight through. `.find`
+  /// answers "what", `.some` answers "any", and only one of those is the
+  /// question being asked.
+  it('refuses a field whose name is the empty string', () => {
+    expect(findFenceProblem(JSON.stringify({ ...valid, '': 'vide' })))
+      .toEqual({ key: 'disc.question.invalidUnknownField' });
+  });
+
+  /// `parse_spec` measures BYTES and refuses before it parses at all. Every
+  /// character cap can pass while this one refuses: an emoji weighs four.
+  it('measures the block in bytes, like the parser does', () => {
+    const emoji = '🙂'.repeat(4000);
+    const heavy = fence({
+      context: emoji,
+      options: [
+        { id: 'a', label: 'x', description: '🙂'.repeat(1000) },
+        { id: 'b', label: 'y', description: '🙂'.repeat(1000) },
+      ],
+      recommended_option_ids: ['a'],
+    });
+    // Every character limit is respected…
+    expect([...emoji]).toHaveLength(4000);
+    // …and the byte count still puts it out of reach.
+    expect(new TextEncoder().encode(heavy).length).toBeGreaterThan(24_000);
+    expect(findFenceProblem(heavy)).toEqual({ key: 'disc.question.invalidTooLong' });
+
+    // The same shape in plain characters fits, which is the whole point.
+    expect(findFenceProblem(fence({ context: 'a'.repeat(4000) }))).toBeNull();
+  });
+
   it('checks the key is a stable identifier', () => {
     expect(findFenceProblem(fence({ key: '' }))).toEqual({ key: 'disc.question.invalidKey' });
     expect(findFenceProblem(fence({ key: 'clé avec espaces' })))

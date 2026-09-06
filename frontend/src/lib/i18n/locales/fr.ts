@@ -534,6 +534,7 @@ const fr: TranslationDict = {
   'disc.question.invalidTitle': 'Notation d’arbitrage invalide',
   'disc.question.invalidHint': 'Rien n’a été enregistré. Corrige la notation et republie-la avec la même clé.',
   'disc.question.invalidEmpty': 'Le bloc est vide.',
+  'disc.question.invalidTooLong': 'Le bloc dépasse 24 000 octets : c’est une limite en octets, pas en caractères.',
   'disc.question.invalidJson': 'Le bloc n’est pas du JSON valide.',
   'disc.question.invalidUnknownField': 'Un champ inconnu suffit à faire rejeter tout le bloc : vérifie l’orthographe des noms de champs.',
   'disc.question.invalidVersionString': '« version » doit être le nombre 1, pas le texte "1".',

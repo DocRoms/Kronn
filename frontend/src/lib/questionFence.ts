@@ -24,6 +24,9 @@ const SPEC_FIELDS = new Set([
 ]);
 const OPTION_FIELDS = new Set(['id', 'label', 'description']);
 
+/// `parse_spec` refuses a body over this many BYTES before parsing it at all.
+const MAX_FENCE_BYTES = 24_000;
+
 const STABLE_KEY = /^[A-Za-z0-9\-_.]{1,100}$/;
 
 function isStableKey(value: unknown): value is string {
@@ -47,6 +50,12 @@ export function findFenceProblem(source: string | undefined): FenceProblem | nul
   // notation it was GIVEN, and says nothing about a caller that gave none.
   if (source === undefined) return null;
   if (!source.trim()) return { key: 'disc.question.invalidEmpty' };
+  // Review @codex-cli-4 — `parse_spec` measures BYTES, and refuses before it
+  // even parses. Every character cap below can pass while this one refuses:
+  // 4 000 emoji of context weigh four times their count.
+  if (new TextEncoder().encode(source).length > MAX_FENCE_BYTES) {
+    return { key: 'disc.question.invalidTooLong' };
+  }
 
   let parsed: unknown;
   try {
@@ -62,8 +71,11 @@ export function findFenceProblem(source: string | undefined): FenceProblem | nul
   // Review @codex-cli-4 — `deny_unknown_fields`. A typo in a field name is
   // silently ignored by a lenient reader and refused by serde, which is the
   // worst pairing: the author sees nothing and gets nothing.
-  const unknown = Object.keys(spec).find(field => !SPEC_FIELDS.has(field));
-  if (unknown) return { key: 'disc.question.invalidUnknownField' };
+  // `.some`, not `.find`: a field literally named "" is falsy, and the check
+  // that was looking for it would have waved it through.
+  if (Object.keys(spec).some(field => !SPEC_FIELDS.has(field))) {
+    return { key: 'disc.question.invalidUnknownField' };
+  }
 
   // The one that actually happened, and the one a reader would never spot:
   // JSON tells a number and a string apart, and the contract wants the number.
