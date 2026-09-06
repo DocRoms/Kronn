@@ -69,12 +69,10 @@ function SourceCodeViewerProject({ projectId, initialPath, onOpenCommit }: Sourc
   const [contentResult, setContentResult] = useState<ContentResult | null>(null);
   const [contentView, setContentView] = useState<'code' | 'preview'>('code');
   const [treeLoading, setTreeLoading] = useState(true);
-  const [treeHydrating, setTreeHydrating] = useState(false);
-  /// KT-594 — the enrichment failed and will not be retried on its own. The
-  /// root listing stays usable, but every folder in it still has empty
-  /// children, and rendering those as empty folders is the same lie the
-  /// loading state was.
-  const [treeHydrateFailed, setTreeHydrateFailed] = useState(false);
+  /// KT-605 — what each opened folder is doing, keyed by its path. A folder
+  /// that finished simply has its children; only the ones still travelling or
+  /// refused need to say anything.
+  const [dirStatus, setDirStatus] = useState<Record<string, 'loading' | 'failed'>>({});
   const [treeError, setTreeError] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResult, setSearchResult] = useState<SearchResult | null>(null);
@@ -90,11 +88,14 @@ function SourceCodeViewerProject({ projectId, initialPath, onOpenCommit }: Sourc
   const [exclusionSaving, setExclusionSaving] = useState<string | null>(null);
   const [exclusionError, setExclusionError] = useState(false);
   const [expandedDirs, setExpandedDirs] = useState<Set<string>>(
-    () => new Set(['src', 'app', 'application', 'frontend', 'backend']),
+    () => new Set(DEFAULT_OPEN_DIRS),
   );
   const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const treeLoadRef = useRef(0);
+  /// Folders already asked for. A second expand must not re-request what is
+  /// already on screen — that was the whole cost this change removes.
+  const loadedDirs = useRef(new Set<string>());
 
   const readTreeRoot = useCallback(() => Promise.all([
     projectsApi.listSourceFiles(projectId, true),
@@ -107,6 +108,42 @@ function SourceCodeViewerProject({ projectId, initialPath, onOpenCommit }: Sourc
     setTreeLoading(false);
   }, []);
 
+  /// KT-605 — one folder, when it is opened, and never twice.
+  ///
+  /// What this replaces: the panel used to fetch the ENTIRE tree behind the
+  /// root listing, bounded at `MAX_SOURCE_FILES`. Past that bound the answer
+  /// stopped and had no way to say so, which is how `site/` went missing from
+  /// this repository without a word. There is no bound left to hit.
+  const loadDirectory = useCallback((path: string) => {
+    if (loadedDirs.current.has(path)) return Promise.resolve();
+    loadedDirs.current.add(path);
+    const generation = treeLoadRef.current;
+    setDirStatus(current => ({ ...current, [path]: 'loading' }));
+    return projectsApi.listSourceFiles(projectId, true, path)
+      .then(children => {
+        if (treeLoadRef.current !== generation) return;
+        setTree(current => withLoadedChildren(current, path, children));
+        // KT-605 — which file the panel opens on arrival used to be picked
+        // from the whole tree, which no longer exists. The rule is now stated
+        // rather than inherited: the first folder to come back with a file
+        // offers it, and a choice already made — a deep link, or a click —
+        // always wins.
+        setSelectedPath(previous => previous ?? findPreferredSourceFile(children)?.path ?? null);
+        setDirStatus(current => {
+          const next = { ...current };
+          delete next[path];
+          return next;
+        });
+      })
+      .catch(() => {
+        if (treeLoadRef.current !== generation) return;
+        // Forgotten on purpose: a folder that failed must be retryable by
+        // closing and reopening it, which is the gesture a reader will try.
+        loadedDirs.current.delete(path);
+        setDirStatus(current => ({ ...current, [path]: 'failed' }));
+      });
+  }, [projectId]);
+
   const applyTreeRoot = useCallback((
     rootFiles: SourceFileNode[],
     savedExclusions: string[],
@@ -117,34 +154,31 @@ function SourceCodeViewerProject({ projectId, initialPath, onOpenCommit }: Sourc
     setExclusions(savedExclusions);
     setSelectedPath(previous => {
       if (previous) return previous;
-      if (initialPath && hasSourcePath(rootFiles, initialPath)) return initialPath;
+      // Only what is loaded can be preferred. A deep link names its own file,
+      // and the folders on the way to it are fetched below.
+      if (initialPath) return initialPath;
       return findPreferredSourceFile(rootFiles)?.path ?? null;
     });
     setTreeLoading(false);
-    setTreeHydrating(true);
-    setTreeHydrateFailed(false);
 
-    return projectsApi.listSourceFiles(projectId)
-      .then(files => {
-        if (treeLoadRef.current !== generation) return;
-        const hydratedTree = mergeHydratedSourceTree(rootFiles, files);
-        setTree(hydratedTree);
-        setSelectedPath(previous => {
-          if (previous && hasSourcePath(hydratedTree, previous)) return previous;
-          if (initialPath && hasSourcePath(hydratedTree, initialPath)) return initialPath;
-          return findPreferredSourceFile(hydratedTree)?.path ?? null;
-        });
-      })
-      .catch(() => {
-        // The root-level tree is already usable; a failed enrichment must not
-        // replace it with a full-page error — but the folders it left empty
-        // have to say why they are empty.
-        if (treeLoadRef.current === generation) setTreeHydrateFailed(true);
-      })
-      .finally(() => {
-        if (treeLoadRef.current === generation) setTreeHydrating(false);
-      });
-  }, [initialPath, projectId]);
+    // The folders open on arrival, in parallel — they are siblings.
+    const open = rootFiles
+      .filter(node => node.is_dir && DEFAULT_OPEN_DIRS.has(node.name))
+      .map(node => loadDirectory(node.path));
+    // And the ones a deep link passes through, in order: a folder cannot
+    // receive its children before its own parent has placed it in the tree.
+    // Fetched AND opened — a deep link that loads its file into a folded tree
+    // leaves the reader looking at a root listing.
+    const onTheWay = ancestorDirs(initialPath);
+    if (onTheWay.length > 0) {
+      setExpandedDirs(previous => new Set([...previous, ...onTheWay]));
+    }
+    const deepLink = onTheWay.reduce(
+      (chain, path) => chain.then(() => loadDirectory(path)),
+      Promise.resolve(),
+    );
+    return Promise.all([...open, deepLink]).then(() => {});
+  }, [initialPath, loadDirectory]);
 
   const fetchTree = useCallback(() => {
     const generation = treeLoadRef.current + 1;
@@ -159,6 +193,7 @@ function SourceCodeViewerProject({ projectId, initialPath, onOpenCommit }: Sourc
   useEffect(() => {
     const generation = treeLoadRef.current + 1;
     treeLoadRef.current = generation;
+    loadedDirs.current.clear();
     void readTreeRoot()
       .then(([rootFiles, savedExclusions]) => (
         applyTreeRoot(rootFiles, savedExclusions, generation)
@@ -171,8 +206,9 @@ function SourceCodeViewerProject({ projectId, initialPath, onOpenCommit }: Sourc
 
   const retryTree = useCallback(() => {
     setTreeLoading(true);
-    setTreeHydrating(false);
     setTreeError(false);
+    loadedDirs.current.clear();
+    setDirStatus({});
     void fetchTree();
   }, [fetchTree]);
 
@@ -180,8 +216,11 @@ function SourceCodeViewerProject({ projectId, initialPath, onOpenCommit }: Sourc
     setExclusionSaving(changedPath);
     setExclusionError(false);
     setTreeLoading(true);
-    setTreeHydrating(false);
     setTreeError(false);
+    // Excluding a folder changes what every other one contains, so the
+    // bookkeeping of "already fetched" starts again with the tree.
+    loadedDirs.current.clear();
+    setDirStatus({});
     try {
       const saved = await projectsApi.setSourceExclusions(projectId, nextPaths);
       setExclusions(saved);
@@ -442,13 +481,6 @@ function SourceCodeViewerProject({ projectId, initialPath, onOpenCommit }: Sourc
               <X size={11} />
             </button>
           ) : null}
-          {treeHydrating && (
-            <Loader2
-              size={11}
-              className="spin"
-              aria-label={t('projects.source.loadingTreeBackground')}
-            />
-          )}
         </div>
         {searchQuery.trim() && !searchLoading && (
           <div className="source-search-summary">
@@ -502,8 +534,7 @@ function SourceCodeViewerProject({ projectId, initialPath, onOpenCommit }: Sourc
               key={node.path}
               node={node}
               depth={0}
-              hydrating={treeHydrating}
-              hydrateFailed={treeHydrateFailed}
+              dirStatus={dirStatus}
               selectedPath={selectedPath}
               expandedDirs={effectiveExpandedDirs}
               searchResults={searchResults}
@@ -513,11 +544,18 @@ function SourceCodeViewerProject({ projectId, initialPath, onOpenCommit }: Sourc
                 if (!HTML_FILE_PATH.test(path)) setContentView('code');
                 setCurrentMatchIdx(0);
               }}
-              onToggle={path => setExpandedDirs(previous => {
-                const next = new Set(previous);
-                if (next.has(path)) next.delete(path); else next.add(path);
-                return next;
-              })}
+              onToggle={path => {
+                setExpandedDirs(previous => {
+                  const next = new Set(previous);
+                  if (next.has(path)) next.delete(path); else next.add(path);
+                  return next;
+                });
+                // Opening is what asks for the contents. `loadDirectory`
+                // ignores a folder it already has, so closing and reopening
+                // costs nothing — except after a failure, which is meant to be
+                // retryable exactly that way.
+                if (!expandedDirs.has(path)) void loadDirectory(path);
+              }}
               onExclude={path => void saveExclusions([...exclusions, path], path)}
               exclusionSaving={exclusionSaving}
             />
@@ -686,22 +724,41 @@ function SourceCodeViewerProject({ projectId, initialPath, onOpenCommit }: Sourc
   );
 }
 
-function mergeHydratedSourceTree(
-  rootFiles: SourceFileNode[],
-  hydratedFiles: SourceFileNode[],
+/// Opened on arrival, when the repository has them. Also the set the panel
+/// fetches straight away, so the first thing a reader looks at is already
+/// there.
+const DEFAULT_OPEN_DIRS = new Set(['src', 'app', 'application', 'frontend', 'backend']);
+
+/// The folders a deep link passes through, outermost first. `a/b/c.rs` needs
+/// `a` then `a/b` — and in that order, since a folder cannot receive children
+/// before its parent has placed it in the tree.
+function ancestorDirs(path: string | null | undefined): string[] {
+  if (!path) return [];
+  const parts = path.split('/').slice(0, -1);
+  return parts.map((_, index) => parts.slice(0, index + 1).join('/'));
+}
+
+/// The tree with one folder's children filled in. Rebuilt along the path to
+/// that folder and shared everywhere else: React needs new objects only where
+/// something changed.
+function withLoadedChildren(
+  nodes: SourceFileNode[],
+  path: string,
+  children: SourceFileNode[],
 ): SourceFileNode[] {
-  const hydratedByPath = new Map(hydratedFiles.map(node => [node.path, node]));
-  const merged = rootFiles.map(node => hydratedByPath.get(node.path) ?? node);
-  const rootPaths = new Set(rootFiles.map(node => node.path));
-  merged.push(...hydratedFiles.filter(node => !rootPaths.has(node.path)));
-  return merged;
+  return nodes.map(node => {
+    if (node.path === path) return { ...node, children };
+    if (node.is_dir && path.startsWith(`${node.path}/`)) {
+      return { ...node, children: withLoadedChildren(node.children ?? [], path, children) };
+    }
+    return node;
+  });
 }
 
 function SourceTreeNode({
   node,
   depth,
-  hydrating,
-  hydrateFailed,
+  dirStatus,
   selectedPath,
   expandedDirs,
   searchResults,
@@ -713,10 +770,8 @@ function SourceTreeNode({
 }: {
   node: SourceFileNode;
   depth: number;
-  /** The full tree is still on its way, so an empty folder may not be empty. */
-  hydrating: boolean;
-  /** The full tree never arrived, so an empty folder is unknown, not empty. */
-  hydrateFailed: boolean;
+  /** What each opened folder is doing, by path. Absent means it is done. */
+  dirStatus: Record<string, 'loading' | 'failed'>;
   selectedPath: string | null;
   expandedDirs: Set<string>;
   searchResults: Map<string, number>;
@@ -728,6 +783,7 @@ function SourceTreeNode({
 }) {
   const { t } = useT();
   const expanded = expandedDirs.has(node.path);
+  const status = dirStatus[node.path];
   const matches = searchResults.get(node.path) ?? 0;
   if (node.is_dir) {
     return (
@@ -760,18 +816,21 @@ function SourceTreeNode({
             still empty. Rendered as-is, an unfinished folder was indistinguishable
             from an empty one: it opened onto nothing, and its contents appeared
             some seconds later without explanation. */}
-        {expanded && (node.children ?? []).length === 0 && (hydrating || hydrateFailed) && (
+        {/* KT-605 — the folder's own state, not the tree's. It is fetched when
+            it is opened, so this is a real request and not the tail of a
+            background pass. */}
+        {expanded && status && (node.children ?? []).length === 0 && (
           <div
             className="source-tree-row source-tree-pending"
-            data-failed={hydrateFailed || undefined}
+            data-failed={status === 'failed' || undefined}
             data-testid={`source-tree-pending-${node.path}`}
             style={{ paddingLeft: 21 + (depth + 1) * 14 }}
           >
-            {hydrateFailed
+            {status === 'failed'
               ? <AlertTriangle size={11} />
               : <Loader2 size={11} className="spin" />}
             <span>
-              {t(hydrateFailed
+              {t(status === 'failed'
                 ? 'projects.source.folderUnavailable'
                 : 'projects.source.loadingFolder')}
             </span>
@@ -782,8 +841,7 @@ function SourceTreeNode({
             key={child.path}
             node={child}
             depth={depth + 1}
-            hydrating={hydrating}
-            hydrateFailed={hydrateFailed}
+            dirStatus={dirStatus}
             selectedPath={selectedPath}
             expandedDirs={expandedDirs}
             searchResults={searchResults}
@@ -827,12 +885,6 @@ function findPreferredSourceFile(nodes: SourceFileNode[]): SourceFileNode | null
   });
   visit(nodes);
   return preferred.map(path => flat.find(file => file.path === path)).find(Boolean) ?? flat[0] ?? null;
-}
-
-function hasSourcePath(nodes: SourceFileNode[], path: string): boolean {
-  return nodes.some(node => (
-    node.is_dir ? hasSourcePath(node.children ?? [], path) : node.path === path
-  ));
 }
 
 function sourceLanguage(path: string): string {

@@ -574,6 +574,27 @@ fn is_probably_text_file(path: &std::path::Path) -> bool {
     !sample.contains(&0) && std::str::from_utf8(&sample).is_ok()
 }
 
+/// KT-605 — a directory the caller asked to expand. Stricter than the file
+/// check below: there the last component is a file name, here it is a folder
+/// and has to answer the same question as its ancestors. Without this, a
+/// caller could ask for `node_modules` by name — the tree never offers it, so
+/// a request for it is out of band.
+fn safe_source_directory_path(path: &str) -> bool {
+    if !safe_source_relative_path(path) {
+        return false;
+    }
+    std::path::Path::new(path)
+        .components()
+        .enumerate()
+        .all(|(index, component)| match component {
+            std::path::Component::Normal(value) => value
+                .to_str()
+                .map(|name| !is_skipped_source_dir(name, index == 0))
+                .unwrap_or(false),
+            _ => false,
+        })
+}
+
 fn safe_source_relative_path(path: &str) -> bool {
     if path.is_empty() || path.starts_with('/') || path.starts_with('\\') {
         return false;
@@ -612,6 +633,7 @@ fn collect_source_dirs(
     rel_prefix: &str,
     root: &std::path::Path,
     excluded_paths: &std::collections::HashSet<String>,
+    remaining_depth: Option<usize>,
     out: &mut Vec<String>,
 ) {
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -636,7 +658,16 @@ fn collect_source_dirs(
         if excluded_paths.contains(&path) {
             continue;
         }
-        collect_source_dirs(&entry.path(), &path, root, excluded_paths, out);
+        if remaining_depth != Some(0) {
+            collect_source_dirs(
+                &entry.path(),
+                &path,
+                root,
+                excluded_paths,
+                remaining_depth.map(|depth| depth.saturating_sub(1)),
+                out,
+            );
+        }
         out.push(path);
     }
 }
@@ -660,9 +691,24 @@ fn walk_exclusions(
     root: &std::path::Path,
     user_exclusions: Vec<String>,
 ) -> std::collections::HashSet<String> {
+    walk_exclusions_under(root, root, "", None, user_exclusions)
+}
+
+/// The same, bounded to the subtree actually about to be listed.
+///
+/// KT-605 — listing one directory must not pay for the whole repository. With
+/// `remaining_depth: Some(0)` this asks git about that directory's own children
+/// and nothing else, which is exactly the set the answer can hide.
+fn walk_exclusions_under(
+    root: &std::path::Path,
+    dir: &std::path::Path,
+    rel_prefix: &str,
+    remaining_depth: Option<usize>,
+    user_exclusions: Vec<String>,
+) -> std::collections::HashSet<String> {
     let mut excluded: std::collections::HashSet<String> = user_exclusions.into_iter().collect();
     let mut candidates = Vec::new();
-    collect_source_dirs(root, "", root, &excluded, &mut candidates);
+    collect_source_dirs(dir, rel_prefix, root, &excluded, remaining_depth, &mut candidates);
     excluded.extend(git_ignored_paths(root, &candidates));
     excluded
 }
@@ -940,10 +986,15 @@ pub(crate) fn compute_source_language_stats(
 
 #[derive(Debug, Default, serde::Deserialize)]
 pub struct SourceFilesQuery {
-    /// Return only repository-root entries. The UI uses this cheap first pass
-    /// while the complete, bounded tree loads in the background.
+    /// Return only the entries of one level, without their children.
     #[serde(default)]
     pub shallow: bool,
+    /// KT-605 — the directory to list, relative to the project root. With it,
+    /// opening a folder costs that folder rather than the whole repository,
+    /// and `MAX_SOURCE_FILES` stops being a ceiling the answer can hit without
+    /// being able to say so. Absent means the root.
+    #[serde(default)]
+    pub path: Option<String>,
 }
 
 /// GET /api/projects/:id/source-files
@@ -967,31 +1018,46 @@ pub async fn list_source_files(
     };
     let (project, exclusions) = project_and_exclusions;
     let project_path = project.path;
-    let result = tokio::task::spawn_blocking(move || {
+    // KT-605 — an empty `path` is the root, not a broken request: the frontend
+    // sends the same shape for both.
+    let requested = query.path.filter(|path| !path.is_empty());
+    if let Some(path) = &requested {
+        if !safe_source_directory_path(path) {
+            return Json(ApiResponse::err("Invalid or unsupported source path"));
+        }
+    }
+    let depth = if query.shallow { Some(0) } else { None };
+    let result = tokio::task::spawn_blocking(move || -> Result<Vec<SourceFileNode>, String> {
         let root = scanner::resolve_host_path(&project_path);
-        let mut file_count = 0;
-        let excluded_paths = walk_exclusions(&root, exclusions);
-        let mut tree = if query.shallow {
-            build_source_tree_with_depth(
-                &root,
-                "",
-                &root,
-                &mut file_count,
-                &excluded_paths,
-                Some(0),
-            )
-        } else {
-            build_source_tree(&root, "", &root, &mut file_count, &excluded_paths)
+        let (dir, rel_prefix) = match &requested {
+            Some(path) => (root.join(path), path.as_str()),
+            None => (root.clone(), ""),
         };
+        if !dir.is_dir() {
+            return Err("Directory not found".to_string());
+        }
+        let mut file_count = 0;
+        let excluded_paths = walk_exclusions_under(&root, &dir, rel_prefix, depth, exclusions);
+        let mut tree = build_source_tree_with_depth(
+            &dir,
+            rel_prefix,
+            &root,
+            &mut file_count,
+            &excluded_paths,
+            depth,
+        );
         let mut paths = Vec::with_capacity(file_count);
         flatten_source_paths(&tree, &mut paths);
         let ignored_paths = git_ignored_paths(&root, &paths);
         mark_git_ignored(&mut tree, &ignored_paths);
-        tree
+        Ok(tree)
     })
     .await
-    .unwrap_or_default();
-    Json(ApiResponse::ok(result))
+    .unwrap_or_else(|error| Err(format!("Source listing failed: {error}")));
+    match result {
+        Ok(tree) => Json(ApiResponse::ok(tree)),
+        Err(error) => Json(ApiResponse::err(error)),
+    }
 }
 
 /// GET /api/projects/:id/source-exclusions
@@ -1813,6 +1879,83 @@ mod tests {
 
         assert!(tree.iter().any(|node| node.path == "keep"));
         assert!(!tree.iter().any(|node| node.path == "drop"));
+    }
+
+    /// KT-605 — listing one directory must cost that directory. The whole point
+    /// of the change is that opening a folder no longer walks the repository,
+    /// so the assertion is on what it collects, not just on what it returns.
+    #[test]
+    fn listing_one_directory_returns_its_children_and_looks_no_further() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        touch(&tmp.path().join("site/en.html"));
+        touch(&tmp.path().join("site/assets/logo.svg"));
+        touch(&tmp.path().join("backend/src/main.rs"));
+
+        let excluded = walk_exclusions_under(tmp.path(), &tmp.path().join("site"), "site", Some(0), Vec::new());
+        let mut count = 0;
+        let tree = build_source_tree_with_depth(
+            &tmp.path().join("site"),
+            "site",
+            tmp.path(),
+            &mut count,
+            &excluded,
+            Some(0),
+        );
+
+        let names: Vec<_> = tree.iter().map(|node| node.path.as_str()).collect();
+        assert_eq!(names, vec!["site/assets", "site/en.html"]);
+        // The child folder is announced but not expanded — that is the next
+        // request, made when someone opens it.
+        let assets = tree.iter().find(|node| node.path == "site/assets").unwrap();
+        assert!(assets.is_dir);
+        assert!(assets.children.is_empty());
+        // And nothing from the sibling subtree was even considered.
+        assert!(!names.iter().any(|path| path.starts_with("backend")));
+    }
+
+    /// A folder path is checked on every component, unlike a file path whose
+    /// last component is a name. Without it a caller could ask for a folder the
+    /// tree never offers.
+    #[test]
+    fn a_directory_outside_the_tree_is_refused() {
+        assert!(safe_source_directory_path("site"));
+        assert!(safe_source_directory_path("site/assets"));
+
+        assert!(!safe_source_directory_path("../etc"));
+        assert!(!safe_source_directory_path("/etc"));
+        assert!(!safe_source_directory_path("site/../../etc"));
+        assert!(!safe_source_directory_path(""));
+        // Named directly rather than reached through the tree, which never
+        // offers them.
+        assert!(!safe_source_directory_path("node_modules"));
+        assert!(!safe_source_directory_path("frontend/node_modules"));
+        assert!(!safe_source_directory_path("docs"));
+        // `docs` is only skipped at the root; deeper it is ordinary source.
+        assert!(safe_source_directory_path("backend/docs"));
+    }
+
+    /// The exclusions of a subtree are the subtree's own. Asking git about the
+    /// whole repository to open one folder would put back the cost the change
+    /// exists to remove.
+    #[test]
+    fn a_subtree_listing_hides_what_git_ignores_inside_it() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(tmp.path())
+            .status()
+            .unwrap();
+        std::fs::write(tmp.path().join(".gitignore"), "site/generated/\n").unwrap();
+        touch(&tmp.path().join("site/en.html"));
+        touch(&tmp.path().join("site/generated/bundle.js"));
+
+        let dir = tmp.path().join("site");
+        let excluded = walk_exclusions_under(tmp.path(), &dir, "site", Some(0), Vec::new());
+        let mut count = 0;
+        let tree = build_source_tree_with_depth(&dir, "site", tmp.path(), &mut count, &excluded, Some(0));
+
+        let names: Vec<_> = tree.iter().map(|node| node.path.as_str()).collect();
+        assert_eq!(names, vec!["site/en.html"]);
     }
 
     // ── 0.8.6 — doc-asset image serving (relative <img> in README/docs) ───

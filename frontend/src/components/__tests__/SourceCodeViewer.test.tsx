@@ -34,17 +34,18 @@ vi.mock('../../lib/api', () => ({
 describe('SourceCodeViewer', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    vi.mocked(projects.listSourceFiles).mockResolvedValue([
-      {
-        path: 'src',
-        name: 'src',
-        is_dir: true,
-        children: [
+    // KT-605 — the endpoint answers for ONE directory. The root lists `src`
+    // without its contents; `src` is fetched because it opens on arrival.
+    vi.mocked(projects.listSourceFiles).mockImplementation(async (_id, _shallow, path) => {
+      if (!path) return [{ path: 'src', name: 'src', is_dir: true, children: [] }];
+      if (path === 'src') {
+        return [
           { path: 'src/main.rs', name: 'main.rs', is_dir: false },
           { path: 'src/local.rules', name: 'local.rules', is_dir: false, git_ignored: true },
-        ],
-      },
-    ]);
+        ];
+      }
+      return [];
+    });
     vi.mocked(projects.readSourceFile).mockResolvedValue({
       path: 'src/main.rs',
       content: 'fn main() {\n    println!("hello");\n}',
@@ -109,7 +110,8 @@ describe('SourceCodeViewer', () => {
 
     expect(await screen.findByText('main.rs')).toBeInTheDocument();
     expect(projects.listSourceFiles).toHaveBeenCalledWith('project-1', true);
-    expect(projects.listSourceFiles).toHaveBeenCalledWith('project-1');
+    // And the folder that opens on arrival, by name — never the whole tree.
+    expect(projects.listSourceFiles).toHaveBeenCalledWith('project-1', true, 'src');
     expect(await screen.findByText('feature/source-browser')).toBeInTheDocument();
     await waitFor(() => expect(projects.readSourceFile).toHaveBeenCalledWith('project-1', 'src/main.rs'));
     expect(container.querySelector('.source-code .hljs-keyword')).toBeInTheDocument();
@@ -205,40 +207,71 @@ describe('SourceCodeViewer', () => {
     expect(screen.queryByTestId('source-html-preview-frame')).not.toBeInTheDocument();
   });
 
-  it('renders repository-root entries before the complete tree finishes loading', async () => {
-    let resolveFull!: (nodes: SourceFileNode[]) => void;
-    const fullTree = new Promise<SourceFileNode[]>(resolve => { resolveFull = resolve; });
-    vi.mocked(projects.listSourceFiles).mockImplementation(async (_id, shallow) => {
-      if (shallow) {
+  /// KT-605 — the root arrives on its own, and a folder costs a request only
+  /// when someone opens it. Before, the panel fetched the WHOLE tree behind
+  /// this listing, bounded at 10 000 files, and went silent past that bound.
+  it('shows the root at once and fetches a folder only when it is opened', async () => {
+    let resolveScripts!: (nodes: SourceFileNode[]) => void;
+    vi.mocked(projects.listSourceFiles).mockImplementation(async (_id, _shallow, path) => {
+      if (!path) {
         return [
-          { path: 'src', name: 'src', is_dir: true, children: [] },
           { path: 'scripts', name: 'scripts', is_dir: true, children: [] },
           { path: 'README.md', name: 'README.md', is_dir: false },
         ];
       }
-      return fullTree;
+      if (path === 'scripts') {
+        return new Promise<SourceFileNode[]>(resolve => { resolveScripts = resolve; });
+      }
+      return [];
     });
 
     render(<SourceCodeViewer projectId="project-1" />);
 
-    expect(await screen.findByText('src')).toBeInTheDocument();
+    expect(await screen.findByText('scripts')).toBeInTheDocument();
     expect(screen.getAllByText('README.md')).not.toHaveLength(0);
-    expect(screen.queryByText('main.rs')).not.toBeInTheDocument();
-    expect(screen.getByLabelText('projects.source.loadingTreeBackground')).toBeInTheDocument();
+    // `scripts` is not one of the folders that open on arrival, so nothing has
+    // been asked about it yet.
+    expect(projects.listSourceFiles).not.toHaveBeenCalledWith('project-1', true, 'scripts');
 
-    await act(async () => {
-      resolveFull([{
-        path: 'src',
-        name: 'src',
-        is_dir: true,
-        children: [{ path: 'src/main.rs', name: 'main.rs', is_dir: false }],
-      }]);
+    fireEvent.click(screen.getByText('scripts'));
+    await waitFor(() => {
+      expect(projects.listSourceFiles).toHaveBeenCalledWith('project-1', true, 'scripts');
     });
 
-    expect(await screen.findByText('main.rs')).toBeInTheDocument();
-    expect(screen.getByText('scripts')).toBeInTheDocument();
-    expect(screen.getAllByText('README.md')).not.toHaveLength(0);
-    expect(screen.queryByLabelText('projects.source.loadingTreeBackground')).not.toBeInTheDocument();
+    await act(async () => {
+      resolveScripts([{ path: 'scripts/build.sh', name: 'build.sh', is_dir: false }]);
+    });
+    expect(await screen.findByText('build.sh')).toBeInTheDocument();
+
+    // Closed and reopened, it is not fetched again: it is already on screen.
+    const calls = vi.mocked(projects.listSourceFiles).mock.calls.length;
+    fireEvent.click(screen.getByText('scripts'));
+    fireEvent.click(screen.getByText('scripts'));
+    expect(vi.mocked(projects.listSourceFiles).mock.calls).toHaveLength(calls);
+  });
+
+  /// A deep link names a file several folders down. Its ancestors have to be
+  /// fetched, in order, or the tree has nowhere to put it.
+  it('opens the folders a deep link passes through', async () => {
+    vi.mocked(projects.listSourceFiles).mockImplementation(async (_id, _shallow, path) => {
+      if (!path) return [{ path: 'site', name: 'site', is_dir: true, children: [] }];
+      if (path === 'site') return [{ path: 'site/assets', name: 'assets', is_dir: true, children: [] }];
+      if (path === 'site/assets') return [{ path: 'site/assets/logo.svg', name: 'logo.svg', is_dir: false }];
+      return [];
+    });
+    vi.mocked(projects.readSourceFile).mockResolvedValue({
+      path: 'site/assets/logo.svg',
+      content: '<svg />',
+    });
+
+    render(<SourceCodeViewer projectId="project-1" initialPath="site/assets/logo.svg" />);
+
+    expect(await screen.findByText('logo.svg')).toBeInTheDocument();
+    expect(projects.listSourceFiles).toHaveBeenCalledWith('project-1', true, 'site');
+    expect(projects.listSourceFiles).toHaveBeenCalledWith('project-1', true, 'site/assets');
+    await waitFor(() => {
+      expect(projects.readSourceFile).toHaveBeenCalledWith('project-1', 'site/assets/logo.svg');
+    });
   });
 
   /// KT-594 — the reported bug. The root listing gives every folder empty
@@ -246,27 +279,22 @@ describe('SourceCodeViewer', () => {
   /// interface said "empty" when it meant "not yet". Romuald clicked `site`,
   /// saw nothing, and watched its contents appear four seconds later.
   it('says a folder is still loading instead of rendering it as empty', async () => {
-    let resolveFull!: (nodes: SourceFileNode[]) => void;
-    const fullTree = new Promise<SourceFileNode[]>(resolve => { resolveFull = resolve; });
-    vi.mocked(projects.listSourceFiles).mockImplementation(async (_id, shallow) => {
-      if (shallow) return [{ path: 'site', name: 'site', is_dir: true, children: [] }];
-      return fullTree;
+    let resolveSite!: (nodes: SourceFileNode[]) => void;
+    vi.mocked(projects.listSourceFiles).mockImplementation(async (_id, _shallow, path) => {
+      if (!path) return [{ path: 'site', name: 'site', is_dir: true, children: [] }];
+      if (path === 'site') return new Promise<SourceFileNode[]>(r => { resolveSite = r; });
+      return [];
     });
 
     render(<SourceCodeViewer projectId="project-1" />);
     fireEvent.click(await screen.findByText('site'));
 
-    const pending = screen.getByTestId('source-tree-pending-site');
+    const pending = await screen.findByTestId('source-tree-pending-site');
     expect(pending).toHaveTextContent('projects.source.loadingFolder');
     expect(pending).not.toHaveAttribute('data-failed');
 
     await act(async () => {
-      resolveFull([{
-        path: 'site',
-        name: 'site',
-        is_dir: true,
-        children: [{ path: 'site/index.html', name: 'index.html', is_dir: false }],
-      }]);
+      resolveSite([{ path: 'site/index.html', name: 'index.html', is_dir: false }]);
     });
 
     // And once the children are there, the row makes way for them.
@@ -277,10 +305,16 @@ describe('SourceCodeViewer', () => {
   /// A failed enrichment leaves the root listing usable on purpose, but its
   /// folders stay empty forever. Saying nothing there is the same lie as
   /// saying nothing during the wait — with no second request coming to undo it.
-  it('says a folder is unreachable when the full tree never arrives', async () => {
-    vi.mocked(projects.listSourceFiles).mockImplementation(async (_id, shallow) => {
-      if (shallow) return [{ path: 'site', name: 'site', is_dir: true, children: [] }];
-      throw new Error('enrichment failed');
+  it('says a folder is unreachable when its own request fails, and lets it be retried', async () => {
+    let attempts = 0;
+    vi.mocked(projects.listSourceFiles).mockImplementation(async (_id, _shallow, path) => {
+      if (!path) return [{ path: 'site', name: 'site', is_dir: true, children: [] }];
+      if (path === 'site') {
+        attempts += 1;
+        if (attempts === 1) throw new Error('folder unreachable');
+        return [{ path: 'site/index.html', name: 'index.html', is_dir: false }];
+      }
+      return [];
     });
 
     render(<SourceCodeViewer projectId="project-1" />);
@@ -289,9 +323,15 @@ describe('SourceCodeViewer', () => {
     const pending = await screen.findByTestId('source-tree-pending-site');
     await waitFor(() => expect(pending).toHaveAttribute('data-failed'));
     expect(pending).toHaveTextContent('projects.source.folderUnavailable');
-    // The root listing is still there: a failed enrichment is not a failed page.
+    // One folder failing is not a failed page: the rest of the tree stands.
     expect(screen.getByText('site')).toBeInTheDocument();
     expect(screen.queryByText('projects.source.error')).not.toBeInTheDocument();
+
+    // KT-605 — closing and reopening is the gesture a reader will try, so it
+    // has to be the one that retries.
+    fireEvent.click(screen.getByText('site'));
+    fireEvent.click(screen.getByText('site'));
+    expect(await screen.findByText('index.html')).toBeInTheDocument();
   });
 
   it('recovers from a transient source-tree failure when Retry succeeds', async () => {

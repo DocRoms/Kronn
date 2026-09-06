@@ -1002,10 +1002,21 @@ export const projects = {
   listAiFiles: (id: string) => api<AiFileNode[]>('GET', `/projects/${id}/ai-files`),
   readAiFile: (id: string, path: string) => api<AiFileContent>('GET', `/projects/${id}/ai-file?path=${encodeURIComponent(path)}`),
   searchAiFiles: (id: string, q: string) => api<AiSearchResult[]>('GET', `/projects/${id}/ai-search?q=${encodeURIComponent(q)}`),
-  listSourceFiles: (id: string, shallow = false) => api<SourceFileNode[]>(
-    'GET',
-    `/projects/${id}/source-files${shallow ? '?shallow=true' : ''}`,
-  ),
+  /** KT-605 — one directory at a time. `path` absent is the root; `shallow`
+   *  returns that level's entries with their own children left unlisted, which
+   *  is what the tree asks for when a folder is opened. Without them the
+   *  endpoint walked the whole repository on every call and stopped, silently,
+   *  at `MAX_SOURCE_FILES`. */
+  listSourceFiles: (id: string, shallow = false, path?: string) => {
+    const query = new URLSearchParams();
+    if (shallow) query.set('shallow', 'true');
+    if (path) query.set('path', path);
+    const suffix = query.toString();
+    return api<SourceFileNode[]>(
+      'GET',
+      `/projects/${id}/source-files${suffix ? `?${suffix}` : ''}`,
+    );
+  },
   readSourceFile: (id: string, path: string) => api<AiFileContent>('GET', `/projects/${id}/source-file?path=${encodeURIComponent(path)}`),
   searchSourceFiles: (id: string, q: string) => api<AiSearchResult[]>('GET', `/projects/${id}/source-search?q=${encodeURIComponent(q)}`),
   getSourceExclusions: (id: string) => api<string[]>('GET', `/projects/${id}/source-exclusions`),
