@@ -16,6 +16,14 @@ export interface FenceProblem {
   key: string;
 }
 
+/// Exactly the fields `QuestionSpec` declares, because it carries
+/// `deny_unknown_fields`: anything else and the whole fence is refused.
+const SPEC_FIELDS = new Set([
+  'version', 'key', 'question', 'context',
+  'options', 'multiple', 'recommended_option_ids', 'task_ref',
+]);
+const OPTION_FIELDS = new Set(['id', 'label', 'description']);
+
 const STABLE_KEY = /^[A-Za-z0-9\-_.]{1,100}$/;
 
 function isStableKey(value: unknown): value is string {
@@ -51,6 +59,12 @@ export function findFenceProblem(source: string | undefined): FenceProblem | nul
   }
   const spec = parsed as Record<string, unknown>;
 
+  // Review @codex-cli-4 — `deny_unknown_fields`. A typo in a field name is
+  // silently ignored by a lenient reader and refused by serde, which is the
+  // worst pairing: the author sees nothing and gets nothing.
+  const unknown = Object.keys(spec).find(field => !SPEC_FIELDS.has(field));
+  if (unknown) return { key: 'disc.question.invalidUnknownField' };
+
   // The one that actually happened, and the one a reader would never spot:
   // JSON tells a number and a string apart, and the contract wants the number.
   if (spec.version !== 1) {
@@ -65,7 +79,9 @@ export function findFenceProblem(source: string | undefined): FenceProblem | nul
     return { key: 'disc.question.invalidTaskRef' };
   }
 
-  const options = spec.options ?? [];
+  // `#[serde(default)]` supplies a value for a key that is ABSENT. A key that
+  // is present and null is a value, and `Vec`/`bool` refuse it.
+  const options = 'options' in spec ? spec.options : [];
   if (!Array.isArray(options) || options.length > 8) {
     return { key: 'disc.question.invalidOptions' };
   }
@@ -73,6 +89,9 @@ export function findFenceProblem(source: string | undefined): FenceProblem | nul
   for (const raw of options) {
     if (typeof raw !== 'object' || raw === null) return { key: 'disc.question.invalidOptions' };
     const option = raw as Record<string, unknown>;
+    if (Object.keys(option).some(field => !OPTION_FIELDS.has(field))) {
+      return { key: 'disc.question.invalidUnknownField' };
+    }
     if (!isStableKey(option.id)) return { key: 'disc.question.invalidOptionId' };
     if (!isFilled(option.label, 250)) return { key: 'disc.question.invalidOptionLabel' };
     if (!isOptionalText(option.description, 1000)) {
@@ -82,11 +101,11 @@ export function findFenceProblem(source: string | undefined): FenceProblem | nul
   }
   if (ids.size !== options.length) return { key: 'disc.question.invalidOptionId' };
 
-  const recommended = spec.recommended_option_ids ?? [];
+  const recommended = 'recommended_option_ids' in spec ? spec.recommended_option_ids : [];
   if (!Array.isArray(recommended) || recommended.some(id => !ids.has(id as string))) {
     return { key: 'disc.question.invalidRecommended' };
   }
-  const multiple = spec.multiple ?? false;
+  const multiple = 'multiple' in spec ? spec.multiple : false;
   if (typeof multiple !== 'boolean') return { key: 'disc.question.invalidMultiple' };
   // Recommending two answers to a question that accepts one is not a
   // recommendation, it is an ambiguity.

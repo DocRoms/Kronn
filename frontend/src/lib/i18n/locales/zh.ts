@@ -529,6 +529,7 @@ const zh: TranslationDict = {
   "disc.question.invalidHint": "未记录任何内容。请修正标记后用相同的 key 重新发布。",
   "disc.question.invalidEmpty": "该块为空。",
   "disc.question.invalidJson": "该块不是有效的 JSON。",
+  "disc.question.invalidUnknownField": "一个未知字段就足以让整个块被拒绝：请检查字段名称。",
   "disc.question.invalidVersionString": "version 必须是数字 1，而不是文本 1。",
   "disc.question.invalidVersion": "version 必须为 1。",
   "disc.question.invalidKey": "key 必须是稳定标识符：字母、数字、- _ .（最多 100 个字符）。",

@@ -54,6 +54,38 @@ describe('findFenceProblem', () => {
     expect(findFenceProblem(undefined)).toBeNull();
   });
 
+  /// Review @codex-cli-4 — `QuestionSpec` carries `deny_unknown_fields`, so a
+  /// typo in a field name refuses the whole fence. A lenient reader would
+  /// ignore it: the author would then see nothing and get nothing, which is
+  /// the worst pairing of all.
+  it('refuses a field the contract does not declare', () => {
+    expect(findFenceProblem(fence({ questoin: 'typo' })))
+      .toEqual({ key: 'disc.question.invalidUnknownField' });
+    expect(findFenceProblem(fence({ options: [{ id: 'a', label: 'x', titel: 'typo' }] })))
+      .toEqual({ key: 'disc.question.invalidUnknownField' });
+  });
+
+  /// `#[serde(default)]` supplies a value for a key that is ABSENT. A key that
+  /// is present and null is a value, and `Vec`/`bool` refuse it — a difference
+  /// the first version of this mirror got wrong in both places.
+  it('tells an absent field from one explicitly set to null', () => {
+    expect(findFenceProblem(fence({ options: null })))
+      .toEqual({ key: 'disc.question.invalidOptions' });
+    expect(findFenceProblem(fence({ multiple: null, recommended_option_ids: [] })))
+      .toEqual({ key: 'disc.question.invalidMultiple' });
+    expect(findFenceProblem(fence({ recommended_option_ids: null })))
+      .toEqual({ key: 'disc.question.invalidRecommended' });
+
+    // Absent is fine for all three, which is the whole distinction.
+    expect(findFenceProblem(JSON.stringify({
+      version: 1,
+      key: 'k',
+      question: 'Une question ?',
+    }))).toBeNull();
+    // And the two that ARE optional accept null, because their type says so.
+    expect(findFenceProblem(fence({ context: null, task_ref: null }))).toBeNull();
+  });
+
   it('checks the key is a stable identifier', () => {
     expect(findFenceProblem(fence({ key: '' }))).toEqual({ key: 'disc.question.invalidKey' });
     expect(findFenceProblem(fence({ key: 'clé avec espaces' })))
