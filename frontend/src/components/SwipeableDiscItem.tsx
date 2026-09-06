@@ -2,7 +2,7 @@ import { useState, useRef, useEffect, memo } from 'react';
 import type { ReactNode } from 'react';
 import {
   ShieldCheck, Zap, Rocket, GitBranch, Loader2, Users, Users2, Square,
-  Link2, Download, AlertTriangle, Check, MoreHorizontal, Copy, Archive, Trash2,
+  Link2, Download, AlertOctagon, AlertTriangle, Check, MoreHorizontal, Copy, Archive, Trash2,
 } from 'lucide-react';
 import type { Discussion } from '../types/generated';
 import { isValidationDisc, isBriefingDisc, isBootstrapDisc } from '../lib/constants';
@@ -18,7 +18,10 @@ import '../pages/DiscussionsPage.css';
 const SWIPE_THRESHOLD = 80;
 
 export interface SwipeableDiscItemProps {
-  disc: Discussion;
+  /** KT-595 — `pending_question_count` rides on the list response
+   *  (`DiscussionListItem`) and nowhere else, so it is read here as optional
+   *  rather than retyping every synthetic row the sidebar builds. */
+  disc: Discussion & { pending_question_count?: number };
   /** Human-facing provider identity. Dynamic HTTP discussions keep `Custom`
    * as their wire AgentType, so the parent resolves the named connection. */
   agentLabel?: string;
@@ -280,6 +283,20 @@ export const SwipeableDiscItem = memo(function SwipeableDiscItem({
               title={t('disc.titleHoverTooltip', disc.title, disc.id)}
             ><MatrixText text={disc.title} /></span>
             {showBadge && <span className="disc-unseen-badge">{unseen}</span>}
+            {/* KT-595 — a decision this room is waiting on, before it is
+                opened. Distinct from the unread count on purpose: unread is
+                "there is something to read", this is "nothing moves until you
+                answer". */}
+            {(disc.pending_question_count ?? 0) > 0 && (
+              <span
+                className="disc-question-badge"
+                title={t('disc.question.bannerPending', disc.pending_question_count ?? 0)}
+                data-testid="disc-question-badge"
+              >
+                <AlertOctagon size={10} aria-hidden="true" />
+                {disc.pending_question_count}
+              </span>
+            )}
           </div>
           <div className="disc-item-meta">
             {/* Queued (throttled, not yet running): a static hourglass,
