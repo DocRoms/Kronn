@@ -193,6 +193,29 @@ before inspecting those controls; it waits for the mounted body and leaves an
 already-open card open without changing any setting.
 [src: file: frontend/e2e/pages/SettingsPage.ts:16]
 
+Media browser specs use `openMediaLauncher()` to open the current panel rail
+and explicitly select the test's local provider slot. Restoring an already-open
+panel must not toggle it closed; relying on the default provider could launch a
+real generation instead of the test stub.
+
+Discussion run-card coverage drives the four inline source-message actions,
+not the removed attached-runs strip. Read each expanded card inside the viewport:
+off-screen cards intentionally defer hydration. A real wheel gesture cancels
+the initial bottom-settling window before walking earlier messages.
+
+The Settings axe scan supplies a populated, typed usage report at the external
+collector boundary and waits for its cost and filter controls before scanning.
+It tests the rendered usage UI, not the `ccusage` process or private operator
+history; collector timeout behavior needs separate backend coverage.
+
+When a disposable backend runs in a container, run browser specs with local
+provider stubs in the same network namespace. Their loopback callbacks then
+reach the stubs, and destructive fixture cleanup uses the backend's real local
+trust boundary. Do not spoof forwarding headers or weaken authentication to
+make a remote runner look local. Keep this stack free of host credentials and
+production data, serialize suites sharing its database, and collect artifacts
+from a dedicated output directory.
+
 ## 0.9.4 interaction regression map
 
 - `AgentSwitchPicker` tests cover the shared agent × reasoning-tier selection.

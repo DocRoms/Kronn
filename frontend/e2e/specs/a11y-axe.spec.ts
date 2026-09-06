@@ -30,6 +30,7 @@ import AxeBuilder from '@axe-core/playwright';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import type { UsageReport } from '../../src/types/generated';
 
 const baselinePath = join(fileURLToPath(import.meta.url), '..', '..', 'fixtures', 'a11y-baseline.json');
 type BaselineEntry = Record<string, number>;
@@ -106,6 +107,33 @@ test.describe('a11y — axe-core scans main pages, fails on serious/critical', (
           await request.fulfill({ json: { success: true, data: { activated: true, activated_at: '2026-08-29T00:00:00Z' }, error: null } });
         });
       }
+      if (route.name === 'Settings') {
+        // ccusage is an external CLI, not app chrome. A cold/offline collector
+        // can wait on its provider catalogue indefinitely. Give axe a populated,
+        // typed report so it scans the real filters and controls, not a loader
+        // (nor the operator's private usage history). All other data stays live.
+        await page.route('**/api/usage?*', async request => {
+          const totals = {
+            input_tokens: 7000, output_tokens: 1000, cache_creation_tokens: 500,
+            cache_read_tokens: 4000, total_tokens: 12500, total_cost: 0.42,
+          };
+          const report: UsageReport = {
+            period_kind: new URL(request.request().url()).searchParams.get('period') ?? 'daily',
+            rows: [{
+              period: '2026-05-28', agent: 'claude', models_used: ['claude-opus-4-7'],
+              model_breakdowns: [{
+                model_name: 'claude-opus-4-7', cost: totals.total_cost,
+                input_tokens: totals.input_tokens, output_tokens: totals.output_tokens,
+                cache_creation_tokens: totals.cache_creation_tokens,
+                cache_read_tokens: totals.cache_read_tokens, total_tokens: totals.total_tokens,
+              }],
+              ...totals,
+            }],
+            totals, agents_detected: ['claude'],
+          };
+          await request.fulfill({ json: { success: true, data: report, error: null } });
+        });
+      }
       await page.goto('/');
       const nav = page.locator(`[data-tour-id="${route.navTourId}"]`);
       await nav.click();
@@ -113,6 +141,11 @@ test.describe('a11y — axe-core scans main pages, fails on serious/critical', (
       const readySelector = route.readySelector;
       if (!readySelector) throw new Error(`Missing readiness selector for ${route.name}`);
       await expect(page.locator(readySelector)).toBeVisible();
+      if (route.name === 'Settings') {
+        await expect(page.getByTestId('usage-total-cost')).toBeVisible();
+        await expect(page.getByTestId('usage-agent-filter')).toBeVisible();
+        await expect(page.getByTestId('usage-model-filter')).toBeVisible();
+      }
       // The shell selector proves that the lazy route mounted. The bounded
       // network-idle wait is fail-closed so axe never scans partial data.
       await page.waitForLoadState('networkidle', { timeout: 10_000 });
