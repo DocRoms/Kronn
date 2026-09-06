@@ -112,6 +112,15 @@ describe('MessageBubble — inline source citations', () => {
     expect(screen.getByTestId('source-citation-chip')).toHaveAttribute('data-state', 'unknown');
   });
 
+  it('renders every URL in consecutive autolinked citation markers', () => {
+    renderMessage('Preuves [src: url: https://example.com/one] [src: url: https://example.org/two] fin.');
+    const chips = screen.getAllByTestId('source-citation-chip');
+    expect(chips).toHaveLength(2);
+    expect(chips[0]).toHaveAttribute('title', '[src: url: https://example.com/one]');
+    expect(chips[1]).toHaveAttribute('title', '[src: url: https://example.org/two]');
+    expect(screen.getByText(/fin\./)).toBeInTheDocument();
+  });
+
   /// Turning ordinary prose into a chip by accident would be worse than
   /// leaving one marker unread, so the pattern stays narrow.
   it('leaves a message with no citation exactly as it was', () => {
