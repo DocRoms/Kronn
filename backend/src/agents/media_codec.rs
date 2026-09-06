@@ -219,7 +219,10 @@ impl MediaCodec for OpenRouterMediaCodec {
             // A frame is a picture the clip must reproduce at one end, which
             // an illustration has no equivalent of — so asking for one here is
             // refused rather than quietly turned into a plain reference.
-            if let Some(frame) = references.iter().find(|r| r.mode.frame_capability().is_some()) {
+            if let Some(frame) = references
+                .iter()
+                .find(|r| r.mode.frame_capability().is_some())
+            {
                 bail!(
                     "an image generation takes reference images, not a '{}'",
                     frame.mode.as_str()
@@ -455,7 +458,9 @@ impl MediaCodec for NvidiaMediaCodec {
         // image slot to measure the reference contract against, and a guessed
         // payload would be submitted and billed on a supposition.
         if !references.is_empty() {
-            bail!("generating from reference images is not supported on this NVIDIA connection yet");
+            bail!(
+                "generating from reference images is not supported on this NVIDIA connection yet"
+            );
         }
         let mut body = json!({ "model": model, "prompt": prompt });
         if let Some(resolution) = &params.resolution {

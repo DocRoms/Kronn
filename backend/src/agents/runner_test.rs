@@ -89,7 +89,10 @@ mod tests {
             .find(|server| server.id == "kronn-internal")
             .expect("the bridge does not depend on a project being attached");
         assert_eq!(bridge.command, "python3");
-        assert_eq!(bridge.args, vec![script.path().to_string_lossy().to_string()]);
+        assert_eq!(
+            bridge.args,
+            vec![script.path().to_string_lossy().to_string()]
+        );
 
         // The whole point of passing it this way: the protocol carries the
         // command and nothing else. The bridge reads its token from the
@@ -97,7 +100,10 @@ mod tests {
         // credential is ever serialized into an ACP payload.
         assert!(bridge.allowed_tools.is_empty());
         assert!(
-            !bridge.args.iter().any(|arg| arg.contains("KRONN_AUTH_TOKEN")),
+            !bridge
+                .args
+                .iter()
+                .any(|arg| arg.contains("KRONN_AUTH_TOKEN")),
             "no credential, and no placeholder for one, may travel over ACP"
         );
 

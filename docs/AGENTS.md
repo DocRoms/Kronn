@@ -7,18 +7,13 @@
 > Read this file first, then follow the context loading strategy below.
 > Do not read the other config files (.cursorrules, copilot-instructions, etc.) — they redirect here.
 
-> **CRITICAL — Never hallucinate.**
-> - **Never invent information** (tech stack, conventions, architecture, file paths...).
-> - If you are unsure about something: **check the `docs/` documentation first**.
-> - If you still don't find the answer: **ask the user** rather than guessing.
-> - After getting the answer: **update the relevant `docs/` file** so the knowledge is captured.
-> - Getting it right matters more than answering fast — hallucinations waste everyone's time.
+> **CRITICAL — Never invent facts.** Follow § 0's evidence cascade; capture human
+> clarifications in the relevant documentation.
 
-> **CRITICAL — MCP tool usage.**
-> Before calling any MCP tool, **read the matching context file** in `docs/operations/mcp-servers/<mcp-name>.md` **if it exists**.
-> These files contain project-specific rules, constraints, and examples that prevent hallucinations and misuse.
-> If no context file exists for an MCP, **proceed normally** — do not block on a missing doc.
-> (Each MCP tool ships its own `description` field via JSON-RPC `tools/list` ; that's the in-band contract. Context files are an additional, optional layer of project-specific guidance.)
+> **CRITICAL — MCP tool usage.** Before any MCP call, **read**
+> `docs/operations/mcp-servers/<mcp-name>.md` **if it exists** for project rules
+> and examples. If absent, proceed normally. Each tool's `description` in
+> JSON-RPC `tools/list` remains its in-band contract; context files supplement it.
 
 > **Discussion notes are routing metadata, not secrets.**
 > Messages on the `note` channel stay visible to humans but are excluded from
@@ -28,7 +23,21 @@
 
 **Unknown term?** → `docs/glossary.md` first.
 
-This folder (`docs/`) contains structured project context (for both humans and AI agents). Use paths relative to repo root.
+**Blocking human decisions in a Kronn room (mandatory).** Use a `kronn-question`
+fence, never prose alone. Read `disc_question_list` first to reuse arbitration;
+its `tool_manual` supplies the full contract and valid JSON example. Use numeric
+`"version":1`, never `"version":"1"` as in delivery/review manifests. Use
+`disc_question_list` to read back the exact key after publication. If absent,
+correct and republish with the same
+key: a receipt or missing card is not arbitration. While pending, do not execute,
+delegate or complete the affected lot; use `disc_wait_for_peer`. Independent
+work may continue. After restart/handoff, read the durable answer by stable key
+before resuming. Never answer for humans or treat a recommended choice as consent.
+See
+[`operations/mcp-servers/kronn-internal.md`](operations/mcp-servers/kronn-internal.md#human-arbitration-cards).
+`[src: file: backend/src/db/discussion_questions.rs:1]`
+
+Use paths relative to the repo root.
 
 <!-- kronn:section name="anti-hallu" curated="ai" audit="2026-05-27" -->
 ## 0. Anti-Hallucination Protocol
@@ -155,8 +164,6 @@ Never load everything "just in case".
 - Mocks must match **real API shapes** (check `types/generated.ts`).
 - Run `cargo test` (backend) and `npx vitest run` (frontend) **before declaring a task done**.
 - If a test is flaky, fix the root cause — do not add retries or sleeps.
-
-**Why this matters:** A failing test catches a bug in seconds. Without tests, bugs surface in production, require debugging, and cost 10-100x more tokens to fix. Tests also prove to the user that the code works — "all 500 tests pass" is more convincing than "I think it's correct".
 
 ---
 

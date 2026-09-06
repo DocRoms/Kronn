@@ -19,7 +19,7 @@
   <a href="https://github.com/DocRoms/Kronn/commits/main"><img src="https://img.shields.io/github/last-commit/DocRoms/Kronn?label=dernier%20commit" alt="Dernier commit" /></a>
 </p>
 
-**Pilote Claude Code, Codex, OpenCode, Gemini, Ollama (100 % local), LiteLLM et 3 autres agents IA depuis un seul dashboard self-hosted, avec des MCP partagés, des secrets chiffrés et des workflows répétables.**
+**Pilote tes agents CLI (Claude Code, Codex, Gemini CLI, OpenCode…), tes modèles locaux avec Ollama et tes fournisseurs HTTP comme LiteLLM, NVIDIA et OpenRouter depuis un seul dashboard self-hosted, avec des MCP partagés, des secrets chiffrés et des workflows répétables.**
 
 **Prompts plus petits, code déterministe quand c'est possible : moins d'hallucinations, facture tokens divisée, écoconception par conception.**
 

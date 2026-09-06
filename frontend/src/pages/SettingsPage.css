@@ -176,9 +176,9 @@
 .set-nav-version {
   display: flex;
   align-items: center;
-  justify-content: center;
-  gap: var(--kr-sp-2);
-  flex-wrap: wrap;
+  /* Against the left edge, like every other row of this column. Centring it
+     read as a stray caption rather than as the app saying its own name. */
+  justify-content: flex-start;
   margin-top: var(--kr-sp-3);
   padding: var(--kr-sp-4);
   border: 1px solid var(--kr-border-light);
@@ -187,7 +187,30 @@
   color: var(--kr-text-faint);
   font-size: var(--kr-fs-xs);
   line-height: 1.45;
-  text-align: center;
+}
+
+/* The mark labels the two lines, so it sits beside them, not above: one block
+   that reads left to right. Inline-flex so the page footer can still centre
+   the whole thing while its lines stay left-aligned. */
+.set-version-card {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--kr-sp-3);
+  text-align: left;
+}
+
+.set-version-card-wrap {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--kr-sp-2);
+}
+
+.set-version-card-lines {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
 }
 
 .set-nav-version a {
@@ -199,6 +222,26 @@
 .set-nav-version a:hover,
 .set-nav-version a:focus-visible {
   text-decoration: underline;
+}
+
+.set-kofi-card {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px var(--kr-sp-2);
+  border: 1px solid var(--kr-border-light);
+  border-radius: var(--kr-r-sm);
+  color: var(--kr-text-secondary);
+  font-size: var(--kr-fs-2xs);
+  font-weight: 650;
+  text-decoration: none;
+}
+
+.set-kofi-card:hover,
+.set-kofi-card:focus-visible {
+  border-color: var(--kr-accent);
+  color: var(--kr-accent-text);
+  text-decoration: none;
 }
 
 .set-nav-tour-progress {
@@ -2902,6 +2945,16 @@
 .set-ext-api-conn-tiers {
   margin-top: auto;
   padding: 0 var(--kr-sp-5) var(--kr-sp-5);
+}
+
+/* KT-589 — the configured media slots, on the row below the three tiers.
+   Full width and auto-fit so one modality fills the row and two split it:
+   a slot left over from a 3-column grid would read as a missing tier. */
+.set-ext-api-conn-media {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-columns: repeat(auto-fit, minmax(0, 1fr));
+  gap: var(--kr-sp-3);
 }
 
 .set-ext-api-conn-tier {

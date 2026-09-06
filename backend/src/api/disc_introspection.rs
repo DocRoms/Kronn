@@ -635,12 +635,14 @@ pub async fn disc_note_list(
             total_notes,
             notes: rows
                 .into_iter()
-                .map(|(sort_order, message, attachments, revised_at)| DiscussionNote {
-                    sort_order,
-                    message,
-                    attachments,
-                    revised_at,
-                })
+                .map(
+                    |(sort_order, message, attachments, revised_at)| DiscussionNote {
+                        sort_order,
+                        message,
+                        attachments,
+                        revised_at,
+                    },
+                )
                 .collect(),
             next_cursor,
         })),

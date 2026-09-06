@@ -1659,6 +1659,23 @@
   flex-shrink: 0;
 }
 
+/* KT-595 — a decision this room is waiting on. Red rather than accent, and
+   deliberately not the unread pill: unread means "there is something to read",
+   this means "nothing moves until you answer". */
+.disc-question-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+  min-width: 14px;
+  padding: 1px 5px;
+  border-radius: 6px;
+  background: var(--kr-error);
+  color: var(--kr-text-on-dark);
+  font-size: 8px;
+  font-weight: 800;
+}
+
 /* Unseen badge on collapsed GROUP headers — same accent pill style as the
    per-discussion badge above but positioned after the count. Lets users
    spot "which group has unread messages" without expanding everything. */
@@ -3181,6 +3198,24 @@ button.disc-contact-open {
   display: flex;
   flex: 1;
   overflow: hidden;
+  /* KT-596 — the anchor for the panel strip when it floats instead of holding
+     a column of its own. */
+  position: relative;
+}
+
+/* The strip's own width: two 28px controls, the 2px between them and the
+   strip's 2px of padding either side, plus its border. Declared once here
+   because the topmost controls must reserve its footprint, not the thread. */
+.disc-messages-git-row[data-rail-floating='true'] {
+  --kr-disc-rail-w: 63px;
+}
+
+/* When search is closed, the arbitration banner can be the topmost row. Keep
+   its reveal button outside the floating controls without restoring a gutter
+   along the full conversation. With search open, the banner is below the rail. */
+.disc-messages-git-row[data-rail-floating='true'][data-search-open='false'] .disc-question-banner,
+.disc-messages-git-row[data-rail-floating='true'] .disc-message-search {
+  padding-right: calc(var(--kr-disc-rail-w) + var(--kr-sp-3));
 }
 
 .disc-plan-btn {
@@ -5720,6 +5755,29 @@ button.disc-contact-open {
   margin-top: 2px;
   color: var(--kr-text-muted);
   font-size: var(--kr-fs-xs);
+}
+
+.disc-new-entry-modes {
+  display: flex;
+  gap: 6px;
+  margin: 0 0 12px;
+}
+
+.disc-new-entry-mode {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--kr-border);
+  border-radius: var(--kr-r-md);
+  background: var(--kr-bg);
+  color: var(--kr-text-muted);
+  padding: 7px 10px;
+}
+
+.disc-new-entry-mode[data-active="true"] {
+  border-color: var(--kr-accent-border);
+  background: rgba(var(--kr-accent-rgb), 0.08);
+  color: var(--kr-text-primary);
 }
 
 .disc-new-layout {

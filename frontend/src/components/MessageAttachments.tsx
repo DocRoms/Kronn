@@ -8,13 +8,21 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { createPortal } from 'react-dom';
 import { ChevronLeft, ChevronRight, Download, ExternalLink, FileText, Image as ImageIcon, Loader2, MessageSquare, Scissors, Sparkles, Trash2, X } from 'lucide-react';
 import type { ContextFile } from '../types/generated';
-import { discussions as discussionsApi } from '../lib/api';
+import { discussions as discussionsApi, media, type ExternalApiConnectionView, type MediaModality, type MediaReferenceMode } from '../lib/api';
 import { triggerDownload } from '../lib/downloadBlob';
 import { isImageFile, isVideoFile, isViewableMedia } from '../lib/mediaKind';
 import { extractLastFrame, LastFrameError, lastFrameFilename } from '../lib/lastFrame';
 import { MediaPlayer } from './MediaPlayer';
 
 type T = (key: string, ...args: (string | number)[]) => string;
+const EMPTY_GENERATION_CONNECTIONS: ExternalApiConnectionView[] = [];
+
+export type ImageGenerationRequest = {
+  assetId: string;
+  modality: MediaModality;
+  slotKey: string;
+  referenceMode: MediaReferenceMode;
+};
 
 function formatKb(bytes: number): string {
   return `${Math.max(1, Math.round(bytes / 1024))} KB`;
@@ -266,6 +274,8 @@ export function MessageAttachments({
   openRequest,
   onDeleted,
   onExtracted,
+  generationConnections = EMPTY_GENERATION_CONNECTIONS,
+  onGenerateFromImage,
 }: {
   files: ContextFile[];
   discussionId: string;
@@ -285,6 +295,10 @@ export function MessageAttachments({
   carouselScope?: ContextFile[];
   /** Controlled one-shot open request from outside the attachment grid. */
   openRequest?: { assetId: string; nonce: number } | null;
+  /** Configured media slots whose input-image capability is checked before an
+   * action is offered in the viewer. */
+  generationConnections?: ExternalApiConnectionView[];
+  onGenerateFromImage?: (request: ImageGenerationRequest) => void;
 }) {
   const imageFiles = useMemo(() => files.filter(isImageFile), [files]);
   // Membership is decided on METADATA, not on a loaded blob: filtering on
@@ -335,6 +349,63 @@ export function MessageAttachments({
   // State rather than a ref: the request is answered during render, and a ref
   // written there is exactly what `react-hooks/refs` exists to catch.
   const [handledOpenNonce, setHandledOpenNonce] = useState<number | null>(null);
+  const generationSlots = useMemo(() => generationConnections.flatMap(connection => (
+    (['image', 'video'] as const).flatMap(modality => {
+      const model = modality === 'image' ? connection.image_model : connection.video_model;
+      return model?.trim()
+        ? [{ key: `${connection.id}:${modality}`, connectionId: connection.id, modality, model: model.trim() }]
+        : [];
+    })
+  )), [generationConnections]);
+  // A capability answer belongs to a complete catalogue snapshot. Keeping its
+  // identity lets render hide stale actions while a new configured model is
+  // being checked, without a synchronous effect reset.
+  const generationCatalogKey = generationSlots
+    .map(slot => `${slot.key}:${slot.model}`)
+    .join('|');
+  const [inputModeResult, setInputModeResult] = useState<{
+    catalogKey: string;
+    modes: Record<string, MediaReferenceMode | null>;
+  }>({ catalogKey: '', modes: {} });
+  const inputModes = useMemo(
+    () => inputModeResult.catalogKey === generationCatalogKey ? inputModeResult.modes : {},
+    [inputModeResult, generationCatalogKey],
+  );
+  const generationActions = useMemo(() => {
+    const actions: Array<{ modality: MediaModality; slotKey: string; referenceMode: MediaReferenceMode }> = [];
+    for (const connection of generationConnections) {
+      for (const modality of ['image', 'video'] as const) {
+        if (actions.some(action => action.modality === modality)) continue;
+        const slotKey = `${connection.id}:${modality}`;
+        const referenceMode = inputModes[slotKey];
+        if (referenceMode) actions.push({ modality, slotKey, referenceMode });
+      }
+    }
+    return actions;
+  }, [generationConnections, inputModes]);
+
+  // Do not infer a provider's input support. Until this request resolves (or
+  // after it fails), the viewer offers no paid-generation action at all.
+  useEffect(() => {
+    let cancelled = false;
+    const requestCatalogKey = generationCatalogKey;
+    void Promise.all(generationSlots.map(async slot => {
+      try {
+        const result = await media.capabilities(slot.connectionId, slot.modality);
+        const mode = slot.modality === 'image'
+          ? (result.capabilities?.max_input_references ?? 0) > 0 ? 'reference' : null
+          : result.capabilities?.frame_positions?.[0] ?? null;
+        return [slot.key, mode] as const;
+      } catch {
+        return [slot.key, null] as const;
+      }
+    })).then(entries => {
+      if (!cancelled) {
+        setInputModeResult({ catalogKey: requestCatalogKey, modes: Object.fromEntries(entries) });
+      }
+    });
+    return () => { cancelled = true; };
+  }, [generationCatalogKey, generationSlots]);
 
   const releaseMediaUrls = useCallback(() => {
     generationRef.current += 1;
@@ -554,6 +625,34 @@ export function MessageAttachments({
                 >
                   {extracting ? <Loader2 size={18} /> : <Scissors size={18} />}
                 </button>
+              )}
+              {isImageFile(selectedFile) && onGenerateFromImage && (
+                <>
+                  {generationActions.map(({ modality, slotKey, referenceMode }) => (
+                    <button
+                      key={slotKey}
+                      type="button"
+                      className="disc-image-lightbox-action"
+                      onClick={() => {
+                        onGenerateFromImage({
+                          assetId: selectedFile.id,
+                          modality,
+                          slotKey,
+                          referenceMode,
+                        });
+                        // The target form lives under the viewer in the panel.
+                        // Close this portal after the handoff so it is visible
+                        // and receives the focus requested by the action.
+                        setSelectedId(null);
+                      }}
+                      aria-label={t(`disc.media.generateFromImage.${modality}`)}
+                      title={t(`disc.media.generateFromImage.${modality}`)}
+                      data-testid={`attachment-generate-${modality}`}
+                    >
+                      {modality === 'image' ? <ImageIcon size={18} /> : <Sparkles size={18} />}
+                    </button>
+                  ))}
+                </>
               )}
               {onDeleted && (confirmingDelete ? (
                 <button

@@ -450,7 +450,7 @@ jobs:
         run: pnpm lint:fast
 
       - name: Lint — eslint (0 errors, warning budget)
-        run: pnpm lint --max-warnings 72
+        run: pnpm lint --max-warnings 63
 
       - name: Lint — i18n key parity (fr/en/es/zh)
         run: pnpm lint:i18n

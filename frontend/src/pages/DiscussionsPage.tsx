@@ -2,6 +2,7 @@ import { Fragment, useState, useRef, useEffect, useLayoutEffect, useCallback, us
 import './DiscussionsPage.css';
 import { MessageBubble, MarkdownContent } from '../components/MessageBubble';
 import { DiscussionNote } from '../components/DiscussionNote';
+import { DiscussionQuestionBanner } from '../components/DiscussionQuestionBanner';
 import { unseenBasis } from '../lib/discussionUiUtils';
 import { ToolCallsGroup } from '../components/ToolCallsGroup';
 import { MessageDateSeparator } from '../components/MessageDateSeparator';
@@ -2359,6 +2360,27 @@ export function DiscussionsPage({
     );
   };
 
+  const handleCreateMediaDiscussion = async (
+    config: Pick<NewDiscConfig, 'title' | 'agent' | 'projectId' | 'tier'> & {
+      connectionId: string | null;
+    },
+  ): Promise<string> => {
+    const disc = await discussionsApi.create({
+      project_id: config.projectId,
+      title: config.title,
+      agent: config.agent,
+      connection_id: config.connectionId,
+      language: configLanguage ?? 'fr',
+      initial_prompt: '',
+      initial_targets: [],
+      tier: config.tier !== 'default' ? config.tier : undefined,
+      no_agent: true,
+    });
+    setActiveDiscussionId(disc.id);
+    refetchDiscussions();
+    return disc.id;
+  };
+
   const handleSendMessage = async (
     msg: string,
     targets: MessageTarget[] = [],
@@ -3701,6 +3723,7 @@ export function DiscussionsPage({
             externalConnections={externalConnections}
             prefill={prefill}
             onSubmit={handleCreateDiscussion}
+            onCreateMediaDiscussion={handleCreateMediaDiscussion}
             onClose={() => setShowNewDiscussion(false)}
             onPrefillConsumed={onPrefillConsumed}
             onNavigate={(page, opts) => {
@@ -3836,7 +3859,7 @@ export function DiscussionsPage({
             />
 
             {/* Messages + one shared utility panel side by side */}
-            <div className="disc-messages-git-row">
+            <div className="disc-messages-git-row" data-rail-floating={!anyPanelOpen} data-search-open={showMessageSearch}>
             <div className="disc-messages-col" data-replying={!!replyTarget}>
             {/* KT-581 — first in the column, so it opens level with the panel
               *  strip rather than a few banners lower: the two controls belong
@@ -4016,6 +4039,14 @@ export function DiscussionsPage({
               </div>
             )}
 
+
+            {/* KT-595 — a decision the room is waiting on, above the thread
+                rather than inside it: the message that asked scrolls away, the
+                need does not. */}
+            <DiscussionQuestionBanner
+              discussionId={activeDiscussion.id}
+              messageRevision={activeDiscussion.messages.at(-1)?.id}
+            />
 
             {/* Messages */}
             <div
@@ -5101,7 +5132,7 @@ export function DiscussionsPage({
 
             </div>{/* end messages column */}
 
-            <div className="disc-utility-col">
+            <div className="disc-utility-col" data-floating={!anyPanelOpen}>
             {/* KT-581 — switching panels, above the panel being switched.
               *  Each panel draws its own header, so putting these icons in the
               *  discussion header too showed every one of them twice. */}
@@ -5136,7 +5167,7 @@ export function DiscussionsPage({
                 },
                 {
                   id: 'delete',
-                  label: t('disc.deleteAction'),
+                  label: t('disc.delete'),
                   icon: <Trash2 size={14} />,
                   active: false,
                   onSelect: () => { void deleteActiveDiscussion(activeDiscussion.id); },

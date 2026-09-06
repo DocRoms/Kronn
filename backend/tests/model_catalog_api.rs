@@ -204,7 +204,12 @@ async fn create_manual_rejects_mismatched_opencode_projection() {
 #[tokio::test]
 async fn delete_manual_removes_the_opencode_entry() {
     let app = test_app();
-    post(app.clone(), "/api/model-catalogs/manual", manual_request(json!({}))).await;
+    post(
+        app.clone(),
+        "/api/model-catalogs/manual",
+        manual_request(json!({})),
+    )
+    .await;
     let (status, json) = post(
         app,
         "/api/model-catalogs/manual/delete",

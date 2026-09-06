@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import type { ExternalApiConnectionView } from '../../lib/api';
 
 const { mediaApi } = vi.hoisted(() => ({
@@ -37,12 +37,6 @@ function visiblePictures(): string[] {
     document.querySelectorAll('.searchable-select-option[data-value]'),
     node => node.getAttribute('data-value') ?? '',
   ).filter(Boolean);
-}
-
-/** Same, opening the list first. */
-function offeredPictures(): string[] {
-  fireEvent.focus(screen.getByTestId('media-reference-select'));
-  return visiblePictures();
 }
 
 /** Open the ratio list and return the option node for one ratio. */
@@ -131,6 +125,90 @@ describe('MediaGenerateForm', () => {
     ).toBeInTheDocument();
   });
 
+  it('does not launch on mount or submit twice from synchronous clicks', async () => {
+    let resolveGeneration!: (value: { job_id: string; status: string; model: string; discussion_id: string; message_id: string }) => void;
+    mediaApi.generate.mockReturnValue(new Promise(resolve => { resolveGeneration = resolve; }));
+    render(<MediaGenerateForm discussionId="d-1" connections={[connection()]} t={t} />);
+
+    expect(mediaApi.generate).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'a lighthouse' } });
+    const submit = screen.getByRole('button', { name: /disc\.media\.generate/ });
+    act(() => {
+      submit.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      submit.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(mediaApi.generate).toHaveBeenCalledTimes(1);
+
+    resolveGeneration({
+      job_id: 'job-1', status: 'pending', model: 'image-model', discussion_id: 'd-1', message_id: 'msg-1',
+    });
+    await waitFor(() => expect(screen.getByText('disc.media.launched:image-model')).toBeInTheDocument());
+  });
+
+  it('creates at most one room for synchronous Generate clicks', async () => {
+    let resolveCreation!: (discussionId: string) => void;
+    const createDiscussion = vi.fn().mockReturnValue(new Promise<string>(resolve => {
+      resolveCreation = resolve;
+    }));
+    render(<MediaGenerateForm connections={[connection({ video_model: null })]} t={t} onCreateDiscussion={createDiscussion} />);
+
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'a lighthouse' } });
+    const submit = screen.getByRole('button', { name: /disc\.media\.generate/ });
+    act(() => {
+      submit.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      submit.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(createDiscussion).toHaveBeenCalledTimes(1);
+    expect(mediaApi.generate).not.toHaveBeenCalled();
+
+    await act(async () => { resolveCreation('d-new'); });
+    await waitFor(() => expect(mediaApi.generate).toHaveBeenCalledTimes(1));
+    expect(mediaApi.generate).toHaveBeenCalledWith(expect.objectContaining({ discussion_id: 'd-new' }));
+  });
+
+  it('creates a no-agent room only on Generate and reuses it after a generation error', async () => {
+    const createDiscussion = vi.fn().mockResolvedValue('d-new');
+    mediaApi.generate
+      .mockRejectedValueOnce(new Error('generation response lost'))
+      .mockResolvedValueOnce({
+        job_id: 'job-2', status: 'pending', model: 'image-model', discussion_id: 'd-new', message_id: 'msg-2',
+      });
+    render(<MediaGenerateForm connections={[connection({ video_model: null })]} t={t} onCreateDiscussion={createDiscussion} />);
+
+    expect(createDiscussion).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'a lighthouse' } });
+    const submit = screen.getByRole('button', { name: /disc\.media\.generate/ });
+    await act(async () => { fireEvent.click(submit); });
+
+    await waitFor(() => expect(mediaApi.generate).toHaveBeenCalledTimes(1));
+    expect(createDiscussion).toHaveBeenCalledTimes(1);
+    expect(mediaApi.generate).toHaveBeenLastCalledWith(expect.objectContaining({ discussion_id: 'd-new' }));
+    expect(await screen.findByText('generation response lost')).toBeInTheDocument();
+
+    await act(async () => { fireEvent.click(submit); });
+    await waitFor(() => expect(mediaApi.generate).toHaveBeenCalledTimes(2));
+    expect(createDiscussion).toHaveBeenCalledTimes(1);
+    expect(mediaApi.generate.mock.calls[1][0].idempotency_key)
+      .toBe(mediaApi.generate.mock.calls[0][0].idempotency_key);
+  });
+
+  it('does not send a billable request when room creation fails', async () => {
+    const createDiscussion = vi.fn()
+      .mockRejectedValueOnce(new Error('room creation failed'))
+      .mockResolvedValueOnce('d-retry');
+    render(<MediaGenerateForm connections={[connection({ video_model: null })]} t={t} onCreateDiscussion={createDiscussion} />);
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'a lighthouse' } });
+    const submit = screen.getByRole('button', { name: /disc\.media\.generate/ });
+
+    await act(async () => { fireEvent.click(submit); });
+    expect(await screen.findByText('room creation failed')).toBeInTheDocument();
+    expect(mediaApi.generate).not.toHaveBeenCalled();
+
+    await act(async () => { fireEvent.click(submit); });
+    await waitFor(() => expect(mediaApi.generate).toHaveBeenCalledTimes(1));
+    expect(createDiscussion).toHaveBeenCalledTimes(2);
+  });
+
   it('shows the price of the click, and says so when there is none', async () => {
     const { unmount } = render(
       <MediaGenerateForm discussionId="d-1" connections={[connection()]} t={t} />,
@@ -172,6 +250,55 @@ describe('MediaGenerateForm', () => {
     expect(screen.queryByText('disc.media.duration')).toBeNull();
     fireEvent.click(screen.getByTestId('media-slot-vid-only:video'));
     await waitFor(() => expect(screen.getByText('disc.media.duration')).toBeInTheDocument());
+  });
+
+  it('keeps a viewer-selected image attached and blocks billing until capabilities arrive', async () => {
+    let resolveCapabilities!: (value: { model: string; capabilities: { max_input_references: number } }) => void;
+    mediaApi.capabilities.mockReturnValue(new Promise(resolve => { resolveCapabilities = resolve; }));
+    render(
+      <MediaGenerateForm
+        discussionId="d-1"
+        connections={[connection()]}
+        images={[{ id: 'asset-1', filename: 'source.png' } as never]}
+        initialSlotKey="conn-1:image"
+        initialReference={{ assetId: 'asset-1', mode: 'reference' }}
+        t={t}
+      />,
+    );
+
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'turn this into art' } });
+    expect(screen.getByTestId('media-reference-pending')).toHaveTextContent('source.png');
+    expect(screen.getByRole('button', { name: /disc\.media\.generate/ })).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: /disc\.media\.generate/ }));
+    expect(mediaApi.generate).not.toHaveBeenCalled();
+    resolveCapabilities({ model: 'image-model', capabilities: { max_input_references: 1 } });
+    expect(await screen.findByTestId('media-reference-picker')).toHaveTextContent('source.png');
+    fireEvent.click(screen.getByRole('button', { name: /disc\.media\.generate/ }));
+    await waitFor(() => expect(mediaApi.generate).toHaveBeenCalledWith(expect.objectContaining({
+      reference_asset_ids: ['asset-1'], reference_mode: 'reference',
+    })));
+  });
+
+  it.each([
+    ['fails', () => mediaApi.capabilities.mockRejectedValue(new Error('catalogue unavailable'))],
+    ['rejects the source', () => mediaApi.capabilities.mockResolvedValue({ model: 'image-model', capabilities: { max_input_references: 0 } })],
+  ])('does not bill when the selected model %s', async (_case, arrange) => {
+    arrange();
+    render(
+      <MediaGenerateForm
+        discussionId="d-1"
+        connections={[connection()]}
+        images={[{ id: 'asset-1', filename: 'source.png' } as never]}
+        initialSlotKey="conn-1:image"
+        initialReference={{ assetId: 'asset-1', mode: 'reference' }}
+        t={t}
+      />,
+    );
+
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'turn this into art' } });
+    expect(await screen.findByTestId('media-reference-pending')).toHaveTextContent('source.png');
+    fireEvent.click(screen.getByRole('button', { name: /disc\.media\.generate/ }));
+    expect(mediaApi.generate).not.toHaveBeenCalled();
   });
 
   it('shows each aspect ratio as a shape, not just as arithmetic', async () => {
@@ -612,7 +739,7 @@ describe('MediaGenerateForm', () => {
     expect(screen.queryByTestId('media-reference-picker')).toBeNull();
   });
 
-  it('drops a picked image the newly selected model cannot take', async () => {
+  it('keeps a picked image visible and blocks launch when the newly selected model cannot take it', async () => {
     mediaApi.capabilities.mockResolvedValue(videoCapabilities(['first_frame', 'last_frame']));
     const { rerender } = render(
       <MediaGenerateForm
@@ -638,10 +765,13 @@ describe('MediaGenerateForm', () => {
         t={t}
       />,
     );
-    // The picker briefly disappears while the new envelope is being read, so
-    // the choice has to be awaited rather than read on the next tick.
-    await waitFor(() => expect(offeredPictures()).toContain('asset-1'));
+    // The source remains visible and blocks launch rather than being silently
+    // downgraded to a text-only request when the new model rejects its mode.
+    expect(await screen.findByTestId('media-reference-pending')).toHaveTextContent('origami.png');
     expect(screen.queryByTestId('media-reference-mode-last_frame')).toBeNull();
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'keep the source' } });
+    fireEvent.click(screen.getByRole('button', { name: /disc\.media\.generate/ }));
+    expect(mediaApi.generate).not.toHaveBeenCalled();
   });
 
   it('explains itself when no connection has a media model', () => {

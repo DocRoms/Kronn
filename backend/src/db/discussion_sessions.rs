@@ -2249,7 +2249,10 @@ mod tests {
     fn backdate_last_seen(conn: &Connection, session_id: &str) {
         conn.execute(
             "UPDATE discussion_sessions SET last_seen = ?1 WHERE session_id = ?2",
-            params![(Utc::now() - RECENTLY_SEEN_WINDOW - Duration::seconds(60)).to_rfc3339(), session_id],
+            params![
+                (Utc::now() - RECENTLY_SEEN_WINDOW - Duration::seconds(60)).to_rfc3339(),
+                session_id
+            ],
         )
         .unwrap();
     }
@@ -2269,7 +2272,11 @@ mod tests {
             .filter(|participant| participant.agent_type == "ClaudeCode")
             .collect();
         let ids: Vec<i64> = claude.iter().map(|participant| participant.id).collect();
-        assert_eq!(ids, vec![second, third], "both live sessions must be projected");
+        assert_eq!(
+            ids,
+            vec![second, third],
+            "both live sessions must be projected"
+        );
         // And each keeps its own stable number, so both stay addressable.
         assert_eq!(claude[0].cli_ordinal, Some(1));
         assert_eq!(claude[1].cli_ordinal, Some(2));
@@ -2281,7 +2288,8 @@ mod tests {
         // working. The first rule used to hide the second.
         let conn = setup_db();
         let working = create_session(&conn, "d1", "ClaudeCode", Some("c-work"), "peer").unwrap();
-        let listening = create_session(&conn, "d1", "ClaudeCode", Some("c-listen"), "peer").unwrap();
+        let listening =
+            create_session(&conn, "d1", "ClaudeCode", Some("c-listen"), "peer").unwrap();
         set_session_activity(&conn, "d1", "ClaudeCode", Some("c-listen"), "listening", 90).unwrap();
 
         let ids: Vec<i64> = list_participant_views(&conn, "d1")

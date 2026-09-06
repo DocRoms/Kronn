@@ -386,7 +386,10 @@ mod tests {
             )
             .unwrap();
         };
-        insert("wf-a", r#"[{"quick_api_id":"qa-1"},{"quick_api_id":"qa-2"},{"quick_prompt_id":"qa-1"}]"#);
+        insert(
+            "wf-a",
+            r#"[{"quick_api_id":"qa-1"},{"quick_api_id":"qa-2"},{"quick_prompt_id":"qa-1"}]"#,
+        );
         insert("wf-b", r#"[{"quick_api_id":"qa-1"}]"#);
 
         // The `quick_prompt_id` holding the same string names a prompt, not this API.

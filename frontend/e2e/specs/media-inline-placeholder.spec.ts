@@ -13,6 +13,7 @@
 import { createServer, type Server } from 'node:http';
 import { expect, test } from '../fixtures/kronn-fixture';
 import { DashboardPage } from '../pages/DashboardPage';
+import { openMediaLauncher } from '../pages/MediaLauncher';
 
 // A real, minimal 1x1 PNG — so the browser's <img> actually decodes it
 // instead of just receiving opaque bytes.
@@ -114,12 +115,7 @@ test('a launch materializes an inline placeholder that becomes the asset in plac
   await dashboard.goto();
   await dashboard.openDiscussion(discussionId);
 
-  await page.getByTestId('discussion-assets-toggle').click();
-  const panel = page.getByRole('complementary', { name: 'Assets' });
-  await expect(panel).toBeVisible();
-  await panel.getByTestId('assets-generate-toggle').click();
-  const form = panel.getByTestId('media-generate-form');
-  await expect(form).toBeVisible();
+  const form = await openMediaLauncher(page, connectionId);
 
   const promptOne = 'un chat en origami KT-549';
   await form.locator('textarea').fill(promptOne);
@@ -222,12 +218,7 @@ test('a generation that finished while the client was away rehydrates from the s
   const dashboard = new DashboardPage(page);
   await dashboard.goto();
   await dashboard.openDiscussion(discussionId);
-  await page.getByTestId('discussion-assets-toggle').click();
-  const panel = page.getByRole('complementary', { name: 'Assets' });
-  await expect(panel).toBeVisible();
-  await panel.getByTestId('assets-generate-toggle').click();
-  const form = panel.getByTestId('media-generate-form');
-  await expect(form).toBeVisible();
+  const form = await openMediaLauncher(page, connectionId);
 
   const prompt = 'un renard en origami KT-549 pendant absence';
   await form.locator('textarea').fill(prompt);
@@ -301,10 +292,7 @@ test('an unreachable connection settles as a clear terminal failure, not a silen
   const dashboard = new DashboardPage(page);
   await dashboard.goto();
   await dashboard.openDiscussion(discussionId);
-  await page.getByTestId('discussion-assets-toggle').click();
-  const panel = page.getByRole('complementary', { name: 'Assets' });
-  await panel.getByTestId('assets-generate-toggle').click();
-  const form = panel.getByTestId('media-generate-form');
+  const form = await openMediaLauncher(page, connectionId);
   const prompt = 'un paysage KT-549 échec';
   await form.locator('textarea').fill(prompt);
   await form.getByRole('button', { name: /Générer/ }).click();

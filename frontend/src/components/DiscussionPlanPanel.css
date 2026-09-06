@@ -128,7 +128,7 @@
 
 .plan-view-switch {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 3px;
   margin: 2px 0 8px;
   padding: 3px;
@@ -156,6 +156,25 @@
   background: var(--kr-bg-raised);
   color: var(--kr-accent-ink);
   box-shadow: var(--kr-shadow-sm);
+}
+
+.plan-task-progress {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  color: var(--kr-accent-ink);
+}
+
+.plan-task-progress svg {
+  animation: plan-task-progress-turn 1.5s linear infinite;
+}
+
+@keyframes plan-task-progress-turn {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .plan-task-progress svg { animation: none; }
 }
 
 .plan-focus-stats > span,

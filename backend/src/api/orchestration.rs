@@ -8143,6 +8143,61 @@ pub(crate) async fn target_aware_task_worker_catalogue_for_discussion(
     Ok(catalogue)
 }
 
+/// Browser-only quota signal for Config > Agents. This route is not exposed by
+/// the MCP worker surface, so an agent cannot re-arm a provider autonomously.
+pub async fn provider_quota_states(
+    State(state): State<AppState>,
+) -> Json<ApiResponse<Vec<crate::models::ProviderQuotaState>>> {
+    let states = bounded_provider_quota_state(&state)
+        .await
+        .into_iter()
+        .map(|(provider, blocked)| crate::models::ProviderQuotaState { provider, blocked })
+        .collect();
+    Json(ApiResponse::ok(states))
+}
+
+#[derive(Deserialize)]
+pub struct RearmProviderQuotaRequest {
+    /// The browser only sends this after its confirmation dialog. Keeping the
+    /// acknowledgement in the request makes an accidental POST fail closed.
+    pub confirmed: bool,
+    pub idempotency_key: String,
+}
+
+/// Human-confirmed browser action. It only advances the provider
+/// acknowledgement watermark; it never launches, cancels or rewrites an
+/// execution.
+pub async fn rearm_provider_quota(
+    State(state): State<AppState>,
+    Path(provider): Path<AgentType>,
+    Json(request): Json<RearmProviderQuotaRequest>,
+) -> Json<ApiResponse<bool>> {
+    let key = request.idempotency_key.trim().to_string();
+    if !request.confirmed || key.is_empty() {
+        return Json(ApiResponse::err_coded(
+            ApiErrorCode::Validation,
+            "a confirmed re-arm and idempotency_key are required",
+        ));
+    }
+    let provider = crate::db::orchestration::agent_type_to_db(&provider);
+    match state
+        .db
+        .with_conn(move |conn| {
+            crate::db::orchestration::rearm_provider_quota(
+                conn,
+                &provider,
+                &key,
+                PlanningActorKind::Human.as_str(),
+                Some("web-operator"),
+            )
+        })
+        .await
+    {
+        Ok(changed) => Json(ApiResponse::ok(changed)),
+        Err(error) => Json(ApiResponse::err(error.to_string())),
+    }
+}
+
 /// MCP-only worker discovery. Caller identity is injected by the bridge and
 /// authorized against the principal room before any room/session catalogue is
 /// returned.
@@ -15450,9 +15505,9 @@ mod tests {
     }
 
     /// KT-515 — puts an unrelated Codex execution in `Escalated` with the exact
-    /// `quota_exhausted:Codex` marker, mirroring what
-    /// `escalate_execution_for_dispatch_quota` leaves behind after a real
-    /// dispatch failure, without needing a live dispatch job.
+    /// quota marker and generation consumed by
+    /// `escalate_execution_for_dispatch_quota`, without needing a live dispatch
+    /// job.
     async fn seed_open_codex_quota_escalation(
         db: &Database,
         project_id: &str,
@@ -15493,13 +15548,19 @@ mod tests {
             )?;
             let now = chrono::Utc::now().to_rfc3339();
             conn.execute(
+                "INSERT INTO provider_quota_generations (provider, latest_generation) VALUES ('Codex', 1) \
+                 ON CONFLICT(provider) DO UPDATE SET latest_generation = MAX(latest_generation, 1)",
+                [],
+            )?;
+            conn.execute(
                 "INSERT INTO task_execution_recovery (
                      task_execution_id, recovery_action, recovery_reason, last_activity_at,
                      assignment_generation, watchdog_redispatches, human_wait_started_at,
-                     pending, updated_at
-                 ) VALUES (?1, 'await_human', 'quota_exhausted:Codex', ?2, 0, 0, ?2, 0, ?2)
+                     pending, updated_at, quota_signal_generation
+                 ) VALUES (?1, 'await_human', 'quota_exhausted:Codex', ?2, 0, 0, ?2, 0, ?2, 1)
                  ON CONFLICT(task_execution_id) DO UPDATE SET
-                     recovery_reason = excluded.recovery_reason, pending = 0, updated_at = ?2",
+                     recovery_reason = excluded.recovery_reason, pending = 0, updated_at = ?2,
+                     quota_signal_generation = excluded.quota_signal_generation",
                 rusqlite::params![execution.id, now],
             )?;
             Ok(execution.id)
@@ -16516,11 +16577,9 @@ mod tests {
         // The record exists and is the canonical payload.
         let stored = {
             let exec_id = exec_id.clone();
-            db.with_conn(move |conn| {
-                crate::db::delivery_summaries::get(conn, &exec_id, attempt_no)
-            })
-            .await
-            .unwrap()
+            db.with_conn(move |conn| crate::db::delivery_summaries::get(conn, &exec_id, attempt_no))
+                .await
+                .unwrap()
         };
         let stored = stored.expect("the report is backed by a persisted record");
         assert_eq!(

@@ -1,37 +1,55 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Kronn">
-  <!-- Redrawn from the 0.13.0 logo rather than embedded as a raster: a favicon
-       is read at 16px, where a downscaled photo turns to mud and a path does
-       not. Same geometry as `desktop/src-tauri/icons/icon.svg`. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="38 48 436 436" role="img" aria-label="Kronn">
+  <!-- The same drawing as the `KronnMark` component the app header renders:
+       same viewBox, same paths, same stops. A tab icon and the mark next to
+       the app name are read one after the other, and any difference between
+       them is read as two logos.
+
+       No dark plate, unlike `desktop/src-tauri/icons/icon.svg`: a desktop icon
+       lands on a dock or a wallpaper and needs its own ground, a favicon lands
+       on the browser's chrome. Dropping the plate also gives the mark the whole
+       16px instead of the ~70% a padded square leaves it. -->
   <defs>
-    <linearGradient id="kronn-shield" x1="0.5" y1="0" x2="0.5" y2="1">
-      <stop offset="0" stop-color="#4ee2f7"/>
-      <stop offset="0.3" stop-color="#7f8bff"/>
-      <stop offset="1" stop-color="#b06cf5"/>
+    <!-- One diagonal run for the whole frame: cyan at the top-right of the
+         crown, magenta at the left flank and foot, blue-violet between.
+         Spanning the whole mark, not each stroke: with the default per-element
+         units every arc restates the full run and the frame reads as three
+         unrelated gradients. -->
+    <linearGradient id="kronn-frame" gradientUnits="userSpaceOnUse"
+                    x1="441" y1="60" x2="84" y2="470">
+      <stop offset="0" stop-color="#1fbdda"/>
+      <stop offset="0.45" stop-color="#6f5ef0"/>
+      <stop offset="1" stop-color="#bd3ce6"/>
     </linearGradient>
-    <linearGradient id="kronn-hub" x1="0.5" y1="0" x2="0.5" y2="1">
-      <stop offset="0" stop-color="#8fe8f6"/>
-      <stop offset="1" stop-color="#9a6cf0"/>
+    <!-- Deeper than the icon files' nodes, for the same reason as KronnMark's:
+         those sit on their own dark plate, this one sits on whatever the tab
+         bar paints, and the logo's pale pinks vanish into a light one. -->
+    <linearGradient id="kronn-top" x1="0.2" y1="0" x2="0.8" y2="1">
+      <stop offset="0" stop-color="#5fd8ea"/><stop offset="1" stop-color="#17b4d4"/>
+    </linearGradient>
+    <linearGradient id="kronn-hub" x1="0.2" y1="0" x2="0.8" y2="1">
+      <stop offset="0" stop-color="#a98ee8"/><stop offset="1" stop-color="#4a86e8"/>
+    </linearGradient>
+    <linearGradient id="kronn-peer" x1="0.2" y1="0" x2="0.8" y2="1">
+      <stop offset="0" stop-color="#dc94e6"/><stop offset="1" stop-color="#9b6ef0"/>
     </linearGradient>
   </defs>
-  <rect width="512" height="512" fill="#0b0f22"/>
-  <!-- Hexagonal shield: pointed crown, vertical flanks, tapered foot. -->
-  <path d="M256 96 L392 168 V300 L256 404 L120 300 V168 Z"
-        fill="none" stroke="url(#kronn-shield)" stroke-width="24"
-        stroke-linejoin="round"/>
-  <!-- The orbit it draws around the graph, broken where the nodes sit. -->
-  <g fill="none" stroke="#b98cf0" stroke-width="6" stroke-linecap="round" opacity="0.85">
-    <path d="M176.8 279.2 A 82 82 0 0 1 209.0 190.8"/>
-    <path d="M303.0 190.8 A 82 82 0 0 1 335.2 279.2"/>
-    <path d="M303.0 325.2 A 82 82 0 0 1 209.0 325.2"/>
+  <!-- Hexagon: shallow crown, vertical flanks, tapered foot. -->
+  <path d="M256 60 L429 152 V380 L256 470 L84 380 V152 Z"
+        fill="none" stroke="url(#kronn-frame)" stroke-width="25" stroke-linejoin="round"/>
+  <!-- The orbit around the graph, broken where the three nodes sit. -->
+  <g fill="none" stroke="url(#kronn-frame)" stroke-width="12" stroke-linecap="round">
+    <path d="M148.4 257.6 A 108 108 0 0 1 210.4 169.1"/>
+    <path d="M301.6 169.1 A 108 108 0 0 1 363.6 257.6"/>
+    <path d="M318 355.5 A 108 108 0 0 1 194 355.5"/>
   </g>
   <!-- The graph it guards: one hub, three peers, the links between them. -->
-  <g stroke="#c9a8f0" stroke-width="6" stroke-linecap="round" fill="none">
-    <path d="M256 262 V186"/>
-    <path d="M256 262 L188 290"/>
-    <path d="M256 262 L324 290"/>
+  <g fill="none" stroke="url(#kronn-frame)" stroke-width="9" stroke-linecap="round">
+    <path d="M256 273 V165"/>
+    <path d="M256 273 L157 316"/>
+    <path d="M256 273 L356 316"/>
   </g>
-  <circle cx="256" cy="186" r="24" fill="#79e6f0"/>
-  <circle cx="188" cy="290" r="21" fill="#e6cdf8"/>
-  <circle cx="324" cy="290" r="21" fill="#e6cdf8"/>
-  <circle cx="256" cy="262" r="33" fill="url(#kronn-hub)"/>
+  <circle cx="256" cy="165" r="33" fill="url(#kronn-top)"/>
+  <circle cx="157" cy="316" r="29" fill="url(#kronn-peer)"/>
+  <circle cx="356" cy="316" r="29" fill="url(#kronn-peer)"/>
+  <circle cx="256" cy="273" r="50" fill="url(#kronn-hub)"/>
 </svg>

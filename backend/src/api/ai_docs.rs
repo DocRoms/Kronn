@@ -403,6 +403,7 @@ fn is_skipped_source_dir(name: &str, is_root_child: bool) -> bool {
             | ".next"
             | ".nuxt"
             | ".output"
+            | ".pnpm-store"
             | ".turbo"
             | ".venv"
             | "cache"
@@ -449,6 +450,263 @@ fn is_sensitive_source_name(name: &str) -> bool {
         )
 }
 
+/// Extensions and bare names whose verdict is settled without opening the file.
+///
+/// KT-594 — deciding by content meant reading 8 KiB of every candidate: on this
+/// repository that was 4.10 s of the 4.19 s a full listing took, against 0.05 s
+/// for the directory walk itself. Almost everything in a source tree carries an
+/// extension that answers the question outright, so the read is now a fallback
+/// for the remainder rather than the rule.
+///
+/// `None` means "the name does not say", and only those files are opened.
+fn source_text_by_name(name: &str) -> Option<bool> {
+    let lower = name.to_ascii_lowercase();
+
+    // Names that carry no extension, or whose whole name IS the extension.
+    // `Path::extension` reads `.gitignore` as a stem, not a suffix.
+    if matches!(
+        lower.as_str(),
+        "makefile"
+            | "dockerfile"
+            | "containerfile"
+            | "rakefile"
+            | "gemfile"
+            | "brewfile"
+            | "justfile"
+            | "procfile"
+            | "vagrantfile"
+            | "jenkinsfile"
+            | "cname"
+            | "license"
+            | "licence"
+            | "readme"
+            | "changelog"
+            | "notice"
+            | "authors"
+            | "contributors"
+            | "copying"
+            | "codeowners"
+            | ".gitignore"
+            | ".gitattributes"
+            | ".gitmodules"
+            | ".mailmap"
+            | ".editorconfig"
+            | ".dockerignore"
+            | ".npmignore"
+            | ".eslintignore"
+            | ".prettierignore"
+            | ".nvmrc"
+            | ".node-version"
+            | ".python-version"
+            | ".ruby-version"
+            | ".tool-versions"
+            | ".browserslistrc"
+            | ".gitkeep"
+    ) {
+        return Some(true);
+    }
+
+    // macOS drops one of these in every directory it has ever displayed.
+    if lower == ".ds_store" {
+        return Some(false);
+    }
+
+    let extension = std::path::Path::new(&lower)
+        .extension()
+        .and_then(|ext| ext.to_str())?;
+
+    if matches!(
+        extension,
+        "rs" | "toml"
+            | "lock"
+            | "ts"
+            | "tsx"
+            | "js"
+            | "jsx"
+            | "mjs"
+            | "cjs"
+            | "mts"
+            | "cts"
+            | "json"
+            | "jsonc"
+            | "json5"
+            | "map"
+            | "css"
+            | "scss"
+            | "sass"
+            | "less"
+            | "styl"
+            | "html"
+            | "htm"
+            | "xml"
+            | "xhtml"
+            | "xsl"
+            | "xslt"
+            | "svg"
+            | "vue"
+            | "svelte"
+            | "astro"
+            | "md"
+            | "mdx"
+            | "markdown"
+            | "rst"
+            | "adoc"
+            | "txt"
+            | "text"
+            | "yml"
+            | "yaml"
+            | "ini"
+            | "cfg"
+            | "conf"
+            | "properties"
+            | "editorconfig"
+            | "py"
+            | "pyi"
+            | "pyx"
+            | "rb"
+            | "go"
+            | "java"
+            | "kt"
+            | "kts"
+            | "scala"
+            | "swift"
+            | "m"
+            | "mm"
+            | "c"
+            | "h"
+            | "cc"
+            | "cpp"
+            | "cxx"
+            | "hpp"
+            | "hh"
+            | "cs"
+            | "php"
+            | "pl"
+            | "pm"
+            | "lua"
+            | "r"
+            | "jl"
+            | "ex"
+            | "exs"
+            | "erl"
+            | "hrl"
+            | "clj"
+            | "cljs"
+            | "cljc"
+            | "dart"
+            | "hs"
+            | "elm"
+            | "nim"
+            | "sh"
+            | "bash"
+            | "zsh"
+            | "fish"
+            | "ps1"
+            | "bat"
+            | "cmd"
+            | "bats"
+            | "sql"
+            | "graphql"
+            | "gql"
+            | "proto"
+            | "thrift"
+            | "tf"
+            | "tfvars"
+            | "hcl"
+            | "nix"
+            | "gradle"
+            | "groovy"
+            | "cmake"
+            | "mk"
+            | "patch"
+            | "diff"
+            | "csv"
+            | "tsv"
+            | "log"
+            | "srt"
+            | "vtt"
+            | "po"
+            | "pot"
+    ) {
+        return Some(true);
+    }
+
+    if matches!(
+        extension,
+        "png"
+            | "jpg"
+            | "jpeg"
+            | "gif"
+            | "bmp"
+            | "tif"
+            | "tiff"
+            | "webp"
+            | "avif"
+            | "ico"
+            | "icns"
+            | "heic"
+            | "psd"
+            | "pdf"
+            | "zip"
+            | "gz"
+            | "bz2"
+            | "xz"
+            | "zst"
+            | "7z"
+            | "rar"
+            | "tar"
+            | "tgz"
+            | "jar"
+            | "war"
+            | "ear"
+            | "class"
+            | "pyc"
+            | "pyo"
+            | "o"
+            | "a"
+            | "so"
+            | "dylib"
+            | "dll"
+            | "exe"
+            | "bin"
+            | "wasm"
+            | "node"
+            | "db"
+            | "sqlite"
+            | "sqlite3"
+            | "mdb"
+            | "pack"
+            | "mp3"
+            | "wav"
+            | "flac"
+            | "ogg"
+            | "m4a"
+            | "aac"
+            | "mp4"
+            | "mov"
+            | "avi"
+            | "mkv"
+            | "webm"
+            | "wmv"
+            | "flv"
+            | "woff"
+            | "woff2"
+            | "ttf"
+            | "otf"
+            | "eot"
+    ) {
+        return Some(false);
+    }
+
+    None
+}
+
+/// Whether a file belongs in the source tree, by name where the name suffices
+/// and by content otherwise.
+fn is_source_text_file(name: &str, path: &std::path::Path) -> bool {
+    source_text_by_name(name).unwrap_or_else(|| is_probably_text_file(path))
+}
+
 fn is_probably_text_file(path: &std::path::Path) -> bool {
     use std::io::Read;
 
@@ -460,6 +718,27 @@ fn is_probably_text_file(path: &std::path::Path) -> bool {
         return false;
     }
     !sample.contains(&0) && std::str::from_utf8(&sample).is_ok()
+}
+
+/// KT-605 — a directory the caller asked to expand. Stricter than the file
+/// check below: there the last component is a file name, here it is a folder
+/// and has to answer the same question as its ancestors. Without this, a
+/// caller could ask for `node_modules` by name — the tree never offers it, so
+/// a request for it is out of band.
+fn safe_source_directory_path(path: &str) -> bool {
+    if !safe_source_relative_path(path) {
+        return false;
+    }
+    std::path::Path::new(path)
+        .components()
+        .enumerate()
+        .all(|(index, component)| match component {
+            std::path::Component::Normal(value) => value
+                .to_str()
+                .map(|name| !is_skipped_source_dir(name, index == 0))
+                .unwrap_or(false),
+            _ => false,
+        })
 }
 
 fn safe_source_relative_path(path: &str) -> bool {
@@ -491,6 +770,100 @@ fn safe_source_relative_path(path: &str) -> bool {
     rel.file_name()
         .and_then(|name| name.to_str())
         .is_some_and(|name| !is_sensitive_source_name(name))
+}
+
+/// Every directory the walk would enter, so git can be asked about them all at
+/// once. Descendants of an already-excluded directory are not collected.
+fn collect_source_dirs(
+    dir: &std::path::Path,
+    rel_prefix: &str,
+    root: &std::path::Path,
+    excluded_paths: &std::collections::HashSet<String>,
+    remaining_depth: Option<usize>,
+    out: &mut Vec<String>,
+) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let Ok(metadata) = entry.path().symlink_metadata() else {
+            continue;
+        };
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        if is_skipped_source_dir(&name, dir == root) {
+            continue;
+        }
+        let path = if rel_prefix.is_empty() {
+            name
+        } else {
+            format!("{rel_prefix}/{name}")
+        };
+        if excluded_paths.contains(&path) {
+            continue;
+        }
+        if remaining_depth != Some(0) {
+            collect_source_dirs(
+                &entry.path(),
+                &path,
+                root,
+                excluded_paths,
+                remaining_depth.map(|depth| depth.saturating_sub(1)),
+                out,
+            );
+        }
+        out.push(path);
+    }
+}
+
+/// What the walk must not enter: the folders the human excluded, plus the ones
+/// git already ignores.
+///
+/// KT-594 — `is_skipped_source_dir` is a hand-maintained guess at "machine
+/// output", and it will always be one name behind. Here the name it lacked was
+/// `frontend/.pnpm-store`: that one content-addressable store filled the
+/// 10 000-file budget on its own, so the walk stopped before reaching `site/`
+/// and those files were simply absent, with nothing in the answer to say why.
+///
+/// Git already knows what is generated. Asking it costs one process and one
+/// pass over the DIRECTORIES — 0.19 s on this repository — and takes the tree
+/// from over 10 000 files down to 2 088.
+///
+/// Ignored FILES inside a kept directory are untouched: they still appear,
+/// still badged. It is entering an ignored directory that has no upside.
+fn walk_exclusions(
+    root: &std::path::Path,
+    user_exclusions: Vec<String>,
+) -> std::collections::HashSet<String> {
+    walk_exclusions_under(root, root, "", None, user_exclusions)
+}
+
+/// The same, bounded to the subtree actually about to be listed.
+///
+/// KT-605 — listing one directory must not pay for the whole repository. With
+/// `remaining_depth: Some(0)` this asks git about that directory's own children
+/// and nothing else, which is exactly the set the answer can hide.
+fn walk_exclusions_under(
+    root: &std::path::Path,
+    dir: &std::path::Path,
+    rel_prefix: &str,
+    remaining_depth: Option<usize>,
+    user_exclusions: Vec<String>,
+) -> std::collections::HashSet<String> {
+    let mut excluded: std::collections::HashSet<String> = user_exclusions.into_iter().collect();
+    let mut candidates = Vec::new();
+    collect_source_dirs(
+        dir,
+        rel_prefix,
+        root,
+        &excluded,
+        remaining_depth,
+        &mut candidates,
+    );
+    excluded.extend(git_ignored_paths(root, &candidates));
+    excluded
 }
 
 fn git_ignored_paths(
@@ -628,7 +1001,7 @@ fn build_source_tree_with_depth(
         } else if metadata.is_file()
             && metadata.len() <= MAX_SOURCE_FILE_BYTES
             && !is_sensitive_source_name(&name)
-            && is_probably_text_file(&entry.path())
+            && is_source_text_file(&name, &entry.path())
         {
             *file_count += 1;
             nodes.push(SourceFileNode {
@@ -729,7 +1102,7 @@ pub(crate) fn compute_source_language_stats(
     exclusions: &[String],
 ) -> Vec<ProjectLanguageStat> {
     let mut file_count = 0;
-    let excluded_paths = exclusions.iter().cloned().collect();
+    let excluded_paths = walk_exclusions(root, exclusions.to_vec());
     let tree = build_source_tree(root, "", root, &mut file_count, &excluded_paths);
     let mut paths = Vec::with_capacity(file_count);
     flatten_source_paths(&tree, &mut paths);
@@ -766,10 +1139,15 @@ pub(crate) fn compute_source_language_stats(
 
 #[derive(Debug, Default, serde::Deserialize)]
 pub struct SourceFilesQuery {
-    /// Return only repository-root entries. The UI uses this cheap first pass
-    /// while the complete, bounded tree loads in the background.
+    /// Return only the entries of one level, without their children.
     #[serde(default)]
     pub shallow: bool,
+    /// KT-605 — the directory to list, relative to the project root. With it,
+    /// opening a folder costs that folder rather than the whole repository,
+    /// and `MAX_SOURCE_FILES` stops being a ceiling the answer can hit without
+    /// being able to say so. Absent means the root.
+    #[serde(default)]
+    pub path: Option<String>,
 }
 
 /// GET /api/projects/:id/source-files
@@ -777,7 +1155,7 @@ pub async fn list_source_files(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Query(query): Query<SourceFilesQuery>,
-) -> Json<ApiResponse<Vec<SourceFileNode>>> {
+) -> Json<ApiResponse<SourceDirectoryListing>> {
     let project_and_exclusions = match state
         .db
         .with_read_conn(move |conn| {
@@ -793,31 +1171,64 @@ pub async fn list_source_files(
     };
     let (project, exclusions) = project_and_exclusions;
     let project_path = project.path;
-    let result = tokio::task::spawn_blocking(move || {
+    // KT-605 — an empty `path` is the root, not a broken request: the frontend
+    // sends the same shape for both.
+    let requested = query.path.filter(|path| !path.is_empty());
+    if let Some(path) = &requested {
+        if !safe_source_directory_path(path) {
+            return Json(ApiResponse::err("Invalid or unsupported source path"));
+        }
+    }
+    let depth = if query.shallow { Some(0) } else { None };
+    let result = tokio::task::spawn_blocking(move || -> Result<SourceDirectoryListing, String> {
         let root = scanner::resolve_host_path(&project_path);
-        let mut file_count = 0;
-        let excluded_paths = exclusions.into_iter().collect();
-        let mut tree = if query.shallow {
-            build_source_tree_with_depth(
-                &root,
-                "",
-                &root,
-                &mut file_count,
-                &excluded_paths,
-                Some(0),
-            )
-        } else {
-            build_source_tree(&root, "", &root, &mut file_count, &excluded_paths)
+        let (dir, rel_prefix) = match &requested {
+            Some(path) => (root.join(path), path.as_str()),
+            None => (root.clone(), ""),
         };
+        // KT-605, review @codex-cli-4 — the name check above rejects `..` and
+        // absolute paths, but a SYMLINK named innocently resolves outside the
+        // project all the same. The walk below skips symlinked children; the
+        // directory it is pointed at was never checked, because it is the one
+        // the caller chose. Both halves are needed: refuse the link itself, and
+        // require the resolved directory to still be under the resolved root.
+        let Ok(metadata) = dir.symlink_metadata() else {
+            return Err("Directory not found".to_string());
+        };
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            return Err("Directory not found".to_string());
+        }
+        match (dir.canonicalize(), root.canonicalize()) {
+            (Ok(real_dir), Ok(real_root)) if real_dir.starts_with(&real_root) => {}
+            _ => return Err("Directory not found".to_string()),
+        }
+        let mut file_count = 0;
+        let excluded_paths = walk_exclusions_under(&root, &dir, rel_prefix, depth, exclusions);
+        let mut tree = build_source_tree_with_depth(
+            &dir,
+            rel_prefix,
+            &root,
+            &mut file_count,
+            &excluded_paths,
+            depth,
+        );
         let mut paths = Vec::with_capacity(file_count);
         flatten_source_paths(&tree, &mut paths);
         let ignored_paths = git_ignored_paths(&root, &paths);
         mark_git_ignored(&mut tree, &ignored_paths);
-        tree
+        // The bound was reached, so entries were left out. Saying so is the
+        // whole difference between a limit and a lie.
+        Ok(SourceDirectoryListing {
+            entries: tree,
+            truncated: file_count >= MAX_SOURCE_FILES,
+        })
     })
     .await
-    .unwrap_or_default();
-    Json(ApiResponse::ok(result))
+    .unwrap_or_else(|error| Err(format!("Source listing failed: {error}")));
+    match result {
+        Ok(tree) => Json(ApiResponse::ok(tree)),
+        Err(error) => Json(ApiResponse::err(error)),
+    }
 }
 
 /// GET /api/projects/:id/source-exclusions
@@ -966,7 +1377,7 @@ pub async fn search_source_files(
     let results = tokio::task::spawn_blocking(move || {
         let root = scanner::resolve_host_path(&project_path);
         let mut file_count = 0;
-        let excluded_paths = exclusions.into_iter().collect();
+        let excluded_paths = walk_exclusions(&root, exclusions);
         let tree = build_source_tree(&root, "", &root, &mut file_count, &excluded_paths);
         let mut paths = Vec::with_capacity(file_count);
         flatten_source_paths(&tree, &mut paths);
@@ -1071,6 +1482,98 @@ pub async fn read_doc_asset(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// KT-594 — the listing used to open and read 8 KiB of every candidate to
+    /// decide whether it was text. The name settles almost all of them, and
+    /// only what it cannot settle is worth an `open()`.
+    #[test]
+    fn the_name_settles_the_common_cases_without_opening_anything() {
+        for name in [
+            "main.rs",
+            "Cargo.toml",
+            "index.tsx",
+            "README.md",
+            "styles.scss",
+        ] {
+            assert_eq!(source_text_by_name(name), Some(true), "{name}");
+        }
+        for name in [
+            "logo.png",
+            "icon.icns",
+            "bundle.wasm",
+            "archive.tar.gz",
+            "font.woff2",
+        ] {
+            assert_eq!(source_text_by_name(name), Some(false), "{name}");
+        }
+    }
+
+    /// `Path::extension` reads `.gitignore` as a stem, so a suffix lookup alone
+    /// would send every dotfile and every `Makefile` to the slow path — which is
+    /// precisely the set a source tree is full of.
+    #[test]
+    fn a_name_without_a_suffix_is_still_answerable() {
+        for name in [
+            "Makefile",
+            "Dockerfile",
+            ".gitignore",
+            ".editorconfig",
+            "LICENSE",
+        ] {
+            assert_eq!(source_text_by_name(name), Some(true), "{name}");
+        }
+        // macOS leaves one of these in every directory it has ever displayed.
+        assert_eq!(source_text_by_name(".DS_Store"), Some(false));
+    }
+
+    /// Case is not a signal: `README.MD` is the same file as `readme.md`.
+    #[test]
+    fn the_verdict_ignores_case() {
+        assert_eq!(source_text_by_name("README.MD"), Some(true));
+        assert_eq!(source_text_by_name("LOGO.PNG"), Some(false));
+        assert_eq!(source_text_by_name("MAKEFILE"), Some(true));
+    }
+
+    /// An unknown suffix must stay undecided rather than guess. Guessing "text"
+    /// would put binaries in the tree; guessing "binary" would hide real files.
+    #[test]
+    fn an_unknown_name_falls_back_to_reading_the_file() {
+        assert_eq!(source_text_by_name("payload.qzx"), None);
+        assert_eq!(source_text_by_name("noextension"), None);
+
+        let dir = tempfile::tempdir().unwrap();
+        let text = dir.path().join("payload.qzx");
+        std::fs::write(&text, "des octets parfaitement lisibles").unwrap();
+        assert!(is_source_text_file("payload.qzx", &text));
+
+        let binary = dir.path().join("payload.qzy");
+        std::fs::write(&binary, [0x00, 0x01, 0x02, 0x00]).unwrap();
+        assert!(!is_source_text_file("payload.qzy", &binary));
+    }
+
+    /// Some suffixes only look binary. EPS is PostScript, which is usually
+    /// text, and a VobSub `.idx` is a plain index. Refusing them by name would
+    /// have hidden real files; they cost one `open()` each and stay visible.
+    #[test]
+    fn a_suffix_that_only_looks_binary_is_left_to_the_bytes() {
+        assert_eq!(source_text_by_name("figure.eps"), None);
+        assert_eq!(source_text_by_name("subtitles.idx"), None);
+
+        let dir = tempfile::tempdir().unwrap();
+        let eps = dir.path().join("figure.eps");
+        std::fs::write(&eps, "%!PS-Adobe-3.0 EPSF-3.0\n").unwrap();
+        assert!(is_source_text_file("figure.eps", &eps));
+    }
+
+    /// The fallback must not be consulted when the name already answered: a
+    /// `.png` is excluded without the read, even if its bytes happen to be text.
+    #[test]
+    fn a_known_name_wins_over_what_the_bytes_say() {
+        let dir = tempfile::tempdir().unwrap();
+        let misnamed = dir.path().join("not-really.png");
+        std::fs::write(&misnamed, "je suis du texte").unwrap();
+        assert!(!is_source_text_file("not-really.png", &misnamed));
+    }
 
     // 0.8.3 UX regression — verrouille l'ordre dirs-first puis files.
     // Avant : tri alphabétique pur mélangeait `architecture/`,
@@ -1334,6 +1837,28 @@ mod tests {
     }
 
     #[test]
+    fn source_tree_skips_nested_pnpm_store_before_applying_file_cap() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path();
+        touch(&root.join("frontend/.pnpm-store/v11/files/29/cached-file.js"));
+        touch(&root.join("site/en.html"));
+        let mut count = MAX_SOURCE_FILES - 1;
+
+        let tree = build_source_tree(
+            root,
+            "",
+            root,
+            &mut count,
+            &std::collections::HashSet::new(),
+        );
+        let mut paths = Vec::new();
+        flatten_source_paths(&tree, &mut paths);
+
+        assert_eq!(count, MAX_SOURCE_FILES);
+        assert_eq!(paths, vec!["site/en.html"]);
+    }
+
+    #[test]
     fn shallow_source_tree_returns_root_entries_without_descending() {
         let tmp = tempfile::TempDir::new().unwrap();
         touch(&tmp.path().join("src/main.rs"));
@@ -1474,6 +1999,203 @@ mod tests {
 
         assert!(local.git_ignored);
         assert!(!tracked.git_ignored);
+    }
+
+    /// KT-594 — the bug @user hit: `frontend/.pnpm-store` is not in the name
+    /// deny-list, and its content-addressable store filled the 10 000-file
+    /// budget on its own. The walk stopped before `site/`, and those files were
+    /// absent from the tree with nothing in the answer to say why.
+    ///
+    /// The deny-list will always be one name behind. Git already knows.
+    #[test]
+    fn a_git_ignored_folder_is_never_walked_however_it_is_named() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(tmp.path())
+            .status()
+            .unwrap();
+        std::fs::write(tmp.path().join(".gitignore"), ".pnpm-store/\n").unwrap();
+        touch(&tmp.path().join(".pnpm-store/v11/deadbeef.rs"));
+        // Alphabetically after the store, which is exactly what got lost.
+        touch(&tmp.path().join("site/en.html"));
+
+        let excluded = walk_exclusions(tmp.path(), Vec::new());
+        let mut count = 0;
+        let tree = build_source_tree(tmp.path(), "", tmp.path(), &mut count, &excluded);
+
+        assert!(
+            tree.iter().any(|node| node.path == "site"),
+            "site/ must be reachable"
+        );
+        assert!(
+            !tree.iter().any(|node| node.path == ".pnpm-store"),
+            "an ignored folder has no business in a source tree",
+        );
+    }
+
+    /// Only FOLDERS. An ignored file inside a kept folder stays visible, badged
+    /// as before — hiding it would remove something the author can see today.
+    #[test]
+    fn an_ignored_file_in_a_kept_folder_is_still_listed() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(tmp.path())
+            .status()
+            .unwrap();
+        std::fs::write(tmp.path().join(".gitignore"), "application/local.rules\n").unwrap();
+        touch(&tmp.path().join("application/local.rules"));
+        touch(&tmp.path().join("application/tracked.rules"));
+
+        let excluded = walk_exclusions(tmp.path(), Vec::new());
+        let mut count = 0;
+        let tree = build_source_tree(tmp.path(), "", tmp.path(), &mut count, &excluded);
+        let application = tree.iter().find(|node| node.path == "application").unwrap();
+
+        assert!(application
+            .children
+            .iter()
+            .any(|node| node.name == "local.rules"));
+        assert!(application
+            .children
+            .iter()
+            .any(|node| node.name == "tracked.rules"));
+    }
+
+    /// A folder the human excluded by hand still wins, and its subtree is not
+    /// even offered to git — there is nothing to ask about.
+    #[test]
+    fn a_hand_excluded_folder_stays_excluded() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        touch(&tmp.path().join("keep/main.rs"));
+        touch(&tmp.path().join("drop/main.rs"));
+
+        let excluded = walk_exclusions(tmp.path(), vec!["drop".to_string()]);
+        let mut count = 0;
+        let tree = build_source_tree(tmp.path(), "", tmp.path(), &mut count, &excluded);
+
+        assert!(tree.iter().any(|node| node.path == "keep"));
+        assert!(!tree.iter().any(|node| node.path == "drop"));
+    }
+
+    /// KT-605 — listing one directory must cost that directory. The whole point
+    /// of the change is that opening a folder no longer walks the repository,
+    /// so the assertion is on what it collects, not just on what it returns.
+    #[test]
+    fn listing_one_directory_returns_its_children_and_looks_no_further() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        touch(&tmp.path().join("site/en.html"));
+        touch(&tmp.path().join("site/assets/logo.svg"));
+        touch(&tmp.path().join("backend/src/main.rs"));
+
+        let excluded = walk_exclusions_under(
+            tmp.path(),
+            &tmp.path().join("site"),
+            "site",
+            Some(0),
+            Vec::new(),
+        );
+        let mut count = 0;
+        let tree = build_source_tree_with_depth(
+            &tmp.path().join("site"),
+            "site",
+            tmp.path(),
+            &mut count,
+            &excluded,
+            Some(0),
+        );
+
+        let names: Vec<_> = tree.iter().map(|node| node.path.as_str()).collect();
+        assert_eq!(names, vec!["site/assets", "site/en.html"]);
+        // The child folder is announced but not expanded — that is the next
+        // request, made when someone opens it.
+        let assets = tree.iter().find(|node| node.path == "site/assets").unwrap();
+        assert!(assets.is_dir);
+        assert!(assets.children.is_empty());
+        // And nothing from the sibling subtree was even considered.
+        assert!(!names.iter().any(|path| path.starts_with("backend")));
+    }
+
+    /// Review @codex-cli-4 — the name check refuses `..` and absolute paths,
+    /// but a symlink with an innocent name resolves outside the project all the
+    /// same. The walk skips symlinked CHILDREN; the directory the caller points
+    /// at was never checked, because it is the one they chose.
+    #[test]
+    fn a_symlinked_directory_is_refused_however_it_is_named() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let outside = tempfile::TempDir::new().unwrap();
+        touch(&outside.path().join("secret.rs"));
+        touch(&tmp.path().join("site/en.html"));
+        std::os::unix::fs::symlink(outside.path(), tmp.path().join("escape")).unwrap();
+
+        // The name passes every rule: no `..`, no leading slash, not a skipped
+        // folder. Only the link itself gives it away.
+        assert!(safe_source_directory_path("escape"));
+
+        let link = tmp.path().join("escape");
+        let metadata = link.symlink_metadata().unwrap();
+        assert!(
+            metadata.file_type().is_symlink(),
+            "the setup must really be a link"
+        );
+
+        // And what the handler checks: the resolved directory has to stay under
+        // the resolved root.
+        let real_root = tmp.path().canonicalize().unwrap();
+        assert!(!link.canonicalize().unwrap().starts_with(&real_root));
+        assert!(tmp
+            .path()
+            .join("site")
+            .canonicalize()
+            .unwrap()
+            .starts_with(&real_root));
+    }
+
+    /// A folder path is checked on every component, unlike a file path whose
+    /// last component is a name. Without it a caller could ask for a folder the
+    /// tree never offers.
+    #[test]
+    fn a_directory_outside_the_tree_is_refused() {
+        assert!(safe_source_directory_path("site"));
+        assert!(safe_source_directory_path("site/assets"));
+
+        assert!(!safe_source_directory_path("../etc"));
+        assert!(!safe_source_directory_path("/etc"));
+        assert!(!safe_source_directory_path("site/../../etc"));
+        assert!(!safe_source_directory_path(""));
+        // Named directly rather than reached through the tree, which never
+        // offers them.
+        assert!(!safe_source_directory_path("node_modules"));
+        assert!(!safe_source_directory_path("frontend/node_modules"));
+        assert!(!safe_source_directory_path("docs"));
+        // `docs` is only skipped at the root; deeper it is ordinary source.
+        assert!(safe_source_directory_path("backend/docs"));
+    }
+
+    /// The exclusions of a subtree are the subtree's own. Asking git about the
+    /// whole repository to open one folder would put back the cost the change
+    /// exists to remove.
+    #[test]
+    fn a_subtree_listing_hides_what_git_ignores_inside_it() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(tmp.path())
+            .status()
+            .unwrap();
+        std::fs::write(tmp.path().join(".gitignore"), "site/generated/\n").unwrap();
+        touch(&tmp.path().join("site/en.html"));
+        touch(&tmp.path().join("site/generated/bundle.js"));
+
+        let dir = tmp.path().join("site");
+        let excluded = walk_exclusions_under(tmp.path(), &dir, "site", Some(0), Vec::new());
+        let mut count = 0;
+        let tree =
+            build_source_tree_with_depth(&dir, "site", tmp.path(), &mut count, &excluded, Some(0));
+
+        let names: Vec<_> = tree.iter().map(|node| node.path.as_str()).collect();
+        assert_eq!(names, vec!["site/en.html"]);
     }
 
     // ── 0.8.6 — doc-asset image serving (relative <img> in README/docs) ───

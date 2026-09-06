@@ -51,9 +51,7 @@ pub async fn upload_context_file(
                             upload = Some((file_name.unwrap_or_else(|| "unknown".into()), bytes));
                         }
                     }
-                    Err(e) => {
-                        return Json(ApiResponse::err(format!("Failed to read upload: {e}")))
-                    }
+                    Err(e) => return Json(ApiResponse::err(format!("Failed to read upload: {e}"))),
                 }
             }
             Ok(None) => break,
@@ -698,7 +696,10 @@ mod tests {
             .await
             .expect_err("refused")
             .to_string();
-        assert!(error.contains("only be taken out of a video"), "got {error}");
+        assert!(
+            error.contains("only be taken out of a video"),
+            "got {error}"
+        );
     }
 
     #[tokio::test]

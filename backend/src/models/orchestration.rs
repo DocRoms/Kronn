@@ -1155,6 +1155,15 @@ pub struct TaskWorkerCatalogue {
     pub workers: Vec<TaskWorkerCatalogueEntry>,
 }
 
+/// Read-only quota state shown to a human in Agent settings.  Re-arming is a
+/// separate human-only HTTP action; it is intentionally absent from agent tools.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ProviderQuotaState {
+    pub provider: AgentType,
+    pub blocked: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct CampaignTaskCandidate {

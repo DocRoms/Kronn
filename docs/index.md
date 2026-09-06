@@ -38,6 +38,11 @@ This folder is the project's living knowledge base, shared by humans and AI agen
   secrets into templates. Launch previews are masked and audited, while each
   run resolves a fresh encrypted snapshot. See the
   [execution-variable architecture](architecture/execution-variables.md).
+- Settings includes a local-icon Ko-fi link to support Kronn; the GitHub funding
+  declaration is present in the repository, while GitHub-side button activation
+  remains dependent on the default branch and Sponsorships configuration.
+  [src: file: frontend/src/pages/SettingsPage.tsx:78-108]
+  [src: file: .github/FUNDING.yml:1]
 
 ## Layout
 

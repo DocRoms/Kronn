@@ -109,7 +109,6 @@ import type {
   CreateDirectiveRequest,
   ServerConfigPublic,
   AiFileNode,
-  SourceFileNode,
   AiFileContent,
   AiSearchResult,
   GitBlameResponse,
@@ -213,7 +212,14 @@ import type {
   ExternalApiConnectionPreset,
   SharedRun,
   DiscussionNoteListResponse,
+  DiscussionListItem,
+  SourceDirectoryListing,
+  DiscussionQuestion,
+  DiscussionQuestionList,
+  AnswerDiscussionQuestionRequest,
+  ProviderQuotaState,
 } from '../types/generated';
+
 import type {
   CatalogModelEntry,
   DeleteManualModelRequest,
@@ -996,10 +1002,21 @@ export const projects = {
   listAiFiles: (id: string) => api<AiFileNode[]>('GET', `/projects/${id}/ai-files`),
   readAiFile: (id: string, path: string) => api<AiFileContent>('GET', `/projects/${id}/ai-file?path=${encodeURIComponent(path)}`),
   searchAiFiles: (id: string, q: string) => api<AiSearchResult[]>('GET', `/projects/${id}/ai-search?q=${encodeURIComponent(q)}`),
-  listSourceFiles: (id: string, shallow = false) => api<SourceFileNode[]>(
-    'GET',
-    `/projects/${id}/source-files${shallow ? '?shallow=true' : ''}`,
-  ),
+  /** KT-605 — one directory at a time. `path` absent is the root; `shallow`
+   *  returns that level's entries with their own children left unlisted, which
+   *  is what the tree asks for when a folder is opened. Without them the
+   *  endpoint walked the whole repository on every call and stopped, silently,
+   *  at `MAX_SOURCE_FILES`. */
+  listSourceFiles: (id: string, shallow = false, path?: string) => {
+    const query = new URLSearchParams();
+    if (shallow) query.set('shallow', 'true');
+    if (path) query.set('path', path);
+    const suffix = query.toString();
+    return api<SourceDirectoryListing>(
+      'GET',
+      `/projects/${id}/source-files${suffix ? `?${suffix}` : ''}`,
+    );
+  },
   readSourceFile: (id: string, path: string) => api<AiFileContent>('GET', `/projects/${id}/source-file?path=${encodeURIComponent(path)}`),
   searchSourceFiles: (id: string, q: string) => api<AiSearchResult[]>('GET', `/projects/${id}/source-search?q=${encodeURIComponent(q)}`),
   getSourceExclusions: (id: string) => api<string[]>('GET', `/projects/${id}/source-exclusions`),
@@ -1324,6 +1341,9 @@ export const projects = {
 
 export const agents = {
   detect: () => api<AgentDetection[]>('GET', '/agents'),
+  quotaStates: () => api<ProviderQuotaState[]>('GET', '/orchestration/provider-quotas'),
+  rearmQuota: (provider: AgentType, idempotencyKey: string) =>
+    api<boolean>('POST', `/orchestration/provider-quotas/${encodeURIComponent(provider)}/rearm`, { confirmed: true, idempotency_key: idempotencyKey }),
   install: (agentType: AgentType) => api<string>('POST', '/agents/install', agentType),
   uninstall: (agentType: AgentType) => api<string>('POST', '/agents/uninstall', agentType),
   toggle: (agentType: AgentType) => api<boolean>('POST', '/agents/toggle', agentType),
@@ -1333,6 +1353,8 @@ export const agents = {
 
 export const mcps = {
   overview: () => api<McpOverview>('GET', '/mcps'),
+  projectEnvironmentNames: (projectId: string) =>
+    api<string[]>('GET', `/mcps/project-environment-names/${encodeURIComponent(projectId)}`),
   registry: (q?: string) => api<McpDefinition[]>('GET', `/mcps/registry${q ? `?q=${encodeURIComponent(q)}` : ''}`),
   refresh: () => api<McpOverview>('POST', '/mcps/refresh'),
   previewBundle: (request: PluginBundleSelectionRequest) =>
@@ -1448,7 +1470,9 @@ function webSessionId(): string {
 }
 
 export const discussions = {
-  list: () => api<Discussion[]>('GET', '/discussions'),
+  /** KT-595 — `DiscussionListItem` is `Discussion` plus `pending_question_count`,
+   *  so a room waiting on a decision says so in the list, before it is opened. */
+  list: () => api<DiscussionListItem[]>('GET', '/discussions'),
   /** 2026-06-24 — disc ids with an in-flight agent run RIGHT NOW, server-side
    *  (incl. background/batch children). Polled so a run still working after you
    *  navigate away keeps showing as running, instead of looking dead. */
@@ -1773,6 +1797,28 @@ export const discussions = {
     'PATCH',
     `/discussions/${encodeURIComponent(id)}/notes/${encodeURIComponent(messageId)}`,
     { content },
+  ),
+
+  /** KT-595 — the arbitration questions of a discussion, pending and past.
+   *  Polled, so the backend checks the room exists without loading its
+   *  transcript. */
+  questions: (id: string) => api<DiscussionQuestionList>(
+    'GET',
+    `/discussions/${encodeURIComponent(id)}/questions`,
+  ),
+
+  /** KT-595 — answer one. `idempotency_key` makes a retry after a lost
+   *  response return the same answer instead of writing a second one: this
+   *  posts a durable message in the room, and a decision must not be recorded
+   *  twice because a click was repeated. */
+  answerQuestion: (
+    id: string,
+    questionId: string,
+    request: AnswerDiscussionQuestionRequest,
+  ) => api<DiscussionQuestion>(
+    'POST',
+    `/discussions/${encodeURIComponent(id)}/questions/${encodeURIComponent(questionId)}/answer`,
+    request,
   ),
 
   /** Remove one message payload while preserving its timeline tombstone. */

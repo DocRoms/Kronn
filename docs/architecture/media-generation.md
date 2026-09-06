@@ -148,6 +148,19 @@ without a reload.
   `api::shared_runs::publish_media_job` — persisting the run and broadcasting
   it are inseparable, so a 100 s generation is visible while it runs.
 
+### New discussion entry
+
+New discussion exposes its media entry only when an external connection has a
+configured image or video slot. Selecting the entry only mounts the existing
+media form; it neither creates a room nor dispatches an agent. The form creates
+a normal `no_agent` discussion at an explicit Generate click, then passes that
+room to the existing generation endpoint. A successfully created room is kept
+across a generation error, and the same idempotency key is retained for an
+explicit identical retry; the UI never automatically repeats an ambiguous
+billable request. `[src: file: frontend/src/components/NewDiscussionForm.tsx:227-231]`
+`[src: file: frontend/src/components/MediaGenerateForm.tsx:476-532]`
+`[src: file: frontend/src/pages/DiscussionsPage.tsx:2363-2379]`
+
 ## What a model accepts, read rather than assumed
 
 `GET /api/media/models?connection_id&modality` reads the provider's own
@@ -172,6 +185,13 @@ are per provider model and volatile — a max duration changes without notice �
 and persisting them would make a stale row authoritative over the provider.
 
 ## Generating from images already in the room
+
+The Assets carousel may hand its currently viewed image to the existing media
+form for a compatible configured slot. This is an explicit handoff: it closes
+the viewer and reveals the form with the source attached, but never starts a
+generation on its own. Until the selected model's input capability resolves,
+the preserved source blocks submission rather than being silently downgraded
+to a text-only paid request.
 
 A video may start from — or end on — a picture the discussion already holds,
 and an image may be drawn from several of them. The request names them by

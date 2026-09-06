@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Clapperboard, FileText, Images, Search, Sparkles, X } from 'lucide-react';
 import type { ContextFile } from '../types/generated';
 import type { ExternalApiConnectionView } from '../lib/api';
-import { MessageAttachments } from './MessageAttachments';
+import { MessageAttachments, type ImageGenerationRequest } from './MessageAttachments';
 import { MediaGenerateForm } from './MediaGenerateForm';
 import { mediaKind } from '../lib/mediaKind';
 
@@ -67,6 +67,7 @@ export function DiscussionAssetsPanel({
   // request clears the query and filter, and their own reset would undo it.
   const [pinnedCount, setPinnedCount] = useState(0);
   const [showGenerate, setShowGenerate] = useState(false);
+  const [generationRequest, setGenerationRequest] = useState<(ImageGenerationRequest & { nonce: number }) | null>(null);
   const clearPagination = useCallback(() => setPinnedCount(0), []);
 
   useEffect(() => {
@@ -75,6 +76,7 @@ export function DiscussionAssetsPanel({
     setPaging({ key: '', count: PAGE_SIZE });
     setPinnedCount(0);
     setShowGenerate(false);
+    setGenerationRequest(null);
   }, [discussionId]);
 
   // KT-587 — a request to reveal one asset is an event, not state to keep in
@@ -182,6 +184,7 @@ export function DiscussionAssetsPanel({
         )}
         {showGenerate && (
           <MediaGenerateForm
+            key={generationRequest?.nonce ?? 0}
             discussionId={discussionId}
             connections={connections}
             /* The images already in this room are the only ones a generation
@@ -191,6 +194,10 @@ export function DiscussionAssetsPanel({
             t={t}
             onLaunched={onMediaLaunched}
             onImageAttached={onAssetExtracted}
+            initialSlotKey={generationRequest?.slotKey}
+            initialReference={generationRequest
+              ? { assetId: generationRequest.assetId, mode: generationRequest.referenceMode }
+              : null}
           />
         )}
       </div>
@@ -238,6 +245,11 @@ export function DiscussionAssetsPanel({
               openRequest={openAssetRequest}
               onDeleted={onAssetDeleted}
               onExtracted={onAssetExtracted}
+              generationConnections={connections}
+              onGenerateFromImage={request => {
+                setGenerationRequest(previous => ({ ...request, nonce: (previous?.nonce ?? 0) + 1 }));
+                setShowGenerate(true);
+              }}
             />
             {shownCount < filteredFiles.length && (
               <button

@@ -332,6 +332,7 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
 
     mcps: {
       overview: resolve({ servers: [], configs: [], customized_contexts: [], incompatibilities: [] }),
+      projectEnvironmentNames: resolve([]),
       registry: resolve([]),
       listCatalog: resolve([]),
       listConfigs: resolve([]),

@@ -13,6 +13,7 @@ import { isUsable } from '../lib/constants';
 import { hydrateTtsVoicesFromBackend } from '../lib/tts-models';
 import { userError } from '../lib/userError';
 import { TourProvider } from '../components/tour/TourProvider';
+import { KronnMark } from '../components/KronnMark';
 import { TourOverlay } from '../components/tour/TourOverlay';
 import { TourHelpButton } from '../components/tour/TourHelpButton';
 import { fetchSttModelId } from '../lib/stt-models';
@@ -713,7 +714,7 @@ export function Dashboard({ onReset }: DashboardProps) {
       {/* Nav */}
       <nav className="dash-nav">
         <div className="dash-nav-brand" data-mobile={isMobile}>
-          <Zap size={18} className="text-accent" />
+          <KronnMark size={20} className="dash-nav-mark" />
           {!isMobile && <span className="dash-nav-title">Kronn</span>}
           {isMobile && <span className="dash-nav-title-mobile">K</span>}
           {runningWorkflows > 0 && (
