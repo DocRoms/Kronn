@@ -517,6 +517,8 @@ const zh: TranslationDict = {
   "projects.master.overview.dependencyCheckFailed": "检查失败",
   "projects.source.loading": "加载源代码…",
   "projects.source.loadingTreeBackground": "在后台加载项目其余部分",
+  "projects.source.loadingFolder": "正在加载此文件夹…",
+  "projects.source.folderUnavailable": "内容不可用 — 请重新加载项目",
   "projects.source.loadingFile": "加载文件…",
   "projects.source.error": "无法加载源代码。",
   "projects.source.empty": "未检测到可读源文件。",

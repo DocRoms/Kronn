@@ -37,7 +37,7 @@ BRIDGE = "backend/scripts/disc-introspection-mcp.py"
 # bytes rather than for its own weight.
 # It carries no slack: lower it whenever the catalogue shrinks, never raise it
 # to make a build pass.
-CATALOGUE_MAX_BYTES = 87_302
+CATALOGUE_MAX_BYTES = 86_968
 
 # Per-declaration ceiling. The five heaviest tools were 29% of the catalogue for
 # 6% of the tools; their descriptions had grown into manuals. A per-tool cap is

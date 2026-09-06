@@ -175,6 +175,59 @@ describe('SourceCodeViewer', () => {
     expect(screen.queryByLabelText('projects.source.loadingTreeBackground')).not.toBeInTheDocument();
   });
 
+  /// KT-594 — the reported bug. The root listing gives every folder empty
+  /// children, so an unfinished folder used to open onto nothing at all: the
+  /// interface said "empty" when it meant "not yet". Romuald clicked `site`,
+  /// saw nothing, and watched its contents appear four seconds later.
+  it('says a folder is still loading instead of rendering it as empty', async () => {
+    let resolveFull!: (nodes: SourceFileNode[]) => void;
+    const fullTree = new Promise<SourceFileNode[]>(resolve => { resolveFull = resolve; });
+    vi.mocked(projects.listSourceFiles).mockImplementation(async (_id, shallow) => {
+      if (shallow) return [{ path: 'site', name: 'site', is_dir: true, children: [] }];
+      return fullTree;
+    });
+
+    render(<SourceCodeViewer projectId="project-1" />);
+    fireEvent.click(await screen.findByText('site'));
+
+    const pending = screen.getByTestId('source-tree-pending-site');
+    expect(pending).toHaveTextContent('projects.source.loadingFolder');
+    expect(pending).not.toHaveAttribute('data-failed');
+
+    await act(async () => {
+      resolveFull([{
+        path: 'site',
+        name: 'site',
+        is_dir: true,
+        children: [{ path: 'site/index.html', name: 'index.html', is_dir: false }],
+      }]);
+    });
+
+    // And once the children are there, the row makes way for them.
+    expect(await screen.findByText('index.html')).toBeInTheDocument();
+    expect(screen.queryByTestId('source-tree-pending-site')).not.toBeInTheDocument();
+  });
+
+  /// A failed enrichment leaves the root listing usable on purpose, but its
+  /// folders stay empty forever. Saying nothing there is the same lie as
+  /// saying nothing during the wait — with no second request coming to undo it.
+  it('says a folder is unreachable when the full tree never arrives', async () => {
+    vi.mocked(projects.listSourceFiles).mockImplementation(async (_id, shallow) => {
+      if (shallow) return [{ path: 'site', name: 'site', is_dir: true, children: [] }];
+      throw new Error('enrichment failed');
+    });
+
+    render(<SourceCodeViewer projectId="project-1" />);
+    fireEvent.click(await screen.findByText('site'));
+
+    const pending = await screen.findByTestId('source-tree-pending-site');
+    await waitFor(() => expect(pending).toHaveAttribute('data-failed'));
+    expect(pending).toHaveTextContent('projects.source.folderUnavailable');
+    // The root listing is still there: a failed enrichment is not a failed page.
+    expect(screen.getByText('site')).toBeInTheDocument();
+    expect(screen.queryByText('projects.source.error')).not.toBeInTheDocument();
+  });
+
   it('recovers from a transient source-tree failure when Retry succeeds', async () => {
     vi.mocked(projects.listSourceFiles)
       .mockRejectedValueOnce(new Error('temporary failure'))

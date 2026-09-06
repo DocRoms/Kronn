@@ -1,7 +1,11 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Kronn">
-  <!-- The same mark as `site/favicon.svg`. Kept as a path rather than the
-       source PNG so the desktop icon can be re-derived at any size without a
-       second round of resampling. -->
+  <!-- The same geometry as `site/favicon.svg` and the `KronnMark` component,
+       on its own dark plate and with brighter nodes: a desktop icon lands on a
+       dock or a wallpaper, where the plate is the ground the pale stops need.
+       The favicon has neither, because the browser chrome is already one.
+
+       Kept as a path rather than the source PNG so the desktop icon can be
+       re-derived at any size without a second round of resampling. -->
   <rect width="512" height="512" fill="#0b0f22"/>
   <defs>
     <!-- One diagonal run for the whole frame: cyan at the top-right of the

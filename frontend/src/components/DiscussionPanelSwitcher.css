@@ -58,6 +58,33 @@
   border-left: 1px solid var(--kr-border-ghost);
 }
 
+/* KT-596 — closed, the column reserved its width down the WHOLE height of the
+   conversation for two buttons sitting at the top of it. The band read as a
+   hole cut out of the thread.
+
+   So when nothing is open it leaves the flex row entirely and floats over the
+   conversation's top-right corner. `.disc-messages-git-row` reserves the strip's
+   width on its search bar alone — the one row the strip actually overlaps —
+   instead of on every row beneath it. */
+.disc-utility-col[data-floating='true'] {
+  position: absolute;
+  top: 0;
+  right: 0;
+  z-index: 3;
+}
+
+/* Opaque, so a message scrolling underneath is hidden cleanly rather than
+   showing through; rounded and shadowed, so it reads as sitting ON the
+   conversation rather than as a piece of it. */
+.disc-utility-col[data-floating='true'] .disc-panel-switcher {
+  width: auto;
+  border-left: 1px solid var(--kr-border-ghost);
+  border-bottom: 1px solid var(--kr-border-ghost);
+  border-bottom-left-radius: var(--kr-r-md);
+  background: var(--kr-bg-surface);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+}
+
 .disc-panel-switcher-item {
   position: relative;
   display: flex;

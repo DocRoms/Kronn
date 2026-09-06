@@ -166,6 +166,12 @@ completeness guard fails when a new API export is missing. Use the extended
 Playwright fixture in `frontend/e2e/fixtures/kronn-fixture.ts` unless the test
 explicitly owns boot/setup behavior.
 
+Agent access and tier controls are mounted only when their settings card is
+expanded. Browser specs should call `SettingsPage.openAgentConfiguration()`
+before inspecting those controls; it waits for the mounted body and leaves an
+already-open card open without changing any setting.
+[src: file: frontend/e2e/pages/SettingsPage.ts:16]
+
 ## 0.9.4 interaction regression map
 
 - `AgentSwitchPicker` tests cover the shared agent × reasoning-tier selection.

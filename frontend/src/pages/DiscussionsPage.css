@@ -3181,6 +3181,22 @@ button.disc-contact-open {
   display: flex;
   flex: 1;
   overflow: hidden;
+  /* KT-596 — the anchor for the panel strip when it floats instead of holding
+     a column of its own. */
+  position: relative;
+}
+
+/* The strip's own width: two 28px controls, the 2px between them and the
+   strip's 2px of padding either side, plus its border. Declared once here
+   because the search bar has to reserve exactly it — and nothing else does. */
+.disc-messages-git-row[data-rail-floating='true'] {
+  --kr-disc-rail-w: 63px;
+}
+
+/* Only this row. The strip overlaps the search bar and nothing below it, so
+   this is the only place that has to step aside. */
+.disc-messages-git-row[data-rail-floating='true'] .disc-message-search {
+  padding-right: calc(var(--kr-disc-rail-w) + var(--kr-sp-3));
 }
 
 .disc-plan-btn {

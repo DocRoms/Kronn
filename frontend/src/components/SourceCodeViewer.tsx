@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  AlertTriangle,
   ChevronDown, ChevronRight, ChevronUp, Code2, FileCode2, Folder, FolderX, GitBranch,
   GitCompareArrows, History,
   Loader2, Search, X,
@@ -66,6 +67,11 @@ function SourceCodeViewerProject({ projectId, initialPath, onOpenCommit }: Sourc
   const [contentResult, setContentResult] = useState<ContentResult | null>(null);
   const [treeLoading, setTreeLoading] = useState(true);
   const [treeHydrating, setTreeHydrating] = useState(false);
+  /// KT-594 — the enrichment failed and will not be retried on its own. The
+  /// root listing stays usable, but every folder in it still has empty
+  /// children, and rendering those as empty folders is the same lie the
+  /// loading state was.
+  const [treeHydrateFailed, setTreeHydrateFailed] = useState(false);
   const [treeError, setTreeError] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResult, setSearchResult] = useState<SearchResult | null>(null);
@@ -113,6 +119,7 @@ function SourceCodeViewerProject({ projectId, initialPath, onOpenCommit }: Sourc
     });
     setTreeLoading(false);
     setTreeHydrating(true);
+    setTreeHydrateFailed(false);
 
     return projectsApi.listSourceFiles(projectId)
       .then(files => {
@@ -127,7 +134,9 @@ function SourceCodeViewerProject({ projectId, initialPath, onOpenCommit }: Sourc
       })
       .catch(() => {
         // The root-level tree is already usable; a failed enrichment must not
-        // replace it with a full-page error.
+        // replace it with a full-page error — but the folders it left empty
+        // have to say why they are empty.
+        if (treeLoadRef.current === generation) setTreeHydrateFailed(true);
       })
       .finally(() => {
         if (treeLoadRef.current === generation) setTreeHydrating(false);
@@ -486,6 +495,8 @@ function SourceCodeViewerProject({ projectId, initialPath, onOpenCommit }: Sourc
               key={node.path}
               node={node}
               depth={0}
+              hydrating={treeHydrating}
+              hydrateFailed={treeHydrateFailed}
               selectedPath={selectedPath}
               expandedDirs={effectiveExpandedDirs}
               searchResults={searchResults}
@@ -658,6 +669,8 @@ function mergeHydratedSourceTree(
 function SourceTreeNode({
   node,
   depth,
+  hydrating,
+  hydrateFailed,
   selectedPath,
   expandedDirs,
   searchResults,
@@ -669,6 +682,10 @@ function SourceTreeNode({
 }: {
   node: SourceFileNode;
   depth: number;
+  /** The full tree is still on its way, so an empty folder may not be empty. */
+  hydrating: boolean;
+  /** The full tree never arrived, so an empty folder is unknown, not empty. */
+  hydrateFailed: boolean;
   selectedPath: string | null;
   expandedDirs: Set<string>;
   searchResults: Map<string, number>;
@@ -708,11 +725,34 @@ function SourceTreeNode({
               : <FolderX size={10} />}
           </button>
         </div>
+        {/* KT-594 — the root listing arrives first, with every folder's children
+            still empty. Rendered as-is, an unfinished folder was indistinguishable
+            from an empty one: it opened onto nothing, and its contents appeared
+            some seconds later without explanation. */}
+        {expanded && (node.children ?? []).length === 0 && (hydrating || hydrateFailed) && (
+          <div
+            className="source-tree-row source-tree-pending"
+            data-failed={hydrateFailed || undefined}
+            data-testid={`source-tree-pending-${node.path}`}
+            style={{ paddingLeft: 21 + (depth + 1) * 14 }}
+          >
+            {hydrateFailed
+              ? <AlertTriangle size={11} />
+              : <Loader2 size={11} className="spin" />}
+            <span>
+              {t(hydrateFailed
+                ? 'projects.source.folderUnavailable'
+                : 'projects.source.loadingFolder')}
+            </span>
+          </div>
+        )}
         {expanded && (node.children ?? []).map(child => (
           <SourceTreeNode
             key={child.path}
             node={child}
             depth={depth + 1}
+            hydrating={hydrating}
+            hydrateFailed={hydrateFailed}
             selectedPath={selectedPath}
             expandedDirs={expandedDirs}
             searchResults={searchResults}

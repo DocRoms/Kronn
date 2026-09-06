@@ -60,6 +60,42 @@ def _load_module():
     return module
 
 
+class DiscussionQuestionReadTests(unittest.TestCase):
+    def setUp(self):
+        self.mod = _load_module()
+
+    def test_pending_is_bounded_and_key_recovers_an_answer_without_writing(self):
+        rows = [{"key": f"q-{i}", "state": "pending"} for i in range(55)]
+        rows.append({"key": "resolved", "state": "answered", "answer": {"text": "Human choice"}})
+        with mock.patch.object(self.mod, "_disc_id", return_value="room"), mock.patch.object(
+            self.mod, "_http", return_value={"success": True, "data": {"questions": rows, "pending_count": 55}}
+        ) as http:
+            pending = self.mod.call_disc_question_list({})
+            self.assertEqual(len(pending["questions"]), 50)
+            self.assertEqual(pending["matching_count"], 55)
+            self.assertTrue(pending["truncated"])
+            answered = self.mod.call_disc_question_list({"key": "resolved"})
+            self.assertEqual(answered["questions"], [rows[-1]])
+            self.assertFalse(answered["truncated"])
+            self.assertEqual(self.mod.call_disc_question_list({"key": "absent"})["questions"], [])
+            self.assertTrue(all(call == mock.call("GET", "/api/discussions/room/questions") for call in http.call_args_list))
+
+    def test_invalid_key_is_rejected_before_http(self):
+        with mock.patch.object(self.mod, "_http") as http:
+            for key in [False, 5, "", "x" * 101]:
+                with self.assertRaises(RuntimeError):
+                    self.mod.call_disc_question_list({"key": key})
+            http.assert_not_called()
+
+    def test_catalogue_manual_and_dispatch_expose_only_the_reader(self):
+        names = {tool["name"] for tool in self.mod.TOOLS}
+        self.assertIn("disc_question_list", names)
+        self.assertIn("disc_question_list", self.mod.TOOL_MANUALS)
+        self.assertNotIn("disc_question_answer", names)
+        self.assertIn("kronn-question", self.mod.TOOL_MANUALS["disc_question_list"])
+        self.assertIn("state=answered", self.mod.TOOL_MANUALS["disc_question_list"])
+
+
 class CurrentDiscMetaCacheTests(unittest.TestCase):
     """Behaviour of `_current_disc_meta()` and its cache."""
 

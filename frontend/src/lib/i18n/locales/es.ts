@@ -523,6 +523,8 @@ const es: TranslationDict = {
   'projects.master.overview.dependencyCheckFailed': 'Comprobación imposible',
   'projects.source.loading': 'Cargando el código fuente…',
   'projects.source.loadingTreeBackground': 'Cargando el resto del proyecto en segundo plano',
+  'projects.source.loadingFolder': 'Cargando la carpeta…',
+  'projects.source.folderUnavailable': 'Contenido no disponible — recarga el proyecto',
   'projects.source.loadingFile': 'Cargando el archivo…',
   'projects.source.error': 'No se puede cargar el código fuente.',
   'projects.source.empty': 'No se detectó ningún archivo fuente legible.',
