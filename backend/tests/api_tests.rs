@@ -2039,6 +2039,107 @@ fn test_app() -> Router {
     build_router_with_auth(test_state(), false)
 }
 
+#[tokio::test]
+async fn project_environment_names_endpoint_scopes_and_masks_config_values() {
+    let state = test_state();
+    state
+        .db
+        .with_conn(move |connection| {
+            let now = chrono::Utc::now().to_rfc3339();
+            for (id, name) in [("env-project-a", "Project A"), ("env-project-b", "Project B")] {
+                connection.execute(
+                    "INSERT INTO projects (id, name, path, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?4)",
+                    rusqlite::params![id, name, format!("/tmp/{id}"), now],
+                )?;
+            }
+            kronn::db::mcps::upsert_server(
+                connection,
+                &kronn::models::McpServer {
+                    id: "environment-names-server".into(),
+                    name: "Environment names server".into(),
+                    description: String::new(),
+                    transport: kronn::models::McpTransport::Stdio { command: "server".into(), args: vec![] },
+                    source: kronn::models::McpSource::Registry,
+                    api_spec: None,
+                },
+            )?;
+            for (id, keys, is_global, project_ids) in [
+                ("environment-names-global", vec!["GLOBAL_TOKEN", "API_TOKEN"], true, vec![]),
+                ("environment-names-a", vec!["A_TOKEN", "API_TOKEN"], false, vec!["env-project-a"]),
+                ("environment-names-b", vec!["B_TOKEN"], false, vec!["env-project-b"]),
+            ] {
+                kronn::db::mcps::insert_config(
+                    connection,
+                    &kronn::models::McpConfig {
+                        id: id.into(),
+                        server_id: "environment-names-server".into(),
+                        label: id.into(),
+                        env_keys: keys.into_iter().map(str::to_owned).collect(),
+                        env_encrypted: "encrypted-value-must-not-appear".into(),
+                        args_override: None,
+                        is_global,
+                        include_general: false,
+                        config_hash: format!("hash-{id}"),
+                        project_ids: project_ids.into_iter().map(str::to_owned).collect(),
+                        host_sync: kronn::models::HostSyncMode::None,
+                    },
+                )?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    let (status, response) = get_json(
+        build_router_with_auth(state.clone(), false),
+        "/api/mcps/project-environment-names/env-project-a",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        response["data"],
+        serde_json::json!(["API_TOKEN", "A_TOKEN", "GLOBAL_TOKEN"])
+    );
+    assert!(response.pointer("/data/2").is_some());
+    assert!(!response
+        .to_string()
+        .contains("encrypted-value-must-not-appear"));
+    assert!(!response.to_string().contains("B_TOKEN"));
+
+    // A missing project follows the existing config-selection convention:
+    // global configurations remain available while project-scoped ones do not.
+    let (status, missing_project) = get_json(
+        build_router_with_auth(state, false),
+        "/api/mcps/project-environment-names/missing-project",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        missing_project["data"],
+        serde_json::json!(["API_TOKEN", "GLOBAL_TOKEN"])
+    );
+
+    // The route remains behind the router's normal bearer middleware.
+    let auth_state = test_state();
+    {
+        let mut config = auth_state.config.write().await;
+        config.server.auth_enabled = true;
+        config.server.auth_strict_localhost = true;
+        config.server.auth_token = Some("environment-names-token".into());
+    }
+    let unauthorized = build_router_with_auth(auth_state, true)
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/mcps/project-environment-names/env-project-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+}
+
 /// Send a GET request and return (status, parsed JSON body).
 async fn get_json(app: Router, uri: &str) -> (StatusCode, Value) {
     let req = Request::builder()

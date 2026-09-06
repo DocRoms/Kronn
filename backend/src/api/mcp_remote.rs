@@ -556,7 +556,10 @@ pub async fn qp_run(
         };
         (secret, config.server.execution_variable_retention_days)
     };
-    let declarations = qp.variables.clone();
+    let declarations = crate::models::declarations_with_template_environment_variables(
+        &qp.prompt_template,
+        &qp.variables,
+    );
     let supplied = req.vars.clone();
     let selected_project = project_id.clone();
     let launch_context = launch.context.clone();
@@ -808,7 +811,10 @@ pub async fn qp_batch_run(
         .iter()
         .map(|_| Uuid::new_v4().to_string())
         .collect();
-    let declarations = qp.variables.clone();
+    let declarations = crate::models::declarations_with_template_environment_variables(
+        &qp.prompt_template,
+        &qp.variables,
+    );
     let supplied_items: Vec<HashMap<String, String>> =
         req.items.iter().map(|item| item.vars.clone()).collect();
     let selected_project = req.project_id.clone().or_else(|| qp.project_id.clone());

@@ -5,6 +5,7 @@ import type { SetupStatus } from './types/generated';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { UpdateBanner } from './components/UpdateBanner';
 import { BackendStatus } from './components/BackendStatus';
+import { KronnMark } from './components/KronnMark';
 import { standaloneLivePageId, standaloneLivePageMosaic } from './lib/live-page-navigation';
 import './App.css';
 
@@ -226,12 +227,11 @@ function LoadingScreen() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   return (
-    <div className="app-fullscreen">
-      <div className="app-spinner" />
+    <div className="app-fullscreen" role="status" aria-live="polite">
+      <KronnMark size={100} className="app-loading-mark" />
       <span className="app-loading-text">
         {hints[hintIdx]}
       </span>
-      {/* Keyframes (spin, pulse, reduced-motion) defined in index.html */}
     </div>
   );
 }

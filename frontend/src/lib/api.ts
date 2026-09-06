@@ -1333,6 +1333,8 @@ export const agents = {
 
 export const mcps = {
   overview: () => api<McpOverview>('GET', '/mcps'),
+  projectEnvironmentNames: (projectId: string) =>
+    api<string[]>('GET', `/mcps/project-environment-names/${encodeURIComponent(projectId)}`),
   registry: (q?: string) => api<McpDefinition[]>('GET', `/mcps/registry${q ? `?q=${encodeURIComponent(q)}` : ''}`),
   refresh: () => api<McpOverview>('POST', '/mcps/refresh'),
   previewBundle: (request: PluginBundleSelectionRequest) =>

@@ -1230,6 +1230,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         )
         // ── MCPs ──
         .route("/api/mcps", get(api::mcps::overview))
+        .route(
+            "/api/mcps/project-environment-names/{project_id}",
+            get(api::mcps::project_environment_names),
+        )
         .route("/api/mcps/registry", get(api::mcps::list_registry))
         .route("/api/mcps/refresh", post(api::mcps::refresh))
         .route(
