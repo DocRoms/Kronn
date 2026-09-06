@@ -17,7 +17,13 @@ pub async fn list(
     let result = state
         .db
         .with_read_conn(move |conn| {
-            if crate::db::discussions::get_discussion(conn, &discussion_id)?.is_none() {
+            // This endpoint is polled: checking existence must not load the transcript.
+            let exists: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM discussions WHERE id=?1)",
+                [&discussion_id],
+                |row| row.get(0),
+            )?;
+            if !exists {
                 return Ok(None);
             }
             discussion_questions::list(conn, &discussion_id).map(Some)

@@ -77,6 +77,16 @@ mod tests {
 {"version":1,"key":"policy","question":"Which policy?","options":[{"id":"a","label":"First"},{"id":"b","label":"Second"}]}
 ```"#).await;
         let get = |uri: &str| Request::builder().uri(uri).body(Body::empty()).unwrap();
+        assert_eq!(
+            send(
+                state.clone(),
+                false,
+                get("/api/discussions/missing/questions")
+            )
+            .await
+            .0,
+            StatusCode::NOT_FOUND,
+        );
         let (status, body) = send(
             state.clone(),
             false,
