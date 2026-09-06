@@ -7,12 +7,8 @@
 > Read this file first, then follow the context loading strategy below.
 > Do not read the other config files (.cursorrules, copilot-instructions, etc.) — they redirect here.
 
-> **CRITICAL — Never hallucinate.**
-> - **Never invent information** (tech stack, conventions, architecture, file paths...).
-> - If you are unsure about something: **check the `docs/` documentation first**.
-> - If you still don't find the answer: **ask the user** rather than guessing.
-> - After getting the answer: **update the relevant `docs/` file** so the knowledge is captured.
-> - Getting it right matters more than answering fast — hallucinations waste everyone's time.
+> **CRITICAL — Never invent facts.** Follow § 0's evidence cascade; capture human
+> clarifications in the relevant documentation.
 
 > **CRITICAL — MCP tool usage.**
 > Before calling any MCP tool, **read the matching context file** in `docs/operations/mcp-servers/<mcp-name>.md` **if it exists**.
@@ -27,6 +23,16 @@
 > [`operations/mcp-servers/kronn-internal.md`](operations/mcp-servers/kronn-internal.md#out-of-context-discussion-notes).
 
 **Unknown term?** → `docs/glossary.md` first.
+
+**Blocking human decisions in a Kronn room (mandatory).** Use a `kronn-question`
+fence, not a prose-only question. First read `disc_question_list` to reuse an
+existing arbitration; its `tool_manual` gives the full creation contract. Do not
+execute, delegate or complete the affected lot while its question is pending.
+Wait with `disc_wait_for_peer`; independent work may continue. After a restart or
+handoff, read the durable answer by its stable key before resuming. Never answer
+or interpret a recommended choice as human consent. See
+[`operations/mcp-servers/kronn-internal.md`](operations/mcp-servers/kronn-internal.md#human-arbitration-cards).
+`[src: file: backend/src/db/discussion_questions.rs:1]`
 
 This folder (`docs/`) contains structured project context (for both humans and AI agents). Use paths relative to repo root.
 
@@ -155,8 +161,6 @@ Never load everything "just in case".
 - Mocks must match **real API shapes** (check `types/generated.ts`).
 - Run `cargo test` (backend) and `npx vitest run` (frontend) **before declaring a task done**.
 - If a test is flaky, fix the root cause — do not add retries or sleeps.
-
-**Why this matters:** A failing test catches a bug in seconds. Without tests, bugs surface in production, require debugging, and cost 10-100x more tokens to fix. Tests also prove to the user that the code works — "all 500 tests pass" is more convincing than "I think it's correct".
 
 ---
 

@@ -1825,6 +1825,43 @@ describe('DiscussionsPage', () => {
     expect(planningApi.proposals).toHaveBeenCalledTimes(2);
   });
 
+  /// KT-596 — closed, the strip's column reserved its width down the whole
+  /// height of the conversation for two buttons sitting at the top of it. It
+  /// now leaves the flex row and floats over the corner, so the thread gets
+  /// that width back; opening a panel puts it back in the row, above it.
+  it('floats the panel strip when nothing is open and returns it to the row when a panel opens', async () => {
+    const discussion = makeListDiscussion('d1', 1);
+    vi.mocked(discussionsApi.get).mockResolvedValue(discussion);
+
+    const { container } = await wrap(
+      <DiscussionsPage
+        projects={[]}
+        agents={[]}
+        allDiscussions={[discussion]}
+        configLanguage="fr"
+        agentAccess={null}
+        refetchDiscussions={noop}
+        refetchProjects={noop}
+        onNavigate={noop}
+        toast={toastFn}
+        initialActiveDiscussionId="d1"
+        {...liftedProps()}
+      />,
+    );
+
+    const column = container.querySelector('.disc-utility-col')!;
+    const row = container.querySelector('.disc-messages-git-row')!;
+    expect(column).toHaveAttribute('data-floating', 'true');
+    // The search bar is the one row the floating strip overlaps, so it is the
+    // only thing that has to reserve its width.
+    expect(row).toHaveAttribute('data-rail-floating', 'true');
+
+    fireEvent.click(await screen.findByTestId('panel-open-toggle'));
+
+    await waitFor(() => expect(column).toHaveAttribute('data-floating', 'false'));
+    expect(row).toHaveAttribute('data-rail-floating', 'false');
+  });
+
   it('refetches and reloads on kronn:discussion-updated (auto-skill activation)', async () => {
     // ChatInput dispatches `kronn:discussion-updated` after auto-activating
     // skills on a discussion. Pre-fix nobody listened, so the sidebar +

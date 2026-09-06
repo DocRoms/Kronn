@@ -3836,7 +3836,7 @@ export function DiscussionsPage({
             />
 
             {/* Messages + one shared utility panel side by side */}
-            <div className="disc-messages-git-row">
+            <div className="disc-messages-git-row" data-rail-floating={!anyPanelOpen}>
             <div className="disc-messages-col" data-replying={!!replyTarget}>
             {/* KT-581 — first in the column, so it opens level with the panel
               *  strip rather than a few banners lower: the two controls belong
@@ -5101,7 +5101,7 @@ export function DiscussionsPage({
 
             </div>{/* end messages column */}
 
-            <div className="disc-utility-col">
+            <div className="disc-utility-col" data-floating={!anyPanelOpen}>
             {/* KT-581 — switching panels, above the panel being switched.
               *  Each panel draws its own header, so putting these icons in the
               *  discussion header too showed every one of them twice. */}

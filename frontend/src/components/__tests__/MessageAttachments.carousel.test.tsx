@@ -10,12 +10,15 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, cleanup, waitFor } from '@testing-library/react';
 
 const contextFileBlob = vi.fn();
+const capabilities = vi.fn();
 vi.mock('../../lib/api', () => ({
   discussions: { contextFileBlob: (...a: unknown[]) => contextFileBlob(...a) },
+  media: { capabilities: (...a: unknown[]) => capabilities(...a) },
 }));
 
 const { MessageAttachments } = await import('../MessageAttachments');
 import type { ContextFile } from '../../types/generated';
+import type { ExternalApiConnectionView } from '../../lib/api';
 
 const t = (key: string, ...args: (string | number)[]) =>
   args.length ? `${key}|${args.join('|')}` : key;
@@ -44,8 +47,20 @@ const FILES = [
   file('i5', 'e.png', 'image/png'),
 ];
 
+function connection(over: Partial<ExternalApiConnectionView> = {}): ExternalApiConnectionView {
+  return {
+    id: 'conn-1', display_name: 'OpenRouter', mention_alias: '@openrouter',
+    endpoint: 'https://openrouter.ai/api/v1', origin_preset: 'open_router', has_credential: true,
+    economy_model: null, default_model: null, reasoning_model: null,
+    image_model: 'image-model', video_model: 'video-model', media_endpoint: null,
+    created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z',
+    ...over,
+  } as ExternalApiConnectionView;
+}
+
 beforeEach(() => {
   contextFileBlob.mockReset();
+  capabilities.mockReset();
   contextFileBlob.mockResolvedValue(new Blob(['x']));
   // Exercise the component's documented non-IntersectionObserver fallback;
   // browser intersection behaviour is covered by the component contract.
@@ -161,5 +176,84 @@ describe('MessageAttachments — mixed carousel', () => {
     // Still 6: the PDF is listed as an asset but is not walkable.
     expect(panel.textContent).toContain('4 / 6');
     expect(screen.getAllByTestId('attach-chip').length).toBeGreaterThan(0);
+  });
+
+  it('offers only capability-confirmed image and video actions for the current picture', async () => {
+    capabilities.mockImplementation(async (_connectionId: string, modality: string) => ({
+      capabilities: modality === 'image'
+        ? { max_input_references: 2 }
+        : { frame_positions: ['last_frame'] },
+    }));
+    const onGenerateFromImage = vi.fn();
+    render(
+      <MessageAttachments
+        files={FILES}
+        discussionId="d1"
+        t={t}
+        variant="library"
+        generationConnections={[connection()]}
+        onGenerateFromImage={onGenerateFromImage}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole('button', { name: 'disc.attachmentImage|a.png' }));
+    const imageAction = await screen.findByTestId('attachment-generate-image');
+    fireEvent.click(imageAction);
+    // A successful handoff closes the portal; reopening the current asset is
+    // a separate, deliberate viewer action.
+    fireEvent.click(await screen.findByRole('button', { name: 'disc.attachmentImage|a.png' }));
+    fireEvent.click(await screen.findByTestId('attachment-generate-video'));
+    expect(onGenerateFromImage).toHaveBeenNthCalledWith(1, {
+      assetId: 'i1', modality: 'image', slotKey: 'conn-1:image', referenceMode: 'reference',
+    });
+    expect(onGenerateFromImage).toHaveBeenNthCalledWith(2, {
+      assetId: 'i1', modality: 'video', slotKey: 'conn-1:video', referenceMode: 'last_frame',
+    });
+  });
+
+  it('does not offer a paid action while capabilities load, fail, or reject image input', async () => {
+    let resolveCapabilities!: (value: { capabilities: null }) => void;
+    capabilities.mockReturnValue(new Promise(resolve => { resolveCapabilities = resolve; }));
+    const { rerender } = render(
+      <MessageAttachments files={FILES} discussionId="d1" t={t} variant="library"
+        generationConnections={[connection()]} onGenerateFromImage={vi.fn()} />,
+    );
+    fireEvent.click(await screen.findByRole('button', { name: 'disc.attachmentImage|a.png' }));
+    expect(screen.queryByTestId('attachment-generate-image')).toBeNull();
+    expect(screen.queryByTestId('attachment-generate-video')).toBeNull();
+
+    resolveCapabilities({ capabilities: null });
+    await waitFor(() => expect(screen.queryByTestId('attachment-generate-image')).toBeNull());
+
+    capabilities.mockRejectedValue(new Error('catalogue unavailable'));
+    rerender(
+      <MessageAttachments files={FILES} discussionId="d1" t={t} variant="library"
+        generationConnections={[connection({ id: 'conn-2' })]} onGenerateFromImage={vi.fn()} />,
+    );
+    await waitFor(() => expect(screen.queryByTestId('attachment-generate-video')).toBeNull());
+  });
+
+  it('withholds prior capability evidence when the configured model changes', async () => {
+    let resolveReplacement!: (value: { capabilities: { max_input_references: number } }) => void;
+    capabilities
+      .mockResolvedValueOnce({ capabilities: { max_input_references: 1 } })
+      .mockReturnValueOnce(new Promise(resolve => { resolveReplacement = resolve; }));
+    const { rerender } = render(
+      <MessageAttachments files={FILES} discussionId="d1" t={t} variant="library"
+        generationConnections={[connection({ video_model: null })]} onGenerateFromImage={vi.fn()} />,
+    );
+
+    fireEvent.click(await screen.findByRole('button', { name: 'disc.attachmentImage|a.png' }));
+    expect(await screen.findByTestId('attachment-generate-image')).toBeInTheDocument();
+
+    rerender(
+      <MessageAttachments files={FILES} discussionId="d1" t={t} variant="library"
+        generationConnections={[connection({ image_model: 'replacement-image-model', video_model: null })]}
+        onGenerateFromImage={vi.fn()} />,
+    );
+    expect(screen.queryByTestId('attachment-generate-image')).toBeNull();
+
+    resolveReplacement({ capabilities: { max_input_references: 1 } });
+    expect(await screen.findByTestId('attachment-generate-image')).toBeInTheDocument();
   });
 });

@@ -98,6 +98,8 @@ export function MediaGenerateForm({
   t,
   onLaunched,
   onImageAttached,
+  initialSlotKey,
+  initialReference,
 }: {
   discussionId: string;
   connections: ExternalApiConnectionView[];
@@ -112,6 +114,10 @@ export function MediaGenerateForm({
   /// discussion adds it to its own inventory. Absent, the launcher offers no
   /// attachment: a surface that cannot show the new file must not create it.
   onImageAttached?: (file: ContextFile) => void;
+  /** A capability-checked viewer action can choose the matching configured
+   * slot and keep its current image attached while this form loads again. */
+  initialSlotKey?: string;
+  initialReference?: { assetId: string; mode: MediaReferenceMode } | null;
 }) {
   const slots = useMemo(() => slotsOf(connections), [connections]);
   const [selectedKey, setSelectedKey] = useState<string>('');
@@ -126,8 +132,16 @@ export function MediaGenerateForm({
   // switchable — a soundtrack nobody asked for is what got a generation
   // rejected for copyright, with no clue in the request that it existed.
   const [generateAudio, setGenerateAudio] = useState(true);
-  const [fetchedCapabilities, setFetchedCapabilities] =
-    useState<MediaModelCapabilities | null>(null);
+  // A viewer handoff is an explicit request to generate FROM a picture.  Keep
+  // the capability request's lifecycle separately from its value: `null` can
+  // mean either a provider that advertised no envelope or a request that has
+  // not answered yet, and those two states must never have the same billing
+  // behaviour.
+  const [capabilityResult, setCapabilityResult] = useState<{
+    key: string;
+    status: 'loading' | 'resolved' | 'error';
+    capabilities: MediaModelCapabilities | null;
+  }>({ key: '', status: 'loading', capabilities: null });
   // The pictures this generation starts from, chosen among the room's own
   // assets. Ids, never paths: the browser never learns where a file lives, and
   // the backend re-checks that each one belongs to this discussion. A clip
@@ -136,7 +150,9 @@ export function MediaGenerateForm({
   // What the operator attached. The model in front of them may take fewer
   // pictures, or none — `reference` below is the part that actually applies.
   const [storedReference, setReference] =
-    useState<{ assetIds: string[]; mode: MediaReferenceMode } | null>(null);
+    useState<{ assetIds: string[]; mode: MediaReferenceMode } | null>(() => (
+      initialReference ? { assetIds: [initialReference.assetId], mode: initialReference.mode } : null
+    ));
   /// Keyed by the picture it belongs to: showing the previous thumbnail while
   /// the new blob loads would be a lie about what is attached. The width is
   /// null while unknown — a picture that could not be measured never blocks,
@@ -155,13 +171,26 @@ export function MediaGenerateForm({
   // even though its response never reached the browser. Reuse the same key
   // only for an identical retry, so it can never schedule a second charge.
   const pendingLaunchRef = useRef<{ signature: string; key: string } | null>(null);
+  // React state does not change inside the same event turn. This ref closes
+  // the gap where two synchronous submit clicks would otherwise bill twice.
+  const submissionInFlightRef = useRef(false);
+  const formRef = useRef<HTMLFormElement | null>(null);
 
   // KT-587 — the stored key can name a slot that no longer exists: the
   // catalogue reloads, a connection goes away. Resolving it at render falls
   // back to the first slot in the same pass, where an effect repaired it one
   // render late and made the form flicker through an invalid state.
-  const selected = slots.find(slot => slot.key === selectedKey) ?? slots[0] ?? null;
+  const selected = slots.find(slot => slot.key === selectedKey)
+    ?? slots.find(slot => slot.key === initialSlotKey)
+    ?? slots[0]
+    ?? null;
   const activeKey = selected?.key ?? '';
+  // The endpoint is addressed by connection and modality, but its answer
+  // describes the configured model. Include that model in the identity so a
+  // response for the previous configured model cannot authorise a new one.
+  const capabilityKey = selected
+    ? `${selected.connectionId}:${selected.modality}:${selected.model}`
+    : '';
   const isVideo = selected?.modality === 'video';
 
   // What this exact model accepts. Absent (an unreachable or catalogue-less
@@ -170,10 +199,17 @@ export function MediaGenerateForm({
   useEffect(() => {
     if (!selected) return;
     let cancelled = false;
+    const requestKey = `${selected.connectionId}:${selected.modality}:${selected.model}`;
     media
       .capabilities(selected.connectionId, selected.modality)
-      .then(result => { if (!cancelled) setFetchedCapabilities(result.capabilities); })
-      .catch(() => { if (!cancelled) setFetchedCapabilities(null); });
+      .then(result => {
+        if (cancelled) return;
+        setCapabilityResult({ key: requestKey, status: 'resolved', capabilities: result.capabilities });
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setCapabilityResult({ key: requestKey, status: 'error', capabilities: null });
+      });
     return () => { cancelled = true; };
   }, [selected]);
 
@@ -182,7 +218,9 @@ export function MediaGenerateForm({
   // ones arrive, because treating the gap as "no limits known" makes the trim
   // below drop every attached picture for one render, and that is not
   // recoverable.
-  const capabilities = selected ? fetchedCapabilities : null;
+  const capabilitiesResolvedForSelected = capabilityResult.key === capabilityKey
+    && capabilityResult.status === 'resolved';
+  const capabilities = capabilitiesResolvedForSelected ? capabilityResult.capabilities : null;
 
   const durations = capabilities?.durations_secs?.length
     ? capabilities.durations_secs
@@ -236,6 +274,11 @@ export function MediaGenerateForm({
       ? { ...storedReference, assetIds: storedReference.assetIds.slice(0, referenceLimit) }
       : storedReference;
   }, [storedReference, canReference, isVideo, framePositions, referenceLimit]);
+  // Do not silently downgrade a viewer handoff to text-to-media.  The stored
+  // source remains available for an explicit removal, but a click cannot
+  // reach the paid endpoint until this selected model has accepted it.
+  const referenceIntentUnresolved = !!storedReference
+    && (!capabilitiesResolvedForSelected || !reference);
   const pickedIds = useMemo(() => reference?.assetIds ?? [], [reference]);
   const canPickMore = pickedIds.length < referenceLimit;
   const offeredImages = useMemo(
@@ -415,8 +458,15 @@ export function MediaGenerateForm({
   const referenceWidth = thumbnail?.assetId === firstAssetId ? thumbnail.width : null;
   const referenceTooNarrow = referenceWidth !== null && referenceWidth < MIN_REFERENCE_WIDTH_PX;
 
+  const initialReferenceKey = initialReference
+    ? `${initialReference.assetId}:${initialReference.mode}`
+    : '';
+  useEffect(() => {
+    if (initialReferenceKey) formRef.current?.focus();
+  }, [initialReferenceKey]);
+
   const submit = useCallback(async () => {
-    if (!selected || !prompt.trim() || busy || referenceTooNarrow) return;
+    if (!selected || !prompt.trim() || busy || referenceTooNarrow || referenceIntentUnresolved || submissionInFlightRef.current) return;
     const signature = JSON.stringify({
       connectionId: selected.connectionId,
       modality: selected.modality,
@@ -431,6 +481,7 @@ export function MediaGenerateForm({
     if (pendingLaunchRef.current?.signature !== signature) {
       pendingLaunchRef.current = { signature, key: crypto.randomUUID() };
     }
+    submissionInFlightRef.current = true;
     setBusy(true);
     setError(null);
     try {
@@ -459,9 +510,10 @@ export function MediaGenerateForm({
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
+      submissionInFlightRef.current = false;
       setBusy(false);
     }
-  }, [aspectRatio, busy, discussionId, durationSecs, generateAudio, onLaunched, prompt, reference, referenceTooNarrow, resolution, selected]);
+  }, [aspectRatio, busy, discussionId, durationSecs, generateAudio, onLaunched, prompt, reference, referenceIntentUnresolved, referenceTooNarrow, resolution, selected]);
 
   if (slots.length === 0) {
     return (
@@ -473,8 +525,10 @@ export function MediaGenerateForm({
 
   return (
     <form
+      ref={formRef}
       className="media-generate-form"
       data-testid="media-generate-form"
+      tabIndex={-1}
       onSubmit={event => {
         event.preventDefault();
         void submit();
@@ -551,7 +605,26 @@ export function MediaGenerateForm({
         </label>
       )}
 
-      {canReference && (
+      {referenceIntentUnresolved && (
+        <fieldset className="media-generate-reference" data-testid="media-reference-pending">
+          <legend>{isVideo ? t('disc.media.sourceImage') : t('disc.media.referenceImages')}</legend>
+          <p className="media-generate-reference-warning" role="alert">
+            {t('disc.media.referenceCompatibilityPending')}
+          </p>
+          <p>{storedReference?.assetIds.map(assetId => images.find(image => image.id === assetId)?.filename ?? assetId).join(', ')}</p>
+          <button
+            type="button"
+            className="btn btn-sm btn-ghost"
+            onClick={() => setReference(null)}
+            aria-label={t('disc.media.clearSourceImage')}
+            data-testid="media-reference-clear"
+          >
+            <X size={13} aria-hidden="true" />
+          </button>
+        </fieldset>
+      )}
+
+      {canReference && !referenceIntentUnresolved && (
         <fieldset className="media-generate-reference" data-testid="media-reference-picker">
           <legend>{isVideo ? t('disc.media.sourceImage') : t('disc.media.referenceImages')}</legend>
           {reference && (
@@ -694,7 +767,7 @@ export function MediaGenerateForm({
         </p>
       )}
 
-      <button type="submit" className="btn btn-sm" disabled={busy || !prompt.trim() || referenceTooNarrow}>
+      <button type="submit" className="btn btn-sm" disabled={busy || !prompt.trim() || referenceTooNarrow || referenceIntentUnresolved}>
         {busy
           ? <Loader2 size={13} aria-hidden="true" className="spin" />
           : <Sparkles size={13} aria-hidden="true" />}

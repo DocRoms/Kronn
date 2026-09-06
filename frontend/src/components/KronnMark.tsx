@@ -1,10 +1,12 @@
 // The Kronn mark, drawn rather than loaded.
 //
 // The lightning bolt that stood next to the app name was a lucide icon, not a
-// logo: it said "fast", it did not say "Kronn". This is the same geometry as
-// `public/favicon.svg` and the desktop icon, minus their dark plate — the
-// interface behind it is already the ground, and a plate would paste a dark
-// square onto the light themes.
+// logo: it said "fast", it did not say "Kronn". `public/favicon.svg` is this
+// drawing exactly — same viewBox, same paths, same stops — because a tab icon
+// and the mark next to the app name are read one after the other, and any
+// difference between them is read as two logos. Only the desktop icon keeps a
+// dark plate: it lands on a dock or a wallpaper, whereas here the interface is
+// already the ground and a plate would paste a dark square onto light themes.
 //
 // The viewBox is cropped to the mark's own bounds so a 20px render spends its
 // pixels on the hexagon instead of on the padding a square icon file needs.

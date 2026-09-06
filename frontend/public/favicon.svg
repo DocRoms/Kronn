@@ -1,26 +1,36 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Kronn">
-  <!-- Redrawn from the 0.13.0 logo rather than embedded as a raster: a favicon
-       is read at 16px, where a downscaled photo turns to mud and a path does
-       not. Same geometry as `desktop/src-tauri/icons/icon.svg` and the
-       `KronnMark` component the app header draws. -->
-  <rect width="512" height="512" fill="#0b0f22"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="38 48 436 436" role="img" aria-label="Kronn">
+  <!-- The same drawing as the `KronnMark` component the app header renders:
+       same viewBox, same paths, same stops. A tab icon and the mark next to
+       the app name are read one after the other, and any difference between
+       them is read as two logos.
+
+       No dark plate, unlike `desktop/src-tauri/icons/icon.svg`: a desktop icon
+       lands on a dock or a wallpaper and needs its own ground, a favicon lands
+       on the browser's chrome. Dropping the plate also gives the mark the whole
+       16px instead of the ~70% a padded square leaves it. -->
   <defs>
     <!-- One diagonal run for the whole frame: cyan at the top-right of the
-         crown, magenta at the left flank and foot, blue-violet between. -->
+         crown, magenta at the left flank and foot, blue-violet between.
+         Spanning the whole mark, not each stroke: with the default per-element
+         units every arc restates the full run and the frame reads as three
+         unrelated gradients. -->
     <linearGradient id="kronn-frame" gradientUnits="userSpaceOnUse"
                     x1="441" y1="60" x2="84" y2="470">
-      <stop offset="0" stop-color="#2ad6f0"/>
-      <stop offset="0.45" stop-color="#7b6cf5"/>
-      <stop offset="1" stop-color="#cc4df2"/>
+      <stop offset="0" stop-color="#1fbdda"/>
+      <stop offset="0.45" stop-color="#6f5ef0"/>
+      <stop offset="1" stop-color="#bd3ce6"/>
     </linearGradient>
+    <!-- Deeper than the icon files' nodes, for the same reason as KronnMark's:
+         those sit on their own dark plate, this one sits on whatever the tab
+         bar paints, and the logo's pale pinks vanish into a light one. -->
     <linearGradient id="kronn-top" x1="0.2" y1="0" x2="0.8" y2="1">
-      <stop offset="0" stop-color="#7ceef2"/><stop offset="1" stop-color="#22c4e2"/>
+      <stop offset="0" stop-color="#5fd8ea"/><stop offset="1" stop-color="#17b4d4"/>
     </linearGradient>
     <linearGradient id="kronn-hub" x1="0.2" y1="0" x2="0.8" y2="1">
-      <stop offset="0" stop-color="#c9aef2"/><stop offset="1" stop-color="#4a86e8"/>
+      <stop offset="0" stop-color="#a98ee8"/><stop offset="1" stop-color="#4a86e8"/>
     </linearGradient>
     <linearGradient id="kronn-peer" x1="0.2" y1="0" x2="0.8" y2="1">
-      <stop offset="0" stop-color="#f4cbee"/><stop offset="1" stop-color="#9b6ef0"/>
+      <stop offset="0" stop-color="#dc94e6"/><stop offset="1" stop-color="#9b6ef0"/>
     </linearGradient>
   </defs>
   <!-- Hexagon: shallow crown, vertical flanks, tapered foot. -->
