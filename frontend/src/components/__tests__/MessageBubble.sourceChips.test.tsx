@@ -70,6 +70,10 @@ describe('MessageBubble — inline source citations', () => {
     const chip = screen.getByTestId('source-citation-chip');
     expect(chip).toHaveTextContent('api.ts:1014');
     expect(chip).toHaveAttribute('data-kind', 'file');
+    // KT-609 — the kind is the one word the reader has to understand, so it is
+    // translated: `code-comment` says nothing to someone who has not read the
+    // anti-hallucination spec.
+    expect(chip).toHaveTextContent('fichier');
     // A citation is evidence: the exact reference has to stay reachable.
     expect(chip).toHaveAttribute('title', '[src: file: frontend/src/lib/api.ts:1014]');
     expect(screen.getByText(/et nulle part ailleurs/)).toBeInTheDocument();
@@ -105,6 +109,12 @@ describe('MessageBubble — inline source citations', () => {
     expect(suspect).toHaveAttribute('data-state', 'suspect');
     // And the reason the backend gave travels with it.
     expect(suspect.getAttribute('title')).toContain('introuvable');
+  });
+
+  it('falls back to the raw kind when nobody wrote a label for it', () => {
+    renderMessage('Bizarre [src: futur-type: quelque chose].');
+    // Not a translation key printed at the reader — the kind itself.
+    expect(screen.getByTestId('source-citation-chip')).toHaveTextContent('futur-type');
   });
 
   it('says nothing about a citation nobody checked', () => {
