@@ -73,7 +73,11 @@ mod tests {
     async fn source_directory_http_refuses_a_symlink_outside_the_project() {
         let root = tempfile::TempDir::new().unwrap();
         let outside = tempfile::TempDir::new().unwrap();
-        std::fs::write(outside.path().join("private-source.rs"), "fn outside() {}\n").unwrap();
+        std::fs::write(
+            outside.path().join("private-source.rs"),
+            "fn outside() {}\n",
+        )
+        .unwrap();
         std::os::unix::fs::symlink(outside.path(), root.path().join("linked")).unwrap();
         let state = test_state();
         let path = root.path().to_string_lossy().into_owned();

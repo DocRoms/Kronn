@@ -7271,7 +7271,10 @@ async fn external_api_nvidia_catalogue_without_modality_metadata_is_capability_u
     // pickers are affected by "capability unknown".
     assert_eq!(
         response["data"]["models"],
-        serde_json::json!(["meta/llama-3.1-70b-instruct", "black-forest-labs/flux.1-dev"])
+        serde_json::json!([
+            "meta/llama-3.1-70b-instruct",
+            "black-forest-labs/flux.1-dev"
+        ])
     );
 }
 
@@ -17025,8 +17028,22 @@ async fn media_generate_refuses_a_source_image_it_cannot_vouch_for() {
         })
         .await
         .unwrap();
-    seed_reference_image(&state, "asset-elsewhere", "disc-other", "image/png", Some("/tmp/x.png")).await;
-    seed_reference_image(&state, "asset-not-image", "disc-media", "text/csv", Some("/tmp/x.csv")).await;
+    seed_reference_image(
+        &state,
+        "asset-elsewhere",
+        "disc-other",
+        "image/png",
+        Some("/tmp/x.png"),
+    )
+    .await;
+    seed_reference_image(
+        &state,
+        "asset-not-image",
+        "disc-media",
+        "text/csv",
+        Some("/tmp/x.csv"),
+    )
+    .await;
     seed_reference_image(&state, "asset-no-file", "disc-media", "image/png", None).await;
     let app = build_router_with_auth(state, false);
 
@@ -17124,7 +17141,14 @@ async fn media_generate_refuses_a_source_image_on_a_provider_that_takes_none() {
         })
         .await
         .unwrap();
-    seed_reference_image(&state, "asset-src", "disc-media", "image/png", Some("/tmp/src.png")).await;
+    seed_reference_image(
+        &state,
+        "asset-src",
+        "disc-media",
+        "image/png",
+        Some("/tmp/src.png"),
+    )
+    .await;
     let app = build_router_with_auth(state.clone(), false);
 
     let (status, body) = post_json(
@@ -17155,7 +17179,10 @@ async fn media_generate_refuses_a_source_image_on_a_provider_that_takes_none() {
         })
         .await
         .unwrap();
-    assert_eq!(queued, 0, "a refused generation must not leave a job behind");
+    assert_eq!(
+        queued, 0,
+        "a refused generation must not leave a job behind"
+    );
 }
 
 /// KT-555 — several reference images reach the job, in the order chosen.
@@ -17163,8 +17190,22 @@ async fn media_generate_refuses_a_source_image_on_a_provider_that_takes_none() {
 async fn media_generate_records_every_reference_image_for_an_image() {
     let state = test_state();
     seed_media_connection(&state, Some("google/gemini-3-pro-image"), None).await;
-    seed_reference_image(&state, "asset-a", "disc-media", "image/png", Some("/tmp/a.png")).await;
-    seed_reference_image(&state, "asset-b", "disc-media", "image/jpeg", Some("/tmp/b.jpg")).await;
+    seed_reference_image(
+        &state,
+        "asset-a",
+        "disc-media",
+        "image/png",
+        Some("/tmp/a.png"),
+    )
+    .await;
+    seed_reference_image(
+        &state,
+        "asset-b",
+        "disc-media",
+        "image/jpeg",
+        Some("/tmp/b.jpg"),
+    )
+    .await;
     let app = build_router_with_auth(state.clone(), false);
 
     let (status, body) = post_json(
@@ -17184,9 +17225,7 @@ async fn media_generate_records_every_reference_image_for_an_image() {
 
     let stored = state
         .db
-        .with_read_conn(move |connection| {
-            kronn::db::media_jobs::get(connection, &job_id)
-        })
+        .with_read_conn(move |connection| kronn::db::media_jobs::get(connection, &job_id))
         .await
         .unwrap()
         .expect("the job was written");
@@ -17246,7 +17285,14 @@ async fn deleting_a_generated_asset_stops_its_bubble_offering_it() {
     // reload rather than being patched in the UI.
     let state = test_state();
     seed_media_connection(&state, Some("meta/muse-image"), None).await;
-    seed_reference_image(&state, "asset-produced", "disc-media", "image/png", Some("/tmp/out.png")).await;
+    seed_reference_image(
+        &state,
+        "asset-produced",
+        "disc-media",
+        "image/png",
+        Some("/tmp/out.png"),
+    )
+    .await;
     state
         .db
         .with_conn(|connection| {
@@ -17289,7 +17335,10 @@ async fn deleting_a_generated_asset_stops_its_bubble_offering_it() {
         })
         .await
         .unwrap();
-    assert_eq!(linked, None, "the job must no longer point at a deleted file");
+    assert_eq!(
+        linked, None,
+        "the job must no longer point at a deleted file"
+    );
 }
 
 #[tokio::test]

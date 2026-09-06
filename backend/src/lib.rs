@@ -1571,10 +1571,7 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             "/api/quick-apis/{id}/export",
             get(api::quick_apis::export_qa),
         )
-        .route(
-            "/api/quick-apis/{id}/usage",
-            get(api::quick_apis::usage),
-        )
+        .route("/api/quick-apis/{id}/usage", get(api::quick_apis::usage))
         .route("/api/quick-apis/import", post(api::quick_apis::import_qa))
         // ── Quick Execs (reusable shell-free CLI collectors) ──
         .route(

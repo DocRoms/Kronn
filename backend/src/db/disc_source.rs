@@ -580,26 +580,33 @@ pub fn search_discussions(
          LIMIT ?2",
     )?;
     let rows = stmt.query_map(
-        params![pattern, lim as i64, include_notes, title_allowed, content_allowed, notes_only],
+        params![
+            pattern,
+            lim as i64,
+            include_notes,
+            title_allowed,
+            content_allowed,
+            notes_only
+        ],
         |row| {
             let raw_snip: String = row.get(4)?;
-        let trimmed = if raw_snip.chars().count() > 80 {
-            let cutoff = raw_snip
-                .char_indices()
-                .nth(80)
-                .map(|(i, _)| i)
-                .unwrap_or(raw_snip.len());
-            format!("{}…", &raw_snip[..cutoff])
-        } else {
-            raw_snip
-        };
-        Ok(DiscSearchHit {
-            disc_id: row.get(0)?,
-            title: row.get(1)?,
-            source_agent: row.get(2)?,
-            source_session_id: row.get(3)?,
-            snippet: trimmed,
-        })
+            let trimmed = if raw_snip.chars().count() > 80 {
+                let cutoff = raw_snip
+                    .char_indices()
+                    .nth(80)
+                    .map(|(i, _)| i)
+                    .unwrap_or(raw_snip.len());
+                format!("{}…", &raw_snip[..cutoff])
+            } else {
+                raw_snip
+            };
+            Ok(DiscSearchHit {
+                disc_id: row.get(0)?,
+                title: row.get(1)?,
+                source_agent: row.get(2)?,
+                source_session_id: row.get(3)?,
+                snippet: trimmed,
+            })
         },
     )?;
     let mut out = Vec::new();
@@ -770,7 +777,9 @@ pub fn search_messages(
     }
     // Under `all`, the room NAMED after the term comes before the twenty that
     // merely mention it — the reader is looking for a place, not an occurrence.
-    sql.push_str(" ORDER BY (d.title LIKE ?1 ESCAPE '\\') DESC, m.timestamp DESC, m.sort_order DESC LIMIT ?");
+    sql.push_str(
+        " ORDER BY (d.title LIKE ?1 ESCAPE '\\') DESC, m.timestamp DESC, m.sort_order DESC LIMIT ?",
+    );
     sql.push_str(&(binds.len() + 1).to_string());
     binds.push(Box::new(lim));
     sql.push_str(" OFFSET ?");
@@ -1228,7 +1237,8 @@ mod tests {
     #[test]
     fn search_discussions_matches_title_and_content() {
         let conn = fresh_conn();
-        let hits = search_discussions(&conn, "ClaudeCode", 10, false, DiscSearchScope::All).unwrap();
+        let hits =
+            search_discussions(&conn, "ClaudeCode", 10, false, DiscSearchScope::All).unwrap();
         assert_eq!(hits.len(), 1, "matches the m1 content body");
         assert_eq!(hits[0].disc_id, "d-alpha");
 
@@ -1245,24 +1255,42 @@ mod tests {
         )
         .unwrap();
         assert!(
-            search_discussions(&conn, "private-note-keyword", 10, false, DiscSearchScope::All)
-                .unwrap()
-                .is_empty(),
+            search_discussions(
+                &conn,
+                "private-note-keyword",
+                10,
+                false,
+                DiscSearchScope::All
+            )
+            .unwrap()
+            .is_empty(),
             "notes stay out of default agent search"
         );
         assert_eq!(
-            search_discussions(&conn, "private-note-keyword", 10, true, DiscSearchScope::All)
-                .unwrap()
-                .len(),
+            search_discussions(
+                &conn,
+                "private-note-keyword",
+                10,
+                true,
+                DiscSearchScope::All
+            )
+            .unwrap()
+            .len(),
             1,
             "explicit include_notes reveals note content"
         );
         // KT-580 — scoping to notes opens the channel without the caller also
         // having to say `include_notes`: asking for notes IS asking for notes.
         assert_eq!(
-            search_discussions(&conn, "private-note-keyword", 10, false, DiscSearchScope::Notes)
-                .unwrap()
-                .len(),
+            search_discussions(
+                &conn,
+                "private-note-keyword",
+                10,
+                false,
+                DiscSearchScope::Notes
+            )
+            .unwrap()
+            .len(),
             1,
             "the notes scope reaches them on its own"
         );
@@ -1288,7 +1316,10 @@ mod tests {
         let all = search_messages(
             &conn,
             "partagé entre les deux",
-            &MessageSearchFilters { scope: DiscSearchScope::All, ..Default::default() },
+            &MessageSearchFilters {
+                scope: DiscSearchScope::All,
+                ..Default::default()
+            },
             10,
             0,
         )
@@ -1298,7 +1329,10 @@ mod tests {
         let notes = search_messages(
             &conn,
             "partagé entre les deux",
-            &MessageSearchFilters { scope: DiscSearchScope::Notes, ..Default::default() },
+            &MessageSearchFilters {
+                scope: DiscSearchScope::Notes,
+                ..Default::default()
+            },
             10,
             0,
         )

@@ -240,9 +240,12 @@ mod tests {
 
     #[test]
     fn a_video_model_is_read_from_the_flat_catalogue() {
-        let caps =
-            capabilities_for(&seedance(), "bytedance/seedance-2.0-mini", MediaModality::Video)
-                .expect("the model is in the catalogue");
+        let caps = capabilities_for(
+            &seedance(),
+            "bytedance/seedance-2.0-mini",
+            MediaModality::Video,
+        )
+        .expect("the model is in the catalogue");
         // The launcher offered 3 s and 1080p, which this model rejects, and
         // hid six of the seven ratios it accepts.
         assert_eq!(caps.durations_secs.first(), Some(&4));
@@ -253,7 +256,10 @@ mod tests {
         assert_eq!(caps.aspect_ratios.len(), 7);
         assert_eq!(
             caps.frame_positions,
-            vec![MediaFramePosition::FirstFrame, MediaFramePosition::LastFrame]
+            vec![
+                MediaFramePosition::FirstFrame,
+                MediaFramePosition::LastFrame
+            ]
         );
         assert_eq!(caps.generate_audio, Some(true));
     }
@@ -324,7 +330,8 @@ mod tests {
     #[test]
     fn a_model_advertising_only_a_first_frame_refuses_the_last_one() {
         // 9 of the 28 video models are in exactly this case.
-        let body = json!({"data": [{"id": "alibaba/wan-3.0", "supported_frame_images": ["first_frame"]}]});
+        let body =
+            json!({"data": [{"id": "alibaba/wan-3.0", "supported_frame_images": ["first_frame"]}]});
         let caps = capabilities_for(&body, "alibaba/wan-3.0", MediaModality::Video).unwrap();
         assert!(caps.supports_reference_mode(MediaReferenceMode::FirstFrame));
         assert!(!caps.supports_reference_mode(MediaReferenceMode::LastFrame));

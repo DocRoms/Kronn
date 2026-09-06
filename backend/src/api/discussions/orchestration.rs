@@ -24,9 +24,7 @@ use crate::AppState;
 
 use super::streaming::{run_agent_collect, run_agent_streaming, AgentStreamMeta};
 use super::{configured_agent_global_timeout, AgentStreamEvent, SseStream};
-use crate::api::disc_helpers::{
-    agent_display_name, auth_mode_for,
-};
+use crate::api::disc_helpers::{agent_display_name, auth_mode_for};
 use crate::api::disc_prompts::{
     build_orchestration_prompt, build_synthesis_prompt, OrchestrationContext,
 };

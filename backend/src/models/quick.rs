@@ -970,7 +970,10 @@ mod tests {
     fn template_environment_rendering_preserves_unicode_and_unresolved_references() {
         let values = std::collections::HashMap::from([
             ("__kronn_template_env__API_TOKEN".into(), "été 🦀".into()),
-            ("__kronn_template_env__LEGACY_TOKEN".into(), "héritage".into()),
+            (
+                "__kronn_template_env__LEGACY_TOKEN".into(),
+                "héritage".into(),
+            ),
         ]);
         assert_eq!(
             render_quick_prompt_template(

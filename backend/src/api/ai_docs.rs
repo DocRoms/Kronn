@@ -517,37 +517,183 @@ fn source_text_by_name(name: &str) -> Option<bool> {
 
     if matches!(
         extension,
-        "rs" | "toml" | "lock"
-            | "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" | "mts" | "cts"
-            | "json" | "jsonc" | "json5" | "map"
-            | "css" | "scss" | "sass" | "less" | "styl"
-            | "html" | "htm" | "xml" | "xhtml" | "xsl" | "xslt"
-            | "svg" | "vue" | "svelte" | "astro"
-            | "md" | "mdx" | "markdown" | "rst" | "adoc" | "txt" | "text"
-            | "yml" | "yaml" | "ini" | "cfg" | "conf" | "properties" | "editorconfig"
-            | "py" | "pyi" | "pyx" | "rb" | "go" | "java" | "kt" | "kts" | "scala"
-            | "swift" | "m" | "mm" | "c" | "h" | "cc" | "cpp" | "cxx" | "hpp" | "hh"
-            | "cs" | "php" | "pl" | "pm" | "lua" | "r" | "jl" | "ex" | "exs"
-            | "erl" | "hrl" | "clj" | "cljs" | "cljc" | "dart" | "hs" | "elm" | "nim"
-            | "sh" | "bash" | "zsh" | "fish" | "ps1" | "bat" | "cmd" | "bats"
-            | "sql" | "graphql" | "gql" | "proto" | "thrift"
-            | "tf" | "tfvars" | "hcl" | "nix" | "gradle" | "groovy" | "cmake" | "mk"
-            | "patch" | "diff" | "csv" | "tsv" | "log" | "srt" | "vtt" | "po" | "pot"
+        "rs" | "toml"
+            | "lock"
+            | "ts"
+            | "tsx"
+            | "js"
+            | "jsx"
+            | "mjs"
+            | "cjs"
+            | "mts"
+            | "cts"
+            | "json"
+            | "jsonc"
+            | "json5"
+            | "map"
+            | "css"
+            | "scss"
+            | "sass"
+            | "less"
+            | "styl"
+            | "html"
+            | "htm"
+            | "xml"
+            | "xhtml"
+            | "xsl"
+            | "xslt"
+            | "svg"
+            | "vue"
+            | "svelte"
+            | "astro"
+            | "md"
+            | "mdx"
+            | "markdown"
+            | "rst"
+            | "adoc"
+            | "txt"
+            | "text"
+            | "yml"
+            | "yaml"
+            | "ini"
+            | "cfg"
+            | "conf"
+            | "properties"
+            | "editorconfig"
+            | "py"
+            | "pyi"
+            | "pyx"
+            | "rb"
+            | "go"
+            | "java"
+            | "kt"
+            | "kts"
+            | "scala"
+            | "swift"
+            | "m"
+            | "mm"
+            | "c"
+            | "h"
+            | "cc"
+            | "cpp"
+            | "cxx"
+            | "hpp"
+            | "hh"
+            | "cs"
+            | "php"
+            | "pl"
+            | "pm"
+            | "lua"
+            | "r"
+            | "jl"
+            | "ex"
+            | "exs"
+            | "erl"
+            | "hrl"
+            | "clj"
+            | "cljs"
+            | "cljc"
+            | "dart"
+            | "hs"
+            | "elm"
+            | "nim"
+            | "sh"
+            | "bash"
+            | "zsh"
+            | "fish"
+            | "ps1"
+            | "bat"
+            | "cmd"
+            | "bats"
+            | "sql"
+            | "graphql"
+            | "gql"
+            | "proto"
+            | "thrift"
+            | "tf"
+            | "tfvars"
+            | "hcl"
+            | "nix"
+            | "gradle"
+            | "groovy"
+            | "cmake"
+            | "mk"
+            | "patch"
+            | "diff"
+            | "csv"
+            | "tsv"
+            | "log"
+            | "srt"
+            | "vtt"
+            | "po"
+            | "pot"
     ) {
         return Some(true);
     }
 
     if matches!(
         extension,
-        "png" | "jpg" | "jpeg" | "gif" | "bmp" | "tif" | "tiff" | "webp" | "avif"
-            | "ico" | "icns" | "heic" | "psd" | "pdf"
-            | "zip" | "gz" | "bz2" | "xz" | "zst" | "7z" | "rar" | "tar" | "tgz"
-            | "jar" | "war" | "ear" | "class" | "pyc" | "pyo"
-            | "o" | "a" | "so" | "dylib" | "dll" | "exe" | "bin" | "wasm" | "node"
-            | "db" | "sqlite" | "sqlite3" | "mdb" | "pack"
-            | "mp3" | "wav" | "flac" | "ogg" | "m4a" | "aac"
-            | "mp4" | "mov" | "avi" | "mkv" | "webm" | "wmv" | "flv"
-            | "woff" | "woff2" | "ttf" | "otf" | "eot"
+        "png"
+            | "jpg"
+            | "jpeg"
+            | "gif"
+            | "bmp"
+            | "tif"
+            | "tiff"
+            | "webp"
+            | "avif"
+            | "ico"
+            | "icns"
+            | "heic"
+            | "psd"
+            | "pdf"
+            | "zip"
+            | "gz"
+            | "bz2"
+            | "xz"
+            | "zst"
+            | "7z"
+            | "rar"
+            | "tar"
+            | "tgz"
+            | "jar"
+            | "war"
+            | "ear"
+            | "class"
+            | "pyc"
+            | "pyo"
+            | "o"
+            | "a"
+            | "so"
+            | "dylib"
+            | "dll"
+            | "exe"
+            | "bin"
+            | "wasm"
+            | "node"
+            | "db"
+            | "sqlite"
+            | "sqlite3"
+            | "mdb"
+            | "pack"
+            | "mp3"
+            | "wav"
+            | "flac"
+            | "ogg"
+            | "m4a"
+            | "aac"
+            | "mp4"
+            | "mov"
+            | "avi"
+            | "mkv"
+            | "webm"
+            | "wmv"
+            | "flv"
+            | "woff"
+            | "woff2"
+            | "ttf"
+            | "otf"
+            | "eot"
     ) {
         return Some(false);
     }
@@ -708,7 +854,14 @@ fn walk_exclusions_under(
 ) -> std::collections::HashSet<String> {
     let mut excluded: std::collections::HashSet<String> = user_exclusions.into_iter().collect();
     let mut candidates = Vec::new();
-    collect_source_dirs(dir, rel_prefix, root, &excluded, remaining_depth, &mut candidates);
+    collect_source_dirs(
+        dir,
+        rel_prefix,
+        root,
+        &excluded,
+        remaining_depth,
+        &mut candidates,
+    );
     excluded.extend(git_ignored_paths(root, &candidates));
     excluded
 }
@@ -1335,10 +1488,22 @@ mod tests {
     /// only what it cannot settle is worth an `open()`.
     #[test]
     fn the_name_settles_the_common_cases_without_opening_anything() {
-        for name in ["main.rs", "Cargo.toml", "index.tsx", "README.md", "styles.scss"] {
+        for name in [
+            "main.rs",
+            "Cargo.toml",
+            "index.tsx",
+            "README.md",
+            "styles.scss",
+        ] {
             assert_eq!(source_text_by_name(name), Some(true), "{name}");
         }
-        for name in ["logo.png", "icon.icns", "bundle.wasm", "archive.tar.gz", "font.woff2"] {
+        for name in [
+            "logo.png",
+            "icon.icns",
+            "bundle.wasm",
+            "archive.tar.gz",
+            "font.woff2",
+        ] {
             assert_eq!(source_text_by_name(name), Some(false), "{name}");
         }
     }
@@ -1348,7 +1513,13 @@ mod tests {
     /// precisely the set a source tree is full of.
     #[test]
     fn a_name_without_a_suffix_is_still_answerable() {
-        for name in ["Makefile", "Dockerfile", ".gitignore", ".editorconfig", "LICENSE"] {
+        for name in [
+            "Makefile",
+            "Dockerfile",
+            ".gitignore",
+            ".editorconfig",
+            "LICENSE",
+        ] {
             assert_eq!(source_text_by_name(name), Some(true), "{name}");
         }
         // macOS leaves one of these in every directory it has ever displayed.
@@ -1853,7 +2024,10 @@ mod tests {
         let mut count = 0;
         let tree = build_source_tree(tmp.path(), "", tmp.path(), &mut count, &excluded);
 
-        assert!(tree.iter().any(|node| node.path == "site"), "site/ must be reachable");
+        assert!(
+            tree.iter().any(|node| node.path == "site"),
+            "site/ must be reachable"
+        );
         assert!(
             !tree.iter().any(|node| node.path == ".pnpm-store"),
             "an ignored folder has no business in a source tree",
@@ -1879,8 +2053,14 @@ mod tests {
         let tree = build_source_tree(tmp.path(), "", tmp.path(), &mut count, &excluded);
         let application = tree.iter().find(|node| node.path == "application").unwrap();
 
-        assert!(application.children.iter().any(|node| node.name == "local.rules"));
-        assert!(application.children.iter().any(|node| node.name == "tracked.rules"));
+        assert!(application
+            .children
+            .iter()
+            .any(|node| node.name == "local.rules"));
+        assert!(application
+            .children
+            .iter()
+            .any(|node| node.name == "tracked.rules"));
     }
 
     /// A folder the human excluded by hand still wins, and its subtree is not
@@ -1909,7 +2089,13 @@ mod tests {
         touch(&tmp.path().join("site/assets/logo.svg"));
         touch(&tmp.path().join("backend/src/main.rs"));
 
-        let excluded = walk_exclusions_under(tmp.path(), &tmp.path().join("site"), "site", Some(0), Vec::new());
+        let excluded = walk_exclusions_under(
+            tmp.path(),
+            &tmp.path().join("site"),
+            "site",
+            Some(0),
+            Vec::new(),
+        );
         let mut count = 0;
         let tree = build_source_tree_with_depth(
             &tmp.path().join("site"),
@@ -1949,13 +2135,21 @@ mod tests {
 
         let link = tmp.path().join("escape");
         let metadata = link.symlink_metadata().unwrap();
-        assert!(metadata.file_type().is_symlink(), "the setup must really be a link");
+        assert!(
+            metadata.file_type().is_symlink(),
+            "the setup must really be a link"
+        );
 
         // And what the handler checks: the resolved directory has to stay under
         // the resolved root.
         let real_root = tmp.path().canonicalize().unwrap();
         assert!(!link.canonicalize().unwrap().starts_with(&real_root));
-        assert!(tmp.path().join("site").canonicalize().unwrap().starts_with(&real_root));
+        assert!(tmp
+            .path()
+            .join("site")
+            .canonicalize()
+            .unwrap()
+            .starts_with(&real_root));
     }
 
     /// A folder path is checked on every component, unlike a file path whose
@@ -1997,7 +2191,8 @@ mod tests {
         let dir = tmp.path().join("site");
         let excluded = walk_exclusions_under(tmp.path(), &dir, "site", Some(0), Vec::new());
         let mut count = 0;
-        let tree = build_source_tree_with_depth(&dir, "site", tmp.path(), &mut count, &excluded, Some(0));
+        let tree =
+            build_source_tree_with_depth(&dir, "site", tmp.path(), &mut count, &excluded, Some(0));
 
         let names: Vec<_> = tree.iter().map(|node| node.path.as_str()).collect();
         assert_eq!(names, vec!["site/en.html"]);

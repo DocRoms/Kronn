@@ -744,8 +744,8 @@ fn agent_start_failure_outcome(agent_type: &AgentType, error: &str) -> AgentExec
     // deferring it is pure repetition: issue 201 logged the same refusal 282
     // times, once every 30 s, and diagnosed nothing. Both wordings are matched
     // — Kronn's own pre-spawn check, and the OS message if one slips past it.
-    let deterministic_nul_byte = error.contains("contains a NUL byte")
-        || error.contains("nul byte found in provided data");
+    let deterministic_nul_byte =
+        error.contains("contains a NUL byte") || error.contains("nul byte found in provided data");
     if matches!(
         agent_type,
         AgentType::LiteLlm | AgentType::Nvidia | AgentType::Ollama | AgentType::Custom
@@ -1379,7 +1379,9 @@ fn messages_not_yet_seen(
     messages: &[crate::models::DiscussionMessage],
     last_seen: &str,
 ) -> Option<Vec<crate::models::DiscussionMessage>> {
-    let position = messages.iter().position(|message| message.id == last_seen)?;
+    let position = messages
+        .iter()
+        .position(|message| message.id == last_seen)?;
     let unseen = &messages[position + 1..];
     (!unseen.is_empty()).then(|| unseen.to_vec())
 }
@@ -2445,8 +2447,7 @@ async fn make_agent_stream_inner(
     // KT-562 — the same discussion, re-narrated in full at every turn, is what
     // made Kronn slower than the same CLI driven by hand. Continue the
     // conversation the CLI already holds whenever that can be proven safe.
-    let acp_session_store =
-        runner::AcpSessionStore::new(state.db.clone(), discussion_id.clone());
+    let acp_session_store = runner::AcpSessionStore::new(state.db.clone(), discussion_id.clone());
     let (prompt, cli_resume_id) = resume_with_delta_if_possible(
         &acp_session_store,
         &agent_type,
@@ -3581,10 +3582,9 @@ async fn make_agent_stream_inner(
                         // HERE and not at the start of the turn: a turn that
                         // dies before this point must be replayed in full, not
                         // silently skipped over.
-                        if let Ok(scope) = runner::resolve_agent_work_dir(
-                            workspace_path.as_deref(),
-                            &project_path,
-                        ) {
+                        if let Ok(scope) =
+                            runner::resolve_agent_work_dir(workspace_path.as_deref(), &project_path)
+                        {
                             if let Err(error) = acp_session_store
                                 .record_cli_print_progress(&agent_type, &scope, &agent_msg.id)
                                 .await

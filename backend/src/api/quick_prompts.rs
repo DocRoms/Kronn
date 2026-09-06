@@ -538,7 +538,10 @@ pub async fn batch_run(
         (secret, config.server.execution_variable_retention_days)
     };
     let effective_project = req.project_id.clone().or(qp.project_id.clone());
-    let workspace_mode = req.workspace_mode.clone().unwrap_or_else(|| "Direct".into());
+    let workspace_mode = req
+        .workspace_mode
+        .clone()
+        .unwrap_or_else(|| "Direct".into());
 
     // Safety: Isolated mode needs a project (git repo) to worktree against.
     // Checked BEFORE the variables are prepared, because preparing them writes

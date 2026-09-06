@@ -1683,7 +1683,10 @@ mod tests {
             })],
             "ses_live",
         );
-        assert!(events.is_empty(), "reasoning leaked into the reply: {events:?}");
+        assert!(
+            events.is_empty(),
+            "reasoning leaked into the reply: {events:?}"
+        );
     }
 
     /// A runtime that does not label its chunks keeps the behaviour it had.
@@ -1710,13 +1713,19 @@ mod tests {
         });
         assert_eq!(
             usage_from_prompt_result(&result),
-            Some(AcpSessionEvent::Usage { input_tokens: 6126, output_tokens: 28 }),
+            Some(AcpSessionEvent::Usage {
+                input_tokens: 6126,
+                output_tokens: 28
+            }),
         );
     }
 
     #[test]
     fn a_response_without_usage_reports_none() {
-        assert_eq!(usage_from_prompt_result(&json!({"stopReason": "end_turn"})), None);
+        assert_eq!(
+            usage_from_prompt_result(&json!({"stopReason": "end_turn"})),
+            None
+        );
         assert_eq!(
             usage_from_prompt_result(&json!({"usage": {"inputTokens": 0, "outputTokens": 0}})),
             None,

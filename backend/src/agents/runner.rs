@@ -1347,7 +1347,6 @@ fn cli_authored_error_text(json: &serde_json::Value) -> Option<String> {
     (!text.trim().is_empty()).then_some(text)
 }
 
-
 /// Result of parsing a single stream-json line
 #[derive(Debug)]
 pub enum StreamJsonEvent {
@@ -8934,9 +8933,7 @@ fn nul_byte_offender(command: &tokio::process::Command) -> Option<String> {
     // have broken every other spawn on the host.
     command
         .get_envs()
-        .find(|(key, value)| {
-            os_str_is_nul_bearing(key) || value.is_some_and(os_str_is_nul_bearing)
-        })
+        .find(|(key, value)| os_str_is_nul_bearing(key) || value.is_some_and(os_str_is_nul_bearing))
         .map(|(key, _)| format!("environment variable {}", key.to_string_lossy()))
 }
 

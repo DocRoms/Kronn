@@ -16577,11 +16577,9 @@ mod tests {
         // The record exists and is the canonical payload.
         let stored = {
             let exec_id = exec_id.clone();
-            db.with_conn(move |conn| {
-                crate::db::delivery_summaries::get(conn, &exec_id, attempt_no)
-            })
-            .await
-            .unwrap()
+            db.with_conn(move |conn| crate::db::delivery_summaries::get(conn, &exec_id, attempt_no))
+                .await
+                .unwrap()
         };
         let stored = stored.expect("the report is backed by a persisted record");
         assert_eq!(

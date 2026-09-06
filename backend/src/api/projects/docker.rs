@@ -388,7 +388,8 @@ fn with_port(url: &str, published: u16) -> Option<String> {
         .rsplit_once(':')
         .filter(|(_, port)| port.parse::<u16>().is_ok())
         .map_or(authority, |(host, _)| host);
-    let default_port = (scheme == "https" && published == 443) || (scheme == "http" && published == 80);
+    let default_port =
+        (scheme == "https" && published == 443) || (scheme == "http" && published == 80);
     Some(if default_port {
         format!("{scheme}://{host}{path}")
     } else {
@@ -1024,9 +1025,11 @@ mod tests {
     /// (`${HTTPS_PORT:-443}:443`) makes the configured value a default, not a
     /// fact. Several projects on one machine take turns on 443; the rest land
     /// on 8443 and the link must follow.
-    fn configured_with(name: &str, urls: &[&str], target_port: Option<u16>)
-        -> ConfiguredDockerService
-    {
+    fn configured_with(
+        name: &str,
+        urls: &[&str],
+        target_port: Option<u16>,
+    ) -> ConfiguredDockerService {
         ConfiguredDockerService {
             name: name.to_string(),
             endpoints: urls
@@ -1049,7 +1052,11 @@ mod tests {
           "Publishers":[{"URL":"0.0.0.0","TargetPort":443,"PublishedPort":8443,"Protocol":"tcp"}]}]"#;
         let services = parse_services(
             output,
-            &[configured_with("php", &["https://fr.docroms.me"], Some(443))],
+            &[configured_with(
+                "php",
+                &["https://fr.docroms.me"],
+                Some(443),
+            )],
         )
         .unwrap();
 
@@ -1063,7 +1070,11 @@ mod tests {
           "Publishers":[{"URL":"0.0.0.0","TargetPort":443,"PublishedPort":443,"Protocol":"tcp"}]}]"#;
         let services = parse_services(
             output,
-            &[configured_with("php", &["https://fr.docroms.me"], Some(443))],
+            &[configured_with(
+                "php",
+                &["https://fr.docroms.me"],
+                Some(443),
+            )],
         )
         .unwrap();
 
@@ -1090,7 +1101,11 @@ mod tests {
           ]}]"#;
         let services = parse_services(
             output,
-            &[configured_with("php", &["https://fr.docroms.me"], Some(443))],
+            &[configured_with(
+                "php",
+                &["https://fr.docroms.me"],
+                Some(443),
+            )],
         )
         .unwrap();
 
@@ -1106,7 +1121,11 @@ mod tests {
           "Publishers":[{"URL":"","TargetPort":443,"PublishedPort":0,"Protocol":"tcp"}]}]"#;
         let services = parse_services(
             output,
-            &[configured_with("php", &["https://fr.docroms.me"], Some(443))],
+            &[configured_with(
+                "php",
+                &["https://fr.docroms.me"],
+                Some(443),
+            )],
         )
         .unwrap();
 
@@ -1119,7 +1138,11 @@ mod tests {
           "Publishers":[{"URL":"0.0.0.0","TargetPort":8080,"PublishedPort":3615,"Protocol":"tcp"}]}]"#;
         let services = parse_services(
             output,
-            &[configured_with("web", &["http://localhost:8080"], Some(8080))],
+            &[configured_with(
+                "web",
+                &["http://localhost:8080"],
+                Some(8080),
+            )],
         )
         .unwrap();
 
@@ -1159,7 +1182,11 @@ mod tests {
         let output = r#"[{"Service":"php","Name":"demo-php-1","State":"exited"}]"#;
         let services = parse_services(
             output,
-            &[configured_with("php", &["https://fr.docroms.me"], Some(443))],
+            &[configured_with(
+                "php",
+                &["https://fr.docroms.me"],
+                Some(443),
+            )],
         )
         .unwrap();
 
@@ -1175,11 +1202,18 @@ mod tests {
           "Publishers":[{"URL":"0.0.0.0","TargetPort":443,"PublishedPort":8443,"Protocol":"tcp"}]}]"#;
         let services = parse_services(
             output,
-            &[configured_with("php", &["https://fr.docroms.me/app"], Some(443))],
+            &[configured_with(
+                "php",
+                &["https://fr.docroms.me/app"],
+                Some(443),
+            )],
         )
         .unwrap();
 
-        assert_eq!(services[0].endpoints[0].url, "https://fr.docroms.me:8443/app");
+        assert_eq!(
+            services[0].endpoints[0].url,
+            "https://fr.docroms.me:8443/app"
+        );
     }
 
     /// A publisher for another container port says nothing about this URL.
@@ -1189,7 +1223,11 @@ mod tests {
           "Publishers":[{"URL":"0.0.0.0","TargetPort":9000,"PublishedPort":9001,"Protocol":"tcp"}]}]"#;
         let services = parse_services(
             output,
-            &[configured_with("php", &["https://fr.docroms.me"], Some(443))],
+            &[configured_with(
+                "php",
+                &["https://fr.docroms.me"],
+                Some(443),
+            )],
         )
         .unwrap();
 

@@ -1485,7 +1485,11 @@ mod tests {
         note.content = "avant".into();
         insert_note_message(&conn, "note-trail", &note).unwrap();
         let written_at: String = conn
-            .query_row("SELECT timestamp FROM messages WHERE id = 'note-2'", [], |row| row.get(0))
+            .query_row(
+                "SELECT timestamp FROM messages WHERE id = 'note-2'",
+                [],
+                |row| row.get(0),
+            )
             .unwrap();
 
         revise_note_message(&conn, "note-trail", "note-2", "après").unwrap();
@@ -1501,7 +1505,11 @@ mod tests {
 
         // When it was written does not change because it was corrected.
         let after: String = conn
-            .query_row("SELECT timestamp FROM messages WHERE id = 'note-2'", [], |row| row.get(0))
+            .query_row(
+                "SELECT timestamp FROM messages WHERE id = 'note-2'",
+                [],
+                |row| row.get(0),
+            )
             .unwrap();
         assert_eq!(after, written_at);
     }
