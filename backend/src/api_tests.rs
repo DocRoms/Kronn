@@ -68,6 +68,38 @@ mod tests {
         (status, json)
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn source_directory_http_refuses_a_symlink_outside_the_project() {
+        let root = tempfile::TempDir::new().unwrap();
+        let outside = tempfile::TempDir::new().unwrap();
+        std::fs::write(outside.path().join("private-source.rs"), "fn outside() {}\n").unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.path().join("linked")).unwrap();
+        let state = test_state();
+        let path = root.path().to_string_lossy().into_owned();
+        state
+            .db
+            .with_conn(move |conn| {
+                conn.execute(
+                    "INSERT INTO projects (id,name,path,created_at,updated_at)
+                     VALUES ('source-jail','Source jail',?1,'now','now')",
+                    [path],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let request = Request::builder()
+            .uri("/api/projects/source-jail/source-files?shallow=true&path=linked")
+            .body(Body::empty())
+            .unwrap();
+        let (_, response) = send(state, false, request).await;
+        assert_eq!(
+            response["success"], false,
+            "the requested directory must obey the project jail: {response}"
+        );
+    }
+
     #[tokio::test]
     async fn discussion_questions_http_answer_is_durable_idempotent_and_counted() {
         let state = test_state();

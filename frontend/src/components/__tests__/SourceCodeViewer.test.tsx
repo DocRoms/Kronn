@@ -330,6 +330,8 @@ describe('SourceCodeViewer', () => {
     // Only now, and the file it pointed at is really in the tree.
     await waitFor(() => expect(asked).toContain('src/nested'));
     expect(await screen.findByText('deep.ts')).toBeInTheDocument();
+    expect(asked.filter(path => path === 'src')).toHaveLength(1);
+    expect(asked.filter(path => path === 'src/nested')).toHaveLength(1);
   });
 
   /// KT-605, review @codex-cli-4 — removing the ceiling from the TREE left it
