@@ -1053,6 +1053,8 @@ const zh: TranslationDict = {
   "disc.media.estimate": "预计费用：{0} 美元（基于 {1} 次已计费生成）",
   "disc.media.estimateUnknown": "费用未知：该模型尚无已计费的生成",
   "disc.media.generate": "生成",
+  "disc.media.generateFromImage.image": "基于此图片生成图像",
+  "disc.media.generateFromImage.video": "基于此图片生成视频",
   "disc.media.generateAudio": "生成音频",
   "disc.media.frame.last_frame": "末帧",
   "disc.media.frame.first_frame": "首帧",

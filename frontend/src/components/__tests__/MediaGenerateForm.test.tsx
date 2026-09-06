@@ -131,6 +131,24 @@ describe('MediaGenerateForm', () => {
     ).toBeInTheDocument();
   });
 
+  it('does not launch on mount or submit twice from synchronous clicks', async () => {
+    let resolveGeneration!: (value: { job_id: string; status: string; model: string; discussion_id: string; message_id: string }) => void;
+    mediaApi.generate.mockReturnValue(new Promise(resolve => { resolveGeneration = resolve; }));
+    render(<MediaGenerateForm discussionId="d-1" connections={[connection()]} t={t} />);
+
+    expect(mediaApi.generate).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'a lighthouse' } });
+    const submit = screen.getByRole('button', { name: /disc\.media\.generate/ });
+    fireEvent.click(submit);
+    fireEvent.click(submit);
+    expect(mediaApi.generate).toHaveBeenCalledTimes(1);
+
+    resolveGeneration({
+      job_id: 'job-1', status: 'pending', model: 'image-model', discussion_id: 'd-1', message_id: 'msg-1',
+    });
+    await waitFor(() => expect(screen.getByText('disc.media.launched:image-model')).toBeInTheDocument());
+  });
+
   it('shows the price of the click, and says so when there is none', async () => {
     const { unmount } = render(
       <MediaGenerateForm discussionId="d-1" connections={[connection()]} t={t} />,
@@ -172,6 +190,25 @@ describe('MediaGenerateForm', () => {
     expect(screen.queryByText('disc.media.duration')).toBeNull();
     fireEvent.click(screen.getByTestId('media-slot-vid-only:video'));
     await waitFor(() => expect(screen.getByText('disc.media.duration')).toBeInTheDocument());
+  });
+
+  it('keeps a viewer-selected image attached until the selected model capabilities arrive', async () => {
+    let resolveCapabilities!: (value: { model: string; capabilities: { max_input_references: number } }) => void;
+    mediaApi.capabilities.mockReturnValue(new Promise(resolve => { resolveCapabilities = resolve; }));
+    render(
+      <MediaGenerateForm
+        discussionId="d-1"
+        connections={[connection()]}
+        images={[{ id: 'asset-1', filename: 'source.png' } as never]}
+        initialSlotKey="conn-1:image"
+        initialReference={{ assetId: 'asset-1', mode: 'reference' }}
+        t={t}
+      />,
+    );
+
+    expect(screen.queryByTestId('media-reference-picker')).toBeNull();
+    resolveCapabilities({ model: 'image-model', capabilities: { max_input_references: 1 } });
+    expect(await screen.findByTestId('media-reference-picker')).toHaveTextContent('source.png');
   });
 
   it('shows each aspect ratio as a shape, not just as arithmetic', async () => {

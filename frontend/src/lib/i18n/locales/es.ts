@@ -1068,6 +1068,8 @@ const es: TranslationDict = {
   'disc.media.estimate': 'Coste estimado: {0} $ (sobre {1} generación(es) facturada(s))',
   'disc.media.estimateUnknown': 'Coste desconocido: ninguna generación facturada para este modelo',
   'disc.media.generate': 'Generar',
+  'disc.media.generateFromImage.image': 'Generar una imagen a partir de esta imagen',
+  'disc.media.generateFromImage.video': 'Generar un vídeo a partir de esta imagen',
   'disc.media.generateAudio': 'Generar el audio',
   'disc.media.frame.last_frame': 'Última imagen',
   'disc.media.frame.first_frame': 'Primera imagen',

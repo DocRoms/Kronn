@@ -8,7 +8,10 @@ const { discussionsApi } = vi.hoisted(() => ({
   discussionsApi: { contextFileBlob: vi.fn() },
 }));
 
-vi.mock('../../lib/api', () => ({ discussions: discussionsApi }));
+vi.mock('../../lib/api', () => ({
+  discussions: discussionsApi,
+  media: { capabilities: vi.fn() },
+}));
 
 import { MessageAttachments } from '../MessageAttachments';
 
