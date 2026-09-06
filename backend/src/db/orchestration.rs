@@ -245,6 +245,7 @@ pub(crate) fn agent_type_from_db(s: &str) -> Result<AgentType> {
     Ok(match s {
         "ClaudeCode" => AgentType::ClaudeCode,
         "Codex" => AgentType::Codex,
+        "OpenCode" => AgentType::OpenCode,
         "Vibe" => AgentType::Vibe,
         "GeminiCli" => AgentType::GeminiCli,
         "Kiro" => AgentType::Kiro,

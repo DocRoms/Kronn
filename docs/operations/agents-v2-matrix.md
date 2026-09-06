@@ -72,6 +72,12 @@ or change session-resume and pricing limitations.
 [src: file: backend/src/api/disc_prompts.rs:391]
 [src: file: backend/src/agents/runner.rs:3764]
 
+The orchestration database must also read back every native provider name it
+writes. OpenCode launch, reload and idempotent replay are covered as one native
+execution, with no fallback to Custom; unknown provider strings remain errors.
+[src: file: backend/src/db/orchestration.rs:244]
+[src: file: backend/src/db/orchestration_tests.rs:3029]
+
 ## Known asymmetries
 
 These are real, deliberate, and the reason two agents can behave differently on

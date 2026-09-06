@@ -3026,6 +3026,62 @@ fn planning_task_events_accept_backend_actor_after_widening() {
 // ─── KT-318 socle: worker identity contract + attempt_no ──────────────────────
 
 #[test]
+fn every_worker_provider_db_name_round_trips_without_custom_fallback() {
+    for agent in [
+        AgentType::ClaudeCode,
+        AgentType::Codex,
+        AgentType::OpenCode,
+        AgentType::Vibe,
+        AgentType::GeminiCli,
+        AgentType::Kiro,
+        AgentType::CopilotCli,
+        AgentType::Ollama,
+        AgentType::LiteLlm,
+        AgentType::Nvidia,
+        AgentType::Custom,
+    ] {
+        let stored = agent_type_to_db(&agent);
+        assert_eq!(agent_type_from_db(&stored).unwrap(), agent, "{stored}");
+    }
+    assert!(agent_type_from_db("unrecognised-provider").is_err());
+}
+
+#[test]
+fn opencode_worker_launch_reload_and_replay_keep_one_native_execution() {
+    let conn = setup();
+    seed_task(&conn, "t-opencode", 1);
+    let mut input = LaunchSingleTaskInput::new("t-opencode", DISC);
+    input.worker_target_kind = Some(MessageTargetKind::Agent);
+    input.worker_agent_type = Some(agent_type_to_db(&AgentType::OpenCode));
+    input.idempotency_key = Some("opencode-launch".into());
+
+    let first = launch_single_task(&conn, &input, &backend_actor()).unwrap();
+    let loaded = get_task_execution(&conn, &first.execution.id)
+        .unwrap()
+        .unwrap();
+    let active = get_active_execution_for_task(&conn, "t-opencode")
+        .unwrap()
+        .unwrap();
+    let replay = launch_single_task(&conn, &input, &backend_actor()).unwrap();
+
+    assert_eq!(loaded.worker_agent_type.as_deref(), Some("OpenCode"));
+    assert_eq!(loaded.worker_target_kind, Some(MessageTargetKind::Agent));
+    assert_eq!(loaded.worker_cli_session_id, None);
+    assert_eq!(loaded.worker_connection_id, None);
+    assert_eq!(loaded.id, active.id);
+    assert_eq!(loaded.id, replay.execution.id);
+    assert_eq!(first.run.id, replay.run.id);
+    assert!(!first.deduplicated);
+    assert!(replay.deduplicated);
+    let counts: (i64, i64) = conn.query_row(
+        "SELECT (SELECT COUNT(*) FROM orchestration_runs), (SELECT COUNT(*) FROM task_executions)",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    ).unwrap();
+    assert_eq!(counts, (1, 1));
+}
+
+#[test]
 fn worker_identity_round_trips_all_kinds_and_two_clis_stay_distinct() {
     use MessageTargetKind::*;
     let conn = setup();
