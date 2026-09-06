@@ -13,11 +13,13 @@ use chrono::{DateTime, Utc};
 use rusqlite::OptionalExtension;
 
 use crate::delivery::{
-    DeliveryChange, DeliveryCommit, DeliveryDocumentation, DeliveryMetrics, DeliverySummaryError,
-    DeliverySummaryInput, DeliverySummaryV1, DeliveryValidation,
+    DeliveryChange, DeliveryCommit, DeliveryDocumentation, DeliveryMetrics,
+    DeliveryPrincipalVerification, DeliverySummaryError, DeliverySummaryInput, DeliverySummaryV1,
+    DeliveryValidation,
 };
 use crate::models::{
-    DeliveryManifestV1, FileChangeKind, MessageTargetKind, TaskExecution, TestStatus,
+    DeliveryManifestV1, FileChangeKind, MessageTargetKind, ReviewDecisionV1, ReviewDodVerification,
+    TaskExecution, TestStatus,
 };
 
 /// Facts about the execution that the manifest cannot be trusted for: who
@@ -112,6 +114,11 @@ pub fn summary_from_manifest(
     execution_id: &str,
     manifest: &DeliveryManifestV1,
     facts: &ExecutionFacts,
+    // KT-613 — what the principal verified itself during the review that
+    // accepted this delivery. Empty when the review added none; the report then
+    // says nothing about principal evidence rather than implying its absence
+    // means the work is unverified.
+    principal_verifications: &[ReviewDodVerification],
     now: DateTime<Utc>,
 ) -> Result<DeliverySummaryV1, DeliverySummaryError> {
     let changes = manifest
@@ -202,6 +209,14 @@ pub fn summary_from_manifest(
             commit,
             validations,
             documentation,
+            principal_verifications: principal_verifications
+                .iter()
+                .map(|verification| DeliveryPrincipalVerification {
+                    dod_id: verification.dod_id.clone(),
+                    met: verification.met,
+                    evidence: verification.evidence.clone(),
+                })
+                .collect(),
             attention_points,
             metrics: DeliveryMetrics {
                 duration_ms: facts.duration_ms,
@@ -230,7 +245,7 @@ pub async fn publish_accepted_delivery(
     let attempt_no = execution.attempt_no;
     let task_id = execution.task_id.clone();
 
-    let (delivery, task, assignment_started_at) = db
+    let (delivery, task, assignment_started_at, review) = db
         .with_conn(move |conn| {
             let delivery =
                 crate::db::worker_deliveries::get_delivery(conn, &execution_id, attempt_no)?;
@@ -243,7 +258,9 @@ pub async fn publish_accepted_delivery(
                     |row| row.get(0),
                 )
                 .optional()?;
-            Ok((delivery, task, assignment_started_at))
+            let review = crate::db::worker_reviews::get_review(conn, &execution_id, attempt_no)?
+                .map(|row| row.decision_json);
+            Ok((delivery, task, assignment_started_at, review))
         })
         .await?;
 
@@ -264,11 +281,20 @@ pub async fn publish_accepted_delivery(
     let duration_ms = (delivered_at - started_at).num_milliseconds().max(0) as u64;
 
     let facts = ExecutionFacts::from_execution(execution, duration_ms);
+    // KT-613 — the review that accepted THIS attempt, and only it. A decision
+    // that failed to parse leaves the report without principal evidence rather
+    // than without a report: publication is total once a delivery is accepted.
+    let principal_verifications = review
+        .as_deref()
+        .and_then(|json| serde_json::from_str::<ReviewDecisionV1>(json).ok())
+        .map(|decision| decision.dod_verifications)
+        .unwrap_or_default();
     let summary = summary_from_manifest(
         &task.summary.reference,
         &execution.id,
         &manifest,
         &facts,
+        &principal_verifications,
         delivered_at,
     )?;
 
@@ -372,6 +398,154 @@ mod tests {
         }
     }
 
+    fn verification(dod_id: &str, met: bool, evidence: &str) -> ReviewDodVerification {
+        ReviewDodVerification {
+            dod_id: dod_id.to_owned(),
+            met,
+            evidence: evidence.to_owned(),
+        }
+    }
+
+    /// KT-613 — the defect, reproduced on KT-611 and then on KT-612: the
+    /// principal ran the browser checks, they passed, and the durable report
+    /// still said the worker had skipped them and that validation remained to
+    /// be done. Six months later that report is all anyone has.
+    #[test]
+    fn the_report_carries_what_the_principal_verified_itself() {
+        let summary = summary_from_manifest(
+            "KT-612",
+            "exec-1",
+            &manifest(),
+            &facts(),
+            &[
+                verification("dod-1", true, "4 Chromium tests, 0 retry, 1.3 min"),
+                verification("dod-2", true, "36 tour unit tests pass"),
+            ],
+            at("2026-09-01T10:00:00Z"),
+        )
+        .expect("a complete manifest must produce a summary");
+
+        assert_eq!(summary.principal_verifications.len(), 2);
+        assert_eq!(summary.principal_verifications[0].dod_id, "dod-1");
+        assert!(summary.principal_verifications[0].met);
+        assert_eq!(
+            summary.principal_verifications[0].evidence,
+            "4 Chromium tests, 0 retry, 1.3 min"
+        );
+
+        let report = summary.render_markdown();
+        assert!(
+            report.contains("### Verified by the principal at review"),
+            "{report}"
+        );
+        assert!(
+            report.contains("4 Chromium tests, 0 retry, 1.3 min"),
+            "{report}"
+        );
+    }
+
+    /// And it must not rewrite the worker's own record while doing it. "The
+    /// worker could not start Chromium" stays true after the principal ran it;
+    /// turning that `skipped` into a `pass` would put a claim in the worker's
+    /// mouth that it never made.
+    #[test]
+    fn principal_evidence_never_rewrites_what_the_worker_reported() {
+        let mut with_skip = manifest();
+        with_skip.tests = vec![crate::models::ManifestTest {
+            name: "Chromium E2E".into(),
+            status: TestStatus::Skipped,
+            evidence: Some("no browser in this worktree".into()),
+        }];
+
+        let summary = summary_from_manifest(
+            "KT-612",
+            "exec-1",
+            &with_skip,
+            &facts(),
+            &[verification("dod-1", true, "principal ran them: 4 PASS")],
+            at("2026-09-01T10:00:00Z"),
+        )
+        .expect("a complete manifest must produce a summary");
+
+        // The worker's line is untouched, verdict and evidence both.
+        assert_eq!(summary.validations.len(), 1);
+        assert_eq!(summary.validations[0].result, "skipped");
+        assert_eq!(
+            summary.validations[0].evidence,
+            "no browser in this worktree"
+        );
+        // And the principal's sits beside it, not on top of it.
+        assert_eq!(summary.principal_verifications.len(), 1);
+
+        let report = summary.render_markdown();
+        assert!(report.contains("→ skipped"), "{report}");
+        assert!(report.contains("principal ran them: 4 PASS"), "{report}");
+    }
+
+    /// A review that added no evidence of its own must produce no section at
+    /// all. An empty heading reads as "the principal checked nothing", which is
+    /// a claim; silence is the absence.
+    #[test]
+    fn a_review_without_its_own_evidence_says_nothing_about_it() {
+        let summary = summary_from_manifest(
+            "KT-544",
+            "exec-1",
+            &manifest(),
+            &facts(),
+            &[],
+            at("2026-09-01T10:00:00Z"),
+        )
+        .expect("a complete manifest must produce a summary");
+
+        assert!(summary.principal_verifications.is_empty());
+        let report = summary.render_markdown();
+        assert!(
+            !report.contains("Verified by the principal"),
+            "an absent verification must not be announced: {report}"
+        );
+    }
+
+    /// A verdict the principal reached is reported as it stands, including a
+    /// `not met` on an approved delivery — a review may accept work while
+    /// recording that one item is still open.
+    #[test]
+    fn an_unmet_item_verified_by_the_principal_is_reported_as_unmet() {
+        let summary = summary_from_manifest(
+            "KT-544",
+            "exec-1",
+            &manifest(),
+            &facts(),
+            &[verification("dod-3", false, "documentation still missing")],
+            at("2026-09-01T10:00:00Z"),
+        )
+        .expect("a complete manifest must produce a summary");
+
+        assert!(!summary.principal_verifications[0].met);
+        let report = summary.render_markdown();
+        assert!(report.contains("`dod-3` → not met"), "{report}");
+    }
+
+    /// Publication is idempotent on the decision: the same review evidence
+    /// replayed must yield byte-identical canonical JSON, or a retry after a
+    /// lost response would look like a second, different report.
+    #[test]
+    fn replaying_the_same_review_produces_the_same_report() {
+        let evidence = [verification("dod-1", true, "4 Chromium tests pass")];
+        let build = || {
+            summary_from_manifest(
+                "KT-612",
+                "exec-1",
+                &manifest(),
+                &facts(),
+                &evidence,
+                at("2026-09-01T10:00:00Z"),
+            )
+            .expect("a complete manifest must produce a summary")
+        };
+
+        assert_eq!(build().canonical_json(), build().canonical_json());
+    }
+
     #[test]
     fn identity_comes_from_the_execution_not_from_the_payload() {
         let summary = summary_from_manifest(
@@ -379,6 +553,7 @@ mod tests {
             "exec-1",
             &manifest(),
             &facts(),
+            &[],
             at("2026-09-01T10:00:00Z"),
         )
         .expect("a complete manifest must produce a summary");
@@ -401,6 +576,7 @@ mod tests {
             "exec-1",
             &manifest(),
             &facts(),
+            &[],
             at("2026-09-01T10:00:00Z"),
         )
         .unwrap();
@@ -448,6 +624,7 @@ mod tests {
             "exec-1",
             &without,
             &facts(),
+            &[],
             at("2026-09-01T10:00:00Z"),
         )
         .expect("an accepted delivery must always get its report");
@@ -474,6 +651,7 @@ mod tests {
             "exec-1",
             &manifest(),
             &facts(),
+            &[],
             at("2026-09-01T10:00:00Z"),
         )
         .unwrap();
@@ -495,6 +673,7 @@ mod tests {
             "exec-1",
             &no_commit,
             &facts(),
+            &[],
             at("2026-09-01T10:00:00Z"),
         )
         .expect("an absent commit is reportable, not fatal");
@@ -511,6 +690,7 @@ mod tests {
             "exec-1",
             &manifest(),
             &facts(),
+            &[],
             at("2026-09-01T10:00:00Z"),
         )
         .unwrap();
@@ -535,6 +715,7 @@ mod tests {
             "exec-1",
             &manifest(),
             &facts(),
+            &[],
             at("2026-09-01T10:00:00Z"),
         )
         .unwrap();

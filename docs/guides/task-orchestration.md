@@ -134,6 +134,37 @@ principal approval without attempt-scoped evidence are all insufficient. This
 keeps local workers useful without asking the model that produced the change to
 be its own quality gate.
 
+### What the accepted report says, and whose word it is
+
+The published report keeps two records apart, because they answer different
+questions.
+
+**Validations** are the worker's own: the commands it ran, and what it honestly
+could not run. A worker with no browser in its worktree reports its Chromium
+checks as `skipped`, and that stays `skipped` in the report for good. Approval
+does not turn it into a `pass`; the worker never claimed one.
+
+**Verified by the principal at review** is the evidence the reviewer produced
+itself, from `dod_verifications` on the approving decision, addressed to the DoD
+items by their opaque ids. It appears only when the review supplied some. A
+review that added no evidence of its own produces no such section — an empty
+heading would read as "the principal checked nothing", which is a claim rather
+than an absence.
+
+A verdict is reported as it stands, including `not met`: a review may accept a
+delivery while recording that one item is still open.
+
+The limits worth knowing:
+
+- The report is derived once, from the review that accepted the attempt. A later
+  validation is not folded back into it; it belongs to the room, or to a new
+  attempt.
+- A decision that cannot be parsed leaves the report without principal evidence
+  rather than without a report. Publication is total once a delivery is
+  accepted, so a broken decision degrades the report instead of suppressing it.
+- Nothing in this section is inferred. No metric, timestamp or verdict is
+  derived from the worker's own claims.
+
 ## Stop or reassign
 
 **Stop** cancels live dispatch and preserves the child branch/worktree for
