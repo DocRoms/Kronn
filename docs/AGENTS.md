@@ -10,11 +10,10 @@
 > **CRITICAL — Never invent facts.** Follow § 0's evidence cascade; capture human
 > clarifications in the relevant documentation.
 
-> **CRITICAL — MCP tool usage.**
-> Before calling any MCP tool, **read the matching context file** in `docs/operations/mcp-servers/<mcp-name>.md` **if it exists**.
-> These files contain project-specific rules, constraints, and examples that prevent hallucinations and misuse.
-> If no context file exists for an MCP, **proceed normally** — do not block on a missing doc.
-> (Each MCP tool ships its own `description` field via JSON-RPC `tools/list` ; that's the in-band contract. Context files are an additional, optional layer of project-specific guidance.)
+> **CRITICAL — MCP tool usage.** Before any MCP call, **read**
+> `docs/operations/mcp-servers/<mcp-name>.md` **if it exists** for project rules
+> and examples. If absent, proceed normally. Each tool's `description` in
+> JSON-RPC `tools/list` remains its in-band contract; context files supplement it.
 
 > **Discussion notes are routing metadata, not secrets.**
 > Messages on the `note` channel stay visible to humans but are excluded from
@@ -25,22 +24,20 @@
 **Unknown term?** → `docs/glossary.md` first.
 
 **Blocking human decisions in a Kronn room (mandatory).** Use a `kronn-question`
-fence, not a prose-only question. First read `disc_question_list` to reuse an
-existing arbitration; its `tool_manual` gives the full creation contract and a
-complete valid JSON example. Use `"version":1` (number), never `"version":"1"`
-(string): the question protocol differs from delivery/review manifests.
-After publication, read back the exact key with `disc_question_list` to verify
-that the card was recorded. If absent, correct the payload and republish with
-the same key; neither a message receipt nor a missing card is an arbitration.
-Do not
-execute, delegate or complete the affected lot while its question is pending.
-Wait with `disc_wait_for_peer`; independent work may continue. After a restart or
-handoff, read the durable answer by its stable key before resuming. Never answer
-or interpret a recommended choice as human consent. See
+fence, never prose alone. Read `disc_question_list` first to reuse arbitration;
+its `tool_manual` supplies the full contract and valid JSON example. Use numeric
+`"version":1`, never `"version":"1"` as in delivery/review manifests. Use
+`disc_question_list` to read back the exact key after publication. If absent,
+correct and republish with the same
+key: a receipt or missing card is not arbitration. While pending, do not execute,
+delegate or complete the affected lot; use `disc_wait_for_peer`. Independent
+work may continue. After restart/handoff, read the durable answer by stable key
+before resuming. Never answer for humans or treat a recommended choice as consent.
+See
 [`operations/mcp-servers/kronn-internal.md`](operations/mcp-servers/kronn-internal.md#human-arbitration-cards).
 `[src: file: backend/src/db/discussion_questions.rs:1]`
 
-This folder (`docs/`) contains structured project context (for both humans and AI agents). Use paths relative to repo root.
+Use paths relative to the repo root.
 
 <!-- kronn:section name="anti-hallu" curated="ai" audit="2026-05-27" -->
 ## 0. Anti-Hallucination Protocol
