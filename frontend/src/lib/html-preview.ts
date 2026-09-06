@@ -7,6 +7,10 @@
 const PREVIEW_CSP = "default-src 'none'; base-uri 'none'; form-action 'none'; script-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src data:";
 
 const BLOCKED_ELEMENTS = new Set([
+  // SMIL can restore URL attributes after sanitization (including on SVG <a>).
+  // The preview is static, so remove mutation elements instead of auditing
+  // attributeName/to/values combinations and browser animation timing.
+  'animate', 'animatemotion', 'animatetransform', 'animation', 'discard', 'set',
   'base', 'embed', 'fencedframe', 'form', 'frame', 'iframe', 'link', 'meta',
   'object', 'portal', 'script', 'template',
 ]);
@@ -27,7 +31,7 @@ function sanitizeForStaticPreview(html: string): { head: string; body: string } 
   // repository node is connected to the preview frame until after this pass.
   const parsed = new DOMParser().parseFromString(html, 'text/html');
   for (const element of Array.from(parsed.querySelectorAll('*'))) {
-    if (BLOCKED_ELEMENTS.has(element.localName)) {
+    if (BLOCKED_ELEMENTS.has(element.localName.toLowerCase())) {
       element.remove();
       continue;
     }

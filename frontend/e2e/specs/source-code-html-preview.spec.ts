@@ -1,6 +1,33 @@
 import { expect, test } from '@playwright/test';
 
 test.describe('Source-code HTML preview isolation', () => {
+  for (const mutation of ['<set attributeName="href" to="https://preview-probe.invalid/svg" begin="0s" />', '<animate attributeName="href" values="https://preview-probe.invalid/svg" dur="1s" repeatCount="indefinite" />']) {
+    test(`prevents SVG link mutation: ${mutation.startsWith('<set') ? 'set' : 'animate'}`, async ({ page }) => {
+      const requests: string[] = [];
+      await page.context().route('https://preview-probe.invalid/**', async route => {
+        requests.push(route.request().url());
+        await route.fulfill({ status: 200, contentType: 'text/html', body: 'Intercepted locally' });
+      });
+      await page.goto('/');
+      const preview = await page.evaluate(async source => {
+        const { buildHtmlPreviewDocument } = await import('/src/lib/html-preview.ts');
+        return buildHtmlPreviewDocument(source);
+      }, `<p id="safe">Static preview</p><svg xmlns="http://www.w3.org/2000/svg"><a id="animated"><text x="0" y="30">Open</text>${mutation}</a></svg>`);
+      await page.setContent('<iframe title="HTML preview" sandbox=""></iframe>');
+      await page.locator('iframe').evaluate((frame, srcdoc) => {
+        (frame as HTMLIFrameElement).srcdoc = srcdoc;
+      }, preview);
+      const rendered = page.frameLocator('iframe');
+      await expect(rendered.locator('#safe')).toHaveText('Static preview');
+      // SVG SMIL href can be navigable without exposing an ARIA link role.
+      // Click the actual anchor, and retain requests from parsing onward.
+      await expect(rendered.locator('svg set, svg animate')).toHaveCount(0);
+      await rendered.locator('svg a').click();
+      await expect(rendered.locator('#safe')).toHaveText('Static preview');
+      expect(requests).toEqual([]);
+    });
+  }
+
   test('renders inline styles without executing scripts, navigating, submitting, or fetching', async ({ page }) => {
     const requests: string[] = [];
     await page.context().route('https://preview-probe.invalid/**', async route => {
