@@ -392,6 +392,7 @@ pub fn build_agent_prompt(
         agent_type,
         AgentType::ClaudeCode
             | AgentType::Codex
+            | AgentType::OpenCode
             | AgentType::GeminiCli
             | AgentType::Kiro
             | AgentType::CopilotCli
@@ -967,6 +968,38 @@ mod tests {
             !prompt.contains("History tools available"),
             "history discovery remains delayed; only the compact Planning capability is turn-one context"
         );
+    }
+
+    #[test]
+    fn opencode_prompt_matches_its_injected_mcp_bridge_on_first_and_later_turns() {
+        for language in ["fr", "en", "es", "zh"] {
+            for turns in [1, 3] {
+                let messages = (0..turns).map(|_| user_msg("Track this work")).collect();
+                let disc = disc_with_messages(messages, language);
+                let prompt = build_agent_prompt(&disc, &AgentType::OpenCode, 0);
+                for tool in [
+                    "plan_get",
+                    "task_exec_prepare",
+                    "task_exec_launch",
+                    "task_exec_status",
+                    "task_exec_deliver",
+                    "task_exec_review",
+                ] {
+                    assert!(
+                        prompt.contains(tool),
+                        "OpenCode [{language}, {turns} turns] must expose {tool}"
+                    );
+                }
+                assert!(prompt.contains(&disc.id));
+                assert!(prompt.contains("`kronn-action`"));
+                assert!(prompt.contains("agent_suggestion"));
+                assert_eq!(
+                    prompt.contains("disc_get_message"),
+                    turns >= 3,
+                    "history discovery stays deferred until the third user message"
+                );
+            }
+        }
     }
 
     #[test]

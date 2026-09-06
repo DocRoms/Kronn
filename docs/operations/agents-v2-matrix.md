@@ -63,6 +63,15 @@ Resume and permissions ARE answerable, so they are asked, and an explicit
 | Credentials over the wire | never — inherited from the spawned process | never — placeholders in the config | server-side only |
 | File and terminal callbacks | refused with a JSON-RPC error | n/a | n/a |
 
+OpenCode's native ACP session receives the same `kronn-internal` bridge as the
+other MCP-enabled CLIs. Its discussion prompt therefore exposes Planning,
+human-gated Automation proposals and the task-delegation lifecycle from the
+first turn; history-tool discovery remains deferred until the third user
+message. This instruction contract does not imply a live provider validation
+or change session-resume and pricing limitations.
+[src: file: backend/src/api/disc_prompts.rs:391]
+[src: file: backend/src/agents/runner.rs:3764]
+
 ## Known asymmetries
 
 These are real, deliberate, and the reason two agents can behave differently on
