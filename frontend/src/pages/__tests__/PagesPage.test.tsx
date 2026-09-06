@@ -67,6 +67,7 @@ vi.mock('../../lib/live-page-sandbox', async importOriginal => ({
 
 import { docs as docsApi, pages as pagesApi, workflows as workflowsApi } from '../../lib/api';
 import { requestRenderedPageHtml } from '../../lib/live-page-sandbox';
+import { HtmlRevisionDiff } from '../../components/HtmlCodeEditor';
 import { PagesPage } from '../PagesPage';
 
 function getCanonicalPageRow(title: string): HTMLElement {
@@ -485,6 +486,15 @@ describe('PagesPage', () => {
   });
 
   it('compares an older HTML revision in isolated previews without mutating the draft', async () => {
+    vi.mocked(pagesApi.updateHtml).mockClear();
+    vi.mocked(pagesApi.launchAction).mockClear();
+    vi.mocked(pagesApi.cancelAction).mockClear();
+    vi.mocked(pagesApi.getAction).mockClear();
+    vi.mocked(pagesApi.revisions).mockResolvedValue([
+      detail.revision,
+      { id: 'rev-1', page_id: page.id, revision: 1, html: '<h1>Adobe legacy</h1>', created_by_agent: 'Claude', created_at: '2026-08-12T10:00:00Z' },
+      { id: 'rev-0', page_id: page.id, revision: 0, html: '<h1>Adobe archived</h1>', created_by_agent: 'Claude', created_at: '2026-08-11T10:00:00Z' },
+    ]);
     render(<PagesPage />);
     await screen.findByTestId('live-page-frame');
     fireEvent.click(screen.getByText('pages.editHtml'));
@@ -498,12 +508,58 @@ describe('PagesPage', () => {
     expect(previews[0]).toHaveAttribute('sandbox', '');
     expect(previews[0]).toHaveAttribute('srcdoc', expect.stringContaining('Adobe legacy'));
     expect(previews[1]).toHaveAttribute('srcdoc', expect.stringContaining('Current draft'));
+
+    fireEvent.change(screen.getByLabelText('pages.compareRevision'), { target: { value: 'rev-0' } });
+    expect(previews[0]).toHaveAttribute('srcdoc', expect.stringContaining('Adobe archived'));
+    expect(previews[1]).toHaveAttribute('srcdoc', expect.stringContaining('Current draft'));
+
     expect(pagesApi.updateHtml).not.toHaveBeenCalled();
+    expect(pagesApi.launchAction).not.toHaveBeenCalled();
+    expect(pagesApi.cancelAction).not.toHaveBeenCalled();
+    expect(pagesApi.getAction).not.toHaveBeenCalled();
 
     fireEvent.click(screen.getByRole('button', { name: 'pages.code' }));
+    expect(screen.getByTestId('live-page-html-diff')).toHaveTextContent('Adobe archived');
     expect(screen.getByTestId('live-page-html-diff')).toHaveTextContent('Current draft');
-    fireEvent.click(screen.getByText('pages.restoreRevision:1'));
-    expect(screen.getByLabelText('pages.htmlTitle')).toHaveValue('<h1>Adobe legacy</h1>');
+  });
+
+  it('updates the active static preview when comparison revision and draft props change without mutations', () => {
+    vi.mocked(pagesApi.updateHtml).mockClear();
+    vi.mocked(pagesApi.launchAction).mockClear();
+    const { rerender } = render(
+      <HtmlRevisionDiff
+        previous="<h1>Adobe legacy</h1>"
+        current="<h1>Current draft</h1>"
+        previousLabel="r1"
+        currentLabel="Current draft"
+        codeLabel="Code"
+        previewLabel="Preview"
+        previewLimitations="Static preview"
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Preview' }));
+    rerender(
+      <HtmlRevisionDiff
+        previous="<h1>Adobe archived</h1>"
+        current="<h1>Updated current draft</h1>"
+        previousLabel="r0"
+        currentLabel="Current draft"
+        codeLabel="Code"
+        previewLabel="Preview"
+        previewLimitations="Static preview"
+      />,
+    );
+
+    const previews = screen.getByTestId('live-page-html-preview-diff').querySelectorAll('iframe');
+    expect(previews[0]).toHaveAttribute('srcdoc', expect.stringContaining('Adobe archived'));
+    expect(previews[1]).toHaveAttribute('srcdoc', expect.stringContaining('Updated current draft'));
+    expect(pagesApi.updateHtml).not.toHaveBeenCalled();
+    expect(pagesApi.launchAction).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Code' }));
+    expect(screen.getByTestId('live-page-html-diff')).toHaveTextContent('Adobe archived');
+    expect(screen.getByTestId('live-page-html-diff')).toHaveTextContent('Updated current draft');
   });
 
   it('shows distinct running, successful and failed Sync states', async () => {
