@@ -1854,6 +1854,14 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             post(api::orchestration::provision),
         )
         .route(
+            "/api/orchestration/provider-quotas",
+            get(api::orchestration::provider_quota_states),
+        )
+        .route(
+            "/api/orchestration/provider-quotas/{provider}/rearm",
+            post(api::orchestration::rearm_provider_quota),
+        )
+        .route(
             "/api/orchestration/tool/workers",
             post(api::orchestration::task_worker_catalogue),
         )

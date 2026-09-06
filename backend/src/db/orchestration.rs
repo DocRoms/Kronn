@@ -1883,15 +1883,46 @@ pub fn provider_has_open_quota_exhaustion(
         "SELECT EXISTS(
              SELECT 1 FROM task_execution_recovery r
              JOIN task_executions e ON e.id = r.task_execution_id
+             JOIN planning_tasks t ON t.id = e.task_id
              WHERE e.worker_agent_type = ?1
                AND r.recovery_reason = ?2
                AND e.status = 'Escalated'
+               AND t.status NOT IN ('done', 'archived')
+               AND r.updated_at > COALESCE(
+                   (SELECT rearmed_at FROM provider_quota_rearms WHERE provider = ?1),
+                   ''
+               )
                AND (?3 IS NULL OR e.id <> ?3)
          )",
         params![provider, marker, exclude_exec_id],
         |row| row.get(0),
     )
     .map_err(Into::into)
+}
+
+/// Records a human-confirmed provider re-arm without mutating historical
+/// executions or recovery rows. Replaying the same key is a no-op.
+pub fn rearm_provider_quota(
+    conn: &Connection,
+    provider: &str,
+    idempotency_key: &str,
+) -> Result<bool> {
+    let transaction = conn.unchecked_transaction()?;
+    let now = Utc::now().to_rfc3339();
+    let inserted = transaction.execute(
+        "INSERT OR IGNORE INTO provider_quota_rearm_events (id, provider, idempotency_key, rearmed_at) \
+         VALUES (?1, ?2, ?3, ?4)",
+        params![Uuid::new_v4().to_string(), provider, idempotency_key, now],
+    )?;
+    if inserted > 0 {
+        transaction.execute(
+            "INSERT INTO provider_quota_rearms (provider, rearmed_at, idempotency_key) VALUES (?1, ?2, ?3) \
+             ON CONFLICT(provider) DO UPDATE SET rearmed_at = excluded.rearmed_at, idempotency_key = excluded.idempotency_key",
+            params![provider, now, idempotency_key],
+        )?;
+    }
+    transaction.commit()?;
+    Ok(inserted > 0)
 }
 
 /// Move an execution to `Blocked` and stamp a human-readable reason plus a structured

@@ -8143,6 +8143,55 @@ pub(crate) async fn target_aware_task_worker_catalogue_for_discussion(
     Ok(catalogue)
 }
 
+/// Browser-only quota signal for Config > Agents. This route is not exposed by
+/// the MCP worker surface, so an agent cannot re-arm a provider autonomously.
+pub async fn provider_quota_states(
+    State(state): State<AppState>,
+) -> Json<ApiResponse<Vec<crate::models::ProviderQuotaState>>> {
+    let states = bounded_provider_quota_state(&state)
+        .await
+        .into_iter()
+        .map(|(provider, blocked)| crate::models::ProviderQuotaState { provider, blocked })
+        .collect();
+    Json(ApiResponse::ok(states))
+}
+
+#[derive(Deserialize)]
+pub struct RearmProviderQuotaRequest {
+    /// The browser only sends this after its confirmation dialog. Keeping the
+    /// acknowledgement in the request makes an accidental POST fail closed.
+    pub confirmed: bool,
+    pub idempotency_key: String,
+}
+
+/// Human-confirmed browser action. It only advances the provider
+/// acknowledgement watermark; it never launches, cancels or rewrites an
+/// execution.
+pub async fn rearm_provider_quota(
+    State(state): State<AppState>,
+    Path(provider): Path<AgentType>,
+    Json(request): Json<RearmProviderQuotaRequest>,
+) -> Json<ApiResponse<bool>> {
+    let key = request.idempotency_key.trim().to_string();
+    if !request.confirmed || key.is_empty() {
+        return Json(ApiResponse::err_coded(
+            ApiErrorCode::Validation,
+            "a confirmed re-arm and idempotency_key are required",
+        ));
+    }
+    let provider = crate::db::orchestration::agent_type_to_db(&provider);
+    match state
+        .db
+        .with_conn(move |conn| {
+            crate::db::orchestration::rearm_provider_quota(conn, &provider, &key)
+        })
+        .await
+    {
+        Ok(changed) => Json(ApiResponse::ok(changed)),
+        Err(error) => Json(ApiResponse::err(error.to_string())),
+    }
+}
+
 /// MCP-only worker discovery. Caller identity is injected by the bridge and
 /// authorized against the principal room before any room/session catalogue is
 /// returned.

@@ -89,6 +89,8 @@ vi.mock('../../lib/api', () => ({
   },
   agents: {
     detect: vi.fn(),
+    quotaStates: vi.fn().mockResolvedValue([]),
+    rearmQuota: vi.fn().mockResolvedValue(true),
     install: vi.fn(),
     uninstall: vi.fn(),
     toggle: vi.fn(),
@@ -179,7 +181,7 @@ vi.mock('../../lib/api', () => ({
 }));
 
 import { SettingsPage } from '../SettingsPage';
-import { config as configApi } from '../../lib/api';
+import { agents as agentsApi, config as configApi } from '../../lib/api';
 import { dictionaries } from '../../lib/i18n/testing';
 import type { AgentsConfig, AgentDetection } from '../../types/generated';
 import type { ToastFn } from '../../hooks/useToast';
@@ -205,6 +207,22 @@ const sampleAgent: AgentDetection = {
 afterEach(() => {
   cleanup();
   localStorage.clear();
+});
+
+it('confirms and re-arms only the provider reported as quota-blocked', async () => {
+  vi.mocked(agentsApi.quotaStates).mockResolvedValueOnce([
+    { provider: 'ClaudeCode', blocked: true },
+    { provider: 'Codex', blocked: false },
+  ]);
+  vi.spyOn(window, 'confirm').mockReturnValue(true);
+  await wrap(<SettingsPage {...defaultProps} agents={[sampleAgent]} />);
+
+  const button = await screen.findByRole('button', { name: /réarmer le fournisseur/i });
+  fireEvent.click(button);
+  fireEvent.click(button);
+  await waitFor(() => expect(agentsApi.rearmQuota).toHaveBeenCalledWith('ClaudeCode', expect.any(String)));
+  expect(agentsApi.rearmQuota).toHaveBeenCalledTimes(1);
+  expect(agentsApi.rearmQuota).not.toHaveBeenCalledWith('Codex', expect.any(String));
 });
 
 const wrap = async (ui: React.ReactElement) => {

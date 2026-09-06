@@ -1435,6 +1435,68 @@ fn quota_signal_clears_once_the_escalated_execution_is_reassigned_away() {
 }
 
 #[test]
+fn quota_signal_ignores_terminal_tasks_but_keeps_non_terminal_tasks_blocking() {
+    let conn = setup();
+    let done = launch_working_execution_for(&conn, "t-quota-done", 1224, "Codex");
+    let active = launch_working_execution_for(&conn, "t-quota-active", 1225, "Codex");
+    escalate_with_reason(&conn, &done, "quota_exhausted:Codex");
+    escalate_with_reason(&conn, &active, "quota_exhausted:Codex");
+
+    conn.execute(
+        "UPDATE planning_tasks SET status = 'done' WHERE id = 't-quota-done'",
+        [],
+    )
+    .unwrap();
+    assert!(provider_has_open_quota_exhaustion(&conn, "Codex", None).unwrap());
+
+    conn.execute(
+        "UPDATE planning_tasks SET status = 'archived' WHERE id = 't-quota-active'",
+        [],
+    )
+    .unwrap();
+    assert!(!provider_has_open_quota_exhaustion(&conn, "Codex", None).unwrap());
+}
+
+#[test]
+fn human_rearm_is_idempotent_isolated_and_a_new_quota_failure_blocks_again() {
+    let conn = setup();
+    let codex = launch_working_execution_for(&conn, "t-quota-rearm", 1226, "Codex");
+    let claude = launch_working_execution_for(&conn, "t-quota-other", 1227, "ClaudeCode");
+    escalate_with_reason(&conn, &codex, "quota_exhausted:Codex");
+    escalate_with_reason(&conn, &claude, "quota_exhausted:ClaudeCode");
+    assert!(provider_has_open_quota_exhaustion(&conn, "Codex", None).unwrap());
+    assert!(provider_has_open_quota_exhaustion(&conn, "ClaudeCode", None).unwrap());
+
+    assert!(rearm_provider_quota(&conn, "Codex", "human-confirmation-1").unwrap());
+    assert!(!rearm_provider_quota(&conn, "Codex", "human-confirmation-1").unwrap());
+    assert!(!provider_has_open_quota_exhaustion(&conn, "Codex", None).unwrap());
+    assert!(provider_has_open_quota_exhaustion(&conn, "ClaudeCode", None).unwrap());
+    assert_eq!(
+        conn.query_row(
+            "SELECT COUNT(*) FROM provider_quota_rearm_events",
+            [],
+            |row| row.get::<_, i64>(0)
+        )
+        .unwrap(),
+        1,
+        "the replay must leave one audit event"
+    );
+    assert_eq!(
+        get_task_execution(&conn, &codex).unwrap().unwrap().status,
+        TaskExecutionStatus::Escalated,
+        "re-arming must not restart or rewrite the historical execution"
+    );
+
+    let after_rearm = (Utc::now() + chrono::Duration::seconds(1)).to_rfc3339();
+    conn.execute(
+        "UPDATE task_execution_recovery SET updated_at = ?2 WHERE task_execution_id = ?1",
+        params![codex, after_rearm],
+    )
+    .unwrap();
+    assert!(provider_has_open_quota_exhaustion(&conn, "Codex", None).unwrap());
+}
+
+#[test]
 fn campaign_candidates_preserve_plan_order_and_explain_every_refusal() {
     let conn = setup();
     seed_plan_task(&conn, "t-first", 1001, 0, "active");

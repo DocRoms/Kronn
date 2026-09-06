@@ -218,6 +218,8 @@ import type {
   DiscussionQuestionList,
   AnswerDiscussionQuestionRequest,
 } from '../types/generated';
+
+type ProviderQuotaState = { provider: AgentType; blocked: boolean };
 import type {
   CatalogModelEntry,
   DeleteManualModelRequest,
@@ -1328,6 +1330,9 @@ export const projects = {
 
 export const agents = {
   detect: () => api<AgentDetection[]>('GET', '/agents'),
+  quotaStates: () => api<ProviderQuotaState[]>('GET', '/orchestration/provider-quotas'),
+  rearmQuota: (provider: AgentType, idempotencyKey: string) =>
+    api<boolean>('POST', `/orchestration/provider-quotas/${encodeURIComponent(provider)}/rearm`, { confirmed: true, idempotency_key: idempotencyKey }),
   install: (agentType: AgentType) => api<string>('POST', '/agents/install', agentType),
   uninstall: (agentType: AgentType) => api<string>('POST', '/agents/uninstall', agentType),
   toggle: (agentType: AgentType) => api<boolean>('POST', '/agents/toggle', agentType),

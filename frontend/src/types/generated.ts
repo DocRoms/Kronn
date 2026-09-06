@@ -4652,6 +4652,12 @@ pending_item_count: number, };
 
 export type ProposeResult = { accepted: boolean, reason: string | null, warnings: Array<string>, evidence_checks: Array<EvidenceCheck>, learning: Learning | null, };
 
+/**
+ * Read-only quota state shown to a human in Agent settings.  Re-arming is a
+ * separate human-only HTTP action; it is intentionally absent from agent tools.
+ */
+export type ProviderQuotaState = { provider: AgentType, blocked: boolean, };
+
 export type ProviderUsage = { provider: string, tokens_used: number, tokens_limit: number | null, cost_usd: number | null, };
 
 export type PublishLivePageRequest = { workflow_id?: string | null, workflow_run_id?: string | null, writes: Array<LivePageWrite>, };
