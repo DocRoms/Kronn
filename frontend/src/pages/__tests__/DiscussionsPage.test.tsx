@@ -3163,7 +3163,7 @@ describe('DiscussionsPage', () => {
       mention_alias: 'visual',
       endpoint: 'https://visual.example.test',
       credential_slug: 'visual-provider',
-      origin_preset: 'custom',
+      origin_preset: 'other',
       economy_model: null,
       default_model: null,
       reasoning_model: null,
@@ -3181,7 +3181,11 @@ describe('DiscussionsPage', () => {
     vi.mocked(discussionsApi.runAgent).mockClear();
     vi.mocked(media.generate).mockReset();
     vi.mocked(media.generate).mockResolvedValue({
-      job_id: 'media-job', message_id: 'media-message', model: 'configured-image',
+      job_id: 'media-job',
+      status: 'pending',
+      model: 'configured-image',
+      discussion_id: 'media-only-room',
+      message_id: 'media-message',
     });
 
     await wrap(
@@ -3247,7 +3251,11 @@ describe('DiscussionsPage', () => {
     vi.mocked(discussionsApi.get).mockResolvedValue(created);
     vi.mocked(media.generate).mockReset();
     vi.mocked(media.generate).mockResolvedValue({
-      job_id: 'custom-media-job', message_id: 'custom-media-message', model: 'configured-image',
+      job_id: 'custom-media-job',
+      status: 'pending',
+      model: 'configured-image',
+      discussion_id: 'custom-media-room',
+      message_id: 'custom-media-message',
     });
 
     await wrap(
