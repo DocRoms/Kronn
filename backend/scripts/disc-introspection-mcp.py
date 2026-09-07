@@ -2263,20 +2263,14 @@ TOOLS = [
     {
         "name": "media_generate",
         "description": (
-            "Generate an image or video on a configured HTTP connection. "
-            "Returns `{job_id, status, model}`.\n\n"
-            "**You do NOT choose the model**: it comes from the connection's "
-            "configured slot, so nothing is billed on a model the human did "
-            "not pick. A modality with no slot is refused, naming what to "
-            "configure.\n\n"
-            "**Cost is real.** Video bills per second (~0.07 USD for 5 s at "
-            "480p), image per picture; a soundtrack — on unless you pass "
-            "`generate_audio: false` — raises that. Ask for the shortest clip "
-            "that works.\n\n"
-            "**`wait` defaults to false** and should stay there: a video takes "
-            "~100 s and lands in the discussion by itself, as a context file "
-            "every agent sees. Pass `true` only when the media must appear in "
-            "the answer you are writing now."
+            "Generate an image/video on a configured HTTP connection; returns "
+            "`{job_id, status, model}`. The human's configured modality slot fixes "
+            "the model; a missing slot is refused with setup guidance. "
+            "Billed operation: video per second, image per picture; audio "
+            "(on unless `generate_audio: false`) adds cost. Use the shortest useful clip. "
+            "Keep `wait: false` (default): the asset arrives in the discussion "
+            "automatically as a context file for all agents. Use `true` only if "
+            "needed in your current answer."
         ),
         "inputSchema": {
             "type": "object",

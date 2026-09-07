@@ -245,6 +245,7 @@ pub(crate) fn agent_type_from_db(s: &str) -> Result<AgentType> {
     Ok(match s {
         "ClaudeCode" => AgentType::ClaudeCode,
         "Codex" => AgentType::Codex,
+        "OpenCode" => AgentType::OpenCode,
         "Vibe" => AgentType::Vibe,
         "GeminiCli" => AgentType::GeminiCli,
         "Kiro" => AgentType::Kiro,
@@ -4505,7 +4506,31 @@ pub fn reassign_execution_worker(
         }
         let run = get_orchestration_run(conn, &execution.orchestration_run_id)?
             .ok_or_else(|| anyhow::anyhow!("orchestration run vanished"))?;
-        resolve_campaign_worker(conn, &run, Some(selection))?;
+        let mut selection_run = run.clone();
+        // The already-assigned CLI may still own its accepted child room.
+        // Only that exact assignment may be recovered there; a replacement
+        // remains subject to the ordinary principal-room selection contract.
+        if execution.worker_target_kind == Some(MessageTargetKind::Cli)
+            && selection.target.kind == MessageTargetKind::Cli
+            && execution.worker_cli_session_id == selection.target.cli_session_id
+            && execution.worker_agent_type.as_deref()
+                == Some(agent_type_to_db(&selection.target.agent_type).as_str())
+        {
+            if let Some(child) = execution.sub_discussion_id.as_deref() {
+                let owns_child: bool = conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM discussion_sessions s \
+                     JOIN discussions d ON d.id = s.disc_id \
+                     WHERE s.id = ?1 AND s.disc_id = ?2 AND s.status <> 'left' \
+                       AND d.archived = 0)",
+                    params![execution.worker_cli_session_id, child],
+                    |row| row.get(0),
+                )?;
+                if owns_child {
+                    selection_run.discussion_id = child.to_string();
+                }
+            }
+        }
+        resolve_campaign_worker(conn, &selection_run, Some(selection))?;
         if execution.worker_target_kind == Some(MessageTargetKind::Cli)
             && selection.target.kind != MessageTargetKind::Cli
         {
