@@ -17,8 +17,10 @@ This page is the operator workflow.
    brief.
 2. Attach the discussion to a registered project repository. Kronn refuses to
    provision an unmanaged or unresolved path.
-3. Commit or intentionally preserve the parent workspace changes. The child is
-   pinned to the selected base SHA; it never edits the parent checkout.
+3. Select a committed base SHA and preserve unrelated workspace changes. The
+   child is pinned to that SHA; it never edits the parent checkout. Integration
+   requires the selected target branch's checked-out worktree to be clean, not
+   every checkout of the project.
 4. Confirm that the chosen agent is installed and authenticated. HTTP agents
    such as Ollama, LiteLLM and NVIDIA can also be selected when configured.
 
@@ -120,14 +122,21 @@ delivery manifest and diff, then choose one of:
 
 - **Approve** — record a result and non-empty evidence for every DoD item against
   the delivered attempt and exact HEAD. Kronn then builds and validates that
-  candidate in an ephemeral integration worktree. The parent branch advances
-  only by a guarded fast-forward after a clean-worktree check, a target-SHA
-  compare-and-swap and a backup ref.
+  candidate in an ephemeral integration worktree. The selected target branch
+  advances only by a guarded fast-forward after a clean-worktree check, a
+  target-SHA compare-and-swap and a backup ref.
 - **Request changes** — enter concrete feedback. The same worker, discussion,
   branch and worktree resume for the next bounded review round.
 
 Review-budget exhaustion escalates to the parent; it never converts a rejected
 candidate into an approval.
+
+Normal integration and restart recovery resolve the unique checked-out worktree
+of that pinned local target branch. A missing or ambiguous checkout, a changed
+target HEAD, or dirty target files stop the operation without switching or
+overwriting another checkout. Unrelated changes in the registered project's
+main checkout do not block a clean target in another worktree. See
+[`pinned-target-worktree.md`](../testing/pinned-target-worktree.md).
 
 Worker-written DoD claims, a checked box in the live Planning task and a
 principal approval without attempt-scoped evidence are all insufficient. This
@@ -186,9 +195,11 @@ durable child discussion that the runtime will actually execute.
 | Agent quota or authentication failure | Reassign to another allowed agent, or retry after quota renewal. |
 | Validation failed | Open the child discussion, fix the reported command, deliver again. |
 | Target branch moved | Refresh/relaunch against the new target; Kronn will not overwrite it. |
-| Dirty parent worktree | Commit or move the changes intentionally, then retry integration. |
+| Dirty target worktree | Intentionally preserve or commit changes in the selected target branch's checkout, then retry integration. Do not move unrelated files from another checkout. |
+| Target checkout missing or ambiguous | Restore exactly one checkout of the pinned local target branch before retrying; Kronn does not choose or switch a branch for you. |
 | Missing workspace | Restore/register the project workspace; do not edit execution rows manually. |
 | Interrupted after restart | Read the persisted reason, verify the worker/worktree, then use the guarded resume/reassign action. |
+| Initial CLI offer never accepted | Resume/reassign do not apply to `Blocked` from `Provisioning`. The principal may cancel with workspace preservation, verify the old execution is terminal, then select the exact available CLI and prepare a new execution for the same task. Launch only after a fresh launchable preflight confirms no active duplicate. Do not silently substitute a different CLI identity. |
 | Review budget exhausted | Decide in the parent discussion whether to expand scope, create a follow-up task or stop. |
 
 Do not repair orchestration by manually changing SQLite rows. The status,
