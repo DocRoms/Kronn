@@ -539,6 +539,8 @@ mod tests {
     async fn publication_loads_persisted_principal_evidence_without_rewriting_worker_facts() {
         let db = Database::open_in_memory().expect("in-memory database");
         let manifest = DeliveryManifestV1 {
+            version: "1".into(),
+            task_ref: "KT-613".into(),
             tests: vec![ManifestTest {
                 name: "cargo test --lib delivery".into(),
                 status: TestStatus::Skipped,
