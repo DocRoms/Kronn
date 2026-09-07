@@ -547,7 +547,7 @@ mod tests {
             ..manifest()
         };
         let decision = ReviewDecisionV1 {
-            version: "review_decision/v1".into(),
+            version: "1".into(),
             task_ref: "KT-613".into(),
             decision: ReviewVerdict::Approve,
             reviewed_head_sha: Some(manifest.head_sha.clone()),
@@ -578,7 +578,7 @@ mod tests {
             worker_profile_id: None,
             worker_scope: None,
             worker_dod_ids: None,
-            attempt_no: 0,
+            attempt_no: 1,
             status: TaskExecutionStatus::Approved,
             blocked_from_status: None,
             interrupted_from_status: None,
@@ -634,6 +634,31 @@ mod tests {
                 "exec-kt-613",
                 0,
                 "approve",
+                &serde_json::json!({
+                    "version": "1",
+                    "task_ref": "KT-613",
+                    "decision": "approve",
+                    "reviewed_head_sha": "abc1234",
+                    "dod_verifications": [{
+                        "dod_id": "dod-1",
+                        "met": true,
+                        "evidence": "attempt zero evidence must not be published"
+                    }]
+                })
+                .to_string(),
+            )?;
+            crate::db::worker_deliveries::upsert_delivery(
+                conn,
+                "exec-kt-613",
+                1,
+                "abc1234",
+                &manifest_json,
+            )?;
+            crate::db::worker_reviews::upsert_review(
+                conn,
+                "exec-kt-613",
+                1,
+                "approve",
                 &decision_json,
             )?;
             Ok(())
@@ -647,7 +672,7 @@ mod tests {
                 .expect("publish"),
             Some(crate::db::delivery_summaries::Published::Created)
         ));
-        let message_id = crate::db::delivery_summaries::message_id_for(&execution.id, 0);
+        let message_id = crate::db::delivery_summaries::message_id_for(&execution.id, 1);
         let report = {
             let message_id = message_id.clone();
             db.with_conn(move |conn| {
@@ -671,6 +696,10 @@ mod tests {
             report.contains("principal inspected the delivered SHA in this test"),
             "{report}"
         );
+        assert!(
+            !report.contains("attempt zero evidence must not be published"),
+            "{report}"
+        );
 
         // An identical approval replay reaches the stored summary and writes
         // neither a second message nor a different report.
@@ -684,7 +713,7 @@ mod tests {
         // The publication record is authoritative even if a caller presents
         // divergent persisted evidence after the report already exists.
         let divergent = serde_json::json!({
-            "version": "review_decision/v1",
+            "version": "1",
             "task_ref": "KT-613",
             "decision": "approve",
             "reviewed_head_sha": "abc1234",
@@ -699,7 +728,7 @@ mod tests {
             crate::db::worker_reviews::upsert_review(
                 conn,
                 "exec-kt-613",
-                0,
+                1,
                 "approve",
                 &divergent,
             )?;
@@ -725,7 +754,7 @@ mod tests {
                     [&message_id],
                     |row| row.get::<_, String>(0),
                 )?;
-                let stored = crate::db::delivery_summaries::get(conn, "exec-kt-613", 0)?
+                let stored = crate::db::delivery_summaries::get(conn, "exec-kt-613", 1)?
                     .expect("stored report");
                 Ok((messages, replayed_report, stored))
             })
