@@ -170,19 +170,31 @@ field resets `current_path`, so a worktree without a `branch` attribute — bare
 or detached — cannot inherit the previous entry's path.
 
 **Guards read, and what they do not amount to.** The first submission said the
-HEAD re-check "closes the window between listing and writing". That was
-overstated and the principal was right to refuse it. What the diff actually
-layers is three distinct guards: the post-resolution HEAD check above; a
-dirty-checkout check before mutating (`worktree::worktree_dirty_files` on the
-resolved target, `backend/src/api/orchestration.rs`); and a
-compare-and-swap on the expected SHA inside
-`worktree::fast_forward_target_to(repo, target_branch, target_sha, merge_sha)`.
+HEAD re-check "closes the window between listing and writing", and the second
+called the last step a compare-and-swap. Both were overstated. The principal
+refused each in turn, including his own earlier wording for the second — and on
+reading `backend/src/core/worktree.rs:1360-1372` myself, he is right.
 
-Together they **detect and refuse** drift rather than proving no interleaving is
-possible. The CAS is the one that makes a lost update impossible on the ref
-itself; the HEAD and dirty checks narrow the window and turn a surprise into a
-refusal. I did not test any interleaving, and this report claims none is
-impossible.
+`fast_forward_target_to(repo_path, target, expected_tip, candidate_sha)` runs
+four steps in order:
+
+1. `integration_target_worktree(repo_path, target)` — exactly one checkout for
+   the branch, canonicalized, its symbolic HEAD re-verified;
+2. `verify_worktree_head(&checkout, expected_tip)` — a plain equality check
+   between the checkout's HEAD and the expected tip;
+3. `worktree_dirty_files(&checkout)` must come back empty, else it refuses;
+4. `fast_forward_to(&checkout, candidate_sha)` — `git merge --ff-only`.
+
+`expected_tip` is **compared**, never handed to an atomic `update-ref <ref>
+<new> <old>`. There is no compare-and-swap on the ref. `--ff-only` does refuse a
+non-fast-forward, which is a real guard against advancing the wrong history, but
+it is not an atomic claim against a concurrent external mutation landing between
+step 2 and step 4.
+
+So: these are layered checks that **detect and refuse** drift. They are not a
+guarantee against every external Git mutation, and this report claims none.
+**No interleaving or external-concurrency test was run**, by me or cited from
+elsewhere.
 
 I could not verify the behaviour against a genuinely dirty or drifted checkout;
 the review was read-only and no runtime was permitted. The reasoning above is
