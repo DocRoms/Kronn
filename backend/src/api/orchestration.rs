@@ -557,9 +557,17 @@ async fn classify_interrupted_execution(
             ) {
                 (Some(MessageTargetKind::Cli), Some(session), Some(agent_type)) => conn.query_row(
                     "SELECT EXISTS(SELECT 1 FROM discussion_sessions \
-                     WHERE id = ?1 AND disc_id = ?2 AND agent_type = ?3 \
+                     WHERE id = ?1 AND (disc_id = ?2 OR disc_id = ?4) AND agent_type = ?3 \
                        AND status <> 'left')",
-                    rusqlite::params![session, execution.parent_discussion_id, agent_type],
+                    // Accepted offers move this exact joined session into the
+                    // pinned child. A backend restart must recognize that
+                    // handoff, never a same-provider substitute or third room.
+                    rusqlite::params![
+                        session,
+                        execution.parent_discussion_id,
+                        agent_type,
+                        execution.sub_discussion_id,
+                    ],
                     |row| row.get(0),
                 )?,
                 (Some(MessageTargetKind::Cli), _, _) => false,
@@ -2751,7 +2759,7 @@ pub async fn accept_worker_offer_and_attach(
     // (`Blocked → Provisioning → Working` + settle the offer), skipping the provisioning
     // session-move and task-CAS. Idempotent: a resumed already-`accepted` offer converges here
     // to Attached. ──
-    if origin == child {
+    if origin == child && offer.reason.as_deref() != Some("cli_reassignment") {
         use crate::db::orchestration::CliReworkOutcome;
         let (eid, oid) = (exec_id.clone(), offer.id.clone());
         let outcome = db
@@ -2794,7 +2802,7 @@ pub async fn accept_worker_offer_and_attach(
     // Transfer its independently-derived DURABLE room binding. Keeping these values
     // separate is essential after an MCP reload: the active row rotates to `adhoc-*`,
     // while the source-history owner remains `cli-*`. Idempotent + fail-closed. ──
-    {
+    if origin != child {
         let (o, c) = (origin.clone(), child.clone());
         let (agent, binding_session) = (
             source_agent.to_string(),
@@ -7523,6 +7531,20 @@ pub async fn reassign_execution(
                 let tx = conn.unchecked_transaction()?;
                 let current = crate::db::orchestration::get_task_execution(&tx, &id)?
                     .context("execution vanished before CLI reassignment offer")?;
+                // A same-assignment recovery keeps the worker in its child.
+                // A newly selected CLI still starts in the principal room.
+                let origin: String = tx.query_row(
+                    "SELECT disc_id FROM discussion_sessions \
+                     WHERE id = ?1 AND agent_type = ?2 AND status <> 'left' \
+                       AND (disc_id = ?3 OR disc_id = ?4)",
+                    rusqlite::params![
+                        session_id,
+                        crate::db::orchestration::agent_type_to_db(&provider),
+                        origin,
+                        child_for_offer,
+                    ],
+                    |row| row.get(0),
+                )?;
                 if current.status != TaskExecutionStatus::Interrupted {
                     crate::db::orchestration::transition_execution(
                         &tx,
@@ -14587,6 +14609,369 @@ mod tests {
             other => panic!("expected Attached, got {other:?}"),
         };
         (task_ref, parent_id, child_id, exec_id)
+    }
+
+    #[tokio::test]
+    async fn cli_restart_recovers_the_exact_worker_after_accepted_child_handoff() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (_, _, child, exec_id) = attached_cli_worker(&db, repo.path()).await;
+        let before = exec_of(&db, &exec_id).await;
+        let id = exec_id.clone();
+        db.with_conn(move |conn| {
+            // A bridge reload may rotate the live transport key, not the exact
+            // joined-session primary key pinned by the accepted offer.
+            conn.execute(
+                "UPDATE discussion_sessions SET session_id = 'reloaded-worker' WHERE id = 101",
+                [],
+            )?;
+            crate::db::orchestration::transition_execution(
+                conn,
+                &id,
+                TaskExecutionStatus::Interrupted,
+                &backend_actor(),
+                serde_json::json!({"reason": "test_backend_restart"}),
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        classify_interrupted_execution(&db, &exec_id, &[])
+            .await
+            .unwrap();
+        let id = exec_id.clone();
+        let recovery = db
+            .with_conn(move |conn| crate::db::orchestration::get_execution_recovery(conn, &id))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            recovery.recovery_action,
+            ExecutionRecoveryAction::ResumeWorker
+        );
+
+        for restart in 0..2 {
+            if restart > 0 {
+                let id = exec_id.clone();
+                db.with_conn(move |conn| {
+                    crate::db::orchestration::transition_execution(
+                        conn,
+                        &id,
+                        TaskExecutionStatus::Interrupted,
+                        &backend_actor(),
+                        serde_json::json!({"reason": "second_backend_restart"}),
+                    )?;
+                    Ok(())
+                })
+                .await
+                .unwrap();
+                classify_interrupted_execution(&db, &exec_id, &[])
+                    .await
+                    .unwrap();
+            }
+            wake_recovered_worker(&db, &exec_id).await.unwrap();
+        }
+        let after = exec_of(&db, &exec_id).await;
+        assert_eq!(after.status, TaskExecutionStatus::Working);
+        assert_eq!(after.worker_cli_session_id, Some(101));
+        assert_eq!(after.sub_discussion_id.as_deref(), Some(child.as_str()));
+        assert_eq!(after.workspace_id, before.workspace_id);
+        assert_eq!(after.child_branch, before.child_branch);
+        assert_eq!(count(&db, "SELECT COUNT(*) FROM task_executions").await, 1);
+        assert_eq!(count(&db, "SELECT COUNT(*) FROM discussions").await, 2);
+        assert_eq!(
+            count(&db, "SELECT COUNT(*) FROM agent_dispatch_jobs").await,
+            0
+        );
+        let message_id = format!("orch-resume-worker:{exec_id}:0");
+        db.with_conn(move |conn| {
+            let (room, copies): (String, i64) = conn.query_row(
+                "SELECT discussion_id, COUNT(*) FROM messages WHERE id = ?1",
+                [&message_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            assert_eq!(room, child);
+            assert_eq!(copies, 1, "restart replay must not duplicate the handoff");
+            let targets = crate::db::discussions::list_message_targets(conn, &message_id)?;
+            assert_eq!(
+                targets,
+                vec![MessageTarget::cli(AgentType::ClaudeCode, 101)]
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn cli_restart_same_worker_reassignment_keeps_child_and_requires_acceptance() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let (_, parent, child, exec_id) = attached_cli_worker(&db, repo.path()).await;
+        seed_cli_session(&db, 102, &child, "other-child-worker").await;
+        seed_cli_session(&db, 103, &parent, "principal").await;
+        let before = exec_of(&db, &exec_id).await;
+        let id = exec_id.clone();
+        db.with_conn(move |conn| {
+            crate::db::orchestration::transition_execution(
+                conn,
+                &id,
+                TaskExecutionStatus::Escalated,
+                &backend_actor(),
+                serde_json::json!({"reason": "historical_child_worker_misclassified"}),
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let state = AppState::new_defaults(
+            std::sync::Arc::new(tokio::sync::RwLock::new(
+                crate::core::config::default_config(),
+            )),
+            db.clone(),
+            crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+        );
+        let request = |session| TaskExecReassignRequest {
+            source_agent: "ClaudeCode".into(),
+            source_session_id: "principal".into(),
+            worker: MessageTarget::cli(AgentType::ClaudeCode, session),
+            reason: "explicitly recover this exact worker in its existing child".into(),
+        };
+        let Json(foreign) = task_exec_reassign(
+            State(state.clone()),
+            Path(exec_id.clone()),
+            Json(request(102)),
+        )
+        .await;
+        assert!(
+            !foreign.success,
+            "another child-room CLI is not an eligible replacement"
+        );
+        assert_eq!(
+            exec_of(&db, &exec_id).await.status,
+            TaskExecutionStatus::Escalated
+        );
+        let Json(reassigned) =
+            task_exec_reassign(State(state), Path(exec_id.clone()), Json(request(101))).await;
+        assert!(reassigned.success, "{:?}", reassigned.error);
+        assert_eq!(
+            exec_of(&db, &exec_id).await.status,
+            TaskExecutionStatus::Interrupted
+        );
+        let id = exec_id.clone();
+        let offer = db
+            .with_conn(move |conn| {
+                crate::db::worker_offers::get_active_offer_for_attempt(conn, &id, 0)
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(offer.target_cli_session_id, 101);
+        assert_eq!(offer.origin_discussion_id, child);
+        assert_eq!(offer.child_discussion_id, child);
+        assert_eq!(offer.reason.as_deref(), Some("cli_reassignment"));
+        let wrong = accept_worker_offer_and_attach(
+            &db,
+            &offer.id,
+            "ClaudeCode",
+            "other-child-worker",
+            "sess-a",
+        )
+        .await
+        .unwrap();
+        assert!(matches!(wrong, AcceptAttachOutcome::WrongAcceptor));
+        for _ in 0..2 {
+            let accepted =
+                accept_worker_offer_and_attach(&db, &offer.id, "ClaudeCode", "sess-a", "sess-a")
+                    .await
+                    .unwrap();
+            assert!(matches!(accepted, AcceptAttachOutcome::Attached { .. }));
+        }
+        let after = exec_of(&db, &exec_id).await;
+        assert_eq!(after.status, TaskExecutionStatus::Working);
+        assert_eq!(after.workspace_id, before.workspace_id);
+        assert_eq!(after.child_branch, before.child_branch);
+        assert_eq!(after.worker_cli_session_id, before.worker_cli_session_id);
+        assert_eq!(after.sub_discussion_id, before.sub_discussion_id);
+        let id = exec_id.clone();
+        db.with_conn(move |conn| {
+            let binding =
+                crate::db::disc_source::find_disc_by_source_session(conn, "ClaudeCode", "sess-a")?;
+            assert_eq!(binding.as_deref(), Some(child.as_str()));
+            let membership: String = conn.query_row(
+                "SELECT disc_id FROM discussion_sessions WHERE id = 101",
+                [],
+                |row| row.get(0),
+            )?;
+            assert_eq!(membership, child);
+            let count: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM messages WHERE id = ?1",
+                [format!("orch-reassign-handoff:{id}:1")],
+                |row| row.get(0),
+            )?;
+            assert_eq!(
+                count, 1,
+                "duplicate acceptance cannot duplicate the handoff"
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert_eq!(count(&db, "SELECT COUNT(*) FROM task_executions").await, 1);
+        assert_eq!(count(&db, "SELECT COUNT(*) FROM discussions").await, 2);
+        assert_eq!(
+            count(&db, "SELECT COUNT(*) FROM agent_dispatch_jobs").await,
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn cli_restart_keeps_foreign_left_missing_and_quota_workers_gated() {
+        for case in [
+            "left",
+            "third_room",
+            "wrong_provider",
+            "missing_child",
+            "quota",
+        ] {
+            let repo = init_repo();
+            let db = Database::open_in_memory().unwrap();
+            let (_, _, child, exec_id) = attached_cli_worker(&db, repo.path()).await;
+            // A second live CLI of the same provider is never a substitute.
+            seed_cli_session(&db, 102, &child, "other-worker").await;
+            let id = exec_id.clone();
+            db.with_conn(move |conn| {
+                match case {
+                    "left" => {
+                        conn.execute(
+                            "UPDATE discussion_sessions SET status = 'left' WHERE id = 101",
+                            [],
+                        )?;
+                    }
+                    "third_room" => {
+                        let third = plain_discussion("third-room", "proj-1");
+                        crate::db::discussions::insert_discussion(conn, &third)?;
+                        crate::db::discussion_sessions::move_session_to_discussion(
+                            conn,
+                            101,
+                            "third-room",
+                        )?;
+                    }
+                    "wrong_provider" => {
+                        conn.execute(
+                            "UPDATE discussion_sessions SET agent_type = 'Codex' WHERE id = 101",
+                            [],
+                        )?;
+                    }
+                    "missing_child" => {
+                        conn.execute(
+                            "UPDATE discussions SET archived = 1 WHERE id = ?1",
+                            [&child],
+                        )?;
+                    }
+                    "quota" => {}
+                    _ => unreachable!(),
+                }
+                crate::db::orchestration::transition_execution(
+                    conn,
+                    &id,
+                    TaskExecutionStatus::Interrupted,
+                    &backend_actor(),
+                    serde_json::json!({"reason": "test_backend_restart"}),
+                )?;
+                if case == "quota" {
+                    let execution =
+                        crate::db::orchestration::get_task_execution(conn, &id)?.unwrap();
+                    let run = crate::db::orchestration::get_orchestration_run(
+                        conn,
+                        &execution.orchestration_run_id,
+                    )?
+                    .unwrap();
+                    crate::db::orchestration::set_execution_recovery(
+                        conn,
+                        &execution,
+                        &run,
+                        ExecutionRecoveryAction::AwaitHuman,
+                        "quota_exhausted:explicit_rearm_required",
+                    )?;
+                }
+                Ok(())
+            })
+            .await
+            .unwrap();
+            classify_interrupted_execution(&db, &exec_id, &[])
+                .await
+                .unwrap();
+            let id = exec_id.clone();
+            let recovery = db
+                .with_conn(move |conn| crate::db::orchestration::get_execution_recovery(conn, &id))
+                .await
+                .unwrap()
+                .unwrap();
+            let expected = match case {
+                "missing_child" => ExecutionRecoveryAction::BlockMissingDiscussion,
+                "quota" => ExecutionRecoveryAction::AwaitHuman,
+                _ => ExecutionRecoveryAction::BlockAgentUnavailable,
+            };
+            assert_eq!(recovery.recovery_action, expected, "{case}");
+            if case == "quota" {
+                assert_eq!(
+                    recovery.recovery_reason,
+                    "quota_exhausted:explicit_rearm_required"
+                );
+            }
+            assert_eq!(
+                exec_of(&db, &exec_id).await.status,
+                TaskExecutionStatus::Interrupted
+            );
+            assert_eq!(
+                count(&db, "SELECT COUNT(*) FROM agent_dispatch_jobs").await,
+                0
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn cli_restart_preserves_the_unaccepted_offer_in_the_parent() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (_, _, _, offer_id) = parked_cli_worker(&db, repo.path()).await;
+        let offer = db
+            .with_conn(move |conn| crate::db::worker_offers::get_worker_offer(conn, &offer_id))
+            .await
+            .unwrap()
+            .unwrap();
+        let exec_id = offer.task_execution_id;
+        let id = exec_id.clone();
+        db.with_conn(move |conn| {
+            crate::db::orchestration::transition_execution(
+                conn,
+                &id,
+                TaskExecutionStatus::Interrupted,
+                &backend_actor(),
+                serde_json::json!({"reason": "test_backend_restart"}),
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        classify_interrupted_execution(&db, &exec_id, &[])
+            .await
+            .unwrap();
+        let recovery = db
+            .with_conn(move |conn| crate::db::orchestration::get_execution_recovery(conn, &exec_id))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            recovery.recovery_action,
+            ExecutionRecoveryAction::ResumeProvisioning
+        );
+        assert_eq!(
+            count(&db, "SELECT COUNT(*) FROM agent_dispatch_jobs").await,
+            0
+        );
     }
 
     /// KT-320 DoD-9: terminality is the return boundary for a joined CLI.
