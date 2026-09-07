@@ -25,85 +25,110 @@ directly while working as a delegated worker on KT-612 and KT-613. That is
 useful — the failure modes are known first-hand — and it is also a bias worth
 naming: I went looking hardest where I had already been hurt.
 
-## Finding 1 — a displaced worker keeps a durable binding to a closed child room
+## Finding 1 — an observed binding left on a closed child room, cause unattributed
 
-**Severity: medium.** Blocks every subsequent delegation to that session, with
-a refusal that names neither the cause nor the remedy.
+**Severity: medium.** Blocks every subsequent delegation to the affected
+session, with a refusal that names neither the bound room nor a remedy the
+worker can apply alone.
 
-**Where.** `backend/src/db/worker_offers.rs:495-512`. Accepting a `Pending`
-offer requires the caller's durable source-session binding to equal the offer's
-origin discussion exactly:
+**Corrected from the first submission.** That version asserted a mechanism —
+"the terminal restore belongs to whoever the worker is at that point, so a
+displaced session is never restored" — that the code does not support. The
+principal was right to refuse it. `restore_reassigned_cli_worker_to_origin`
+(`backend/src/db/orchestration.rs:4389-4435`) exists precisely for the
+displaced worker and does the right thing: when the session's binding is still
+on the child it rebinds it to the parent, when it already sits on the parent it
+does nothing, and when it has moved to a *third* room it fails the reassignment
+loudly rather than stealing it. It is called on CLI → non-CLI reassignment
+(`:4534-4537`). The terminal path `return_cli_worker_to_origin` (`:3410`)
+carries the same care and refuses to steal a session rebound elsewhere.
 
-```rust
-let binding_ready = match offer.status {
-    WorkerOfferStatus::Pending => {
-        bound_disc.as_deref() == Some(offer.origin_discussion_id.as_str())
-    }
-```
+So what follows is separated into what was observed and what is only supposed.
 
-**Scenario, reproduced twice on 2026-09-06 and 2026-09-07.**
+### Observed
 
-1. A CLI session accepts a worker offer. Its durable binding moves into the
-   execution's child room.
-2. The execution is taken away from it — escalated then reassigned to another
-   worker, or cancelled before acceptance. The terminal return-to-origin event
-   belongs to whoever the execution's worker is at that point, not to the
-   displaced session.
-3. The child room closes. The displaced session's durable binding still points
-   at it.
-4. The next offer, in the parent room, is refused with
-   `BindingMismatch` → *"this CLI session is not durably bound to the offer
-   room; reconnect or explicitly transfer the session, then retry"*
-   (`backend/src/api/orchestration.rs:8746-8749`).
+- Execution `a7674a05` (KT-613), worker CLI session 142, child discussion
+  `42e73d37`. The execution escalated with `block_agent_unavailable`, then was
+  reassigned to a native worker (`orch-reassign:a7674a05:1`, 2026-09-07 05:51).
+- On 2026-09-07 07:15, session 147 — the same CLI process after a reconnect —
+  called `disc_find_by_session` and received
+  `binding_conflict: true`, durable link on `42e73d37`, runtime room
+  `85513703`, `rejoin_required: true`.
+- The KT-618 offer for that session was refused with `BindingMismatch`
+  (`backend/src/db/worker_offers.rs:495-512`: a `Pending` offer requires the
+  caller's binding to equal `offer.origin_discussion_id` exactly; the refusal
+  text is at `backend/src/api/orchestration.rs:8746-8749`).
+- An explicit `disc_transfer_session` released it, and the same offer was then
+  accepted without any other change.
 
-The message is accurate and unactionable: it does not say which room the
-session is bound to, and the remedy it names — `disc_transfer_session` — is
-human-confirmed by contract, so the worker cannot apply it alone.
+### Not established
 
-**What does not resolve it.** `disc_leave()` on the child sets
-`discussion_sessions.status = 'left'` but leaves the durable binding in place.
-The session is then in the worst of both states: not recoverable by KT-615's
-new check, which requires `status <> 'left'`
-(`backend/src/api/orchestration.rs:557-573`), and not offerable elsewhere,
-because the binding still points at the closed child. `disc_find_by_session`
-reports this precisely as `binding_conflict: true` with
-`rejoin_required: true` — the diagnosis exists; nothing acts on it.
+Why the restore did not leave that session bound to the parent. Reading alone
+did not settle it, and no run was permitted. Candidate explanations, none
+verified:
 
-**Uncertainty, stated.** A terminal execution does restore the binding to the
-parent — `backend/src/api/orchestration.rs:15311` asserts exactly that. I could
-not determine by reading alone whether that restore is skipped for a *displaced*
-worker or whether it runs and is later overwritten. Both are consistent with
-what I observed; distinguishing them needs a run I was not permitted to make.
-The finding stands either way: the observed end state is a binding on a closed
-room, twice.
+- the session identity changed across the reconnect (142 → 147) between the
+  reassignment and the later offer, so the row the restore acted on and the row
+  the offer checked may not be the same one;
+- the escalation path reached its terminal state without passing through the
+  CLI → non-CLI branch that calls the restore;
+- the restore ran and something rebound the session afterwards.
 
-**Suggested shape, not a prescription.** Either release the displaced session's
-binding when an execution changes worker, or let the refusal carry the bound
-room id so the worker can ask for the right transfer instead of guessing.
+Distinguishing these needs an execution trace, which this review could not
+produce. **The symptom is reported as a symptom.**
 
-## Finding 2 — the pre-acceptance window has no automatic exit
+### Independent of the cause
 
-**Severity: medium.** Already known to the principal; recorded here with dates
-because a DoD needs evidence, not recollection.
+The refusal itself is unactionable by the party that receives it. It names
+neither the room the session is bound to nor a remedy the worker can apply:
+`disc_transfer_session` is human-confirmed by contract. `disc_find_by_session`
+already computes the missing detail — it returns the conflicting room and
+`rejoin_required` — so surfacing it in the refusal is a small change with a
+direct effect on how long a blocked worker stays blocked. That much holds
+whatever the root cause turns out to be.
 
-Between an offer's creation and its acceptance the execution is `Blocked` from
-`Provisioning`. In that state it has no active worker, and neither resume nor
-reassign applies: `task_exec_reassign` requires a worker state, and resume does
-not cover an initial offer. The only exit is a human-driven cancel-and-recreate.
+## Finding 2 — no reassignment path before an offer is accepted
 
-Four occurrences, all in two days:
+**Severity: medium.** Operator limitation, not a proven defect. Already known
+to the principal; recorded with dates because a DoD needs evidence.
+
+**Corrected from the first submission.** That version counted two steps of the
+same execution `0d1f1c59` as two incidents, and counted KT-613 as evidence
+about the initial-offer window. Both were wrong: KT-613 was a resume after
+already-accepted work — a different mechanism, fixed by KT-615 — and one
+execution passing through two states is one occurrence.
+
+**Fact.** Between an offer's creation and its acceptance the execution is
+`Blocked` from `Provisioning`. `task_exec_reassign` requires a worker state, and
+resume does not apply to an unaccepted initial offer, so neither reaches it.
+
+**Occurrences, one per execution:**
 
 | date | execution | trigger |
 |---|---|---|
 | 2026-09-06 | KT-612 `bd91f870` | offer never read by the target worker |
-| 2026-09-06 | KT-613 `a7674a05` | session in child read as worker gone — **fixed by KT-615** |
-| 2026-09-07 | KT-618 `0d1f1c59` (1) | offer expired while the worker was bound elsewhere |
-| 2026-09-07 | KT-618 `0d1f1c59` (2) | `Blocked` before acceptance, therefore not reassignable |
+| 2026-09-07 | KT-618 `0d1f1c59` | offer expired; the worker was bound to another room |
 
-KT-615 removed one cause. The window itself remains, and each new cause lands
-in it the same way. This is offered as an argument that KT-544's
-"deterministic delegation" is not yet true, not as a criticism of the fixes:
-both of them are correct as far as they go.
+**Impact.** The exit is principal-driven rather than automatic. It is not
+necessarily human: the principal walked it entirely through public tooling on
+2026-09-07, and it worked —
+
+- 07:11:40 — `0d1f1c59` cancelled with `cleanup_policy=preserve`, terminal state
+  verified, worktree kept;
+- catalogue re-read (CLI 147 available), preflight `launchable=true` with
+  `active_execution=null`;
+- 07:15:22 — replacement execution `515983ef` created for the same ticket;
+- 07:16:52 — accepted by the worker.
+
+No files lost, no duplicate worker, no second task.
+
+**Proposal, offered not asserted.** An automatic exit — or a change of worker
+identity before acceptance — would need an explicit contract about who may
+claim an unaccepted offer and when. That is a design decision, not a bug fix,
+and the absence of one does not by itself make KT-544's deterministic-delegation
+criterion false. What the two occurrences do show is that the window is reached
+in practice, and that recovering from it currently costs a principal several
+deliberate steps.
 
 ## KT-615 — no further actionable finding
 
@@ -136,27 +161,48 @@ target branch to exactly one checked-out worktree and refuses anything else:
 - `matches.len() != 1` is refused with the count named, so both "no checkout"
   and "ambiguous checkout" surface as themselves rather than as a silent pick.
 - The path is canonicalized before use.
-- **HEAD is re-verified after resolution** — `symbolic-ref --quiet HEAD` must
-  still equal `refs/heads/{branch}`, otherwise the integration refuses to mutate
-  the checkout. This closes the window between listing and writing, which is the
-  defect a naive implementation would have.
+- After resolution, `symbolic-ref --quiet HEAD` must still equal
+  `refs/heads/{branch}`, otherwise the integration refuses to mutate the
+  checkout.
 
 The `--porcelain -z` parsing handles the record separator correctly: an empty
 field resets `current_path`, so a worktree without a `branch` attribute — bare
 or detached — cannot inherit the previous entry's path.
 
-I could not verify the behaviour against a real dirty or drifted checkout; the
-review was read-only and no runtime was permitted. The reasoning above is from
-source, and the principal's own KT-616 evidence (RED reproducing both
-integration errors, then 6 targeted regressions) is cited but not re-run here.
+**Guards read, and what they do not amount to.** The first submission said the
+HEAD re-check "closes the window between listing and writing". That was
+overstated and the principal was right to refuse it. What the diff actually
+layers is three distinct guards: the post-resolution HEAD check above; a
+dirty-checkout check before mutating (`worktree::worktree_dirty_files` on the
+resolved target, `backend/src/api/orchestration.rs`); and a
+compare-and-swap on the expected SHA inside
+`worktree::fast_forward_target_to(repo, target_branch, target_sha, merge_sha)`.
 
-## KT-613 junction — verified in production, not by me
+Together they **detect and refuse** drift rather than proving no interleaving is
+possible. The CAS is the one that makes a lost update impossible on the ref
+itself; the HEAD and dirty checks narrow the window and turn a surprise into a
+refusal. I did not test any interleaving, and this report claims none is
+impossible.
+
+I could not verify the behaviour against a genuinely dirty or drifted checkout;
+the review was read-only and no runtime was permitted. The reasoning above is
+from source, and the principal's own KT-616 evidence — RED reproducing both
+integration errors, then targeted regressions including
+`pinned_target_checkout_does_not_advance_another_clean_branch` and
+`assert_pinned_target_checkout_integration` — is cited as source, not re-run.
+
+## KT-613 junction — verified on the qualification instance, not by me
 
 The principal reported that KT-617's accepted report carries the three
 principal verifications in their own section, separated from the four worker
 validations and the worker's stated limitation. That is the first live exercise
 of the junction, and it is the right kind of evidence: the KT-613 delivery could
 not report on itself, because it published under the pre-fix code.
+
+**Scope of that word "live".** This is the local development and qualification
+instance, not a production deployment, and not the PROD PR-Review workflow,
+which is a separate perimeter. The claim is that the code path ran on real data
+outside a unit test — nothing more.
 
 One half remains unexercised: KT-617's final attempt declared no `skipped`
 validation, so "a worker `skipped` survives approval untouched" has unit
@@ -168,9 +214,9 @@ coverage only. The next delivery that carries a genuine `skipped` will settle it
 |---|---|
 | KT-615 classification and DB selection | no further actionable finding |
 | KT-616 pinned-target worktree | no actionable finding |
-| KT-613 junction | verified live on KT-617, one half still unit-only |
-| durable binding after displacement | **Finding 1**, medium |
-| pre-acceptance window | **Finding 2**, medium, already known |
+| KT-613 junction | exercised on KT-617 on the qualification instance; one half still unit-only |
+| durable binding after displacement | **Finding 1**, medium — symptom observed, cause unattributed |
+| pre-acceptance window | **Finding 2**, medium — operator limitation, already known |
 
 No test was executed for this report. No product code was modified. Nothing
 here should be read as a green light on the wider Agents v2 qualification,
