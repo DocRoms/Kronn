@@ -4,6 +4,9 @@ The root [`CHANGELOG.md`](../../CHANGELOG.md) is the authoritative source for
 the current and recent Kronn releases. Older notes live in this directory so
 the release-facing changelog stays concise and reviewable.
 
+- [`0.13.0-checklist.md`](0.13.0-checklist.md) tracks qualification in progress,
+  including checkpoint-specific evidence and gates that remain open. It is not
+  a release approval.
 - [`0.12.0-checklist.md`](0.12.0-checklist.md) is the evidence checklist for
   the current 0.12.0 candidate. [`0.11.0-checklist.md`](0.11.0-checklist.md)
   retains the previous candidate's record; both are operational evidence, not
