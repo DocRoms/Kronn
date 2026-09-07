@@ -151,8 +151,10 @@ review that added no evidence of its own produces no such section — an empty
 heading would read as "the principal checked nothing", which is a claim rather
 than an absence.
 
-A verdict is reported as it stands, including `not met`: a review may accept a
-delivery while recording that one item is still open.
+Every verification attached to an approved delivery reads `met`: approval
+requires it, and a decision carrying any `met: false` is refused before it can
+accept the delivery. The renderer preserves its supplied data rather than
+inventing a verdict.
 
 The limits worth knowing:
 

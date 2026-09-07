@@ -344,7 +344,13 @@ fn parse_rfc3339(value: &str) -> Option<DateTime<Utc>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{ManifestDodStatus, ManifestFile, ManifestTest};
+    use crate::{
+        db::Database,
+        models::{
+            ManifestDodStatus, ManifestFile, ManifestTest, ReviewVerdict, TaskExecution,
+            TaskExecutionStatus,
+        },
+    };
 
     fn at(iso: &str) -> DateTime<Utc> {
         DateTime::parse_from_rfc3339(iso)
@@ -505,11 +511,11 @@ mod tests {
         );
     }
 
-    /// A verdict the principal reached is reported as it stands, including a
-    /// `not met` on an approved delivery — a review may accept work while
-    /// recording that one item is still open.
+    /// The renderer faithfully preserves the supplied verdict. The approval
+    /// gate is responsible for refusing `met: false`; this narrow unit test
+    /// keeps the rendering contract independent from that gate.
     #[test]
-    fn an_unmet_item_verified_by_the_principal_is_reported_as_unmet() {
+    fn the_renderer_reports_an_unmet_verdict_rather_than_assuming_it_met() {
         let summary = summary_from_manifest(
             "KT-544",
             "exec-1",
@@ -523,6 +529,214 @@ mod tests {
         assert!(!summary.principal_verifications[0].met);
         let report = summary.render_markdown();
         assert!(report.contains("`dod-3` → not met"), "{report}");
+    }
+
+    /// The publication path reads the decision persisted for the current
+    /// attempt. It must preserve the worker's skipped test as a worker fact,
+    /// add the principal's evidence in its own section, and retain the first
+    /// accepted projection when a replay reaches it again.
+    #[tokio::test]
+    async fn publication_loads_persisted_principal_evidence_without_rewriting_worker_facts() {
+        let db = Database::open_in_memory().expect("in-memory database");
+        let manifest = DeliveryManifestV1 {
+            tests: vec![ManifestTest {
+                name: "cargo test --lib delivery".into(),
+                status: TestStatus::Skipped,
+                evidence: Some("no shell; principal must run".into()),
+            }],
+            ..manifest()
+        };
+        let decision = ReviewDecisionV1 {
+            version: "review_decision/v1".into(),
+            task_ref: "KT-613".into(),
+            decision: ReviewVerdict::Approve,
+            reviewed_head_sha: Some(manifest.head_sha.clone()),
+            dod_verifications: vec![verification(
+                "dod-1",
+                true,
+                "principal inspected the delivered SHA in this test",
+            )],
+            comment: None,
+            findings: vec![],
+        };
+        let execution = TaskExecution {
+            id: "exec-kt-613".into(),
+            orchestration_run_id: "run-kt-613".into(),
+            task_id: "task-kt-613".into(),
+            parent_discussion_id: "parent-kt-613".into(),
+            sub_discussion_id: None,
+            workspace_id: None,
+            dispatch_job_id: None,
+            base_sha: None,
+            child_branch: Some("kronn/task/kt-613".into()),
+            worker_target_kind: None,
+            worker_cli_session_id: None,
+            worker_connection_id: None,
+            worker_agent_type: Some("ClaudeCode".into()),
+            worker_model: None,
+            worker_model_tier: None,
+            worker_profile_id: None,
+            worker_scope: None,
+            worker_dod_ids: None,
+            attempt_no: 0,
+            status: TaskExecutionStatus::Approved,
+            blocked_from_status: None,
+            interrupted_from_status: None,
+            review_rounds: 0,
+            max_review_rounds: 3,
+            candidate_target_sha: None,
+            candidate_merge_sha: None,
+            integrated_sha: None,
+            backup_ref: None,
+            blocked_reason: None,
+            blocked_reason_code: None,
+            outcome_reason: None,
+            idempotency_key: None,
+            created_at: at("2026-09-01T09:00:00Z"),
+            updated_at: at("2026-09-01T09:00:00Z"),
+            finished_at: None,
+        };
+        let manifest_json = serde_json::to_string(&manifest).expect("manifest JSON");
+        let decision_json = serde_json::to_string(&decision).expect("decision JSON");
+        db.with_conn(move |conn| {
+            conn.execute(
+                "INSERT INTO discussions (id, title, created_at, updated_at) \
+                 VALUES ('parent-kt-613', 'Parent', ?1, ?1)",
+                ["2026-09-01T09:00:00Z"],
+            )?;
+            conn.execute(
+                "INSERT INTO planning_tasks \
+                 (id, task_number, title, created_at, updated_at) \
+                 VALUES ('task-kt-613', 613, 'Delivery summary', ?1, ?1)",
+                ["2026-09-01T09:00:00Z"],
+            )?;
+            conn.execute(
+                "INSERT INTO orchestration_runs \
+                 (id, discussion_id, created_at, updated_at) \
+                 VALUES ('run-kt-613', 'parent-kt-613', ?1, ?1)",
+                ["2026-09-01T09:00:00Z"],
+            )?;
+            conn.execute(
+                "INSERT INTO task_executions \
+                 (id, orchestration_run_id, task_id, parent_discussion_id, status, created_at, updated_at) \
+                 VALUES ('exec-kt-613', 'run-kt-613', 'task-kt-613', 'parent-kt-613', 'Approved', ?1, ?1)",
+                ["2026-09-01T09:00:00Z"],
+            )?;
+            crate::db::worker_deliveries::upsert_delivery(
+                conn,
+                "exec-kt-613",
+                0,
+                "abc1234",
+                &manifest_json,
+            )?;
+            crate::db::worker_reviews::upsert_review(
+                conn,
+                "exec-kt-613",
+                0,
+                "approve",
+                &decision_json,
+            )?;
+            Ok(())
+        })
+        .await
+        .expect("seed accepted attempt");
+
+        assert!(matches!(
+            publish_accepted_delivery(&db, &execution)
+                .await
+                .expect("publish"),
+            Some(crate::db::delivery_summaries::Published::Created)
+        ));
+        let message_id = crate::db::delivery_summaries::message_id_for(&execution.id, 0);
+        let report = {
+            let message_id = message_id.clone();
+            db.with_conn(move |conn| {
+                conn.query_row(
+                    "SELECT content FROM messages WHERE id = ?1",
+                    [message_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .map_err(Into::into)
+            })
+            .await
+            .expect("published report")
+        };
+        assert!(report.contains("→ skipped"), "{report}");
+        assert!(report.contains("no shell; principal must run"), "{report}");
+        assert!(
+            report.contains("### Verified by the principal at review"),
+            "{report}"
+        );
+        assert!(
+            report.contains("principal inspected the delivered SHA in this test"),
+            "{report}"
+        );
+
+        // An identical approval replay reaches the stored summary and writes
+        // neither a second message nor a different report.
+        assert!(matches!(
+            publish_accepted_delivery(&db, &execution)
+                .await
+                .expect("replay"),
+            Some(crate::db::delivery_summaries::Published::AlreadyComplete)
+        ));
+
+        // The publication record is authoritative even if a caller presents
+        // divergent persisted evidence after the report already exists.
+        let divergent = serde_json::json!({
+            "version": "review_decision/v1",
+            "task_ref": "KT-613",
+            "decision": "approve",
+            "reviewed_head_sha": "abc1234",
+            "dod_verifications": [{
+                "dod_id": "dod-1",
+                "met": true,
+                "evidence": "divergent evidence must not rewrite history"
+            }]
+        })
+        .to_string();
+        db.with_conn(move |conn| {
+            crate::db::worker_reviews::upsert_review(
+                conn,
+                "exec-kt-613",
+                0,
+                "approve",
+                &divergent,
+            )?;
+            Ok(())
+        })
+        .await
+        .expect("seed divergent replay input");
+        assert!(matches!(
+            publish_accepted_delivery(&db, &execution)
+                .await
+                .expect("divergent replay"),
+            Some(crate::db::delivery_summaries::Published::AlreadyComplete)
+        ));
+        let (messages, replayed_report, stored) = db
+            .with_conn(move |conn| {
+                let messages = conn.query_row(
+                    "SELECT COUNT(*) FROM messages WHERE id = ?1",
+                    [&message_id],
+                    |row| row.get::<_, i64>(0),
+                )?;
+                let replayed_report = conn.query_row(
+                    "SELECT content FROM messages WHERE id = ?1",
+                    [&message_id],
+                    |row| row.get::<_, String>(0),
+                )?;
+                let stored = crate::db::delivery_summaries::get(conn, "exec-kt-613", 0)?
+                    .expect("stored report");
+                Ok((messages, replayed_report, stored))
+            })
+            .await
+            .expect("read replay result");
+        assert_eq!(messages, 1);
+        assert_eq!(replayed_report, report);
+        assert!(stored
+            .canonical_json
+            .contains("principal inspected the delivered SHA in this test"));
+        assert!(!stored.canonical_json.contains("divergent evidence"));
     }
 
     /// Publication is idempotent on the decision: the same review evidence

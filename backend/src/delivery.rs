@@ -76,8 +76,9 @@ pub struct DeliveryValidation {
 pub struct DeliveryPrincipalVerification {
     /// The Definition-of-Done item this evidence answers.
     pub dod_id: String,
-    /// The verdict the principal reached, which may be `false`: a review can
-    /// approve a delivery while recording that one item is still not met.
+    /// The verdict supplied by the review decision. The approve gate requires
+    /// `true` for every verification; the renderer nevertheless preserves the
+    /// supplied value rather than inventing a verdict.
     pub met: bool,
     /// The principal's own evidence. Never the worker's, never inferred.
     pub evidence: String,
