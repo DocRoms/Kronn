@@ -24,11 +24,11 @@ whole parse if a caller tries to inject them; Kronn derives them server-side.
 
 ## Who can publish
 
-Only the orchestrator's own session or a human can publish. A worker cannot
-create, prepare or publish a card — including by calling the ingest path
-directly with a forged `author_kind`, an empty session, or a different target
-room. Authority is resolved from the CALLER's own durable identity, never from
-a field the payload claims:
+Today, only the orchestrator's own CLI/bridge session can publish. A worker
+cannot create, prepare or publish a card — including by calling the ingest
+path directly with a forged `author_kind`, an empty session, or a different
+target room. Authority is resolved from the CALLER's own durable identity,
+never from a field the payload claims:
 
 - `disc_append` (the CLI/bridge channel) resolves the caller's session by
   `session_id` alone — no `disc_id` filter, so a worker's session is found and
@@ -39,10 +39,24 @@ a field the payload claims:
   turn either.
   [src: file: backend/src/api/disc_source.rs:749-825]
   [src: file: backend/src/db/discussion_important.rs:458-502]
-- `send_message` (the authenticated human composer) is the one legitimate
-  `Human` publisher — this endpoint has no session or claimed role to spoof,
-  so it constructs `ImportantPublisher::Human` directly.
-  [src: file: backend/src/api/discussions/messaging.rs:671-697]
+
+**Human publication is not yet wired — deliberately.** `send_message` (the
+human chat composer) takes no caller identity at all (`State`/`Path`/`Json`
+only), and Kronn's whole trust model treats every LOCAL caller as the human
+(`auth_middleware`'s loopback bypass exists because a self-hosted instance
+assumes "the user is always on the same machine") — a worker calling this
+endpoint directly is indistinguishable from the browser. An earlier version
+of this lot granted `ImportantPublisher::Human` from this endpoint on the
+assumption that "no session/role field to spoof" made it safe; it does not,
+because there is no verification of ANY KIND, which is a weaker guarantee
+than the one already rejected for `disc_append`. A human decision
+(`kt619-human-publication-boundary`, answered `verified-publication`)
+confirmed: ship nothing rather than a label-only grant. `send_message` now
+logs and refuses every `kronn-important` fence; the fence stays in the
+transcript and the card renders as "not recorded" — the same honest failure
+mode as a malformed spec.
+[src: file: backend/src/api/discussions/messaging.rs:671-693]
+[src: file: backend/src/lib.rs:389-453]
 
 A card also attaches only to the message the caller just wrote:
 `is_newest_message` checks the message about to receive a card is the newest
@@ -84,24 +98,47 @@ instance, one showing the format) never publishes.
 
 `ImportantMessagesBar` renders a counter (`total_all`, the discussion-wide
 count — it does not drop while a category filter is active), a category
-filter, and previous/next navigation that scrolls the transcript to a card
-without re-rendering or reordering it, so the reader's scroll position is the
-only thing that moves. `ImportantMessageCard` renders the DURABLE row for a
-`kronn-important` fence in the transcript, never the fence text itself; a
-fence that produced no row (refused or malformed) says so instead of
-rendering raw JSON.
-[src: file: frontend/src/components/ImportantMessageCard.tsx:1-204]
+filter, and previous/next navigation. Jumping to a card goes through the
+transcript's own shared navigation callback (`onNavigate`, the same
+`handleReplyNavigate` a reply-jump uses), so it releases stick-to-bottom and
+highlights the target the way every other jump in the page does, instead of
+reimplementing scroll/focus against a raw `querySelector`. The counter is
+itself a button: with one card, or a filter narrowed to one, both arrows are
+disabled and the counter is the only way left to reach it.
+[src: file: frontend/src/components/ImportantMessageCard.tsx:116-236]
+
+`ImportantMessageCard` renders the DURABLE row for a `kronn-important` fence
+in the transcript, never the fence text itself; a fence that produced no row
+(refused or malformed) says so instead of rendering raw JSON.
+[src: file: frontend/src/components/ImportantMessageCard.tsx:1-114]
 [src: file: frontend/src/lib/importantMessages.ts:1-98]
 
-The bar/card store is refreshed on the WebSocket `chat_message`/
-`message_revised` event and on the human composer's own accepted receipt —
-both the transcript reload and the important-messages store need their own
-invalidation, since they are separate caches.
-[src: file: frontend/src/pages/DiscussionsPage.tsx:1543-1554]
-[src: file: frontend/src/pages/DiscussionsPage.tsx:2706-2729]
+The bar re-fetches when the transcript's newest durable message id changes
+(`messageRevision`, the same idiom `DiscussionQuestionBanner` uses) — one
+fetch per arrival, not one per render or per bubble, and never stuck on the
+first GET while a new card lands.
+[src: file: frontend/src/components/ImportantMessageCard.tsx:156-162]
+[src: file: frontend/src/pages/DiscussionsPage.tsx:4052-4059]
+
+## Tests
+
+- Backend model, dedup/replay/restart, categories: `backend/src/db/discussion_important/tests.rs`.
+- Authorization at the real handler (role/System bypass, bulk import, missing/invalid session, parent-room targeting): `backend/src/api/disc_source.rs` (`disc_append_*` tests) and `backend/src/api/discussions/messaging.rs` (`send_message_does_not_publish_an_unverified_human_card`).
+- Frontend behaviour (filter, counter, navigation, refetch-on-arrival): `frontend/src/components/__tests__/ImportantMessageCard.test.tsx`.
+- E2E layout (no horizontal overflow, click targets, keyboard focus ring) at phone and desktop widths: `frontend/e2e/specs/important-message-card-layout.spec.ts`.
 
 ## Known limitations
 
+- **The human half of DoD `ddf34a4e` is not met yet.** The contract asks for
+  an explicit human publish path; today there is none — `send_message` refuses
+  every `kronn-important` fence rather than ship an unverified one (see
+  "Who can publish" above). This is a deliberate, human-approved deferral
+  (`kt619-human-publication-boundary` → `verified-publication`), not an
+  oversight: Kronn has no existing verified-human primitive distinct from "any
+  local caller" to hook into, and inventing a weak one was explicitly
+  rejected. A follow-up needs its own design (e.g. a confirmation tied to
+  content hash + room + nonce + expiry, or another human-approved mechanism)
+  and its own arbitration before implementation.
 - A bulk `disc_append` (several messages in one call) reports only the LAST
   message's `ImportantIngest` in the response; earlier messages' outcomes are
   not summed into it. The database is still authoritative — nothing is lost —

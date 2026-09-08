@@ -15,7 +15,7 @@ const styles = [
 
 const markup = `
   <div class="disc-important-bar" role="group" aria-label="Important messages">
-    <span class="disc-important-count">3 important</span>
+    <button type="button" class="disc-important-count" aria-label="Go to the current important message">3 important</button>
     <label>
       <span class="sr-only">Filter by category</span>
       <select aria-label="Filter by category">

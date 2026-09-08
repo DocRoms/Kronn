@@ -668,32 +668,28 @@ pub async fn send_message(
                         }
                     }
                 }
-                // KT-619 — the one legitimate `Human` publisher: this endpoint
-                // is the authenticated human composer, never a CLI/bridge
-                // caller, so there is no session or claimed role to verify —
-                // unlike `disc_append`, which must resolve authority and can
-                // never grant `Human`. Non-fatal like the pins/participants
-                // above: a card-ingest failure must not drop the message the
-                // human just sent.
+                // KT-619 — a `kronn-important` fence sent through this
+                // endpoint publishes NOTHING, on purpose.
+                //
+                // This handler has no caller identity (State/Path/Json only),
+                // and `auth_middleware` waives authentication for every local
+                // request, so a worker calling it directly is indistinguishable
+                // from the browser. Granting `Human` here would be a label, not
+                // a verification — weaker than the ticket the principal already
+                // refused for exactly that reason.
+                //
+                // The human decision `kt619-human-publication-boundary` chose
+                // `verified-publication`. Until that mechanism exists, the
+                // honest state is to refuse: an unverified grant that ships is
+                // harder to take back than a capability that arrives late. The
+                // fence stays in the transcript and the reader is told the card
+                // was not recorded.
                 if msg.content.contains("kronn-important") {
-                    let label = msg
-                        .author_pseudo
-                        .clone()
-                        .unwrap_or_else(|| "Human".to_string());
-                    let publisher = crate::db::discussion_important::ImportantPublisher::Human(label);
-                    if let Err(e) = crate::db::discussion_important::ingest_message_important(
-                        conn,
-                        &disc_id,
-                        &msg.id,
-                        &msg.content,
-                        &publisher,
-                        &msg.timestamp.to_rfc3339(),
-                    ) {
-                        tracing::warn!(
-                            "Failed to ingest important card for message {}: {e}",
-                            msg.id
-                        );
-                    }
+                    tracing::info!(
+                        "important fence in message {} not published: \
+                         no verified human publication authority yet (KT-619)",
+                        msg.id
+                    );
                 }
             }
             Ok(outcome)
@@ -3233,10 +3229,11 @@ mod tests {
         );
     }
 
-    /// KT-619 — `send_message` is the one legitimate `Human` publisher: this
-    /// is the authenticated human composer, with no session/role to spoof.
+    /// KT-619 — this endpoint cannot tell a human from a worker (no caller
+    /// identity, and loopback waives auth), so it publishes no card at all
+    /// until a verified publication authority exists.
     #[tokio::test]
-    async fn send_message_publishes_a_human_authored_important_card() {
+    async fn send_message_does_not_publish_an_unverified_human_card() {
         let disc = "d-human-important";
         let state = make_state_with_disc(disc).await;
         state
@@ -3286,10 +3283,9 @@ mod tests {
             .with_conn(move |conn| crate::db::discussion_important::list(conn, &disc_owned, None))
             .await
             .unwrap();
-        assert_eq!(list.total, 1, "the human's fence must publish a card");
         assert_eq!(
-            list.items[0].author_kind,
-            crate::db::discussion_important::ImportantAuthorKind::Human
+            list.total, 0,
+            "an unverified caller must not publish, however it labels itself"
         );
     }
 }
