@@ -651,6 +651,13 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "170_provider_quota_signal_generation",
         include_str!("sql/170_provider_quota_signal_generation.sql"),
     ),
+    // 171 is reserved for KT-620 (durable worker binding identity); KT-619
+    // takes 172 so the two lots cannot collide the way KT-545 and KT-556 did
+    // on 165.
+    (
+        "172_discussion_important_messages",
+        include_str!("sql/172_discussion_important_messages.sql"),
+    ),
 ];
 
 /// Apply one migration inside the caller-owned transaction.

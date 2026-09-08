@@ -255,6 +255,12 @@ pub struct DiscAppendResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub lint: Option<AppendLintSummary>,
+    /// KT-619 — what a `kronn-important` fence produced, present only when the
+    /// append carried one. A refusal is reported rather than dropped: a worker
+    /// that cannot publish must learn it did not, instead of assuming it did.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub important: Option<crate::db::discussion_important::ImportantIngest>,
     /// `sort_order` of the LAST appended message (stab-1). This is a write
     /// receipt, not a read cursor: another message may have landed between
     /// the caller's last read and this append. `None` when nothing was appended.
@@ -639,6 +645,9 @@ pub async fn disc_append(
     let mut skipped = 0u32;
     let mut last_sort_order: Option<i64> = None;
     let mut last_message_id: Option<String> = None;
+    // KT-619 — reported back so a refused publisher learns it was refused. A
+    // silently dropped fence would leave a worker believing it had published.
+    let mut important_ingest: Option<crate::db::discussion_important::ImportantIngest> = None;
     // Freshly-inserted messages, federated to peers after the loop IF this is a
     // single-message (live-turn) append on a shared disc — see the F3 gate below.
     let mut inserted_msgs: Vec<DiscussionMessage> = Vec::new();
@@ -713,30 +722,89 @@ pub async fn disc_append(
                         dedupe_key: None,
                     })
                     .collect::<Vec<_>>();
-                if let Some(author_cli_session_id) = author_cli_session_id {
-                    crate::db::discussions::insert_cli_message_with_targets_and_dispatches(
-                        conn,
-                        &did_insert,
-                        &msg_clone,
-                        &typed_targets,
-                        &dispatches,
-                        author_cli_session_id,
-                    )
-                } else if !typed_targets.is_empty() || !dispatches.is_empty() {
-                    crate::db::discussions::insert_message_with_targets_and_dispatches(
-                        conn,
-                        &did_insert,
-                        &msg_clone,
-                        &typed_targets,
-                        &dispatches,
-                    )
+                let insert = |conn: &rusqlite::Connection| {
+                    if let Some(author_cli_session_id) = author_cli_session_id {
+                        crate::db::discussions::insert_cli_message_with_targets_and_dispatches(
+                            conn,
+                            &did_insert,
+                            &msg_clone,
+                            &typed_targets,
+                            &dispatches,
+                            author_cli_session_id,
+                        )
+                    } else if !typed_targets.is_empty() || !dispatches.is_empty() {
+                        crate::db::discussions::insert_message_with_targets_and_dispatches(
+                            conn,
+                            &did_insert,
+                            &msg_clone,
+                            &typed_targets,
+                            &dispatches,
+                        )
+                    } else {
+                        crate::db::discussions::insert_message(conn, &did_insert, &msg_clone)
+                    }
+                };
+
+                // KT-619 — a `kronn-important` fence becomes a card in the SAME
+                // unit as its message, so a card exists iff its message does.
+                // Authority is read from the author's own room, never from the
+                // target room or the role the caller typed: a worker can name
+                // any `disc_id` and can label its turn `User`, but it cannot
+                // move the session Kronn placed in the execution room.
+                if !msg_clone.content.contains("kronn-important") {
+                    return insert(conn).map(|order| (order, Default::default()));
+                }
+                let label = if matches!(msg_clone.role, crate::models::MessageRole::User) {
+                    msg_clone
+                        .author_pseudo
+                        .clone()
+                        .unwrap_or_else(|| "Human".to_string())
                 } else {
-                    crate::db::discussions::insert_message(conn, &did_insert, &msg_clone)
+                    msg_clone
+                        .agent_type
+                        .as_ref()
+                        .map(|agent| format!("{agent:?}"))
+                        .unwrap_or_else(|| "Orchestrator".to_string())
+                };
+                let publisher = crate::db::discussion_important::publisher_for_author(
+                    conn,
+                    author_cli_session_id,
+                    matches!(msg_clone.role, crate::models::MessageRole::User),
+                    &label,
+                )?;
+                conn.execute_batch("SAVEPOINT disc_append_important")?;
+                let outcome = insert(conn).and_then(|order| {
+                    let ingest = crate::db::discussion_important::ingest_message_important(
+                        conn,
+                        &did_insert,
+                        &msg_clone.id,
+                        &msg_clone.content,
+                        &publisher,
+                        &msg_clone.timestamp.to_rfc3339(),
+                    )?;
+                    Ok((order, ingest))
+                });
+                match outcome {
+                    Ok(result) => {
+                        conn.execute_batch("RELEASE disc_append_important")?;
+                        Ok(result)
+                    }
+                    Err(e) => {
+                        let _ = conn.execute_batch(
+                            "ROLLBACK TO disc_append_important; RELEASE disc_append_important",
+                        );
+                        Err(e)
+                    }
                 }
             })
             .await;
         match insert_result {
-            Ok(sort_order) => last_sort_order = Some(sort_order),
+            Ok((sort_order, ingest)) => {
+                last_sort_order = Some(sort_order);
+                if !ingest.is_empty() {
+                    important_ingest = Some(ingest);
+                }
+            }
             Err(e) => {
                 return Json(ApiResponse::err(format!(
                     "DB error appending message: {}",
@@ -900,6 +968,7 @@ pub async fn disc_append(
         latest_peer_role,
         diverged,
         lint: lint_summary,
+        important: important_ingest,
     }))
 }
 
