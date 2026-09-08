@@ -706,6 +706,7 @@ pub async fn disc_append(
         let did_insert = did_for_loop.clone();
         let msg_clone = msg.clone();
         let typed_targets = requested_targets.clone();
+        let important_session_id = req.session_id.clone();
         let dispatch_jobs = dispatch_agents
             .iter()
             .cloned()
@@ -754,22 +755,36 @@ pub async fn disc_append(
                 if !msg_clone.content.contains("kronn-important") {
                     return insert(conn).map(|order| (order, Default::default()));
                 }
-                let label = if matches!(msg_clone.role, crate::models::MessageRole::User) {
-                    msg_clone
-                        .author_pseudo
-                        .clone()
-                        .unwrap_or_else(|| "Human".to_string())
-                } else {
-                    msg_clone
-                        .agent_type
-                        .as_ref()
-                        .map(|agent| format!("{agent:?}"))
-                        .unwrap_or_else(|| "Orchestrator".to_string())
+                // Display only — authority never depends on this. `disc_append`
+                // carries no genuine human turn (that path is `send_message`),
+                // so the label is always agent-shaped regardless of the role
+                // the payload claimed.
+                let label = msg_clone
+                    .agent_type
+                    .as_ref()
+                    .map(|agent| format!("{agent:?}"))
+                    .unwrap_or_else(|| "Orchestrator".to_string());
+                // Resolved fresh from the calling bridge's OWN session
+                // (`req.session_id`), never from `author_cli_session_id` above:
+                // that one is `None` whenever this append is not a single live
+                // Agent turn (a bulk import, several messages, a claimed
+                // `role: User`) or targets a room other than the session's own
+                // — every one of those must refuse, not silently read as "no
+                // session, trust the payload". Resolution is by session id
+                // alone, with no `disc_id` filter, so a worker's session is
+                // found and refused even when it targets its parent room.
+                let important_author_session_id = match important_session_id.as_deref() {
+                    Some(session_id) => {
+                        crate::db::discussion_sessions::find_active_session_by_id(
+                            conn, session_id,
+                        )?
+                        .map(|(pk, _home_disc_id, _agent_type)| pk)
+                    }
+                    None => None,
                 };
                 let publisher = crate::db::discussion_important::publisher_for_author(
                     conn,
-                    author_cli_session_id,
-                    matches!(msg_clone.role, crate::models::MessageRole::User),
+                    important_author_session_id,
                     &label,
                 )?;
                 conn.execute_batch("SAVEPOINT disc_append_important")?;
@@ -3470,6 +3485,245 @@ mod tests {
             !is_live_peer_turn(true, Some("joined-session"), 2),
             "bulk transcript imports are not live turns"
         );
+    }
+
+    // KT-619 — `publisher_for_author`'s own unit tests (in
+    // `db::discussion_important::tests`) cover `Some(worker)` called
+    // directly; they cannot see the resolution `disc_append` itself performs
+    // (or fails to). These exercise the real handler end to end so a
+    // spoofed/omitted identity is refused here, not just in the helper.
+
+    const IMPORTANT_PARENT: &str = "d-lint";
+    const IMPORTANT_CHILD: &str = "d-lint-child";
+    const IMPORTANT_WORKER_SESSION: &str = "important-worker-session";
+
+    /// Give `child` a `task_executions` row anchored at `parent`, and park a
+    /// worker CLI session inside `child` — the way a real delegation does.
+    async fn execution_room(state: &crate::AppState, parent: &str, child: &str) {
+        let parent = parent.to_string();
+        let child = child.to_string();
+        state
+            .db
+            .with_conn(move |conn| {
+                conn.execute(
+                    "INSERT INTO discussions (id, title, agent, created_at, updated_at) \
+                     VALUES (?1, ?1, 'ClaudeCode', datetime('now'), datetime('now'))",
+                    rusqlite::params![child],
+                )?;
+                conn.execute(
+                    "INSERT INTO orchestration_runs (id, kind, discussion_id, created_at, updated_at) \
+                     VALUES ('run', 'single_task', ?1, 'now', 'now')",
+                    rusqlite::params![parent],
+                )?;
+                conn.execute(
+                    "INSERT INTO planning_tasks (id, task_number, title, created_at, updated_at) \
+                     VALUES ('task', 619, 'Important messages', 'now', 'now')",
+                    [],
+                )?;
+                let worker = crate::db::discussion_sessions::create_session(
+                    conn,
+                    &child,
+                    "ClaudeCode",
+                    Some(IMPORTANT_WORKER_SESSION),
+                    "peer",
+                )?;
+                conn.execute(
+                    "INSERT INTO task_executions (id, orchestration_run_id, task_id, \
+                         parent_discussion_id, sub_discussion_id, status, worker_target_kind, \
+                         worker_agent_type, worker_cli_session_id, created_at, updated_at) \
+                     VALUES ('x','run','task',?1,?2,'Working','cli','ClaudeCode',?3,'now','now')",
+                    rusqlite::params![parent, child, worker],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
+    fn important_fence(dedup_key: &str) -> String {
+        format!(
+            "Decision made.\n\n```kronn-important\n{}\n```\n",
+            serde_json::json!({
+                "version": crate::db::discussion_important::IMPORTANT_SCHEMA_VERSION,
+                "category": "decision",
+                "dedup_key": dedup_key,
+                "title": "Title",
+                "highlight": "Highlight.",
+                "impact": "Impact.",
+                "action_required": { "required": false },
+            })
+        )
+    }
+
+    fn role_msg(
+        id: &str,
+        role: MessageRole,
+        agent_type: Option<AgentType>,
+        content: &str,
+    ) -> DiscAppendMessage {
+        DiscAppendMessage {
+            source_msg_id: id.into(),
+            role,
+            channel: crate::models::MessageChannel::Main,
+            content: content.into(),
+            agent_type,
+            targets: Vec::new(),
+            target_agent: None,
+            reply_to_message_id: None,
+        }
+    }
+
+    async fn important_card_count(state: &crate::AppState, disc_id: &str) -> u32 {
+        let disc_id = disc_id.to_string();
+        state
+            .db
+            .with_conn(move |conn| crate::db::discussion_important::count(conn, &disc_id))
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn disc_append_lets_the_orchestrators_own_session_publish() {
+        crate::core::anti_halluc::set_mode("off");
+        let (state, _tmp) = lint_state(false).await;
+        state
+            .db
+            .with_conn(|conn| {
+                crate::db::discussion_sessions::create_session(
+                    conn,
+                    IMPORTANT_PARENT,
+                    "ClaudeCode",
+                    Some("orchestrator-session"),
+                    "peer",
+                )
+            })
+            .await
+            .unwrap();
+
+        let response = append_as(
+            &state,
+            vec![agent_msg("m1", &important_fence("kt-619.orch"))],
+            Some("orchestrator-session"),
+        )
+        .await;
+
+        assert_eq!(response.important.map(|i| i.published), Some(1));
+        assert_eq!(important_card_count(&state, IMPORTANT_PARENT).await, 1);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn disc_append_refuses_a_worker_claiming_the_user_role() {
+        crate::core::anti_halluc::set_mode("off");
+        let (state, _tmp) = lint_state(false).await;
+        execution_room(&state, IMPORTANT_PARENT, IMPORTANT_CHILD).await;
+
+        // The payload bypass Codex flagged: a worker labels its own turn
+        // `User` so the (buggy) fallback would read it as a human.
+        let msg = role_msg(
+            "m1",
+            MessageRole::User,
+            None,
+            &important_fence("kt-619.user-bypass"),
+        );
+        let response = append_as(&state, vec![msg], Some(IMPORTANT_WORKER_SESSION)).await;
+
+        assert_eq!(response.important.map(|i| i.refused_worker), Some(1));
+        assert_eq!(important_card_count(&state, IMPORTANT_PARENT).await, 0);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn disc_append_refuses_a_worker_claiming_the_system_role() {
+        crate::core::anti_halluc::set_mode("off");
+        let (state, _tmp) = lint_state(false).await;
+        execution_room(&state, IMPORTANT_PARENT, IMPORTANT_CHILD).await;
+
+        let msg = role_msg(
+            "m1",
+            MessageRole::System,
+            Some(AgentType::Codex),
+            &important_fence("kt-619.system-bypass"),
+        );
+        let response = append_as(&state, vec![msg], Some(IMPORTANT_WORKER_SESSION)).await;
+
+        assert_eq!(response.important.map(|i| i.refused_worker), Some(1));
+        assert_eq!(important_card_count(&state, IMPORTANT_PARENT).await, 0);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn disc_append_refuses_worker_fences_inside_a_bulk_import() {
+        crate::core::anti_halluc::set_mode("off");
+        let (state, _tmp) = lint_state(false).await;
+        execution_room(&state, IMPORTANT_PARENT, IMPORTANT_CHILD).await;
+
+        // Two messages in one call is never a "single live Agent append", the
+        // gate the old `author_cli_session_id` relied on — and must not read
+        // as "no CLI session, trust the payload" for either one.
+        let msgs = vec![
+            agent_msg("m1", &important_fence("kt-619.bulk-1")),
+            agent_msg("m2", &important_fence("kt-619.bulk-2")),
+        ];
+        append_as(&state, msgs, Some(IMPORTANT_WORKER_SESSION)).await;
+
+        assert_eq!(important_card_count(&state, IMPORTANT_PARENT).await, 0);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn disc_append_refuses_when_the_session_id_is_missing() {
+        crate::core::anti_halluc::set_mode("off");
+        let (state, _tmp) = lint_state(false).await;
+
+        let response = append(
+            &state,
+            vec![agent_msg("m1", &important_fence("kt-619.no-session"))],
+        )
+        .await;
+
+        assert_eq!(response.important.map(|i| i.refused_worker), Some(1));
+        assert_eq!(important_card_count(&state, IMPORTANT_PARENT).await, 0);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn disc_append_refuses_when_the_session_id_does_not_resolve() {
+        crate::core::anti_halluc::set_mode("off");
+        let (state, _tmp) = lint_state(false).await;
+
+        let response = append_as(
+            &state,
+            vec![agent_msg("m1", &important_fence("kt-619.bad-session"))],
+            Some("no-such-session"),
+        )
+        .await;
+
+        assert_eq!(response.important.map(|i| i.refused_worker), Some(1));
+        assert_eq!(important_card_count(&state, IMPORTANT_PARENT).await, 0);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn disc_append_refuses_a_worker_targeting_its_parent_room() {
+        crate::core::anti_halluc::set_mode("off");
+        let (state, _tmp) = lint_state(false).await;
+        execution_room(&state, IMPORTANT_PARENT, IMPORTANT_CHILD).await;
+
+        // The route bypass: the worker's session lives in `IMPORTANT_CHILD`,
+        // but it appends to `IMPORTANT_PARENT` (what `append_as` always
+        // targets) instead of its own room. Resolution reads the session by
+        // id alone, with no `disc_id` filter, so it is still found and refused.
+        let response = append_as(
+            &state,
+            vec![agent_msg("m1", &important_fence("kt-619.parent-bypass"))],
+            Some(IMPORTANT_WORKER_SESSION),
+        )
+        .await;
+
+        assert_eq!(response.important.map(|i| i.refused_worker), Some(1));
+        assert_eq!(important_card_count(&state, IMPORTANT_PARENT).await, 0);
     }
 }
 

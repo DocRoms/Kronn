@@ -668,6 +668,33 @@ pub async fn send_message(
                         }
                     }
                 }
+                // KT-619 — the one legitimate `Human` publisher: this endpoint
+                // is the authenticated human composer, never a CLI/bridge
+                // caller, so there is no session or claimed role to verify —
+                // unlike `disc_append`, which must resolve authority and can
+                // never grant `Human`. Non-fatal like the pins/participants
+                // above: a card-ingest failure must not drop the message the
+                // human just sent.
+                if msg.content.contains("kronn-important") {
+                    let label = msg
+                        .author_pseudo
+                        .clone()
+                        .unwrap_or_else(|| "Human".to_string());
+                    let publisher = crate::db::discussion_important::ImportantPublisher::Human(label);
+                    if let Err(e) = crate::db::discussion_important::ingest_message_important(
+                        conn,
+                        &disc_id,
+                        &msg.id,
+                        &msg.content,
+                        &publisher,
+                        &msg.timestamp.to_rfc3339(),
+                    ) {
+                        tracing::warn!(
+                            "Failed to ingest important card for message {}: {e}",
+                            msg.id
+                        );
+                    }
+                }
             }
             Ok(outcome)
         })
@@ -3203,6 +3230,66 @@ mod tests {
             msgs.iter()
                 .any(|m| m.role == MessageRole::System && m.content.starts_with("Erreur:")),
             "the preflight error must be persisted in the thread (fire-and-forget child)"
+        );
+    }
+
+    /// KT-619 — `send_message` is the one legitimate `Human` publisher: this
+    /// is the authenticated human composer, with no session/role to spoof.
+    #[tokio::test]
+    async fn send_message_publishes_a_human_authored_important_card() {
+        let disc = "d-human-important";
+        let state = make_state_with_disc(disc).await;
+        state
+            .db
+            .with_conn(move |conn| {
+                conn.execute("UPDATE discussions SET no_agent = 1 WHERE id = ?1", [disc])?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let fence = format!(
+            "Décision prise.\n\n```kronn-important\n{}\n```\n",
+            serde_json::json!({
+                "version": crate::db::discussion_important::IMPORTANT_SCHEMA_VERSION,
+                "category": "decision",
+                "dedup_key": "kt-619.human-card",
+                "title": "Titre",
+                "highlight": "Le point essentiel.",
+                "impact": "Conséquence concrète.",
+                "action_required": { "required": false },
+            })
+        );
+
+        let response = send_message(
+            State(state.clone()),
+            Path(disc.to_string()),
+            Json(SendMessageRequest {
+                content: fence,
+                channel: MessageChannel::Main,
+                targets: vec![],
+                target_all: false,
+                target_agents: vec![],
+                target_agent: None,
+                client_message_id: Some("f2f1a6a0-9e2b-4c9a-9b1d-9f7e9a9c5d21".into()),
+                defer_dispatch: false,
+                reply_to_message_id: None,
+            }),
+        )
+        .await;
+        let body = sse_body_to_string(response).await;
+        assert!(body.contains("event: accepted"), "message accepted: {body}");
+
+        let disc_owned = disc.to_string();
+        let list = state
+            .db
+            .with_conn(move |conn| crate::db::discussion_important::list(conn, &disc_owned, None))
+            .await
+            .unwrap();
+        assert_eq!(list.total, 1, "the human's fence must publish a card");
+        assert_eq!(
+            list.items[0].author_kind,
+            crate::db::discussion_important::ImportantAuthorKind::Human
         );
     }
 }

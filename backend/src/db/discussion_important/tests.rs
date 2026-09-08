@@ -162,7 +162,7 @@ fn a_worker_is_refused_and_told_so() {
     execution_room(&conn);
     let worker = session(&conn, CHILD, "worker-1");
 
-    let publisher = publisher_for_author(&conn, Some(worker), false, "ClaudeCode").unwrap();
+    let publisher = publisher_for_author(&conn, Some(worker), "ClaudeCode").unwrap();
     assert_eq!(publisher, ImportantPublisher::Worker);
 
     let ingest = append(&conn, ROOM, "m1", fenced(&spec_json("kt-619.ship")), &publisher);
@@ -181,7 +181,7 @@ fn a_worker_targeting_the_parent_room_is_still_refused() {
 
     // The route bypass: name the principal's room instead of its own. Authority
     // is read from where the session sits, so the target changes nothing.
-    let publisher = publisher_for_author(&conn, Some(worker), false, "ClaudeCode").unwrap();
+    let publisher = publisher_for_author(&conn, Some(worker), "ClaudeCode").unwrap();
     assert_eq!(publisher, ImportantPublisher::Worker);
     let ingest = append(&conn, ROOM, "m1", fenced(&spec_json("k")), &publisher);
     assert_eq!(ingest.refused_worker, 1);
@@ -195,8 +195,8 @@ fn a_worker_claiming_the_human_role_is_still_refused() {
     let worker = session(&conn, CHILD, "worker-1");
 
     // The payload bypass: label the turn `User` to be taken for the human.
-    // The lineage check runs first and does not consult the claimed role.
-    let publisher = publisher_for_author(&conn, Some(worker), true, "Human").unwrap();
+    // The label is display-only and never consulted for authority.
+    let publisher = publisher_for_author(&conn, Some(worker), "Human").unwrap();
     assert_eq!(publisher, ImportantPublisher::Worker);
     let ingest = append_as(
         &conn,
@@ -211,12 +211,26 @@ fn a_worker_claiming_the_human_role_is_still_refused() {
 }
 
 #[test]
+fn an_unresolvable_session_is_refused_rather_than_trusted() {
+    let conn = database();
+    execution_room(&conn);
+    // No row exists for this pk: a bulk import, a missing/invalid session, or
+    // a worker whose home room this lookup could not read must all refuse —
+    // there is no legitimate "unknown caller" case for `disc_append`.
+    let publisher = publisher_for_author(&conn, Some(9_999), "ClaudeCode").unwrap();
+    assert_eq!(publisher, ImportantPublisher::Worker);
+
+    let publisher_no_session = publisher_for_author(&conn, None, "ClaudeCode").unwrap();
+    assert_eq!(publisher_no_session, ImportantPublisher::Worker);
+}
+
+#[test]
 fn the_human_publishes_even_inside_an_execution_room() {
     let conn = database();
     execution_room(&conn);
-    // Not a worker: no CLI session of its own parked in the child.
-    let publisher = publisher_for_author(&conn, None, true, "Romu").unwrap();
-    assert_eq!(publisher, ImportantPublisher::Human("Romu".into()));
+    // The human path never calls `publisher_for_author` at all — `send_message`
+    // constructs this directly, with no CLI session to resolve.
+    let publisher = ImportantPublisher::Human("Romu".into());
 
     let ingest = append_as(
         &conn,
@@ -391,8 +405,10 @@ fn the_filter_and_the_transcript_agree_on_order() {
     let alerts = list(&conn, ROOM, Some(ImportantCategory::BlockingAlert)).unwrap();
     assert_eq!(alerts.total, 1);
     assert_eq!(alerts.items[0].dedup_key, "b");
-    // The counter is the unfiltered total, so the chip does not lie when a
-    // filter is active.
+    // The chip reads `total_all`, so filtering to one card must not make the
+    // counter claim the discussion only ever had one.
+    assert_eq!(alerts.total_all, 3);
+    assert_eq!(all.total_all, 3);
     assert_eq!(count(&conn, ROOM).unwrap(), 3);
 }
 

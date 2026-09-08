@@ -52,7 +52,10 @@ impl ImportantCategory {
         }
     }
 
-    pub fn from_str(value: &str) -> Option<Self> {
+    /// Named `parse`, not `from_str`: an inherent `from_str` is easily
+    /// confused for `std::str::FromStr`, which this deliberately is not (no
+    /// `Err` — an unrecognised value is simply not a category).
+    pub fn parse(value: &str) -> Option<Self> {
         Some(match value {
             "decision" => Self::Decision,
             "scope_change" => Self::ScopeChange,
@@ -68,6 +71,9 @@ impl ImportantCategory {
 /// Who may publish. There is deliberately no worker variant: a worker cannot
 /// name itself here, so the refusal does not depend on the API layer being
 /// asked politely.
+///
+/// `Human` is never resolved from a CLI session — see
+/// [`ImportantPublisher::Human`] and its one call site.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(export)]
@@ -84,7 +90,8 @@ impl ImportantAuthorKind {
         }
     }
 
-    pub fn from_str(value: &str) -> Option<Self> {
+    /// Named `parse`, not `from_str` — same reason as [`ImportantCategory::parse`].
+    pub fn parse(value: &str) -> Option<Self> {
         Some(match value {
             "orchestrator" => Self::Orchestrator,
             "human" => Self::Human,
@@ -182,7 +189,11 @@ pub struct ImportantMessage {
 #[ts(export)]
 pub struct ImportantMessageList {
     pub items: Vec<ImportantMessage>,
+    /// How many `items` came back — the filtered count.
     pub total: u32,
+    /// Every card in the discussion, filter or no filter. The counter chip
+    /// reads this one, so it does not drop while a category is selected.
+    pub total_all: u32,
 }
 
 fn nonempty_bounded(value: &str, max: usize) -> bool {
@@ -342,8 +353,8 @@ fn row_to_message(row: &rusqlite::Row<'_>) -> rusqlite::Result<Option<ImportantM
     // A row whose category or author no longer parses is a contract break, not
     // a card to render half-way; skip it rather than guess.
     let (Some(category), Some(author_kind), Ok(spec)) = (
-        ImportantCategory::from_str(&category),
-        ImportantAuthorKind::from_str(&author_kind),
+        ImportantCategory::parse(&category),
+        ImportantAuthorKind::parse(&author_kind),
         serde_json::from_str::<ImportantSpec>(&payload),
     ) else {
         return Ok(None);
@@ -386,7 +397,7 @@ pub fn list(
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(
         params![discussion_id, category.map(|c| c.as_str())],
-        |row| row_to_message(row),
+        row_to_message,
     )?;
     let mut items = Vec::new();
     for row in rows {
@@ -395,7 +406,15 @@ pub fn list(
         }
     }
     let total = items.len() as u32;
-    Ok(ImportantMessageList { items, total })
+    let total_all = match category {
+        None => total,
+        Some(_) => count(conn, discussion_id)?,
+    };
+    Ok(ImportantMessageList {
+        items,
+        total,
+        total_all,
+    })
 }
 
 /// Cheap counter for the filter chip; does not build the payloads.
@@ -414,8 +433,15 @@ pub fn count(conn: &Connection, discussion_id: &str) -> Result<u32> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ImportantPublisher {
     Orchestrator(String),
+    /// Never produced by [`publisher_for_author`] — `disc_append` (the CLI/
+    /// bridge channel) carries no genuine human turn. The one legitimate
+    /// source is `send_message`, the authenticated human endpoint, which
+    /// constructs this directly with no session lookup at all.
     Human(String),
-    /// An active worker. It cannot publish, and is told so rather than ignored.
+    /// An active worker, OR a caller [`publisher_for_author`] could not
+    /// verify (no session, one that no longer resolves, a room this lookup
+    /// cannot read). Both are refused identically and told so: publishing an
+    /// important card has no legitimate "unknown caller" case.
     Worker,
 }
 
@@ -429,40 +455,50 @@ impl ImportantPublisher {
     }
 }
 
-/// Resolve who is publishing from the caller's own durable room.
+/// Resolve who is publishing, from the caller's own durable CLI session.
 ///
-/// Deliberately ignores both the target room and the claimed role. A worker can
-/// name any `disc_id` and can label its own turn `User`; what it cannot do is
-/// change which room its session sits in. That room is written by Kronn at
-/// offer acceptance, so it is the one fact here the caller does not author.
+/// **Authority is not message provenance.** `disc_append` also resolves an
+/// `author_cli_session_id`, and that one is deliberately filtered to the
+/// target room: a session that is not in this room did not author a message
+/// here. Authority is the opposite property — it belongs to the caller
+/// wherever it is writing — so this lookup does NOT filter on the target, and
+/// does not depend on the append being a single agent turn. Reusing the
+/// provenance value here is what let a worker naming the parent room resolve
+/// to "no identity".
 ///
-/// A session in a room that is or was an execution room is treated as a worker.
-/// Erring that way costs an orchestrator nothing — it does not sit in one.
+/// Everything the caller controls is ignored: the target room, the role on
+/// the message, the agent type in the payload. What remains is the room its
+/// session sits in, written by Kronn at offer acceptance.
+///
+/// Refuses by default. Zero matches (never sent, expired, left) and more than
+/// one (an ambiguous session id) are both unverifiable, and publishing an
+/// important card has no legitimate "unknown caller" case. It also has no
+/// legitimate human caller: a human reaches a card through `send_message`,
+/// which never calls this.
 pub fn publisher_for_author(
     conn: &Connection,
     author_cli_session_id: Option<i64>,
-    role_is_human: bool,
     label: &str,
 ) -> Result<ImportantPublisher> {
-    if let Some(session_pk) = author_cli_session_id {
-        let home: Option<String> = conn
-            .query_row(
-                "SELECT disc_id FROM discussion_sessions WHERE id = ?1",
-                params![session_pk],
-                |row| row.get(0),
-            )
-            .optional()?;
-        if let Some(home) = home {
-            if crate::db::orchestration::discussion_is_execution_room(conn, &home)? {
-                return Ok(ImportantPublisher::Worker);
-            }
-        }
+    let Some(session_pk) = author_cli_session_id else {
+        return Ok(ImportantPublisher::Worker);
+    };
+    let home: Option<String> = conn
+        .query_row(
+            "SELECT disc_id FROM discussion_sessions WHERE id = ?1 AND status <> 'left'",
+            params![session_pk],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(home) = home else {
+        return Ok(ImportantPublisher::Worker);
+    };
+    // A room that is or was an execution room means a worker. Erring that way
+    // costs an orchestrator nothing: it does not sit in one.
+    if crate::db::orchestration::discussion_is_execution_room(conn, &home)? {
+        return Ok(ImportantPublisher::Worker);
     }
-    Ok(if role_is_human {
-        ImportantPublisher::Human(label.to_string())
-    } else {
-        ImportantPublisher::Orchestrator(label.to_string())
-    })
+    Ok(ImportantPublisher::Orchestrator(label.to_string()))
 }
 
 /// What one message's fences produced. Counts are reported back so a refused
@@ -582,7 +618,7 @@ pub fn get_by_message(conn: &Connection, message_id: &str) -> Result<Option<Impo
           WHERE i.message_id = ?1"
     );
     Ok(conn
-        .query_row(&sql, [message_id], |row| row_to_message(row))
+        .query_row(&sql, [message_id], row_to_message)
         .optional()?
         .flatten())
 }

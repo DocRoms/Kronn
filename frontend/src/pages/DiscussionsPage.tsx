@@ -3,6 +3,8 @@ import './DiscussionsPage.css';
 import { MessageBubble, MarkdownContent } from '../components/MessageBubble';
 import { DiscussionNote } from '../components/DiscussionNote';
 import { DiscussionQuestionBanner } from '../components/DiscussionQuestionBanner';
+import { ImportantMessagesBar } from '../components/ImportantMessageCard';
+import { refreshImportantMessages } from '../lib/importantMessages';
 import { unseenBasis } from '../lib/discussionUiUtils';
 import { ToolCallsGroup } from '../components/ToolCallsGroup';
 import { MessageDateSeparator } from '../components/MessageDateSeparator';
@@ -1544,6 +1546,11 @@ export function DiscussionsPage({
       refetchDiscussions();
       if (activeDiscussionId) {
         reloadDiscussion(activeDiscussionId);
+        // KT-619 — the message that just landed may carry a `kronn-important`
+        // card (published by a peer CLI or the orchestrator); the bar/counter
+        // read a separate store from the transcript, so a transcript reload
+        // alone would leave them stale until the next navigation.
+        refreshImportantMessages(activeDiscussionId);
       }
     }
     // A federated file finished landing (announced, then fetched + linked to its
@@ -2715,6 +2722,10 @@ export function DiscussionsPage({
           // headers, which can also precede an SSE error.
           reloadDiscussion(discId);
           loadContextFiles(discId);
+          // KT-619 — a human-authored `kronn-important` fence publishes on
+          // this same receipt; the bar/counter store is separate from the
+          // transcript, so it needs its own invalidation.
+          refreshImportantMessages(discId);
           // The optimistic update above bumped both counts by 1 (the freshly
           // queued User message); seed lastSeen with the matching non-System
           // basis so the badge resolves to 0 without waiting on the next tick.
@@ -4047,6 +4058,11 @@ export function DiscussionsPage({
               discussionId={activeDiscussion.id}
               messageRevision={activeDiscussion.messages.at(-1)?.id}
             />
+
+            {/* KT-619 — find the steering cards without scrolling the whole
+                thread. Sits beside the question banner because both answer
+                "what do I need to know about this room", not "what was said". */}
+            <ImportantMessagesBar discussionId={activeDiscussion.id} />
 
             {/* Messages */}
             <div

@@ -1580,6 +1580,12 @@ diverged: boolean,
  */
 lint?: AppendLintSummary,
 /**
+ * KT-619 — what a `kronn-important` fence produced, present only when the
+ * append carried one. A refusal is reported rather than dropped: a worker
+ * that cannot publish must learn it did not, instead of assuming it did.
+ */
+important?: ImportantIngest,
+/**
  * `sort_order` of the LAST appended message (stab-1). This is a write
  * receipt, not a read cursor: another message may have landed between
  * the caller's last read and this append. `None` when nothing was appended.
@@ -2864,6 +2870,89 @@ export type HostScope = { "kind": "ClaudeUser" } | { "kind": "ClaudeLocal", "val
  * whether Kronn writes the entry into `~/.claude.json` & friends.
  */
 export type HostSyncMode = "None" | "GlobalOnly" | "MirrorAll";
+
+/**
+ * `required: false` is the explicit "none" the contract asks for, so an
+ * omitted action and a deliberate absence of action cannot be confused.
+ * Validation refuses a half-filled action in either direction.
+ */
+export type ImportantAction = { required: boolean, action?: string | null, owner?: string | null, due?: string | null, };
+
+/**
+ * Who may publish. There is deliberately no worker variant: a worker cannot
+ * name itself here, so the refusal does not depend on the API layer being
+ * asked politely.
+ *
+ * `Human` is never resolved from a CLI session — see
+ * [`ImportantPublisher::Human`] and its one call site.
+ */
+export type ImportantAuthorKind = "orchestrator" | "human";
+
+/**
+ * The closed set. A category is part of the contract, so a new one is a
+ * deliberate migration, never a free-text label.
+ */
+export type ImportantCategory = "decision" | "scope_change" | "dod_waiver" | "blocking_alert" | "human_action_required" | "accepted_delivery";
+
+/**
+ * What one message's fences produced. Counts are reported back so a refused
+ * publisher learns it was refused instead of assuming it succeeded.
+ */
+export type ImportantIngest = { published: number, deduplicated: number, refused_worker: number, invalid: number,
+/**
+ * Fences past the first in one message. One card is one message, so the
+ * extras are refused rather than silently collapsed by the unique index.
+ */
+refused_extra: number, };
+
+/**
+ * A persisted card, as read back.
+ */
+export type ImportantMessage = { id: string, discussion_id: string, message_id: string, category: ImportantCategory, schema_version: number, dedup_key: string, title: string, highlight: string, context: string | null, impact: string, action_required: ImportantAction, references: ImportantReferences, author_kind: ImportantAuthorKind, author_label: string, source_kind: string | null, source_id: string | null, created_at: string,
+/**
+ * Transcript position, so the filter and previous/next agree with the list.
+ */
+sort_order: number, };
+
+export type ImportantMessageList = { items: Array<ImportantMessage>,
+/**
+ * How many `items` came back — the filtered count.
+ */
+total: number,
+/**
+ * Every card in the discussion, filter or no filter. The counter chip
+ * reads this one, so it does not drop while a category is selected.
+ */
+total_all: number, };
+
+export type ImportantQuery = {
+/**
+ * One closed category, or absent for every card.
+ */
+category?: string | null, };
+
+/**
+ * Objects the card points at. Every field is optional because a card may
+ * legitimately predate the object it will later concern.
+ */
+export type ImportantReferences = { task_ref?: string | null, dod_id?: string | null, execution_id?: string | null, agent?: string | null, commit?: string | null, artifact?: string | null, };
+
+/**
+ * The bounded template a publisher submits.
+ *
+ * `deny_unknown_fields` is what keeps `author`, `created_at` and
+ * `schema_version` server-owned: a payload that tries to carry them fails to
+ * parse instead of being silently trusted.
+ */
+export type ImportantSpec = { version: number, category: ImportantCategory,
+/**
+ * Stable identity of the reported fact. Replays collapse onto it.
+ */
+dedup_key: string, title: string,
+/**
+ * The one line that must survive being read at a glance.
+ */
+highlight: string, context?: string | null, impact: string, action_required: ImportantAction, references: ImportantReferences, };
 
 export type ImportDiscussionReport = { discussion_id: string, source_discussion_id: string, already_imported: boolean, imported_messages: number, imported_attachments: number, imported_revision_events: number, imported_tasks: number, imported_task_events: number, warnings: Array<string>, conflicts: Array<string>, };
 

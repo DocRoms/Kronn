@@ -1,0 +1,198 @@
+/* KT-619 — a steering card. Full width because it is not one voice among
+   others in the thread: it is the thread's state changing. The highlight is
+   the only thing sized to be read without stopping, everything else is there
+   for the reader who did stop. */
+.disc-important-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-sp-3);
+  width: 100%;
+  margin: var(--kr-sp-4) 0;
+  padding: var(--kr-sp-4);
+  border: 1px solid var(--kr-border);
+  border-left: 3px solid var(--kr-cat, var(--kr-accent));
+  border-radius: var(--kr-r-md);
+  background: var(--kr-bg-card);
+}
+
+/* One token per category, so the colour is the category rather than a mood
+   chosen per card. */
+.disc-important-card[data-category='decision'] { --kr-cat: var(--kr-accent); }
+.disc-important-card[data-category='scope_change'] { --kr-cat: var(--kr-purple); }
+.disc-important-card[data-category='dod_waiver'] { --kr-cat: var(--kr-warning); }
+.disc-important-card[data-category='blocking_alert'] { --kr-cat: var(--kr-error); }
+.disc-important-card[data-category='human_action_required'] { --kr-cat: var(--kr-cyan); }
+.disc-important-card[data-category='accepted_delivery'] { --kr-cat: var(--kr-success); }
+
+.disc-important-card:target,
+.disc-important-card[data-focused='true'] {
+  border-color: var(--kr-cat, var(--kr-accent));
+  box-shadow: var(--kr-shadow-md);
+}
+
+.disc-important-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--kr-sp-2);
+}
+
+.disc-important-category {
+  padding: 2px var(--kr-sp-2);
+  border-radius: var(--kr-r-pill);
+  background: var(--kr-cat, var(--kr-accent));
+  color: var(--kr-text-on-accent);
+  font-size: var(--kr-fs-2xs);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.disc-important-title {
+  flex: 1 1 12rem;
+  margin: 0;
+  color: var(--kr-text-primary);
+  font-size: var(--kr-fs-md);
+  font-weight: 600;
+}
+
+.disc-important-meta {
+  color: var(--kr-text-muted);
+  font-size: var(--kr-fs-xs);
+  white-space: nowrap;
+}
+
+/* The one line that must survive a glance. */
+.disc-important-highlight {
+  margin: 0;
+  padding: var(--kr-sp-3);
+  border-radius: var(--kr-r-sm);
+  background: var(--kr-bg-subtle);
+  color: var(--kr-text-primary);
+  font-size: var(--kr-fs-lg);
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.disc-important-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-sp-2);
+  margin: 0;
+}
+
+.disc-important-body > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--kr-sp-2);
+  font-size: var(--kr-fs-sm);
+}
+
+.disc-important-label {
+  flex: 0 0 auto;
+  color: var(--kr-text-muted);
+  font-weight: 600;
+}
+
+.disc-important-value {
+  flex: 1 1 12rem;
+  color: var(--kr-text-secondary);
+  min-width: 0;
+}
+
+.disc-important-action {
+  border-left: 2px solid var(--kr-cat, var(--kr-accent));
+  padding-left: var(--kr-sp-3);
+}
+
+.disc-important-refs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--kr-sp-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.disc-important-refs li {
+  padding: 1px var(--kr-sp-2);
+  border: 1px solid var(--kr-border-subtle);
+  border-radius: var(--kr-r-sm);
+  background: var(--kr-bg-subtle);
+  color: var(--kr-text-secondary);
+  font-family: var(--kr-font-mono);
+  font-size: var(--kr-fs-2xs);
+}
+
+/* ── Filter bar ─────────────────────────────────────────────────────────── */
+
+.disc-important-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--kr-sp-2);
+  padding: var(--kr-sp-2) var(--kr-sp-3);
+  border: 1px solid var(--kr-border-subtle);
+  border-radius: var(--kr-r-md);
+  background: var(--kr-bg-subtle);
+}
+
+.disc-important-count {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--kr-sp-2);
+  color: var(--kr-text-primary);
+  font-size: var(--kr-fs-sm);
+  font-weight: 600;
+}
+
+.disc-important-bar select,
+.disc-important-bar button {
+  min-height: 32px;
+  padding: 0 var(--kr-sp-2);
+  border: 1px solid var(--kr-border);
+  border-radius: var(--kr-r-sm);
+  background: var(--kr-bg-input);
+  color: var(--kr-text-primary);
+  font-size: var(--kr-fs-sm);
+  cursor: pointer;
+}
+
+.disc-important-bar button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.disc-important-bar button:not(:disabled):hover {
+  background: var(--kr-bg-hover);
+}
+
+/* Keyboard users must see where they are; the ring is the same everywhere. */
+.disc-important-bar select:focus-visible,
+.disc-important-bar button:focus-visible,
+.disc-important-card:focus-visible {
+  outline: 2px solid var(--kr-accent);
+  outline-offset: 2px;
+}
+
+.disc-important-position {
+  color: var(--kr-text-muted);
+  font-size: var(--kr-fs-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+@media (max-width: 640px) {
+  .disc-important-card {
+    padding: var(--kr-sp-3);
+  }
+
+  .disc-important-highlight {
+    font-size: var(--kr-fs-md);
+  }
+
+  .disc-important-bar {
+    /* The counter and the pager stay on one line; the filter wraps under. */
+    justify-content: space-between;
+  }
+}

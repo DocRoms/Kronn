@@ -1588,6 +1588,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route("/api/runs", get(api::shared_runs::list))
         .route("/api/runs/{id}", get(api::shared_runs::get))
         .route(
+            "/api/discussions/{id}/important",
+            get(api::discussion_important::list),
+        )
+        .route(
             "/api/discussions/{id}/questions",
             get(api::discussion_questions::list),
         )

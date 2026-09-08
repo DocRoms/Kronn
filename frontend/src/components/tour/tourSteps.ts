@@ -505,6 +505,21 @@ export const TOUR_STEPS: TourStep[] = [
     groupKey: 'tour.group.discussions',
   },
   {
+    id: 'important-messages',
+    page: 'discussions',
+    // KT-619 — the bar only renders once the discussion holds a card
+    // (`totalAll > 0`); the seeded demo discussion has none, so a brand-new
+    // user has no target here. `optionalWhenMissing` is exactly the escape
+    // hatch the tour already has for a supported-but-often-absent control.
+    selector: '.disc-important-bar',
+    titleKey: 'tour.importantMessages.title',
+    descKey: 'tour.importantMessages.desc',
+    agentNoteKey: 'tour.importantMessages.agentNote',
+    position: 'bottom',
+    optionalWhenMissing: true,
+    groupKey: 'tour.group.discussions',
+  },
+  {
     id: 'copyable-ids',
     page: 'discussions',
     beforeStep: revealCopyableIds,

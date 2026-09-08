@@ -19,6 +19,7 @@ import { DocPreview } from './DocPreview';
 import { DocDataExport } from './DocDataExport';
 import { PlanningActionCard } from './PlanningActionCard';
 import { DiscussionQuestionCard } from './DiscussionQuestionCard';
+import { ImportantMessageCard } from './ImportantMessageCard';
 import { SourceCitationChip } from './SourceCitationChip';
 import { hasSourceCitation, splitSourceCitations } from '../lib/sourceCitations';
 import { DiscussionActionCard } from './DiscussionActionCard';
@@ -1809,6 +1810,16 @@ export const MarkdownContent = memo(({
               source={questionSource.trim()}
               sourceMessageId={sourceMessageId}
               fenceIndex={fenceIndex !== undefined && fenceIndex >= 0 ? fenceIndex : undefined}
+            />
+          );
+        }
+        // KT-619 — a steering card. Like the question above, the durable row
+        // is what renders: the fence is the orchestrator's draft of it.
+        if (className.includes('language-kronn-important')) {
+          return (
+            <ImportantMessageCard
+              discussionId={discussionId}
+              sourceMessageId={sourceMessageId}
             />
           );
         }

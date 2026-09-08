@@ -216,6 +216,8 @@ import type {
   SourceDirectoryListing,
   DiscussionQuestion,
   DiscussionQuestionList,
+  ImportantCategory,
+  ImportantMessageList,
   AnswerDiscussionQuestionRequest,
   ProviderQuotaState,
 } from '../types/generated';
@@ -1797,6 +1799,16 @@ export const discussions = {
     'PATCH',
     `/discussions/${encodeURIComponent(id)}/notes/${encodeURIComponent(messageId)}`,
     { content },
+  ),
+
+  /** KT-619 — the important steering cards of a discussion, in transcript
+   *  order. `category` narrows the list; the counter reads `total_all`, which
+   *  stays the discussion-wide count so the chip does not drop while a filter
+   *  is active. */
+  importantMessages: (id: string, category?: ImportantCategory) => api<ImportantMessageList>(
+    'GET',
+    `/discussions/${encodeURIComponent(id)}/important`
+      + (category ? `?category=${encodeURIComponent(category)}` : ''),
   ),
 
   /** KT-595 — the arbitration questions of a discussion, pending and past.
