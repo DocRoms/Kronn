@@ -96,9 +96,10 @@ attention.
 ## Option B — accept the limitation, and shrink what depends on it
 
 Do not attempt the distinction. `Human` is simply not publishable through the
-API; the only authority is `Orchestrator`, whose lineage is genuinely verified.
-A person who wants a card asks the orchestrator to publish it, which stays
-auditable — author, date and source event are recorded either way.
+API; the only authority is `Orchestrator`, whose room is verified even though —
+until proof of possession lands — the identity presenting it is not. A person
+who wants a card asks the orchestrator to publish it, which stays auditable:
+author, date and source event are recorded either way.
 
 This is the current state of the branch, and it costs nothing to keep.
 
