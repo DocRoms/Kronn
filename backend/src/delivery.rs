@@ -63,6 +63,27 @@ pub struct DeliveryValidation {
     pub evidence: String,
 }
 
+/// One Definition-of-Done item the PRINCIPAL verified itself during review.
+///
+/// KT-613 — kept apart from `validations`, which are the worker's, because the
+/// two are different facts. "The worker could not start Chromium" stays true
+/// after the principal ran it: folding the second into the first would turn an
+/// honest `skipped` into a claim the worker never made, and dropping the second
+/// leaves an accepted delivery whose durable report says a validated DoD was
+/// never checked. That is what happened on KT-611 and KT-612 — the report read
+/// "the principal will run it" long after the principal had.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeliveryPrincipalVerification {
+    /// The Definition-of-Done item this evidence answers.
+    pub dod_id: String,
+    /// The verdict supplied by the review decision. The approve gate requires
+    /// `true` for every verification; the renderer nevertheless preserves the
+    /// supplied value rather than inventing a verdict.
+    pub met: bool,
+    /// The principal's own evidence. Never the worker's, never inferred.
+    pub evidence: String,
+}
+
 /// Documentation touched by the delivery, or an explicit absence.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -103,6 +124,11 @@ pub struct DeliverySummaryV1 {
     pub commit: DeliveryCommit,
     pub validations: Vec<DeliveryValidation>,
     pub documentation: DeliveryDocumentation,
+    /// What the principal verified itself, if anything. Empty when the review
+    /// added no evidence of its own — an absence the report states rather than
+    /// implies.
+    #[serde(default)]
+    pub principal_verifications: Vec<DeliveryPrincipalVerification>,
     /// Explicit attention points; may be empty but never omitted.
     pub attention_points: Vec<String>,
     pub metrics: DeliveryMetrics,
@@ -123,6 +149,10 @@ pub struct DeliverySummaryInput {
     pub commit: DeliveryCommit,
     pub validations: Vec<DeliveryValidation>,
     pub documentation: DeliveryDocumentation,
+    /// KT-613 — supplied by Kronn from the review, never by the worker: a
+    /// worker cannot vouch for what the principal checked.
+    #[serde(default)]
+    pub principal_verifications: Vec<DeliveryPrincipalVerification>,
     #[serde(default)]
     pub attention_points: Vec<String>,
     pub metrics: DeliveryMetrics,
@@ -178,6 +208,7 @@ impl DeliverySummaryV1 {
             commit: input.commit,
             validations: input.validations,
             documentation: input.documentation,
+            principal_verifications: input.principal_verifications,
             attention_points: input.attention_points,
             metrics: input.metrics,
             timestamp: timestamp.into(),
@@ -324,6 +355,23 @@ impl DeliverySummaryV1 {
             out.push('\n');
         }
 
+        // KT-613 — after the worker's, and labelled as the principal's. The
+        // section is omitted entirely when the review added nothing: an empty
+        // heading would read as "the principal checked nothing", which is a
+        // claim, not an absence.
+        if !self.principal_verifications.is_empty() {
+            out.push_str("### Verified by the principal at review\n");
+            for verification in &self.principal_verifications {
+                out.push_str(&format!(
+                    "- `{}` → {} — {}\n",
+                    verification.dod_id,
+                    if verification.met { "met" } else { "not met" },
+                    verification.evidence
+                ));
+            }
+            out.push('\n');
+        }
+
         out.push_str("### Documentation\n");
         match &self.documentation {
             DeliveryDocumentation::Updated { files } => {
@@ -412,6 +460,7 @@ mod tests {
 
     fn valid_input() -> DeliverySummaryInput {
         DeliverySummaryInput {
+            principal_verifications: Vec::new(),
             agent: "OpenCode".into(),
             runtime: "native-acp".into(),
             tier: "reasoning".into(),

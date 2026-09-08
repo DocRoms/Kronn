@@ -357,6 +357,45 @@ describe('BatchComparePanel', () => {
     expect(onOpenDiscussion).toHaveBeenCalledWith('disc-improvement');
   });
 
+  it('selects usable OpenCode as the compare judge and sends its native identity', async () => {
+    compareApi.get.mockResolvedValue({
+      run_id: 'run-opencode-judge',
+      prompt_compatibility: 'same',
+      improvement_availability: 'available',
+      latest_judge_run: null,
+      evaluations: [],
+    });
+    compareApi.startJudge.mockResolvedValue({});
+    render(
+      <BatchComparePanel
+        runId="run-opencode-judge"
+        label="OpenCode judge"
+        discussions={[discussion('disc-opencode', 'OpenCode', 'default', 'OpenCode answer')]}
+        loading={false}
+        error={null}
+        availableAgents={['Codex', 'OpenCode']}
+        runningIds={new Set()}
+        onRefresh={vi.fn()}
+        onOpenDiscussion={vi.fn()}
+        onClose={vi.fn()}
+        t={(key, ...args) => `${key}${args.length ? ` ${args.join(' ')}` : ''}`}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'disc.compare.details' }));
+    await screen.findByText('disc.compare.aiJudge');
+    fireEvent.click(screen.getByRole('button', { name: 'disc.compare.chooseJudge' }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'OpenCode · default' }));
+    expect(screen.getByRole('button', { name: 'disc.compare.chooseJudge' })).toHaveTextContent('OpenCode');
+    fireEvent.click(screen.getByRole('button', { name: 'disc.compare.launchJudge' }));
+
+    await waitFor(() => expect(compareApi.startJudge).toHaveBeenCalledWith('run-opencode-judge', {
+      agent: 'OpenCode',
+      tier: 'default',
+      connection_id: null,
+    }));
+  });
+
   it('keeps objective and human metrics but disables AI judging and prompt improvement for mixed prompts', async () => {
     vi.clearAllMocks();
     compareApi.get.mockResolvedValue({

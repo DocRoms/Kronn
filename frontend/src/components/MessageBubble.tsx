@@ -1690,6 +1690,112 @@ const LargeMessageFallback = memo(({ content }: { content: string }) => {
   );
 });
 
+interface MarkdownRenderContextValue {
+  discussionId?: string;
+  sourceMessageId?: string;
+  sources?: SourceCheck[];
+  proposalFenceLines: number[];
+  questionFenceLines: number[];
+}
+
+// KT-622 — renderer functions are component TYPES, not ordinary callbacks.
+// Recreating `pre` on a fresh lint array or streamed text remounts every form
+// below it. Keep types stable and deliver changing values through context.
+const MarkdownRenderContext = createContext<MarkdownRenderContextValue>({
+  proposalFenceLines: [],
+  questionFenceLines: [],
+});
+
+function MarkdownParagraph({ children }: MdProps) {
+  const { sources } = useContext(MarkdownRenderContext);
+  return <p>{withSourceChips(children, sources)}</p>;
+}
+
+function MarkdownListItem({ children }: MdProps) {
+  const { sources } = useContext(MarkdownRenderContext);
+  return <li>{withSourceChips(children, sources)}</li>;
+}
+
+function parseFenceJson(source: string): unknown {
+  try {
+    return JSON.parse(source);
+  } catch {
+    return null;
+  }
+}
+
+function MarkdownPre({ children, node }: {
+  children?: ReactNode;
+  node?: { position?: { start?: { line?: number } } };
+}) {
+  const { discussionId, sourceMessageId, proposalFenceLines, questionFenceLines } = useContext(MarkdownRenderContext);
+  if (discussionId) {
+    // ReactMarkdown supplies <pre><code>…</code></pre>; inspect the child's
+    // language class without treating an arbitrary ReactNode as an element.
+    const childEl = Array.isArray(children) ? children[0] : children;
+    const codeEl = childEl as { props?: { className?: string; children?: ReactNode } } | undefined;
+    const className = codeEl?.props?.className ?? '';
+    const raw = codeEl?.props?.children;
+    const source = Array.isArray(raw) ? raw.join('') : String(raw ?? '');
+    if (className.includes('language-mermaid')) {
+      return <MermaidDiagram source={source.trim()} />;
+    }
+    if (className.includes('language-kronn-doc-preview')) {
+      return <DocPreview html={source.trim()} discussionId={discussionId} />;
+    }
+    if (className.includes('language-kronn-doc-data')) {
+      // Parse only data inside try/catch, never JSX. Malformed/unsupported
+      // envelopes still fall through to the ordinary copyable code block.
+      const parsed = parseFenceJson(source);
+      if (parsed && typeof parsed === 'object' && 'format' in parsed) {
+        const { format, ...payload } = parsed;
+        if (format === 'csv' || format === 'xlsx' || format === 'pptx') {
+          return <DocDataExport payload={payload} format={format} discussionId={discussionId} />;
+        }
+      }
+    }
+    // Cards read the durable row. A fresh context must update the same card;
+    // a different message/fence must not inherit the previous human's draft.
+    if (className.includes('language-kronn-question')) {
+      const line = node?.position?.start?.line;
+      const fenceIndex = line === undefined ? undefined : questionFenceLines.indexOf(line);
+      return (
+        <DiscussionQuestionCard
+          key={JSON.stringify([discussionId, sourceMessageId, fenceIndex])}
+          discussionId={discussionId}
+          source={source.trim()}
+          sourceMessageId={sourceMessageId}
+          fenceIndex={fenceIndex !== undefined && fenceIndex >= 0 ? fenceIndex : undefined}
+        />
+      );
+    }
+    if (className.includes('language-kronn-plan-action')) {
+      const proposal = parsePlanningProposal(parseFenceJson(source));
+      if (proposal) {
+        const line = node?.position?.start?.line;
+        const fenceIndex = line === undefined ? undefined : proposalFenceLines.indexOf(line);
+        return (
+          <PlanningActionCard
+            key={JSON.stringify([discussionId, sourceMessageId, fenceIndex])}
+            proposal={proposal}
+            discussionId={discussionId}
+            sourceMessageId={sourceMessageId}
+            fenceIndex={fenceIndex !== undefined && fenceIndex >= 0 ? fenceIndex : undefined}
+          />
+        );
+      }
+    }
+  }
+  return <CopyableBlock tag="pre"><pre>{children}</pre></CopyableBlock>;
+}
+
+const discussionMdComponents = {
+  ...mdComponents,
+  p: MarkdownParagraph,
+  li: MarkdownListItem,
+  pre: MarkdownPre,
+};
+
 export const MarkdownContent = memo(({
   content,
   discussionId,
@@ -1701,8 +1807,7 @@ export const MarkdownContent = memo(({
   discussionId?: string;
   sourceMessageId?: string;
   agentMentions?: boolean;
-  /** KT-609 — what the backend already decided about this message's `[src:]`
-   *  markers, so a chip can carry its verdict instead of guessing at one. */
+  /** The backend's citation verdicts; refreshes must not remount forms. */
   sources?: SourceCheck[];
 }) => {
   const proposalFenceLines = useMemo(() => {
@@ -1713,9 +1818,7 @@ export const MarkdownContent = memo(({
     return lines;
   }, [content]);
 
-  // KT-595 — same trick as the proposals above: the durable question row is
-  // addressed by (message, which fence within it), so the card needs to know
-  // its own rank among this message's question fences.
+  // A durable question is addressed by its message and rank among fences.
   const questionFenceLines = useMemo(() => {
     const lines: number[] = [];
     content.split('\n').forEach((line, index) => {
@@ -1724,125 +1827,9 @@ export const MarkdownContent = memo(({
     return lines;
   }, [content]);
 
-  // Override the `pre` handler when we have a discussion id: fenced
-  // blocks tagged `kronn-doc-preview` get replaced with the DocPreview
-  // component (sandboxed iframe + export buttons). Everything else
-  // renders through the shared mdComponents table above.
-  // NOTE: this useMemo runs UNCONDITIONALLY (before the big-content guard
-  // below) — a hook after an early return violates rules-of-hooks. It only
-  // builds the components table, so running it for huge content is free; the
-  // expensive markdown parse is gated by the guard.
-  // KT-609 — the marker left in the prose. Rebuilt here rather than in the
-  // module-level table because only this scope knows the message's verdicts.
-  const citationComponents = useMemo(() => ({
-    ...mdComponents,
-    p: ({ children }: MdProps) => <p>{withSourceChips(children, sources)}</p>,
-    li: ({ children }: MdProps) => <li>{withSourceChips(children, sources)}</li>,
-  }), [sources]);
-
-  const components = useMemo(() => {
-    if (!discussionId) return citationComponents;
-    return {
-      ...citationComponents,
-      pre: ({
-        children,
-        node,
-      }: {
-        children?: ReactNode;
-        node?: { position?: { start?: { line?: number } } };
-      }) => {
-        // ReactMarkdown renders <pre><code>…</code></pre>; the outer pre
-        // gets a child element whose props carry the language class.
-        // We need access to that child's `props`, which ReactNode
-        // doesn't expose by default — narrow to a React element.
-        const childEl = Array.isArray(children) ? children[0] : children;
-        const codeEl = (childEl as { props?: { className?: string; children?: ReactNode } } | undefined);
-        const className: string = codeEl?.props?.className ?? '';
-        // 0.8.3 (#289) — visual Mermaid render in chat. Same pattern
-        // as kronn-doc-preview below: intercept the fence, dynamic
-        // import the renderer. Out-of-band Mermaid blocks (agent
-        // emits a diagram mid-conversation) get the same treatment
-        // as docs files for consistency.
-        if (className.includes('language-mermaid')) {
-          const raw = codeEl?.props?.children;
-          const source = Array.isArray(raw) ? raw.join('') : String(raw ?? '');
-          return <MermaidDiagram source={source.trim()} />;
-        }
-        if (className.includes('language-kronn-doc-preview')) {
-          // `children` of a fenced block is typically a string (or an
-          // array with one string); coerce safely.
-          const raw = codeEl?.props?.children;
-          const html = Array.isArray(raw) ? raw.join('') : String(raw ?? '');
-          return <DocPreview html={html.trim()} discussionId={discussionId} />;
-        }
-        if (className.includes('language-kronn-doc-data')) {
-          // Parsed payload must carry a `format` discriminator ∈ {csv,xlsx,pptx}.
-          // Malformed JSON or unknown format → fall through to a regular
-          // code block so the chat keeps rendering instead of blowing up.
-          const raw = codeEl?.props?.children;
-          const text = Array.isArray(raw) ? raw.join('') : String(raw ?? '');
-          try {
-            const parsed = JSON.parse(text);
-            const { format, ...payload } = parsed;
-            if (format === 'csv' || format === 'xlsx' || format === 'pptx') {
-              return <DocDataExport payload={payload} format={format} discussionId={discussionId} />;
-            }
-          } catch {
-            // fall through to raw code render
-          }
-        }
-        // KT-595 — an arbitration the room is waiting on. The card renders
-        // the DURABLE row, not the fence: the fence is what the agent wrote,
-        // the row is what was recorded and what the answer attaches to.
-        if (className.includes('language-kronn-question')) {
-          const rawQuestion = codeEl?.props?.children;
-          const questionSource = Array.isArray(rawQuestion)
-            ? rawQuestion.join('')
-            : String(rawQuestion ?? '');
-          const line = node?.position?.start?.line;
-          const fenceIndex = line === undefined
-            ? undefined
-            : questionFenceLines.indexOf(line);
-          return (
-            <DiscussionQuestionCard
-              discussionId={discussionId}
-              source={questionSource.trim()}
-              sourceMessageId={sourceMessageId}
-              fenceIndex={fenceIndex !== undefined && fenceIndex >= 0 ? fenceIndex : undefined}
-            />
-          );
-        }
-        if (className.includes('language-kronn-plan-action')) {
-          const raw = codeEl?.props?.children;
-          const text = Array.isArray(raw) ? raw.join('') : String(raw ?? '');
-          try {
-            const proposal = parsePlanningProposal(JSON.parse(text));
-            if (proposal) {
-              const line = node?.position?.start?.line;
-              const fenceIndex = line === undefined
-                ? undefined
-                : proposalFenceLines.indexOf(line);
-              return (
-                <PlanningActionCard
-                  proposal={proposal}
-                  discussionId={discussionId}
-                  sourceMessageId={sourceMessageId}
-                  fenceIndex={fenceIndex !== undefined && fenceIndex >= 0 ? fenceIndex : undefined}
-                />
-              );
-            }
-          } catch {
-            // Malformed proposals stay visible as raw code.
-          }
-        }
-        return (
-          <CopyableBlock tag="pre">
-            <pre>{children}</pre>
-          </CopyableBlock>
-        );
-      },
-    };
-  }, [citationComponents, discussionId, proposalFenceLines, questionFenceLines, sourceMessageId]);
+  const renderContext = useMemo(() => ({
+    discussionId, sourceMessageId, sources, proposalFenceLines, questionFenceLines,
+  }), [discussionId, sourceMessageId, sources, proposalFenceLines, questionFenceLines]);
 
   // Guard against multi-MB messages crashing the tab — see MAX_MARKDOWN_CHARS.
   // Placed AFTER all hooks (the useMemo above) to satisfy rules-of-hooks.
@@ -1851,14 +1838,16 @@ export const MarkdownContent = memo(({
   }
 
   return (
-    <div className="disc-md">
-      <ReactMarkdown
-        remarkPlugins={agentMentions ? mentionRemarkPluginsList : remarkPluginsList}
-        components={components}
-      >
-        {content}
-      </ReactMarkdown>
-    </div>
+    <MarkdownRenderContext.Provider value={renderContext}>
+      <div className="disc-md">
+        <ReactMarkdown
+          remarkPlugins={agentMentions ? mentionRemarkPluginsList : remarkPluginsList}
+          components={discussionMdComponents}
+        >
+          {content}
+        </ReactMarkdown>
+      </div>
+    </MarkdownRenderContext.Provider>
   );
 });
 
