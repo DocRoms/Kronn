@@ -3612,6 +3612,56 @@ mod tests {
         assert_eq!(important_card_count(&state, IMPORTANT_PARENT).await, 1);
     }
 
+    /// KT-619 — the hole the review found, recorded rather than argued about.
+    ///
+    /// `session_id` arrives in the JSON body and nothing proves the caller owns
+    /// it. A worker that reads an orchestrator's session id — they are visible
+    /// in room metadata — can present it and publish. Resolving the row proves
+    /// the row exists, never possession.
+    ///
+    /// Ignored, not deleted: fixing it means requiring proof of possession
+    /// (`discussion_sessions.resume_token_hash` already exists for the join and
+    /// resume paths, and `disc_append` simply does not use it), which is the
+    /// same authority arbitration as the `Human` branch. Remove the `ignore`
+    /// with the fix; until then this states plainly what is not guaranteed.
+    #[tokio::test]
+    #[serial]
+    #[ignore = "KT-619: declared session identity is not authenticated; pending the authority arbitration"]
+    async fn disc_append_refuses_a_worker_presenting_an_orchestrators_session_id() {
+        crate::core::anti_halluc::set_mode("off");
+        let (state, _tmp) = lint_state(false).await;
+        execution_room(&state, IMPORTANT_PARENT, IMPORTANT_CHILD).await;
+        state
+            .db
+            .with_conn(|conn| {
+                crate::db::discussion_sessions::create_session(
+                    conn,
+                    IMPORTANT_PARENT,
+                    "ClaudeCode",
+                    Some("orchestrator-session"),
+                    "peer",
+                )
+            })
+            .await
+            .unwrap();
+
+        // The worker never sends its own id. It sends the orchestrator's, which
+        // it did not have to steal — only read.
+        let response = append_as(
+            &state,
+            vec![agent_msg("m1", &important_fence("kt-619.borrowed-identity"))],
+            Some("orchestrator-session"),
+        )
+        .await;
+
+        assert_eq!(
+            response.important.map(|i| i.published),
+            Some(0),
+            "presenting an identity must not be the same as holding it"
+        );
+        assert_eq!(important_card_count(&state, IMPORTANT_PARENT).await, 0);
+    }
+
     #[tokio::test]
     #[serial]
     async fn disc_append_refuses_a_worker_claiming_the_user_role() {

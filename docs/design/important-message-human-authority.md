@@ -6,10 +6,36 @@ proposals were refused, both for the same reason.
 
 ## What we are protecting
 
-The `Human` authority on an important card: the claim that a specific card was
-published by the person, not by an agent. `Orchestrator` is out of scope — its
-lineage resolves from the caller's own durable session, which Kronn writes at
-offer acceptance and the caller does not author.
+The claim that a card was published by a given authority. This started as a
+question about `Human` only. It is not: the review showed `Orchestrator` rests
+on the same weakness, so both are in scope.
+
+## Declared identity is not authenticated identity
+
+`DiscAppendRequest.session_id` arrives in the JSON body, and the handler
+extracts no authenticated identity. Publication resolves that string against
+`discussion_sessions` — which proves **the row exists**, never that the caller
+holds it. Session ids are visible in room metadata, so a worker does not have
+to steal one; it only has to read one and present it.
+
+`disc_append_refuses_a_worker_presenting_an_orchestrators_session_id`
+(`backend/src/api/disc_source.rs`) records this. It is `#[ignore]`d rather than
+deleted, and run with `--ignored` it fails on `left: Some(1)` — the card is
+published. That is the current, honest state.
+
+An authenticated identity **does exist in the product**:
+`discussion_sessions.resume_token_hash`, minted by `new_resume_credential` and
+used by the join and resume paths. `disc_append` simply does not use it.
+Requiring proof of possession there is the smallest correct fix, and it changes
+one decision point rather than the auth model — but it needs the bridge to send
+the token it already holds, which is a transport contract change, so it belongs
+to this arbitration rather than to a card-rendering lot.
+
+Under the same-OS-user adversary below, even proof of possession is not a
+boundary: the token sits somewhere that user can read. It is still worth having.
+It moves the bar from *anyone local who read a session id* to *a process that
+went and took another process's credential* — which is the ordinary bar
+everywhere else, and the difference between a mistake and an intrusion.
 
 ## Threat model
 
@@ -84,6 +110,18 @@ from the human's).
 
 **What it is worth:** it is the only option that adds no machinery and claims
 nothing it cannot prove.
+
+## What each option covers, and what it does not
+
+| Threat | A (WebAuthn) | B (limitation) | Proof of possession |
+|---|---|---|---|
+| A local caller presents someone else's session id | covered for `Human` | n/a — nothing publishes as `Human` | **covered** |
+| A local caller reads another process's credential | covered | n/a | not covered |
+| A remote caller | already covered by `auth_middleware` | same | same |
+| A person approving without reading | not covered | not covered | not covered |
+
+Proof of possession is orthogonal to A and B: it is what makes `Orchestrator`
+mean anything, whichever is chosen for `Human`.
 
 ## Recommendation
 
