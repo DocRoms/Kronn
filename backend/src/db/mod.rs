@@ -5,6 +5,7 @@ pub mod agent_jobs;
 pub mod api_call_logs;
 pub mod audit_runs;
 pub mod cli_telemetry;
+pub(crate) mod cli_worker_bindings;
 pub mod compare;
 pub mod contacts;
 pub mod context_audits;

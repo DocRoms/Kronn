@@ -2820,11 +2820,27 @@ pub async fn accept_worker_offer_and_attach(
     // while the source-history owner remains `cli-*`. Idempotent + fail-closed. ──
     if origin != child {
         let (o, c) = (origin.clone(), child.clone());
+        let execution_id = exec_id.clone();
         let (agent, binding_session) = (
             source_agent.to_string(),
             source_binding_session_id.to_string(),
         );
         db.with_conn(move |conn| {
+            // An accepted offer survives task completion/reassignment. Its
+            // retry must never move a released worker back into the child.
+            // Check on the same write connection as the transfer, not only
+            // before yielding between the acceptance saga's phases.
+            let current = crate::db::orchestration::get_task_execution(conn, &execution_id)?
+                .context("worker transfer execution vanished")?;
+            if current.status.is_terminal()
+                || current.worker_target_kind != Some(MessageTargetKind::Cli)
+                || current.worker_cli_session_id != Some(session_pk)
+                || current.worker_agent_type.as_deref() != Some(agent.as_str())
+            {
+                anyhow::bail!(
+                    "worker transfer refused: execution no longer owns this CLI assignment"
+                );
+            }
             crate::db::disc_source::transfer_source_binding(
                 conn,
                 &o,
@@ -14164,14 +14180,24 @@ mod tests {
     /// Seed a parked CLI worker + a durable origin binding, returning the ids the
     /// acceptance flow needs. Mirrors what a real `disc_join` + provisioning leave behind.
     async fn parked_cli_worker(db: &Database, repo: &Path) -> (String, String, String, String) {
+        parked_cli_worker_with_identities(db, repo, "sess-a", "sess-a").await
+    }
+
+    async fn parked_cli_worker_with_identities(
+        db: &Database,
+        repo: &Path,
+        active: &str,
+        durable: &str,
+    ) -> (String, String, String, String) {
         let (task_ref, parent_id, _pid) = seed(db, repo).await;
-        seed_cli_session(db, 101, &parent_id, "sess-a").await;
+        seed_cli_session(db, 101, &parent_id, active).await;
         // A real disc_join binds the session to the origin room durably; the acceptance
         // transfer needs that expected source to move from.
         {
             let p = parent_id.clone();
+            let durable = durable.to_string();
             db.with_conn(move |conn| {
-                crate::db::disc_source::bind_to_source(conn, &p, "ClaudeCode", "sess-a")
+                crate::db::disc_source::bind_to_source(conn, &p, "ClaudeCode", &durable)
             })
             .await
             .unwrap();
@@ -14812,6 +14838,304 @@ mod tests {
     }
 
     // ── KT-319 tranche 2 — the deliver path (worker → AwaitingReview + review request). ──
+
+    /// KT-620: real bridge identities differ even without a mid-task reload.
+    async fn distinct_identity_cli_worker(db: &Database, repo: &Path) -> (String, String) {
+        let (_, parent, _, offer) =
+            parked_cli_worker_with_identities(db, repo, "adhoc-worker", "cli-worker").await;
+        match accept_worker_offer_and_attach(db, &offer, "ClaudeCode", "adhoc-worker", "cli-worker")
+            .await
+            .unwrap()
+        {
+            AcceptAttachOutcome::Attached { execution, .. } => (parent, execution.id),
+            other => panic!("expected Attached, got {other:?}"),
+        }
+    }
+
+    async fn assert_distinct_cli_returned(db: &Database, parent: String) {
+        db.with_conn(move |conn| {
+            let durable = crate::db::disc_source::find_disc_by_source_session(
+                conn,
+                "ClaudeCode",
+                "cli-worker",
+            )?;
+            assert_eq!(durable.as_deref(), Some(parent.as_str()));
+            let active_room: String = conn.query_row(
+                "SELECT disc_id FROM discussion_sessions WHERE id = 101",
+                [],
+                |row| row.get(0),
+            )?;
+            assert_eq!(active_room, parent);
+            assert_eq!(
+                crate::db::disc_source::find_disc_by_source_session(
+                    conn,
+                    "ClaudeCode",
+                    "adhoc-worker",
+                )?,
+                None,
+                "the ephemeral transport key must not gain a fabricated binding"
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn cli_durable_return_terminal_preserves_the_distinct_binding_identity() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (parent, exec_id) = distinct_identity_cli_worker(&db, repo.path()).await;
+        db.with_conn(move |conn| {
+            assert!(crate::db::orchestration::transition_execution(
+                conn,
+                &exec_id,
+                TaskExecutionStatus::Cancelled,
+                &backend_actor(),
+                serde_json::json!({ "test": "distinct_cli_return" }),
+            )?);
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert_distinct_cli_returned(&db, parent).await;
+    }
+
+    #[tokio::test]
+    async fn cli_durable_return_reassignment_preserves_the_distinct_binding_identity() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (parent, exec_id) = distinct_identity_cli_worker(&db, repo.path()).await;
+        db.with_conn(move |conn| {
+            crate::db::orchestration::reassign_execution_worker(
+                conn,
+                &exec_id,
+                &crate::models::CampaignWorkerSelection {
+                    target: MessageTarget::agent(AgentType::Codex),
+                    model: None,
+                    profile_id: None,
+                },
+                "explicit test reassignment",
+                &backend_actor(),
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert_distinct_cli_returned(&db, parent).await;
+    }
+
+    #[tokio::test]
+    async fn cli_durable_return_done_restores_the_pinned_source() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (parent, exec_id) = distinct_identity_cli_worker(&db, repo.path()).await;
+        db.with_conn(move |conn| {
+            for status in [
+                TaskExecutionStatus::AwaitingReview,
+                TaskExecutionStatus::Approved,
+                TaskExecutionStatus::Integrating,
+                TaskExecutionStatus::Validating,
+                TaskExecutionStatus::Applying,
+            ] {
+                assert!(crate::db::orchestration::transition_execution(
+                    conn,
+                    &exec_id,
+                    status,
+                    &backend_actor(),
+                    serde_json::json!({}),
+                )?);
+            }
+            const MERGE: &str = "dddddddddddddddddddddddddddddddddddddddd";
+            conn.execute(
+                "UPDATE task_executions SET candidate_merge_sha = ?2 WHERE id = ?1",
+                rusqlite::params![exec_id, MERGE],
+            )?;
+            assert_eq!(
+                crate::db::orchestration::commit_integration_checkpoint(
+                    conn,
+                    &exec_id,
+                    crate::db::orchestration::IntegrationStep::Integrated {
+                        integrated_sha: MERGE
+                    },
+                    &backend_actor(),
+                )?,
+                crate::db::orchestration::IntegrationCheckpointOutcome::Committed {
+                    status: TaskExecutionStatus::Done
+                }
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert_distinct_cli_returned(&db, parent).await;
+    }
+
+    #[tokio::test]
+    async fn cli_durable_return_failed_after_staged_acceptance_restores_the_source() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (_, parent, child, offer) =
+            parked_cli_worker_with_identities(&db, repo.path(), "adhoc-worker", "cli-worker").await;
+        let origin = parent.clone();
+        db.with_conn(move |conn| {
+            let accepted = crate::db::worker_offers::accept_worker_offer(
+                conn,
+                &offer,
+                "ClaudeCode",
+                "adhoc-worker",
+                "cli-worker",
+            )?;
+            let crate::db::worker_offers::AcceptOutcome::Accepting(accepted) = accepted else {
+                anyhow::bail!("expected staged acceptance");
+            };
+            crate::db::disc_source::transfer_source_binding(
+                conn,
+                &origin,
+                &child,
+                "ClaudeCode",
+                "cli-worker",
+            )?;
+            crate::db::discussion_sessions::move_session_to_discussion(conn, 101, &child)?;
+            for status in [
+                TaskExecutionStatus::Provisioning,
+                TaskExecutionStatus::Failed,
+            ] {
+                assert!(crate::db::orchestration::transition_execution(
+                    conn,
+                    &accepted.task_execution_id,
+                    status,
+                    &backend_actor(),
+                    serde_json::json!({}),
+                )?);
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert_distinct_cli_returned(&db, parent).await;
+    }
+
+    #[tokio::test]
+    async fn cli_durable_return_replacement_cli_does_not_strand_the_previous_worker() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (parent, exec_id) = distinct_identity_cli_worker(&db, repo.path()).await;
+        seed_cli_session(&db, 102, &parent, "replacement-worker").await;
+        db.with_conn(move |conn| {
+            crate::db::orchestration::reassign_execution_worker(
+                conn,
+                &exec_id,
+                &crate::models::CampaignWorkerSelection {
+                    target: MessageTarget::cli(AgentType::ClaudeCode, 102),
+                    model: None,
+                    profile_id: None,
+                },
+                "explicit replacement by a different joined CLI",
+                &backend_actor(),
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert_distinct_cli_returned(&db, parent).await;
+    }
+
+    #[tokio::test]
+    async fn cli_durable_return_legacy_worker_can_explicitly_reconfirm_its_accepted_offer() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (parent, exec_id) = distinct_identity_cli_worker(&db, repo.path()).await;
+        let id = exec_id.clone();
+        let offer_id = db.with_conn(move |conn| {
+            // Simulate an active execution accepted before migration 171:
+            // the verified offer exists, but no identity was pinned yet.
+            conn.execute("DELETE FROM task_execution_cli_bindings WHERE task_execution_id = ?1", [&id])?;
+            let offer: String = conn.query_row(
+                "SELECT id FROM task_execution_worker_offers WHERE task_execution_id = ?1 AND status = 'accepted'",
+                [&id], |row| row.get(0),
+            )?;
+            Ok(offer)
+        }).await.unwrap();
+        for _ in 0..2 {
+            let result = accept_worker_offer_and_attach(
+                &db,
+                &offer_id,
+                "ClaudeCode",
+                "adhoc-worker",
+                "cli-worker",
+            )
+            .await
+            .unwrap();
+            assert!(matches!(result, AcceptAttachOutcome::Attached { .. }));
+        }
+        db.with_conn(move |conn| {
+            assert!(crate::db::orchestration::transition_execution(
+                conn,
+                &exec_id,
+                TaskExecutionStatus::Cancelled,
+                &backend_actor(),
+                serde_json::json!({}),
+            )?);
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert_distinct_cli_returned(&db, parent).await;
+    }
+
+    async fn assert_old_offer_cannot_move_a_released_worker(replacement: bool) {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (parent, exec_id) = distinct_identity_cli_worker(&db, repo.path()).await;
+        let id = exec_id.clone();
+        let offer_id = db.with_conn(move |conn| {
+            let offer: String = conn.query_row(
+                "SELECT id FROM task_execution_worker_offers WHERE task_execution_id = ?1 AND status = 'accepted'",
+                [&id], |row| row.get(0),
+            )?;
+            if replacement {
+                crate::db::orchestration::reassign_execution_worker(
+                    conn, &id,
+                    &crate::models::CampaignWorkerSelection {
+                        target: MessageTarget::agent(AgentType::Codex), model: None, profile_id: None,
+                    },
+                    "explicit replacement before a stale offer replay", &backend_actor(),
+                )?;
+            } else {
+                crate::db::orchestration::transition_execution(
+                    conn, &id, TaskExecutionStatus::Cancelled, &backend_actor(), serde_json::json!({}),
+                )?;
+            }
+            Ok(offer)
+        }).await.unwrap();
+        assert_distinct_cli_returned(&db, parent.clone()).await;
+        let before = exec_of(&db, &exec_id).await;
+        let replay = accept_worker_offer_and_attach(
+            &db,
+            &offer_id,
+            "ClaudeCode",
+            "adhoc-worker",
+            "cli-worker",
+        )
+        .await;
+        assert_distinct_cli_returned(&db, parent).await;
+        assert!(!matches!(replay, Ok(AcceptAttachOutcome::Attached { .. })));
+        let after = exec_of(&db, &exec_id).await;
+        assert_eq!(after.status, before.status);
+        assert_eq!(after.worker_cli_session_id, before.worker_cli_session_id);
+        assert_eq!(after.worker_agent_type, before.worker_agent_type);
+    }
+
+    #[tokio::test]
+    async fn cli_durable_return_old_offer_cannot_recapture_a_terminal_worker() {
+        assert_old_offer_cannot_move_a_released_worker(false).await;
+    }
+
+    #[tokio::test]
+    async fn cli_durable_return_old_offer_cannot_recapture_a_replaced_worker() {
+        assert_old_offer_cannot_move_a_released_worker(true).await;
+    }
 
     /// Drive a CLI worker to `Working` via the full KT-328 handshake, returning the handles
     /// the deliver tests act on.

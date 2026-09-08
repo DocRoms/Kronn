@@ -487,11 +487,22 @@ fn accept_within_tx(
     // identities. Verify ownership before staging: otherwise a stale/rejoined bridge can
     // commit `pending → accepting`, fail the later transfer, and strand the offer. During
     // a resumed `accepting` saga either side is valid because phase 2 may already have
-    // moved the binding before a crash.
+    // moved the binding before a crash. An explicit replay by the STILL assigned
+    // worker can also pin a pre-migration accepted offer. Never backfill a
+    // terminal execution or a superseded assignment from a historical offer.
+    let reconfirm_current_worker = offer.status == WorkerOfferStatus::Accepted
+        && crate::db::orchestration::get_task_execution(conn, &offer.task_execution_id)?
+            .is_some_and(|execution| {
+                !execution.status.is_terminal()
+                    && execution.worker_target_kind == Some(crate::models::MessageTargetKind::Cli)
+                    && execution.worker_cli_session_id == Some(offer.target_cli_session_id)
+                    && execution.worker_agent_type.as_deref() == Some(source_agent)
+            });
     if matches!(
         offer.status,
         WorkerOfferStatus::Pending | WorkerOfferStatus::Accepting
-    ) {
+    ) || reconfirm_current_worker
+    {
         let bound_disc = crate::db::disc_source::find_disc_by_source_session(
             conn,
             source_agent,
@@ -501,15 +512,24 @@ fn accept_within_tx(
             WorkerOfferStatus::Pending => {
                 bound_disc.as_deref() == Some(offer.origin_discussion_id.as_str())
             }
-            WorkerOfferStatus::Accepting => bound_disc.as_deref().is_some_and(|disc_id| {
-                disc_id == offer.origin_discussion_id.as_str()
-                    || disc_id == offer.child_discussion_id.as_str()
-            }),
+            WorkerOfferStatus::Accepting | WorkerOfferStatus::Accepted => {
+                bound_disc.as_deref().is_some_and(|disc_id| {
+                    disc_id == offer.origin_discussion_id.as_str()
+                        || disc_id == offer.child_discussion_id.as_str()
+                })
+            }
             _ => false,
         };
         if !binding_ready {
             return Ok(AcceptOutcome::BindingMismatch);
         }
+        crate::db::cli_worker_bindings::pin(
+            conn,
+            &offer.task_execution_id,
+            offer.target_cli_session_id,
+            source_agent,
+            source_binding_session_id,
+        )?;
     }
 
     // A same-session retry from `accepting` resumes the saga. Concurrent duplicate calls

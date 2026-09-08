@@ -3436,45 +3436,14 @@ fn return_cli_worker_to_origin(
         return Ok(());
     }
 
-    // The durable session row gives the external source identity used by the
-    // binding history. A terminal execution must never steal a session that has
-    // since been rebound to an unrelated room; fail the whole terminal CAS.
-    let source: Option<(String, String)> = conn
-        .query_row(
-            "SELECT agent_type, session_id FROM discussion_sessions WHERE id = ?1",
-            [session_pk],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .optional()?;
-    if let Some((source_agent, source_session_id)) = source {
-        let current = crate::db::disc_source::find_disc_by_source_session(
-            conn,
-            &source_agent,
-            &source_session_id,
-        )?;
-        match current.as_deref() {
-            Some(current) if current == child => {
-                // `bind_to_source` composes in this savepoint and closes the
-                // child's open history row before reopening the origin row.
-                crate::db::disc_source::bind_to_source(
-                    conn,
-                    &origin,
-                    &source_agent,
-                    &source_session_id,
-                )?;
-            }
-            Some(current) if current == origin => {}
-            Some(current) => bail!(
-                "terminal worker return refused: session ownership moved from child {child} to {current}"
-            ),
-            None => {
-                // A left/expired source has no live binding to move. Its durable
-                // room trace still lands below, and the terminal transition must
-                // not be held hostage by an already-closed CLI session.
-            }
-        }
-        crate::db::discussion_sessions::move_session_to_discussion(conn, session_pk, &origin)?;
-    }
+    crate::db::cli_worker_bindings::return_to_origin(
+        conn,
+        exec_id,
+        session_pk,
+        worker_agent.as_deref(),
+        &origin,
+        &child,
+    )?;
 
     let worker = worker_agent.unwrap_or_else(|| "CLI worker".to_string());
     let terminal = terminal.as_str();
@@ -4399,39 +4368,14 @@ fn restore_reassigned_cli_worker_to_origin(
     if child == execution.parent_discussion_id {
         return Ok(());
     }
-    let source: Option<(String, String)> = conn
-        .query_row(
-            "SELECT agent_type, session_id FROM discussion_sessions WHERE id = ?1",
-            [session_pk],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .optional()?;
-    if let Some((source_agent, source_session_id)) = source {
-        let current = crate::db::disc_source::find_disc_by_source_session(
-            conn,
-            &source_agent,
-            &source_session_id,
-        )?;
-        match current.as_deref() {
-            Some(current) if current == child => crate::db::disc_source::bind_to_source(
-                conn,
-                &execution.parent_discussion_id,
-                &source_agent,
-                &source_session_id,
-            )?,
-            Some(current) if current == execution.parent_discussion_id => {}
-            Some(current) => bail!(
-                "CLI reassignment return refused: session ownership moved from child {child} to {current}"
-            ),
-            None => {}
-        }
-        crate::db::discussion_sessions::move_session_to_discussion(
-            conn,
-            session_pk,
-            &execution.parent_discussion_id,
-        )?;
-    }
-    Ok(())
+    crate::db::cli_worker_bindings::return_to_origin(
+        conn,
+        &execution.id,
+        session_pk,
+        execution.worker_agent_type.as_deref(),
+        &execution.parent_discussion_id,
+        child,
+    )
 }
 
 pub fn reassign_execution_worker(
@@ -4532,7 +4476,8 @@ pub fn reassign_execution_worker(
         }
         resolve_campaign_worker(conn, &selection_run, Some(selection))?;
         if execution.worker_target_kind == Some(MessageTargetKind::Cli)
-            && selection.target.kind != MessageTargetKind::Cli
+            && (selection.target.kind != MessageTargetKind::Cli
+                || execution.worker_cli_session_id != selection.target.cli_session_id)
         {
             restore_reassigned_cli_worker_to_origin(conn, &execution)?;
         }
