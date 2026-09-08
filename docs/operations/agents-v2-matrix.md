@@ -94,10 +94,15 @@ the same job.
   qualification boundary, distinct from KT-577's long-lived Claude process.
   [src: file: backend/src/agents/runner.rs:3121-3156]
   [src: file: backend/src/agents/runner.rs:2068-2086]
-- **An ACP agent reports tokens but no spend.** The protocol carries no price,
-  the catalogue records a qualitative hint rather than a rate, and the spend
-  report reads Claude, Codex and Gemini logs only. Absence there means unknown,
-  never free.
+- **Kronn does not yet normalize ACP's optional session cost.** The current
+  upstream v1 schema supports `usage_update.cost` as a cumulative amount with
+  an explicit currency; this is not a per-turn USD price. Kronn's normalized
+  ACP event currently retains token counts only, while its global spend report
+  reads Claude, Codex and Gemini logs. Missing cost therefore remains unknown,
+  never free. This is an implementation limit, not a protocol prohibition.
+  [ACP v1 UsageUpdate, checked 2026-09-08](https://agentclientprotocol.com/protocol/v1/schema#usageupdate)
+  [src: file: backend/src/acp.rs:341-356]
+  [src: file: backend/src/acp.rs:794-806]
 - **MCP servers holding a credential are dropped**, whole. A project mixing
   safe and credentialed entries loses the credentialed ones — silently from the
   agent's point of view, since it simply never sees them.
