@@ -532,6 +532,7 @@ const es: TranslationDict = {
   'disc.question.bannerPending': '{0} decisión(es) pendiente(s)',
   'disc.question.bannerGo': 'Ver',
   'disc.important.count': '{0} importante(s)',
+  'disc.important.goToCurrent': 'Ir al mensaje importante actual',
   'disc.important.barLabel': 'Mensajes importantes',
   'disc.important.filterLabel': 'Filtrar por categoría',
   'disc.important.filterAll': 'Todas las categorías',

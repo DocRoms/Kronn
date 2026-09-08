@@ -157,29 +157,80 @@ describe('ImportantMessagesBar', () => {
     expect(screen.getByText('disc.important.position|1|1')).toBeInTheDocument();
   });
 
-  it('walks the cards in transcript order without disturbing the thread', async () => {
+  it('navigates to the exact card, through the transcript\'s own jump', async () => {
     serve(three);
-    const scrollIntoView = vi.fn();
-    // Stand in for the transcript: navigation must only scroll, never re-render
-    // or reorder what the reader already had open.
-    three.forEach((item) => {
-      const node = document.createElement('div');
-      node.setAttribute('data-message-id', item.message_id);
-      node.scrollIntoView = scrollIntoView;
-      document.body.appendChild(node);
-    });
-
-    render(<ImportantMessagesBar discussionId={DISC} />);
+    const onNavigate = vi.fn();
+    render(<ImportantMessagesBar discussionId={DISC} onNavigate={onNavigate} />);
     expect(await screen.findByText('disc.important.position|1|3')).toBeInTheDocument();
 
+    // The target matters, not just the counter: a pager that moves its label
+    // while jumping to the wrong message is worse than no pager.
     await userEvent.click(screen.getByLabelText('disc.important.next'));
+    expect(onNavigate).toHaveBeenLastCalledWith('m-2');
     expect(screen.getByText('disc.important.position|2|3')).toBeInTheDocument();
+
     await userEvent.click(screen.getByLabelText('disc.important.next'));
-    expect(screen.getByText('disc.important.position|3|3')).toBeInTheDocument();
-    expect(scrollIntoView).toHaveBeenCalledTimes(2);
+    expect(onNavigate).toHaveBeenLastCalledWith('m-3');
 
     await userEvent.click(screen.getByLabelText('disc.important.previous'));
+    expect(onNavigate).toHaveBeenLastCalledWith('m-2');
     expect(screen.getByText('disc.important.position|2|3')).toBeInTheDocument();
+  });
+
+  it('reaches the only card there is, when both arrows are disabled', async () => {
+    serve([card({ id: 'i-9', message_id: 'm-9' })]);
+    const onNavigate = vi.fn();
+    render(<ImportantMessagesBar discussionId={DISC} onNavigate={onNavigate} />);
+    await screen.findByText('disc.important.count|1');
+
+    // With one card there is no previous and no next; without the counter
+    // being actionable, nothing would reach it at all.
+    expect(screen.getByLabelText('disc.important.previous')).toBeDisabled();
+    expect(screen.getByLabelText('disc.important.next')).toBeDisabled();
+    await userEvent.click(screen.getByLabelText('disc.important.goToCurrent'));
+    expect(onNavigate).toHaveBeenCalledWith('m-9');
+  });
+
+  it('reaches the single result a filter leaves behind', async () => {
+    serve(three);
+    const onNavigate = vi.fn();
+    render(<ImportantMessagesBar discussionId={DISC} onNavigate={onNavigate} />);
+    await screen.findByText('disc.important.count|3');
+
+    await userEvent.selectOptions(
+      screen.getByLabelText('disc.important.filterLabel'),
+      'blocking_alert',
+    );
+    await userEvent.click(screen.getByLabelText('disc.important.goToCurrent'));
+    expect(onNavigate).toHaveBeenCalledWith('m-2');
+  });
+
+  it('refetches when the transcript grows, so a new card is not missed', async () => {
+    serve([card({ id: 'i-1', message_id: 'm-1' })]);
+    const { rerender } = render(
+      <ImportantMessagesBar discussionId={DISC} messageRevision="m-1" />,
+    );
+    expect(await screen.findByText('disc.important.count|1')).toBeInTheDocument();
+    expect(importantMessages).toHaveBeenCalledTimes(1);
+
+    // A card published after the first GET must not stay invisible until a
+    // reload: the newest message id changing is the signal to look again.
+    serve(three);
+    rerender(<ImportantMessagesBar discussionId={DISC} messageRevision="m-3" />);
+    expect(await screen.findByText('disc.important.count|3')).toBeInTheDocument();
+    expect(importantMessages).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not refetch while the transcript is unchanged', async () => {
+    serve(three);
+    const { rerender } = render(
+      <ImportantMessagesBar discussionId={DISC} messageRevision="m-3" />,
+    );
+    await screen.findByText('disc.important.count|3');
+    rerender(<ImportantMessagesBar discussionId={DISC} messageRevision="m-3" />);
+    rerender(<ImportantMessagesBar discussionId={DISC} messageRevision="m-3" />);
+    // One fetch per arrival, never one per render or per bubble.
+    expect(importantMessages).toHaveBeenCalledTimes(1);
   });
 
   it('cannot walk past either end', async () => {

@@ -4062,7 +4062,11 @@ export function DiscussionsPage({
             {/* KT-619 — find the steering cards without scrolling the whole
                 thread. Sits beside the question banner because both answer
                 "what do I need to know about this room", not "what was said". */}
-            <ImportantMessagesBar discussionId={activeDiscussion.id} />
+            <ImportantMessagesBar
+              discussionId={activeDiscussion.id}
+              messageRevision={activeDiscussion.messages.at(-1)?.id}
+              onNavigate={handleReplyNavigate}
+            />
 
             {/* Messages */}
             <div

@@ -532,6 +532,7 @@ const fr: TranslationDict = {
   'disc.question.bannerPending': '{0} arbitrage(s) en attente',
   'disc.question.bannerGo': 'Voir',
   'disc.important.count': '{0} important(s)',
+  'disc.important.goToCurrent': 'Aller au message important courant',
   'disc.important.barLabel': 'Messages importants',
   'disc.important.filterLabel': 'Filtrer par catégorie',
   'disc.important.filterAll': 'Toutes les catégories',

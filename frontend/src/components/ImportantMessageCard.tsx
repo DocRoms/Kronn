@@ -4,10 +4,14 @@
 // fence is what the orchestrator typed, the row is what Kronn recorded and
 // what the counter, the filter and the navigation all agree on.
 
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { AlertTriangle, ChevronDown, ChevronUp } from 'lucide-react';
 import { useT } from '../lib/I18nContext';
-import { IMPORTANT_CATEGORIES, useImportantMessages } from '../lib/importantMessages';
+import {
+  IMPORTANT_CATEGORIES,
+  refreshImportantMessages,
+  useImportantMessages,
+} from '../lib/importantMessages';
 import type { ImportantCategory } from '../types/generated';
 import './ImportantMessageCard.css';
 
@@ -111,6 +115,14 @@ export function ImportantMessageCard({ discussionId, sourceMessageId }: Importan
 
 export interface ImportantMessagesBarProps {
   discussionId?: string;
+  /** Id of the newest durable message. Changing it means the transcript grew,
+   *  which is the only moment a new card can have appeared. Same idiom as
+   *  `DiscussionQuestionBanner`, and one fetch per arrival — not per bubble. */
+  messageRevision?: string;
+  /** The transcript's own navigation. Reused rather than reimplemented so a
+   *  jump releases stick-to-bottom and highlights the target the way every
+   *  other jump in this page does. */
+  onNavigate?: (messageId: string) => void;
 }
 
 /**
@@ -120,7 +132,11 @@ export interface ImportantMessagesBarProps {
  * the list, so the reader's position is the only thing that moves — and only
  * when they asked for it.
  */
-export function ImportantMessagesBar({ discussionId }: ImportantMessagesBarProps) {
+export function ImportantMessagesBar({
+  discussionId,
+  messageRevision,
+  onNavigate,
+}: ImportantMessagesBarProps) {
   const { t } = useT();
   const { items, totalAll, loaded } = useImportantMessages(discussionId);
   const [category, setCategory] = useState<ImportantCategory | ''>('');
@@ -138,28 +154,44 @@ export function ImportantMessagesBar({ discussionId }: ImportantMessagesBarProps
     setCursor(0);
   };
 
-  const go = useCallback(
-    (delta: number) => {
-      if (visible.length === 0) return;
-      const next = Math.min(Math.max(cursor + delta, 0), visible.length - 1);
-      setCursor(next);
-      const target = visible[next];
-      const node = document.querySelector(`[data-message-id="${CSS.escape(target.message_id)}"]`);
-      // Scrolling is the whole effect: no state in the transcript changes, so
-      // nothing the reader had open collapses.
-      node?.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      (node as HTMLElement | null)?.focus?.({ preventScroll: true });
+  // A new durable message is the only moment a card can have appeared. Without
+  // this the store stayed on its first GET, so an arriving card showed as
+  // "not recorded" and the counter stayed behind until a reload.
+  useEffect(() => {
+    if (discussionId && messageRevision) refreshImportantMessages(discussionId);
+  }, [discussionId, messageRevision]);
+
+  const goTo = useCallback(
+    (index: number) => {
+      const target = visible[index];
+      if (!target) return;
+      setCursor(index);
+      onNavigate?.(target.message_id);
     },
-    [cursor, visible],
+    [visible, onNavigate],
   );
+
+  // Separate from `goTo` so the current card stays reachable when there is only
+  // one: both arrows are disabled then, and without this nothing would reach it.
+  const goToCurrent = useCallback(() => goTo(Math.min(cursor, visible.length - 1)), [
+    goTo,
+    cursor,
+    visible.length,
+  ]);
 
   if (!loaded || totalAll === 0) return null;
 
   return (
     <div className="disc-important-bar" role="group" aria-label={t('disc.important.barLabel')}>
-      <span className="disc-important-count">
+      <button
+        type="button"
+        className="disc-important-count"
+        onClick={goToCurrent}
+        disabled={visible.length === 0}
+        aria-label={t('disc.important.goToCurrent')}
+      >
         {t('disc.important.count', String(totalAll))}
-      </span>
+      </button>
 
       <label>
         <span className="sr-only">{t('disc.important.filterLabel')}</span>
@@ -179,7 +211,7 @@ export function ImportantMessagesBar({ discussionId }: ImportantMessagesBarProps
 
       <button
         type="button"
-        onClick={() => go(-1)}
+        onClick={() => goTo(cursor - 1)}
         disabled={visible.length === 0 || cursor === 0}
         aria-label={t('disc.important.previous')}
       >
@@ -187,7 +219,7 @@ export function ImportantMessagesBar({ discussionId }: ImportantMessagesBarProps
       </button>
       <button
         type="button"
-        onClick={() => go(1)}
+        onClick={() => goTo(cursor + 1)}
         disabled={visible.length === 0 || cursor >= visible.length - 1}
         aria-label={t('disc.important.next')}
       >

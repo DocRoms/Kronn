@@ -526,6 +526,7 @@ const zh: TranslationDict = {
   "disc.question.bannerPending": "{0} 项决定待处理",
   "disc.question.bannerGo": "查看",
   "disc.important.count": "{0} 条重要消息",
+  "disc.important.goToCurrent": "跳转到当前重要消息",
   "disc.important.barLabel": "重要消息",
   "disc.important.filterLabel": "按类别筛选",
   "disc.important.filterAll": "全部类别",
