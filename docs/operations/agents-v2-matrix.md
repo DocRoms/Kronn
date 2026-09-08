@@ -45,7 +45,7 @@ toggle on changes the plumbing, not the process model.
 | Streaming | assumed at initialize | yes | yes |
 | Cancellation | assumed at initialize | yes | yes |
 | MCP injection | assumed at initialize | yes, via CLI config | no |
-| Session resume | **negotiated** — only if the agent answers `loadSession: true` | yes, via `--resume` | n/a |
+| Session resume | **host capability negotiated**; production currently starts fresh (see below) | yes, via `--resume` | n/a |
 | Live permissions | **negotiated** — only if it advertises `permissionCapabilities` | no, computed once per session | n/a |
 | Model list | **negotiated** — read from the `session/new` response | from the CLI's own catalogue | from the connection's slots |
 
@@ -83,6 +83,17 @@ execution, with no fallback to Custom; unknown provider strings remain errors.
 These are real, deliberate, and the reason two agents can behave differently on
 the same job.
 
+- **Native ACP does not currently resume production discussion turns.** The
+  shared host implements negotiated loading, but the production `NativeAcp`
+  branch passes both `resume_id: None` and `session_store: None`. The OpenCode
+  runtime key recognized by `AcpSessionStore` does not make that branch persist
+  or reload a conversation. A host/fake-transport resume test is therefore not
+  evidence of OpenCode production continuity. Enabling it also needs the unseen
+  message delta and full-history fallback; merely passing the old ID would
+  repeat history into a resumed conversation. This remains an open KT-543
+  qualification boundary, distinct from KT-577's long-lived Claude process.
+  [src: file: backend/src/agents/runner.rs:3121-3156]
+  [src: file: backend/src/agents/runner.rs:2068-2086]
 - **An ACP agent reports tokens but no spend.** The protocol carries no price,
   the catalogue records a qualitative hint rather than a rate, and the spend
   report reads Claude, Codex and Gemini logs only. Absence there means unknown,
