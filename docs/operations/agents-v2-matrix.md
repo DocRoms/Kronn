@@ -37,6 +37,27 @@ Claude and Codex have no ACP mode of their own. Their adapter is Kronn wrapping
 the CLI in the ACP contract — one process per turn either way. Turning the
 toggle on changes the plumbing, not the process model.
 
+### Bounded host check — September 8, 2026
+
+The native commands above match the compiled dispatch table.
+[src: file: backend/src/acp.rs:152-169]
+These checks inspect help/version metadata, not authentication, negotiated
+capabilities, provider availability or successful prompts.
+
+| Native agent | Observed on the macOS qualification host | Official reference |
+|---|---|---|
+| OpenCode | 1.18.27; `opencode acp --help` exited 0. The latest release checked separately was 1.18.29; no update performed. | [ACP mode](https://opencode.ai/docs/acp/) |
+| Gemini CLI | No `gemini` found in the audit shell's PATH; no local execution proof. This is not a claim about a separate container or configured runtime. | [ACP mode documents `--acp`](https://geminicli.com/docs/cli/acp-mode/) |
+| Copilot CLI | 1.0.80; installed help exposes `--acp`. | [ACP server](https://docs.github.com/en/copilot/reference/copilot-cli-reference/acp-server) |
+| Kiro | 2.21.1; `kiro-cli acp --help` exited 0. | [ACP command](https://kiro.dev/docs/cli/acp/) |
+| Vibe | `mistral-vibe` 2.24.5 in `uv tool list`; `vibe-acp --help` exited 0 after explicit local-file permission. | [Installed entrypoints](https://docs.mistral.ai/vibe/code/cli/install-setup) |
+
+Vibe's installed entrypoint initializes logging and runtime files before parsing
+help arguments. Its initial sandbox denial was not a provider or ACP failure;
+the authorized retry completed without an ACP session or provider prompt.
+No login, installation or update was performed. These observations do not
+assert that every installed version is the newest available.
+
 ## Capabilities
 
 | Capability | Native ACP | Claude/Codex adapter | HTTP provider |
@@ -109,8 +130,9 @@ the same job.
 - **Task workers never take the adapter route**, whatever the toggle says.
 - **File and terminal requests are refused**, so an ACP agent reads and writes
   through its own tools, outside Kronn's audit trail.
-- **Kronn spawns one process per turn** on every route. Nothing here keeps a
-  CLI warm between turns; that is 0.14 work (KT-577).
+- **Kronn spawns one process per turn on its local CLI/ACP routes.** HTTP
+  provider calls do not spawn a CLI. Nothing here keeps a CLI warm between
+  turns; that is 0.14 work (KT-577).
 
 ## ACP runtime diagnostics (KT-600)
 
