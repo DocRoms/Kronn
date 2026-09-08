@@ -1185,6 +1185,74 @@ pub fn resolve_local_branch(repo_path: &Path, rev: &str) -> Result<String, Strin
     Ok(branch.to_string())
 }
 
+/// Resolve the checkout to mutate, not merely the repository containing its ref.
+pub fn integration_target_worktree(repo_path: &Path, target: &str) -> Result<PathBuf, String> {
+    let branch = resolve_local_branch(repo_path, target)?;
+    let branch_field = format!("branch refs/heads/{branch}");
+    let output = sync_cmd("git")
+        .args(["worktree", "list", "--porcelain", "-z"])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|error| format!("cannot list target worktrees: {error}"))?;
+    if !output.status.success() {
+        return Err("cannot list target worktrees".into());
+    }
+    let listing = std::str::from_utf8(&output.stdout)
+        .map_err(|_| "target worktree paths are not valid UTF-8")?;
+    let mut current_path = None;
+    let mut matches = Vec::new();
+    for field in listing.split('\0') {
+        if let Some(path) = field.strip_prefix("worktree ") {
+            current_path = Some(PathBuf::from(path));
+        } else if field == branch_field {
+            if let Some(path) = current_path.take() {
+                matches.push(path);
+            }
+        } else if field.is_empty() {
+            current_path = None;
+        }
+    }
+    let [path] = matches.as_slice() else {
+        return Err(format!(
+            "integration target '{branch}' must have exactly one checked-out worktree (found {})",
+            matches.len()
+        ));
+    };
+    let path = path
+        .canonicalize()
+        .map_err(|error| format!("integration target worktree is unavailable: {error}"))?;
+    let head = sync_cmd("git")
+        .args(["symbolic-ref", "--quiet", "HEAD"])
+        .current_dir(&path)
+        .output()
+        .map_err(|error| format!("cannot verify target checkout branch: {error}"))?;
+    if !head.status.success()
+        || String::from_utf8_lossy(&head.stdout).trim() != format!("refs/heads/{branch}")
+    {
+        return Err("integration target checkout changed branch; refusing to mutate it".into());
+    }
+    let common_dir = |directory: &Path| -> Result<PathBuf, String> {
+        let output = sync_cmd("git")
+            .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+            .current_dir(directory)
+            .output()
+            .map_err(|error| format!("cannot verify target repository: {error}"))?;
+        if !output.status.success() {
+            return Err("cannot verify target repository".into());
+        }
+        let value = std::str::from_utf8(&output.stdout)
+            .map_err(|_| "target repository path is not valid UTF-8")?
+            .trim_end_matches(['\r', '\n']);
+        Path::new(value)
+            .canonicalize()
+            .map_err(|error| error.to_string())
+    };
+    if common_dir(repo_path)? != common_dir(&path)? {
+        return Err("integration target checkout belongs to another repository".into());
+    }
+    Ok(path)
+}
+
 /// Outcome of building the integration candidate (phase 1 of `TwoPhaseFfOnly`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CandidateOutcome {
@@ -1287,6 +1355,20 @@ pub fn fast_forward_to(repo_path: &Path, candidate_sha: &str) -> Result<String, 
         ));
     }
     git_head(repo_path)
+}
+
+pub fn fast_forward_target_to(
+    repo_path: &Path,
+    target: &str,
+    expected_tip: &str,
+    candidate_sha: &str,
+) -> Result<String, String> {
+    let checkout = integration_target_worktree(repo_path, target)?;
+    verify_worktree_head(&checkout, expected_tip)?;
+    if !worktree_dirty_files(&checkout)?.is_empty() {
+        return Err("integration target worktree became dirty before fast-forward".into());
+    }
+    fast_forward_to(&checkout, candidate_sha)
 }
 
 /// Confirm a worktree's HEAD is exactly `expected_sha`.
@@ -3404,6 +3486,89 @@ mod tests {
     }
 
     // ── Task-execution worktree provisioning (KT-318) ─────────────────────────
+
+    #[test]
+    fn pinned_target_checkout_requires_one_checked_out_local_branch() {
+        let repo = make_test_repo("pinned-target");
+        assert_eq!(
+            integration_target_worktree(repo.path(), "main").unwrap(),
+            repo.path().canonicalize().unwrap()
+        );
+        for invalid in ["missing", "HEAD", "--all"] {
+            assert!(integration_target_worktree(repo.path(), invalid).is_err());
+        }
+        assert!(sync_cmd("git")
+            .args(["branch", "not-checked-out"])
+            .current_dir(repo.path())
+            .status()
+            .unwrap()
+            .success());
+        assert!(integration_target_worktree(repo.path(), "not-checked-out").is_err());
+        let duplicate = tempfile::tempdir().unwrap();
+        let duplicate_path = duplicate.path().join("same branch");
+        assert!(sync_cmd("git")
+            .args(["worktree", "add", "--force"])
+            .arg(&duplicate_path)
+            .arg("main")
+            .current_dir(repo.path())
+            .output()
+            .unwrap()
+            .status
+            .success());
+        assert!(integration_target_worktree(repo.path(), "main")
+            .unwrap_err()
+            .contains("exactly one"));
+    }
+
+    #[test]
+    fn pinned_target_checkout_refuses_dirty_or_drifted_heads() {
+        for dirty in [true, false] {
+            let repo = make_test_repo("pinned-target-guard");
+            let original = git_head(repo.path()).unwrap();
+            let candidate =
+                create_task_worktree(repo.path(), "KT-616", "deadbeef", &original).unwrap();
+            let sha = commit_file(
+                Path::new(&candidate.path),
+                "worker.txt",
+                "validated",
+                "candidate",
+            );
+            let expected = if dirty {
+                fs::write(repo.path().join("user.txt"), "preserve exactly").unwrap();
+                original.clone()
+            } else {
+                commit_file(repo.path(), "user.txt", "preserve exactly", "user work")
+            };
+            assert!(fast_forward_target_to(repo.path(), "main", &original, &sha).is_err());
+            assert_eq!(git_head(repo.path()).unwrap(), expected);
+            assert_eq!(
+                fs::read_to_string(repo.path().join("user.txt")).unwrap(),
+                "preserve exactly"
+            );
+            assert!(!repo.path().join("worker.txt").exists());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pinned_target_checkout_preserves_newlines_and_unicode_in_paths() {
+        let repo = make_test_repo("pinned-target-path");
+        let directory = tempfile::tempdir().unwrap();
+        let checkout = directory.path().join("review\n target é");
+        assert!(sync_cmd("git")
+            .args(["worktree", "add", "-b", "review-target"])
+            .arg(&checkout)
+            .arg("main")
+            .current_dir(repo.path())
+            .output()
+            .unwrap()
+            .status
+            .success());
+        assert_eq!(
+            integration_target_worktree(repo.path(), "review-target").unwrap(),
+            checkout.canonicalize().unwrap()
+        );
+    }
 
     /// Commit a file in `dir` and return the new HEAD sha.
     fn commit_file(dir: &Path, name: &str, content: &str, msg: &str) -> String {

@@ -73,6 +73,13 @@ const CODEX_AGENT: AgentDetection = {
   path: '/usr/bin/codex',
 };
 
+const OPENCODE_AGENT: AgentDetection = {
+  ...AGENT,
+  name: 'OpenCode',
+  agent_type: 'OpenCode',
+  path: '/usr/bin/opencode',
+};
+
 const OPENROUTER_CONNECTION: ExternalApiConnectionView = {
   id: 'conn-openrouter',
   display_name: 'OpenRouter',
@@ -392,6 +399,39 @@ describe('NewDiscussionForm — creation flow layout', () => {
     await waitFor(() => expect(onSubmit).toHaveBeenCalledWith(
       expect.objectContaining({ agent: 'Codex', tier: 'reasoning' }),
     ));
+  });
+
+  it('selects usable OpenCode and preserves its native identity in the discussion payload', async () => {
+    const onSubmit = vi.fn();
+    render(
+      <NewDiscussionForm
+        projects={[]}
+        agents={[AGENT, OPENCODE_AGENT]}
+        configLanguage="fr"
+        agentAccess={null}
+        onSubmit={onSubmit}
+        onClose={vi.fn()}
+        onNavigate={vi.fn()}
+        t={(key: string) => key}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole('button', { name: 'disc.agentAndMode' }));
+    fireEvent.click(await screen.findByRole('menuitem', {
+      name: 'OpenCode · disc.tier.reasoning',
+    }));
+    expect(screen.getByTestId('new-disc-agent-picker')).toHaveTextContent('OpenCode');
+
+    fireEvent.change(screen.getByRole('textbox', { name: 'disc.prompt' }), {
+      target: { value: 'Review this change.' },
+    });
+    fireEvent.click(document.querySelector('.disc-create-btn') as HTMLButtonElement);
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
+      agent: 'OpenCode',
+      tier: 'reasoning',
+      targetAgents: [],
+    })));
   });
 
   it('keeps the prepare-without-agent path explicit and hides the agent picker', async () => {

@@ -359,23 +359,32 @@
       padding: 0 10px;
       text-shadow: 0 0 6px rgba(200, 160, 255, 0.55);
     }
-    .cli-grid {
+    .family-grid {
       display: grid;
-      grid-template-columns: repeat(6, 1fr);
+      grid-template-columns: repeat(3, 1fr);
       gap: 12px;
       margin-bottom: 24px;
     }
-    .cli-cell {
+    .family-card {
       border: 1.5px solid var(--magenta);
-      padding: 14px 10px;
+      padding: 16px 14px;
       text-align: center;
       background: var(--bg-card-hi);
+    }
+    .family-card .family-name {
       font-family: var(--display);
-      font-size: 14px;
+      font-size: 15px;
       text-transform: uppercase;
-      letter-spacing: 0.04em;
+      letter-spacing: 0.05em;
       color: var(--magenta-bright);
       text-shadow: 0 0 6px rgba(255, 91, 188, 0.4);
+    }
+    .family-card .family-examples {
+      font-family: var(--terminal);
+      font-size: 12px;
+      color: var(--lila);
+      letter-spacing: 0.02em;
+      margin-top: 6px;
     }
     .arrow-down {
       text-align: center;
@@ -1270,7 +1279,6 @@
     @media (max-width: 980px) {
       .container { padding: 0 22px; }
       header { flex-direction: column; align-items: flex-start; gap: 12px; }
-      .cli-grid { grid-template-columns: repeat(2, 1fr); }
       .leaves { grid-template-columns: repeat(2, 1fr); }
       .compare-grid { grid-template-columns: 1fr; }
       .compound-grid { grid-template-columns: 1fr 1fr; }
@@ -1296,7 +1304,7 @@
       /* Force every known grid layout to single column. Cleaner than
          hunting them one by one — any future grid added to the page
          automatically inherits the mobile-safe default. */
-      .cli-grid,
+      .family-grid,
       .leaves,
       .compare-grid,
       .compound-grid,
@@ -1422,22 +1430,28 @@
   <!-- LEVEL 1 · THE BRIDGE -->
   <section class="section" id="level-1">
     <a class="level-tag" href="#level-1">LEVEL 1 · THE BRIDGE</a>
-    <h2 class="section-title">Un seul <span class="pk">cerveau</span>.<br>Tous tes CLI <span class="li">branchés dessus</span>.</h2>
+    <h2 class="section-title">Un seul <span class="pk">cerveau</span>.<br>Tous tes agents <span class="li">branchés dessus</span>.</h2>
     <p class="section-intro">
       Six agents IA qui s'ignorent. Trois configs MCP qui divergent. Quatorze prompts copiés-collés. <strong>État de l'art accepté.</strong> Kronn propose un cerveau partagé, local, branché à tout.
     </p>
 
     <div class="schema" role="img"
-         aria-label="Carte du système Kronn : Kronn lance les CLI par commande, les agents rappellent Kronn par MCP. Toute communication entre CLI passe par Kronn.">
+         aria-label="Carte du système Kronn : Kronn lance ses agents par commande, les agents rappellent Kronn par MCP. Toute communication entre agents passe par Kronn.">
       <span class="schema-label">· SYSTEM MAP ·</span>
 
-      <div class="cli-grid">
-        <div class="cli-cell">Claude Code</div>
-        <div class="cli-cell">Codex</div>
-        <div class="cli-cell">Gemini</div>
-        <div class="cli-cell">Vibe</div>
-        <div class="cli-cell">Ollama</div>
-        <div class="cli-cell">LiteLLM</div>
+      <div class="family-grid">
+        <div class="family-card">
+          <div class="family-name">CLI</div>
+          <div class="family-examples">Codex · Claude Code · OpenCode · …</div>
+        </div>
+        <div class="family-card">
+          <div class="family-name">Local</div>
+          <div class="family-examples">Ollama</div>
+        </div>
+        <div class="family-card">
+          <div class="family-name">HTTP</div>
+          <div class="family-examples">LiteLLM · OpenRouter · NVIDIA · …</div>
+        </div>
       </div>
 
       <!-- Boucle asymétrique : Kronn descend en COMMANDE (spawn process),
@@ -1445,7 +1459,7 @@
       <div class="schema-loop" aria-hidden="true">
         <div class="loop-edge loop-cmd">
           <span class="loop-glyph">▲</span>
-          <span class="loop-tag"><span class="sk-pk">COMMANDE</span> · une seule UI orchestre tous tes CLIs, fini d'ouvrir 20 terminaux.</span>
+          <span class="loop-tag"><span class="sk-pk">COMMANDE</span> · une seule UI orchestre tous tes agents, fini d'ouvrir 20 terminaux.</span>
         </div>
         <div class="loop-edge loop-mcp">
           <span class="loop-glyph">▼</span>

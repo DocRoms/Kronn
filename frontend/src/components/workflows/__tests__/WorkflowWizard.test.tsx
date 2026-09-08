@@ -487,6 +487,22 @@ describe('WorkflowWizard — save handler', () => {
     expect(updateMock).not.toHaveBeenCalled();
   });
 
+  it('selects usable OpenCode for a workflow step and persists that native agent', async () => {
+    renderWizard({ installedAgentTypes: ['ClaudeCode', 'OpenCode'] });
+    fireEvent.change(screen.getByLabelText('wiz.name'), { target: { value: 'OpenCode workflow' } });
+    fireEvent.click(screen.getByText('wiz.next'));
+    fireEvent.click(screen.getByRole('button', { name: 'wiz.agentAndTierLabel' }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'OpenCode · disc.tier.default' }));
+    expect(screen.getByRole('button', { name: 'wiz.agentAndTierLabel' })).toHaveTextContent('OpenCode');
+    fireEvent.change(screen.getByLabelText('wiz.promptLabel'), { target: { value: 'review the repository' } });
+    fireEvent.click(screen.getByText('wiz.next'));
+    fireEvent.click(screen.getByText('wiz.create'));
+
+    await waitFor(() => expect(createMock).toHaveBeenCalledWith(expect.objectContaining({
+      steps: [expect.objectContaining({ agent: 'OpenCode' })],
+    })));
+  });
+
   it('Edit mode calls workflowsApi.update with the workflow id', async () => {
     const onDone = vi.fn();
     renderWizard({ editWorkflow: mkWorkflow(), onDone });

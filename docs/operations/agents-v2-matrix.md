@@ -37,6 +37,27 @@ Claude and Codex have no ACP mode of their own. Their adapter is Kronn wrapping
 the CLI in the ACP contract — one process per turn either way. Turning the
 toggle on changes the plumbing, not the process model.
 
+### Bounded host check — September 8, 2026
+
+The native commands above match the compiled dispatch table.
+[src: file: backend/src/acp.rs:152-169]
+These checks inspect help/version metadata, not authentication, negotiated
+capabilities, provider availability or successful prompts.
+
+| Native agent | Observed on the macOS qualification host | Official reference |
+|---|---|---|
+| OpenCode | 1.18.27; `opencode acp --help` exited 0. The latest release checked separately was 1.18.29; no update performed. | [ACP mode](https://opencode.ai/docs/acp/) |
+| Gemini CLI | No `gemini` found in the audit shell's PATH; no local execution proof. This is not a claim about a separate container or configured runtime. | [ACP mode documents `--acp`](https://geminicli.com/docs/cli/acp-mode/) |
+| Copilot CLI | 1.0.80; installed help exposes `--acp`. | [ACP server](https://docs.github.com/en/copilot/reference/copilot-cli-reference/acp-server) |
+| Kiro | 2.21.1; `kiro-cli acp --help` exited 0. | [ACP command](https://kiro.dev/docs/cli/acp/) |
+| Vibe | `mistral-vibe` 2.24.5 in `uv tool list`; `vibe-acp --help` exited 0 after explicit local-file permission. | [Installed entrypoints](https://docs.mistral.ai/vibe/code/cli/install-setup) |
+
+Vibe's installed entrypoint initializes logging and runtime files before parsing
+help arguments. Its initial sandbox denial was not a provider or ACP failure;
+the authorized retry completed without an ACP session or provider prompt.
+No login, installation or update was performed. These observations do not
+assert that every installed version is the newest available.
+
 ## Capabilities
 
 | Capability | Native ACP | Claude/Codex adapter | HTTP provider |
@@ -45,7 +66,7 @@ toggle on changes the plumbing, not the process model.
 | Streaming | assumed at initialize | yes | yes |
 | Cancellation | assumed at initialize | yes | yes |
 | MCP injection | assumed at initialize | yes, via CLI config | no |
-| Session resume | **negotiated** — only if the agent answers `loadSession: true` | yes, via `--resume` | n/a |
+| Session resume | **host capability negotiated**; production currently starts fresh (see below) | yes, via `--resume` | n/a |
 | Live permissions | **negotiated** — only if it advertises `permissionCapabilities` | no, computed once per session | n/a |
 | Model list | **negotiated** — read from the `session/new` response | from the CLI's own catalogue | from the connection's slots |
 
@@ -83,18 +104,35 @@ execution, with no fallback to Custom; unknown provider strings remain errors.
 These are real, deliberate, and the reason two agents can behave differently on
 the same job.
 
-- **An ACP agent reports tokens but no spend.** The protocol carries no price,
-  the catalogue records a qualitative hint rather than a rate, and the spend
-  report reads Claude, Codex and Gemini logs only. Absence there means unknown,
-  never free.
+- **Native ACP does not currently resume production discussion turns.** The
+  shared host implements negotiated loading, but the production `NativeAcp`
+  branch passes both `resume_id: None` and `session_store: None`. The OpenCode
+  runtime key recognized by `AcpSessionStore` does not make that branch persist
+  or reload a conversation. A host/fake-transport resume test is therefore not
+  evidence of OpenCode production continuity. Enabling it also needs the unseen
+  message delta and full-history fallback; merely passing the old ID would
+  repeat history into a resumed conversation. This remains an open KT-543
+  qualification boundary, distinct from KT-577's long-lived Claude process.
+  [src: file: backend/src/agents/runner.rs:3121-3156]
+  [src: file: backend/src/agents/runner.rs:2068-2086]
+- **Kronn does not yet normalize ACP's optional session cost.** The current
+  upstream v1 schema supports `usage_update.cost` as a cumulative amount with
+  an explicit currency; this is not a per-turn USD price. Kronn's normalized
+  ACP event currently retains token counts only, while its global spend report
+  reads Claude, Codex and Gemini logs. Missing cost therefore remains unknown,
+  never free. This is an implementation limit, not a protocol prohibition.
+  [ACP v1 UsageUpdate, checked 2026-09-08](https://agentclientprotocol.com/protocol/v1/schema#usageupdate)
+  [src: file: backend/src/acp.rs:341-356]
+  [src: file: backend/src/acp.rs:794-806]
 - **MCP servers holding a credential are dropped**, whole. A project mixing
   safe and credentialed entries loses the credentialed ones — silently from the
   agent's point of view, since it simply never sees them.
 - **Task workers never take the adapter route**, whatever the toggle says.
 - **File and terminal requests are refused**, so an ACP agent reads and writes
   through its own tools, outside Kronn's audit trail.
-- **Kronn spawns one process per turn** on every route. Nothing here keeps a
-  CLI warm between turns; that is 0.14 work (KT-577).
+- **Kronn spawns one process per turn on its local CLI/ACP routes.** HTTP
+  provider calls do not spawn a CLI. Nothing here keeps a CLI warm between
+  turns; that is 0.14 work (KT-577).
 
 ## ACP runtime diagnostics (KT-600)
 

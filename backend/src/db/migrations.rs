@@ -651,6 +651,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "170_provider_quota_signal_generation",
         include_str!("sql/170_provider_quota_signal_generation.sql"),
     ),
+    (
+        "171_cli_worker_bindings",
+        include_str!("sql/171_cli_worker_bindings.sql"),
+    ),
 ];
 
 /// Apply one migration inside the caller-owned transaction.
