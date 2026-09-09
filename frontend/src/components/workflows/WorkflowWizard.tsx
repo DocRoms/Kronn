@@ -7,7 +7,8 @@ import { STARTER_TEMPLATES, cloneTemplateSteps } from '../../lib/workflow-templa
 import { buildV07Presets, type ChildWorkflowPreset } from '../../lib/workflow-templates/v07-presets';
 import { WorkflowQuickStartPicker } from './WorkflowQuickStartPicker';
 import { CopyIdPill } from '../CopyIdPill';
-import { AgentSwitchPicker } from '../AgentSwitchPicker';
+import { AgentSwitchPicker, type AgentSwitchTarget } from '../AgentSwitchPicker';
+import { agentSettingsForSelection } from '../../lib/agentSelection';
 import { SearchableSelect } from '../SearchableSelect';
 import { ModelCatalogPicker } from '../ModelCatalogPicker';
 import { MarkdownEditor } from '../MarkdownComposerTools';
@@ -228,6 +229,7 @@ export interface WorkflowWizardProps {
   onDone: () => void;
   onCancel: () => void;
   installedAgentTypes?: AgentType[];
+  agentChoices?: AgentSwitchTarget[];
   agentAccess?: AgentsConfig;
   /** Backend "agent output language" (Settings → Output language). Distinct from
    *  the UI locale (`useT()`): UI labels follow the user's interface language,
@@ -251,7 +253,7 @@ export interface WorkflowWizardProps {
   onNavigatePage?: (pageId: string) => void;
 }
 
-export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, installedAgentTypes, agentAccess, configLanguage, initialPresetId, initialProjectId, initialStepId, focusedStepOnly = false, onNavigatePage }: WorkflowWizardProps) {
+export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, installedAgentTypes, agentChoices, agentAccess, configLanguage, initialPresetId, initialProjectId, initialStepId, focusedStepOnly = false, onNavigatePage }: WorkflowWizardProps) {
   const { t } = useT();
   const availableAgents = (installedAgentTypes && installedAgentTypes.length > 0
     ? installedAgentTypes
@@ -261,16 +263,17 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
     <AgentSwitchPicker
       currentAgent={step.agent}
       availableAgents={availableAgents.map(agent => agent.type)}
+      availableTargets={agentChoices?.length ? agentChoices : undefined}
       currentTier={step.agent_settings?.tier ?? 'default'}
       currentModel={step.agent_settings?.model}
       currentConnectionId={step.agent_settings?.connection_id}
-      onSelectionChange={async (agent, tier) => {
+      onTargetSelectionChange={async (target, tier) => {
         // A concrete expert model has higher runtime priority than the tier.
         // Clear it when the user explicitly selects an agent × mode pair so
         // the visible choice is guaranteed to be the one that executes.
         updateStep(index, {
-          agent,
-          agent_settings: { ...step.agent_settings, model: null, tier },
+          agent: target.agent,
+          agent_settings: agentSettingsForSelection(step.agent_settings, tier, target.connectionId),
         });
       }}
       tierLabels={{
@@ -4130,6 +4133,8 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                               connectionId={step.agent_settings?.connection_id}
                               tier={step.agent_settings?.tier ?? 'default'}
                               modelTiers={agentAccess?.model_tiers}
+                              targetModelTiers={agentChoices?.find(target => target.agent === step.agent
+                                && (target.connectionId ?? null) === (step.agent_settings?.connection_id ?? null))?.modelTiers}
                               value={step.agent_settings?.model ?? ''}
                               onChange={model => updateStep(i, {
                                 agent_settings: { ...step.agent_settings, model: model || null }

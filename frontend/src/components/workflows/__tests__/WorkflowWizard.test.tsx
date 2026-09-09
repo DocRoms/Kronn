@@ -520,6 +520,58 @@ describe('WorkflowWizard — save handler', () => {
     await waitFor(() => expect(onDone).toHaveBeenCalledTimes(1));
   });
 
+  it.each([
+    ['Codex · disc.tier.default', 'Codex', 'default', null],
+    ['LiteLLM · disc.tier.economy', 'LiteLlm', 'economy', 'team-one'],
+  ] as const)('clears model-specific overrides only on explicit selection: %s', async (label, agent, tier, connectionId) => {
+    const settings = { model: 'old-model', connection_id: 'team-one', reasoning_effort: 'xhigh', max_tokens: 12345, tier: 'default' as const };
+    renderWizard({ installedAgentTypes: ['Codex'], editWorkflow: mkWorkflow({
+      steps: [mkStep({ agent: 'LiteLlm', agent_settings: settings })],
+    }) });
+    fireEvent.click(screen.getByText('wiz.next'));
+    fireEvent.click(screen.getByRole('button', { name: 'wiz.agentAndTierLabel' }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: label }));
+    fireEvent.click(screen.getByText('wiz.next'));
+    fireEvent.click(screen.getByText('wiz.save'));
+    await waitFor(() => expect(updateMock).toHaveBeenCalledTimes(1));
+    expect(updateMock.mock.calls[0][1].steps[0]).toMatchObject({
+      agent, agent_settings: { model: null, connection_id: connectionId, reasoning_effort: null, max_tokens: 12345, tier },
+    });
+    expect(settings).toEqual({ model: 'old-model', connection_id: 'team-one', reasoning_effort: 'xhigh', max_tokens: 12345, tier: 'default' });
+  });
+
+  it('preserves saved target and model-specific settings when editing without a target change', async () => {
+    const settings = { model: 'old-model', connection_id: 'team-one', reasoning_effort: 'xhigh', max_tokens: 12345, tier: 'default' as const };
+    renderWizard({ editWorkflow: mkWorkflow({ steps: [mkStep({ agent: 'LiteLlm', agent_settings: settings })] }) });
+    fireEvent.click(screen.getByText('wiz.next'));
+    fireEvent.click(screen.getByText('wiz.next'));
+    fireEvent.click(screen.getByText('wiz.save'));
+    await waitFor(() => expect(updateMock).toHaveBeenCalledTimes(1));
+    expect(updateMock.mock.calls[0][1].steps[0].agent_settings).toEqual(settings);
+  });
+
+  it('persists an explicit change between two named connections of the same family and tier', async () => {
+    renderWizard({ installedAgentTypes: ['Codex'],
+      agentChoices: [
+        { agent: 'Custom', connectionId: 'team-one', label: 'Team One' },
+        { agent: 'Custom', connectionId: 'team-two', label: 'Team Two' },
+      ],
+      editWorkflow: mkWorkflow({ steps: [mkStep({ agent: 'Custom', agent_settings: {
+        model: 'shared-model', connection_id: 'team-one', reasoning_effort: 'xhigh', max_tokens: 12345,
+      } })] }),
+    });
+    fireEvent.click(screen.getByText('wiz.next'));
+    fireEvent.click(screen.getByRole('button', { name: 'wiz.agentAndTierLabel' }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Team Two · disc.tier.default' }));
+    expect(screen.getByRole('button', { name: 'wiz.agentAndTierLabel' })).toHaveTextContent('Team Two');
+    fireEvent.click(screen.getByText('wiz.next'));
+    fireEvent.click(screen.getByText('wiz.save'));
+    await waitFor(() => expect(updateMock).toHaveBeenCalledTimes(1));
+    expect(updateMock.mock.calls[0][1].steps[0]).toMatchObject({ agent: 'Custom', agent_settings: {
+      connection_id: 'team-two', model: null, reasoning_effort: null, max_tokens: 12345, tier: 'default',
+    } });
+  });
+
   it('can save a valid existing workflow without visiting the summary', async () => {
     const onDone = vi.fn();
     renderWizard({ editWorkflow: mkWorkflow(), onDone });

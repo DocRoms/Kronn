@@ -191,3 +191,13 @@ values remain visible. QP saves preserve the existing token limit and chosen
 reasoning mode. See [form preservation](../gotchas/agent-tier-catalogue-settings.md).
 [src: file: frontend/src/components/ModelCatalogPicker.tsx:22-68]
 [src: file: frontend/src/components/workflows/QuickPromptForm.tsx:187-202]
+
+Explicit QP/workflow target changes now clear old model/reasoning overrides,
+preserve the token limit and persist the exact selected connection. Named
+connections are available in the creation/full/inline editors and pipeline;
+changing only the connection is not treated as an unchanged agent/tier pair.
+Ordinary edits and catalogue refreshes do not clear saved settings. The
+discussion PATCH path remains a separate backend audit, not a frontend claim.
+[src: file: frontend/src/lib/agentSelection.ts:1-16]
+[src: file: frontend/src/components/workflows/WorkflowDetail.tsx:1300-1330]
+[src: file: frontend/src/pages/WorkflowsPage.tsx:1223-1244]

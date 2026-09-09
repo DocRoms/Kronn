@@ -157,7 +157,7 @@ describe('WorkflowsPage — QP launch double-click race', () => {
     mockQuickPromptsApi.update.mockResolvedValue({
       ...qp,
       agent: 'Codex',
-      agent_settings: { ...qp.agent_settings, model: null },
+      agent_settings: { ...qp.agent_settings, model: null, reasoning_effort: null, connection_id: null },
     });
 
     await wrap(
@@ -186,14 +186,17 @@ describe('WorkflowsPage — QP launch double-click race', () => {
         prompt_template: qp.prompt_template,
         agent: 'Codex',
         tier: 'reasoning',
+        connection_id: null,
         agent_settings: {
           model: null,
           tier: 'reasoning',
-          reasoning_effort: 'high',
+          reasoning_effort: null,
+          connection_id: null,
           max_tokens: 16000,
         },
       }),
     );
+    expect(qp.agent_settings).toMatchObject({ model: 'claude-opus', reasoning_effort: 'high', max_tokens: 16000 });
   });
 
   it('does not spawn duplicate discussions on two fast Enter presses (QP with variable)', async () => {

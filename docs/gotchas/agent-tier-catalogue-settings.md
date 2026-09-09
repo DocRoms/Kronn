@@ -46,8 +46,8 @@ selection; alternative choices resolve their own tiers. The Quick Prompt
 caller still explicitly clears its old override when choosing a new agent/tier.
 [src: file: frontend/src/components/AgentSwitchPicker.tsx:189-210]
 [src: file: frontend/src/components/ChatHeader.tsx:418-428]
-[src: file: frontend/src/pages/WorkflowsPage.tsx:1221-1240]
-[src: file: frontend/src/pages/WorkflowsPage.tsx:2845-2858]
+[src: file: frontend/src/pages/WorkflowsPage.tsx:1223-1244]
+[src: file: frontend/src/pages/WorkflowsPage.tsx:2850-2857]
 
 This checkpoint does not close KT-531: remaining custom selector/display paths
 still need the same contract, and the HTTP runner retains a legacy embedded
@@ -65,7 +65,7 @@ Unavailable known entries remain disabled. Clearing an override is explicit
 and leaves tier resolution to the caller/backend.
 [src: file: frontend/src/components/ModelCatalogPicker.tsx:22-68]
 [src: file: frontend/src/components/workflows/QuickPromptForm.tsx:308-315]
-[src: file: frontend/src/components/workflows/WorkflowWizard.tsx:4128-4144]
+[src: file: frontend/src/components/workflows/WorkflowWizard.tsx:4131-4146]
 
 Reasoning choices come from the effective model's `reasoning_modes`, not a
 fixed low/medium/high list. An existing value absent from that list is retained
@@ -85,3 +85,31 @@ layout qualification. Other custom launch selectors and the discussion's
 persisted override on target changes still require the remaining KT-531 audit.
 [src: file: frontend/src/components/workflows/__tests__/QuickPromptForm.catalog.test.tsx:37-88]
 [src: file: frontend/src/components/__tests__/ModelCatalogPicker.test.tsx:25-66]
+
+## Explicit target changes are not catalogue refreshes
+
+Choosing another target or tier in a QP/workflow clears the old explicit model
+and model-specific reasoning mode, while preserving unrelated settings such as
+`max_tokens`. The payload pins the exact selected connection, or explicitly
+clears it for a connectionless agent. A change between two connections of the
+same agent family and tier is still a real target change, not a no-op. Merely
+opening, editing or rereading the catalogue preserves the saved overrides.
+[src: file: frontend/src/lib/agentSelection.ts:1-16]
+[src: file: frontend/src/components/workflows/WorkflowWizard.tsx:261-277]
+[src: file: frontend/src/pages/WorkflowsPage.tsx:821-844]
+[src: file: frontend/src/pages/WorkflowsPage.tsx:1223-1244]
+
+The creation wizard, full editor, inline inspector, pipeline and QP card receive
+the configured named targets. Their selectors display the saved explicit model
+and pass the selected immutable connection instead of carrying an old one via
+an object spread. Component tests inspect the actual update payloads and exact
+connection callback; these are not live workflow/provider executions.
+[src: file: frontend/src/components/workflows/WorkflowDetail.tsx:1300-1330]
+[src: file: frontend/src/components/workflows/__tests__/WorkflowWizard.test.tsx:523-574]
+[src: file: frontend/src/components/workflows/__tests__/WorkflowDetail.steps.test.tsx:444-483]
+
+The separate discussion PATCH still has no explicit model-override field; its
+agent/tier/connection setters require the remaining backend audit. The frontend
+must not claim to clear that override by sending an ignored extra property.
+[src: file: backend/src/models/discussions.rs:420-469]
+[src: file: backend/src/api/discussions/crud.rs:664-692]

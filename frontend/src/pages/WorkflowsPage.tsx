@@ -23,6 +23,7 @@ import {
 import { useWebSocket } from '../hooks/useWebSocket';
 import { WorkflowDetail } from '../components/workflows/WorkflowDetail';
 import { WorkflowWizard } from '../components/workflows/WorkflowWizard';
+import { agentSettingsForSelection } from '../lib/agentSelection';
 import { QuickPromptForm } from '../components/workflows/QuickPromptForm';
 import { QuickApiForm } from '../components/workflows/QuickApiForm';
 import { QuickExecForm } from '../components/workflows/QuickExecForm';
@@ -817,12 +818,13 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workflowList]);
 
-  const changeStepAgent = async (stepIndex: number, agent: AgentType, tier: ModelTier) => {
+  const changeStepAgent = async (stepIndex: number, agent: AgentType, tier: ModelTier, connectionId?: string | null) => {
     const workflow = detailWorkflow;
     const step = workflow?.steps[stepIndex];
     if (!workflow || !step || (step.step_type && step.step_type.type !== 'Agent')) return;
     const currentTier = step.agent_settings?.tier ?? 'default';
-    if (step.agent === agent && currentTier === tier) return;
+    if (step.agent === agent && currentTier === tier
+      && (step.agent_settings?.connection_id ?? null) === (connectionId ?? null)) return;
 
     // Selecting an abstract tier explicitly clears any concrete model. A
     // concrete model wins over the tier at runtime, so preserving it here
@@ -832,7 +834,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
         ? {
             ...current,
             agent,
-            agent_settings: { ...current.agent_settings, model: null, tier },
+            agent_settings: agentSettingsForSelection(current.agent_settings, tier, connectionId),
           }
         : current
     );
@@ -1218,8 +1220,9 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     refetchQP();
   };
 
-  const changeQuickPromptAgent = async (qp: QuickPrompt, agent: AgentType, tier: ModelTier) => {
-    if (qp.agent === agent && qp.tier === tier) return;
+  const changeQuickPromptAgent = async (qp: QuickPrompt, target: AgentSwitchTarget, tier: ModelTier) => {
+    const { agent, connectionId } = target;
+    if (qp.agent === agent && qp.tier === tier && (qp.connection_id ?? null) === (connectionId ?? null)) return;
     try {
       await quickPromptsApi.update(qp.id, {
         name: qp.name,
@@ -1227,6 +1230,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
         prompt_template: qp.prompt_template,
         variables: qp.variables,
         agent,
+        connection_id: connectionId ?? null,
         project_id: qp.project_id,
         skill_ids: qp.skill_ids,
         profile_ids: qp.profile_ids,
@@ -1235,9 +1239,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
         // The explicit matrix choice must win over an expert model override.
         // Clearing it also prevents carrying a provider-specific model to a
         // different agent (for example Claude's "opus" to Codex).
-        agent_settings: qp.agent_settings
-          ? { ...qp.agent_settings, model: null, tier }
-          : { model: null, tier },
+        agent_settings: agentSettingsForSelection(qp.agent_settings, tier, connectionId),
         description: qp.description,
       });
       refetchQP();
@@ -2443,6 +2445,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
         <WorkflowWizard
           projects={projects}
           installedAgentTypes={installedAgentTypes}
+          agentChoices={compareAgentChoices}
           agentAccess={agentAccess}
           configLanguage={configLanguage}
           initialPresetId={pendingPresetLocal?.presetId}
@@ -2459,6 +2462,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
           key={editingWorkflow.id}
           projects={projects}
           installedAgentTypes={installedAgentTypes}
+          agentChoices={compareAgentChoices}
           agentAccess={agentAccess}
           configLanguage={configLanguage}
           editWorkflow={editingWorkflow}
@@ -2683,6 +2687,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                 runs={detailRuns}
                 availableAgentTypes={installedAgentTypes}
                 onChangeStepAgent={changeStepAgent}
+                agentChoices={compareAgentChoices}
                 totalRuns={detailRunTotal}
                 hasMoreRuns={hasMoreDetailRuns}
                 loadingMoreRuns={loadingMoreRuns}
@@ -2845,9 +2850,11 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                           <AgentSwitchPicker
                             currentAgent={qp.agent}
                             availableAgents={installedAgentTypes ?? []}
+                            availableTargets={compareAgentChoices}
+                            currentConnectionId={qp.connection_id}
                             currentTier={qp.tier ?? 'default'}
                             currentModel={qp.agent_settings?.model}
-                            onSelectionChange={(agent, tier) => changeQuickPromptAgent(qp, agent, tier)}
+                            onTargetSelectionChange={(target, tier) => changeQuickPromptAgent(qp, target, tier)}
                             tierLabels={{
                               economy: t('disc.tier.economy'),
                               default: t('disc.tier.default'),
