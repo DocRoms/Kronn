@@ -1009,9 +1009,21 @@ pub fn update_discussion_profile_ids(
     )
 }
 
+/// Primary target lookup without loading a potentially long message history.
+pub fn get_discussion_agent(conn: &Connection, id: &str) -> Result<Option<AgentType>> {
+    Ok(conn
+        .query_row("SELECT agent FROM discussions WHERE id = ?1", [id], |row| {
+            row.get::<_, String>(0)
+        })
+        .optional()?
+        .map(|agent| parse_agent_type(&agent)))
+}
+
 pub fn update_discussion_tier(conn: &Connection, id: &str, tier: &ModelTier) -> Result<bool> {
     let affected = conn.execute(
-        "UPDATE discussions SET model_tier = ?1, updated_at = ?2 WHERE id = ?3",
+        "UPDATE discussions
+         SET model = CASE WHEN model_tier IS NOT ?1 THEN NULL ELSE model END,
+             model_tier = ?1, updated_at = ?2 WHERE id = ?3",
         params![format_model_tier(tier), Utc::now().to_rfc3339(), id],
     )?;
     Ok(affected > 0)
@@ -1079,7 +1091,8 @@ pub fn update_discussion_agent(conn: &Connection, id: &str, agent: &AgentType) -
 
     tx.execute(
         "UPDATE discussions
-         SET agent = ?1, pending_agent_handoff_from = ?2, updated_at = ?3
+         SET model = CASE WHEN agent IS NOT ?1 THEN NULL ELSE model END,
+             agent = ?1, pending_agent_handoff_from = ?2, updated_at = ?3
          WHERE id = ?4",
         params![next_agent, next_pending, Utc::now().to_rfc3339(), id],
     )?;
@@ -1109,7 +1122,9 @@ pub fn update_discussion_connection(
     connection_id: Option<&str>,
 ) -> Result<bool> {
     let affected = conn.execute(
-        "UPDATE discussions SET connection_id = ?1, updated_at = ?2 WHERE id = ?3",
+        "UPDATE discussions
+         SET model = CASE WHEN connection_id IS NOT ?1 THEN NULL ELSE model END,
+             connection_id = ?1, updated_at = ?2 WHERE id = ?3",
         params![connection_id, Utc::now().to_rfc3339(), id],
     )?;
     Ok(affected > 0)

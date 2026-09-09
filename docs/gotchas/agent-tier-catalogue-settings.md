@@ -108,8 +108,32 @@ connection callback; these are not live workflow/provider executions.
 [src: file: frontend/src/components/workflows/__tests__/WorkflowWizard.test.tsx:523-574]
 [src: file: frontend/src/components/workflows/__tests__/WorkflowDetail.steps.test.tsx:444-483]
 
-The separate discussion PATCH still has no explicit model-override field; its
-agent/tier/connection setters require the remaining backend audit. The frontend
-must not claim to clear that override by sending an ignored extra property.
-[src: file: backend/src/models/discussions.rs:420-469]
-[src: file: backend/src/api/discussions/crud.rs:664-692]
+## Discussion target persistence
+
+Discussion PATCH has no explicit model-override field. Its backend setters now
+clear the old override only when the persisted agent, tier or connection
+actually changes. Each setter updates its field and clears the model in the
+same SQL statement. Resending an unchanged selection preserves its override;
+ordinary title edits and historical message models remain untouched.
+[src: file: backend/src/db/discussions.rs:1022-1030]
+[src: file: backend/src/db/discussions.rs:1092-1103]
+[src: file: backend/src/db/discussions.rs:1119-1132]
+
+An explicit JSON `connection_id: null` is distinct from an absent field.
+Clearing a connection is validated against the effective agent before any
+requested field is written: an explicit clear is refused for Custom.
+Resending the same agent no longer clears an existing connection or invalidates
+the summary cache. A lightweight agent lookup avoids loading the transcript
+merely to compare targets.
+[src: file: backend/src/models/discussions.rs:435-445]
+[src: file: backend/src/api/discussions/crud.rs:599-630]
+[src: file: backend/src/api/discussions/crud.rs:671-694]
+[src: file: backend/src/db/discussions.rs:1012-1020]
+
+Seven isolated Router/SQLite regressions cover changed and unchanged targets,
+null versus absent, invalid-target refusal and historical answer preservation.
+Six failed on the unchanged backend; the control for ordinary edits passed.
+These tests never launch an agent or contact a provider and do not qualify the
+separate HTTP fallback or Important-message authority work.
+[src: file: backend/tests/discussion_target_model.rs:12-57]
+[src: file: backend/tests/discussion_target_model.rs:77-211]

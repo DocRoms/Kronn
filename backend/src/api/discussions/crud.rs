@@ -596,10 +596,10 @@ pub async fn update(
         }
     }
 
-    // KT-545 — validate a newly-set connection against the effective agent
+    // Validate an explicitly set or cleared connection against the effective agent
     // (the request's own `agent` when switching both together, otherwise the
     // discussion's current agent) before anything is persisted.
-    if let Some(Some(ref requested_connection_id)) = new_connection_id {
+    if let Some(ref requested_connection_id) = new_connection_id {
         let effective_agent = match new_agent.clone() {
             Some(agent) => Some(agent),
             None => {
@@ -607,12 +607,11 @@ pub async fn update(
                 state
                     .db
                     .with_read_conn(move |conn| {
-                        crate::db::discussions::get_discussion(conn, &lookup_id)
+                        crate::db::discussions::get_discussion_agent(conn, &lookup_id)
                     })
                     .await
                     .ok()
                     .flatten()
-                    .map(|disc| disc.agent)
             }
         };
         let Some(effective_agent) = effective_agent else {
@@ -621,7 +620,7 @@ pub async fn update(
         if let Err(error) = crate::http_transport::validate_connection_target(
             &state,
             &effective_agent,
-            Some(requested_connection_id.as_str()),
+            requested_connection_id.as_deref(),
         )
         .await
         {
@@ -670,14 +669,18 @@ pub async fn update(
                 )? || updated;
             }
             if let Some(ref agent) = new_agent {
+                let changed = crate::db::discussions::get_discussion_agent(conn, &id)?
+                    .is_some_and(|current| current != *agent);
                 updated =
                     crate::db::discussions::update_discussion_agent(conn, &id, agent)? || updated;
                 // Invalidate summary — new agent has different budget/context
-                crate::db::discussions::invalidate_summary_cache(conn, &id)?;
+                if changed {
+                    crate::db::discussions::invalidate_summary_cache(conn, &id)?;
+                }
                 // KT-545 — an agent switch away from Custom with no explicit
                 // connection_id in the same request must not leave a stale
                 // connection pointing at the previous agent.
-                if new_connection_id.is_none() && *agent != AgentType::Custom {
+                if changed && new_connection_id.is_none() && *agent != AgentType::Custom {
                     updated =
                         crate::db::discussions::update_discussion_connection(conn, &id, None)?
                             || updated;

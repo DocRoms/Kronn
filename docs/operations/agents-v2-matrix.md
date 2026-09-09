@@ -197,7 +197,11 @@ preserve the token limit and persist the exact selected connection. Named
 connections are available in the creation/full/inline editors and pipeline;
 changing only the connection is not treated as an unchanged agent/tier pair.
 Ordinary edits and catalogue refreshes do not clear saved settings. The
-discussion PATCH path remains a separate backend audit, not a frontend claim.
+discussion PATCH correction is backend-owned: it clears the persisted model
+only on an actual target/tier change, distinguishes an absent connection from
+explicit null, and preserves historical message models. Isolated API tests
+cover this path, not provider inference or a new browser qualification.
 [src: file: frontend/src/lib/agentSelection.ts:1-16]
 [src: file: frontend/src/components/workflows/WorkflowDetail.tsx:1300-1330]
 [src: file: frontend/src/pages/WorkflowsPage.tsx:1223-1244]
+[src: file: backend/tests/discussion_target_model.rs:94-211]
