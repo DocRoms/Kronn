@@ -23,8 +23,12 @@ CREATE TABLE human_credentials (
     id           TEXT NOT NULL PRIMARY KEY,
     label        TEXT NOT NULL,
     secret_hash  TEXT NOT NULL UNIQUE,
-    -- 'admin' for the first, 'human' when an existing credential enrolled it.
-    -- There is no 'anonymous': enrolment always names who authorised it.
+    -- The role this grant carries, fixed at enrolment and never derived from
+    -- anything afterwards. Closed set: a new one is a migration.
+    role         TEXT NOT NULL CHECK (role IN ('human', 'orchestrator')),
+    -- Who authorised it. There is no 'anonymous', and no 'orchestrator':
+    -- an orchestrator publishes and administers nothing, so the weaker role
+    -- cannot mint the stronger.
     enrolled_by  TEXT NOT NULL CHECK (enrolled_by IN ('admin', 'human')),
     created_at   TEXT NOT NULL,
     revoked_at   TEXT,

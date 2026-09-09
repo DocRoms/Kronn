@@ -22,7 +22,7 @@ fn database() -> Connection {
 fn enrolled(conn: &Connection) -> (Secret, Secret) {
     let admin = create_admin_secret(conn, "/operator/private/kronn-admin-secret").unwrap();
     let authority = authorise_enrolment(conn, &admin).unwrap().unwrap();
-    let (_credential, human) = enrol(conn, &authority, "Romu — laptop").unwrap();
+    let (_credential, human) = enrol(conn, &authority, GrantRole::Human, "Romu — laptop").unwrap();
     (admin, human)
 }
 
@@ -80,7 +80,7 @@ fn rotating_the_admin_secret_keeps_the_credentials_it_enrolled() {
     assert!(authorise_enrolment(&conn, &rotated).unwrap().is_some());
     // …and a credential already enrolled is untouched: rotation of the
     // bootstrap is not a revocation of everything it ever signed.
-    assert!(authenticate_human(&conn, &human).is_ok());
+    assert!(authenticate(&conn, &human).is_ok());
 }
 
 // ── Enrolment ───────────────────────────────────────────────────────────────
@@ -91,9 +91,9 @@ fn a_live_human_credential_can_enrol_another() {
     let (_admin, human) = enrolled(&conn);
 
     let authority = authorise_enrolment(&conn, &human).unwrap().unwrap();
-    let (second, secret) = enrol(&conn, &authority, "Romu — phone").unwrap();
+    let (second, secret) = enrol(&conn, &authority, GrantRole::Human, "Romu — phone").unwrap();
     assert_eq!(second.enrolled_by, EnrolledBy::Human);
-    assert!(authenticate_human(&conn, &secret).is_ok());
+    assert!(authenticate(&conn, &secret).is_ok());
 
     // Recovery without the admin secret is exactly this path, which is why it
     // needs no anonymous reset.
@@ -104,13 +104,10 @@ fn a_live_human_credential_can_enrol_another() {
 fn a_revoked_credential_can_no_longer_enrol_or_publish() {
     let conn = database();
     let (_admin, human) = enrolled(&conn);
-    let id = authenticate_human(&conn, &human).unwrap().0;
+    let id = authenticate(&conn, &human).unwrap().0;
 
     assert!(revoke(&conn, &id, "laptop lost").unwrap());
-    assert_eq!(
-        authenticate_human(&conn, &human),
-        Err(AuthorityError::Revoked)
-    );
+    assert_eq!(authenticate(&conn, &human), Err(AuthorityError::Revoked));
     assert!(authorise_enrolment(&conn, &human).unwrap().is_none());
     // Revoking twice is not an error the caller should act on, but it is not a
     // second revocation either.
@@ -122,9 +119,91 @@ fn a_label_is_required_and_bounded() {
     let conn = database();
     let admin = create_admin_secret(&conn, "/p").unwrap();
     let authority = authorise_enrolment(&conn, &admin).unwrap().unwrap();
-    assert!(enrol(&conn, &authority, "   ").is_err());
-    assert!(enrol(&conn, &authority, &"x".repeat(101)).is_err());
-    assert!(enrol(&conn, &authority, &"é".repeat(100)).is_ok());
+    assert!(enrol(&conn, &authority, GrantRole::Human, "   ").is_err());
+    assert!(enrol(&conn, &authority, GrantRole::Human, &"x".repeat(101)).is_err());
+    assert!(enrol(&conn, &authority, GrantRole::Human, &"é".repeat(100)).is_ok());
+}
+
+#[test]
+fn an_orchestrator_grant_can_never_enrol_anything() {
+    let conn = database();
+    let admin = create_admin_secret(&conn, "/p").unwrap();
+    let by_admin = authorise_enrolment(&conn, &admin).unwrap().unwrap();
+    let (_row, orchestrator) =
+        enrol(&conn, &by_admin, GrantRole::Orchestrator, "principal").unwrap();
+
+    // It authenticates perfectly well — it simply may not administer.
+    assert!(matches!(
+        authenticate(&conn, &orchestrator),
+        Ok((_, GrantRole::Orchestrator, _))
+    ));
+
+    // This is the B1 defect, pinned: accepting "any live credential" let the
+    // role that only publishes mint the role that administers.
+    assert!(
+        authorise_enrolment(&conn, &orchestrator).unwrap().is_none(),
+        "an orchestrator must not reach enrolment, not even for its own role"
+    );
+}
+
+#[test]
+fn the_role_is_fixed_at_enrolment_and_rotation_cannot_move_it() {
+    let conn = database();
+    let admin = create_admin_secret(&conn, "/p").unwrap();
+    let by_admin = authorise_enrolment(&conn, &admin).unwrap().unwrap();
+    let (row, orchestrator) =
+        enrol(&conn, &by_admin, GrantRole::Orchestrator, "principal").unwrap();
+
+    // Rotation proves possession of the current secret. Possession must never
+    // be a path to a role change, so the role is absent from the UPDATE.
+    let rotated = rotate_grant(&conn, &row.id).unwrap();
+    assert_ne!(rotated.expose(), orchestrator.expose());
+    assert!(matches!(
+        authenticate(&conn, &rotated),
+        Ok((_, GrantRole::Orchestrator, _))
+    ));
+    assert!(authorise_enrolment(&conn, &rotated).unwrap().is_none());
+}
+
+#[test]
+fn a_human_grant_may_enrol_either_role() {
+    let conn = database();
+    let (_admin, human) = enrolled(&conn);
+    let by_human = authorise_enrolment(&conn, &human).unwrap().unwrap();
+
+    let (orchestrator_row, _s) =
+        enrol(&conn, &by_human, GrantRole::Orchestrator, "principal").unwrap();
+    assert_eq!(orchestrator_row.role, GrantRole::Orchestrator);
+    assert_eq!(orchestrator_row.enrolled_by, EnrolledBy::Human);
+
+    let (human_row, _s2) = enrol(&conn, &by_human, GrantRole::Human, "second human").unwrap();
+    assert_eq!(human_row.role, GrantRole::Human);
+}
+
+#[test]
+fn the_database_refuses_a_role_outside_the_closed_set() {
+    let conn = database();
+    let (_admin, human) = enrolled(&conn);
+    let id = authenticate(&conn, &human).unwrap().0;
+
+    // The CHECK is the guard: an invented role cannot even be written, so a
+    // privileged role cannot be conjured by editing a row.
+    let written = conn.execute(
+        "UPDATE human_credentials SET role = 'superuser' WHERE id = ?1",
+        params![id],
+    );
+    assert!(
+        written.is_err(),
+        "the closed set must be enforced by the schema"
+    );
+
+    // And the Rust side refuses an unparsable role too, rather than defaulting
+    // to something permissive — defence in depth, not a duplicate.
+    assert!(GrantRole::parse("superuser").is_none());
+    assert!(matches!(
+        authenticate(&conn, &human),
+        Ok((_, GrantRole::Human, _))
+    ));
 }
 
 // ── Proofs ──────────────────────────────────────────────────────────────────
@@ -207,10 +286,10 @@ fn revocation_and_rotation_kill_proofs_already_in_flight() {
     let conn = database();
     let (_admin, human) = enrolled(&conn);
     let now = Utc::now();
-    let id = authenticate_human(&conn, &human).unwrap().0;
+    let id = authenticate(&conn, &human).unwrap().0;
 
     let issued_before = issue_proof(&conn, &human, "d-room", BODY, now).unwrap();
-    let rotated = rotate_human(&conn, &id).unwrap();
+    let rotated = rotate_grant(&conn, &id).unwrap();
     // The old secret is dead, so the proof it holds is unreachable…
     assert_eq!(
         consume_proof(&conn, &issued_before, &human, "d-room", BODY, now),
@@ -236,7 +315,7 @@ fn a_proof_belonging_to_someone_else_is_simply_unknown() {
     let conn = database();
     let (admin, first) = enrolled(&conn);
     let authority = authorise_enrolment(&conn, &admin).unwrap().unwrap();
-    let (_second, other) = enrol(&conn, &authority, "someone else").unwrap();
+    let (_second, other) = enrol(&conn, &authority, GrantRole::Human, "someone else").unwrap();
     let now = Utc::now();
 
     let proof = issue_proof(&conn, &first, "d-room", BODY, now).unwrap();

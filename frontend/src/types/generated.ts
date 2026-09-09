@@ -1569,10 +1569,15 @@ session_id?: string | null,
 since_sort_order?: number | null,
 /**
  * KT-619 — the resume credential the bridge already holds, injected by the
- * transport and NEVER exposed as a tool parameter: a model cannot set what
- * it is never offered. Publication authority is decided from this alone;
- * `session_id` above stays what it always was, a declared hint for
- * provenance and heartbeats.
+ * transport rather than offered as a tool parameter.
+ *
+ * Keeping it out of the MCP schema **reduces the surface a model reaches
+ * for**; it proves nothing on its own, because any direct HTTP caller can
+ * still set this field. What makes it an identity is the server-side hash
+ * comparison, not its absence from a catalogue.
+ *
+ * `session_id` above stays what it always was: a declared hint for
+ * provenance and heartbeats, never an authority.
  */
 session_credential?: SessionCredential | null, };
 
@@ -2550,6 +2555,11 @@ http_status: number, failures: number,
 successes: number, last_seen: string, };
 
 /**
+ * Who authorised an enrolment. There is deliberately no anonymous variant.
+ */
+export type EnrolledBy = "admin" | "human";
+
+/**
  * One piece of evidence backing a claim. `kind` mirrors the citable source
  * types; `reference` is the resolvable ref (file:line / url / disc-id / cmd /
  * user:date); `quote` is the supporting excerpt (the NL premise the Gate-2
@@ -2861,6 +2871,11 @@ export type GitSwitchBranchRequest = { branch: string, };
 export type GitWorkspaceProvenance = { workspace_id: string | null, ownership: string, state: string, path: string | null, branch: string, base_sha: string | null, head_sha: string | null, integrated_sha: string | null, task_execution_id: string | null, task_reference: string | null, };
 
 /**
+ * What a grant may do. Fixed at enrolment, never derived afterwards.
+ */
+export type GrantRole = "human" | "orchestrator";
+
+/**
  * Which guard tripped — surfaced verbatim in the SSE `GuardTriggered`
  * event so the frontend can render the right badge / toast / explainer.
  */
@@ -2878,6 +2893,12 @@ export type HostScope = { "kind": "ClaudeUser" } | { "kind": "ClaudeLocal", "val
  * whether Kronn writes the entry into `~/.claude.json` & friends.
  */
 export type HostSyncMode = "None" | "GlobalOnly" | "MirrorAll";
+
+/**
+ * A credential as the UI may see it. No hash, no plaintext — a list of these
+ * is safe to return.
+ */
+export type HumanCredential = { id: string, label: string, role: GrantRole, enrolled_by: EnrolledBy, created_at: string, revoked_at: string | null, revoked_reason: string | null, };
 
 /**
  * `required: false` is the explicit "none" the contract asks for, so an

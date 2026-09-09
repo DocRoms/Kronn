@@ -55,6 +55,35 @@ impl Secret {
     }
 }
 
+/// What a grant may do. Fixed at enrolment, never derived afterwards.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum GrantRole {
+    /// Publishes human cards, and administers credentials.
+    Human,
+    /// Publishes orchestrator cards. Administers nothing — that is the whole
+    /// difference, and it is why an orchestrator cannot mint a human.
+    Orchestrator,
+}
+
+impl GrantRole {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Human => "human",
+            Self::Orchestrator => "orchestrator",
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        Some(match value {
+            "human" => Self::Human,
+            "orchestrator" => Self::Orchestrator,
+            _ => return None,
+        })
+    }
+}
+
 /// Who authorised an enrolment. There is deliberately no anonymous variant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
@@ -80,6 +109,7 @@ impl EnrolledBy {
 pub struct HumanCredential {
     pub id: String,
     pub label: String,
+    pub role: GrantRole,
     pub enrolled_by: EnrolledBy,
     pub created_at: String,
     pub revoked_at: Option<String>,
@@ -169,10 +199,16 @@ pub fn rotate_admin_secret(conn: &Connection, delivered_to: &str) -> Result<Secr
 /// so a route cannot enrol by forgetting to check.
 pub struct EnrolmentAuthority(EnrolledBy);
 
-/// Authorise an enrolment by the admin secret OR a live human credential.
+/// Authorise an enrolment by the admin secret, or by a live grant whose role is
+/// **`Human`**.
 ///
-/// There is no third way in, and no "first caller" case: an install with no
-/// admin secret and no credential can enrol nothing, which is the point.
+/// The first version accepted any live credential. That was a defect, not a
+/// simplification: it let an `orchestrator` — which exists only to publish —
+/// mint credentials, including `human` ones, so the weaker role could reach the
+/// stronger in one step.
+///
+/// There is no third way in and no "first caller" case: an install with no
+/// admin secret and no human grant authorises nobody.
 pub fn authorise_enrolment(
     conn: &Connection,
     presented: &Secret,
@@ -180,9 +216,11 @@ pub fn authorise_enrolment(
     if admin_secret_matches(conn, presented)? {
         return Ok(Some(EnrolmentAuthority(EnrolledBy::Admin)));
     }
-    match authenticate_human(conn, presented) {
-        Ok(_) => Ok(Some(EnrolmentAuthority(EnrolledBy::Human))),
-        Err(_) => Ok(None),
+    match authenticate(conn, presented) {
+        Ok((_, GrantRole::Human, _)) => Ok(Some(EnrolmentAuthority(EnrolledBy::Human))),
+        // Explicitly including a live `orchestrator`: administering is not
+        // among the things it may do.
+        Ok((_, GrantRole::Orchestrator, _)) | Err(_) => Ok(None),
     }
 }
 
@@ -190,6 +228,7 @@ pub fn authorise_enrolment(
 pub fn enrol(
     conn: &Connection,
     authority: &EnrolmentAuthority,
+    role: GrantRole,
     label: &str,
 ) -> Result<(HumanCredential, Secret)> {
     let label = label.trim();
@@ -200,14 +239,23 @@ pub fn enrol(
     let id = Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
     conn.execute(
-        "INSERT INTO human_credentials (id, label, secret_hash, enrolled_by, created_at, epoch) \
-         VALUES (?1, ?2, ?3, ?4, ?5, 1)",
-        params![id, label, secret.hash(), authority.0.as_str(), now],
+        "INSERT INTO human_credentials \
+             (id, label, role, secret_hash, enrolled_by, created_at, epoch) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1)",
+        params![
+            id,
+            label,
+            role.as_str(),
+            secret.hash(),
+            authority.0.as_str(),
+            now
+        ],
     )?;
     Ok((
         HumanCredential {
             id,
             label: label.to_string(),
+            role,
             enrolled_by: authority.0,
             created_at: now,
             revoked_at: None,
@@ -217,26 +265,31 @@ pub fn enrol(
     ))
 }
 
-/// The live credential a secret authenticates, or why it does not.
-pub fn authenticate_human(
+/// The live grant a secret authenticates: its id, role and epoch — or why it
+/// authenticates nothing.
+pub fn authenticate(
     conn: &Connection,
     presented: &Secret,
-) -> std::result::Result<(String, i64), AuthorityError> {
+) -> std::result::Result<(String, GrantRole, i64), AuthorityError> {
     if presented.expose().is_empty() {
         return Err(AuthorityError::Unknown);
     }
-    let row: Option<(String, Option<String>, i64)> = conn
+    let row: Option<(String, String, Option<String>, i64)> = conn
         .query_row(
-            "SELECT id, revoked_at, epoch FROM human_credentials WHERE secret_hash = ?1",
+            "SELECT id, role, revoked_at, epoch FROM human_credentials WHERE secret_hash = ?1",
             params![presented.hash()],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
         .optional()
         .map_err(|_| AuthorityError::Unknown)?;
     match row {
         None => Err(AuthorityError::Unknown),
-        Some((_, Some(_revoked), _)) => Err(AuthorityError::Revoked),
-        Some((id, None, epoch)) => Ok((id, epoch)),
+        Some((_, _, Some(_revoked), _)) => Err(AuthorityError::Revoked),
+        // An unparsable role is a contract break, not a permissive default.
+        Some((id, role, None, epoch)) => match GrantRole::parse(&role) {
+            Some(role) => Ok((id, role, epoch)),
+            None => Err(AuthorityError::Unknown),
+        },
     }
 }
 
@@ -254,9 +307,12 @@ pub fn revoke(conn: &Connection, credential_id: &str, reason: &str) -> Result<bo
     Ok(changed == 1)
 }
 
-/// Rotate a credential's secret in place, keeping its identity and history.
+/// Rotate a grant's secret in place, keeping its identity, role and history.
+///
+/// The role is deliberately absent from the UPDATE: rotation proves possession
+/// of the current secret, and possession must never be a path to a role change.
 /// Proofs issued under the old secret die with the epoch bump.
-pub fn rotate_human(conn: &Connection, credential_id: &str) -> Result<Secret> {
+pub fn rotate_grant(conn: &Connection, credential_id: &str) -> Result<Secret> {
     let secret = Secret::new(format!("kr-human-{}", Uuid::new_v4().simple()));
     let changed = conn.execute(
         "UPDATE human_credentials SET secret_hash = ?2, epoch = epoch + 1 \
@@ -271,21 +327,23 @@ pub fn rotate_human(conn: &Connection, credential_id: &str) -> Result<Secret> {
 
 pub fn list(conn: &Connection) -> Result<Vec<HumanCredential>> {
     let mut statement = conn.prepare(
-        "SELECT id, label, enrolled_by, created_at, revoked_at, revoked_reason \
+        "SELECT id, label, role, enrolled_by, created_at, revoked_at, revoked_reason \
            FROM human_credentials ORDER BY created_at, id",
     )?;
     let rows = statement.query_map([], |row| {
-        let enrolled: String = row.get(2)?;
+        let role: String = row.get(2)?;
+        let enrolled: String = row.get(3)?;
         Ok(HumanCredential {
             id: row.get(0)?,
             label: row.get(1)?,
+            role: GrantRole::parse(&role).unwrap_or(GrantRole::Orchestrator),
             enrolled_by: match enrolled.as_str() {
                 "admin" => EnrolledBy::Admin,
                 _ => EnrolledBy::Human,
             },
-            created_at: row.get(3)?,
-            revoked_at: row.get(4)?,
-            revoked_reason: row.get(5)?,
+            created_at: row.get(4)?,
+            revoked_at: row.get(5)?,
+            revoked_reason: row.get(6)?,
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -302,7 +360,7 @@ pub fn issue_proof(
     content: &str,
     now: DateTime<Utc>,
 ) -> std::result::Result<String, AuthorityError> {
-    let (credential_id, epoch) = authenticate_human(conn, presented)?;
+    let (credential_id, _role, epoch) = authenticate(conn, presented)?;
     let id = format!("proof-{}", Uuid::new_v4().simple());
     conn.execute(
         "INSERT INTO human_publication_proofs \
@@ -347,8 +405,8 @@ pub fn consume_proof(
     content: &str,
     now: DateTime<Utc>,
 ) -> std::result::Result<String, ProofError> {
-    let (credential_id, epoch) =
-        authenticate_human(conn, presented).map_err(|_| ProofError::Unknown)?;
+    let (credential_id, _role, epoch) =
+        authenticate(conn, presented).map_err(|_| ProofError::Unknown)?;
 
     let row: Option<(String, String, String, String, Option<String>, i64)> = conn
         .query_row(
