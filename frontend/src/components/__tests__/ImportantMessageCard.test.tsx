@@ -274,6 +274,67 @@ describe('ImportantMessagesBar', () => {
     expect(screen.getByLabelText('disc.important.previous')).toBeDisabled();
   });
 
+  it('is operable from the keyboard alone', async () => {
+    serve(three);
+    const onNavigate = vi.fn();
+    render(<ImportantMessagesBar discussionId={DISC} onNavigate={onNavigate} />);
+    await screen.findByText('disc.important.count|3');
+
+    // Every enabled control must be reachable by tabbing, in reading order.
+    // A pager only usable with a mouse is not a pager for the people most
+    // likely to need it.
+    await userEvent.tab();
+    expect(screen.getByLabelText('disc.important.goToCurrent')).toHaveFocus();
+    await userEvent.tab();
+    expect(screen.getByLabelText('disc.important.filterLabel')).toHaveFocus();
+
+    // `previous` is disabled on the first card, so the browser skips it —
+    // that is correct, and the point is that it comes BACK once usable.
+    await userEvent.tab();
+    expect(screen.getByLabelText('disc.important.next')).toHaveFocus();
+
+    // Activating with the keyboard must do exactly what a click does.
+    await userEvent.keyboard('{Enter}');
+    expect(onNavigate).toHaveBeenLastCalledWith('m-2');
+
+    await userEvent.tab({ shift: true });
+    expect(screen.getByLabelText('disc.important.previous')).toHaveFocus();
+    await userEvent.keyboard('{Enter}');
+    expect(onNavigate).toHaveBeenLastCalledWith('m-1');
+  });
+
+  it('announces the position to a screen reader as it moves', async () => {
+    serve(three);
+    render(<ImportantMessagesBar discussionId={DISC} onNavigate={vi.fn()} />);
+    const position = await screen.findByText('disc.important.position|1|3');
+
+    // Without a live region the position changes silently, which is the same
+    // as not being there for anyone not watching that corner of the screen.
+    expect(position).toHaveAttribute('aria-live', 'polite');
+    await userEvent.click(screen.getByLabelText('disc.important.next'));
+    expect(screen.getByText('disc.important.position|2|3')).toHaveAttribute(
+      'aria-live',
+      'polite',
+    );
+  });
+
+  it('names the group and every control, so none is an unlabelled icon', async () => {
+    serve(three);
+    render(<ImportantMessagesBar discussionId={DISC} />);
+    await screen.findByText('disc.important.count|3');
+
+    expect(screen.getByRole('group', { name: 'disc.important.barLabel' })).toBeInTheDocument();
+    // The arrows are icon-only: their accessible name is the only name they have.
+    for (const label of [
+      'disc.important.goToCurrent',
+      'disc.important.filterLabel',
+      'disc.important.previous',
+      'disc.important.next',
+    ]) {
+      expect(screen.getByLabelText(label)).toBeInTheDocument();
+    }
+  });
+
   it('leaves the thread readable when the cards cannot be loaded', async () => {
     importantMessages.mockRejectedValue(new Error('offline'));
     const { container } = render(<ImportantMessagesBar discussionId={DISC} />);
