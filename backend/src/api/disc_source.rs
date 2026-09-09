@@ -253,10 +253,15 @@ pub struct DiscAppendRequest {
     #[serde(default)]
     pub since_sort_order: Option<i64>,
     /// KT-619 — the resume credential the bridge already holds, injected by the
-    /// transport and NEVER exposed as a tool parameter: a model cannot set what
-    /// it is never offered. Publication authority is decided from this alone;
-    /// `session_id` above stays what it always was, a declared hint for
-    /// provenance and heartbeats.
+    /// transport rather than offered as a tool parameter.
+    ///
+    /// Keeping it out of the MCP schema **reduces the surface a model reaches
+    /// for**; it proves nothing on its own, because any direct HTTP caller can
+    /// still set this field. What makes it an identity is the server-side hash
+    /// comparison, not its absence from a catalogue.
+    ///
+    /// `session_id` above stays what it always was: a declared hint for
+    /// provenance and heartbeats, never an authority.
     #[serde(default)]
     pub session_credential: Option<SessionCredential>,
 }
@@ -736,8 +741,12 @@ pub async fn disc_append(
         let did_insert = did_for_loop.clone();
         let msg_clone = msg.clone();
         let typed_targets = requested_targets.clone();
-        // Cloned per message so the closure owns it; the redacting `Debug` on
-        // `SessionCredential` travels with it.
+        // Cloned per message so the closure owns it. NOTE: this is a plain
+        // `String` — `expose()` leaves the redacting `Debug` behind, so nothing
+        // below may print this binding.
+        //
+        // TODO(KT-619): carry `SessionCredential` itself into the closure so the
+        // redaction is structural here too, instead of a comment asking for care.
         let important_credential = req
             .session_credential
             .as_ref()
@@ -758,80 +767,61 @@ pub async fn disc_append(
                         dedupe_key: None,
                     })
                     .collect::<Vec<_>>();
-                let insert = |conn: &rusqlite::Connection| {
-                    if let Some(author_cli_session_id) = author_cli_session_id {
-                        crate::db::discussions::insert_cli_message_with_targets_and_dispatches(
-                            conn,
-                            &did_insert,
-                            &msg_clone,
-                            &typed_targets,
-                            &dispatches,
-                            author_cli_session_id,
-                        )
-                    } else if !typed_targets.is_empty() || !dispatches.is_empty() {
-                        crate::db::discussions::insert_message_with_targets_and_dispatches(
-                            conn,
-                            &did_insert,
-                            &msg_clone,
-                            &typed_targets,
-                            &dispatches,
-                        )
-                    } else {
-                        crate::db::discussions::insert_message(conn, &did_insert, &msg_clone)
-                    }
-                };
+                // KT-619 — ONE transaction for the whole turn: message, CLI
+                // author, targets, dispatches and any important card commit
+                // together or roll back together.
+                //
+                // The earlier version wrapped a SAVEPOINT around
+                // `insert_cli_message_with_targets_and_dispatches`, which opens
+                // its own transaction — so a genuinely joined CLI got
+                // "cannot start a transaction within a transaction" on every
+                // append. The authorisation fixtures never took that path, which
+                // is why the suite stayed green while the real path was broken.
+                let tx = conn.unchecked_transaction()?;
+                let (sort_order, _jobs) =
+                    crate::db::discussions::insert_message_with_targets_and_dispatches_within_tx(
+                        &tx,
+                        &did_insert,
+                        &msg_clone,
+                        &typed_targets,
+                        &dispatches,
+                        author_cli_session_id,
+                    )?;
 
-                // KT-619 — a `kronn-important` fence becomes a card in the SAME
-                // unit as its message, so a card exists iff its message does.
-                // Authority is read from the author's own room, never from the
-                // target room or the role the caller typed: a worker can name
-                // any `disc_id` and can label its turn `User`, but it cannot
-                // move the session Kronn placed in the execution room.
-                if !msg_clone.content.contains("kronn-important") {
-                    return insert(conn).map(|order| (order, Default::default()));
-                }
-                // Display only — authority never depends on this. `disc_append`
-                // carries no genuine human turn (that path is `send_message`),
-                // so the label is always agent-shaped regardless of the role
-                // the payload claimed.
-                let label = msg_clone
-                    .agent_type
-                    .as_ref()
-                    .map(|agent| format!("{agent:?}"))
-                    .unwrap_or_else(|| "Orchestrator".to_string());
-                // Authority comes from the credential the bridge HOLDS, not
-                // from any id it declares. `session_id` above proved only that
-                // a row existed — session ids are visible in room metadata, so
-                // presenting one was never evidence of holding it.
-                let publisher = crate::db::discussion_important::publisher_for_credential(
-                    conn,
-                    important_credential.as_deref(),
-                    &label,
-                )?;
-                conn.execute_batch("SAVEPOINT disc_append_important")?;
-                let outcome = insert(conn).and_then(|order| {
-                    let ingest = crate::db::discussion_important::ingest_message_important(
-                        conn,
+                let ingest = if msg_clone.content.contains("kronn-important") {
+                    let label = if matches!(msg_clone.role, crate::models::MessageRole::User) {
+                        msg_clone
+                            .author_pseudo
+                            .clone()
+                            .unwrap_or_else(|| "Human".to_string())
+                    } else {
+                        msg_clone
+                            .agent_type
+                            .as_ref()
+                            .map(|agent| format!("{agent:?}"))
+                            .unwrap_or_else(|| "Orchestrator".to_string())
+                    };
+                    // Authority comes from the credential the caller HOLDS, not
+                    // from any id it declares.
+                    let publisher = crate::db::discussion_important::publisher_for_credential(
+                        &tx,
+                        important_credential.as_deref(),
+                        &label,
+                    )?;
+                    crate::db::discussion_important::ingest_message_important(
+                        &tx,
                         &did_insert,
                         &msg_clone.id,
                         &msg_clone.content,
                         &publisher,
                         &msg_clone.timestamp.to_rfc3339(),
-                    )?;
-                    Ok((order, ingest))
-                });
-                match outcome {
-                    Ok(result) => {
-                        conn.execute_batch("RELEASE disc_append_important")?;
-                        Ok(result)
-                    }
-                    Err(e) => {
-                        let _ = conn.execute_batch(
-                            "ROLLBACK TO disc_append_important; RELEASE disc_append_important",
-                        );
-                        Err(e)
-                    }
-                }
+                    )?
+                } else {
+                    Default::default()
+                };
+
+                tx.commit()?;
+                Ok((sort_order, ingest))
             })
             .await;
         match insert_result {
@@ -3677,6 +3667,121 @@ mod tests {
             .with_conn(move |conn| crate::db::discussion_important::count(conn, &disc_id))
             .await
             .unwrap()
+    }
+
+    /// KT-619 — the path the authorisation fixtures never took, and the one a
+    /// real CLI uses on every single append: a session id that actually
+    /// resolves, so `insert_cli_message_with_targets_and_dispatches` runs.
+    ///
+    /// A SAVEPOINT wrapped around that call made every such append fail with
+    /// "cannot start a transaction within a transaction". The suite stayed
+    /// green because no test declared a resolvable session. This is that test.
+    #[tokio::test]
+    #[serial]
+    async fn a_joined_cli_can_append_an_ordinary_message() {
+        crate::core::anti_halluc::set_mode("off");
+        let (state, _tmp) = lint_state(false).await;
+        state
+            .db
+            .with_conn(|conn| {
+                crate::db::discussion_sessions::create_session(
+                    conn,
+                    IMPORTANT_PARENT,
+                    "ClaudeCode",
+                    Some(IMPORTANT_ORCH_SESSION),
+                    "peer",
+                )
+            })
+            .await
+            .unwrap();
+
+        // No fence at all: this is the ordinary turn, and it must not have been
+        // made to depend on anything KT-619 added.
+        let plain = append_as(
+            &state,
+            vec![agent_msg("m1", "just talking")],
+            Some(IMPORTANT_ORCH_SESSION),
+        )
+        .await;
+        assert_eq!(
+            plain.appended, 1,
+            "a joined CLI must still be able to speak"
+        );
+
+        // And with a fence, still through the CLI-author path.
+        hold_credential(&state, IMPORTANT_ORCH_SESSION, IMPORTANT_ORCH_SECRET).await;
+        let carded = append_declaring(
+            &state,
+            vec![agent_msg("m2", &important_fence("kt-619.joined-cli"))],
+            Some(IMPORTANT_ORCH_SESSION),
+            Some(IMPORTANT_ORCH_SECRET),
+        )
+        .await;
+        assert_eq!(carded.appended, 1);
+        assert_eq!(carded.important.map(|i| i.published), Some(1));
+    }
+
+    /// KT-619 — the card and its message share one transaction, so a failure
+    /// after the message is written must leave neither behind.
+    #[tokio::test]
+    #[serial]
+    async fn a_failed_card_takes_its_message_down_with_it() {
+        crate::core::anti_halluc::set_mode("off");
+        let (state, _tmp) = lint_state(false).await;
+        state
+            .db
+            .with_conn(|conn| {
+                crate::db::discussion_sessions::create_session(
+                    conn,
+                    IMPORTANT_PARENT,
+                    "ClaudeCode",
+                    Some(IMPORTANT_ORCH_SESSION),
+                    "peer",
+                )
+            })
+            .await
+            .unwrap();
+        hold_credential(&state, IMPORTANT_ORCH_SESSION, IMPORTANT_ORCH_SECRET).await;
+
+        // Drop the table the card needs. The message insert succeeds, the card
+        // insert cannot, and the whole turn must roll back rather than leave a
+        // message whose fence silently produced nothing.
+        state
+            .db
+            .with_conn(|conn| {
+                conn.execute("DROP TABLE discussion_important_messages", [])?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let resp = disc_append(
+            axum::extract::State(state.clone()),
+            Json(DiscAppendRequest {
+                disc_id: IMPORTANT_PARENT.into(),
+                messages: vec![agent_msg("m1", &important_fence("kt-619.rollback"))],
+                session_id: Some(IMPORTANT_ORCH_SESSION.into()),
+                since_sort_order: None,
+                session_credential: Some(
+                    serde_json::from_value(serde_json::json!(IMPORTANT_ORCH_SECRET)).unwrap(),
+                ),
+            }),
+        )
+        .await;
+        assert!(resp.0.data.is_none(), "the append must report failure");
+
+        let orphan: i64 = state
+            .db
+            .with_conn(|conn| {
+                Ok(
+                    conn.query_row("SELECT COUNT(*) FROM messages WHERE id = 'm1'", [], |row| {
+                        row.get(0)
+                    })?,
+                )
+            })
+            .await
+            .unwrap();
+        assert_eq!(orphan, 0, "the message must roll back with the card");
     }
 
     /// KT-619 — resume rotates the secret. A credential read once must not be
