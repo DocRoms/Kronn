@@ -37,22 +37,49 @@ namespace. HTTP tiers may fall back to their own configured default, unlike
 CLI tiers. No embedded model list participates in the display helper anymore.
 [src: file: frontend/src/lib/constants.ts:60-75]
 [src: file: frontend/src/lib/modelCatalogSelection.ts:15-31]
-[src: file: frontend/src/components/AgentSwitchPicker.tsx:113-142]
+[src: file: frontend/src/components/AgentSwitchPicker.tsx:124-143]
 
 The shared picker keeps an unavailable configured entry disabled. A failed
 snapshot read reports the error and retains previous data as cached, not live.
 Saved per-discussion and Quick Prompt overrides are shown for the current
 selection; alternative choices resolve their own tiers. The Quick Prompt
 caller still explicitly clears its old override when choosing a new agent/tier.
-[src: file: frontend/src/components/AgentSwitchPicker.tsx:189-210]
+[src: file: frontend/src/components/AgentSwitchPicker.tsx:241-264]
 [src: file: frontend/src/components/ChatHeader.tsx:418-428]
 [src: file: frontend/src/pages/WorkflowsPage.tsx:1223-1244]
 [src: file: frontend/src/pages/WorkflowsPage.tsx:2850-2857]
 
-This checkpoint does not close KT-531: remaining custom selector/display paths
-still need the same contract, and the HTTP runner retains a legacy embedded
-fallback. Neither a unit-test migration fallback nor historical model metadata
-is evidence that the production runtime is free of embedded defaults.
+KT-627 separately removed the HTTP runner's embedded fallback and qualified
+production-library resolution/preflight. Remaining custom selector/display
+paths still keep KT-531 open; a historical test result never qualifies a later
+candidate by itself.
+[src: file: backend/tests/http_model_resolution.rs:1]
+
+### Search and keyboard interaction
+
+The shared agent picker filters agent labels, exact connection identities and
+configured/assigned model IDs or aliases. Search ignores case and diacritics
+without rewriting the selected identity. Typing never selects a target or
+refetches the catalogue. An unknown configured ID remains searchable, and a
+known unavailable choice remains disabled; accessible descriptions retain the
+model, provenance and unavailable state after filtering.
+[src: file: frontend/src/components/AgentSwitchPicker.tsx:144-180]
+[src: file: frontend/src/components/AgentSwitchPicker.tsx:382-419]
+
+The search field is outside the menu, within a portalled non-modal dialog.
+Arrow keys move among enabled choices; Home/End retain their caret behavior in
+search and navigate choices when an option has focus. Escape inside the picker
+does not propagate to its parent form. Closing with Escape or completing an
+asynchronous selection restores trigger focus. Reopening clears the query,
+an empty result is explicit, and the popup's height is bounded by the viewport.
+[src: file: frontend/src/components/AgentSwitchPicker.tsx:155-239]
+[src: file: frontend/src/components/AgentSwitchPicker.tsx:337-363]
+[src: file: frontend/src/components/__tests__/AgentSwitchPicker.catalog.test.tsx:123-247]
+[src: file: frontend/src/components/__tests__/AgentSwitchPicker.accessibility.test.tsx:42-73]
+
+These are component regressions, not a new browser layout qualification.
+The separate composer mention palettes and comparison display paths still
+require the remaining KT-531 review.
 
 ## Quick Prompt and workflow model editors
 
@@ -81,8 +108,9 @@ catalogue read or failure never changes either value.
 The regressions exercise the actual form payload, explicit unknown Unicode IDs,
 reload failures, namespace switching, disabled entries and per-model reasoning.
 They use API fixtures only; these tests are not provider discovery or a browser
-layout qualification. Other custom launch selectors and the discussion's
-persisted override on target changes still require the remaining KT-531 audit.
+layout qualification. Other custom launch selectors, mentions and comparison
+labels still require the remaining KT-531 audit. Discussion target persistence
+is covered separately below.
 [src: file: frontend/src/components/workflows/__tests__/QuickPromptForm.catalog.test.tsx:37-88]
 [src: file: frontend/src/components/__tests__/ModelCatalogPicker.test.tsx:25-66]
 

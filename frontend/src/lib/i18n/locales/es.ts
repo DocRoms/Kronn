@@ -1,6 +1,8 @@
 import type { TranslationDict } from '../../i18n';
 
 const es: TranslationDict = {
+  'agentPicker.search': 'Buscar un agente, una conexión o un modelo…',
+  'agentPicker.noMatch': 'Ningún agente o modelo coincide.',
   "modelCatalog.lastChecked": "Última comprobación: {0}",
   "modelCatalog.notInCatalog": "Ausente del catálogo cargado",
   "modelCatalog.keepConfigured": "Se conserva el valor configurado. Comprueba el catálogo o elige un reemplazo explícitamente.",

@@ -1,6 +1,8 @@
 import type { TranslationDict } from '../../i18n';
 
 const zh: TranslationDict = {
+  'agentPicker.search': '搜索代理、连接或模型…',
+  'agentPicker.noMatch': '没有匹配的代理或模型。',
   "modelCatalog.lastChecked": "上次检查：{0}",
   "modelCatalog.notInCatalog": "不在已加载的目录中",
   "modelCatalog.keepConfigured": "已保留配置值。请重新检查目录或明确选择替代模型。",

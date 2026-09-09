@@ -223,7 +223,10 @@ describe('ChatHeader — shared agent switcher', () => {
     await waitFor(() => expect(trigger).toBeEnabled());
     fireEvent.click(trigger);
     const menu = screen.getByRole('menu');
-    expect(menu.parentElement).toBe(document.body);
+    const picker = screen.getByRole('dialog', { name: 'disc.switchAgentAndTier' });
+    expect(picker.parentElement).toBe(document.body);
+    expect(picker).toContainElement(menu);
+    expect(menu).not.toContainElement(screen.getByRole('searchbox', { name: 'agentPicker.search' }));
     expect(screen.getByRole('menuitem', { name: 'Claude Code · disc.tier.default' })).toBeDisabled();
     expect(screen.getByRole('menuitem', { name: 'Codex · disc.tier.reasoning' })).toBeEnabled();
     expect(screen.queryByRole('group', { name: 'Gemini CLI' })).toBeNull();

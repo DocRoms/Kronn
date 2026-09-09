@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { createPortal } from 'react-dom';
 import { Check, ChevronDown, Loader2, RefreshCw } from 'lucide-react';
 import { modelCatalogApi } from '../lib/api';
@@ -79,14 +79,18 @@ export function AgentSwitchPicker({
   displayName,
 }: AgentSwitchPickerProps) {
   const { t } = useT();
+  const pickerId = useId();
   const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState('');
   const [saving, setSaving] = useState(false);
   const [catalog, setCatalog] = useState<ModelCatalogSnapshot | null>(null);
   const [catalogError, setCatalogError] = useState(false);
-  const [popoverPosition, setPopoverPosition] = useState<{ top: number; left: number } | null>(null);
+  const [popoverPosition, setPopoverPosition] = useState<{ top: number; left: number; maxHeight: number } | null>(null);
   const savingRef = useRef(false);
+  const restoreFocusRef = useRef(false);
   const rootRef = useRef<HTMLSpanElement>(null);
   const popoverRef = useRef<HTMLSpanElement>(null);
+  const searchRef = useRef<HTMLInputElement>(null);
   const targetKey = (target: AgentSwitchTarget) => `${target.agent}:${target.connectionId ?? ''}`;
   const suppliedTargets: AgentSwitchTarget[] = availableTargets
     ?? availableAgents.map(agent => ({ agent }));
@@ -137,6 +141,43 @@ export function AgentSwitchPicker({
     `${tierLabels?.[tier] ?? tier} · ${targetModel(target, tier)}`;
   const effectiveSuffix = suffix
     ?? (tierPicker && currentTier ? targetModel(currentTarget, currentTier) : undefined);
+  const searchText = (value: string) => value.normalize('NFKD').replace(/\p{Diacritic}/gu, '').toLowerCase();
+  const normalizedQuery = searchText(query.trim());
+  const visibleChoices = choices.filter(target => !normalizedQuery || searchText([
+    targetLabel(target), target.agent, target.connectionId, runtimeTargetId(target),
+    ...tierChoices.flatMap(tier => {
+      const entry = catalogEntry(target, tier);
+      return [tier, tierLabels?.[tier], configuredModel(target, tier),
+        entry?.model_id, entry?.display_name, entry?.display_alias];
+    }),
+  ].filter(Boolean).join(' ')).includes(normalizedQuery));
+
+  const navigateChoices = (event: ReactKeyboardEvent<HTMLSpanElement>) => {
+    if (event.nativeEvent.isComposing) return;
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      event.stopPropagation();
+      restoreFocusRef.current = true;
+      setOpen(false);
+      return;
+    }
+    const options = Array.from(popoverRef.current?.querySelectorAll<HTMLButtonElement>(
+      '[role="menuitem"]:not(:disabled)',
+    ) ?? []);
+    if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
+    const inSearch = event.target === searchRef.current;
+    // Home/End keep their normal caret behavior in the search field.
+    if (inSearch && (event.key === 'Home' || event.key === 'End')) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (!options.length) return;
+    const index = options.indexOf(event.target as HTMLButtonElement);
+    if (event.key === 'Home') options[0].focus();
+    else if (event.key === 'End') options[options.length - 1].focus();
+    else if (event.key === 'ArrowUp' && index === 0) searchRef.current?.focus();
+    else if (event.key === 'ArrowUp') options[index < 0 ? options.length - 1 : index - 1].focus();
+    else options[(index + 1) % options.length].focus();
+  };
 
   const updatePopoverPosition = useCallback(() => {
     const rect = rootRef.current?.getBoundingClientRect();
@@ -145,7 +186,7 @@ export function AgentSwitchPicker({
     const viewportPadding = 8;
     const compactTierLayout = tierPicker && window.innerWidth < 420;
     const popoverWidth = tierPicker ? 342 : 170;
-    const estimatedHeight = choiceCount * (compactTierLayout ? 75 : tierPicker ? 45 : 31) + 8;
+    const estimatedHeight = choiceCount * (compactTierLayout ? 75 : tierPicker ? 45 : 31) + 46;
     const hasRoomBelow = rect.bottom + 5 + estimatedHeight <= window.innerHeight - viewportPadding;
     const top = hasRoomBelow
       ? rect.bottom + 5
@@ -154,7 +195,7 @@ export function AgentSwitchPicker({
       viewportPadding,
       Math.min(rect.left, window.innerWidth - popoverWidth - viewportPadding),
     );
-    setPopoverPosition({ top, left });
+    setPopoverPosition({ top, left, maxHeight: Math.max(0, window.innerHeight - top - viewportPadding) });
   }, [choiceCount, tierPicker]);
 
   const select = async (target: AgentSwitchTarget, tier?: ModelTier) => {
@@ -177,6 +218,7 @@ export function AgentSwitchPicker({
       } else if (onChange) {
         await onChange(target.agent);
       }
+      restoreFocusRef.current = true;
       setOpen(false);
     } catch {
       // The caller owns the user-facing error. Keep the picker open so
@@ -188,7 +230,15 @@ export function AgentSwitchPicker({
   };
 
   useEffect(() => {
+    if (!open && !saving && restoreFocusRef.current) {
+      restoreFocusRef.current = false;
+      rootRef.current?.querySelector('button')?.focus();
+    }
+  }, [open, saving]);
+
+  useEffect(() => {
     if (!open) return;
+    searchRef.current?.focus();
     let active = true;
     void modelCatalogApi.list()
       .then(snapshot => {
@@ -217,7 +267,10 @@ export function AgentSwitchPicker({
       }
     };
     const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setOpen(false);
+      if (event.key === 'Escape' && !event.isComposing) {
+        restoreFocusRef.current = true;
+        setOpen(false);
+      }
     };
     document.addEventListener('mousedown', closeOutside);
     document.addEventListener('keydown', closeOnEscape);
@@ -260,10 +313,14 @@ export function AgentSwitchPicker({
           ? `${title} · ${tierTitle(currentTarget, currentTier)}`
           : title}
         aria-label={ariaLabel}
+        aria-haspopup="dialog"
         aria-expanded={open}
         disabled={disabled || saving}
         onClick={() => {
-          if (!open) updatePopoverPosition();
+          if (!open) {
+            setQuery('');
+            updatePopoverPosition();
+          }
           setOpen(value => !value);
         }}
       >
@@ -285,11 +342,24 @@ export function AgentSwitchPicker({
         <span
           ref={popoverRef}
           className="kr-agent-switch-popover"
-          role="menu"
+          role="dialog"
+          aria-label={ariaLabel}
           style={popoverPosition}
+          onKeyDown={navigateChoices}
         >
-          {catalogError && <span role="status" className="kr-agent-switch-catalog-meta">{t('modelCatalog.loadError')}</span>}
-          {choices.map(target => tierPicker ? (
+          <input
+            ref={searchRef}
+            type="search"
+            className="kr-agent-switch-search"
+            aria-label={t('agentPicker.search')}
+            placeholder={t('agentPicker.search')}
+            value={query}
+            onChange={event => setQuery(event.target.value)}
+          />
+          {catalogError && <span role="status" className="kr-agent-switch-status">{t('modelCatalog.loadError')}</span>}
+          {!visibleChoices.length && <span role="status" className="kr-agent-switch-status">{t('agentPicker.noMatch')}</span>}
+          <span role="menu" aria-label={ariaLabel} className="kr-agent-switch-results">
+          {visibleChoices.map((target, targetIndex) => tierPicker ? (
             <span
               key={targetKey(target)}
               className="kr-agent-switch-tier-row"
@@ -314,6 +384,7 @@ export function AgentSwitchPicker({
                   const provenance = entry
                     ? t(`modelCatalog.provenance.${catalogModelProvenance(entry, catalogView(target))}`)
                     : null;
+                  const descriptionId = `${pickerId}-${targetIndex}-${tier}`;
                   return (
                     <button
                       key={tier}
@@ -323,12 +394,17 @@ export function AgentSwitchPicker({
                       data-tier={tier}
                       data-current={selected}
                       aria-label={`${targetLabel(target)} · ${label}`}
+                      aria-describedby={descriptionId}
                       title={tierTitle(target, tier)}
                       disabled={saving || selected || unavailable}
                       onClick={() => void select(target, tier)}
                     >
                       <span aria-hidden="true">{icon}</span>
                       <span>{label}</span>
+                      <span id={descriptionId} hidden>
+                        {[tierTitle(target, tier), provenance ?? (configuredModel(target, tier) ? t('modelCatalog.notInCatalog') : ''),
+                          unavailable ? t('modelCatalog.unavailable') : ''].filter(Boolean).join(' · ')}
+                      </span>
                       {(entry || configuredModel(target, tier)) && (
                         <span className="kr-agent-switch-catalog-meta">
                           {unavailable
@@ -360,6 +436,7 @@ export function AgentSwitchPicker({
               {targetKey(target) === targetKey(currentTarget) && <Check size={10} />}
             </button>
           ))}
+          </span>
         </span>,
         document.body,
       )}

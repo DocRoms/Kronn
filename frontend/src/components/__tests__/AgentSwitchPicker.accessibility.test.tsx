@@ -69,6 +69,7 @@ describe('AgentSwitchPicker — accessible agent identity colours', () => {
     Object.defineProperty(window, 'innerHeight', { configurable: true, value: 60 });
     fireEvent(window, new Event('resize'));
     expect(popover?.style.top).toBe('8px');
+    expect(popover?.style.maxHeight).toBe('44px');
 
     Object.defineProperty(window, 'innerHeight', { configurable: true, value: originalInnerHeight });
     rectSpy.mockRestore();
