@@ -542,4 +542,94 @@ describe('BatchComparePanel', () => {
     const models = Array.from(document.querySelectorAll('.disc-compare-model')).map(node => node.textContent);
     expect(models).toEqual(['model-from-a', 'model-from-b']);
   });
+
+  it('prefers the response-attested model over an older recorded one', () => {
+    const withHistory = discussion('disc-attested', 'ClaudeCode', 'default', 'Final answer');
+    withHistory.messages = [
+      {
+        id: 'm-older', role: 'Agent', channel: 'main', content: 'Older answer',
+        agent_type: 'ClaudeCode', timestamp: '2026-09-01T09:00:00Z', tokens_used: 5, duration_ms: 50,
+        model: 'older-recorded-model',
+      },
+      withHistory.messages[0],
+    ] as Discussion['messages'];
+    withHistory.messages[1].model = 'final-attested-model';
+
+    render(
+      <BatchComparePanel
+        runId="run-attested"
+        label="Attested model wins"
+        discussions={[withHistory]}
+        loading={false}
+        error={null}
+        availableAgents={['ClaudeCode']}
+        runningIds={new Set()}
+        onRefresh={vi.fn()}
+        onOpenDiscussion={vi.fn()}
+        onClose={vi.fn()}
+        t={(key) => key}
+      />,
+    );
+
+    expect(screen.getByText('final-attested-model')).toBeInTheDocument();
+    expect(screen.queryByText('older-recorded-model')).not.toBeInTheDocument();
+  });
+
+  it('falls back to an older recorded model when the final answer model is blank, never the live discussion override', () => {
+    const missingFinalModel = discussion('disc-missing-final-model', 'ClaudeCode', 'default', 'Final answer, legacy row');
+    missingFinalModel.model = 'live-discussion-override';
+    missingFinalModel.messages = [
+      {
+        id: 'm-older', role: 'Agent', channel: 'main', content: 'Older answer',
+        agent_type: 'ClaudeCode', timestamp: '2026-09-01T09:00:00Z', tokens_used: 5, duration_ms: 50,
+        model: 'older-recorded-model',
+      },
+      missingFinalModel.messages[0],
+    ] as Discussion['messages'];
+    missingFinalModel.messages[1].model = '   ';
+
+    render(
+      <BatchComparePanel
+        runId="run-missing-final-model"
+        label="Config drift must not leak"
+        discussions={[missingFinalModel]}
+        loading={false}
+        error={null}
+        availableAgents={['ClaudeCode']}
+        runningIds={new Set()}
+        onRefresh={vi.fn()}
+        onOpenDiscussion={vi.fn()}
+        onClose={vi.fn()}
+        t={(key) => key}
+      />,
+    );
+
+    expect(screen.getByText('older-recorded-model')).toBeInTheDocument();
+    expect(screen.queryByText('live-discussion-override')).not.toBeInTheDocument();
+  });
+
+  it('never labels the live discussion override as the model behind a run with no response at all', () => {
+    const noResponse = discussion('disc-no-response-override', 'ClaudeCode', 'default', 'unused');
+    noResponse.model = 'live-discussion-override';
+    noResponse.messages = [];
+
+    render(
+      <BatchComparePanel
+        runId="run-no-response-override"
+        label="No response at all"
+        discussions={[noResponse]}
+        loading={false}
+        error={null}
+        availableAgents={['ClaudeCode']}
+        runningIds={new Set()}
+        onRefresh={vi.fn()}
+        onOpenDiscussion={vi.fn()}
+        onClose={vi.fn()}
+        t={(key) => key}
+      />,
+    );
+
+    expect(screen.queryByText('live-discussion-override')).not.toBeInTheDocument();
+    expect(screen.getByText('disc.defaultAgentModel')).toBeInTheDocument();
+  });
 });

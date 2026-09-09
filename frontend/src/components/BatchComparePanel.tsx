@@ -48,6 +48,11 @@ function lastRecordedModel(discussion: Discussion) {
   return null;
 }
 
+function normalizeModelId(value: string | null | undefined) {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : null;
+}
+
 function compareAgentLabel(
   discussion: Discussion,
   externalConnections: ExternalApiConnectionView[],
@@ -172,13 +177,13 @@ export function BatchComparePanel({
               && (runningIds.has(discussion.id) || discussion.awaiting_agent);
             const failureCause = !answer && !running ? terminalCause : null;
             const tier = discussion.tier ?? 'default';
-            // A missing historical record stays an honest unknown: the current
-            // tier configuration may have changed since this child ran and
-            // must never stand in for what actually answered.
-            const model = answer?.model
-              || discussion.model
-              || lastRecordedModel(discussion)
-              || t('disc.defaultAgentModel');
+            // A missing historical record stays an honest unknown: neither the
+            // current tier configuration nor `discussion.model` (a forward
+            // override for the NEXT run, not a record of what already ran)
+            // may stand in for what actually answered.
+            const model = normalizeModelId(answer?.model)
+              ?? lastRecordedModel(discussion)
+              ?? t('disc.defaultAgentModel');
             const agentLabel = compareAgentLabel(discussion, externalConnections);
             const duration = formatDuration(answer?.duration_ms);
             const tokens = answer?.tokens_used != null && answer.tokens_used > 0

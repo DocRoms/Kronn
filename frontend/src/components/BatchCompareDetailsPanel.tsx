@@ -52,6 +52,11 @@ function lastRecordedModel(discussion: Discussion) {
   return null;
 }
 
+function normalizeModelId(value: string | null | undefined) {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : null;
+}
+
 function compareAgentLabel(
   discussion: Discussion,
   externalConnections: ExternalApiConnectionView[],
@@ -432,13 +437,15 @@ export function BatchCompareDetailsPanel({
               const manualScore = evaluation?.manual_score ?? null;
               const ai = evaluation?.ai;
               const agentLabel = compareAgentLabel(discussion, externalConnections);
-              // A missing historical record stays an honest unknown: the
-              // current tier configuration may have changed since this child
-              // ran and must never stand in for what actually answered.
-              const concreteModel = answer?.model
-                ?? discussion.model
-                ?? lastRecordedModel(discussion)
-                ?? t('disc.defaultAgentModel');
+              // Three distinct provenances, never conflated: the answer's own
+              // attested model, an earlier message's recorded model (kept for
+              // reference, but not proof of what produced THIS answer), and a
+              // genuine unknown. `discussion.model` is a forward override for
+              // the NEXT run — it can be edited at any time and must never be
+              // shown as if it were the model that produced a past answer.
+              const attestedModel = normalizeModelId(answer?.model);
+              const recordedModel = attestedModel ?? lastRecordedModel(discussion);
+              const concreteModel = recordedModel ?? t('disc.defaultAgentModel');
               const weighted = weightedQuality(evaluation, humanWeight);
               const failureCause = answer ? null : lastSystemCause(discussion);
               const tokens = answer?.tokens_used && answer.tokens_used > 0
@@ -458,7 +465,8 @@ export function BatchCompareDetailsPanel({
                   <div className="disc-compare-card-model" title={concreteModel}>
                     <Bot size={12} />
                     <span>{concreteModel}</span>
-                    {!answer?.model && <small>{t('disc.compare.modelInferred')}</small>}
+                    {attestedModel == null && recordedModel != null && <small>{t('disc.compare.modelRecorded')}</small>}
+                    {recordedModel == null && <small>{t('disc.compare.modelUnknown')}</small>}
                   </div>
 
                   <div className="disc-compare-all-metrics">

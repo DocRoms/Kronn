@@ -186,4 +186,117 @@ describe('BatchCompareDetailsPanel — model identity in the ranking list', () =
       .map(node => node.textContent);
     expect(models).toEqual(['model-from-a', 'model-from-b']);
   });
+
+  it('prefers the response-attested model over an older recorded one, with no inferred badge', async () => {
+    compareApi.get.mockResolvedValue({
+      run_id: 'run-attested',
+      prompt_compatibility: 'same',
+      improvement_availability: 'available',
+      latest_judge_run: null,
+      evaluations: [],
+    });
+    const withHistory = discussion('disc-attested', 'ClaudeCode', 'default');
+    withHistory.messages = [
+      {
+        id: 'm-older', role: 'Agent', channel: 'main', content: 'Older answer',
+        agent_type: 'ClaudeCode', timestamp: '2026-09-01T09:00:00Z', tokens_used: 5, duration_ms: 50,
+        model: 'older-recorded-model',
+      },
+      {
+        id: 'm-final', role: 'Agent', channel: 'main', content: 'Final answer',
+        agent_type: 'ClaudeCode', timestamp: '2026-09-01T10:00:00Z', tokens_used: 10, duration_ms: 100,
+        model: 'final-attested-model',
+      },
+    ] as Discussion['messages'];
+
+    render(
+      <BatchCompareDetailsPanel
+        runId="run-attested"
+        discussions={[withHistory]}
+        availableAgents={['ClaudeCode']}
+        onOpenDiscussion={vi.fn()}
+        onClose={vi.fn()}
+        t={t}
+      />,
+    );
+
+    await screen.findByLabelText('disc.compare.rankBy');
+    expect(screen.getByText('final-attested-model')).toBeInTheDocument();
+    expect(screen.queryByText('older-recorded-model')).not.toBeInTheDocument();
+    expect(screen.queryByText('disc.compare.modelRecorded')).not.toBeInTheDocument();
+    expect(screen.queryByText('disc.compare.modelUnknown')).not.toBeInTheDocument();
+  });
+
+  it('falls back to an older recorded model when the final answer has no model, never the live discussion override', async () => {
+    compareApi.get.mockResolvedValue({
+      run_id: 'run-missing-final-model',
+      prompt_compatibility: 'same',
+      improvement_availability: 'available',
+      latest_judge_run: null,
+      evaluations: [],
+    });
+    const missingFinalModel = discussion('disc-missing-final-model', 'ClaudeCode', 'default');
+    missingFinalModel.model = 'live-discussion-override';
+    missingFinalModel.messages = [
+      {
+        id: 'm-older', role: 'Agent', channel: 'main', content: 'Older answer',
+        agent_type: 'ClaudeCode', timestamp: '2026-09-01T09:00:00Z', tokens_used: 5, duration_ms: 50,
+        model: 'older-recorded-model',
+      },
+      {
+        id: 'm-final', role: 'Agent', channel: 'main', content: 'Final answer, legacy row',
+        agent_type: 'ClaudeCode', timestamp: '2026-09-01T10:00:00Z', tokens_used: 10, duration_ms: 100,
+        model: '   ',
+      },
+    ] as Discussion['messages'];
+
+    render(
+      <BatchCompareDetailsPanel
+        runId="run-missing-final-model"
+        discussions={[missingFinalModel]}
+        availableAgents={['ClaudeCode']}
+        onOpenDiscussion={vi.fn()}
+        onClose={vi.fn()}
+        t={t}
+      />,
+    );
+
+    await screen.findByLabelText('disc.compare.rankBy');
+    expect(screen.getByText('older-recorded-model')).toBeInTheDocument();
+    expect(screen.queryByText('live-discussion-override')).not.toBeInTheDocument();
+    expect(screen.getByText('disc.compare.modelRecorded')).toBeInTheDocument();
+  });
+
+  it('never labels the live discussion override as the model behind a run with no response at all', async () => {
+    compareApi.get.mockResolvedValue({
+      run_id: 'run-no-response-override',
+      prompt_compatibility: 'same',
+      improvement_availability: 'available',
+      latest_judge_run: null,
+      evaluations: [],
+    });
+    const noResponse = discussion('disc-no-response-override', 'ClaudeCode', 'default');
+    noResponse.model = 'live-discussion-override';
+    noResponse.messages = [{
+      id: 'system-only', role: 'System', channel: 'main',
+      content: 'Configuration required: authentication is not ready.',
+      timestamp: '2026-09-01T10:00:00Z', tokens_used: 0,
+    }] as Discussion['messages'];
+
+    render(
+      <BatchCompareDetailsPanel
+        runId="run-no-response-override"
+        discussions={[noResponse]}
+        availableAgents={['ClaudeCode']}
+        onOpenDiscussion={vi.fn()}
+        onClose={vi.fn()}
+        t={t}
+      />,
+    );
+
+    await screen.findByLabelText('disc.compare.rankBy');
+    expect(screen.queryByText('live-discussion-override')).not.toBeInTheDocument();
+    expect(screen.getByText('disc.defaultAgentModel')).toBeInTheDocument();
+    expect(screen.getByText('disc.compare.modelUnknown')).toBeInTheDocument();
+  });
 });
