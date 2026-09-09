@@ -39,7 +39,7 @@ import { ImportDropzone } from '../components/workflows/ImportDropzone';
 import { triggerDownload } from '../lib/downloadBlob';
 import { mergeDeclaredAndDetected } from '../lib/workflowVariables';
 import { detectAutomationImport, type AutomationImportKind } from '../lib/automationImport';
-import { AGENT_LABELS, MODEL_TIER_ICONS, agentColor, modelForAgentTier } from '../lib/constants';
+import { AGENT_LABELS, MODEL_TIER_ICONS, agentColor } from '../lib/constants';
 import { AgentSwitchPicker } from '../components/AgentSwitchPicker';
 import type { AgentSwitchTarget } from '../components/AgentSwitchPicker';
 import { CollectionFavoritesHeader } from '../components/CollectionFavoritesHeader';
@@ -3232,8 +3232,6 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                                         defaultModelLabel={t('config.defaultModel')}
                                         title={t('disc.switchAgentAndTier')}
                                         ariaLabel={t('qp.compareAgents.targetLabel', targetLabel)}
-                                        suffix={selectedChoice?.modelTiers?.[target.tier]
-                                          ?? modelForAgentTier(target.agent, target.tier, agentAccess?.model_tiers, t('config.defaultModel'))}
                                         compact
                                       />
                                     </span>

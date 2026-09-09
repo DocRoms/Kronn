@@ -4,7 +4,7 @@ import {
 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { workflows as workflowsApi } from '../lib/api';
-import { AGENT_LABELS, agentTextColor, modelForAgentTier } from '../lib/constants';
+import { AGENT_LABELS, agentTextColor } from '../lib/constants';
 import type {
   AgentType, BatchCompareDetails, BatchCompareEvaluation, Discussion,
   ModelTier, ModelTiersConfig,
@@ -432,15 +432,13 @@ export function BatchCompareDetailsPanel({
               const manualScore = evaluation?.manual_score ?? null;
               const ai = evaluation?.ai;
               const agentLabel = compareAgentLabel(discussion, externalConnections);
+              // A missing historical record stays an honest unknown: the
+              // current tier configuration may have changed since this child
+              // ran and must never stand in for what actually answered.
               const concreteModel = answer?.model
                 ?? discussion.model
                 ?? lastRecordedModel(discussion)
-                ?? modelForAgentTier(
-                  discussion.agent,
-                  discussion.tier ?? 'default',
-                  modelTiers,
-                  t('disc.defaultAgentModel'),
-                );
+                ?? t('disc.defaultAgentModel');
               const weighted = weightedQuality(evaluation, humanWeight);
               const failureCause = answer ? null : lastSystemCause(discussion);
               const tokens = answer?.tokens_used && answer.tokens_used > 0

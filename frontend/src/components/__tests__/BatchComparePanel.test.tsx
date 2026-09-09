@@ -1,8 +1,40 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import { BatchComparePanel } from '../BatchComparePanel';
-import type { Discussion, MessageTarget } from '../../types/generated';
+import type { Discussion, MessageTarget, ModelTiersConfig } from '../../types/generated';
 import type { ExternalApiConnectionView } from '../../lib/api';
+
+const zeroModelTiers: ModelTiersConfig = {
+  claude_code: { economy: null, default: null, reasoning: null },
+  codex: { economy: null, default: null, reasoning: null },
+  open_code: { economy: null, default: null, reasoning: null },
+  gemini_cli: { economy: null, default: null, reasoning: null },
+  kiro: { economy: null, default: null, reasoning: null },
+  vibe: { economy: null, default: null, reasoning: null },
+  copilot_cli: { economy: null, default: null, reasoning: null },
+  ollama: { economy: null, default: null, reasoning: null },
+  lite_llm: { economy: null, default: null, reasoning: null },
+  nvidia: { economy: null, default: null, reasoning: null },
+};
+
+function customConnection(
+  overrides: Partial<ExternalApiConnectionView> & { id: string },
+): ExternalApiConnectionView {
+  return {
+    display_name: 'Gateway',
+    mention_alias: overrides.id,
+    endpoint: 'https://gateway.example/v1',
+    credential_slug: overrides.id,
+    origin_preset: 'other',
+    economy_model: null,
+    default_model: null,
+    reasoning_model: null,
+    created_at: '2026-09-01T00:00:00Z',
+    updated_at: '2026-09-01T00:00:00Z',
+    has_credential: true,
+    ...overrides,
+  };
+}
 
 const compareApi = vi.hoisted(() => ({
   get: vi.fn(),
@@ -439,5 +471,75 @@ describe('BatchComparePanel', () => {
     await waitFor(() => expect(compareApi.updateManual).toHaveBeenCalledWith('compare-free', 'disc-codex', 5));
     expect(compareApi.startJudge).not.toHaveBeenCalled();
     expect(compareApi.startImprovement).not.toHaveBeenCalled();
+  });
+
+  it('never guesses a missing historical model from a tier configuration that changed after the run', () => {
+    const noHistory = discussion('disc-no-history', 'Codex', 'reasoning', '');
+    noHistory.messages = [];
+    render(
+      <BatchComparePanel
+        runId="run-config-drifted"
+        label="Config drifted after the run"
+        discussions={[noHistory]}
+        loading={false}
+        error={null}
+        availableAgents={['Codex']}
+        modelTiers={{
+          ...zeroModelTiers,
+          codex: { economy: null, default: null, reasoning: 'codex-reasoning-v9-today' },
+        }}
+        runningIds={new Set()}
+        onRefresh={vi.fn()}
+        onOpenDiscussion={vi.fn()}
+        onClose={vi.fn()}
+        t={(key) => key}
+      />,
+    );
+
+    // The run never recorded what actually answered; today's config must not
+    // stand in for that missing history.
+    expect(screen.queryByText('codex-reasoning-v9-today')).not.toBeInTheDocument();
+    expect(screen.getByText('disc.defaultAgentModel')).toBeInTheDocument();
+  });
+
+  it('keeps each homonymous connection its own recorded model instead of blending them', () => {
+    const fromA = discussion('disc-gateway-a', 'Custom', 'default', 'Answer from A');
+    fromA.messages[0].model = 'model-from-a';
+    (fromA as Discussion & { message_targets: Record<string, MessageTarget[]> }).message_targets = {
+      [`m-${fromA.id}`]: [{
+        kind: 'discussion_agent', agent_type: 'Custom', connection_id: 'conn-gateway-a', tier: 'default',
+      }],
+    };
+    const fromB = discussion('disc-gateway-b', 'Custom', 'default', 'Answer from B');
+    fromB.messages[0].model = 'model-from-b';
+    (fromB as Discussion & { message_targets: Record<string, MessageTarget[]> }).message_targets = {
+      [`m-${fromB.id}`]: [{
+        kind: 'discussion_agent', agent_type: 'Custom', connection_id: 'conn-gateway-b', tier: 'default',
+      }],
+    };
+
+    render(
+      <BatchComparePanel
+        runId="run-homonyms"
+        label="Same display name, different connections"
+        discussions={[fromA, fromB]}
+        loading={false}
+        error={null}
+        availableAgents={['Custom']}
+        externalConnections={[
+          customConnection({ id: 'conn-gateway-a', default_model: 'a-default' }),
+          customConnection({ id: 'conn-gateway-b', default_model: 'b-default' }),
+        ]}
+        runningIds={new Set()}
+        onRefresh={vi.fn()}
+        onOpenDiscussion={vi.fn()}
+        onClose={vi.fn()}
+        t={(key) => key}
+      />,
+    );
+
+    expect(screen.getAllByText('Gateway')).toHaveLength(2);
+    const models = Array.from(document.querySelectorAll('.disc-compare-model')).map(node => node.textContent);
+    expect(models).toEqual(['model-from-a', 'model-from-b']);
   });
 });

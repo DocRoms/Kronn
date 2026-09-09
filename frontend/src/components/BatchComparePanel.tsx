@@ -1,7 +1,7 @@
 import { ArrowLeft, ArrowRight, BarChart3, Clock3, ExternalLink, Hash, Loader2, RefreshCw, Scale, X } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import { MarkdownContent } from './MessageBubble';
-import { AGENT_LABELS, MODEL_TIER_ICONS, agentTextColor, modelForAgentTier } from '../lib/constants';
+import { AGENT_LABELS, MODEL_TIER_ICONS, agentTextColor } from '../lib/constants';
 import type { AgentType, Discussion, ModelTiersConfig } from '../types/generated';
 import { BatchCompareDetailsPanel } from './BatchCompareDetailsPanel';
 import type { ExternalApiConnectionView } from '../lib/api';
@@ -172,10 +172,13 @@ export function BatchComparePanel({
               && (runningIds.has(discussion.id) || discussion.awaiting_agent);
             const failureCause = !answer && !running ? terminalCause : null;
             const tier = discussion.tier ?? 'default';
+            // A missing historical record stays an honest unknown: the current
+            // tier configuration may have changed since this child ran and
+            // must never stand in for what actually answered.
             const model = answer?.model
               || discussion.model
               || lastRecordedModel(discussion)
-              || modelForAgentTier(discussion.agent, tier, modelTiers, t('disc.defaultAgentModel'));
+              || t('disc.defaultAgentModel');
             const agentLabel = compareAgentLabel(discussion, externalConnections);
             const duration = formatDuration(answer?.duration_ms);
             const tokens = answer?.tokens_used != null && answer.tokens_used > 0
