@@ -53,3 +53,35 @@ This checkpoint does not close KT-531: remaining custom selector/display paths
 still need the same contract, and the HTTP runner retains a legacy embedded
 fallback. Neither a unit-test migration fallback nor historical model metadata
 is evidence that the production runtime is free of embedded defaults.
+
+## Quick Prompt and workflow model editors
+
+Both editors now use `ModelCatalogPicker` and the shared searchable control.
+The saved snapshot supplies model provenance, availability and reasoning modes
+for the exact runtime. Opening the form no longer queries Ollama's separate
+model endpoint. An operator can still explicitly enter a model ID absent from
+the loaded catalogue; that option is labelled as unverified, never live.
+Unavailable known entries remain disabled. Clearing an override is explicit
+and leaves tier resolution to the caller/backend.
+[src: file: frontend/src/components/ModelCatalogPicker.tsx:22-68]
+[src: file: frontend/src/components/workflows/QuickPromptForm.tsx:308-315]
+[src: file: frontend/src/components/workflows/WorkflowWizard.tsx:4128-4144]
+
+Reasoning choices come from the effective model's `reasoning_modes`, not a
+fixed low/medium/high list. An existing value absent from that list is retained
+and explicitly labelled, not silently rewritten. The QP save path preserves
+the edited reasoning value and the existing `max_tokens`; previously it
+replaced both with null on every save. Choosing a different agent/tier in the
+QP form explicitly clears the old model and reasoning override, while a
+catalogue read or failure never changes either value.
+[src: file: frontend/src/components/ModelCatalogPicker.tsx:33-63]
+[src: file: frontend/src/components/workflows/QuickPromptForm.tsx:187-202]
+[src: file: frontend/src/components/workflows/QuickPromptForm.tsx:248-257]
+
+The regressions exercise the actual form payload, explicit unknown Unicode IDs,
+reload failures, namespace switching, disabled entries and per-model reasoning.
+They use API fixtures only; these tests are not provider discovery or a browser
+layout qualification. Other custom launch selectors and the discussion's
+persisted override on target changes still require the remaining KT-531 audit.
+[src: file: frontend/src/components/workflows/__tests__/QuickPromptForm.catalog.test.tsx:37-88]
+[src: file: frontend/src/components/__tests__/ModelCatalogPicker.test.tsx:25-66]

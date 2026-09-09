@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect } from 'react';
 import { buildBlankStep, jsonPathToTarget } from '../../lib/workflowUiUtils';
 import { useT } from '../../lib/I18nContext';
-import { workflows as workflowsApi, pages as pagesApi, skills as skillsApi, profiles as profilesApi, directives as directivesApi, quickPrompts as quickPromptsApi, quickApis as quickApisApi, quickExecs as quickExecsApi, mcps as mcpsApi, config as configApi, ollama as ollamaApi } from '../../lib/api';
+import { workflows as workflowsApi, pages as pagesApi, skills as skillsApi, profiles as profilesApi, directives as directivesApi, quickPrompts as quickPromptsApi, quickApis as quickApisApi, quickExecs as quickExecsApi, mcps as mcpsApi, config as configApi } from '../../lib/api';
 import { ApiCallStepCard, JsonTreeViewer, type ApiPluginOption } from './ApiCallStepCard';
 import { STARTER_TEMPLATES, cloneTemplateSteps } from '../../lib/workflow-templates/chartbeat-top5';
 import { buildV07Presets, type ChildWorkflowPreset } from '../../lib/workflow-templates/v07-presets';
@@ -9,6 +9,7 @@ import { WorkflowQuickStartPicker } from './WorkflowQuickStartPicker';
 import { CopyIdPill } from '../CopyIdPill';
 import { AgentSwitchPicker } from '../AgentSwitchPicker';
 import { SearchableSelect } from '../SearchableSelect';
+import { ModelCatalogPicker } from '../ModelCatalogPicker';
 import { MarkdownEditor } from '../MarkdownComposerTools';
 import { buildQuickStartCatalogue, type UnifiedQuickStart } from '../../lib/workflow-quick-start';
 import { parseRepoUrl, buildOldestIssueRequest, inferTrackerSlugFromRepoUrl } from '../../lib/constants';
@@ -261,6 +262,8 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
       currentAgent={step.agent}
       availableAgents={availableAgents.map(agent => agent.type)}
       currentTier={step.agent_settings?.tier ?? 'default'}
+      currentModel={step.agent_settings?.model}
+      currentConnectionId={step.agent_settings?.connection_id}
       onSelectionChange={async (agent, tier) => {
         // A concrete expert model has higher runtime priority than the tier.
         // Clear it when the user explicitly selects an agent × mode pair so
@@ -305,15 +308,6 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
   const [expandedStepTypePicker, setExpandedStepTypePicker] = useState<number | null>(null);
   const [name, setName] = useState(editWorkflow?.name ?? '');
   const [projectId, setProjectId] = useState<string>(editWorkflow?.project_id ?? '');
-  // Pulled Ollama models → suggestions for the per-step model picker.
-  // Best-effort: stays empty when Ollama is offline, so the model field
-  // simply remains a free-text input (any tag / remote host still typable).
-  const [ollamaModels, setOllamaModels] = useState<string[]>([]);
-  useEffect(() => {
-    ollamaApi.models()
-      .then(r => setOllamaModels((r.models ?? []).map(m => m.name)))
-      .catch(() => {});
-  }, []);
   const [triggerType, setTriggerType] = useState<'Cron' | 'Tracker' | 'Manual'>(initTrigger?.type ?? 'Manual');
   const [cronEvery, setCronEvery] = useState(initCron?.every ?? 5);
   const [cronUnit, setCronUnit] = useState<'minutes' | 'hours' | 'days' | 'weeks' | 'months'>(initCron?.unit ?? 'minutes');
@@ -4131,38 +4125,20 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                         <label className="wf-label">{t('wiz.agentSettings')}</label>
                         <div className="flex-row gap-3">
                           <div className="flex-1">
-                            <label className="wf-label text-2xs">{t('wiz.model')}</label>
-                            <input
-                              className="wf-input"
+                            <ModelCatalogPicker
+                              agent={step.agent}
+                              connectionId={step.agent_settings?.connection_id}
+                              tier={step.agent_settings?.tier ?? 'default'}
+                              modelTiers={agentAccess?.model_tiers}
                               value={step.agent_settings?.model ?? ''}
-                              onChange={e => updateStep(i, {
-                                agent_settings: { ...step.agent_settings, model: e.target.value || null }
+                              onChange={model => updateStep(i, {
+                                agent_settings: { ...step.agent_settings, model: model || null }
                               })}
-                              placeholder={step.agent === 'Ollama' ? 'ex: qwen3:8b' : 'ex: o3'}
-                              list={step.agent === 'Ollama' ? `ollama-models-${i}` : undefined}
-                              aria-label={t('wiz.model')}
+                              reasoningEffort={step.agent_settings?.reasoning_effort ?? ''}
+                              onReasoningChange={mode => updateStep(i, {
+                                agent_settings: { ...step.agent_settings, reasoning_effort: mode || null }
+                              })}
                             />
-                            {step.agent === 'Ollama' && ollamaModels.length > 0 && (
-                              <datalist id={`ollama-models-${i}`}>
-                                {ollamaModels.map(m => <option key={m} value={m} />)}
-                              </datalist>
-                            )}
-                          </div>
-                          <div className="flex-1">
-                            <label className="wf-label text-2xs">{t('wiz.reasoningEffort')}</label>
-                            <select
-                              className="wf-select"
-                              value={step.agent_settings?.reasoning_effort ?? ''}
-                              aria-label={t('wiz.reasoningEffort')}
-                              onChange={e => updateStep(i, {
-                                agent_settings: { ...step.agent_settings, reasoning_effort: e.target.value || null }
-                              })}
-                            >
-                              <option value="">default</option>
-                              <option value="low">low</option>
-                              <option value="medium">medium</option>
-                              <option value="high">high</option>
-                            </select>
                           </div>
                           <div className="flex-1">
                             <label className="wf-label text-2xs">{t('wiz.maxTokens')}</label>

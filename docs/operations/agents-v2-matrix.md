@@ -182,3 +182,12 @@ KT-531 remains open for the other custom selector/display paths and the legacy
 HTTP runner fallback; this checkpoint does not qualify every selector.
 [src: file: frontend/src/lib/constants.ts:60-75]
 [src: file: frontend/src/components/AgentSwitchPicker.tsx:113-142]
+
+Quick Prompt and workflow model editors also use a shared catalogue-backed
+searchable picker. Model IDs outside the snapshot remain an explicit operator
+choice; known unavailable rows are disabled. Reasoning modes come from the
+effective model's metadata instead of a fixed list, and existing unadvertised
+values remain visible. QP saves preserve the existing token limit and chosen
+reasoning mode. See [form preservation](../gotchas/agent-tier-catalogue-settings.md).
+[src: file: frontend/src/components/ModelCatalogPicker.tsx:22-68]
+[src: file: frontend/src/components/workflows/QuickPromptForm.tsx:187-202]

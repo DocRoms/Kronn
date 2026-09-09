@@ -23,14 +23,14 @@ import type { ComponentProps } from 'react';
 import { buildApiMock } from '../../../test/apiMock';
 import type {
   Project, Workflow, WorkflowStep, Skill, AgentProfile, Directive,
-  QuickApi,
+  QuickApi, CatalogModelEntry,
 } from '../../../types/generated';
 
 const {
   createMock, updateMock, previewTransformMock, testCollectMock, qpListMock, qaListMock,
   pageListMock,
   skillsListMock, profilesListMock, directivesListMock,
-  suggestionsMock, overviewMock,
+  suggestionsMock, overviewMock, catalogListMock,
 } = vi.hoisted(() => ({
   createMock: vi.fn(),
   updateMock: vi.fn(),
@@ -44,6 +44,7 @@ const {
   directivesListMock: vi.fn(),
   suggestionsMock: vi.fn(),
   overviewMock: vi.fn(),
+  catalogListMock: vi.fn(),
 }));
 
 vi.mock('../../../lib/api', () => buildApiMock({
@@ -61,6 +62,7 @@ vi.mock('../../../lib/api', () => buildApiMock({
   profiles: { list: profilesListMock as never },
   directives: { list: directivesListMock as never },
   mcps: { overview: overviewMock as never },
+  modelCatalogApi: { list: catalogListMock as never },
 }));
 
 vi.mock('../../../lib/I18nContext', () => ({
@@ -137,6 +139,7 @@ beforeEach(() => {
   directivesListMock.mockReset();
   suggestionsMock.mockReset();
   overviewMock.mockReset();
+  catalogListMock.mockReset().mockResolvedValue({ targets: [] });
   createMock.mockResolvedValue({});
   updateMock.mockResolvedValue({});
   previewTransformMock.mockResolvedValue({ value: { summary: { requests: 1240 } }, error: null });
@@ -905,19 +908,59 @@ describe('WorkflowWizard — output format toggle', () => {
 // ── Advanced per-step panel: agent settings model/effort/tokens ─────
 
 describe('WorkflowWizard — advanced agent settings', () => {
-  it('edits model, reasoning effort, max tokens, retry backoff and delay', () => {
+  it('uses the exact catalogue namespace and its advertised reasoning modes', async () => {
+    const model = (id: string, runtime = 'http:one'): CatalogModelEntry => ({
+      id, model_id: id, runtime_target_id: runtime, agent_type: 'Custom', display_name: id,
+      provenance: 'manual', availability: 'available', capabilities: ['chat'], reasoning_modes: ['minimal', 'xhigh'],
+      tier_assignment: 'default', manual_origin: true, first_seen_at: '2026-09-09T00:00:00Z',
+      last_checked_at: '2026-09-09T00:00:00Z', created_at: '2026-09-09T00:00:00Z', updated_at: '2026-09-09T00:00:00Z',
+    });
+    catalogListMock.mockResolvedValue({ targets: [{ runtime_target_id: 'http:one', agent_type: 'Custom',
+      stale: true, live_refresh_ok: false, models: [model('custom-model'), model('foreign-model', 'http:two')] }] });
+    renderWizard({ editWorkflow: mkWorkflow({ trigger: { type: 'Cron', schedule: '*/5 * * * *' },
+      steps: [mkStep({ agent: 'Custom', agent_settings: { connection_id: 'one', model: 'custom-model' } })] }) });
+    fireEvent.click(screen.getByText('wiz.next'));
+    fireEvent.click(screen.getByText('wiz.next'));
+    fireEvent.click(screen.getByRole('button', { name: /^wiz\.advanced/ }));
+    const picker = screen.getByRole('combobox', { name: 'wiz.model' });
+    await waitFor(() => expect(picker).toHaveValue('custom-model'));
+    fireEvent.focus(picker);
+    expect(await screen.findByRole('option', { name: 'custom-model' })).toBeEnabled();
+    expect(screen.queryByRole('option', { name: 'foreign-model' })).not.toBeInTheDocument();
+    expect(screen.getByText(/modelCatalog.provenance.manual/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('option', { name: 'custom-model' }));
+    const effort = screen.getByRole('combobox', { name: 'wiz.reasoningEffort' });
+    fireEvent.focus(effort);
+    fireEvent.click(screen.getByRole('option', { name: 'xhigh' }));
+    expect(effort).toHaveValue('xhigh');
+    fireEvent.focus(effort);
+    expect(screen.getByRole('option', { name: 'minimal' })).toBeEnabled();
+    expect(screen.queryByRole('option', { name: 'medium' })).not.toBeInTheDocument();
+  });
+
+  it('edits model, reasoning effort, max tokens, retry backoff and delay', async () => {
+    const discovered: CatalogModelEntry = {
+      id: 'catalog-o3', model_id: 'o3', runtime_target_id: 'agent:claude-code', agent_type: 'ClaudeCode',
+      display_name: 'o3', provenance: 'manual', availability: 'available', capabilities: ['chat'],
+      reasoning_modes: ['high'], tier_assignment: 'default', manual_origin: true,
+      first_seen_at: '2026-09-09T00:00:00Z', last_checked_at: '2026-09-09T00:00:00Z',
+      created_at: '2026-09-09T00:00:00Z', updated_at: '2026-09-09T00:00:00Z',
+    };
+    catalogListMock.mockResolvedValue({ targets: [{ runtime_target_id: 'agent:claude-code', agent_type: 'ClaudeCode',
+      stale: true, live_refresh_ok: false, models: [discovered] }] });
     // Single Agent step (Cron-forced advanced) so per-step fields are unique.
     renderWizard({ editWorkflow: mkWorkflow({ trigger: { type: 'Cron', schedule: '*/5 * * * *' }, steps: [mkStep()] }) });
     fireEvent.click(screen.getByText('wiz.next')); // → Trigger
     fireEvent.click(screen.getByText('wiz.next')); // → Steps
     fireEvent.click(screen.getByText('wiz.advanced'));
-    // Model input (placeholder "ex: o3").
-    const model = screen.getByPlaceholderText('ex: o3') as HTMLInputElement;
-    fireEvent.change(model, { target: { value: 'o3' } });
+    const model = screen.getByRole('combobox', { name: 'wiz.model' }) as HTMLInputElement;
+    fireEvent.focus(model);
+    fireEvent.click(await screen.findByRole('option', { name: 'o3' }));
     expect(model.value).toBe('o3');
-    // Reasoning effort select.
-    const effort = screen.getByDisplayValue('default') as HTMLSelectElement;
-    fireEvent.change(effort, { target: { value: 'high' } });
+    // Reasoning choices come from this exact model's catalogue metadata.
+    const effort = screen.getByRole('combobox', { name: 'wiz.reasoningEffort' }) as HTMLInputElement;
+    fireEvent.focus(effort);
+    fireEvent.click(screen.getByRole('option', { name: 'high' }));
     expect(effort.value).toBe('high');
     // Max tokens.
     const maxTokens = screen.getByPlaceholderText('ex: 16000') as HTMLInputElement;
