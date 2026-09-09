@@ -233,21 +233,60 @@ its schema.
 
 ## Model resolution (precedence)
 
-`runner::effective_model_flag` [src: file: backend/src/agents/runner.rs] resolves
-the model for every run:
+`runner::effective_model_flag` resolves the requested model without inventing
+one. Empty or whitespace-only values are unset; a nonblank explicit ID is
+preserved exactly.
+[src: file: backend/src/agents/runner.rs:2650-2737]
 
 1. **Explicit model** (`AgentStartConfig.model_override`) — wins outright.
    Fed from a workflow step's `agent_settings.model` (`steps.rs`) or a
    discussion's `model` (`streaming.rs`, e.g. inherited from the launching QP).
-2. **Tier** → `resolve_model_flag(agent, tier, model_tiers)` — the OllamaCard
-   overrides (global `ModelTiers`) or the built-in fallbacks.
+2. **Configured tier** → `resolve_model_flag(agent, tier, model_tiers)` uses
+   that agent's exact per-tier value. An empty HTTP-chat tier may use that
+   agent's configured Default; another provider's slot is never substituted.
+3. **Durable catalogue** → the available assigned tier projected at bootstrap
+   or after catalogue writes. HTTP-chat agents may use their assigned Default
+   if their selected tier has no assignment. No assignment means no model.
+[src: file: backend/src/agents/runner.rs:2650-2720]
+[src: file: backend/src/core/model_catalog/mod.rs:54-97]
 
-Built-in Ollama fallbacks are **portability-first** (fit almost any machine),
-NOT tuned for a big box: Economy `qwen3:4b`, Default `qwen3:8b`, Reasoning
-`qwen3:30b-a3b` [src: file: backend/src/agents/runner.rs]. A powerful machine
-sets a bigger model per-tier (OllamaCard) or per-step/QP; small machines are
-safe by default. The old `llama3.2` / bare `qwen3` fallbacks (not pulled / not
-a pullable tag) that produced opaque Ollama 404s are gone.
+An unresolved Ollama launch is refused before any provider request, with an
+actionable Settings/override message. Historical seeds are written once by the
+migration; no runner fallback revives them after deletion. Unit tests use the
+same resolver as production; the historical expectation helper itself is
+test-only and is not called by the resolver.
+[src: file: backend/src/agents/runner.rs:2739-2741]
+[src: file: backend/src/agents/runner.rs:3036-3090]
+[src: file: backend/src/core/model_catalog/mod.rs:62-77]
+[src: file: backend/src/core/model_catalog/mod.rs:98-207]
+
+Ollama is always routed through HTTP before the production command-builder
+call. Its obsolete `ollama run` branch is a non-inference diagnostic sentinel,
+like the other HTTP families; it cannot choose or invoke an embedded model.
+This is based on the caller's control flow, not an assumption from its comment.
+[src: file: backend/src/agents/runner.rs:2608-2613]
+[src: file: backend/src/agents/runner.rs:3114-3134]
+[src: file: backend/src/agents/runner.rs:3232-3248]
+[src: file: backend/src/agents/runner.rs:8748-8759]
+
+Preflight checks the exact durable target/tier assignment, including unavailable
+rows, before using any HTTP Default assignment. Otherwise the launch cache's
+intentional exclusion of unavailable rows could hide a disappeared model behind
+another model or a CLI default. Explicit operator settings still take priority;
+failed assignment reads refuse launch. A target with no selected or assigned
+identity keeps the existing no-model preflight behavior; this change does not
+introduce new discovery for unconfigured runtimes.
+[src: file: backend/src/core/model_catalog/mod.rs:481-537]
+
+The production integration fixture links the library without `cfg(test)` and
+uses isolated SQLite plus explicit loopback endpoints. It actually creates,
+dispatches and deletes a catalogue entry, refreshes the runtime projection,
+asserts refusal without a further request, and preserves a later explicit ID.
+Other cases cover empty/whitespace models and each HTTP family's own configured
+Default and exact override, unavailable tier versus available Default, exact
+connection namespace, and failed catalogue reads. No real provider inference
+is qualified.
+[src: file: backend/tests/http_model_resolution.rs:1-404]
 
 Per-step model: workflow Agent step → Advanced → *Modèle* (WorkflowStep
 `agent_settings.model`). Per-QP model: QuickPrompt form → *Modèle* field

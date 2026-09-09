@@ -59,8 +59,9 @@ pub fn assigned_model_for_agent(agent_type: &AgentType, tier: ModelTier) -> Opti
         .and_then(|catalog| catalog.get(&(target, tier_key(tier))).cloned())
 }
 
-/// Historical defaults exposed solely to the one-time migration and unit
-/// tests that exercise resolution without running application bootstrap.
+/// Historical unit-test expectations only, never a runtime resolver fallback.
+/// The one-time migration below writes its own durable seed rows.
+#[cfg(test)]
 pub fn migrated_default(agent_type: &AgentType, tier: ModelTier) -> Option<String> {
     match (agent_type, tier) {
         (AgentType::ClaudeCode, ModelTier::Economy) => Some("haiku".into()),
@@ -475,8 +476,8 @@ fn recommended_action_for(reason: ModelUnavailableReason) -> &'static str {
 /// when nothing in the catalog contradicts launching (including "we simply
 /// have no record of this identity" — an unknown model is not blocked on
 /// absence alone, only a model the catalog has positively marked
-/// unavailable). Out-of-scope runtimes (Ollama/LiteLLM/NVIDIA/Custom) always
-/// pass here; they keep their existing HTTP-reachability preflight.
+/// unavailable). HTTP targets read their own durable identity but never trigger
+/// CLI discovery here; reachability remains owned by their transport preflight.
 pub async fn preflight_check(
     db: &Database,
     runtime_target_id: Option<&str>,
@@ -485,12 +486,55 @@ pub async fn preflight_check(
     model_override: Option<&str>,
     model_tiers: Option<&ModelTiersConfig>,
 ) -> Option<CatalogPreflightFailure> {
-    let resolved_model =
-        crate::agents::runner::effective_model_flag(model_override, &agent_type, tier, model_tiers);
-    let model_id = resolved_model?;
+    let configured_model = model_override
+        .filter(|model| !model.trim().is_empty())
+        .map(str::to_string)
+        .or_else(|| crate::agents::runner::configured_model_flag(&agent_type, tier, model_tiers));
     let runtime_target_id = runtime_target_id
         .map(str::to_string)
         .unwrap_or_else(|| db::agent_runtime_target_id(&agent_type));
+
+    // Resolve from durable assignments, including unavailable ones. The hot
+    // execution cache intentionally excludes them; using it here could hide a
+    // disappeared tier behind an available HTTP Default (or a CLI default).
+    let model_id = if let Some(model) = configured_model {
+        model
+    } else {
+        let target = runtime_target_id.clone();
+        let http_default = crate::agents::runner::is_http_chat_agent(&agent_type);
+        let result = db
+            .with_read_conn(move |conn| {
+                let entries = db::list_for_target(conn, &target)?;
+                Ok(entries
+                    .iter()
+                    .find(|entry| entry.tier_assignment == Some(tier))
+                    .or_else(|| {
+                        http_default
+                            .then(|| {
+                                entries
+                                    .iter()
+                                    .find(|entry| entry.tier_assignment == Some(ModelTier::Default))
+                            })
+                            .flatten()
+                    })
+                    .map(|entry| entry.model_id.clone()))
+            })
+            .await;
+        match result {
+            Ok(model) => model?,
+            Err(error) => {
+                return Some(CatalogPreflightFailure {
+                    runtime_target_id,
+                    agent_type,
+                    model_id: None,
+                    reason: ModelUnavailableReason::ProviderError,
+                    detail: format!("catalog assignment lookup failed: {error}"),
+                    last_checked_at: Utc::now(),
+                    recommended_action: "recheck_catalog".into(),
+                })
+            }
+        }
+    };
 
     // A launch is a freshness trigger, not a blind read. CLI discovery is
     // bounded by `DISCOVERY_TIMEOUT`; named HTTP targets consume the latest
@@ -505,7 +549,7 @@ pub async fn preflight_check(
                 return Some(CatalogPreflightFailure {
                     runtime_target_id,
                     agent_type,
-                    model_id: Some(model_id),
+                    model_id: Some(model_id.clone()),
                     reason: ModelUnavailableReason::ProviderError,
                     detail: format!("catalog refresh failed: {error}"),
                     last_checked_at: Utc::now(),
@@ -529,7 +573,7 @@ pub async fn preflight_check(
             return Some(CatalogPreflightFailure {
                 runtime_target_id,
                 agent_type,
-                model_id: Some(model_id),
+                model_id: Some(model_id.clone()),
                 reason,
                 detail: view
                     .last_error_detail
@@ -539,7 +583,6 @@ pub async fn preflight_check(
             });
         }
     }
-
     let target = runtime_target_id.clone();
     let mid = model_id.clone();
     let entry = db
@@ -732,8 +775,7 @@ mod tests {
         .unwrap();
         let failure =
             preflight_check(&db, None, AgentType::Codex, ModelTier::Economy, None, None).await;
-        // Built-in default resolves to a model id (gpt-5.6-luna) that has no
-        // catalog row in a fresh DB — unknown, not unavailable, must pass.
+        // No configured or assigned identity is not an unavailable identity.
         assert!(failure.is_none());
     }
 
@@ -750,15 +792,14 @@ mod tests {
             .unwrap()
             .is_none());
 
-        // Claude stays on its non-discoverable fallback until KT-542's ACP
-        // adapter is enabled, but the preflight must still execute and record
-        // the bounded discovery decision instead of reading stale rows only.
+        // For an explicitly selected model, preflight must record the bounded
+        // discovery decision even when this runtime has no live discovery.
         let failure = preflight_check(
             &db,
             None,
             AgentType::ClaudeCode,
             ModelTier::Default,
-            None,
+            Some("operator-claude-model"),
             None,
         )
         .await;

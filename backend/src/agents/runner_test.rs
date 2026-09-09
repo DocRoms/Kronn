@@ -7002,20 +7002,35 @@ Suite de la réponse.";
     // ─── resolve_model_flag: tier mapping per agent ─────────────────────────────
 
     #[test]
-    fn resolve_model_flag_claude_code_tiers() {
+    fn ollama_command_builder_is_a_non_inference_http_sentinel() {
+        for model in [None, Some("explicit-operator-model")] {
+            let (binary, package, args, env_key, _, _) = super::super::agent_command(
+                &AgentType::Ollama,
+                "private prompt",
+                true,
+                "private context",
+                model,
+            );
+            assert_eq!(binary, "echo");
+            assert_eq!(package, None);
+            assert_eq!(env_key, "NONE");
+            assert_eq!(args, ["Ollama runs over HTTP, not as a CLI process"]);
+        }
+    }
+
+    #[test]
+    fn resolve_model_flag_without_catalog_assignments_returns_none() {
         use crate::models::ModelTier;
-        assert_eq!(
-            resolve_model_flag(&AgentType::ClaudeCode, ModelTier::Economy, None),
-            Some("haiku".into())
-        );
-        assert_eq!(
-            resolve_model_flag(&AgentType::ClaudeCode, ModelTier::Default, None),
-            Some("sonnet".into())
-        );
-        assert_eq!(
-            resolve_model_flag(&AgentType::ClaudeCode, ModelTier::Reasoning, None),
-            Some("opus".into())
-        );
+        for agent in [
+            AgentType::ClaudeCode,
+            AgentType::Codex,
+            AgentType::GeminiCli,
+            AgentType::Ollama,
+        ] {
+            for tier in [ModelTier::Economy, ModelTier::Default, ModelTier::Reasoning] {
+                assert_eq!(resolve_model_flag(&agent, tier, None), None);
+            }
+        }
     }
 
     #[test]
@@ -7036,19 +7051,19 @@ Suite de la réponse.";
             resolve_model_flag(&AgentType::ClaudeCode, ModelTier::Reasoning, Some(&cfg)),
             Some("fable".into())
         );
-        // unset tiers still fall through to the built-ins
+        // An unassigned tier has no runtime fallback.
         assert_eq!(
             resolve_model_flag(&AgentType::ClaudeCode, ModelTier::Economy, Some(&cfg)),
-            Some("haiku".into())
+            None
         );
     }
 
     #[test]
-    fn resolve_model_flag_codex_tiers() {
+    fn resolve_model_flag_codex_unassigned_tiers_are_not_guessed() {
         use crate::models::ModelTier;
         assert_eq!(
             resolve_model_flag(&AgentType::Codex, ModelTier::Economy, None),
-            Some("gpt-5.6-luna".into())
+            None
         );
         assert_eq!(
             resolve_model_flag(&AgentType::Codex, ModelTier::Default, None),
@@ -7056,16 +7071,16 @@ Suite de la réponse.";
         );
         assert_eq!(
             resolve_model_flag(&AgentType::Codex, ModelTier::Reasoning, None),
-            Some("gpt-5.6-sol".into())
+            None
         );
     }
 
     #[test]
-    fn resolve_model_flag_gemini_tiers() {
+    fn resolve_model_flag_gemini_unassigned_tiers_are_not_guessed() {
         use crate::models::ModelTier;
         assert_eq!(
             resolve_model_flag(&AgentType::GeminiCli, ModelTier::Economy, None),
-            Some("gemini-2.5-flash".into())
+            None
         );
         assert_eq!(
             resolve_model_flag(&AgentType::GeminiCli, ModelTier::Default, None),
@@ -7073,7 +7088,7 @@ Suite de la réponse.";
         );
         assert_eq!(
             resolve_model_flag(&AgentType::GeminiCli, ModelTier::Reasoning, None),
-            Some("gemini-3.1-pro-preview".into())
+            None
         );
     }
 
@@ -7110,14 +7125,14 @@ Suite de la réponse.";
             Some("custom-haiku-3".into()),
             "User override should take precedence over built-in"
         );
-        // Reasoning has no override → falls back to built-in
+        // Reasoning has no override and no catalog assignment.
         assert_eq!(
             resolve_model_flag(
                 &AgentType::ClaudeCode,
                 ModelTier::Reasoning,
                 Some(&overrides)
             ),
-            Some("opus".into()),
+            None,
         );
     }
 
@@ -7141,12 +7156,12 @@ Suite de la réponse.";
             Some("gemma3:27b".into()),
             "Default-tier user override must win over the built-in qwen3 fallback",
         );
-        // Without an override, the legacy built-in is still served.
+        // Without an override or catalog assignment, the launch has no model.
         let no_override = ModelTiersConfig::default();
         assert_eq!(
             resolve_model_flag(&AgentType::Ollama, ModelTier::Default, Some(&no_override)),
-            Some("qwen3:8b".into()),
-            "No override → portable built-in default (small, fits most machines), never a bare/absent name",
+            None,
+            "No override must not revive a historical migration seed",
         );
     }
 
@@ -7193,31 +7208,29 @@ Suite de la réponse.";
             Some("qwen3:32b".into()),
             "Empty reasoning slot falls back to the user's default, not the built-in",
         );
-        // The all-empty case is unchanged: portable built-ins per tier.
+        // The all-empty case has no runtime assignment.
         assert_eq!(
             resolve_model_flag(&AgentType::Ollama, ModelTier::Reasoning, None),
-            Some("qwen3:30b-a3b".into()),
+            None,
         );
     }
 
-    // ─── Ollama tier fallbacks are real, pullable tags (no opaque 404) ────────
+    // ─── Historical Ollama defaults remain migration input only ───────────────
     #[test]
-    fn resolve_model_flag_ollama_tiers_are_pullable_tags() {
+    fn migrated_ollama_defaults_are_not_runtime_fallbacks() {
         use crate::models::ModelTier;
-        // Regression: the old fallbacks were `llama3.2` (not pulled) and the
-        // bare `qwen3` (not a pullable tag) → opaque Ollama 404 at run time.
-        // Portability-first: Default is a small, universal model (qwen3:8b);
-        // Reasoning is the only heavy opt-in fallback.
+        // These values may seed a one-time migration, but resolution must use
+        // a current catalog assignment or an explicit configuration instead.
         assert_eq!(
-            resolve_model_flag(&AgentType::Ollama, ModelTier::Economy, None),
+            crate::core::model_catalog::migrated_default(&AgentType::Ollama, ModelTier::Economy),
             Some("qwen3:8b".into())
         );
         assert_eq!(
-            resolve_model_flag(&AgentType::Ollama, ModelTier::Default, None),
+            crate::core::model_catalog::migrated_default(&AgentType::Ollama, ModelTier::Default),
             Some("qwen3:8b".into())
         );
         assert_eq!(
-            resolve_model_flag(&AgentType::Ollama, ModelTier::Reasoning, None),
+            crate::core::model_catalog::migrated_default(&AgentType::Ollama, ModelTier::Reasoning),
             Some("qwen3:30b-a3b".into())
         );
     }
@@ -7561,10 +7574,20 @@ Suite de la réponse.";
 
     // ─── effective_model_flag: explicit model override beats tier ─────────────
     #[test]
+    fn unassigned_ollama_model_is_not_replaced_by_a_migrated_default() {
+        use crate::models::ModelTier;
+
+        assert_eq!(
+            effective_model_flag(None, &AgentType::Ollama, ModelTier::Default, None),
+            None,
+            "a missing runtime catalog assignment must refuse dispatch instead of reviving a seed",
+        );
+    }
+
+    #[test]
     fn effective_model_flag_override_wins_over_tier() {
         use crate::models::ModelTier;
-        // Explicit model beats the tier fallback — including the Economy tier
-        // that would otherwise resolve to the qwen3:8b built-in.
+        // Explicit model beats a missing tier assignment.
         assert_eq!(
             effective_model_flag(
                 Some("qwen3:30b-a3b"),
@@ -7579,15 +7602,15 @@ Suite de la réponse.";
     #[test]
     fn effective_model_flag_blank_or_none_falls_back_to_tier() {
         use crate::models::ModelTier;
-        // Blank override is treated as unset → tier resolution.
+        // Blank override is treated as unset → no model without an assignment.
         assert_eq!(
             effective_model_flag(Some("   "), &AgentType::Ollama, ModelTier::Default, None),
             resolve_model_flag(&AgentType::Ollama, ModelTier::Default, None),
         );
-        // None → identical to resolve_model_flag (here: Claude reasoning → opus).
+        // None → identical to resolve_model_flag.
         assert_eq!(
             effective_model_flag(None, &AgentType::ClaudeCode, ModelTier::Reasoning, None),
-            Some("opus".into()),
+            None,
         );
     }
 
@@ -8096,8 +8119,10 @@ Suite de la réponse.";
     }
 
     #[test]
-    fn plugin_invocation_rule_reaches_every_supported_agent_command() {
+    fn plugin_invocation_rule_reaches_every_supported_cli_command() {
         let rule = "Fastly production: API first via `api_call`";
+        // HTTP families return before this builder. Their sentinel must not
+        // carry the prompt/context; the Ollama sentinel has its own regression.
         let agents = [
             AgentType::ClaudeCode,
             AgentType::Codex,
@@ -8105,7 +8130,6 @@ Suite de la réponse.";
             AgentType::GeminiCli,
             AgentType::Kiro,
             AgentType::CopilotCli,
-            AgentType::Ollama,
         ];
 
         for agent in agents {

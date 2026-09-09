@@ -2645,9 +2645,9 @@ pub(crate) fn http_agent_identity_context(agent_type: &AgentType, model: &str) -
     }
 }
 
-/// Resolve a ModelTier to a concrete --model flag value for a given agent.
-/// Returns None for Default tier or agents without --model support.
-pub(crate) fn resolve_model_flag(
+/// Resolve only explicit operator configuration, without consulting the cache.
+/// Preflight must inspect durable unavailable assignments before any fallback.
+pub(crate) fn configured_model_flag(
     agent_type: &AgentType,
     tier: ModelTier,
     overrides: Option<&ModelTiersConfig>,
@@ -2670,58 +2670,53 @@ pub(crate) fn resolve_model_flag(
         let override_val = match tier {
             ModelTier::Economy => &agent_cfg.economy,
             ModelTier::Reasoning => &agent_cfg.reasoning,
-            // `Default` tier now honors a user override too — primarily
-            // for Ollama, where the OllamaCard picker writes here so the
-            // user's preferred model wins over the built-in qwen3 fallback
-            // below. Backward compatible: `None` (the common case) falls
-            // through to the built-in match.
+            // `Default` tier honors an explicit user override too — primarily
+            // for Ollama, where the OllamaCard picker writes the preferred
+            // model into this slot.
             ModelTier::Default => &agent_cfg.default,
         };
         if let Some(ref val) = override_val {
-            if !val.is_empty() {
+            if !val.trim().is_empty() {
                 return Some(val.clone());
             }
         }
 
-        // Ollama has no built-in notion of tiers: the user picks ONE model in
+        // Ollama has no intrinsic tier notion: the user picks ONE model in
         // the OllamaCard, which writes the `default` slot. So an empty
         // economy/reasoning slot must fall back to that single configured model
-        // — NOT to a portability fallback the user never asked for. Without
-        // this, someone who set "qwen3:32b" as their Ollama default but whose
-        // discussions run at the reasoning tier would silently get
-        // "qwen3:30b-a3b" instead. (Cloud agents keep distinct per-tier
-        // built-ins below, since haiku/sonnet/opus are genuinely different.)
+        // — not to a different model. This keeps a configured default stable
+        // when a discussion uses Economy or Reasoning.
         if is_http_chat_agent(agent_type) {
             if let Some(ref d) = agent_cfg.default {
-                if !d.is_empty() {
+                if !d.trim().is_empty() {
                     return Some(d.clone());
                 }
             }
         }
     }
 
+    None
+}
+
+/// Resolve a ModelTier to a concrete model without embedded runtime defaults.
+pub(crate) fn resolve_model_flag(
+    agent_type: &AgentType,
+    tier: ModelTier,
+    overrides: Option<&ModelTiersConfig>,
+) -> Option<String> {
+    if let Some(model) = configured_model_flag(agent_type, tier, overrides) {
+        return Some(model);
+    }
     // The durable catalog is the runtime source. Former built-ins are seeded
     // once by `migrate_hardcoded_catalog_once`; keeping literals here would
     // silently revive them after an operator removes or replaces a model.
-    let catalog_model = crate::core::model_catalog::assigned_model_for_agent(agent_type, tier)
-        .or_else(|| {
-            is_http_chat_agent(agent_type)
-                .then(|| {
-                    crate::core::model_catalog::assigned_model_for_agent(
-                        agent_type,
-                        ModelTier::Default,
-                    )
-                })
-                .flatten()
-        });
-    #[cfg(test)]
-    {
-        catalog_model.or_else(|| crate::core::model_catalog::migrated_default(agent_type, tier))
-    }
-    #[cfg(not(test))]
-    {
-        catalog_model
-    }
+    crate::core::model_catalog::assigned_model_for_agent(agent_type, tier).or_else(|| {
+        is_http_chat_agent(agent_type)
+            .then(|| {
+                crate::core::model_catalog::assigned_model_for_agent(agent_type, ModelTier::Default)
+            })
+            .flatten()
+    })
 }
 
 /// Resolve the effective `--model` value for a run: an explicit per-step /
@@ -2739,6 +2734,10 @@ pub(crate) fn effective_model_flag(
         Some(m) if !m.trim().is_empty() => Some(m.to_string()),
         _ => resolve_model_flag(agent_type, tier, model_tiers),
     }
+}
+
+fn missing_ollama_model_error() -> String {
+    "No Ollama model configured. Choose an available model for the selected tier in Settings → Agents → Ollama, or set a model override on the step.".into()
 }
 
 /// Start an agent process with minimal config (no skills/directives/profiles).
@@ -3075,7 +3074,15 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                         .into(),
                 )
             }
-            _ => "qwen3:8b",
+            (AgentType::Ollama, _) => {
+                return Err(missing_ollama_model_error())
+            }
+            _ => {
+                return Err(
+                    "No model configured for this HTTP provider. Choose an available model for the selected tier in Settings → Agents, or set a model override on the step."
+                        .into(),
+                )
+            }
         };
         // Both OpenAI-compatible providers read their endpoint and key from their
         // own slot: LiteLLM's proxy is operator-hosted (config or env), NVIDIA's
@@ -8738,29 +8745,16 @@ fn agent_command_with_task_worker_policy(
                 OutputMode::Text,
             )
         }
-        AgentType::Ollama => {
-            // Ollama: local LLM inference via `ollama run <model> <prompt>`
-            let model = model_flag.unwrap_or("qwen3:8b");
-            let full_prompt = if mcp_context.is_empty() {
-                prompt.into()
-            } else {
-                format!("{}\n\n{}", mcp_context, prompt)
-            };
-            let args = vec![
-                "run".into(),
-                "--nowordwrap".into(),
-                model.into(),
-                full_prompt,
-            ];
-            (
-                "ollama",
-                None,
-                args,
-                "OLLAMA_HOST",
-                StderrMode::StdoutOnly,
-                OutputMode::Text,
-            )
-        }
+        // The production caller already returned through the HTTP path.
+        // Do not retain a second inference command or an embedded model here.
+        AgentType::Ollama => (
+            "echo",
+            None,
+            vec!["Ollama runs over HTTP, not as a CLI process".into()],
+            "NONE",
+            StderrMode::Merge,
+            OutputMode::Text,
+        ),
         // Unreachable in practice: `start_agent_with_config` returns via the
         // HTTP path before building a command line. Kept explicit (rather than
         // folded into a catch-all) so a future CLI-mode LiteLLM has to make a

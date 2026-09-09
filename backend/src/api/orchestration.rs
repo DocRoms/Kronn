@@ -9698,8 +9698,10 @@ mod tests {
             },
             Some("@codex-cli".into()),
         )];
+        let mut config = crate::core::config::default_config();
+        config.agents.model_tiers.ollama.default = Some("operator-ollama".into());
         let catalogue = build_task_worker_catalogue(
-            &crate::core::config::default_config(),
+            &config,
             &detections,
             &joined,
             &[
@@ -9728,7 +9730,8 @@ mod tests {
         assert_eq!(ollama.worker.kind, MessageTargetKind::DiscussionAgent);
         assert_eq!(ollama.worker.tier, Some(ModelTier::Default));
         assert!(ollama.tiers.iter().any(|tier| {
-            tier.tier == ModelTier::Default && tier.resolved_model.as_deref() == Some("qwen3:8b")
+            tier.tier == ModelTier::Default
+                && tier.resolved_model.as_deref() == Some("operator-ollama")
         }));
         assert!(worker_static_refusal(&ollama.worker).is_none());
 
