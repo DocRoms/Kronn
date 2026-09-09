@@ -2566,6 +2566,23 @@ successes: number, last_seen: string, };
 export type EnrolledBy = "admin" | "human";
 
 /**
+ * The presented secret never appears in a URL or a query string — a path is
+ * logged by every proxy in the world, and a body is not.
+ */
+export type EnrolRequest = {
+/**
+ * The admin secret, or a live credential whose role is `human`.
+ */
+authority: string, role: GrantRole, label: string, };
+
+/**
+ * Carries the plaintext exactly once, in the response to the request that
+ * created it. No route returns it a second time, and it is stored only as a
+ * hash.
+ */
+export type EnrolResponse = { credential: HumanCredential, secret: string, };
+
+/**
  * One piece of evidence backing a claim. `kind` mirrors the citable source
  * types; `reference` is the resolvable ref (file:line / url / disc-id / cmd /
  * user:date); `quote` is the supporting excerpt (the NL premise the Gate-2
@@ -3268,6 +3285,8 @@ export type LintReport = { unsourced_count: number, flagged_spans: Array<Flagged
  * a soft amber pill, NOT a red "fabricated" one.
  */
 unverified_count: number, };
+
+export type ListRequest = { authority: string, };
 
 export type LiteLlmHealthResponse = {
 /**
@@ -5217,6 +5236,10 @@ target_agents?: Array<AgentType>, };
  * DELETE /api/discussions/:id/messages/:message_id
  */
 export type ReviseNoteRequest = { content: string, };
+
+export type RevokeRequest = { authority: string, credential_id: string, reason: string, };
+
+export type RotateRequest = { authority: string, credential_id: string, };
 
 /**
  * Rotation metrics — KT-193 DoD 6.

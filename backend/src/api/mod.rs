@@ -33,6 +33,7 @@ pub mod execution_variables;
 pub mod external_api_connections;
 pub mod federation;
 pub mod git_ops;
+pub mod human_credentials;
 pub mod id_resolver;
 pub mod learnings;
 pub mod lite_llm;

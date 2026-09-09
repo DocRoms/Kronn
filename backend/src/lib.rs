@@ -1591,6 +1591,24 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             "/api/discussions/{id}/important",
             get(api::discussion_important::list),
         )
+        // KT-619 — administering publication credentials. Every one of these
+        // authenticates in the same transaction as the mutation it performs.
+        .route(
+            "/api/human-credentials/list",
+            post(api::human_credentials::list),
+        )
+        .route(
+            "/api/human-credentials/enrol",
+            post(api::human_credentials::enrol),
+        )
+        .route(
+            "/api/human-credentials/revoke",
+            post(api::human_credentials::revoke),
+        )
+        .route(
+            "/api/human-credentials/rotate",
+            post(api::human_credentials::rotate),
+        )
         .route(
             "/api/discussions/{id}/questions",
             get(api::discussion_questions::list),
