@@ -19,6 +19,7 @@ pub mod discussion_workspaces;
 pub mod discussions;
 pub mod execution_variable_snapshots;
 pub mod external_api_connections;
+pub mod human_credentials;
 pub mod id_resolver;
 pub(crate) mod kronn_action_engine;
 pub mod learnings;

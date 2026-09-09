@@ -658,6 +658,11 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "172_discussion_important_messages",
         include_str!("sql/172_discussion_important_messages.sql"),
     ),
+    // 173 belongs to KT-621.
+    (
+        "174_human_publication_credentials",
+        include_str!("sql/174_human_publication_credentials.sql"),
+    ),
 ];
 
 /// Apply one migration inside the caller-owned transaction.
