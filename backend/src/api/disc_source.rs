@@ -264,6 +264,11 @@ pub struct DiscAppendRequest {
     /// provenance and heartbeats, never an authority.
     #[serde(default)]
     pub session_credential: Option<SessionCredential>,
+    /// KT-619 — the publication grant the caller holds, read by the bridge from
+    /// its own private file and injected here. Attached to no session, so no
+    /// amount of inviting, joining or transferring produces one.
+    #[serde(default)]
+    pub publication_grant: Option<SessionCredential>,
 }
 
 /// Compact lint feedback echoed to the POSTING agent (tool result), so it can
@@ -745,6 +750,7 @@ pub async fn disc_append(
         // out of it: `expose()` would leave the redacting `Debug` behind and
         // leave a bare secret in scope, protected by nothing but care.
         let important_credential = req.session_credential.clone();
+        let important_grant = req.publication_grant.clone();
         let dispatch_jobs = dispatch_agents
             .iter()
             .cloned()
@@ -795,10 +801,12 @@ pub async fn disc_append(
                             .map(|agent| format!("{agent:?}"))
                             .unwrap_or_else(|| "Orchestrator".to_string())
                     };
-                    // Authority comes from the credential the caller HOLDS, not
-                    // from any id it declares.
-                    let publisher = crate::db::discussion_important::publisher_for_credential(
+                    // Authority comes from the GRANT the caller holds. The
+                    // session credential is passed only so an active worker is
+                    // refused even when its grant is perfectly valid.
+                    let publisher = crate::db::discussion_important::publisher_for_grant(
                         &tx,
+                        important_grant.as_ref().map(SessionCredential::expose),
                         important_credential.as_ref().map(SessionCredential::expose),
                         &label,
                     )?;
@@ -1706,6 +1714,7 @@ mod tests {
                 session_id: session_id.map(str::to_owned),
                 since_sort_order: None,
                 session_credential: None,
+                publication_grant: None,
             }),
         )
         .await;
@@ -1735,6 +1744,7 @@ mod tests {
                 since_sort_order: None,
                 session_credential: credential
                     .map(|c| serde_json::from_value(serde_json::json!(c)).unwrap()),
+                publication_grant: None,
             }),
         )
         .await;
@@ -1757,6 +1767,7 @@ mod tests {
                 since_sort_order: None,
                 session_credential: credential
                     .map(|c| serde_json::from_value(serde_json::json!(c)).unwrap()),
+                publication_grant: None,
             }),
         )
         .await;
@@ -1906,6 +1917,7 @@ mod tests {
                 session_id: Some("cli-me".into()),
                 since_sort_order: Some(0),
                 session_credential: None,
+                publication_grant: None,
             }),
         )
         .await
@@ -1947,6 +1959,7 @@ mod tests {
                 session_id: Some("cli-me".into()),
                 since_sort_order: Some(0),
                 session_credential: None,
+                publication_grant: None,
             }),
         )
         .await
@@ -2022,6 +2035,7 @@ mod tests {
                 session_id: Some("cli-me".into()),
                 since_sort_order: Some(0),
                 session_credential: None,
+                publication_grant: None,
             }),
         )
         .await
@@ -2093,6 +2107,7 @@ mod tests {
                 session_id: Some("cli-me".into()),
                 since_sort_order: Some(cursor),
                 session_credential: None,
+                publication_grant: None,
             }),
         )
         .await
@@ -2157,6 +2172,7 @@ mod tests {
                 session_id: None,
                 since_sort_order: None,
                 session_credential: None,
+                publication_grant: None,
             }),
         )
         .await;
@@ -3759,6 +3775,7 @@ mod tests {
                 session_credential: Some(
                     serde_json::from_value(serde_json::json!(IMPORTANT_ORCH_SECRET)).unwrap(),
                 ),
+                publication_grant: None,
             }),
         )
         .await;
@@ -3895,11 +3912,18 @@ mod tests {
             session_credential: Some(
                 serde_json::from_value(serde_json::json!("kr-resume-super-secret")).unwrap(),
             ),
+            publication_grant: Some(
+                serde_json::from_value(serde_json::json!("kr-human-also-never-appears")).unwrap(),
+            ),
         };
         let printed = format!("{request:?}");
         assert!(
             !printed.contains("super-secret"),
-            "the credential leaked into Debug: {printed}"
+            "the session credential leaked into Debug: {printed}"
+        );
+        assert!(
+            !printed.contains("never-appears"),
+            "the publication grant leaked into Debug: {printed}"
         );
         assert!(printed.contains("<redacted>"));
         // The declared id is not a secret and stays readable, which is what
@@ -3907,34 +3931,47 @@ mod tests {
         assert!(printed.contains("visible-and-harmless"));
     }
 
+    /// KT-619 — the orchestrator publishes with a GRANT, not with its session.
+    ///
+    /// This test used to prove the opposite, and it was right about the code
+    /// and wrong about the contract: a session is acquired by inviting and
+    /// joining, which anybody local can do.
     #[tokio::test]
     #[serial]
-    async fn disc_append_lets_the_orchestrators_own_session_publish() {
+    async fn disc_append_lets_a_granted_orchestrator_publish() {
         crate::core::anti_halluc::set_mode("off");
         let (state, _tmp) = lint_state(false).await;
-        state
+        let grant = state
             .db
             .with_conn(|conn| {
-                crate::db::discussion_sessions::create_session(
+                let admin = crate::db::human_credentials::create_admin_secret(conn, "/p")?;
+                let authority = crate::db::human_credentials::authorise_enrolment(conn, &admin)?
+                    .expect("the admin secret authorises");
+                let (_row, grant) = crate::db::human_credentials::enrol(
                     conn,
-                    IMPORTANT_PARENT,
-                    "ClaudeCode",
-                    Some(IMPORTANT_ORCH_SESSION),
-                    "peer",
-                )
+                    &authority,
+                    crate::db::human_credentials::GrantRole::Orchestrator,
+                    "principal",
+                )?;
+                Ok(grant.expose().to_string())
             })
             .await
             .unwrap();
-        hold_credential(&state, IMPORTANT_ORCH_SESSION, IMPORTANT_ORCH_SECRET).await;
 
-        let response = append_holding(
-            &state,
-            vec![agent_msg("m1", &important_fence("kt-619.orch"))],
-            Some(IMPORTANT_ORCH_SECRET),
+        let response = disc_append(
+            axum::extract::State(state.clone()),
+            Json(DiscAppendRequest {
+                disc_id: IMPORTANT_PARENT.into(),
+                messages: vec![agent_msg("m1", &important_fence("kt-619.granted"))],
+                session_id: None,
+                since_sort_order: None,
+                session_credential: None,
+                publication_grant: Some(serde_json::from_value(serde_json::json!(grant)).unwrap()),
+            }),
         )
         .await;
-
-        assert_eq!(response.important.map(|i| i.published), Some(1));
+        let data = response.0.data.expect("append succeeds");
+        assert_eq!(data.important.map(|i| i.published), Some(1));
         assert_eq!(important_card_count(&state, IMPORTANT_PARENT).await, 1);
     }
 

@@ -42,7 +42,7 @@ fn session(conn: &Connection, room: &str, session_id: &str) -> String {
 ///
 /// The real parent rows are inserted rather than switching foreign keys off:
 /// a fixture the schema would reject proves nothing about the schema.
-fn execution_room(conn: &Connection) {
+fn execution_room(conn: &Connection) -> String {
     conn.execute(
         "INSERT INTO orchestration_runs (id, kind, discussion_id, created_at, updated_at) \
          VALUES ('run','single_task',?1,'now','now')",
@@ -55,7 +55,7 @@ fn execution_room(conn: &Connection) {
         [],
     )
     .unwrap();
-    session(conn, CHILD, "execution-worker");
+    let secret = session(conn, CHILD, "execution-worker");
     let worker: i64 = conn
         .query_row(
             "SELECT id FROM discussion_sessions WHERE session_id = 'execution-worker'",
@@ -71,6 +71,7 @@ fn execution_room(conn: &Connection) {
         rusqlite::params![ROOM, CHILD, worker],
     )
     .unwrap();
+    secret
 }
 
 fn spec_json(dedup_key: &str) -> String {
@@ -180,10 +181,9 @@ fn an_orchestrator_fence_becomes_one_persisted_card() {
 #[test]
 fn a_worker_is_refused_and_told_so() {
     let conn = database();
-    execution_room(&conn);
-    let worker = session(&conn, CHILD, "worker-1");
+    let worker = execution_room(&conn);
 
-    let publisher = publisher_for_credential(&conn, Some(&worker), "ClaudeCode").unwrap();
+    let publisher = publisher_for_grant(&conn, None, Some(&worker), "ClaudeCode").unwrap();
     assert_eq!(publisher, ImportantPublisher::Worker);
 
     let ingest = append(
@@ -203,12 +203,11 @@ fn a_worker_is_refused_and_told_so() {
 #[test]
 fn a_worker_targeting_the_parent_room_is_still_refused() {
     let conn = database();
-    execution_room(&conn);
-    let worker = session(&conn, CHILD, "worker-1");
+    let worker = execution_room(&conn);
 
     // The route bypass: name the principal's room instead of its own. Authority
     // is read from where the session sits, so the target changes nothing.
-    let publisher = publisher_for_credential(&conn, Some(&worker), "ClaudeCode").unwrap();
+    let publisher = publisher_for_grant(&conn, None, Some(&worker), "ClaudeCode").unwrap();
     assert_eq!(publisher, ImportantPublisher::Worker);
     let ingest = append(&conn, ROOM, "m1", fenced(&spec_json("k")), &publisher);
     assert_eq!(ingest.refused_worker, 1);
@@ -218,12 +217,11 @@ fn a_worker_targeting_the_parent_room_is_still_refused() {
 #[test]
 fn a_worker_claiming_the_human_role_is_still_refused() {
     let conn = database();
-    execution_room(&conn);
-    let worker = session(&conn, CHILD, "worker-1");
+    let worker = execution_room(&conn);
 
     // The payload bypass: label the turn `User` to be taken for the human.
     // The label is display-only and never consulted for authority.
-    let publisher = publisher_for_credential(&conn, Some(&worker), "Human").unwrap();
+    let publisher = publisher_for_grant(&conn, None, Some(&worker), "Human").unwrap();
     assert_eq!(publisher, ImportantPublisher::Worker);
     let ingest = append_as(
         &conn,
@@ -248,31 +246,28 @@ fn a_caller_that_proves_nothing_gets_nothing() {
     // more useful than calling it an impostor.
     for absent in [Some("kr-resume-nobody"), None] {
         assert_eq!(
-            publisher_for_credential(&conn, absent, "ClaudeCode").unwrap(),
+            publisher_for_grant(&conn, absent, None, "ClaudeCode").unwrap(),
             ImportantPublisher::Unverified
         );
     }
 }
 
 #[test]
-fn presenting_a_session_id_is_not_holding_its_credential() {
+fn a_session_credential_is_no_longer_an_authority_at_all() {
     let conn = database();
-    // An orchestrator session, and the secret only it holds.
+    // A perfectly good session, in a room that is not an execution room. Under
+    // volet A this published. It must not any more: a session is acquired by
+    // inviting and joining, which anybody local can do.
     let secret = session(&conn, ROOM, "orchestrator-session");
-    assert!(matches!(
-        publisher_for_credential(&conn, Some(&secret), "Codex").unwrap(),
-        ImportantPublisher::Orchestrator(_)
-    ));
-
-    // The session id is visible in room metadata. Presenting it — or anything
-    // derived from it that is not the secret — proves nothing.
-    for guess in ["orchestrator-session", "kr-resume-orchestrator", ""] {
-        assert_eq!(
-            publisher_for_credential(&conn, Some(guess), "Codex").unwrap(),
-            ImportantPublisher::Unverified,
-            "{guess:?} must not authenticate"
-        );
-    }
+    assert_eq!(
+        publisher_for_grant(&conn, None, Some(&secret), "Codex").unwrap(),
+        ImportantPublisher::Unverified
+    );
+    // And presenting it as though it were a grant buys nothing either.
+    assert_eq!(
+        publisher_for_grant(&conn, Some(&secret), None, "Codex").unwrap(),
+        ImportantPublisher::Unverified
+    );
 }
 
 #[test]
@@ -287,33 +282,41 @@ fn a_left_session_no_longer_authenticates() {
     // The credential is still correct; the session is gone. Authority goes with
     // the session, not with the bytes.
     assert_eq!(
-        publisher_for_credential(&conn, Some(&secret), "Codex").unwrap(),
+        publisher_for_grant(&conn, Some(&secret), None, "Codex").unwrap(),
         ImportantPublisher::Unverified
     );
 }
 
 #[test]
-fn a_rotated_credential_stops_working() {
+fn a_grant_publishes_and_a_working_session_still_cannot() {
     let conn = database();
-    let secret = session(&conn, ROOM, "orchestrator-session");
-    conn.execute(
-        "UPDATE discussion_sessions SET resume_token_hash = ?1 \
-          WHERE session_id = 'orchestrator-session'",
-        rusqlite::params![crate::db::discussion_sessions::sha256_hex(
-            "kr-resume-rotated"
-        )],
+    let worker = execution_room(&conn);
+    let admin = crate::db::human_credentials::create_admin_secret(&conn, "/p").unwrap();
+    let authority = crate::db::human_credentials::authorise_enrolment(&conn, &admin)
+        .unwrap()
+        .unwrap();
+    let (_row, grant) = crate::db::human_credentials::enrol(
+        &conn,
+        &authority,
+        crate::db::human_credentials::GrantRole::Orchestrator,
+        "principal",
     )
     .unwrap();
-    // Resume rotates the secret. The old one must die with the rotation, or a
-    // credential read once would be good forever.
-    assert_eq!(
-        publisher_for_credential(&conn, Some(&secret), "Codex").unwrap(),
-        ImportantPublisher::Unverified
-    );
+
+    // The grant alone publishes.
     assert!(matches!(
-        publisher_for_credential(&conn, Some("kr-resume-rotated"), "Codex").unwrap(),
+        publisher_for_grant(&conn, Some(grant.expose()), None, "Codex").unwrap(),
         ImportantPublisher::Orchestrator(_)
     ));
+
+    // The same grant, presented by a session that is CURRENTLY a worker, does
+    // not. A principal delegated afterwards must not publish steering cards
+    // while it is working on someone else's task.
+    assert_eq!(
+        publisher_for_grant(&conn, Some(grant.expose()), Some(&worker), "Codex").unwrap(),
+        ImportantPublisher::Worker,
+        "a valid grant must not buy its way past the worker refusal"
+    );
 }
 
 #[test]

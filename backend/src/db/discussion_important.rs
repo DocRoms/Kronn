@@ -13,6 +13,7 @@
 use anyhow::Result;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
+use std::str::FromStr;
 use ts_rs::TS;
 
 #[cfg(test)]
@@ -460,51 +461,74 @@ impl ImportantPublisher {
     }
 }
 
-/// Resolve who is publishing, from the credential the caller actually holds.
+/// Is this session the worker of an execution that is still running?
 ///
-/// **Possession is the identity.** The caller declares no session id, so there
-/// is nothing to spoof: `resume_token_hash` is uniquely indexed, the match is
-/// exact, and ambiguity is impossible by construction. A caller that proves
-/// nothing gets nothing — the earlier version resolved a declared string, which
-/// proved the row existed and never that the caller held it.
+/// The **exact active assignment**, not the session's home room. A home is
+/// transferable — `invite`, `join`, `transfer` and `rebind` all move it — so
+/// reading it as a role is what let three anonymous calls mint an orchestrator.
+/// An assignment is written by Kronn when an offer is accepted and cleared when
+/// the execution ends.
+fn session_is_working(conn: &Connection, session_pk: i64) -> Result<bool> {
+    let mut statement =
+        conn.prepare("SELECT status FROM task_executions WHERE worker_cli_session_id = ?1")?;
+    let statuses = statement
+        .query_map(params![session_pk], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(statuses.iter().any(|status| {
+        // An unreadable status counts as working: losing a card is cheaper than
+        // publishing one from a worker because a state string changed shape.
+        crate::models::TaskExecutionStatus::from_str(status)
+            .map(|status| !status.is_terminal())
+            .unwrap_or(true)
+    }))
+}
+
+/// Resolve who is publishing, from the grant the caller HOLDS.
 ///
-/// **Authority is not message provenance.** `disc_append` also resolves an
-/// `author_cli_session_id`, and that one is deliberately filtered to the
-/// target room: a session that is not in this room did not author a message
-/// here. Authority is the opposite property — it belongs to the caller
-/// wherever it is writing — so this lookup does NOT filter on the target, and
-/// does not depend on the append being a single agent turn. Reusing the
-/// provenance value here is what let a worker naming the parent room resolve
-/// to "no identity".
+/// Two independent facts, and both must be right:
 ///
-/// Everything the caller controls is ignored: the target room, the role on
-/// the message, the agent type in the payload. What remains is the room its
-/// session sits in, written by Kronn at offer acceptance.
-///
-/// Refuses by default. Zero matches (never sent, expired, left) and more than
-/// one (an ambiguous session id) are both unverifiable, and publishing an
-/// important card has no legitimate "unknown caller" case. It also has no
-/// legitimate human caller: a human reaches a card through `send_message`,
-/// which never calls this.
-pub fn publisher_for_credential(
+/// 1. **A grant.** Authority is an enrolled row with its own secret, presented
+///    by the caller. It is attached to no session, so `invite`, `join`,
+///    `transfer` and `rebind` cannot reach it. The earlier version derived the
+///    role from the session's room, which is a property anyone can acquire —
+///    three anonymous calls did.
+/// 2. **Not currently a worker.** Checked even when the grant is valid: a
+///    principal that holds an orchestrator grant and is later delegated must not
+///    publish steering cards while it is working on someone else's task. That is
+///    read from the exact active assignment, never from the room.
+pub fn publisher_for_grant(
     conn: &Connection,
-    caller_credential: Option<&str>,
+    grant: Option<&str>,
+    session_credential: Option<&str>,
     label: &str,
 ) -> Result<ImportantPublisher> {
-    let Some(secret) = caller_credential else {
-        return Ok(ImportantPublisher::Unverified);
-    };
-    let Some((_session_pk, home)) =
-        crate::db::discussion_sessions::authenticate_by_resume_credential(conn, secret)?
-    else {
-        return Ok(ImportantPublisher::Unverified);
-    };
-    // Verified, but a worker all the same — and the room it sits in decides
-    // that, not the room it is writing into.
-    if crate::db::orchestration::discussion_is_execution_room(conn, &home)? {
-        return Ok(ImportantPublisher::Worker);
+    // The worker check runs first and unconditionally: a valid grant must not
+    // buy its way past it.
+    if let Some(secret) = session_credential {
+        if let Some((session_pk, _home)) =
+            crate::db::discussion_sessions::authenticate_by_resume_credential(conn, secret)?
+        {
+            if session_is_working(conn, session_pk)? {
+                return Ok(ImportantPublisher::Worker);
+            }
+        }
     }
-    Ok(ImportantPublisher::Orchestrator(label.to_string()))
+
+    let Some(grant) = grant else {
+        return Ok(ImportantPublisher::Unverified);
+    };
+    match crate::db::human_credentials::authenticate(
+        conn,
+        &crate::db::human_credentials::Secret::new(grant),
+    ) {
+        Ok((_id, crate::db::human_credentials::GrantRole::Human, _epoch)) => {
+            Ok(ImportantPublisher::Human(label.to_string()))
+        }
+        Ok((_id, crate::db::human_credentials::GrantRole::Orchestrator, _epoch)) => {
+            Ok(ImportantPublisher::Orchestrator(label.to_string()))
+        }
+        Err(_) => Ok(ImportantPublisher::Unverified),
+    }
 }
 
 /// What one message's fences produced. Counts are reported back so a refused

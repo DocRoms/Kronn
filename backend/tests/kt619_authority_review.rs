@@ -131,18 +131,16 @@ async fn exercise_issuance_chain(include_declared_session: bool) -> (Value, u32)
     (after, persisted)
 }
 
-/// The bypass, still open: an anonymous `invite` + `join` yields a resume
-/// credential, and volet A reads any authenticated non-execution session as the
-/// orchestrator. Ignored rather than deleted — run with `--ignored` it fails on
-/// a card that was really persisted.
+/// The bypass, closed. An anonymous `invite` + `join` still yields a resume
+/// credential — that is what those endpoints do — but a credential is no longer
+/// an authority. Publication needs an enrolled grant, which is its own row with
+/// its own secret and is attached to no session, so nothing acquired by
+/// inviting, joining, transferring or rebinding can reach it.
 ///
-/// The fix is the enrolled grant designed in
-/// `docs/design/important-message-orchestrator-grant.md`: a grant is its own
-/// row, so a session obtained anonymously carries no authority at all. Remove
-/// the `ignore` with the grant.
+/// This failed on `left: 1, right: 0` — a card really persisted — until the
+/// grant landed.
 #[tokio::test]
 #[serial_test::serial]
-#[ignore = "KT-619: anonymous issuance still mints orchestrator authority; pending the enrolled grant"]
 async fn anonymous_local_invite_and_join_must_not_mint_important_publication_authority() {
     exercise_anonymous_issuance_chain(false).await;
 }

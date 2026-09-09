@@ -1579,7 +1579,13 @@ since_sort_order?: number | null,
  * `session_id` above stays what it always was: a declared hint for
  * provenance and heartbeats, never an authority.
  */
-session_credential?: SessionCredential | null, };
+session_credential?: SessionCredential | null,
+/**
+ * KT-619 — the publication grant the caller holds, read by the bridge from
+ * its own private file and injected here. Attached to no session, so no
+ * amount of inviting, joining or transferring produces one.
+ */
+publication_grant?: SessionCredential | null, };
 
 export type DiscAppendResponse = { appended: number, skipped_as_duplicates: number,
 /**
