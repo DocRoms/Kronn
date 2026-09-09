@@ -566,7 +566,15 @@ These reads reuse the existing list endpoints and do not mutate the library.
 ## Joined CLI worktrees
 
 - Call `disc_workspace_get({})` before editing when several peers may be
-  active. It is a compact read and derives this bridge's durable identity.
+  active. It derives this bridge's **active joined CLI identity**, not the
+  durable binding key used to restore the room after a restart. The same
+  identity rule applies to declaration and history leases. Omit the optional
+  identity arguments: matching values remain compatible, but foreign or
+  durable-key overrides are refused before HTTP. A missing joined session is
+  an error, never a reason to select another participant or reassign a worktree.
+  Restore this caller's binding before retrying; do not substitute a peer's id.
+  `[src: file: backend/scripts/disc-introspection-mcp.py:5992-6025]`
+  `[src: file: backend/src/api/disc_workspace.rs:235-259]`
 - Call `disc_workspace_set({task_ref: "KT-140"})` from the worktree root (or
   pass an explicit `workspace_path`) whenever the CLI changes worktree or
   branch. Kronn refreshes branch and HEAD from Git on each declaration.

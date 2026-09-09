@@ -779,7 +779,7 @@ TOOLS = [
         "description": (
             "Return the compact worktree state for THIS joined CLI session and "
             "the other worktrees declared in the current discussion. Called "
-            "bare, the bridge derives its durable agent/session identity. Use "
+            "bare, the bridge derives its active agent/session identity. Use "
             "this before editing when the room may contain several worktrees."
         ),
         "inputSchema": {
@@ -791,7 +791,7 @@ TOOLS = [
                 },
                 "source_session_id": {
                     "type": "string",
-                    "description": "Defaults to this bridge's durable CLI session id.",
+                    "description": "This bridge's active CLI id; no foreign override.",
                 },
             },
             "required": [],
@@ -829,7 +829,7 @@ TOOLS = [
                 },
                 "source_session_id": {
                     "type": "string",
-                    "description": "Defaults to this bridge's durable CLI session id.",
+                    "description": "This bridge's active CLI id; no foreign override.",
                 },
             },
             "required": [],
@@ -5990,12 +5990,28 @@ def call_disc_find_by_session(args):
 
 
 def _workspace_identity(args, tool_name):
-    source_agent = args.get("source_agent") or _agent_type_for_session()
-    source_session_id = args.get("source_session_id") or _durable_session_id()
-    if not source_agent or source_agent == "Unknown" or not source_session_id:
+    # Workspace routes resolve the joined session row, not the durable resume
+    # binding. A caller must never select another CLI's workspace identity.
+    source_agent = _agent_type_for_session()
+    source_session_id = _session_id_for_caller()
+    if (
+        not isinstance(source_agent, str)
+        or not source_agent.strip()
+        or source_agent == "Unknown"
+        or not isinstance(source_session_id, str)
+        or not source_session_id.strip()
+    ):
         raise RuntimeError(
-            f"{tool_name}: no durable identity for this bridge — pass "
-            "source_agent and source_session_id explicitly"
+            f"{tool_name}: no active CLI identity for this bridge — "
+            "join or restore this caller before using workspace tools"
+        )
+    if (
+        args.get("source_agent") not in (None, source_agent)
+        or args.get("source_session_id") not in (None, source_session_id)
+    ):
+        raise RuntimeError(
+            f"{tool_name}: only the caller's active CLI identity is allowed; "
+            "foreign or durable identity overrides are refused"
         )
     return source_agent, source_session_id
 
