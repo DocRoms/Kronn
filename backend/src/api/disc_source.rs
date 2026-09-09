@@ -741,16 +741,10 @@ pub async fn disc_append(
         let did_insert = did_for_loop.clone();
         let msg_clone = msg.clone();
         let typed_targets = requested_targets.clone();
-        // Cloned per message so the closure owns it. NOTE: this is a plain
-        // `String` — `expose()` leaves the redacting `Debug` behind, so nothing
-        // below may print this binding.
-        //
-        // TODO(KT-619): carry `SessionCredential` itself into the closure so the
-        // redaction is structural here too, instead of a comment asking for care.
-        let important_credential = req
-            .session_credential
-            .as_ref()
-            .map(|credential| credential.expose().to_string());
+        // The typed credential travels into the closure, NOT a `String` pulled
+        // out of it: `expose()` would leave the redacting `Debug` behind and
+        // leave a bare secret in scope, protected by nothing but care.
+        let important_credential = req.session_credential.clone();
         let dispatch_jobs = dispatch_agents
             .iter()
             .cloned()
@@ -805,7 +799,7 @@ pub async fn disc_append(
                     // from any id it declares.
                     let publisher = crate::db::discussion_important::publisher_for_credential(
                         &tx,
-                        important_credential.as_deref(),
+                        important_credential.as_ref().map(SessionCredential::expose),
                         &label,
                     )?;
                     crate::db::discussion_important::ingest_message_important(
