@@ -1,9 +1,11 @@
 //! Pure prompt builders extracted from `api::discussions`.
 //!
-//! Three public entry points:
+//! Prompt-building entry points:
 //! - [`build_agent_prompt`] — serialise a discussion's history into the
 //!   prompt a single agent sees (with summary injection + budget-aware
 //!   truncation).
+//! - [`build_agent_delta_prompt`] — preserve every unseen message for a
+//!   continuation whose complete size is checked by the discussion layer.
 //! - [`build_orchestration_prompt`] — one debate round's prompt for a
 //!   specific agent, across up to 3 locales (fr/es/en-default).
 //! - [`build_synthesis_prompt`] — final-round synthesis prompt that
@@ -365,7 +367,37 @@ pub fn build_agent_prompt(
     agent_type: &AgentType,
     extra_context_len: usize,
 ) -> String {
-    let budget = agent_prompt_budget(agent_type).saturating_sub(extra_context_len);
+    build_agent_prompt_inner(disc, agent_type, extra_context_len, false)
+}
+
+/// Render every unseen message for a proven session continuation. The caller
+/// accepts this result only when it is smaller than the ordinary bounded full
+/// prompt; truncating a delta here would silently lose interleaved messages.
+/// Old summary indices and a pinned first message refer to the full history,
+/// not to the sliced delta, so neither may skip rows in this rendering.
+pub fn build_agent_delta_prompt(
+    disc: &Discussion,
+    agent_type: &AgentType,
+    extra_context_len: usize,
+) -> String {
+    let mut delta = disc.clone();
+    delta.summary_cache = None;
+    delta.summary_up_to_msg_idx = None;
+    delta.pin_first_message = false;
+    build_agent_prompt_inner(&delta, agent_type, extra_context_len, true)
+}
+
+fn build_agent_prompt_inner(
+    disc: &Discussion,
+    agent_type: &AgentType,
+    extra_context_len: usize,
+    is_delta: bool,
+) -> String {
+    let budget = if is_delta {
+        usize::MAX
+    } else {
+        agent_prompt_budget(agent_type).saturating_sub(extra_context_len)
+    };
     let lang_instr = language_instruction(&disc.language);
 
     // Include discussion title as context if it's meaningful (not auto-generated placeholder)
@@ -581,7 +613,7 @@ pub fn build_agent_prompt(
     // agent may already have answered that first user message, though: in that
     // case the native principal must see and answer the peer, not replay the
     // original human prompt.
-    if user_msgs.len() <= 1 && !latest_is_peer_agent {
+    if !is_delta && user_msgs.len() <= 1 && !latest_is_peer_agent {
         let content = user_msgs
             .last()
             .map(|m| format!("{}{}", reply_context(m, &disc.messages), m.content))

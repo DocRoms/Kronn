@@ -51,7 +51,14 @@ pub(crate) mod test_support {
     }
 }
 
-type PendingRequests = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, AcpError>>>>>;
+struct PendingRequest {
+    sender: oneshot::Sender<Result<Value, AcpError>>,
+    /// Only an OpenCode session/resume request may classify the verified
+    /// missing-session contract as safe to replace, for this exact id.
+    missing_session_id: Option<String>,
+}
+
+type PendingRequests = Arc<Mutex<HashMap<u64, PendingRequest>>>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum AcpAgent {
@@ -176,6 +183,10 @@ pub fn acp_agent(agent: &AgentType) -> Option<AcpAgent> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum AcpCapability {
     Sessions,
+    /// `agentCapabilities.loadSession`: loading replays the prior transcript.
+    LoadSession,
+    /// `agentCapabilities.sessionCapabilities.resume`: reconnect without a
+    /// replay, so it is safe to pair with a discussion delta.
     Resume,
     Streaming,
     Cancellation,
@@ -369,6 +380,11 @@ pub enum AcpError {
     InvalidSessionResponse,
     #[error("ACP request timed out: {0}")]
     Timeout(String),
+    /// Only a transport that has positively identified this condition may use
+    /// the safe fresh-session fallback. Authentication and I/O failures remain
+    /// distinct and must be returned to the caller.
+    #[error("ACP session does not exist")]
+    SessionNotFound,
 }
 
 #[async_trait]
@@ -490,10 +506,7 @@ impl AcpJsonRpcTransport {
             .take()
             .ok_or_else(|| AcpError::Transport("ACP stdout unavailable".into()))?;
         let stdin = Arc::new(Mutex::new(stdin));
-        let pending = Arc::new(Mutex::new(HashMap::<
-            u64,
-            oneshot::Sender<Result<Value, AcpError>>,
-        >::new()));
+        let pending: PendingRequests = Arc::new(Mutex::new(HashMap::new()));
         let (notifications, _) = broadcast::channel(256);
         let broker = Arc::new(match scope {
             Some(scope) => AcpPermissionBroker::scoped(full_access, scope),
@@ -574,15 +587,18 @@ impl AcpJsonRpcTransport {
                             }
                         };
                         let _ = write_frame(&stdin, envelope).await;
-                    } else if let Some(sender) = pending.lock().await.remove(&id) {
+                    } else if let Some(request) = pending.lock().await.remove(&id) {
                         let result = if let Some(error) = message.get("error") {
-                            Err(AcpError::Transport(format!("ACP response error: {error}")))
+                            Err(classify_response_error(
+                                error,
+                                request.missing_session_id.as_deref(),
+                            ))
                         } else {
                             message.get("result").cloned().ok_or_else(|| {
                                 AcpError::Transport("ACP response returned no result".into())
                             })
                         };
-                        let _ = sender.send(result);
+                        let _ = request.sender.send(result);
                     }
                 } else {
                     let _ = notifications.send(message);
@@ -594,7 +610,21 @@ impl AcpJsonRpcTransport {
     async fn request(&self, method: &str, params: Value) -> Result<Value, AcpError> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (sender, receiver) = oneshot::channel();
-        self.pending.lock().await.insert(id, sender);
+        let missing_session_id = (self.agent == AcpAgent::OpenCode && method == "session/resume")
+            .then(|| {
+                params
+                    .get("sessionId")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            })
+            .flatten();
+        self.pending.lock().await.insert(
+            id,
+            PendingRequest {
+                sender,
+                missing_session_id,
+            },
+        );
         if let Err(error) = self
             .send(json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}))
             .await
@@ -634,10 +664,56 @@ async fn write_frame(stdin: &Arc<Mutex<ChildStdin>>, frame: Value) -> Result<(),
     Ok(())
 }
 
+/// JSON-RPC "Invalid params" per the spec Kronn's ACP transports speak.
+/// OpenCode's `toRequestError(ACPSessionNotFoundError)` (verified against
+/// `packages/opencode/src/acp/error.ts` at tag v1.18.27) uses this code with
+/// `message: "session not found: <id>"` and `data: {"sessionId": "<id>"}`.
+const JSON_RPC_INVALID_PARAMS: i64 = -32602;
+
+/// Turn one JSON-RPC error response into an `AcpError`, promoting it to the
+/// safe `SessionNotFound` fallback ONLY for the exact structured shape a
+/// server can use to positively identify a missing session.
+///
+/// This is deliberately narrow. OpenCode's own `resumeSession` (same source,
+/// `service.ts`) calls the SDK with `throwOnError: true` and its
+/// `fromUnknownError` keeps only an ACP-tagged error or an auth error —
+/// anything else, including a genuine missing session reached through that
+/// path, collapses into a generic `ServiceFailureError` with no code and no
+/// `sessionId` data. Such a response is indistinguishable from a transport
+/// hiccup here on purpose: this function must NOT guess "missing" from a
+/// generic code, an HTTP-style 404, or free text, because doing so would
+/// turn an ambiguous failure (auth, timeout, a real bug) into an automatic
+/// fresh-session replay after a prompt may already have had an external
+/// effect. A session that disappears through a path this narrow match does
+/// not cover is a known upstream gap, not something this function should
+/// paper over — see docs/gotchas/native-acp-resume-continuity.md.
+fn classify_response_error(error: &Value, requested_session: Option<&str>) -> AcpError {
+    let code = error.get("code").and_then(Value::as_i64);
+    let message = error.get("message").and_then(Value::as_str).unwrap_or("");
+    let session_id = error
+        .get("data")
+        .and_then(|data| data.get("sessionId"))
+        .and_then(Value::as_str);
+    if code == Some(JSON_RPC_INVALID_PARAMS)
+        && requested_session.is_some_and(|id| {
+            !id.is_empty()
+                && id.trim() == id
+                && !id.chars().any(char::is_control)
+                && session_id == Some(id)
+                && message == format!("session not found: {id}")
+        })
+    {
+        return AcpError::SessionNotFound;
+    }
+    AcpError::Transport(format!("ACP response error: {error}"))
+}
+
 async fn fail_pending(pending: &PendingRequests, error: AcpError) {
     let waiters = std::mem::take(&mut *pending.lock().await);
-    for (_, sender) in waiters {
-        let _ = sender.send(Err(AcpError::Transport(error.to_string())));
+    for (_, request) in waiters {
+        let _ = request
+            .sender
+            .send(Err(AcpError::Transport(error.to_string())));
     }
 }
 
@@ -666,9 +742,9 @@ fn handle_client_request(
 /// (`session/new`), prompt turns (`session/prompt`), cancellation
 /// (`session/cancel` notification) and stdio MCP servers. These are core
 /// methods, not negotiated flags, so they must never be gated behind an
-/// `agentCapabilities` sub-object. Only session loading (`loadSession`) and
-/// scoped permission negotiation are genuinely optional and advertised per
-/// agent at `initialize`.
+/// `agentCapabilities` sub-object. Session loading and session resumption are
+/// separate optional capabilities: loading replays history, while resumption
+/// does not. Scoped permission negotiation is optional too.
 ///
 /// A model/mode catalogue is deliberately NOT derived here: the ACP
 /// session-config-options contract returns selectable options in the
@@ -684,12 +760,21 @@ fn agent_capabilities(agent_caps: &Value) -> BTreeSet<AcpCapability> {
     .into_iter()
     .collect();
     if let Some(object) = agent_caps.as_object() {
-        // `loadSession` is an ACP bool; an explicit `false` means resume is not
-        // supported, so never assume it works from mere key presence.
+        // `loadSession` replays history, so it is never evidence that a delta
+        // can safely use `session/resume`.
         if object
             .get("loadSession")
             .map(|value| value.as_bool().unwrap_or(true))
             .unwrap_or(false)
+        {
+            caps.insert(AcpCapability::LoadSession);
+        }
+        if object
+            .get("sessionCapabilities")
+            .and_then(Value::as_object)
+            .and_then(|capabilities| capabilities.get("resume"))
+            .and_then(Value::as_object)
+            .is_some()
         {
             caps.insert(AcpCapability::Resume);
         }
@@ -918,15 +1003,15 @@ impl AcpTransport for AcpJsonRpcTransport {
         self.broker
             .bind_protocol_session(&target.session_id)
             .map_err(AcpError::Transport)?;
-        // ACP session-resume must restate the workspace scope (`cwd` +
-        // `mcpServers`), not only the opaque session id, so the resumed session
-        // keeps Kronn's project MCP registry and working directory.
+        // `session/resume` restores the session without the history replay that
+        // `session/load` mandates, so it is the only lifecycle call paired with
+        // a delta prompt.
         let setup = self.session_setup.lock().await.clone().ok_or_else(|| {
             AcpError::Transport("ACP session/resume was called before initialize".into())
         })?;
         let result = self
             .request(
-                "session/load",
+                "session/resume",
                 json!({
                     "sessionId": target.session_id,
                     "cwd": setup.cwd,
@@ -1610,21 +1695,53 @@ mod tests {
         assert!(baseline.contains(&AcpCapability::Streaming));
         assert!(baseline.contains(&AcpCapability::Cancellation));
         assert!(baseline.contains(&AcpCapability::McpInjection));
+        assert!(!baseline.contains(&AcpCapability::LoadSession));
         assert!(!baseline.contains(&AcpCapability::Resume));
 
         // Optional capabilities are added only when genuinely advertised. A
         // model catalogue is NOT one of them: it is discovered from the
         // session response, never from a fabricated initialize object.
         let extended = agent_capabilities(&json!({
-            "loadSession": true, "modelCapabilities": {}, "permissionCapabilities": {}
+            "loadSession": true,
+            "sessionCapabilities": {"resume": {}},
+            "modelCapabilities": {}, "permissionCapabilities": {}
         }));
+        assert!(extended.contains(&AcpCapability::LoadSession));
         assert!(extended.contains(&AcpCapability::Resume));
         assert!(extended.contains(&AcpCapability::Permissions));
 
-        // An explicit `loadSession: false` must not enable resume.
+        // Loading is not resumption: neither a false nor a true load flag may
+        // enable `session/resume` by itself.
         assert!(
             !agent_capabilities(&json!({"loadSession": false})).contains(&AcpCapability::Resume)
         );
+        assert!(!agent_capabilities(&json!({"loadSession": true})).contains(&AcpCapability::Resume));
+    }
+
+    #[test]
+    fn null_or_malformed_resume_capabilities_do_not_advertise_resume() {
+        // ACP explicitly permits null to mean unsupported; a present key is
+        // not sufficient. Other non-object values cannot negotiate support.
+        for value in [
+            Value::Null,
+            json!(false),
+            json!(true),
+            json!(0),
+            json!("yes"),
+            json!([]),
+        ] {
+            assert!(
+                !agent_capabilities(&json!({"sessionCapabilities": {"resume": value}}))
+                    .contains(&AcpCapability::Resume),
+                "non-object resume advertisement must not cause session/resume: {value}"
+            );
+        }
+        for value in [json!({}), json!({"_meta": {"vendor": "fixture"}})] {
+            assert!(
+                agent_capabilities(&json!({"sessionCapabilities": {"resume": value}}))
+                    .contains(&AcpCapability::Resume)
+            );
+        }
     }
 
     #[test]
@@ -1872,5 +1989,103 @@ mod tests {
             AcpError::InvalidSessionResponse
         );
         assert_eq!(session_id(&json!({"sessionId": "acp-1"})).unwrap(), "acp-1");
+    }
+
+    #[test]
+    fn classify_response_error_maps_only_the_exact_opencode_missing_session_shape() {
+        let matching = json!({"code": -32602, "message": "session not found: native-id", "data": {"sessionId": "native-id"}});
+        assert_eq!(
+            classify_response_error(&matching, Some("native-id")),
+            AcpError::SessionNotFound
+        );
+        for requested in [None, Some("different-id")] {
+            assert!(matches!(
+                classify_response_error(&matching, requested),
+                AcpError::Transport(_)
+            ));
+        }
+        for error in [
+            json!({"code": -32602, "message": "session not found: native-id", "data": {"sessionId": "different-id"}}),
+            json!({"code": -32602, "message": "session not found: native-id because authentication failed", "data": {"sessionId": "native-id"}}),
+            json!({"code": -32602, "message": "session not found: native-id"}),
+            json!({"code": -32000, "message": "session not found: native-id", "data": {"sessionId": "native-id"}}),
+            json!({"code": -32603, "message": "internal error"}),
+            json!({"code": -32002, "message": "resource not found"}),
+        ] {
+            assert!(
+                matches!(
+                    classify_response_error(&error, Some("native-id")),
+                    AcpError::Transport(_)
+                ),
+                "only the exact structured error for the requested session permits replay"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn resume_session_over_the_real_transport_maps_the_structured_session_not_found_error() {
+        let mut command = crate::core::cmd::async_cmd("sh");
+        command.args(["-c", "while IFS= read -r line; do case \"$line\" in *'\"method\":\"initialize\"'*) printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":1,\"agentCapabilities\":{\"sessionCapabilities\":{\"resume\":{}}}}}' ;; *'\"method\":\"session/resume\"'*) printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":2,\"error\":{\"code\":-32602,\"message\":\"session not found: gone-id\",\"data\":{\"sessionId\":\"gone-id\"}}}' ;; esac; done"]);
+        let transport = AcpJsonRpcTransport::spawn(AcpAgent::OpenCode, command, false)
+            .await
+            .unwrap();
+        transport.initialize(request()).await.unwrap();
+        let target = AcpSessionTarget::new(AcpAgent::OpenCode, "gone-id").unwrap();
+        assert_eq!(
+            transport.resume_session(&target).await.unwrap_err(),
+            AcpError::SessionNotFound
+        );
+        transport.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn resume_session_over_the_real_transport_keeps_an_ambiguous_error_as_transport() {
+        // A timeout/auth/unstructured failure from the real process must never
+        // be read as a positively-identified missing session: the caller
+        // (run_acp_session) fails closed on `Transport` instead of silently
+        // starting a replacement session and resending the prompt.
+        let mut command = crate::core::cmd::async_cmd("sh");
+        command.args(["-c", "while IFS= read -r line; do case \"$line\" in *'\"method\":\"initialize\"'*) printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":1,\"agentCapabilities\":{\"sessionCapabilities\":{\"resume\":{}}}}}' ;; *'\"method\":\"session/resume\"'*) printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":2,\"error\":{\"code\":-32603,\"message\":\"internal error\"}}' ;; esac; done"]);
+        let transport = AcpJsonRpcTransport::spawn(AcpAgent::OpenCode, command, false)
+            .await
+            .unwrap();
+        transport.initialize(request()).await.unwrap();
+        let target = AcpSessionTarget::new(AcpAgent::OpenCode, "ambiguous-id").unwrap();
+        let error = transport.resume_session(&target).await.unwrap_err();
+        assert!(matches!(error, AcpError::Transport(_)));
+        assert_ne!(error, AcpError::SessionNotFound);
+        transport.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn missing_session_fallback_is_bound_to_the_exact_opencode_resume_request() {
+        for (agent, method, requested, expected_missing) in [
+            (AcpAgent::OpenCode, "session/resume", "gone-id", true),
+            (AcpAgent::OpenCode, "session/resume", "another-id", false),
+            (AcpAgent::OpenCode, "session/prompt", "gone-id", false),
+            (AcpAgent::Codex, "session/resume", "gone-id", false),
+        ] {
+            let mut command = crate::core::cmd::async_cmd("sh");
+            command.args(["-c", r#"while IFS= read -r line; do
+case "$line" in
+*'"method":"initialize"'*) printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{"sessionCapabilities":{"resume":{}}}}}' ;;
+*) printf '%s\n' '{"jsonrpc":"2.0","id":2,"error":{"code":-32602,"message":"session not found: gone-id","data":{"sessionId":"gone-id"}}}' ;;
+esac
+done"#]);
+            let transport = AcpJsonRpcTransport::spawn(agent, command, false)
+                .await
+                .unwrap();
+            transport.initialize(request()).await.unwrap();
+            let error = transport
+                .request(method, json!({"sessionId": requested}))
+                .await
+                .unwrap_err();
+            if expected_missing {
+                assert_eq!(error, AcpError::SessionNotFound);
+            } else {
+                assert!(matches!(error, AcpError::Transport(_)));
+            }
+            transport.shutdown().await.unwrap();
+        }
     }
 }

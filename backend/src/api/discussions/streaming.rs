@@ -1388,10 +1388,10 @@ fn messages_not_yet_seen(
 
 /// Decide whether this turn can continue the CLI's own conversation.
 ///
-/// Kronn's default is to re-narrate the whole discussion every turn. That is
-/// always correct and always expensive: the same history is re-sent, re-read
-/// and re-billed at each message. When the CLI still holds the conversation,
-/// the turn can instead carry only what the agent has not seen.
+/// Kronn's default sends the ordinary bounded discussion prompt. When the
+/// runtime still holds a proven conversation, the turn can instead carry only
+/// the retained messages it has not seen. This reduces repeated input, but
+/// does not establish any provider's caching or billing behavior.
 ///
 /// Returns the prompt to send and, when resuming, the conversation to resume.
 /// The two travel together on purpose: a delta prompt WITHOUT `--resume` loses
@@ -1407,42 +1407,86 @@ async fn resume_with_delta_if_possible(
     extra_context_len: usize,
     full_prompt: String,
     is_task_worker: bool,
-) -> (String, Option<String>) {
+) -> (String, Option<String>, Option<String>) {
+    let checkpoint = prompt_disc
+        .messages
+        .last()
+        .map(|message| message.id.clone());
     // A task worker opens on a fresh worktree with the task as its first turn.
     // Resuming a room's conversation there would hand it a history it has no
     // business seeing — and the runner refuses the id anyway, which would
     // leave the delta prompt travelling alone.
-    if is_task_worker || !runner::AcpSessionStore::tracks_cli_print(agent_type) {
-        return (full_prompt, None);
+    let native_acp = runner::AcpSessionStore::tracks_native_delta(agent_type);
+    // An enabled Claude/Codex adapter owns an ACP session too.  It must use
+    // its adapter runtime key and the same proven delta/id pair; the old
+    // direct-CLI key is not interchangeable with it.
+    let adapted_acp = matches!(
+        crate::acp::resolve_acp_route(agent_type),
+        crate::acp::AcpProductionRoute::AdaptedAcp
+    );
+    let acp_delta = native_acp || adapted_acp;
+    let cli_print = runner::AcpSessionStore::tracks_cli_print(agent_type);
+    if is_task_worker || (!acp_delta && !cli_print) {
+        return (full_prompt, None, checkpoint);
     }
     let Ok(scope) = runner::resolve_agent_work_dir(work_dir, project_path) else {
-        return (full_prompt, None);
+        return (full_prompt, None, checkpoint);
     };
-    let Ok(Some((conversation_id, Some(last_seen)))) =
-        store.load_cli_print(agent_type, &scope).await
+    let Ok(Some(completed)) = store
+        .load_completed_checkpoint(agent_type, &scope, !acp_delta)
+        .await
     else {
-        return (full_prompt, None);
+        return (full_prompt, None, checkpoint);
     };
-    // A dead id does not degrade the turn, it FAILS it. Ask the store first.
-    if !runner::cli_print_session_is_resumable(&scope, &conversation_id) {
-        return (full_prompt, None);
+    let conversation_id = completed.conversation_id;
+    // Claude can probe its own `--print --resume` session before shrinking the
+    // prompt: `conversation_id` there names a `<id>.jsonl` file under
+    // `~/.claude/projects/...`. That probe is meaningless once `acp_delta` is
+    // true — the id loaded above then comes from the ACP adapter runtime key
+    // (`claude_cli_adapter_v1`/`opencode_acp_v1`), never a `--print` file, so
+    // testing it against the CLI-print store would always miss and silently
+    // force a full prompt on every adapted/native turn. Native ACP exposes no
+    // side-effect-free probe either, so the runner owns the full-prompt
+    // fallback there when negotiated continuation reports a safe absence.
+    if cli_print && !acp_delta && !runner::cli_print_session_is_resumable(&scope, &conversation_id)
+    {
+        return (full_prompt, None, checkpoint);
     }
-    let Some(unseen) = messages_not_yet_seen(&prompt_disc.messages, &last_seen) else {
-        return (full_prompt, None);
+    let Some(mut unseen) =
+        messages_not_yet_seen(&prompt_disc.messages, &completed.input_message_id)
+    else {
+        return (full_prompt, None, checkpoint);
     };
+    // Only the exact durable response of the completed turn is already in the
+    // provider's conversation. Never skip every message by this agent: a
+    // different CLI of the same provider may have written in the interval.
+    if !unseen
+        .iter()
+        .any(|message| message.id == completed.output_message_id)
+    {
+        return (full_prompt, None, checkpoint);
+    }
+    unseen.retain(|message| message.id != completed.output_message_id);
+    if unseen.is_empty() {
+        return (full_prompt, None, checkpoint);
+    }
     let mut delta_disc = prompt_disc.clone();
     delta_disc.messages = unseen;
-    let delta_prompt = build_agent_prompt(&delta_disc, agent_type, extra_context_len);
+    let delta_prompt = crate::api::disc_prompts::build_agent_delta_prompt(
+        &delta_disc,
+        agent_type,
+        extra_context_len,
+    );
     // A delta that saves nothing is not worth the divergence risk it carries.
     if delta_prompt.len() >= full_prompt.len() {
-        return (full_prompt, None);
+        return (full_prompt, None, checkpoint);
     }
     tracing::debug!(
         conversation_id = %conversation_id,
         saved_bytes = full_prompt.len() - delta_prompt.len(),
         "resuming the CLI conversation instead of replaying the discussion"
     );
-    (delta_prompt, Some(conversation_id))
+    (delta_prompt, Some(conversation_id), checkpoint)
 }
 
 async fn make_agent_stream_inner(
@@ -2448,7 +2492,8 @@ async fn make_agent_stream_inner(
     // made Kronn slower than the same CLI driven by hand. Continue the
     // conversation the CLI already holds whenever that can be proven safe.
     let acp_session_store = runner::AcpSessionStore::new(state.db.clone(), discussion_id.clone());
-    let (prompt, cli_resume_id) = resume_with_delta_if_possible(
+    let full_prompt = prompt.clone();
+    let (prompt, cli_resume_id, acp_progress_message_id) = resume_with_delta_if_possible(
         &acp_session_store,
         &agent_type,
         workspace_path.as_deref(),
@@ -2669,6 +2714,7 @@ async fn make_agent_stream_inner(
             // bridge knows which discussion to introspect when called.
             discussion_id: Some(&discussion_id),
             acp_session_store: Some(acp_session_store.clone()),
+            native_acp_full_prompt: Some(&full_prompt),
             cli_resume_id: cli_resume_id.as_deref(),
             task_worker_context: cli_task_worker_context.as_ref(),
             // Only HTTP agents consume this: CLI agents already reach the same
@@ -3052,19 +3098,15 @@ async fn make_agent_stream_inner(
                                 }
                             }
                             runner::StreamJsonEvent::SessionId(session_id) => {
-                                // The `init` line, so this lands before any work.
-                                // Recorded once per turn: the id never changes
-                                // mid-stream, and a turn cut short still leaves
-                                // a conversation its successor can resume.
+                                // Capture the CLI's init identity and invalidate
+                                // the previous checkpoint. Only this store's
+                                // successful durable response certifies the turn;
+                                // an interrupted turn cannot supply a delta.
                                 if !cli_session_persisted
                                     && runner::AcpSessionStore::tracks_cli_print(&agent_type)
                                 {
                                     cli_session_persisted = true;
-                                    let store = runner::AcpSessionStore::new(
-                                        state.db.clone(),
-                                        discussion_id.clone(),
-                                    );
-                                    if let Err(error) = store
+                                    if let Err(error) = acp_session_store
                                         .persist_cli_print(&agent_type, &session_scope, &session_id)
                                         .await
                                     {
@@ -3559,10 +3601,32 @@ async fn make_agent_stream_inner(
                 let msg = agent_msg.clone();
                 let source_agent = agent_type.clone();
                 let dispatch_id = dispatch_job_id.clone();
+                let checkpoint = if child_run_was_success {
+                    runner::resolve_agent_work_dir(workspace_path.as_deref(), &project_path)
+                        .ok()
+                        .zip(acp_progress_message_id.as_deref())
+                        .and_then(|(scope, input_id)| {
+                            let acp_delta =
+                                runner::AcpSessionStore::tracks_native_delta(&agent_type)
+                                    || matches!(
+                                        crate::acp::resolve_acp_route(&agent_type),
+                                        crate::acp::AcpProductionRoute::AdaptedAcp
+                                    );
+                            acp_session_store.completion_checkpoint(
+                                &agent_type,
+                                &scope,
+                                !acp_delta,
+                                input_id,
+                                &agent_msg.id,
+                            )
+                        })
+                } else {
+                    None
+                };
                 match state
                     .db
                     .with_conn(move |conn| {
-                        crate::db::discussions::insert_native_agent_message_with_handoffs(
+                        crate::db::discussions::insert_native_agent_message_with_checkpoint(
                             conn,
                             &did,
                             &msg,
@@ -3572,31 +3636,12 @@ async fn make_agent_stream_inner(
                             &candidate_handoffs,
                             handoffs_enabled,
                             handoff_paid_limit,
+                            checkpoint.as_ref(),
                         )
                     })
                     .await
                 {
                     Ok(outcome) => {
-                        // KT-562 — the reply is stored, so the agent has now
-                        // seen everything up to and including it. Recorded
-                        // HERE and not at the start of the turn: a turn that
-                        // dies before this point must be replayed in full, not
-                        // silently skipped over.
-                        if let Ok(scope) =
-                            runner::resolve_agent_work_dir(workspace_path.as_deref(), &project_path)
-                        {
-                            if let Err(error) = acp_session_store
-                                .record_cli_print_progress(&agent_type, &scope, &agent_msg.id)
-                                .await
-                            {
-                                // Losing the cursor costs a full replay next
-                                // turn, which is merely the old behaviour.
-                                tracing::warn!(
-                                    discussion_id = %disc_id,
-                                    "Unable to record CLI conversation progress: {error}"
-                                );
-                            }
-                        }
                         if !outcome.dispatched_agents.is_empty() {
                             tracing::info!(
                                 discussion_id = %disc_id,
@@ -5385,7 +5430,9 @@ mod resume_delta_tests {
     //! KT-562 — what a resumed turn actually sends. Every wrong answer here is
     //! an invisible one: the agent replies confidently to a history it was
     //! never given.
-    use super::messages_not_yet_seen;
+    use super::runner;
+    use super::{messages_not_yet_seen, resume_with_delta_if_possible};
+    use crate::agents::runner::AcpSessionStore;
     use crate::models::{AgentType, DiscussionMessage, MessageChannel, MessageRole};
     use chrono::Utc;
 
@@ -5413,6 +5460,73 @@ mod resume_delta_tests {
             target_agent: None,
             reply_to_message_id: None,
         }
+    }
+
+    fn seed_completed_checkpoint(
+        conn: &rusqlite::Connection,
+        discussion_id: &str,
+        agent_type: &str,
+        runtime: &str,
+        scope: &str,
+        session_id: &str,
+    ) -> anyhow::Result<()> {
+        use crate::db::acp_runtime_sessions::{self, SessionKey, TurnCompletion};
+        let key = SessionKey {
+            discussion_id: discussion_id.into(),
+            agent_type: agent_type.into(),
+            runtime: runtime.into(),
+            project_scope: scope.into(),
+        };
+        acp_runtime_sessions::begin_turn(conn, &key, session_id, "fixture-completed-turn")?;
+        assert!(acp_runtime_sessions::complete_turn(
+            conn,
+            &TurnCompletion {
+                key,
+                turn_id: "fixture-completed-turn".into(),
+                input_message_id: "m1".into(),
+                output_message_id: "own-reply".into(),
+            }
+        )?);
+        Ok(())
+    }
+
+    #[test]
+    fn delta_rendering_preserves_peer_messages_and_ignores_old_summary_offsets() {
+        let disc: crate::models::Discussion = serde_json::from_value(serde_json::json!({
+            "id": "render-delta", "title": "Delta", "agent": "OpenCode", "language": "en",
+            "participants": ["OpenCode"], "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
+            "messages": [message("peer", MessageRole::Agent), message("human", MessageRole::User)],
+            "pin_first_message": true, "summary_cache": "OLD_ALREADY_SEEN_SUMMARY", "summary_up_to_msg_idx": 90
+        })).unwrap();
+        let prompt =
+            crate::api::disc_prompts::build_agent_delta_prompt(&disc, &AgentType::OpenCode, 0);
+        assert!(prompt.contains("content of peer"));
+        assert!(prompt.contains("content of human"));
+        assert!(!prompt.contains("OLD_ALREADY_SEEN_SUMMARY"));
+        assert!(!prompt.contains("INSTRUCTIONS DU PROTOCOLE"));
+    }
+
+    #[test]
+    fn delta_rendering_does_not_silently_truncate_an_unseen_message_to_fit_the_budget() {
+        let mut first = message("unseen-first", MessageRole::User);
+        first.content.push_str(&"x".repeat(1000));
+        let disc: crate::models::Discussion = serde_json::from_value(serde_json::json!({
+            "id": "render-delta", "title": "Delta", "agent": "OpenCode", "language": "en",
+            "participants": ["OpenCode"], "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
+            "messages": [first, message("unseen-last", MessageRole::User)]
+        })).unwrap();
+        let full = super::build_agent_prompt(&disc, &AgentType::OpenCode, usize::MAX);
+        let delta = crate::api::disc_prompts::build_agent_delta_prompt(
+            &disc,
+            &AgentType::OpenCode,
+            usize::MAX,
+        );
+        assert!(!full.contains("content of unseen-first"));
+        assert!(delta.contains("content of unseen-first"));
+        assert!(delta.contains("content of unseen-last"));
+        // The discussion's size gate must reject this oversized delta and
+        // use the honest bounded full prompt, not certify omitted input.
+        assert!(delta.len() >= full.len());
     }
 
     #[test]
@@ -5463,6 +5577,524 @@ mod resume_delta_tests {
         let unseen = messages_not_yet_seen(&history, "m2").expect("a delta exists");
         assert_eq!(unseen.len(), 1);
         assert_eq!(unseen[0].id, "m3");
+    }
+
+    #[tokio::test]
+    async fn delta_decision_checkpoints_the_input_boundary_not_the_future_reply() {
+        let db = std::sync::Arc::new(crate::db::Database::open_in_memory().unwrap());
+        let store = AcpSessionStore::new(db.clone(), "delta-discussion");
+        db.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO discussions (id, title, created_at, updated_at)
+                 VALUES ('delta-discussion', 'Delta', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let scope = crate::agents::runner::resolve_agent_work_dir(Some("."), ".").unwrap();
+        let scope_for_db = scope.to_string_lossy().into_owned();
+        db.with_conn(move |conn| {
+            seed_completed_checkpoint(
+                conn,
+                "delta-discussion",
+                "OpenCode",
+                "opencode_acp_v1",
+                &scope_for_db,
+                "native-id",
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let discussion: crate::models::Discussion = serde_json::from_value(serde_json::json!({
+            "id": "delta-discussion",
+            "project_id": null,
+            "title": "Delta",
+            "agent": "OpenCode",
+            "language": "en",
+            "participants": ["OpenCode"],
+            "messages": [message("m1", MessageRole::User), message("own-reply", MessageRole::Agent), message("m2", MessageRole::User)],
+            "message_count": 3,
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z"
+        }))
+        .unwrap();
+        let (prompt, resume_id, checkpoint) = resume_with_delta_if_possible(
+            &store,
+            &AgentType::OpenCode,
+            Some("."),
+            ".",
+            &discussion,
+            0,
+            "full prompt with m1 and m2 ".repeat(200),
+            false,
+        )
+        .await;
+        assert_eq!(resume_id.as_deref(), Some("native-id"));
+        assert_eq!(checkpoint.as_deref(), Some("m2"));
+        assert!(prompt.contains("content of m2"));
+    }
+
+    #[tokio::test]
+    async fn delta_without_a_size_gain_keeps_the_full_prompt_and_declines_resume() {
+        let db = std::sync::Arc::new(crate::db::Database::open_in_memory().unwrap());
+        let store = AcpSessionStore::new(db.clone(), "delta-no-gain");
+        db.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO discussions (id, title, created_at, updated_at)
+                 VALUES ('delta-no-gain', 'Delta', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let scope = crate::agents::runner::resolve_agent_work_dir(Some("."), ".").unwrap();
+        let scope_for_db = scope.to_string_lossy().into_owned();
+        db.with_conn(move |conn| {
+            seed_completed_checkpoint(
+                conn,
+                "delta-no-gain",
+                "OpenCode",
+                "opencode_acp_v1",
+                &scope_for_db,
+                "native-id",
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let discussion: crate::models::Discussion = serde_json::from_value(serde_json::json!({
+            "id": "delta-no-gain",
+            "project_id": null,
+            "title": "Delta",
+            "agent": "OpenCode",
+            "language": "en",
+            "participants": ["OpenCode"],
+            "messages": [message("m1", MessageRole::User), message("own-reply", MessageRole::Agent), message("m2", MessageRole::User)],
+            "message_count": 3,
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z"
+        }))
+        .unwrap();
+        let full_prompt = "short full prompt".to_owned();
+        let (prompt, resume_id, checkpoint) = resume_with_delta_if_possible(
+            &store,
+            &AgentType::OpenCode,
+            Some("."),
+            ".",
+            &discussion,
+            0,
+            full_prompt.clone(),
+            false,
+        )
+        .await;
+        assert_eq!(prompt, full_prompt);
+        assert_eq!(resume_id, None);
+        assert_eq!(checkpoint.as_deref(), Some("m2"));
+    }
+
+    /// KT-621 review — the CLI-print resumability probe checks for a
+    /// `--print --resume` `<id>.jsonl` file, which an ACP-adapter session id
+    /// never has. Before the fix that probe still ran whenever
+    /// `AcpSessionStore::tracks_cli_print` was true (Claude), regardless of
+    /// which route actually produced the id, so it always missed for an
+    /// adapted Claude session and silently forced a full prompt on every
+    /// turn — the adapter's delta continuation never fired.
+    #[tokio::test]
+    #[serial_test::serial(acp_adapter_env_toggle)]
+    async fn adapted_claude_resume_is_not_gated_by_the_print_resume_file_probe() {
+        struct RestoreAdapterEnv(Option<std::ffi::OsString>);
+        impl Drop for RestoreAdapterEnv {
+            fn drop(&mut self) {
+                if let Some(value) = self.0.as_ref() {
+                    std::env::set_var("KRONN_ACP_ADAPTER_CLAUDE", value);
+                } else {
+                    std::env::remove_var("KRONN_ACP_ADAPTER_CLAUDE");
+                }
+            }
+        }
+        let _restore = RestoreAdapterEnv(std::env::var_os("KRONN_ACP_ADAPTER_CLAUDE"));
+        std::env::set_var("KRONN_ACP_ADAPTER_CLAUDE", "1");
+
+        let db = std::sync::Arc::new(crate::db::Database::open_in_memory().unwrap());
+        let store = AcpSessionStore::new(db.clone(), "adapted-claude-disc");
+        db.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO discussions (id, title, created_at, updated_at)
+                 VALUES ('adapted-claude-disc', 'Adapted', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let scope = crate::agents::runner::resolve_agent_work_dir(Some("."), ".").unwrap();
+        let scope_for_db = scope.to_string_lossy().into_owned();
+        db.with_conn(move |conn| {
+            seed_completed_checkpoint(
+                conn,
+                "adapted-claude-disc",
+                "ClaudeCode",
+                "claude_cli_adapter_v1",
+                &scope_for_db,
+                // Never a real `--print --resume` conversation id — an
+                // adapter-minted id has no matching `.jsonl` file anywhere,
+                // by construction, so this proves the probe was skipped
+                // rather than having happened to pass.
+                "adapter-session-with-no-print-file",
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let discussion: crate::models::Discussion = serde_json::from_value(serde_json::json!({
+            "id": "adapted-claude-disc", "project_id": null, "title": "Adapted", "agent": "ClaudeCode",
+            "language": "en", "participants": ["ClaudeCode"],
+            "messages": [message("m1", MessageRole::User), message("own-reply", MessageRole::Agent), message("m2", MessageRole::User)],
+            "message_count": 3,
+            "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z"
+        }))
+        .unwrap();
+        let (prompt, resume_id, checkpoint) = resume_with_delta_if_possible(
+            &store,
+            &AgentType::ClaudeCode,
+            Some("."),
+            ".",
+            &discussion,
+            0,
+            "full prompt with m1 and m2 ".repeat(200),
+            false,
+        )
+        .await;
+
+        assert_eq!(
+            resume_id.as_deref(),
+            Some("adapter-session-with-no-print-file"),
+            "the adapter's own recorded session must be resumed without a --print file probe"
+        );
+        assert_eq!(checkpoint.as_deref(), Some("m2"));
+        assert!(prompt.contains("content of m2"));
+        assert!(!prompt.contains("content of m1"));
+    }
+
+    /// KT-621 — the production chain, not the helper in isolation: the exact
+    /// decision function above, feeding the exact `start_agent_with_config`
+    /// NativeAcp route (only its I/O boundary is a fixture), against an
+    /// on-disk database closed and reopened between turns — the way a
+    /// backend restart or a second HTTP request actually behaves. A peer
+    /// message written between turns must survive the delta untouched, and
+    /// the runtime's own reply from turn 1 must never come back.
+    #[tokio::test]
+    async fn two_turns_through_the_real_decision_and_spawn_chain_survive_a_db_reopen() {
+        use crate::acp::{
+            AcpAgent, AcpCapability, AcpConfigOption, AcpError as TransportError, AcpInitialize,
+            AcpNegotiatedCapabilities, AcpSessionEvent, AcpSessionTarget, AcpTransport,
+        };
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Mutex as StdMutex;
+
+        struct ChainTransport {
+            created: AtomicUsize,
+            resumed: AtomicUsize,
+            prompts: StdMutex<Vec<String>>,
+        }
+
+        #[async_trait::async_trait]
+        impl AcpTransport for ChainTransport {
+            async fn initialize(
+                &self,
+                _: AcpInitialize,
+            ) -> Result<AcpNegotiatedCapabilities, TransportError> {
+                Ok(AcpNegotiatedCapabilities {
+                    protocol_version: 1,
+                    capabilities: std::collections::BTreeSet::from([
+                        AcpCapability::Sessions,
+                        AcpCapability::Resume,
+                        AcpCapability::Streaming,
+                        AcpCapability::Cancellation,
+                        AcpCapability::McpInjection,
+                    ]),
+                })
+            }
+            async fn create_session(&self) -> Result<AcpSessionTarget, TransportError> {
+                self.created.fetch_add(1, Ordering::SeqCst);
+                AcpSessionTarget::new(AcpAgent::OpenCode, "chain-native-session")
+            }
+            async fn config_options(&self) -> Vec<AcpConfigOption> {
+                Vec::new()
+            }
+            async fn set_config_option(
+                &self,
+                _: &AcpSessionTarget,
+                _: &str,
+                _: &str,
+            ) -> Result<(), TransportError> {
+                Ok(())
+            }
+            async fn resume_session(&self, _: &AcpSessionTarget) -> Result<(), TransportError> {
+                self.resumed.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+            async fn prompt(
+                &self,
+                _: &AcpSessionTarget,
+                prompt: &str,
+                events: tokio::sync::mpsc::Sender<AcpSessionEvent>,
+            ) -> Result<(), TransportError> {
+                self.prompts.lock().unwrap().push(prompt.to_owned());
+                events
+                    .send(AcpSessionEvent::TextDelta("kt621-own-native-answer".into()))
+                    .await
+                    .unwrap();
+                events.send(AcpSessionEvent::Completed).await.unwrap();
+                Ok(())
+            }
+            async fn cancel(&self, _: &AcpSessionTarget) -> Result<(), TransportError> {
+                Ok(())
+            }
+            async fn shutdown(&self) -> Result<(), TransportError> {
+                Ok(())
+            }
+        }
+
+        let fixture = std::sync::Arc::new(ChainTransport {
+            created: AtomicUsize::new(0),
+            resumed: AtomicUsize::new(0),
+            prompts: StdMutex::new(Vec::new()),
+        });
+        let transport: std::sync::Arc<dyn AcpTransport> = fixture.clone();
+
+        let project = tempfile::tempdir().unwrap();
+        let project_path = project.path().to_str().unwrap();
+        let db_dir = tempfile::tempdir().unwrap();
+        let db_path = db_dir.path().join("chain.db");
+        let tokens = crate::models::setup::TokensConfig {
+            anthropic: None,
+            openai: None,
+            google: None,
+            keys: Vec::new(),
+            disabled_overrides: Vec::new(),
+        };
+        let scope = runner::resolve_agent_work_dir(Some(project_path), project_path).unwrap();
+
+        let db = std::sync::Arc::new(crate::db::Database::open_path(&db_path).unwrap());
+        db.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO discussions (id, title, agent, created_at, updated_at)
+                 VALUES ('chain-disc', 'Chain', 'OpenCode', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                [],
+            )?;
+            let mut first = message("m1", MessageRole::User);
+            first.content = "content of m1 ".repeat(200);
+            crate::db::discussions::insert_message(conn, "chain-disc", &first)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let store = AcpSessionStore::new(db.clone(), "chain-disc");
+
+        // --- Turn 1: nothing recorded yet — must send the full transcript
+        // and create a fresh native session.
+        let discussion_t1 = db
+            .with_conn(|conn| crate::db::discussions::get_discussion(conn, "chain-disc"))
+            .await
+            .unwrap()
+            .unwrap();
+        let full_prompt_t1 = super::build_agent_prompt(&discussion_t1, &AgentType::OpenCode, 0);
+        let (prompt1, resume_id1, checkpoint1) = resume_with_delta_if_possible(
+            &store,
+            &AgentType::OpenCode,
+            Some(project_path),
+            project_path,
+            &discussion_t1,
+            0,
+            full_prompt_t1,
+            false,
+        )
+        .await;
+        assert_eq!(resume_id1, None);
+        assert_eq!(checkpoint1.as_deref(), Some("m1"));
+
+        let mut turn1 = runner::start_agent_with_config(runner::AgentStartConfig {
+            cli_resume_id: resume_id1.as_deref(),
+            acp_session_store: Some(store.clone()),
+            discussion_id: Some("chain-disc"),
+            test_acp_transport: Some(transport.clone()),
+            ..runner::AgentStartConfig::new(&AgentType::OpenCode, project_path, &prompt1, &tokens)
+        })
+        .await
+        .unwrap();
+        while turn1.next_line().await.is_some() {}
+        assert!(turn1.child.wait().await.unwrap().success());
+        let completion1 = store
+            .completion_checkpoint(
+                &AgentType::OpenCode,
+                &scope,
+                false,
+                checkpoint1.as_deref().unwrap(),
+                "own-reply-1",
+            )
+            .unwrap();
+        db.with_conn(move |conn| {
+            // Another agent writes after the input snapshot, but before our
+            // reply is persisted. A cursor at the reply would lose this peer.
+            let mut peer = message("peer-before-reply", MessageRole::Agent);
+            // A different CLI of the same provider is still unseen input.
+            peer.agent_type = Some(AgentType::OpenCode);
+            crate::db::discussions::insert_message(conn, "chain-disc", &peer)?;
+            let mut reply = message("own-reply-1", MessageRole::Agent);
+            reply.agent_type = Some(AgentType::OpenCode);
+            reply.content = "kt621-own-native-answer".into();
+            crate::db::discussions::insert_native_agent_message_with_checkpoint(
+                conn,
+                "chain-disc",
+                &reply,
+                true,
+                None,
+                &AgentType::OpenCode,
+                &[],
+                false,
+                None,
+                Some(&completion1),
+            )?;
+            crate::db::discussions::insert_message(
+                conn,
+                "chain-disc",
+                &message("m2", MessageRole::User),
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        // This is the same atomic response/checkpoint writer used by the
+        // streaming handler, not an independently mirrored cursor update.
+        assert_eq!(fixture.created.load(Ordering::SeqCst), 1);
+        assert_eq!(fixture.resumed.load(Ordering::SeqCst), 0);
+
+        // --- Reopen the database from disk: the session id and the cursor
+        // must both survive a reconnect, not just live in the open handle.
+        drop(turn1);
+        drop(store);
+        assert_eq!(std::sync::Arc::strong_count(&db), 1);
+        drop(db);
+        let db2 = std::sync::Arc::new(crate::db::Database::open_path(&db_path).unwrap());
+        let store2 = AcpSessionStore::new(db2.clone(), "chain-disc");
+
+        // --- Turn 2: carry both the interleaved peer and the next human
+        // message, but never our own reply already held by the runtime.
+        let discussion_t2 = db2
+            .with_conn(|conn| crate::db::discussions::get_discussion(conn, "chain-disc"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(discussion_t2.messages.len(), 4);
+        let full_prompt_t2 = super::build_agent_prompt(&discussion_t2, &AgentType::OpenCode, 0);
+        let (prompt2, resume_id2, checkpoint2) = resume_with_delta_if_possible(
+            &store2,
+            &AgentType::OpenCode,
+            Some(project_path),
+            project_path,
+            &discussion_t2,
+            0,
+            full_prompt_t2.clone(),
+            false,
+        )
+        .await;
+        assert_eq!(resume_id2.as_deref(), Some("chain-native-session"));
+        assert_eq!(checkpoint2.as_deref(), Some("m2"));
+        assert!(prompt2.contains("content of m2"));
+        assert!(
+            prompt2.contains("content of peer-before-reply"),
+            "interleaved peer must survive: {prompt2}"
+        );
+        assert!(
+            !prompt2.contains("kt621-own-native-answer"),
+            "the real transcript includes our reply, but the resumed runtime already has it"
+        );
+        assert!(
+            !prompt2.contains("content of m1"),
+            "the delta must not resend what the runtime already saw"
+        );
+
+        let mut turn2 = runner::start_agent_with_config(runner::AgentStartConfig {
+            cli_resume_id: resume_id2.as_deref(),
+            native_acp_full_prompt: Some(&full_prompt_t2),
+            acp_session_store: Some(store2.clone()),
+            discussion_id: Some("chain-disc"),
+            test_acp_transport: Some(transport.clone()),
+            ..runner::AgentStartConfig::new(&AgentType::OpenCode, project_path, &prompt2, &tokens)
+        })
+        .await
+        .unwrap();
+        while turn2.next_line().await.is_some() {}
+        assert!(turn2.child.wait().await.unwrap().success());
+        let completion2 = store2
+            .completion_checkpoint(
+                &AgentType::OpenCode,
+                &scope,
+                false,
+                checkpoint2.as_deref().unwrap(),
+                "own-reply-2",
+            )
+            .unwrap();
+        db2.with_conn(move |conn| {
+            let mut reply = message("own-reply-2", MessageRole::Agent);
+            reply.agent_type = Some(AgentType::OpenCode);
+            reply.content = "kt621-own-native-answer".into();
+            crate::db::discussions::insert_native_agent_message_with_checkpoint(
+                conn,
+                "chain-disc",
+                &reply,
+                true,
+                None,
+                &AgentType::OpenCode,
+                &[],
+                false,
+                None,
+                Some(&completion2),
+            )
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(
+            fixture.created.load(Ordering::SeqCst),
+            1,
+            "a resumed turn must not create a stranger session"
+        );
+        assert_eq!(fixture.resumed.load(Ordering::SeqCst), 1);
+        {
+            let prompts = fixture.prompts.lock().unwrap();
+            assert_eq!(prompts.len(), 2);
+            assert!(prompts[1].ends_with(prompt2.as_str()));
+            assert!(!prompts[1].contains("content of m1"));
+            assert!(!prompts[1].contains("kt621-own-native-answer"));
+            assert!(prompts[1].contains("content of peer-before-reply"));
+        }
+
+        // --- Reopen once more: the durable cursor after turn 2 is exactly
+        // "m2", not the reply that turn 2 itself produced.
+        drop(turn2);
+        drop(store2);
+        assert_eq!(std::sync::Arc::strong_count(&db2), 1);
+        drop(db2);
+        let db3 = std::sync::Arc::new(crate::db::Database::open_path(&db_path).unwrap());
+        let store3 = AcpSessionStore::new(db3.clone(), "chain-disc");
+        let loaded = store3
+            .load_completed_checkpoint(&AgentType::OpenCode, &scope, false)
+            .await
+            .unwrap();
+        assert_eq!(
+            loaded,
+            Some(crate::db::acp_runtime_sessions::CompletedCheckpoint {
+                conversation_id: "chain-native-session".into(),
+                input_message_id: "m2".into(),
+                output_message_id: "own-reply-2".into(),
+            })
+        );
     }
 }
 

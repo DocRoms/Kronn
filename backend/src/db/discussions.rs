@@ -1715,6 +1715,43 @@ pub fn insert_native_agent_message_with_handoffs(
     globally_enabled: bool,
     paid_limit: Option<u32>,
 ) -> Result<NativeAgentMessageOutcome> {
+    insert_native_agent_message_with_checkpoint(
+        conn,
+        discussion_id,
+        msg,
+        child_run_was_success,
+        dispatch_job_id,
+        source_agent,
+        candidate_agents,
+        globally_enabled,
+        paid_limit,
+        None,
+    )
+}
+
+/// The completed conversation frontier and the native response are one
+/// durable unit. A failed insert/checkpoint cannot certify a missing response.
+#[allow(clippy::too_many_arguments)]
+pub fn insert_native_agent_message_with_checkpoint(
+    conn: &Connection,
+    discussion_id: &str,
+    msg: &DiscussionMessage,
+    child_run_was_success: bool,
+    dispatch_job_id: Option<&str>,
+    source_agent: &AgentType,
+    candidate_agents: &[AgentType],
+    globally_enabled: bool,
+    paid_limit: Option<u32>,
+    checkpoint: Option<&super::acp_runtime_sessions::TurnCompletion>,
+) -> Result<NativeAgentMessageOutcome> {
+    let checkpoint = checkpoint.filter(|_| child_run_was_success);
+    if checkpoint.is_some_and(|proof| {
+        proof.key.discussion_id != discussion_id
+            || proof.output_message_id != msg.id
+            || proof.key.agent_type != format!("{source_agent:?}")
+    }) {
+        anyhow::bail!("conversation checkpoint does not match its native response");
+    }
     let transaction = conn.unchecked_transaction()?;
     let (no_agent, discussion_disabled, primary_agent, participants_json): (
         i64,
@@ -1864,6 +1901,9 @@ pub fn insert_native_agent_message_with_handoffs(
             }
             set_awaiting_agent(&transaction, discussion_id, true)?;
         }
+        if let Some(proof) = checkpoint {
+            super::acp_runtime_sessions::complete_turn(&transaction, proof)?;
+        }
         transaction.commit()?;
         return Ok(NativeAgentMessageOutcome {
             sort_order,
@@ -1885,6 +1925,9 @@ pub fn insert_native_agent_message_with_handoffs(
     );
     if !mention_targets.is_empty() {
         replace_message_targets(&transaction, &msg.id, &mention_targets)?;
+    }
+    if let Some(proof) = checkpoint {
+        super::acp_runtime_sessions::complete_turn(&transaction, proof)?;
     }
     transaction.commit()?;
     Ok(NativeAgentMessageOutcome {

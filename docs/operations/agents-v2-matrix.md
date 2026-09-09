@@ -104,17 +104,21 @@ execution, with no fallback to Custom; unknown provider strings remain errors.
 These are real, deliberate, and the reason two agents can behave differently on
 the same job.
 
-- **Native ACP does not currently resume production discussion turns.** The
-  shared host implements negotiated loading, but the production `NativeAcp`
-  branch passes both `resume_id: None` and `session_store: None`. The OpenCode
-  runtime key recognized by `AcpSessionStore` does not make that branch persist
-  or reload a conversation. A host/fake-transport resume test is therefore not
-  evidence of OpenCode production continuity. Enabling it also needs the unseen
-  message delta and full-history fallback; merely passing the old ID would
-  repeat history into a resumed conversation. This remains an open KT-543
-  qualification boundary, distinct from KT-577's long-lived Claude process.
-  [src: file: backend/src/agents/runner.rs:3121-3156]
-  [src: file: backend/src/agents/runner.rs:2068-2086]
+- **ACP continuity is checkpointed, not a long-lived CLI process.** The
+  production OpenCode and enabled adapter branches accept a proven resume ID
+  together with its unseen-message delta and bounded full-prompt fallback.
+  The completed checkpoint distinguishes the last input from the exact native
+  response, so an interleaved peer is retained without repeating that response.
+  Missing/incomplete proof or no size saving means a fresh full-prompt turn;
+  ambiguous errors never authorize an automatic replay. The deterministic
+  two-turn regression exercises the production start branch and atomic reply
+  writer across a database reopen, with only the transport replaced. It does
+  not qualify live model behavior or KT-577's long-lived Claude process.
+  See [native ACP continuity](../gotchas/native-acp-resume-continuity.md) for the
+  negotiated `session/resume` contract and exact proof boundaries.
+  [src: file: backend/src/agents/runner.rs:3150-3224]
+  [src: file: backend/src/api/discussions/streaming.rs:1401-1502]
+  [src: file: backend/src/api/discussions/streaming.rs:5791-6085]
 - **Kronn does not yet normalize ACP's optional session cost.** The current
   upstream v1 schema supports `usage_update.cost` as a cumulative amount with
   an explicit currency; this is not a per-turn USD price. Kronn's normalized
@@ -122,12 +126,15 @@ the same job.
   reads Claude, Codex and Gemini logs. Missing cost therefore remains unknown,
   never free. This is an implementation limit, not a protocol prohibition.
   [ACP v1 UsageUpdate, checked 2026-09-08](https://agentclientprotocol.com/protocol/v1/schema#usageupdate)
-  [src: file: backend/src/acp.rs:341-356]
-  [src: file: backend/src/acp.rs:794-806]
+  [src: file: backend/src/acp.rs:352-365]
+  [src: file: backend/src/acp.rs:790-813]
 - **MCP servers holding a credential are dropped**, whole. A project mixing
   safe and credentialed entries loses the credentialed ones — silently from the
   agent's point of view, since it simply never sees them.
 - **Task workers never take the adapter route**, whatever the toggle says.
+  The direct Copilot worker preflight keeps a four-second deadline and awaits
+  process collection on timeout. Its [timeout regression](../gotchas/copilot-preflight-timeout.md)
+  uses controlled time and an owned child, not a startup PID-file race.
 - **File and terminal requests are refused**, so an ACP agent reads and writes
   through its own tools, outside Kronn's audit trail.
 - **Kronn spawns one process per turn on its local CLI/ACP routes.** HTTP
