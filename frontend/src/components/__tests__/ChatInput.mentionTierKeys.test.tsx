@@ -11,9 +11,14 @@
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
+import { buildApiMock } from '../../test/apiMock';
 import { ChatInput } from '../ChatInput';
 import type { AgentDetection, Discussion } from '../../types/generated';
 import { discussions as discussionsApi } from '../../lib/api';
+
+vi.mock('../../lib/api', () => buildApiMock({
+  discussions: { participants: vi.fn().mockResolvedValue([]), nativeAgentMode: vi.fn().mockResolvedValue({ disabled: false }) },
+}));
 
 vi.mock('../../lib/stt-engine', () => ({
   audioBufferToFloat32: vi.fn(),
@@ -38,7 +43,7 @@ const baseDiscussion = {
   workspace_mode: 'Direct',
   workspace_path: null,
   worktree_branch: null,
-  tier: 'Default',
+  tier: 'default',
   pin_first_message: false,
   summary_cache: null,
   summary_up_to_msg_idx: null,

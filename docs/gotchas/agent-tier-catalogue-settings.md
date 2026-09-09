@@ -10,7 +10,7 @@ and preserves an unknown configured model as a disabled, explicitly labelled
 option. Cache provenance never becomes a live discovery merely because the
 snapshot request succeeded. Clearing an override is an explicit action; its
 placeholder and card preview show the catalogue's tier assignment when known.
-[src: file: frontend/src/lib/modelCatalogSelection.ts:33-70]
+[src: file: frontend/src/lib/modelCatalogSelection.ts:65-102]
 [src: file: frontend/src/components/settings/AgentsSection.tsx:1215-1238]
 
 The settings endpoint replaces the whole model-tier document. Before a save,
@@ -36,15 +36,15 @@ agent-family settings; even rows inside its view must match the exact runtime
 namespace. HTTP tiers may fall back to their own configured default, unlike
 CLI tiers. No embedded model list participates in the display helper anymore.
 [src: file: frontend/src/lib/constants.ts:60-75]
-[src: file: frontend/src/lib/modelCatalogSelection.ts:15-31]
-[src: file: frontend/src/components/AgentSwitchPicker.tsx:124-143]
+[src: file: frontend/src/lib/modelCatalogSelection.ts:12-31]
+[src: file: frontend/src/components/AgentSwitchPicker.tsx:117-129]
 
 The shared picker keeps an unavailable configured entry disabled. A failed
 snapshot read reports the error and retains previous data as cached, not live.
 Saved per-discussion and Quick Prompt overrides are shown for the current
 selection; alternative choices resolve their own tiers. The Quick Prompt
 caller still explicitly clears its old override when choosing a new agent/tier.
-[src: file: frontend/src/components/AgentSwitchPicker.tsx:241-264]
+[src: file: frontend/src/hooks/useModelCatalogSnapshot.ts:5-27]
 [src: file: frontend/src/components/ChatHeader.tsx:418-428]
 [src: file: frontend/src/pages/WorkflowsPage.tsx:1223-1244]
 [src: file: frontend/src/pages/WorkflowsPage.tsx:2850-2857]
@@ -63,8 +63,8 @@ without rewriting the selected identity. Typing never selects a target or
 refetches the catalogue. An unknown configured ID remains searchable, and a
 known unavailable choice remains disabled; accessible descriptions retain the
 model, provenance and unavailable state after filtering.
-[src: file: frontend/src/components/AgentSwitchPicker.tsx:144-180]
-[src: file: frontend/src/components/AgentSwitchPicker.tsx:382-419]
+[src: file: frontend/src/components/AgentSwitchPicker.tsx:130-166]
+[src: file: frontend/src/components/AgentSwitchPicker.tsx:341-380]
 
 The search field is outside the menu, within a portalled non-modal dialog.
 Arrow keys move among enabled choices; Home/End retain their caret behavior in
@@ -72,14 +72,43 @@ search and navigate choices when an option has focus. Escape inside the picker
 does not propagate to its parent form. Closing with Escape or completing an
 asynchronous selection restores trigger focus. Reopening clears the query,
 an empty result is explicit, and the popup's height is bounded by the viewport.
-[src: file: frontend/src/components/AgentSwitchPicker.tsx:155-239]
-[src: file: frontend/src/components/AgentSwitchPicker.tsx:337-363]
+[src: file: frontend/src/components/AgentSwitchPicker.tsx:141-223]
+[src: file: frontend/src/components/AgentSwitchPicker.tsx:303-328]
 [src: file: frontend/src/components/__tests__/AgentSwitchPicker.catalog.test.tsx:123-247]
 [src: file: frontend/src/components/__tests__/AgentSwitchPicker.accessibility.test.tsx:42-73]
 
 These are component regressions, not a new browser layout qualification.
-The separate composer mention palettes and comparison display paths still
-require the remaining KT-531 review.
+The remaining KT-531 review still covers search consistency across custom
+surfaces and the separately delegated comparison display paths.
+
+### Composer mention catalogue contract
+
+Both composer palettes share tier buttons and the same catalogue resolver and
+opening-time snapshot reader as the agent picker. A named principal connection
+uses only its own tier configuration; an empty HTTP tier may use that same
+connection's default. Exact model IDs, provenance and verification time remain
+accessible even when an alias is displayed. Failed reloads retain stale data
+and an explicit error; typing within an open palette does not refetch.
+[src: file: frontend/src/lib/modelCatalogSelection.ts:12-31]
+[src: file: frontend/src/hooks/useModelCatalogSnapshot.ts:5-27]
+[src: file: frontend/src/components/MentionTierChoices.tsx:7]
+[src: file: frontend/src/components/ChatInput.tsx:678-720]
+
+Untouched principal insertion preserves its saved model override and does not
+write a tier preference. Explicit tier choices resolve their own configuration.
+Unavailable tier buttons remain visible and disabled; horizontal keyboard
+navigation skips them without wrapping. A disabled tier's pointer event must
+not bubble into the new form's implicit default selection. Joined CLI mentions
+keep their exact session and stable ordinal, expose no model tier, and do not
+change native preferences. New-discussion submissions retain the immutable
+connection and explicitly selected tier.
+[src: file: frontend/src/lib/mentionTierSelection.ts:6-16]
+[src: file: frontend/src/components/NewDiscussionForm.tsx:715-743]
+[src: file: frontend/src/components/__tests__/ComposerMentionCatalog.test.tsx:72-185]
+
+The new regressions use API fixtures, including colliding IDs in two HTTP
+namespaces and a real send/creation callback assertion. They neither call a
+provider nor qualify browser layout or the separate comparison worker.
 
 ## Quick Prompt and workflow model editors
 

@@ -5296,16 +5296,30 @@ button.disc-contact-open {
 
 .disc-mention-tier-choice {
   display: inline-flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
-  width: 26px;
-  height: 24px;
-  padding: 0;
+  min-width: 26px;
+  min-height: 24px;
+  padding: 2px;
   color: var(--kr-text-muted);
   background: transparent;
   border: 1px solid transparent;
   border-radius: var(--kr-r-md);
   cursor: pointer;
+}
+
+.disc-mention-catalog-meta {
+  font-size: 8px;
+  line-height: 1.2;
+  max-width: 72px;
+  overflow-wrap: anywhere;
+}
+
+.disc-mention-tier-choice:disabled,
+.disc-mention-main:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
 }
 
 .disc-mention-tier-choice:hover,
