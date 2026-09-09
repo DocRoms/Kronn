@@ -838,16 +838,17 @@ pub fn ensure_mirror_by_shared_id(
     }
 }
 
-/// F9 — whether this disc is "human-only" (no agent runner ever spawns).
-/// Read directly off the column (like `diverged_at`) so we don't have to thread
-/// the flag through the big `Discussion` struct + all its query sites.
+/// Whether native dispatch is disabled by F9 or durable CLI-worker ownership.
+/// Keep this effective mode outside the big `Discussion` struct so every
+/// routing site observes the current persisted assignment, not a stale flag.
 pub fn disc_is_no_agent(conn: &Connection, disc_id: &str) -> Result<bool> {
     Ok(get_disc_no_agent(conn, disc_id)?.unwrap_or(false))
 }
 
-/// Read the persisted native-agent mode while preserving "not found" for API
-/// callers. Routing uses [`disc_is_no_agent`] because it already has a loaded
-/// discussion and only needs the boolean.
+/// Read the effective native-agent mode, preserving "not found" for API callers.
+/// A CLI-owned execution room also forbids native dispatch, independently of
+/// its historical UI flag or the worker's transient presence. This is derived
+/// from ownership, not a backfill that would outlive an explicit reassignment.
 pub fn get_disc_no_agent(conn: &Connection, disc_id: &str) -> Result<Option<bool>> {
     let value = conn
         .query_row(
@@ -856,7 +857,11 @@ pub fn get_disc_no_agent(conn: &Connection, disc_id: &str) -> Result<Option<bool
             |row| row.get::<_, i64>(0),
         )
         .optional()?;
-    Ok(value.map(|disabled| disabled != 0))
+    value
+        .map(|disabled| {
+            Ok(disabled != 0 || super::orchestration::discussion_has_cli_worker(conn, disc_id)?)
+        })
+        .transpose()
 }
 
 /// Set/clear the F9 human-only flag on a disc. Disabling is one transaction
@@ -865,6 +870,9 @@ pub fn get_disc_no_agent(conn: &Connection, disc_id: &str) -> Result<Option<bool
 /// discussion existed.
 pub fn set_disc_no_agent(conn: &Connection, disc_id: &str, no_agent: bool) -> Result<bool> {
     let transaction = conn.unchecked_transaction()?;
+    if !no_agent && super::orchestration::discussion_has_cli_worker(&transaction, disc_id)? {
+        anyhow::bail!("this room is owned by a CLI worker; reassign the execution before enabling a native agent");
+    }
     let affected = transaction.execute(
         "UPDATE discussions SET no_agent = ?2, updated_at = ?3 WHERE id = ?1",
         params![disc_id, no_agent as i32, Utc::now().to_rfc3339()],
