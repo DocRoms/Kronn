@@ -1,6 +1,11 @@
 import type { TranslationDict } from '../../i18n';
 
 const zh: TranslationDict = {
+  "modelCatalog.lastChecked": "上次检查：{0}",
+  "modelCatalog.notInCatalog": "不在已加载的目录中",
+  "modelCatalog.keepConfigured": "已保留配置值。请重新检查目录或明确选择替代模型。",
+  "modelCatalog.loadError": "无法加载模型目录。现有设置保持不变。",
+  "modelCatalog.reload": "重新加载已保存的目录",
   "modelCatalog.title": "模型目录",
   "modelCatalog.description": "每个目标已检测、缓存或手动配置的模型。",
   "modelCatalog.addHint": "用于检测无结果的目标：此时手动声明模型。",

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Check, ChevronDown, Loader2, RefreshCw } from 'lucide-react';
 import { modelCatalogApi } from '../lib/api';
+import { modelRuntimeTargetId } from '../lib/modelCatalogSelection';
 import { useT } from '../lib/I18nContext';
 import {
   AGENT_COLORS,
@@ -108,21 +109,7 @@ export function AgentSwitchPicker({
 
   const targetLabel = (target: AgentSwitchTarget) =>
     target.label ?? AGENT_LABELS[target.agent] ?? target.agent;
-  const runtimeTargetId = (target: AgentSwitchTarget) => target.connectionId
-    ? `http:${target.connectionId}`
-    : ({
-      ClaudeCode: 'agent:claude-code',
-      Codex: 'agent:codex',
-      OpenCode: 'agent:opencode',
-      Vibe: 'agent:vibe',
-      GeminiCli: 'agent:gemini-cli',
-      Kiro: 'agent:kiro',
-      CopilotCli: 'agent:copilot-cli',
-      Ollama: 'agent:ollama',
-      LiteLlm: 'agent:litellm',
-      Nvidia: 'agent:nvidia',
-      Custom: 'agent:custom',
-    } satisfies Record<AgentType, string>)[target.agent];
+  const runtimeTargetId = (target: AgentSwitchTarget) => modelRuntimeTargetId(target.agent, target.connectionId);
   const catalogEntry = (target: AgentSwitchTarget, tier: ModelTier): CatalogModelEntry | undefined => {
     const models = catalog?.targets
       .find(view => view.runtime_target_id === runtimeTargetId(target))

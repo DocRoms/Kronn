@@ -1,6 +1,11 @@
 import type { TranslationDict } from '../../i18n';
 
 const fr: TranslationDict = {
+  "modelCatalog.lastChecked": "Dernière vérification : {0}",
+  "modelCatalog.notInCatalog": "Absent du catalogue chargé",
+  "modelCatalog.keepConfigured": "Valeur configurée conservée. Revérifiez le catalogue ou choisissez explicitement un remplacement.",
+  "modelCatalog.loadError": "Impossible de charger le catalogue de modèles. Les réglages existants sont conservés.",
+  "modelCatalog.reload": "Recharger le catalogue enregistré",
   'modelCatalog.title': 'Catalogues de modèles',
   'modelCatalog.description': 'Modèles détectés, mis en cache ou configurés manuellement pour chaque cible.',
   'modelCatalog.addHint': "Pour une cible dont la détection ne renvoie rien : le modèle est alors déclaré à la main.",

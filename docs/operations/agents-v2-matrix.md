@@ -155,17 +155,27 @@ usage still has no implied price.
 [src: file: backend/src/agents/runner.rs:10020-10133]
 [src: file: backend/src/core/redact.rs:232-240]
 
-## Settings catalogue diagnostic (KT-597)
+## Settings catalogue correction (KT-531 / KT-597)
 
-The dynamic catalogue and the model-tier editor on an agent card are currently
-different consumers. `ModelCatalogSection` reads `/api/model-catalogs`, and
-Codex discovery calls its own `codex app-server` / `model/list`. However, the
-Codex card in `AgentsSection` still supplies `SearchableSelect` from the static
-`AGENT_TIER_MODELS.codex.options` array. A newly available model absent from that
-array will not appear there even after a catalogue refresh. Updating OpenCode
-or an OpenRouter connection cannot change this array. This is a remaining UI
-integration gap, not evidence that the Codex account lacks access to the model.
-[src: file: frontend/src/components/settings/AgentsSection.tsx:106-123]
-[src: file: frontend/src/components/settings/AgentsSection.tsx:1233-1253]
-[src: file: frontend/src/components/settings/ModelCatalogSection.tsx:67]
+The agent-card tier editor now consumes the shared `/api/model-catalogs`
+snapshot through `SearchableSelect`, including OpenCode, Kiro and Vibe. It
+matches the exact `runtime_target_id`, never another connection's agent-family
+projection. A catalogue refresh or manual edit reloads the tier options.
+Unavailable models stay visible but disabled; an existing setting absent from
+the snapshot is retained explicitly rather than erased or substituted. Option
+details include provenance, last check, reasoning modes and known cost metadata;
+a stale live result is labelled as cached. No model discovery process is started
+by this snapshot read.
+[src: file: frontend/src/components/settings/AgentsSection.tsx:149-168]
+[src: file: frontend/src/components/settings/AgentsSection.tsx:1215-1262]
+[src: file: frontend/src/lib/modelCatalogSelection.ts:15-53]
+[src: file: frontend/src/components/settings/ModelCatalogSection.tsx:67-72]
 [src: file: backend/src/core/model_catalog/codex_discovery.rs:75-158]
+
+Saving a tier rereads the current settings and replaces only the selected
+field, preserving other agents' values and showing the new value only after
+the write succeeds. See [the preservation regression](../gotchas/agent-tier-catalogue-settings.md).
+KT-531 remains open: the separate `modelForAgentTier` display helper still has
+embedded fallbacks used by other surfaces; this settings correction alone does
+not qualify every selector.
+[src: file: frontend/src/lib/constants.ts:63-80]

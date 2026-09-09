@@ -1,6 +1,11 @@
 import type { TranslationDict } from '../../i18n';
 
 const en: TranslationDict = {
+  "modelCatalog.lastChecked": "Last checked: {0}",
+  "modelCatalog.notInCatalog": "Not in loaded catalog",
+  "modelCatalog.keepConfigured": "Configured value retained. Recheck the catalog or choose a replacement explicitly.",
+  "modelCatalog.loadError": "Unable to load the model catalog. Existing settings are unchanged.",
+  "modelCatalog.reload": "Reload saved catalog",
   'modelCatalog.title': 'Model catalogs',
   'modelCatalog.description': 'Detected, cached or manually configured models for each target.',
   'modelCatalog.addHint': 'For a target whose detection returns nothing: the model is then declared by hand.',

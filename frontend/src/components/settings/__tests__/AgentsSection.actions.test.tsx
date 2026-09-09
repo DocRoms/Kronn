@@ -34,6 +34,7 @@ const {
   getModelTiersMock,
   quotaStatesMock,
   rearmQuotaMock,
+  catalogListMock,
 } = vi.hoisted(() => ({
   getServerConfigMock: vi.fn(),
   installMock: vi.fn(),
@@ -47,9 +48,11 @@ const {
   getModelTiersMock: vi.fn(),
   quotaStatesMock: vi.fn(),
   rearmQuotaMock: vi.fn(),
+  catalogListMock: vi.fn(),
 }));
 
 vi.mock('../../../lib/api', () => buildApiMock({
+  modelCatalogApi: { list: catalogListMock as never },
   config: {
     getServerConfig: getServerConfigMock as never,
     setAgentAccess: setAgentAccessMock as never,
@@ -159,6 +162,7 @@ beforeEach(() => {
   getModelTiersMock.mockResolvedValue({
     claude_code: { economy: 'haiku', default: 'sonnet', reasoning: 'opus' },
     codex: { ...emptyTier },
+    open_code: { ...emptyTier },
     gemini_cli: { ...emptyTier },
     kiro: { ...emptyTier },
     vibe: { ...emptyTier },
@@ -171,6 +175,18 @@ beforeEach(() => {
   quotaStatesMock.mockResolvedValue([]);
   rearmQuotaMock.mockReset();
   rearmQuotaMock.mockResolvedValue(true);
+  catalogListMock.mockReset().mockResolvedValue({ targets: [{
+    runtime_target_id: 'agent:claude-code', agent_type: 'ClaudeCode',
+    live_refresh_ok: true, stale: false,
+    models: ['haiku', 'sonnet', 'fable', 'opus'].map(model => ({
+      id: `agent:claude-code:${model}`, runtime_target_id: 'agent:claude-code', agent_type: 'ClaudeCode',
+      model_id: model, display_name: model, provenance: 'migrated', availability: 'available',
+      capabilities: ['chat'], reasoning_modes: [], manual_origin: false,
+      tier_assignment: model === 'haiku' ? 'economy' : model === 'sonnet' ? 'default' : model === 'opus' ? 'reasoning' : null,
+      first_seen_at: '2026-09-09T00:00:00Z', last_checked_at: '2026-09-09T00:00:00Z',
+      created_at: '2026-09-09T00:00:00Z', updated_at: '2026-09-09T00:00:00Z',
+    })),
+  }] });
   sessionStorage.removeItem('kronn:model-config-target');
 });
 

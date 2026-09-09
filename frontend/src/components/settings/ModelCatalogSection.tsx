@@ -47,7 +47,7 @@ const blankForm = (snapshot: ModelCatalogSnapshot | null): ManualForm => {
   };
 };
 
-export function ModelCatalogSection() {
+export function ModelCatalogSection({ onCatalogChanged }: { onCatalogChanged?: () => void } = {}) {
   const { t } = useT();
   const [snapshot, setSnapshot] = useState<ModelCatalogSnapshot | null>(null);
   const [form, setForm] = useState<ManualForm | null>(null);
@@ -66,6 +66,7 @@ export function ModelCatalogSection() {
   const load = async () => {
     const value = await modelCatalogApi.list();
     setSnapshot(value);
+    onCatalogChanged?.();
     return value;
   };
   // KT-587 — awaited before anything is written, and dropped if the section
