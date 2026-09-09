@@ -12,25 +12,38 @@ authenticator guarantees unaddressed. Each of those alone was enough to sink it.
 The claim that a card was published by a given authority. This started as a
 question about `Human`. It is not: `Orchestrator` rests on the same weakness.
 
-## Threat model
+## Threat model, as the human decision bounded it
 
-**The adversary is a process running as the same OS user, on the same machine.**
-Concretely: a CLI worker Kronn itself launched. It can read the whole user
-filesystem, make loopback HTTP calls, and read anything the server or the
-browser writes down.
+`kt619-authenticated-api-or-os-isolation` was answered **`authenticated-api`**:
+distinct API identities with proof of possession, and **credential theft or
+direct DB writes by the same OS account are explicitly out of scope**.
 
-Out of scope: remote callers (`auth_middleware` already requires a bearer for
-any non-local address), other OS users, and root.
+That settles what earlier drafts kept re-litigating. The adversary here is a
+caller that **presents** an identity it does not hold — a worker naming an
+orchestrator's session, a payload claiming a role, a request omitting what it
+cannot produce. It is not a process rifling through another's files.
 
-**The consequence:** any secret readable by the same OS user is not a boundary.
+Also out of scope: remote callers (`auth_middleware` already requires a bearer
+for any non-local address), other OS users, and root.
 
-| Candidate | Why it fails |
+**Both authorities are required.** Deferring `Human` is not an available answer,
+and no waiver was granted.
+
+**Historical note.** Three proposals were refused before the decision narrowed
+the model, and the reason is worth keeping: under an adversary that reads the
+same user's files, any secret it can read is not a boundary.
+
+| Candidate | Why it was refused |
 |---|---|
-| `auth_strict_localhost` bearer | One shared secret; a worker holding it is indistinguishable from the person. |
-| A capability ticket from an issuing endpoint | The endpoint has no identity to check either, so a worker omits its session and asks for one. |
-| A pairing code on the server's terminal | Terminal output, supervisor logs and browser storage are all reachable by the same OS user. "Never logged" is not a property the server can guarantee about its own stdout. |
+| `auth_strict_localhost` bearer | One shared secret; every holder looks the same. Still true, and still not an identity. |
+| A capability ticket from an issuing endpoint | The issuing endpoint had no identity to check either — the hole moved one step, it did not close. |
+| A pairing code on the server's terminal | Rested on stdout never being captured, which the server cannot promise about itself. |
 
-## Step 0 — proof of possession, before anything else
+The first two fail on their own terms and stay refused. The third fails only
+against file-reading, which the decision now excludes — but it is still weaker
+than a real credential, so it is not revived.
+
+## Step 0 — proof of possession — **DONE** (`4b95e5df`)
 
 **A prerequisite, not an option.** The first draft called it orthogonal; that was
 wrong. Without it neither option below means anything, because the authority is
@@ -126,38 +139,37 @@ whatever was put in front of them.
 table, a recovery code, and a verification at the single publication point.
 `auth_middleware` is not modified.
 
-## Option B — accept the limitation, and shrink what depends on it
+## Option B — defer `Human` — **withdrawn**
 
-`Human` is not publishable through the API. The only authority is
-`Orchestrator`, which — once Step 0 lands — means a caller that holds its session
-credential. A person who wants a card asks the orchestrator to publish it;
-author, date and source event are recorded either way.
+Earlier drafts proposed shipping `Orchestrator` alone and documenting the rest
+as a limitation. The human decision requires **both** authorities and granted no
+waiver, so this is no longer an available answer. It is recorded here only so
+the option is not re-proposed a fourth time.
 
-**Gives up:** "the human can also create an important message" is not met, and
-becomes a documented limitation until the deployment model changes —
-authentication enabled, and workers holding credentials they cannot escalate
-from (a separate OS user, or a token distinct from the human's).
+## What each covers, under the decided model
 
-**Worth:** no new machinery, and it claims nothing it cannot prove.
+| Threat | Step 0 (done) | Human authority (A) |
+|---|---|---|
+| A caller presents a session id it does not hold | **covered** | covered |
+| A caller claims a role in the payload | **covered** | covered |
+| A caller omits what it cannot produce | **covered** (refused, and told to reload) | covered |
+| An authenticated worker publishing as orchestrator | **covered** | covered |
+| A worker publishing as the human | not applicable | **the remaining gap** |
+| Credential theft / direct DB write, same OS account | out of scope by decision | out of scope by decision |
+| A person approving without reading | no | no |
 
-## What each covers
+## Where this leaves `Human`
 
-| Threat | Step 0 alone | + A | B |
-|---|---|---|---|
-| A local caller presents someone else's session id | **covered** | covered | covered |
-| A local caller reads another process's credential | no | covered for `Human` | n/a |
-| An adversary that enrolled first | n/a | **not covered** (A.1) | n/a |
-| An adversary driving the real browser | n/a | not covered (A.3) | n/a |
-| A remote caller | already covered by `auth_middleware` | same | same |
-| A person approving without reading | no | no | no |
+Step 0 gives every CLI caller a real identity. It does **not** give the browser
+one: `send_message` takes no caller identity at all, and there is no artefact a
+browser holds that a local process could not also present.
 
-## Recommendation
+So `Human` needs its own credential, enrolled and proven per publication —
+bound to discussion id, content hash, single-use nonce and expiry, the four
+links already agreed. The open questions are A.1 to A.3 above: who authorises
+the first enrolment, how recovery works, and what the authenticator actually
+guarantees. Under the decided model those get easier, because an enrolment
+artefact no longer has to survive an adversary reading it off the disk — but
+they still have to be answered before anything is built.
 
-**Step 0 regardless, and it is the release blocker** — a defect, not a missing
-feature: today a worker can publish as the orchestrator.
-
-Then **B**, with A available if human publication is wanted later. A is a real
-feature — enrolment, sealing, recovery, several origins in Docker — and should
-be decided as one rather than slipped in under a card-rendering lot.
-
-Whichever is chosen, the criterion is not ticked on half a rights contract.
+Migration 174 is reserved for that table and remains unopened.

@@ -1732,6 +1732,31 @@ mod tests {
         append_as(state, msgs, None).await
     }
 
+    /// KT-619 — append declaring an id AND (optionally) holding a credential.
+    ///
+    /// The old attack entry was the declared `session_id`; the new field must
+    /// not become the only thing tested, or that door stops being locked.
+    async fn append_declaring(
+        state: &crate::AppState,
+        msgs: Vec<DiscAppendMessage>,
+        session_id: Option<&str>,
+        credential: Option<&str>,
+    ) -> DiscAppendResponse {
+        let resp = disc_append(
+            axum::extract::State(state.clone()),
+            Json(DiscAppendRequest {
+                disc_id: "d-lint".into(),
+                messages: msgs,
+                session_id: session_id.map(str::to_owned),
+                since_sort_order: None,
+                session_credential: credential
+                    .map(|c| serde_json::from_value(serde_json::json!(c)).unwrap()),
+            }),
+        )
+        .await;
+        resp.0.data.expect("append succeeds")
+    }
+
     /// KT-619 — append the way an up-to-date bridge does: carrying the resume
     /// credential it holds, and declaring nothing it cannot prove.
     async fn append_holding(
@@ -3758,6 +3783,40 @@ mod tests {
             Some(0),
             "presenting an identity must not be the same as holding it"
         );
+
+        // The ORIGINAL entry point: the public id in `session_id`, with no
+        // credential at all. This is what used to publish, and it is the door
+        // that must stay locked — testing only the new field would quietly
+        // stop covering it.
+        let declared = append_declaring(
+            &state,
+            vec![agent_msg("m2", &important_fence("kt-619.declared-id"))],
+            Some(IMPORTANT_ORCH_SESSION),
+            None,
+        )
+        .await;
+        assert_eq!(declared.important.map(|i| i.published), Some(0));
+
+        // And the same declaration backed by the worker's OWN credential: it
+        // authenticates, so it is refused as a worker rather than as unknown —
+        // the declared id buys it nothing either way.
+        let borrowed = append_declaring(
+            &state,
+            vec![agent_msg(
+                "m3",
+                &important_fence("kt-619.declared-plus-own"),
+            )],
+            Some(IMPORTANT_ORCH_SESSION),
+            Some(IMPORTANT_WORKER_SECRET),
+        )
+        .await;
+        let ingest = borrowed.important.expect("a refusal is reported");
+        assert_eq!(ingest.published, 0);
+        assert_eq!(
+            ingest.refused_worker, 1,
+            "authenticated, and still a worker"
+        );
+
         assert_eq!(important_card_count(&state, IMPORTANT_PARENT).await, 0);
     }
 
