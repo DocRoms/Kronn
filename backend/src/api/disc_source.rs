@@ -3679,6 +3679,110 @@ mod tests {
             .unwrap()
     }
 
+    /// KT-619 — resume rotates the secret. A credential read once must not be
+    /// good forever, so the rotation has to invalidate the old one AT the
+    /// append boundary, not only inside the resume path.
+    #[tokio::test]
+    #[serial]
+    async fn a_rotated_credential_stops_publishing_and_the_new_one_starts() {
+        crate::core::anti_halluc::set_mode("off");
+        let (state, _tmp) = lint_state(false).await;
+        state
+            .db
+            .with_conn(|conn| {
+                crate::db::discussion_sessions::create_session(
+                    conn,
+                    IMPORTANT_PARENT,
+                    "ClaudeCode",
+                    Some(IMPORTANT_ORCH_SESSION),
+                    "peer",
+                )
+            })
+            .await
+            .unwrap();
+        hold_credential(&state, IMPORTANT_ORCH_SESSION, IMPORTANT_ORCH_SECRET).await;
+
+        let before = append_holding(
+            &state,
+            vec![agent_msg("m1", &important_fence("kt-619.before-rotation"))],
+            Some(IMPORTANT_ORCH_SECRET),
+        )
+        .await;
+        assert_eq!(before.important.map(|i| i.published), Some(1));
+
+        // The bridge resumes: same session row, new secret.
+        hold_credential(&state, IMPORTANT_ORCH_SESSION, "kr-resume-rotated").await;
+
+        let stale = append_holding(
+            &state,
+            vec![agent_msg("m2", &important_fence("kt-619.after-rotation"))],
+            Some(IMPORTANT_ORCH_SECRET),
+        )
+        .await;
+        assert_eq!(
+            stale.important.map(|i| i.refused_unverified),
+            Some(1),
+            "the pre-rotation secret must die with the rotation"
+        );
+
+        let resumed = append_holding(
+            &state,
+            vec![agent_msg("m3", &important_fence("kt-619.resumed"))],
+            Some("kr-resume-rotated"),
+        )
+        .await;
+        assert_eq!(resumed.important.map(|i| i.published), Some(1));
+        assert_eq!(important_card_count(&state, IMPORTANT_PARENT).await, 2);
+    }
+
+    /// KT-619 — a bridge whose binding file vanished between two appends sends
+    /// no credential at all. It must lose the card and keep the message, and be
+    /// told what to do — not be mistaken for an attacker.
+    #[tokio::test]
+    #[serial]
+    async fn a_binding_lost_between_two_appends_keeps_the_message_and_says_so() {
+        crate::core::anti_halluc::set_mode("off");
+        let (state, _tmp) = lint_state(false).await;
+        state
+            .db
+            .with_conn(|conn| {
+                crate::db::discussion_sessions::create_session(
+                    conn,
+                    IMPORTANT_PARENT,
+                    "ClaudeCode",
+                    Some(IMPORTANT_ORCH_SESSION),
+                    "peer",
+                )
+            })
+            .await
+            .unwrap();
+        hold_credential(&state, IMPORTANT_ORCH_SESSION, IMPORTANT_ORCH_SECRET).await;
+
+        let first = append_holding(
+            &state,
+            vec![agent_msg("m1", &important_fence("kt-619.with-binding"))],
+            Some(IMPORTANT_ORCH_SECRET),
+        )
+        .await;
+        assert_eq!(first.important.map(|i| i.published), Some(1));
+
+        // Binding file gone: the bridge still declares who it is, and can no
+        // longer prove it.
+        let after = append_declaring(
+            &state,
+            vec![agent_msg("m2", &important_fence("kt-619.binding-lost"))],
+            Some(IMPORTANT_ORCH_SESSION),
+            None,
+        )
+        .await;
+        let ingest = after.important.expect("a refusal is reported, not dropped");
+        assert_eq!(ingest.refused_unverified, 1);
+        assert_eq!(ingest.refused_worker, 0);
+        assert_eq!(after.appended, 1, "the message itself must survive");
+        assert!(ingest.hint.is_some_and(|hint| hint.contains("Reload")));
+        assert_eq!(important_card_count(&state, IMPORTANT_PARENT).await, 1);
+    }
+
     /// KT-619 — the credential must not reach a log or a test failure. This is
     /// the property, not the intention: `DiscAppendRequest` derives `Debug`, and
     /// one `tracing::warn!("{req:?}")` would otherwise print the secret.

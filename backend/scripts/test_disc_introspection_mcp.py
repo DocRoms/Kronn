@@ -246,6 +246,89 @@ class ResolveIdTests(unittest.TestCase):
         http.assert_not_called()
 
 
+class DiscAppendCredentialInjectionTests(unittest.TestCase):
+    """KT-619 — the credential the bridge injects, and never shows.
+
+    Publication authority is decided from the resume token this bridge HOLDS.
+    Two properties matter, and neither is provable by reading the code once:
+    it must actually reach the append body, and it must not reach anything the
+    model or a log can see.
+    """
+
+    SECRET = "kr-resume-must-never-appear"
+
+    def setUp(self):
+        self.mod = _load_module()
+        self.fake_http = mock.MagicMock(return_value={
+            "success": True,
+            "data": {"appended": 1, "last_message_id": "m-1"},
+        })
+        self.http_patch = mock.patch.object(self.mod, "_http", self.fake_http)
+        self.http_patch.start()
+        self.addCleanup(self.http_patch.stop)
+        self.binding_patch = mock.patch.object(
+            self.mod,
+            "_read_binding",
+            return_value={"disc_id": "disc-1", "resume_token": self.SECRET},
+        )
+        self.binding_patch.start()
+        self.addCleanup(self.binding_patch.stop)
+
+    def _append(self, **extra):
+        args = {"disc_id": "disc-1", "content": "hello", **extra}
+        return self.mod.call_disc_append(args)
+
+    def _body(self):
+        """The append body specifically: `call_disc_append` makes other HTTP
+        calls, so the LAST one is not reliably the one under test."""
+        for call in self.fake_http.call_args_list:
+            args = call.args
+            if len(args) >= 3 and args[0] == "POST" and args[1] == "/api/disc/append":
+                return args[2]
+        self.fail(f"no POST /api/disc/append among {self.fake_http.call_args_list}")
+
+    def test_the_held_credential_reaches_the_append_body(self):
+        self._append()
+        self.assertEqual(self._body().get("session_credential"), self.SECRET)
+
+    def test_no_binding_means_no_credential_rather_than_an_empty_one(self):
+        """An absent binding must omit the field, not send `""` or `None`:
+        the backend refuses either way, but only omission is honest about
+        having nothing."""
+        with mock.patch.object(self.mod, "_read_binding", return_value=None):
+            self._append()
+        self.assertNotIn("session_credential", self._body())
+
+    def test_a_binding_without_a_token_sends_nothing(self):
+        with mock.patch.object(
+            self.mod, "_read_binding", return_value={"disc_id": "disc-1"}
+        ):
+            self._append()
+        self.assertNotIn("session_credential", self._body())
+
+    def test_the_credential_is_absent_from_the_tool_schemas(self):
+        """A model cannot set what it is never offered. If this ever fails,
+        the field became a parameter and the whole contract is void."""
+        schemas = json.dumps(self.mod.tool_definitions()
+                             if hasattr(self.mod, "tool_definitions")
+                             else self.mod.TOOLS)
+        self.assertNotIn("session_credential", schemas)
+
+    def test_the_credential_is_absent_from_the_tool_result(self):
+        result = self._append()
+        # `repr` rather than a JSON dump: it is what a log line or a traceback
+        # would print, and it does not choke on a non-serialisable value.
+        self.assertNotIn(self.SECRET, repr(result))
+
+    def test_the_credential_is_absent_from_anything_logged(self):
+        """The bridge logs to stderr. A secret printed there lands in the
+        supervisor's capture, which is exactly where it must not be."""
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            self._append()
+        self.assertNotIn(self.SECRET, stderr.getvalue())
+
+
 class CallDiscCreateAutoInheritTests(unittest.TestCase):
     """The auto-fill contract on `call_disc_create`.
 
