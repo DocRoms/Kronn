@@ -75,39 +75,33 @@ nonce and short expiry. The private key lives in the authenticator or platform
 keystore, never in browser storage or a file. No home-made cryptography: a W3C
 standard with a maintained Rust server implementation.
 
-### A.1 — Who authorises the FIRST enrolment
+### A.1 — Who authorises the first enrolment — **superseded**
 
-The gap that sank the first draft. If any local caller can enrol the first
-passkey, the adversary enrols its own and *becomes* the human.
+This note proposed trust on first use: enrolment while the credential set is
+empty, sealed afterwards. That was written under the earlier threat model, where
+every bootstrap secret was assumed readable by the adversary, so a ceremony was
+the only thing left.
 
-There is no way to close this from inside the machine: every bootstrap secret
-lands somewhere the same OS user can read. The honest construction is **trust on
-first use, made explicit and narrow** — the same shape as an SSH host key:
+**The decided model removes that assumption**, and with it the reason for TOFU.
+Credential theft by the same OS account is out of scope, so a secret CAN be the
+bootstrap — provided it never travels where a worker can pick it up.
 
-- enrolment is possible **only while the credential set is empty**;
-- the window is opened deliberately during setup, and is expected to happen
-  **before any agent has ever run on that install**;
-- once a credential exists the set is **sealed**: adding, replacing or removing
-  one requires an assertion from an existing credential;
-- the UI states plainly which install enrolled and when, so a surprise enrolment
-  is visible rather than silent.
+The pending arbitration (`kt619-human-credential-bootstrap`) is therefore the
+live proposal, not this section: a dedicated admin secret delivered out of band
+through operator private storage, never through an API, MCP, log or worker
+environment. TOFU is explicitly rejected there, and rightly — a window anyone
+can walk through first is not an authorisation, it is a race.
 
-The guarantee therefore *begins* at enrolment. If an adversary enrols first it
-wins, and no later mechanism recovers from that. That belongs in the product's
-own words, not in a user's eventual discovery.
+Recorded rather than deleted, because the reasoning shows why the answer changed
+with the model rather than with anyone's preference.
 
-### A.2 — Recovery
+### A.2 — Recovery — **superseded**
 
-A lost passkey must not mean a lost install, and recovery must not reopen A.1
-for whoever asks.
-
-A recovery code, shown **once** at enrolment, stored **off the machine** —
-password manager, paper. It is the only artefact in this design deliberately not
-on disk, because it is the only one that survives the adversary owning the disk.
-Presenting it reopens the enrolment window once and invalidates itself.
-
-If that code is lost too, the honest answer is a reset that clears the credential
-set and is recorded as such: an audited break-glass, not a silent recovery.
+Same fate. This note proposed a recovery code held off the machine, which was
+the only artefact that survived an adversary reading the disk. Under the decided
+model recovery can rest on the same out-of-band admin secret, and the pending
+card requires it to be protected with **no anonymous reset** — closing the
+break-glass this section left open.
 
 ### A.3 — What the authenticator actually guarantees
 
@@ -159,6 +153,12 @@ the option is not re-proposed a fourth time.
 | A person approving without reading | no | no |
 
 ## Where this leaves `Human`
+
+**The live proposal is the pending card**, not the options below: a dedicated
+admin secret out of band, a distinct and revocable human credential, single-use
+publication proofs bound to discussion, content and expiry, protected recovery
+with no anonymous reset, and a stated Web/Desktop/Docker contract. What follows
+is the reasoning that led there.
 
 Step 0 gives every CLI caller a real identity. It does **not** give the browser
 one: `send_message` takes no caller identity at all, and there is no artefact a
