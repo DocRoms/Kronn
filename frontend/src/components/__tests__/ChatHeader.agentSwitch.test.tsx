@@ -267,7 +267,7 @@ describe('ChatHeader — shared agent switcher', () => {
     const blank = { economy: null, default: null, reasoning: null };
     renderHeader({
       modelTiers: {
-        claude_code: { ...blank },
+        claude_code: { ...blank, default: 'sonnet' },
         codex: { ...blank, reasoning: 'gpt-company-review' },
         open_code: { ...blank },
         gemini_cli: { ...blank },
@@ -295,6 +295,13 @@ describe('ChatHeader — shared agent switcher', () => {
   it('is disabled while the discussion is sending', () => {
     renderHeader({ sending: true });
     expect(screen.getByRole('button', { name: 'disc.switchAgentAndTier' })).toBeDisabled();
+  });
+
+  it('shows a saved discussion model before the catalogue is opened', async () => {
+    renderHeader({ discussion: { ...makeDiscussion(), model: 'explicit-disc-model' } });
+    const trigger = screen.getByRole('button', { name: 'disc.switchAgentAndTier' });
+    await waitFor(() => expect(trigger).toBeEnabled());
+    expect(trigger).toHaveAttribute('title', 'disc.switchAgentAndTier · disc.tier.default · explicit-disc-model');
   });
 
   it('shows declared joined-CLI worktrees in the discussion header', async () => {

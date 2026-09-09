@@ -1,5 +1,5 @@
 import type { SearchableSelectOption } from '../components/SearchableSelect';
-import type { AgentType, ModelCatalogView } from '../types/generated';
+import type { AgentType, CatalogModelEntry, ModelCatalogView, ModelTier } from '../types/generated';
 
 const AGENT_RUNTIME_TARGETS: Record<AgentType, string> = {
   ClaudeCode: 'agent:claude-code', Codex: 'agent:codex', OpenCode: 'agent:opencode',
@@ -12,6 +12,24 @@ export function modelRuntimeTargetId(agent: AgentType, connectionId?: string | n
   return connectionId ? `http:${connectionId}` : AGENT_RUNTIME_TARGETS[agent];
 }
 
+export function catalogTierEntry(
+  target: ModelCatalogView | undefined,
+  tier: ModelTier,
+  configured: string,
+  useDefaultTier = false,
+): CatalogModelEntry | undefined {
+  const models = target?.models.filter(model => model.runtime_target_id === target.runtime_target_id);
+  // An unknown explicit identity is still explicit: never substitute another model.
+  if (configured) return models?.find(model => model.model_id === configured);
+  return models?.find(model => model.tier_assignment === tier)
+    ?? (useDefaultTier ? models?.find(model => model.tier_assignment === 'default') : undefined);
+}
+
+export function catalogModelProvenance(model: CatalogModelEntry, target: ModelCatalogView | undefined) {
+  return model.provenance === 'live' && (target?.stale || !target?.live_refresh_ok)
+    ? 'cached' : model.provenance;
+}
+
 export function catalogModelOptions(
   target: ModelCatalogView | undefined,
   configured: string,
@@ -22,8 +40,7 @@ export function catalogModelOptions(
     .filter(model => model.runtime_target_id === target?.runtime_target_id)
     .map(model => {
       const unavailable = model.availability === 'unavailable';
-      const provenance = model.provenance === 'live' && (target?.stale || !target?.live_refresh_ok)
-        ? 'cached' : model.provenance;
+      const provenance = catalogModelProvenance(model, target);
       return {
         value: model.model_id,
         label: `${model.display_alias ?? model.display_name}${unavailable ? ` — ${t('modelCatalog.unavailable')}` : ''}`,

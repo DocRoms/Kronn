@@ -1756,7 +1756,8 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
       name: /Changer l'agent ou le mode IA du QP « Review release »/,
     });
     expect(trigger).toHaveTextContent('🎯');
-    expect(trigger).toHaveAttribute('title', expect.stringContaining('sonnet'));
+    // The saved per-QP override wins over the tier mapping until a new choice clears it.
+    expect(trigger).toHaveAttribute('title', expect.stringContaining('opus'));
     fireEvent.click(trigger);
     await act(async () => {
       fireEvent.click(screen.getByRole('menuitem', { name: 'Codex · Avancé' }));

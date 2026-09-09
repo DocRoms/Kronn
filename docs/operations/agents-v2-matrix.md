@@ -168,14 +168,17 @@ a stale live result is labelled as cached. No model discovery process is started
 by this snapshot read.
 [src: file: frontend/src/components/settings/AgentsSection.tsx:149-168]
 [src: file: frontend/src/components/settings/AgentsSection.tsx:1215-1262]
-[src: file: frontend/src/lib/modelCatalogSelection.ts:15-53]
+[src: file: frontend/src/lib/modelCatalogSelection.ts:33-70]
 [src: file: frontend/src/components/settings/ModelCatalogSection.tsx:67-72]
 [src: file: backend/src/core/model_catalog/codex_discovery.rs:75-158]
 
 Saving a tier rereads the current settings and replaces only the selected
 field, preserving other agents' values and showing the new value only after
 the write succeeds. See [the preservation regression](../gotchas/agent-tier-catalogue-settings.md).
-KT-531 remains open: the separate `modelForAgentTier` display helper still has
-embedded fallbacks used by other surfaces; this settings correction alone does
-not qualify every selector.
-[src: file: frontend/src/lib/constants.ts:63-80]
+The shared picker prioritizes explicit identities, isolates named HTTP targets,
+disables known unavailable models and retains a failed reload as cached with
+an error. `modelForAgentTier` no longer invents embedded fallback model names.
+KT-531 remains open for the other custom selector/display paths and the legacy
+HTTP runner fallback; this checkpoint does not qualify every selector.
+[src: file: frontend/src/lib/constants.ts:60-75]
+[src: file: frontend/src/components/AgentSwitchPicker.tsx:113-142]

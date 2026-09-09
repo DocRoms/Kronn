@@ -2846,6 +2846,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                             currentAgent={qp.agent}
                             availableAgents={installedAgentTypes ?? []}
                             currentTier={qp.tier ?? 'default'}
+                            currentModel={qp.agent_settings?.model}
                             onSelectionChange={(agent, tier) => changeQuickPromptAgent(qp, agent, tier)}
                             tierLabels={{
                               economy: t('disc.tier.economy'),

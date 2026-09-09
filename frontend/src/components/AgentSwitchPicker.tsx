@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Check, ChevronDown, Loader2, RefreshCw } from 'lucide-react';
 import { modelCatalogApi } from '../lib/api';
-import { modelRuntimeTargetId } from '../lib/modelCatalogSelection';
+import { catalogModelProvenance, catalogTierEntry, modelRuntimeTargetId } from '../lib/modelCatalogSelection';
 import { useT } from '../lib/I18nContext';
 import {
   AGENT_COLORS,
@@ -13,7 +13,6 @@ import {
 } from '../lib/constants';
 import type {
   AgentType,
-  CatalogModelEntry,
   ModelCatalogSnapshot,
   ModelTier,
   ModelTierConfig,
@@ -36,6 +35,8 @@ interface AgentSwitchPickerProps {
   availableTargets?: AgentSwitchTarget[];
   onChange?: (agent: AgentType) => Promise<void>;
   currentTier?: ModelTier;
+  /** Saved per-discussion/QP override; alternative selections resolve their own tiers. */
+  currentModel?: string | null;
   onSelectionChange?: (agent: AgentType, tier: ModelTier) => Promise<void>;
   onTargetSelectionChange?: (target: AgentSwitchTarget, tier: ModelTier) => Promise<void>;
   tierLabels?: Record<ModelTier, string>;
@@ -63,6 +64,7 @@ export function AgentSwitchPicker({
   availableTargets,
   onChange,
   currentTier,
+  currentModel,
   onSelectionChange,
   onTargetSelectionChange,
   tierLabels,
@@ -80,6 +82,7 @@ export function AgentSwitchPicker({
   const [open, setOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [catalog, setCatalog] = useState<ModelCatalogSnapshot | null>(null);
+  const [catalogError, setCatalogError] = useState(false);
   const [popoverPosition, setPopoverPosition] = useState<{ top: number; left: number } | null>(null);
   const savingRef = useRef(false);
   const rootRef = useRef<HTMLSpanElement>(null);
@@ -110,21 +113,25 @@ export function AgentSwitchPicker({
   const targetLabel = (target: AgentSwitchTarget) =>
     target.label ?? AGENT_LABELS[target.agent] ?? target.agent;
   const runtimeTargetId = (target: AgentSwitchTarget) => modelRuntimeTargetId(target.agent, target.connectionId);
-  const catalogEntry = (target: AgentSwitchTarget, tier: ModelTier): CatalogModelEntry | undefined => {
-    const models = catalog?.targets
-      .find(view => view.runtime_target_id === runtimeTargetId(target))
-      ?.models;
-    const assigned = models?.find(model => model.tier_assignment === tier);
-    if (assigned) return assigned;
-    const configuredModel = target.modelTiers?.[tier]
-      ?? modelForAgentTier(target.agent, tier, modelTiers, defaultModelLabel);
-    return models?.find(model => model.model_id === configuredModel);
+  const catalogView = (target: AgentSwitchTarget) =>
+    catalog?.targets.find(view => view.runtime_target_id === runtimeTargetId(target));
+  const isHttpTarget = (target: AgentSwitchTarget) => Boolean(target.connectionId)
+    || ['Ollama', 'LiteLlm', 'Nvidia'].includes(target.agent);
+  const configuredModel = (target: AgentSwitchTarget, tier: ModelTier) => {
+    if (currentModel?.trim() && targetKey(target) === targetKey(currentTarget) && tier === currentTier) {
+      return currentModel;
+    }
+    const configured = target.modelTiers?.[tier]
+      || (isHttpTarget(target) ? target.modelTiers?.default : null);
+    // A named connection owns its configuration; family defaults belong to a different target.
+    return configured || (target.connectionId ? '' : modelForAgentTier(target.agent, tier, modelTiers, ''));
   };
+  const catalogEntry = (target: AgentSwitchTarget, tier: ModelTier) =>
+    catalogTierEntry(catalogView(target), tier, configuredModel(target, tier), isHttpTarget(target));
   const targetModel = (target: AgentSwitchTarget, tier: ModelTier) => {
     const entry = catalogEntry(target, tier);
     return entry?.display_alias ?? entry?.display_name ?? entry?.model_id
-      ?? target.modelTiers?.[tier]
-      ?? modelForAgentTier(target.agent, tier, modelTiers, defaultModelLabel);
+      ?? (configuredModel(target, tier) || defaultModelLabel);
   };
   const tierTitle = (target: AgentSwitchTarget, tier: ModelTier) =>
     `${tierLabels?.[tier] ?? tier} · ${targetModel(target, tier)}`;
@@ -185,11 +192,19 @@ export function AgentSwitchPicker({
     let active = true;
     void modelCatalogApi.list()
       .then(snapshot => {
-        if (active) setCatalog(snapshot);
+        if (active) {
+          setCatalog(snapshot);
+          setCatalogError(false);
+        }
       })
       .catch(() => {
-        // The existing configured tiers remain a safe fallback. A picker
-        // never becomes unusable just because the catalog read failed.
+        if (!active) return;
+        setCatalogError(true);
+        // Keep known identities, but do not present the previous snapshot as fresh.
+        setCatalog(previous => previous ? {
+          ...previous,
+          targets: previous.targets.map(target => ({ ...target, stale: true, live_refresh_ok: false })),
+        } : null);
       });
     updatePopoverPosition();
     const closeOutside = (event: MouseEvent) => {
@@ -273,6 +288,7 @@ export function AgentSwitchPicker({
           role="menu"
           style={popoverPosition}
         >
+          {catalogError && <span role="status" className="kr-agent-switch-catalog-meta">{t('modelCatalog.loadError')}</span>}
           {choices.map(target => tierPicker ? (
             <span
               key={targetKey(target)}
@@ -296,7 +312,7 @@ export function AgentSwitchPicker({
                   const entry = catalogEntry(target, tier);
                   const unavailable = entry?.availability === 'unavailable';
                   const provenance = entry
-                    ? t(`modelCatalog.provenance.${entry.provenance}`)
+                    ? t(`modelCatalog.provenance.${catalogModelProvenance(entry, catalogView(target))}`)
                     : null;
                   return (
                     <button
@@ -313,11 +329,11 @@ export function AgentSwitchPicker({
                     >
                       <span aria-hidden="true">{icon}</span>
                       <span>{label}</span>
-                      {entry && (
+                      {(entry || configuredModel(target, tier)) && (
                         <span className="kr-agent-switch-catalog-meta">
                           {unavailable
                             ? t('modelCatalog.unavailable')
-                            : provenance}
+                            : provenance ?? t('modelCatalog.notInCatalog')}
                         </span>
                       )}
                       {selected && <Check size={8} aria-hidden="true" />}
