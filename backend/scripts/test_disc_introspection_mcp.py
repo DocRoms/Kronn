@@ -47,16 +47,49 @@ from unittest import mock
 _SCRIPT = Path(__file__).resolve().parent / "disc-introspection-mcp.py"
 
 
-def _load_module():
+# Every loaded module points here instead of `~/.config/kronn`, for the whole
+# test process. Kept alive at module scope so it outlives each `_load_module()`.
+_ISOLATED_BINDING_DIR = tempfile.TemporaryDirectory(prefix="kronn-test-bindings-")
+
+
+def _refuse_ambient_http(*args, **kwargs):
+    """Stand-in for `_http` in a module nobody mocked.
+
+    A test that reaches a real backend passes or fails on whatever happens to be
+    running, which is not a test. Failing loudly here says which one forgot to
+    mock, instead of leaving the suite quietly dependent on the machine.
+    """
+    raise AssertionError(
+        f"un-mocked _http{args[:2]} — patch `_http` in this test, "
+        "or the suite depends on an ambient backend"
+    )
+
+
+def _load_module(isolate=True, isolate_http=None):
     """Load disc-introspection-mcp.py despite the kebab-case filename.
 
     Standard `import` can't handle the hyphens, so we use importlib's
     file-loader API. Re-loaded fresh in `setUp` so per-process caches
     (`_CURRENT_DISC_META_CACHE`) don't leak between tests.
+
+    `isolate` (the default) redirects the binding directory into a temporary
+    one and disarms un-mocked HTTP, so a test cannot touch the developer's real
+    `~/.config/kronn` or a backend that happens to be up. Tests that exercise
+    binding persistence for real override `_BINDING_DIR` themselves with their
+    own directory — this default is a floor, not a ceiling.
+
+    `isolate_http=False` keeps the real `_http`, for the handful of tests whose
+    subject IS `_http` (they mock the transport underneath it instead). Kept a
+    separate switch so keeping real HTTP never silently un-isolates the binding
+    directory too.
     """
     spec = importlib.util.spec_from_file_location("kronn_mcp", _SCRIPT)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    if isolate:
+        module._BINDING_DIR = _ISOLATED_BINDING_DIR.name
+    if isolate_http if isolate_http is not None else isolate:
+        module._http = _refuse_ambient_http
     return module
 
 
@@ -6401,7 +6434,9 @@ class HttpAuthHeaderTests(unittest.TestCase):
     own sidecar (was a silent 401 before the boot injects the token)."""
 
     def setUp(self):
-        self.mod = _load_module()
+        # `_http` is the SUBJECT here, so it must be the real one; the transport
+        # underneath it is mocked instead. The binding directory stays isolated.
+        self.mod = _load_module(isolate_http=False)
 
     def _ok_response(self):
         cm = mock.MagicMock()
