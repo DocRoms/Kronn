@@ -19,15 +19,23 @@ fn database() -> Connection {
     conn
 }
 
-/// A CLI session parked in `room`, as Kronn writes it at offer acceptance.
-fn session(conn: &Connection, room: &str, session_id: &str) -> i64 {
+/// A CLI session parked in `room`, holding a resume credential — the way Kronn
+/// writes one at offer acceptance. Returns the plaintext secret, which is what
+/// the bridge holds and the only thing that now grants authority.
+fn session(conn: &Connection, room: &str, session_id: &str) -> String {
+    let secret = format!("kr-resume-{session_id}");
     conn.execute(
-        "INSERT INTO discussion_sessions (disc_id, agent_type, session_id, role, status, joined_at) \
-         VALUES (?1,'ClaudeCode',?2,'peer','active','now')",
-        rusqlite::params![room, session_id],
+        "INSERT INTO discussion_sessions \
+             (disc_id, agent_type, session_id, role, status, joined_at, resume_token_hash) \
+         VALUES (?1,'ClaudeCode',?2,'peer','active','now',?3)",
+        rusqlite::params![
+            room,
+            session_id,
+            crate::db::discussion_sessions::sha256_hex(&secret)
+        ],
     )
     .unwrap();
-    conn.last_insert_rowid()
+    secret
 }
 
 /// Make `CHILD` a genuine execution room, the way a delegation does.
@@ -47,7 +55,14 @@ fn execution_room(conn: &Connection) {
         [],
     )
     .unwrap();
-    let worker = session(conn, CHILD, "execution-worker");
+    session(conn, CHILD, "execution-worker");
+    let worker: i64 = conn
+        .query_row(
+            "SELECT id FROM discussion_sessions WHERE session_id = 'execution-worker'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
     conn.execute(
         "INSERT INTO task_executions (id, orchestration_run_id, task_id, parent_discussion_id, \
              sub_discussion_id, status, worker_target_kind, worker_agent_type, \
@@ -140,7 +155,13 @@ fn orchestrator() -> ImportantPublisher {
 #[test]
 fn an_orchestrator_fence_becomes_one_persisted_card() {
     let conn = database();
-    let ingest = append(&conn, ROOM, "m1", fenced(&spec_json("kt-619.ship")), &orchestrator());
+    let ingest = append(
+        &conn,
+        ROOM,
+        "m1",
+        fenced(&spec_json("kt-619.ship")),
+        &orchestrator(),
+    );
 
     assert_eq!(ingest.published, 1);
     let list = list(&conn, ROOM, None).unwrap();
@@ -162,10 +183,16 @@ fn a_worker_is_refused_and_told_so() {
     execution_room(&conn);
     let worker = session(&conn, CHILD, "worker-1");
 
-    let publisher = publisher_for_author(&conn, Some(worker), "ClaudeCode").unwrap();
+    let publisher = publisher_for_credential(&conn, Some(&worker), "ClaudeCode").unwrap();
     assert_eq!(publisher, ImportantPublisher::Worker);
 
-    let ingest = append(&conn, ROOM, "m1", fenced(&spec_json("kt-619.ship")), &publisher);
+    let ingest = append(
+        &conn,
+        ROOM,
+        "m1",
+        fenced(&spec_json("kt-619.ship")),
+        &publisher,
+    );
     assert_eq!(ingest.refused_worker, 1);
     assert_eq!(ingest.published, 0);
     // The refusal is visible, not a silent drop.
@@ -181,7 +208,7 @@ fn a_worker_targeting_the_parent_room_is_still_refused() {
 
     // The route bypass: name the principal's room instead of its own. Authority
     // is read from where the session sits, so the target changes nothing.
-    let publisher = publisher_for_author(&conn, Some(worker), "ClaudeCode").unwrap();
+    let publisher = publisher_for_credential(&conn, Some(&worker), "ClaudeCode").unwrap();
     assert_eq!(publisher, ImportantPublisher::Worker);
     let ingest = append(&conn, ROOM, "m1", fenced(&spec_json("k")), &publisher);
     assert_eq!(ingest.refused_worker, 1);
@@ -196,7 +223,7 @@ fn a_worker_claiming_the_human_role_is_still_refused() {
 
     // The payload bypass: label the turn `User` to be taken for the human.
     // The label is display-only and never consulted for authority.
-    let publisher = publisher_for_author(&conn, Some(worker), "Human").unwrap();
+    let publisher = publisher_for_credential(&conn, Some(&worker), "Human").unwrap();
     assert_eq!(publisher, ImportantPublisher::Worker);
     let ingest = append_as(
         &conn,
@@ -211,47 +238,92 @@ fn a_worker_claiming_the_human_role_is_still_refused() {
 }
 
 #[test]
-fn an_unresolvable_session_is_refused_rather_than_trusted() {
+fn a_caller_that_proves_nothing_gets_nothing() {
     let conn = database();
     execution_room(&conn);
-    // No row exists for this pk: a bulk import, a missing/invalid session, or
-    // a worker whose home room this lookup could not read must all refuse —
-    // there is no legitimate "unknown caller" case for `disc_append`.
-    let publisher = publisher_for_author(&conn, Some(9_999), "ClaudeCode").unwrap();
-    assert_eq!(publisher, ImportantPublisher::Worker);
 
-    let publisher_no_session = publisher_for_author(&conn, None, "ClaudeCode").unwrap();
-    assert_eq!(publisher_no_session, ImportantPublisher::Worker);
+    // A credential that authenticates no session, and no credential at all,
+    // both refuse. They report as `Unverified` rather than `Worker`: the usual
+    // cause is a bridge older than the contract, and telling it to reload is
+    // more useful than calling it an impostor.
+    for absent in [Some("kr-resume-nobody"), None] {
+        assert_eq!(
+            publisher_for_credential(&conn, absent, "ClaudeCode").unwrap(),
+            ImportantPublisher::Unverified
+        );
+    }
 }
 
 #[test]
-fn the_human_publishes_even_inside_an_execution_room() {
+fn presenting_a_session_id_is_not_holding_its_credential() {
     let conn = database();
-    execution_room(&conn);
-    // The human path never calls `publisher_for_author` at all — `send_message`
-    // constructs this directly, with no CLI session to resolve.
-    let publisher = ImportantPublisher::Human("Romu".into());
+    // An orchestrator session, and the secret only it holds.
+    let secret = session(&conn, ROOM, "orchestrator-session");
+    assert!(matches!(
+        publisher_for_credential(&conn, Some(&secret), "Codex").unwrap(),
+        ImportantPublisher::Orchestrator(_)
+    ));
 
-    let ingest = append_as(
-        &conn,
-        CHILD,
-        "m1",
-        fenced(&spec_json("k")),
-        &publisher,
-        MessageRole::User,
-    );
-    assert_eq!(ingest.published, 1);
+    // The session id is visible in room metadata. Presenting it — or anything
+    // derived from it that is not the secret — proves nothing.
+    for guess in ["orchestrator-session", "kr-resume-orchestrator", ""] {
+        assert_eq!(
+            publisher_for_credential(&conn, Some(guess), "Codex").unwrap(),
+            ImportantPublisher::Unverified,
+            "{guess:?} must not authenticate"
+        );
+    }
+}
+
+#[test]
+fn a_left_session_no_longer_authenticates() {
+    let conn = database();
+    let secret = session(&conn, ROOM, "orchestrator-session");
+    conn.execute(
+        "UPDATE discussion_sessions SET status = 'left' WHERE session_id = 'orchestrator-session'",
+        [],
+    )
+    .unwrap();
+    // The credential is still correct; the session is gone. Authority goes with
+    // the session, not with the bytes.
     assert_eq!(
-        list(&conn, CHILD, None).unwrap().items[0].author_kind,
-        ImportantAuthorKind::Human
+        publisher_for_credential(&conn, Some(&secret), "Codex").unwrap(),
+        ImportantPublisher::Unverified
     );
+}
+
+#[test]
+fn a_rotated_credential_stops_working() {
+    let conn = database();
+    let secret = session(&conn, ROOM, "orchestrator-session");
+    conn.execute(
+        "UPDATE discussion_sessions SET resume_token_hash = ?1 \
+          WHERE session_id = 'orchestrator-session'",
+        rusqlite::params![crate::db::discussion_sessions::sha256_hex(
+            "kr-resume-rotated"
+        )],
+    )
+    .unwrap();
+    // Resume rotates the secret. The old one must die with the rotation, or a
+    // credential read once would be good forever.
+    assert_eq!(
+        publisher_for_credential(&conn, Some(&secret), "Codex").unwrap(),
+        ImportantPublisher::Unverified
+    );
+    assert!(matches!(
+        publisher_for_credential(&conn, Some("kr-resume-rotated"), "Codex").unwrap(),
+        ImportantPublisher::Orchestrator(_)
+    ));
 }
 
 #[test]
 fn a_replayed_event_collapses_onto_its_dedup_key() {
     let conn = database();
     let body = fenced(&spec_json("kt-619.ship"));
-    assert_eq!(append(&conn, ROOM, "m1", body.clone(), &orchestrator()).published, 1);
+    assert_eq!(
+        append(&conn, ROOM, "m1", body.clone(), &orchestrator()).published,
+        1
+    );
 
     // Same fact, different message: a restart replaying the steering event.
     let again = append(&conn, ROOM, "m2", body, &orchestrator());
@@ -331,7 +403,10 @@ fn an_explicit_no_action_carries_no_action_fields() {
     assert!(parse_spec(&value.to_string()).is_none());
 
     value["action_required"] = serde_json::json!({ "required": true, "action": "Trancher" });
-    assert!(parse_spec(&value.to_string()).is_none(), "owner is required");
+    assert!(
+        parse_spec(&value.to_string()).is_none(),
+        "owner is required"
+    );
 
     value["action_required"] =
         serde_json::json!({ "required": true, "action": "Trancher", "owner": "Romu" });
@@ -345,7 +420,10 @@ fn empty_blank_and_oversized_fields_are_refused() {
     assert!(parse_spec(&value.to_string()).is_none(), "blank highlight");
 
     value["highlight"] = serde_json::json!("x".repeat(501));
-    assert!(parse_spec(&value.to_string()).is_none(), "highlight ceiling");
+    assert!(
+        parse_spec(&value.to_string()).is_none(),
+        "highlight ceiling"
+    );
 
     let mut over = serde_json::from_str::<serde_json::Value>(&spec_json("k")).unwrap();
     over["impact"] = serde_json::json!("x".repeat(30_000));
@@ -415,10 +493,18 @@ fn the_filter_and_the_transcript_agree_on_order() {
 #[test]
 fn cards_survive_a_restart_with_their_source_link() {
     let conn = database();
-    append(&conn, ROOM, "m1", fenced(&spec_json("kt-619.ship")), &orchestrator());
+    append(
+        &conn,
+        ROOM,
+        "m1",
+        fenced(&spec_json("kt-619.ship")),
+        &orchestrator(),
+    );
     // Re-reading through a fresh statement is what a restart does: the row is
     // the truth, not any in-memory projection.
-    let card = get_by_message(&conn, "m1").unwrap().expect("card persisted");
+    let card = get_by_message(&conn, "m1")
+        .unwrap()
+        .expect("card persisted");
     assert_eq!(card.message_id, "m1");
     assert_eq!(card.dedup_key, "kt-619.ship");
     assert_eq!(card.impact, "Les captures d'écran arrivent en 0.13.1.");

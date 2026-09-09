@@ -5135,6 +5135,16 @@ def call_disc_append(args):
     consumed_cursor = _read_cursor(disc_id)
     if consumed_cursor is not None:
         append_body["since_sort_order"] = consumed_cursor
+    # KT-619 — publication authority for an `kronn-important` fence is decided
+    # from the credential we HOLD, never from the session id we declare: an id
+    # is visible in room metadata, so presenting one proved nothing. Injected
+    # here, from the 0600 binding file, and never exposed as a tool parameter —
+    # a model cannot set what it is never offered. Absent binding stays absent:
+    # the backend refuses the card and says to reload, and the message itself
+    # is appended either way.
+    _binding = _read_binding()
+    if isinstance(_binding, dict) and _binding.get("resume_token"):
+        append_body["session_credential"] = _binding["resume_token"]
     appended = _unwrap(_http("POST", "/api/disc/append", append_body))
 
     if attachment_paths:

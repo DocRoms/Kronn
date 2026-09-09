@@ -239,7 +239,10 @@ pub fn validate_spec(spec: &ImportantSpec) -> bool {
         && stable_key(&spec.dedup_key)
         && nonempty_bounded(&spec.title, 200)
         && nonempty_bounded(&spec.highlight, 500)
-        && spec.context.as_ref().is_none_or(|s| s.chars().count() <= 2000)
+        && spec
+            .context
+            .as_ref()
+            .is_none_or(|s| s.chars().count() <= 2000)
         && nonempty_bounded(&spec.impact, 1000)
         && action_ok
         && optional_bounded(spec.references.task_ref.as_ref(), 100)
@@ -438,11 +441,13 @@ pub enum ImportantPublisher {
     /// source is `send_message`, the authenticated human endpoint, which
     /// constructs this directly with no session lookup at all.
     Human(String),
-    /// An active worker, OR a caller [`publisher_for_author`] could not
-    /// verify (no session, one that no longer resolves, a room this lookup
-    /// cannot read). Both are refused identically and told so: publishing an
-    /// important card has no legitimate "unknown caller" case.
+    /// An authenticated caller that is an active worker.
     Worker,
+    /// Nothing was proved: no credential, or one that no longer authenticates.
+    /// Refused like a worker, but reported apart — the usual cause is a bridge
+    /// that predates the contract, and telling it to reload is more useful than
+    /// treating it as hostile.
+    Unverified,
 }
 
 impl ImportantPublisher {
@@ -450,12 +455,18 @@ impl ImportantPublisher {
         match self {
             Self::Orchestrator(label) => Some((ImportantAuthorKind::Orchestrator, label)),
             Self::Human(label) => Some((ImportantAuthorKind::Human, label)),
-            Self::Worker => None,
+            Self::Worker | Self::Unverified => None,
         }
     }
 }
 
-/// Resolve who is publishing, from the caller's own durable CLI session.
+/// Resolve who is publishing, from the credential the caller actually holds.
+///
+/// **Possession is the identity.** The caller declares no session id, so there
+/// is nothing to spoof: `resume_token_hash` is uniquely indexed, the match is
+/// exact, and ambiguity is impossible by construction. A caller that proves
+/// nothing gets nothing — the earlier version resolved a declared string, which
+/// proved the row existed and never that the caller held it.
 ///
 /// **Authority is not message provenance.** `disc_append` also resolves an
 /// `author_cli_session_id`, and that one is deliberately filtered to the
@@ -475,26 +486,21 @@ impl ImportantPublisher {
 /// important card has no legitimate "unknown caller" case. It also has no
 /// legitimate human caller: a human reaches a card through `send_message`,
 /// which never calls this.
-pub fn publisher_for_author(
+pub fn publisher_for_credential(
     conn: &Connection,
-    author_cli_session_id: Option<i64>,
+    caller_credential: Option<&str>,
     label: &str,
 ) -> Result<ImportantPublisher> {
-    let Some(session_pk) = author_cli_session_id else {
-        return Ok(ImportantPublisher::Worker);
+    let Some(secret) = caller_credential else {
+        return Ok(ImportantPublisher::Unverified);
     };
-    let home: Option<String> = conn
-        .query_row(
-            "SELECT disc_id FROM discussion_sessions WHERE id = ?1 AND status <> 'left'",
-            params![session_pk],
-            |row| row.get(0),
-        )
-        .optional()?;
-    let Some(home) = home else {
-        return Ok(ImportantPublisher::Worker);
+    let Some((_session_pk, home)) =
+        crate::db::discussion_sessions::authenticate_by_resume_credential(conn, secret)?
+    else {
+        return Ok(ImportantPublisher::Unverified);
     };
-    // A room that is or was an execution room means a worker. Erring that way
-    // costs an orchestrator nothing: it does not sit in one.
+    // Verified, but a worker all the same — and the room it sits in decides
+    // that, not the room it is writing into.
     if crate::db::orchestration::discussion_is_execution_room(conn, &home)? {
         return Ok(ImportantPublisher::Worker);
     }
@@ -503,16 +509,26 @@ pub fn publisher_for_author(
 
 /// What one message's fences produced. Counts are reported back so a refused
 /// publisher learns it was refused instead of assuming it succeeded.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct ImportantIngest {
     pub published: u32,
     pub deduplicated: u32,
     pub refused_worker: u32,
+    /// The caller proved nothing: no credential, or one that no longer
+    /// authenticates. Counted apart from a known worker so an out-of-date
+    /// bridge can be told to reload instead of being called an impostor.
+    pub refused_unverified: u32,
     pub invalid: u32,
     /// Fences past the first in one message. One card is one message, so the
     /// extras are refused rather than silently collapsed by the unique index.
     pub refused_extra: u32,
+    /// What the caller should DO about a refusal. Present only when there is
+    /// something actionable — an out-of-date bridge is the common cause of an
+    /// unverified refusal, and "reload the MCP" is more useful than silence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub hint: Option<String>,
 }
 
 impl ImportantIngest {
@@ -576,7 +592,18 @@ pub fn ingest_message_important(
     }
 
     let Some((author_kind, author_label)) = publisher.authority() else {
-        ingest.refused_worker = fences.len() as u32;
+        match publisher {
+            ImportantPublisher::Unverified => {
+                ingest.refused_unverified = fences.len() as u32;
+                ingest.hint = Some(
+                    "This bridge sent no usable session credential, so the card was not \
+                     published. The message itself was appended. Reload the Kronn MCP \
+                     (or rejoin) so the bridge sends the credential it already holds."
+                        .to_string(),
+                );
+            }
+            _ => ingest.refused_worker = fences.len() as u32,
+        }
         return Ok(ingest);
     };
 

@@ -1566,7 +1566,15 @@ session_id?: string | null,
  * Used only to report whether peer traffic arrived while it was working;
  * it never advances the durable read cursor.
  */
-since_sort_order?: number | null, };
+since_sort_order?: number | null,
+/**
+ * KT-619 — the resume credential the bridge already holds, injected by the
+ * transport and NEVER exposed as a tool parameter: a model cannot set what
+ * it is never offered. Publication authority is decided from this alone;
+ * `session_id` above stays what it always was, a declared hint for
+ * provenance and heartbeats.
+ */
+session_credential?: SessionCredential | null, };
 
 export type DiscAppendResponse = { appended: number, skipped_as_duplicates: number,
 /**
@@ -2898,12 +2906,24 @@ export type ImportantCategory = "decision" | "scope_change" | "dod_waiver" | "bl
  * What one message's fences produced. Counts are reported back so a refused
  * publisher learns it was refused instead of assuming it succeeded.
  */
-export type ImportantIngest = { published: number, deduplicated: number, refused_worker: number, invalid: number,
+export type ImportantIngest = { published: number, deduplicated: number, refused_worker: number,
+/**
+ * The caller proved nothing: no credential, or one that no longer
+ * authenticates. Counted apart from a known worker so an out-of-date
+ * bridge can be told to reload instead of being called an impostor.
+ */
+refused_unverified: number, invalid: number,
 /**
  * Fences past the first in one message. One card is one message, so the
  * extras are refused rather than silently collapsed by the unique index.
  */
-refused_extra: number, };
+refused_extra: number,
+/**
+ * What the caller should DO about a refusal. Present only when there is
+ * something actionable — an out-of-date bridge is the common cause of an
+ * unverified refusal, and "reload the MCP" is more useful than silence.
+ */
+hint?: string, };
 
 /**
  * A persisted card, as read back.
@@ -5656,6 +5676,16 @@ max_turns: number,
  * prepare a handover instead of being cut off mid-task.
  */
 soft_ratio: number, };
+
+/**
+ * A bridge-held secret, carried without ever being printed.
+ *
+ * KT-619 — `DiscAppendRequest` derives `Debug`, and a tracing line or a test
+ * failure that dumps the request would put the credential in a log. The
+ * redacting `Debug` makes that impossible rather than unlikely; there is no
+ * `Serialize`, so it cannot travel back out either.
+ */
+export type SessionCredential = string;
 
 export type SetAgentAccessRequest = { agent: AgentType, full_access: boolean, };
 

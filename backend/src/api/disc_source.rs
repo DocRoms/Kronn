@@ -215,6 +215,29 @@ pub struct DiscAppendMessage {
     pub reply_to_message_id: Option<String>,
 }
 
+/// A bridge-held secret, carried without ever being printed.
+///
+/// KT-619 — `DiscAppendRequest` derives `Debug`, and a tracing line or a test
+/// failure that dumps the request would put the credential in a log. The
+/// redacting `Debug` makes that impossible rather than unlikely; there is no
+/// `Serialize`, so it cannot travel back out either.
+#[derive(Clone, Deserialize, TS)]
+#[ts(export)]
+pub struct SessionCredential(String);
+
+impl std::fmt::Debug for SessionCredential {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SessionCredential(<redacted>)")
+    }
+}
+
+impl SessionCredential {
+    /// Deliberately crate-visible and named: every read is greppable.
+    pub(crate) fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, TS)]
 #[ts(export)]
 pub struct DiscAppendRequest {
@@ -229,6 +252,13 @@ pub struct DiscAppendRequest {
     /// it never advances the durable read cursor.
     #[serde(default)]
     pub since_sort_order: Option<i64>,
+    /// KT-619 — the resume credential the bridge already holds, injected by the
+    /// transport and NEVER exposed as a tool parameter: a model cannot set what
+    /// it is never offered. Publication authority is decided from this alone;
+    /// `session_id` above stays what it always was, a declared hint for
+    /// provenance and heartbeats.
+    #[serde(default)]
+    pub session_credential: Option<SessionCredential>,
 }
 
 /// Compact lint feedback echoed to the POSTING agent (tool result), so it can
@@ -706,7 +736,12 @@ pub async fn disc_append(
         let did_insert = did_for_loop.clone();
         let msg_clone = msg.clone();
         let typed_targets = requested_targets.clone();
-        let important_session_id = req.session_id.clone();
+        // Cloned per message so the closure owns it; the redacting `Debug` on
+        // `SessionCredential` travels with it.
+        let important_credential = req
+            .session_credential
+            .as_ref()
+            .map(|credential| credential.expose().to_string());
         let dispatch_jobs = dispatch_agents
             .iter()
             .cloned()
@@ -764,27 +799,13 @@ pub async fn disc_append(
                     .as_ref()
                     .map(|agent| format!("{agent:?}"))
                     .unwrap_or_else(|| "Orchestrator".to_string());
-                // Resolved fresh from the calling bridge's OWN session
-                // (`req.session_id`), never from `author_cli_session_id` above:
-                // that one is `None` whenever this append is not a single live
-                // Agent turn (a bulk import, several messages, a claimed
-                // `role: User`) or targets a room other than the session's own
-                // — every one of those must refuse, not silently read as "no
-                // session, trust the payload". Resolution is by session id
-                // alone, with no `disc_id` filter, so a worker's session is
-                // found and refused even when it targets its parent room.
-                let important_author_session_id = match important_session_id.as_deref() {
-                    Some(session_id) => {
-                        crate::db::discussion_sessions::find_active_session_by_id(
-                            conn, session_id,
-                        )?
-                        .map(|(pk, _home_disc_id, _agent_type)| pk)
-                    }
-                    None => None,
-                };
-                let publisher = crate::db::discussion_important::publisher_for_author(
+                // Authority comes from the credential the bridge HOLDS, not
+                // from any id it declares. `session_id` above proved only that
+                // a row existed — session ids are visible in room metadata, so
+                // presenting one was never evidence of holding it.
+                let publisher = crate::db::discussion_important::publisher_for_credential(
                     conn,
-                    important_author_session_id,
+                    important_credential.as_deref(),
                     &label,
                 )?;
                 conn.execute_batch("SAVEPOINT disc_append_important")?;
@@ -1700,6 +1721,7 @@ mod tests {
                 messages: msgs,
                 session_id: session_id.map(str::to_owned),
                 since_sort_order: None,
+                session_credential: None,
             }),
         )
         .await;
@@ -1708,6 +1730,28 @@ mod tests {
 
     async fn append(state: &crate::AppState, msgs: Vec<DiscAppendMessage>) -> DiscAppendResponse {
         append_as(state, msgs, None).await
+    }
+
+    /// KT-619 — append the way an up-to-date bridge does: carrying the resume
+    /// credential it holds, and declaring nothing it cannot prove.
+    async fn append_holding(
+        state: &crate::AppState,
+        msgs: Vec<DiscAppendMessage>,
+        credential: Option<&str>,
+    ) -> DiscAppendResponse {
+        let resp = disc_append(
+            axum::extract::State(state.clone()),
+            Json(DiscAppendRequest {
+                disc_id: "d-lint".into(),
+                messages: msgs,
+                session_id: None,
+                since_sort_order: None,
+                session_credential: credential
+                    .map(|c| serde_json::from_value(serde_json::json!(c)).unwrap()),
+            }),
+        )
+        .await;
+        resp.0.data.expect("append succeeds")
     }
 
     #[tokio::test]
@@ -1852,6 +1896,7 @@ mod tests {
                 messages: vec![agent_msg("my-reply", "ack")],
                 session_id: Some("cli-me".into()),
                 since_sort_order: Some(0),
+                session_credential: None,
             }),
         )
         .await
@@ -1892,6 +1937,7 @@ mod tests {
                 messages: vec![agent_msg("my-only-message", "still working")],
                 session_id: Some("cli-me".into()),
                 since_sort_order: Some(0),
+                session_credential: None,
             }),
         )
         .await
@@ -1966,6 +2012,7 @@ mod tests {
                 messages: vec![agent_msg("mine-now", "new progress")],
                 session_id: Some("cli-me".into()),
                 since_sort_order: Some(0),
+                session_credential: None,
             }),
         )
         .await
@@ -2036,6 +2083,7 @@ mod tests {
                 messages: vec![agent_msg("mine-after-note", "progress")],
                 session_id: Some("cli-me".into()),
                 since_sort_order: Some(cursor),
+                session_credential: None,
             }),
         )
         .await
@@ -2099,6 +2147,7 @@ mod tests {
                 }],
                 session_id: None,
                 since_sort_order: None,
+                session_credential: None,
             }),
         )
         .await;
@@ -3496,6 +3545,27 @@ mod tests {
     const IMPORTANT_PARENT: &str = "d-lint";
     const IMPORTANT_CHILD: &str = "d-lint-child";
     const IMPORTANT_WORKER_SESSION: &str = "important-worker-session";
+    const IMPORTANT_WORKER_SECRET: &str = "kr-resume-important-worker";
+    const IMPORTANT_ORCH_SESSION: &str = "orchestrator-session";
+    const IMPORTANT_ORCH_SECRET: &str = "kr-resume-orchestrator";
+
+    /// Give an existing session the resume credential its bridge would hold.
+    async fn hold_credential(state: &crate::AppState, session_id: &str, secret: &str) {
+        let session_id = session_id.to_string();
+        let hash = crate::db::discussion_sessions::sha256_hex(secret);
+        state
+            .db
+            .with_conn(move |conn| {
+                let updated = conn.execute(
+                    "UPDATE discussion_sessions SET resume_token_hash = ?2 WHERE session_id = ?1",
+                    rusqlite::params![session_id, hash],
+                )?;
+                assert_eq!(updated, 1, "fixture must target exactly one session");
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
 
     /// Give `child` a `task_executions` row anchored at `parent`, and park a
     /// worker CLI session inside `child` — the way a real delegation does.
@@ -3538,6 +3608,8 @@ mod tests {
             })
             .await
             .unwrap();
+        // The worker's bridge holds a credential, like every real one does.
+        hold_credential(state, IMPORTANT_WORKER_SESSION, IMPORTANT_WORKER_SECRET).await;
     }
 
     fn important_fence(dedup_key: &str) -> String {
@@ -3582,6 +3654,31 @@ mod tests {
             .unwrap()
     }
 
+    /// KT-619 — the credential must not reach a log or a test failure. This is
+    /// the property, not the intention: `DiscAppendRequest` derives `Debug`, and
+    /// one `tracing::warn!("{req:?}")` would otherwise print the secret.
+    #[test]
+    fn the_session_credential_never_prints_itself() {
+        let request = DiscAppendRequest {
+            disc_id: "d-lint".into(),
+            messages: vec![],
+            session_id: Some("visible-and-harmless".into()),
+            since_sort_order: None,
+            session_credential: Some(
+                serde_json::from_value(serde_json::json!("kr-resume-super-secret")).unwrap(),
+            ),
+        };
+        let printed = format!("{request:?}");
+        assert!(
+            !printed.contains("super-secret"),
+            "the credential leaked into Debug: {printed}"
+        );
+        assert!(printed.contains("<redacted>"));
+        // The declared id is not a secret and stays readable, which is what
+        // makes a debug line useful at all.
+        assert!(printed.contains("visible-and-harmless"));
+    }
+
     #[tokio::test]
     #[serial]
     async fn disc_append_lets_the_orchestrators_own_session_publish() {
@@ -3594,17 +3691,18 @@ mod tests {
                     conn,
                     IMPORTANT_PARENT,
                     "ClaudeCode",
-                    Some("orchestrator-session"),
+                    Some(IMPORTANT_ORCH_SESSION),
                     "peer",
                 )
             })
             .await
             .unwrap();
+        hold_credential(&state, IMPORTANT_ORCH_SESSION, IMPORTANT_ORCH_SECRET).await;
 
-        let response = append_as(
+        let response = append_holding(
             &state,
             vec![agent_msg("m1", &important_fence("kt-619.orch"))],
-            Some("orchestrator-session"),
+            Some(IMPORTANT_ORCH_SECRET),
         )
         .await;
 
@@ -3619,14 +3717,11 @@ mod tests {
     /// in room metadata — can present it and publish. Resolving the row proves
     /// the row exists, never possession.
     ///
-    /// Ignored, not deleted: fixing it means requiring proof of possession
-    /// (`discussion_sessions.resume_token_hash` already exists for the join and
-    /// resume paths, and `disc_append` simply does not use it), which is the
-    /// same authority arbitration as the `Human` branch. Remove the `ignore`
-    /// with the fix; until then this states plainly what is not guaranteed.
+    /// Fixed: authority now comes from the credential the caller holds, so
+    /// presenting an id proves nothing. The `#[ignore]` this carried while the
+    /// hole was open is gone with the hole.
     #[tokio::test]
     #[serial]
-    #[ignore = "KT-619: declared session identity is not authenticated; pending the authority arbitration"]
     async fn disc_append_refuses_a_worker_presenting_an_orchestrators_session_id() {
         crate::core::anti_halluc::set_mode("off");
         let (state, _tmp) = lint_state(false).await;
@@ -3638,19 +3733,23 @@ mod tests {
                     conn,
                     IMPORTANT_PARENT,
                     "ClaudeCode",
-                    Some("orchestrator-session"),
+                    Some(IMPORTANT_ORCH_SESSION),
                     "peer",
                 )
             })
             .await
             .unwrap();
+        hold_credential(&state, IMPORTANT_ORCH_SESSION, IMPORTANT_ORCH_SECRET).await;
 
-        // The worker never sends its own id. It sends the orchestrator's, which
-        // it did not have to steal — only read.
-        let response = append_as(
+        // The worker never sends its own credential. It sends the
+        // orchestrator's session ID, which it did not have to steal — only read.
+        let response = append_holding(
             &state,
-            vec![agent_msg("m1", &important_fence("kt-619.borrowed-identity"))],
-            Some("orchestrator-session"),
+            vec![agent_msg(
+                "m1",
+                &important_fence("kt-619.borrowed-identity"),
+            )],
+            Some(IMPORTANT_ORCH_SESSION),
         )
         .await;
 
@@ -3677,7 +3776,7 @@ mod tests {
             None,
             &important_fence("kt-619.user-bypass"),
         );
-        let response = append_as(&state, vec![msg], Some(IMPORTANT_WORKER_SESSION)).await;
+        let response = append_holding(&state, vec![msg], Some(IMPORTANT_WORKER_SECRET)).await;
 
         assert_eq!(response.important.map(|i| i.refused_worker), Some(1));
         assert_eq!(important_card_count(&state, IMPORTANT_PARENT).await, 0);
@@ -3696,7 +3795,7 @@ mod tests {
             Some(AgentType::Codex),
             &important_fence("kt-619.system-bypass"),
         );
-        let response = append_as(&state, vec![msg], Some(IMPORTANT_WORKER_SESSION)).await;
+        let response = append_holding(&state, vec![msg], Some(IMPORTANT_WORKER_SECRET)).await;
 
         assert_eq!(response.important.map(|i| i.refused_worker), Some(1));
         assert_eq!(important_card_count(&state, IMPORTANT_PARENT).await, 0);
@@ -3716,7 +3815,7 @@ mod tests {
             agent_msg("m1", &important_fence("kt-619.bulk-1")),
             agent_msg("m2", &important_fence("kt-619.bulk-2")),
         ];
-        append_as(&state, msgs, Some(IMPORTANT_WORKER_SESSION)).await;
+        append_holding(&state, msgs, Some(IMPORTANT_WORKER_SECRET)).await;
 
         assert_eq!(important_card_count(&state, IMPORTANT_PARENT).await, 0);
     }
@@ -3733,7 +3832,15 @@ mod tests {
         )
         .await;
 
-        assert_eq!(response.important.map(|i| i.refused_worker), Some(1));
+        let ingest = response
+            .important
+            .expect("a refusal is reported, not dropped");
+        assert_eq!(ingest.refused_unverified, 1);
+        assert_eq!(ingest.refused_worker, 0, "an old bridge is not an impostor");
+        // The message still landed; only the card was refused, and the caller
+        // is told what to do about it.
+        assert_eq!(response.appended, 1);
+        assert!(ingest.hint.is_some_and(|h| h.contains("Reload")));
         assert_eq!(important_card_count(&state, IMPORTANT_PARENT).await, 0);
     }
 
@@ -3743,14 +3850,18 @@ mod tests {
         crate::core::anti_halluc::set_mode("off");
         let (state, _tmp) = lint_state(false).await;
 
-        let response = append_as(
+        let response = append_holding(
             &state,
             vec![agent_msg("m1", &important_fence("kt-619.bad-session"))],
-            Some("no-such-session"),
+            Some("kr-resume-no-such-session"),
         )
         .await;
 
-        assert_eq!(response.important.map(|i| i.refused_worker), Some(1));
+        assert_eq!(
+            response.important.map(|i| i.refused_unverified),
+            Some(1),
+            "a credential that authenticates nothing proves nothing"
+        );
         assert_eq!(important_card_count(&state, IMPORTANT_PARENT).await, 0);
     }
 
@@ -3765,10 +3876,10 @@ mod tests {
         // but it appends to `IMPORTANT_PARENT` (what `append_as` always
         // targets) instead of its own room. Resolution reads the session by
         // id alone, with no `disc_id` filter, so it is still found and refused.
-        let response = append_as(
+        let response = append_holding(
             &state,
             vec![agent_msg("m1", &important_fence("kt-619.parent-bypass"))],
-            Some(IMPORTANT_WORKER_SESSION),
+            Some(IMPORTANT_WORKER_SECRET),
         )
         .await;
 
