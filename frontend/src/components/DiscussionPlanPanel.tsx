@@ -36,6 +36,8 @@ import { TaskCampaignPanel } from './TaskCampaignPanel';
 import { TaskExecutionCard } from './TaskExecutionCard';
 import { TaskLaunchDialog } from './TaskLaunchDialog';
 import { orchestrationResolution } from './taskLaunchResolution';
+import { AgentSwitchPicker } from './AgentSwitchPicker';
+import { ModelCatalogPicker } from './ModelCatalogPicker';
 import type {
   AgentType,
   Discussion,
@@ -377,6 +379,17 @@ export function DiscussionPlanPanel({
       },
       'Réassignation demandée depuis le panneau d’orchestration',
     ));
+  };
+  const reassignAgents = useMemo(() => Array.from(new Set([
+    ...(campaign?.run.allowed_agents ?? []),
+    discussion?.agent ?? 'Codex',
+  ])), [campaign?.run.allowed_agents, discussion?.agent]);
+  const selectReassignAgent = async (next: AgentType) => {
+    if (next === reassignAgent) return;
+    setReassignAgent(next);
+    // A model override is target-scoped, so retain it until an explicit
+    // target change and clear it exactly when that change occurs.
+    setReassignModel('');
   };
   const filteredAllRelations = useMemo(() => {
     if (!plan) return { active: [], later: [] };
@@ -1089,16 +1102,23 @@ export function DiscussionPlanPanel({
               <div className="orch-inline-action" role="dialog" aria-label={t('orch.exec.reassign')}>
                 <label>
                   <span>{t('orch.config.agent')}</span>
-                  <select value={reassignAgent} onChange={event => setReassignAgent(event.target.value as AgentType)}>
-                    {Array.from(new Set([
-                      ...(campaign?.run.allowed_agents ?? []),
-                      discussion?.agent ?? 'Codex',
-                    ])).map(value => <option value={value} key={value}>{value}</option>)}
-                  </select>
+                  <AgentSwitchPicker
+                    currentAgent={reassignAgent}
+                    availableAgents={reassignAgents}
+                    onChange={selectReassignAgent}
+                    disabled={Boolean(actionBusy)}
+                    title={t('orch.config.agent')}
+                    ariaLabel={t('orch.config.agent')}
+                  />
                 </label>
                 <label>
                   <span>{t('orch.config.model')}</span>
-                  <input value={reassignModel} onChange={event => setReassignModel(event.target.value)} />
+                  <ModelCatalogPicker
+                    agent={reassignAgent}
+                    value={reassignModel}
+                    onChange={setReassignModel}
+                    disabled={Boolean(actionBusy)}
+                  />
                 </label>
                 <div>
                   <button type="button" onClick={() => setReassignOpen(false)} disabled={Boolean(actionBusy)}>{t('common.cancel')}</button>

@@ -9,6 +9,8 @@ import {
 import { useT } from '../lib/I18nContext';
 import { userError } from '../lib/userError';
 import { orchestrationResolution } from './taskLaunchResolution';
+import { AgentSwitchPicker } from './AgentSwitchPicker';
+import { ModelCatalogPicker } from './ModelCatalogPicker';
 import type {
   AgentDetection,
   AgentProfile,
@@ -123,6 +125,23 @@ function TaskLaunchDialogContent({
   const profilesForAgent = useMemo(() => availableProfiles, [availableProfiles]);
 
   const policyLocked = campaign !== null;
+  const pickerAgents = useMemo(() => {
+    const detected = detections.length
+      ? detections.map(item => item.agent_type)
+      : [defaultAgent];
+    const permitted = policyLocked && campaign?.run.allowed_agents.length
+      ? campaign.run.allowed_agents
+      : detected;
+    return Array.from(new Set([initialAgent, ...permitted]));
+  }, [campaign, defaultAgent, detections, initialAgent, policyLocked]);
+
+  const selectAgent = async (next: AgentType) => {
+    if (next === agent) return;
+    setAgent(next);
+    // A model override belongs to one runtime target.  Only an explicit target
+    // choice clears it; opening or loading either picker must leave it intact.
+    setModel('');
+  };
 
   const submit = async () => {
     if (inFlight.current) return;
@@ -193,15 +212,23 @@ function TaskLaunchDialogContent({
         <div className="orch-launch-grid">
           <label>
             <span>{t('orch.config.agent')}</span>
-            <select value={agent} onChange={event => setAgent(event.target.value as AgentType)}>
-              {(detections.length ? detections.map(item => item.agent_type) : [defaultAgent])
-                .filter((value, index, list) => list.indexOf(value) === index)
-                .map(value => <option value={value} key={value}>{value}</option>)}
-            </select>
+            <AgentSwitchPicker
+              currentAgent={agent}
+              availableAgents={pickerAgents}
+              onChange={selectAgent}
+              disabled={busy}
+              title={t('orch.config.agent')}
+              ariaLabel={t('orch.config.agent')}
+            />
           </label>
           <label>
             <span>{t('orch.config.model')}</span>
-            <input value={model} onChange={event => setModel(event.target.value)} placeholder={t('orch.config.modelDefault')} />
+            <ModelCatalogPicker
+              agent={agent}
+              value={model}
+              onChange={setModel}
+              disabled={busy}
+            />
           </label>
           <label>
             <span>{t('orch.config.profile')}</span>
