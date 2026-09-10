@@ -358,3 +358,83 @@ async fn no_refusal_or_error_ever_echoes_the_secret_presented() {
         );
     }
 }
+
+#[tokio::test]
+#[serial_test::serial]
+async fn a_proof_is_issued_only_to_a_live_grant() {
+    let fixture = fixture().await;
+    let admin = bootstrap(&fixture).await;
+    // A proof references a real room: the foreign key is part of the binding,
+    // so a proof cannot be minted for a discussion that does not exist.
+    let (_s, created) = post(
+        &fixture.app,
+        "/api/disc/create",
+        json!({"title": "Room", "agent": "Codex", "no_agent": true}),
+    )
+    .await;
+    let room = created["data"]["disc_id"].as_str().unwrap().to_string();
+    let (_s, enrolled) = enrol(&fixture, &admin, "orchestrator", "principal").await;
+    let grant = enrolled["data"]["secret"].as_str().unwrap().to_string();
+    let id = enrolled["data"]["credential"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let ask = |authority: String| {
+        let app = fixture.app.clone();
+        let room_id = room.clone();
+        async move {
+            post(
+                &app,
+                "/api/human-credentials/proof",
+                json!({"grant": authority, "discussion_id": room_id, "content": "body"}),
+            )
+            .await
+        }
+    };
+
+    let (status, issued) = ask(grant.clone()).await;
+    assert_eq!(status, 200);
+    assert!(issued["data"].as_str().unwrap().starts_with("proof-"));
+
+    // Nothing else gets one.
+    for stranger in ["", "kr-human-invented", &admin] {
+        let (status, _e) = ask(stranger.to_string()).await;
+        assert_eq!(status, 403, "{stranger:?} must not be issued a proof");
+    }
+
+    // And revocation stops issuance immediately, not at the next expiry.
+    let (status, _e) = post(
+        &fixture.app,
+        "/api/human-credentials/revoke",
+        json!({"authority": &admin, "credential_id": &id, "reason": "compromised"}),
+    )
+    .await;
+    assert_eq!(status, 200);
+    let (status, _e) = ask(grant).await;
+    assert_eq!(status, 403, "a revoked grant must stop being issued proofs");
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn the_admin_secret_publishes_nothing_by_itself() {
+    // The bootstrap authorises enrolment. It is not a publication authority,
+    // and conflating the two would make the operator's file a live publisher.
+    let fixture = fixture().await;
+    let admin = bootstrap(&fixture).await;
+    let (_s, created) = post(
+        &fixture.app,
+        "/api/disc/create",
+        json!({"title": "Room", "agent": "Codex", "no_agent": true}),
+    )
+    .await;
+    let room = created["data"]["disc_id"].as_str().unwrap().to_string();
+
+    let (status, _e) = post(
+        &fixture.app,
+        "/api/human-credentials/proof",
+        json!({"grant": &admin, "discussion_id": room, "content": "body"}),
+    )
+    .await;
+    assert_eq!(status, 403);
+}

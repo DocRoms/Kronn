@@ -3714,6 +3714,65 @@ def _read_binding_path(path):
     return None
 
 
+# KT-619 — the publication grant.
+#
+# Same shape as the resume credential above and for the same reasons: 0600, in
+# the operator's private directory, never logged and never shown to the model.
+# There is ONE path and no search: a fallback would let a grant be picked up
+# from somewhere the operator did not put it.
+_GRANT_FILE = "publication-grant"
+
+
+def _read_publication_grant():
+    """The grant this bridge holds, or None.
+
+    Refuses anything that is not a private regular file. A grant readable by
+    others has already been given away, and using it anyway would be pretending
+    that did not happen.
+    """
+    path = os.path.join(_BINDING_DIR, _GRANT_FILE)
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return None
+    if not stat.S_ISREG(info.st_mode):
+        return None
+    if info.st_mode & 0o077:
+        print(
+            "kronn-internal: publication grant is readable beyond its owner; ignoring it",
+            file=sys.stderr,
+        )
+        return None
+    if info.st_uid != os.geteuid():
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            grant = handle.read().strip()
+    except OSError:
+        return None
+    return grant or None
+
+
+def _request_publication_proof(disc_id, messages, grant):
+    """Ask for a single-use proof over the body about to be posted.
+
+    The content sent here MUST be the content sent to the append, or the proof
+    will not match its own card — which is the point of binding it.
+    """
+    content = "".join(message.get("content") or "" for message in messages)
+    try:
+        return _unwrap(
+            _http(
+                "POST",
+                "/api/human-credentials/proof",
+                {"grant": grant, "discussion_id": disc_id, "content": content},
+            )
+        )
+    except Exception:
+        # A refused or unreachable proof loses the card, never the message.
+        return None
+
+
 def _read_binding():
     """Read the current credential, with one Codex upgrade bridge.
 
@@ -5145,6 +5204,20 @@ def call_disc_append(args):
     _binding = _read_binding()
     if isinstance(_binding, dict) and _binding.get("resume_token"):
         append_body["session_credential"] = _binding["resume_token"]
+    # KT-619 — a `kronn-important` card also needs a publication GRANT and a
+    # single-use proof issued over this exact body. The grant lives in a 0600
+    # file the operator placed; it is never a tool parameter, never logged, and
+    # never shown to the model. No grant simply means no card: the message is
+    # appended either way and the backend says why.
+    if "kronn-important" in "".join(
+        message.get("content") or "" for message in messages
+    ):
+        _grant = _read_publication_grant()
+        if _grant:
+            append_body["publication_grant"] = _grant
+            _proof = _request_publication_proof(disc_id, messages, _grant)
+            if _proof:
+                append_body["publication_proof"] = _proof
     appended = _unwrap(_http("POST", "/api/disc/append", append_body))
 
     if attachment_paths:

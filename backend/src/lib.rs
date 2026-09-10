@@ -1610,6 +1610,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             post(api::human_credentials::rotate),
         )
         .route(
+            "/api/human-credentials/proof",
+            post(api::human_credentials::issue_proof),
+        )
+        .route(
             "/api/discussions/{id}/questions",
             get(api::discussion_questions::list),
         )

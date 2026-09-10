@@ -237,3 +237,50 @@ pub async fn list(
         ),
     }
 }
+
+#[derive(Deserialize, TS)]
+#[ts(export)]
+pub struct IssueProofRequest {
+    pub grant: String,
+    pub discussion_id: String,
+    /// The exact message body about to be posted. Hashed here, so the proof
+    /// cannot be issued for one card and spent on another.
+    pub content: String,
+}
+
+/// `POST /api/human-credentials/proof`
+///
+/// A publication is two steps on purpose. Ask for a proof over the body you are
+/// about to post, then post it: a captured append cannot be replayed, because
+/// the proof it carried is spent, and a captured proof cannot be aimed
+/// elsewhere, because it is bound to this room and this body.
+pub async fn issue_proof(
+    State(state): State<AppState>,
+    Json(request): Json<IssueProofRequest>,
+) -> (StatusCode, Json<ApiResponse<String>>) {
+    let result = state
+        .db
+        .with_conn(move |conn| {
+            let grant = Secret::new(request.grant);
+            Ok(human_credentials::issue_proof(
+                conn,
+                &grant,
+                &request.discussion_id,
+                &request.content,
+                chrono::Utc::now(),
+            )
+            .ok())
+        })
+        .await;
+
+    match result {
+        Ok(Some(proof)) => (StatusCode::OK, Json(ApiResponse::ok(proof))),
+        // A grant that authenticates nothing, or one revoked since. Same
+        // refusal either way.
+        Ok(None) => refused(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiResponse::err(error.to_string())),
+        ),
+    }
+}

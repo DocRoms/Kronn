@@ -3123,6 +3123,13 @@ export type InviteTokenIssued = { token: string, disc_id: string, expires_at: st
  */
 export type InviteTokenRecord = { id: number, disc_id: string, created_at: string, expires_at: string, used_at: string | null, used_by_session_id: number | null, };
 
+export type IssueProofRequest = { grant: string, discussion_id: string,
+/**
+ * The exact message body about to be posted. Hashed here, so the proof
+ * cannot be issued for one card and spent on another.
+ */
+content: string, };
+
 /**
  * Result of an atomic invite-token consumption + session creation.
  * Used by the `POST /api/discussions/peer-join` endpoint that
