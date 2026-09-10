@@ -1736,10 +1736,72 @@ mod tests {
         append_as(state, msgs, None).await
     }
 
+    /// Enrol an orchestrator grant and issue a proof over `content`.
+    ///
+    /// Since B3 a session credential is not an authority: publishing needs a
+    /// grant AND the proof issued for that exact body.
+    async fn granted(state: &crate::AppState, content: &str) -> (String, String) {
+        let body = content.to_string();
+        state
+            .db
+            .with_conn(move |conn| {
+                let admin = crate::core::operator_secret::bootstrap(conn)
+                    .map(|_| ())
+                    .or_else(|_| Ok::<_, anyhow::Error>(()))
+                    .and_then(|_| crate::core::operator_secret::read_delivered())?;
+                let authority = crate::db::human_credentials::authorise_enrolment(conn, &admin)?
+                    .expect("the admin secret authorises");
+                let (_row, grant) = crate::db::human_credentials::enrol(
+                    conn,
+                    &authority,
+                    crate::db::human_credentials::GrantRole::Orchestrator,
+                    "principal",
+                )?;
+                let proof = crate::db::human_credentials::issue_proof(
+                    conn,
+                    &grant,
+                    IMPORTANT_PARENT,
+                    &body,
+                    chrono::Utc::now(),
+                )
+                .expect("a live grant is issued a proof");
+                Ok((grant.expose().to_string(), proof))
+            })
+            .await
+            .unwrap()
+    }
+
     /// KT-619 — append declaring an id AND (optionally) holding a credential.
     ///
     /// The old attack entry was the declared `session_id`; the new field must
     /// not become the only thing tested, or that door stops being locked.
+    #[allow(clippy::too_many_arguments)]
+    async fn append_declaring_with_grant(
+        state: &crate::AppState,
+        msgs: Vec<DiscAppendMessage>,
+        session_id: Option<&str>,
+        credential: Option<&str>,
+        grant: Option<&str>,
+        proof: Option<&str>,
+    ) -> DiscAppendResponse {
+        let resp = disc_append(
+            axum::extract::State(state.clone()),
+            Json(DiscAppendRequest {
+                disc_id: "d-lint".into(),
+                messages: msgs,
+                session_id: session_id.map(str::to_owned),
+                since_sort_order: None,
+                session_credential: credential
+                    .map(|c| serde_json::from_value(serde_json::json!(c)).unwrap()),
+                publication_grant: grant
+                    .map(|g| serde_json::from_value(serde_json::json!(g)).unwrap()),
+                publication_proof: proof.map(str::to_owned),
+            }),
+        )
+        .await;
+        resp.0.data.expect("append succeeds")
+    }
+
     async fn append_declaring(
         state: &crate::AppState,
         msgs: Vec<DiscAppendMessage>,
@@ -3736,13 +3798,19 @@ mod tests {
             "a joined CLI must still be able to speak"
         );
 
-        // And with a fence, still through the CLI-author path.
+        // And with a fence, still through the CLI-author path. Since B3 that
+        // needs a grant and its proof: the session credential proves which
+        // session this is, and nothing about what it may publish.
         hold_credential(&state, IMPORTANT_ORCH_SESSION, IMPORTANT_ORCH_SECRET).await;
-        let carded = append_declaring(
+        let content = important_fence("kt-619.joined-cli");
+        let (grant, proof) = granted(&state, &content).await;
+        let carded = append_declaring_with_grant(
             &state,
-            vec![agent_msg("m2", &important_fence("kt-619.joined-cli"))],
+            vec![agent_msg("m2", &content)],
             Some(IMPORTANT_ORCH_SESSION),
             Some(IMPORTANT_ORCH_SECRET),
+            Some(&grant),
+            Some(&proof),
         )
         .await;
         assert_eq!(carded.appended, 1);
@@ -3770,6 +3838,8 @@ mod tests {
             .await
             .unwrap();
         hold_credential(&state, IMPORTANT_ORCH_SESSION, IMPORTANT_ORCH_SECRET).await;
+        let content = important_fence("kt-619.rollback");
+        let (grant, proof) = granted(&state, &content).await;
 
         // Drop the table the card needs. The message insert succeeds, the card
         // insert cannot, and the whole turn must roll back rather than leave a
@@ -3787,14 +3857,14 @@ mod tests {
             axum::extract::State(state.clone()),
             Json(DiscAppendRequest {
                 disc_id: IMPORTANT_PARENT.into(),
-                messages: vec![agent_msg("m1", &important_fence("kt-619.rollback"))],
+                messages: vec![agent_msg("m1", &content)],
                 session_id: Some(IMPORTANT_ORCH_SESSION.into()),
                 since_sort_order: None,
                 session_credential: Some(
                     serde_json::from_value(serde_json::json!(IMPORTANT_ORCH_SECRET)).unwrap(),
                 ),
-                publication_grant: None,
-                publication_proof: None,
+                publication_grant: Some(serde_json::from_value(serde_json::json!(grant)).unwrap()),
+                publication_proof: Some(proof),
             }),
         )
         .await;
@@ -3814,12 +3884,15 @@ mod tests {
         assert_eq!(orphan, 0, "the message must roll back with the card");
     }
 
-    /// KT-619 — resume rotates the secret. A credential read once must not be
-    /// good forever, so the rotation has to invalidate the old one AT the
-    /// append boundary, not only inside the resume path.
+    /// KT-619 — rotating a SESSION credential changes nothing about publishing.
+    ///
+    /// This used to assert the opposite, and it was right until B3: publication
+    /// hung off the session credential, so rotating it moved authority. It does
+    /// not any more, and the test now guards against the two being coupled back
+    /// together. Grant rotation is covered in `kt619_credential_routes`.
     #[tokio::test]
     #[serial]
-    async fn a_rotated_credential_stops_publishing_and_the_new_one_starts() {
+    async fn rotating_a_session_credential_does_not_move_publication_authority() {
         crate::core::anti_halluc::set_mode("off");
         let (state, _tmp) = lint_state(false).await;
         state
@@ -3837,37 +3910,35 @@ mod tests {
             .unwrap();
         hold_credential(&state, IMPORTANT_ORCH_SESSION, IMPORTANT_ORCH_SECRET).await;
 
-        let before = append_holding(
+        // The pre-rotation session credential publishes nothing on its own.
+        let alone = append_holding(
             &state,
-            vec![agent_msg("m1", &important_fence("kt-619.before-rotation"))],
+            vec![agent_msg("m1", &important_fence("kt-619.session-only"))],
             Some(IMPORTANT_ORCH_SECRET),
         )
         .await;
-        assert_eq!(before.important.map(|i| i.published), Some(1));
+        assert_eq!(alone.important.map(|i| i.published), Some(0));
 
-        // The bridge resumes: same session row, new secret.
-        hold_credential(&state, IMPORTANT_ORCH_SESSION, "kr-resume-rotated").await;
+        // Rotate it. A grant issued before still publishes afterwards, because
+        // the two were never connected.
+        let content = important_fence("kt-619.after-session-rotation");
+        let (grant, proof) = granted(&state, &content).await;
+        hold_credential(&state, IMPORTANT_ORCH_SESSION, "kr-resume-rotated-session").await;
 
-        let stale = append_holding(
+        let after = append_declaring_with_grant(
             &state,
-            vec![agent_msg("m2", &important_fence("kt-619.after-rotation"))],
-            Some(IMPORTANT_ORCH_SECRET),
+            vec![agent_msg("m2", &content)],
+            None,
+            Some("kr-resume-rotated-session"),
+            Some(&grant),
+            Some(&proof),
         )
         .await;
         assert_eq!(
-            stale.important.map(|i| i.refused_unverified),
+            after.important.map(|i| i.published),
             Some(1),
-            "the pre-rotation secret must die with the rotation"
+            "a session rotation must not touch publication authority"
         );
-
-        let resumed = append_holding(
-            &state,
-            vec![agent_msg("m3", &important_fence("kt-619.resumed"))],
-            Some("kr-resume-rotated"),
-        )
-        .await;
-        assert_eq!(resumed.important.map(|i| i.published), Some(1));
-        assert_eq!(important_card_count(&state, IMPORTANT_PARENT).await, 2);
     }
 
     /// KT-619 — a bridge whose binding file vanished between two appends sends
@@ -3893,10 +3964,15 @@ mod tests {
             .unwrap();
         hold_credential(&state, IMPORTANT_ORCH_SESSION, IMPORTANT_ORCH_SECRET).await;
 
-        let first = append_holding(
+        let content = important_fence("kt-619.with-binding");
+        let (grant, proof) = granted(&state, &content).await;
+        let first = append_declaring_with_grant(
             &state,
-            vec![agent_msg("m1", &important_fence("kt-619.with-binding"))],
+            vec![agent_msg("m1", &content)],
+            None,
             Some(IMPORTANT_ORCH_SECRET),
+            Some(&grant),
+            Some(&proof),
         )
         .await;
         assert_eq!(first.important.map(|i| i.published), Some(1));
