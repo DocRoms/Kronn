@@ -86,7 +86,7 @@ The fix removes the manual `suffix` override so the Compare selector reuses
 the same catalogue+identity resolution as every other `AgentSwitchPicker`
 caller.
 [src: file: frontend/src/pages/WorkflowsPage.tsx:3203-3232]
-[src: file: frontend/src/components/AgentSwitchPicker.tsx:124-143]
+[src: file: frontend/src/components/AgentSwitchPicker.tsx:108-123]
 [src: file: frontend/src/components/BatchCompareDetailsPanel.tsx:343-354]
 
 Regressions: a config-drifted-after-the-run case (no answer, no historical
@@ -112,3 +112,31 @@ surfaces instead of the generic label.
 
 These are component-level regressions against mocked APIs; no backend, worker,
 or provider execution was exercised.
+
+## Principal integration and validation working directory
+
+The delivered HEAD `1667efc1` was reviewed independently (37 focused tests).
+The protected merge candidate `d1e93929` included the principal's `d5a5c70d`
+checkpoint. Its configured validation invoked Vitest from the repository root
+with `--root frontend`; this did not change the process working directory for
+tests reading local files. The persisted gate failed with 24 failed tests and
+one failed suite, and the target branch did not advance.
+
+The human approved `principal-takeover` for KT-628/630 in the durable question
+`kt628-kt630-validation-cwd-recovery` at 2026-09-10T05:51:28.464773Z. Both
+executions were cancelled with preservation at 05:53:50Z. Their commits,
+worktrees, manifests, reviews and failed gate remain available; cancellation
+did not report confirmed OS termination. No database row or validation result
+was rewritten and no replacement worker was launched.
+[src: user: 2026-09-10: kt628-kt630-validation-cwd-recovery]
+
+The same candidate, frontend tree `355a5c5e1a665f3bd80ed825bcdb8b233fbf7a66`,
+passed the full unfiltered replay from its `frontend` working directory:
+313 files / 4,063 tests, 54.17 seconds (run 87630). Native and legacy TypeScript
+builds, Oxlint, ESLint (0 errors / 63 existing warnings), i18n parity
+(4,481 keys in each of four locales), and Vite (8.08 seconds) passed.
+The principal then advanced both local branches by fast-forward to this
+candidate. This is independently qualified principal integration, not a
+successful automatic execution: its durable execution remains `Cancelled`.
+No browser, coverage or provider qualification is implied.
+[src: commit: d1e9392944173463966d738327523a5b6b39c348]
