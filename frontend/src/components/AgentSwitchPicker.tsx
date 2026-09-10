@@ -37,6 +37,8 @@ interface AgentSwitchPickerProps {
   currentModel?: string | null;
   onSelectionChange?: (agent: AgentType, tier: ModelTier) => Promise<void>;
   onTargetSelectionChange?: (target: AgentSwitchTarget, tier: ModelTier) => Promise<void>;
+  /** Optional, explicit return to the caller's agent default (no tier override). */
+  onDefaultTierSelection?: (target: AgentSwitchTarget) => Promise<void>;
   tierLabels?: Record<ModelTier, string>;
   modelTiers?: ModelTiersConfig | null;
   defaultModelLabel?: string;
@@ -65,6 +67,7 @@ export function AgentSwitchPicker({
   currentModel,
   onSelectionChange,
   onTargetSelectionChange,
+  onDefaultTierSelection,
   tierLabels,
   modelTiers,
   defaultModelLabel = 'Default agent model',
@@ -105,10 +108,13 @@ export function AgentSwitchPicker({
   );
   const choiceCount = choices.length;
   const tierChoices: ModelTier[] = ['economy', 'default', 'reasoning'];
+  const tierOptions: (ModelTier | null)[] = onDefaultTierSelection
+    ? [null, ...tierChoices]
+    : tierChoices;
   const tierPicker = currentTier !== undefined
     && (onSelectionChange !== undefined || onTargetSelectionChange !== undefined);
   const canChange = tierPicker
-    ? choices.length > 1 || tierChoices.length > 1
+    ? choices.length > 1 || tierOptions.length > 1
     : Boolean(onChange) && choices.length > 1;
 
   const targetLabel = (target: AgentSwitchTarget) =>
@@ -129,7 +135,9 @@ export function AgentSwitchPicker({
   const visibleChoices = choices.filter(target => matchesCatalogSearch(query, [
     targetLabel(target),
     ...catalogTargetSearchTerms(target, tierChoices.map(tier => resolvedTier(target, tier))),
-    ...tierChoices.flatMap(tier => [tier, tierLabels?.[tier]]),
+    ...tierOptions.flatMap(tier => tier === null
+      ? [defaultModelLabel]
+      : [tier, tierLabels?.[tier]]),
   ]));
 
   const navigateChoices = (event: ReactKeyboardEvent<HTMLSpanElement>) => {
@@ -178,10 +186,10 @@ export function AgentSwitchPicker({
     setPopoverPosition({ top, left, maxHeight: Math.max(0, window.innerHeight - top - viewportPadding) });
   }, [choiceCount, tierPicker]);
 
-  const select = async (target: AgentSwitchTarget, tier?: ModelTier) => {
+  const select = async (target: AgentSwitchTarget, tier?: ModelTier | null) => {
     if (savingRef.current) return;
     if (tierPicker) {
-      if (!tier || (
+      if (tier === undefined || (
         targetKey(target) === targetKey(currentTarget)
         && tier === currentTier
       )) return;
@@ -191,7 +199,9 @@ export function AgentSwitchPicker({
     savingRef.current = true;
     setSaving(true);
     try {
-      if (tierPicker && tier && onTargetSelectionChange) {
+      if (tierPicker && tier === null && onDefaultTierSelection) {
+        await onDefaultTierSelection(target);
+      } else if (tierPicker && tier && onTargetSelectionChange) {
         await onTargetSelectionChange(target, tier);
       } else if (tierPicker && tier && onSelectionChange) {
         await onSelectionChange(target.agent, tier);
@@ -336,38 +346,38 @@ export function AgentSwitchPicker({
                 {targetLabel(target)}
               </span>
               <span className="kr-agent-switch-tier-choices">
-                {tierChoices.map(tier => {
+                {tierOptions.map(tier => {
                   const selected = targetKey(target) === targetKey(currentTarget)
                     && tier === currentTier;
-                  const icon = MODEL_TIER_ICONS[tier];
-                  const label = tierLabels?.[tier] ?? tier;
-                  const entry = catalogEntry(target, tier);
+                  const icon = tier === null ? null : MODEL_TIER_ICONS[tier];
+                  const label = tier === null ? defaultModelLabel : (tierLabels?.[tier] ?? tier);
+                  const entry = tier === null ? null : catalogEntry(target, tier);
                   const unavailable = entry?.availability === 'unavailable';
                   const provenance = entry
-                    ? t(`modelCatalog.provenance.${resolvedTier(target, tier).provenance}`)
+                    ? t(`modelCatalog.provenance.${resolvedTier(target, tier as ModelTier).provenance}`)
                     : null;
-                  const descriptionId = `${pickerId}-${targetIndex}-${tier}`;
+                  const descriptionId = `${pickerId}-${targetIndex}-${tier ?? 'agent-default'}`;
                   return (
                     <button
                       key={tier}
                       type="button"
                       role="menuitem"
                       className="kr-agent-switch-tier-option"
-                      data-tier={tier}
+                      data-tier={tier ?? 'agent-default'}
                       data-current={selected}
                       aria-label={`${targetLabel(target)} · ${label}`}
                       aria-describedby={descriptionId}
-                      title={tierTitle(target, tier)}
+                      title={tier === null ? label : tierTitle(target, tier)}
                       disabled={saving || selected || unavailable}
                       onClick={() => void select(target, tier)}
                     >
-                      <span aria-hidden="true">{icon}</span>
+                      {icon && <span aria-hidden="true">{icon}</span>}
                       <span>{label}</span>
                       <span id={descriptionId} hidden>
-                        {[tierTitle(target, tier), provenance ?? (configuredModel(target, tier) ? t('modelCatalog.notInCatalog') : ''),
+                        {[tier === null ? label : tierTitle(target, tier), provenance ?? (tier !== null && configuredModel(target, tier) ? t('modelCatalog.notInCatalog') : ''),
                           unavailable ? t('modelCatalog.unavailable') : ''].filter(Boolean).join(' · ')}
                       </span>
-                      {(entry || configuredModel(target, tier)) && (
+                      {tier !== null && (entry || configuredModel(target, tier)) && (
                         <span className="kr-agent-switch-catalog-meta">
                           {unavailable
                             ? t('modelCatalog.unavailable')

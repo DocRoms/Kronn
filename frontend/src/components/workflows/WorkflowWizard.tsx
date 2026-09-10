@@ -4175,7 +4175,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                               multi_agent_review: e.target.checked
                                 ? (step.multi_agent_review ?? {
                                     reviewer_agent: availableAgents.find(a => a.type !== step.agent)?.type ?? 'Codex',
-                                    reviewer_tier: null,
+                                    reviewer_tier: 'reasoning',
                                     debate_prompt: t('wiz.multiReview.defaultPrompt'),
                                     max_rounds: 3,
                                   })
@@ -4202,6 +4202,15 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                                         ...multiAgentReview,
                                         reviewer_agent: target.agent,
                                         reviewer_tier: tier,
+                                      },
+                                    });
+                                  }}
+                                  onDefaultTierSelection={async target => {
+                                    updateStep(i, {
+                                      multi_agent_review: {
+                                        ...multiAgentReview,
+                                        reviewer_agent: target.agent,
+                                        reviewer_tier: null,
                                       },
                                     });
                                   }}

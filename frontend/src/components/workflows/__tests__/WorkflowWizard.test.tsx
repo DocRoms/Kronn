@@ -485,6 +485,39 @@ describe('WorkflowWizard — step list handlers', () => {
     });
   });
 
+  it('uses reasoning for a newly enabled review and preserves the other review settings', async () => {
+    toStepsPage([mkStep(), mkStep({ name: 'beta' })]);
+    fireEvent.click(screen.getAllByText('wiz.advanced')[0]);
+    fireEvent.click(screen.getByText('wiz.multiReview.toggle'));
+    expect(screen.getByRole('button', { name: 'wiz.multiReview.reviewer' })).toHaveTextContent('Codex');
+    expect(screen.getByLabelText('wiz.multiReview.rounds')).toHaveValue(3);
+    expect(screen.getByLabelText('wiz.multiReview.prompt')).toHaveValue('wiz.multiReview.defaultPrompt');
+    fireEvent.click(screen.getByText('wiz.next'));
+    fireEvent.click(screen.getByText('wiz.next'));
+    fireEvent.click(screen.getByText('wiz.save'));
+    await waitFor(() => expect(updateMock).toHaveBeenCalled());
+    expect(updateMock.mock.calls[0][1].steps[0].multi_agent_review).toMatchObject({
+      reviewer_agent: 'Codex', reviewer_tier: 'reasoning',
+      debate_prompt: 'wiz.multiReview.defaultPrompt', max_rounds: 3,
+    });
+  });
+
+  it('returns an existing reviewer explicitly to the agent default tier in the saved payload', async () => {
+    toStepsPage([mkStep({ multi_agent_review: {
+      reviewer_agent: 'Codex', reviewer_tier: 'reasoning', debate_prompt: 'Review the result.', max_rounds: 3,
+    } }), mkStep({ name: 'beta' })]);
+    fireEvent.click(screen.getAllByText('wiz.advanced')[0]);
+    fireEvent.click(screen.getByRole('button', { name: 'wiz.multiReview.reviewer' }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Codex · config.defaultModel' }));
+    fireEvent.click(screen.getByText('wiz.next'));
+    fireEvent.click(screen.getByText('wiz.next'));
+    fireEvent.click(screen.getByText('wiz.save'));
+    await waitFor(() => expect(updateMock).toHaveBeenCalled());
+    expect(updateMock.mock.calls[0][1].steps[0].multi_agent_review).toMatchObject({
+      reviewer_agent: 'Codex', reviewer_tier: null, debate_prompt: 'Review the result.', max_rounds: 3,
+    });
+  });
+
   it('adding a rollback (on_failure) step renders a Notify rollback row', () => {
     toStepsPage([mkStep(), mkStep({ name: 'beta' })]);
     const addRb = screen.getByText('wiz.addRollbackStep').closest('button') as HTMLButtonElement;

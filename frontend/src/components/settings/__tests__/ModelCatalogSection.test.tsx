@@ -130,6 +130,29 @@ describe('ModelCatalogSection', () => {
     expect(target).toHaveValue('Router two');
   });
 
+  it('does not describe a failed live refresh as a verified catalog and keeps same-label targets distinct', async () => {
+    listMock.mockResolvedValue({ targets: [
+      { ...snapshot.targets[0], runtime_target_id: 'http:one', target_label: 'Shared router', live_refresh_ok: false, stale: false },
+      { ...snapshot.targets[1], runtime_target_id: 'http:two', target_label: 'Shared router', live_refresh_ok: true, stale: false },
+    ] });
+    render(<ModelCatalogSection />);
+    await screen.findByTestId('model-catalog-table');
+    fireEvent.click(screen.getByText('modelCatalog.add'));
+    const target = screen.getByRole('combobox', { name: 'modelCatalog.target' });
+    fireEvent.focus(target);
+    const options = screen.getAllByRole('option', { name: 'Shared router' });
+    expect(options).toHaveLength(2);
+    expect(options[0]).toHaveTextContent('modelCatalog.stale');
+    expect(options[1]).toHaveTextContent('modelCatalog.current');
+    fireEvent.click(options[1]);
+    fireEvent.change(screen.getByLabelText('modelCatalog.modelId'), { target: { value: 'shared' } });
+    fireEvent.change(screen.getByLabelText('modelCatalog.displayName'), { target: { value: 'Shared' } });
+    fireEvent.click(screen.getByText('common.save'));
+    await waitFor(() => expect(createMock).toHaveBeenCalledWith(expect.objectContaining({
+      runtime_target_id: 'http:two', agent_type: 'Custom',
+    })));
+  });
+
   it('shows the catalog-driven cost hint and privacy note for an OpenCode Zen model, never a hardcoded name (KT-543)', async () => {
     render(<ModelCatalogSection />);
     const badge = await screen.findByText('modelCatalog.costHint.unknown');

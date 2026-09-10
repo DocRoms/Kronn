@@ -166,7 +166,7 @@ export function ModelCatalogSection({ onCatalogChanged }: { onCatalogChanged?: (
     value: target.runtime_target_id,
     label: target.target_label ?? target.runtime_target_id,
     keywords: `${target.runtime_target_id} ${target.agent_type}`,
-    description: target.stale ? t('modelCatalog.stale') : t('modelCatalog.current'),
+    description: target.stale || !target.live_refresh_ok ? t('modelCatalog.stale') : t('modelCatalog.current'),
   }));
   // A saved manual entry can outlive a target returned by the latest snapshot.
   // Keep that identity visible and immutable while editing; only an explicit
@@ -237,8 +237,8 @@ export function ModelCatalogSection({ onCatalogChanged }: { onCatalogChanged?: (
       {form && (
         <div className="set-ext-api-form set-model-catalog-form">
           <div className="set-ext-api-fields">
-            <label className="set-litellm-field">
-              <span className="set-litellm-label">{t('modelCatalog.target')}</span>
+            <div className="set-litellm-field" role="group" aria-labelledby="model-catalog-target-label">
+              <span id="model-catalog-target-label" className="set-litellm-label">{t('modelCatalog.target')}</span>
               <SearchableSelect
                 className="set-litellm-input"
                 value={form.runtimeTargetId}
@@ -257,7 +257,7 @@ export function ModelCatalogSection({ onCatalogChanged }: { onCatalogChanged?: (
                   }));
                 }}
               />
-            </label>
+            </div>
             <label className="set-litellm-field">
               <span className="set-litellm-label">{t('modelCatalog.modelId')}</span>
               <input className="set-litellm-input" value={form.modelId} disabled={Boolean(editing)} onChange={event => setForm(current => current && ({ ...current, modelId: event.target.value }))} />
