@@ -104,17 +104,21 @@ execution, with no fallback to Custom; unknown provider strings remain errors.
 These are real, deliberate, and the reason two agents can behave differently on
 the same job.
 
-- **Native ACP does not currently resume production discussion turns.** The
-  shared host implements negotiated loading, but the production `NativeAcp`
-  branch passes both `resume_id: None` and `session_store: None`. The OpenCode
-  runtime key recognized by `AcpSessionStore` does not make that branch persist
-  or reload a conversation. A host/fake-transport resume test is therefore not
-  evidence of OpenCode production continuity. Enabling it also needs the unseen
-  message delta and full-history fallback; merely passing the old ID would
-  repeat history into a resumed conversation. This remains an open KT-543
-  qualification boundary, distinct from KT-577's long-lived Claude process.
-  [src: file: backend/src/agents/runner.rs:3121-3156]
-  [src: file: backend/src/agents/runner.rs:2068-2086]
+- **ACP continuity is checkpointed, not a long-lived CLI process.** The
+  production OpenCode and enabled adapter branches accept a proven resume ID
+  together with its unseen-message delta and bounded full-prompt fallback.
+  The completed checkpoint distinguishes the last input from the exact native
+  response, so an interleaved peer is retained without repeating that response.
+  Missing/incomplete proof or no size saving means a fresh full-prompt turn;
+  ambiguous errors never authorize an automatic replay. The deterministic
+  two-turn regression exercises the production start branch and atomic reply
+  writer across a database reopen, with only the transport replaced. It does
+  not qualify live model behavior or KT-577's long-lived Claude process.
+  See [native ACP continuity](../gotchas/native-acp-resume-continuity.md) for the
+  negotiated `session/resume` contract and exact proof boundaries.
+  [src: file: backend/src/agents/runner.rs:3150-3224]
+  [src: file: backend/src/api/discussions/streaming.rs:1401-1502]
+  [src: file: backend/src/api/discussions/streaming.rs:5791-6085]
 - **Kronn does not yet normalize ACP's optional session cost.** The current
   upstream v1 schema supports `usage_update.cost` as a cumulative amount with
   an explicit currency; this is not a per-turn USD price. Kronn's normalized
@@ -122,12 +126,15 @@ the same job.
   reads Claude, Codex and Gemini logs. Missing cost therefore remains unknown,
   never free. This is an implementation limit, not a protocol prohibition.
   [ACP v1 UsageUpdate, checked 2026-09-08](https://agentclientprotocol.com/protocol/v1/schema#usageupdate)
-  [src: file: backend/src/acp.rs:341-356]
-  [src: file: backend/src/acp.rs:794-806]
+  [src: file: backend/src/acp.rs:352-365]
+  [src: file: backend/src/acp.rs:790-813]
 - **MCP servers holding a credential are dropped**, whole. A project mixing
   safe and credentialed entries loses the credentialed ones — silently from the
   agent's point of view, since it simply never sees them.
 - **Task workers never take the adapter route**, whatever the toggle says.
+  The direct Copilot worker preflight keeps a four-second deadline and awaits
+  process collection on timeout. Its [timeout regression](../gotchas/copilot-preflight-timeout.md)
+  uses controlled time and an owned child, not a startup PID-file race.
 - **File and terminal requests are refused**, so an ACP agent reads and writes
   through its own tools, outside Kronn's audit trail.
 - **Kronn spawns one process per turn on its local CLI/ACP routes.** HTTP
@@ -148,17 +155,53 @@ usage still has no implied price.
 [src: file: backend/src/agents/runner.rs:10020-10133]
 [src: file: backend/src/core/redact.rs:232-240]
 
-## Settings catalogue diagnostic (KT-597)
+## Settings catalogue correction (KT-531 / KT-597)
 
-The dynamic catalogue and the model-tier editor on an agent card are currently
-different consumers. `ModelCatalogSection` reads `/api/model-catalogs`, and
-Codex discovery calls its own `codex app-server` / `model/list`. However, the
-Codex card in `AgentsSection` still supplies `SearchableSelect` from the static
-`AGENT_TIER_MODELS.codex.options` array. A newly available model absent from that
-array will not appear there even after a catalogue refresh. Updating OpenCode
-or an OpenRouter connection cannot change this array. This is a remaining UI
-integration gap, not evidence that the Codex account lacks access to the model.
-[src: file: frontend/src/components/settings/AgentsSection.tsx:106-123]
-[src: file: frontend/src/components/settings/AgentsSection.tsx:1233-1253]
-[src: file: frontend/src/components/settings/ModelCatalogSection.tsx:67]
+The agent-card tier editor now consumes the shared `/api/model-catalogs`
+snapshot through `SearchableSelect`, including OpenCode, Kiro and Vibe. It
+matches the exact `runtime_target_id`, never another connection's agent-family
+projection. A catalogue refresh or manual edit reloads the tier options.
+Unavailable models stay visible but disabled; an existing setting absent from
+the snapshot is retained explicitly rather than erased or substituted. Option
+details include provenance, last check, reasoning modes and known cost metadata;
+a stale live result is labelled as cached. No model discovery process is started
+by this snapshot read.
+[src: file: frontend/src/components/settings/AgentsSection.tsx:149-168]
+[src: file: frontend/src/components/settings/AgentsSection.tsx:1215-1262]
+[src: file: frontend/src/lib/modelCatalogSelection.ts:33-70]
+[src: file: frontend/src/components/settings/ModelCatalogSection.tsx:67-72]
 [src: file: backend/src/core/model_catalog/codex_discovery.rs:75-158]
+
+Saving a tier rereads the current settings and replaces only the selected
+field, preserving other agents' values and showing the new value only after
+the write succeeds. See [the preservation regression](../gotchas/agent-tier-catalogue-settings.md).
+The shared picker prioritizes explicit identities, isolates named HTTP targets,
+disables known unavailable models and retains a failed reload as cached with
+an error. `modelForAgentTier` no longer invents embedded fallback model names.
+KT-531 remains open for the other custom selector/display paths and the legacy
+HTTP runner fallback; this checkpoint does not qualify every selector.
+[src: file: frontend/src/lib/constants.ts:60-75]
+[src: file: frontend/src/components/AgentSwitchPicker.tsx:113-142]
+
+Quick Prompt and workflow model editors also use a shared catalogue-backed
+searchable picker. Model IDs outside the snapshot remain an explicit operator
+choice; known unavailable rows are disabled. Reasoning modes come from the
+effective model's metadata instead of a fixed list, and existing unadvertised
+values remain visible. QP saves preserve the existing token limit and chosen
+reasoning mode. See [form preservation](../gotchas/agent-tier-catalogue-settings.md).
+[src: file: frontend/src/components/ModelCatalogPicker.tsx:22-68]
+[src: file: frontend/src/components/workflows/QuickPromptForm.tsx:187-202]
+
+Explicit QP/workflow target changes now clear old model/reasoning overrides,
+preserve the token limit and persist the exact selected connection. Named
+connections are available in the creation/full/inline editors and pipeline;
+changing only the connection is not treated as an unchanged agent/tier pair.
+Ordinary edits and catalogue refreshes do not clear saved settings. The
+discussion PATCH correction is backend-owned: it clears the persisted model
+only on an actual target/tier change, distinguishes an absent connection from
+explicit null, and preserves historical message models. Isolated API tests
+cover this path, not provider inference or a new browser qualification.
+[src: file: frontend/src/lib/agentSelection.ts:1-16]
+[src: file: frontend/src/components/workflows/WorkflowDetail.tsx:1300-1330]
+[src: file: frontend/src/pages/WorkflowsPage.tsx:1223-1244]
+[src: file: backend/tests/discussion_target_model.rs:94-211]

@@ -13,6 +13,7 @@ const MAX_EXTRACTED_SIZE: usize = 512_000;
 /// agent's context (the full file lives on disk; the agent reads it with its
 /// tools). Small files (≤ this) are therefore fully visible inline.
 const PREVIEW_BYTES: usize = 8 * 1024;
+const NO_TEXT_PREVIEW: &str = "Binary or invalid text — no text preview. The original attachment is preserved; read its file path with an appropriate decoder.";
 /// Office/binary docs that are converted to text inline (the raw binary is not
 /// useful to read on disk; the extracted text is).
 const OFFICE_DOC_EXTENSIONS: &[&str] = &["xlsx", "xls", "docx", "pptx", "pdf"];
@@ -222,12 +223,81 @@ pub fn extract_content(filename: &str, data: &[u8]) -> Result<ExtractedContent> 
     // Everything else (text, code, logs, HAR, JSON, NDJSON, …) → save the RAW
     // file to disk and surface only a short preview in context. The agent reads
     // the full file with its tools — no whole-file token cost, no 500KB cap.
-    let preview_len = data.len().min(PREVIEW_BYTES);
-    let preview = String::from_utf8_lossy(&data[..preview_len]).to_string();
+    let preview = attachment_preview(data);
+    if preview == NO_TEXT_PREVIEW {
+        tracing::warn!(
+            "Attachment preview omitted: binary or invalid text; original bytes preserved"
+        );
+    }
     Ok(ExtractedContent::DiskFile {
         data: data.to_vec(),
         preview,
     })
+}
+
+fn attachment_preview(data: &[u8]) -> String {
+    let prefix = &data[..data.len().min(PREVIEW_BYTES)];
+    if prefix.starts_with(&[0xff, 0xfe, 0, 0]) || prefix.starts_with(&[0, 0, 0xfe, 0xff]) {
+        return NO_TEXT_PREVIEW.into();
+    }
+    let mut text = if prefix.starts_with(&[0xff, 0xfe]) || prefix.starts_with(&[0xfe, 0xff]) {
+        let little_endian = prefix[0] == 0xff;
+        let payload = &prefix[2..];
+        if !payload.len().is_multiple_of(2) {
+            return NO_TEXT_PREVIEW.into();
+        }
+        let mut units: Vec<_> = payload
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| {
+                if little_endian {
+                    u16::from_le_bytes([pair[0], pair[1]])
+                } else {
+                    u16::from_be_bytes([pair[0], pair[1]])
+                }
+            })
+            .collect();
+        // A bounded preview can end halfway through a valid surrogate pair.
+        if data.len() > prefix.len()
+            && units
+                .last()
+                .is_some_and(|unit| (0xd800..=0xdbff).contains(unit))
+        {
+            units.pop();
+        }
+        match String::from_utf16(&units) {
+            Ok(text) => text,
+            Err(_) => return NO_TEXT_PREVIEW.into(),
+        }
+    } else {
+        match std::str::from_utf8(prefix) {
+            Ok(text) => text.to_string(),
+            Err(error) if error.error_len().is_none() && data.len() > prefix.len() => {
+                String::from_utf8_lossy(&prefix[..error.valid_up_to()]).into_owned()
+            }
+            Err(_) => return NO_TEXT_PREVIEW.into(),
+        }
+    };
+    if text.contains('\0') {
+        return NO_TEXT_PREVIEW.into();
+    }
+    let mut end = text.len().min(PREVIEW_BYTES);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text.truncate(end);
+    text
+}
+
+/// Execution-only projection: keep stored history untouched and byte budgets
+/// stable, but separate words around NUL instead of joining them by deletion.
+pub fn nul_safe_prompt(text: String) -> String {
+    if text.contains('\0') {
+        text.replace('\0', " ")
+    } else {
+        text
+    }
 }
 
 /// Extract text content from a file's raw bytes.
@@ -461,6 +531,15 @@ pub fn build_context_prompt(files: &[ContextEntry]) -> String {
 
     let mut parts = Vec::new();
     for entry in files {
+        let text = if entry.text.contains('\0') {
+            if entry.disk_path.is_some() {
+                NO_TEXT_PREVIEW
+            } else {
+                "Invalid stored text — no text preview. Ask the user to reattach this file in a supported text encoding."
+            }
+        } else {
+            &entry.text
+        };
         match entry.disk_path {
             Some(ref path) if is_image(&entry.filename) => {
                 // Image: instruct the agent to read it with its vision/file tool
@@ -476,15 +555,15 @@ pub fn build_context_prompt(files: &[ContextEntry]) -> String {
                 // attachment (e.g. a 5MB HAR) costs no context tokens here.
                 parts.push(format!(
                     "--- {} (file on disk) ---\nThis file is attached on disk and NOT fully inlined (to save context). Read or parse the FULL file with your file tools at:\n{}\n\nPreview (first {} chars — read the path above for the rest):\n{}",
-                    entry.filename, path, entry.text.len(), entry.text
+                    entry.filename, path, text.chars().count(), text
                 ));
             }
             None => {
-                parts.push(format!("--- {} ---\n{}", entry.filename, entry.text));
+                parts.push(format!("--- {} ---\n{}", entry.filename, text));
             }
         }
     }
-    parts.join("\n\n")
+    nul_safe_prompt(parts.join("\n\n"))
 }
 
 /// Detect MIME type from extension (simple mapping for display).
@@ -685,6 +764,142 @@ mod tests {
             ExtractedContent::DiskFile { preview, .. } => assert_eq!(preview, "short note"),
             _ => panic!("expected DiskFile"),
         }
+    }
+
+    fn disk_preview(bytes: &[u8]) -> String {
+        match extract_content("fixture.json", bytes).unwrap() {
+            ExtractedContent::DiskFile { data, preview } => {
+                assert_eq!(
+                    data, bytes,
+                    "preview conversion must preserve original bytes"
+                );
+                preview
+            }
+            _ => panic!("expected a disk-backed file"),
+        }
+    }
+
+    #[test]
+    fn kt633_utf16_bom_previews_decode_both_byte_orders_without_changing_files() {
+        let text = "{\"hello\":\"été 中文 😀\"}";
+        for little_endian in [true, false] {
+            let mut bytes = if little_endian {
+                vec![0xff, 0xfe]
+            } else {
+                vec![0xfe, 0xff]
+            };
+            for unit in text.encode_utf16() {
+                bytes.extend(if little_endian {
+                    unit.to_le_bytes()
+                } else {
+                    unit.to_be_bytes()
+                });
+            }
+            assert_eq!(disk_preview(&bytes), text);
+        }
+    }
+
+    #[test]
+    fn kt633_binary_and_bomless_nul_previews_are_explicitly_unavailable() {
+        for bytes in [vec![0; 100], vec![0xff, 0x80, 0x01], b"{\0\"\0x\0".to_vec()] {
+            let preview = disk_preview(&bytes);
+            assert!(!preview.contains('\0'));
+            assert!(preview.contains("no text preview"), "{preview:?}");
+        }
+    }
+
+    #[test]
+    fn kt633_utf8_preview_cut_does_not_invent_a_replacement_character() {
+        let text = format!("{}😀rest", "x".repeat(PREVIEW_BYTES - 1));
+        let preview = disk_preview(text.as_bytes());
+        assert_eq!(preview, "x".repeat(PREVIEW_BYTES - 1));
+        assert!(preview.len() <= PREVIEW_BYTES);
+    }
+
+    #[test]
+    fn kt633_utf16_preview_is_bounded_in_decoded_bytes_and_handles_a_split_surrogate() {
+        let text = format!("{}😀rest", "a".repeat((PREVIEW_BYTES - 2) / 2 - 1));
+        let mut bytes = vec![0xff, 0xfe];
+        bytes.extend(text.encode_utf16().flat_map(u16::to_le_bytes));
+        assert_eq!(
+            disk_preview(&bytes),
+            "a".repeat((PREVIEW_BYTES - 2) / 2 - 1)
+        );
+
+        let mut bytes = vec![0xff, 0xfe];
+        bytes.extend(
+            "界"
+                .repeat(PREVIEW_BYTES)
+                .encode_utf16()
+                .flat_map(u16::to_le_bytes),
+        );
+        let preview = disk_preview(&bytes);
+        assert!(preview.len() <= PREVIEW_BYTES);
+        assert!(preview.chars().all(|c| c == '界'));
+    }
+
+    #[test]
+    fn kt633_malformed_utf16_and_utf32_are_not_misrepresented_as_text() {
+        for bytes in [
+            vec![0xff, 0xfe, 0x00, 0xd8],
+            vec![0xff, 0xfe, 0x7b],
+            vec![0xff, 0xfe, 0, 0, 0x7b, 0, 0, 0],
+            vec![0, 0, 0xfe, 0xff],
+        ] {
+            assert!(disk_preview(&bytes).contains("no text preview"));
+        }
+    }
+
+    #[test]
+    fn kt633_legacy_context_is_safe_without_mutating_stored_text() {
+        for disk_path in [Some("/tmp/legacy.json".to_string()), None] {
+            let entries = vec![ContextEntry {
+                filename: "legacy\0.json".into(),
+                text: "x\0y".into(),
+                disk_path,
+            }];
+            let prompt = build_context_prompt(&entries);
+            assert!(!prompt.contains('\0'), "{prompt:?}");
+            assert!(prompt.contains("no text preview"));
+            assert_eq!(entries[0].text, "x\0y");
+            if entries[0].disk_path.is_none() {
+                assert!(prompt.contains("reattach"));
+                assert!(!prompt.contains("read its file path"));
+            }
+        }
+    }
+
+    #[test]
+    fn kt633_execution_projection_preserves_byte_budget_unicode_and_word_boundaries() {
+        for text in [
+            "été 中文 😀\r\n\t".to_string(),
+            "hello\0world".repeat(PREVIEW_BYTES),
+        ] {
+            let original = text.clone();
+            let safe = nul_safe_prompt(text);
+            assert_eq!(safe.len(), original.len());
+            assert_eq!(safe, original.replace('\0', " "));
+            assert!(std::ffi::CString::new(safe).is_ok());
+        }
+        let entries = [ContextEntry {
+            filename: "legacy\0.png".into(),
+            text: String::new(),
+            disk_path: Some("/tmp/legacy\0.png".into()),
+        }];
+        let prompt = build_context_prompt(&entries);
+        assert!(std::ffi::CString::new(prompt).is_ok());
+        assert_eq!(entries[0].disk_path.as_deref(), Some("/tmp/legacy\0.png"));
+    }
+
+    #[test]
+    fn kt633_preview_caption_counts_characters_not_utf8_bytes() {
+        let prompt = build_context_prompt(&[ContextEntry {
+            filename: "unicode.txt".into(),
+            text: "été😀".into(),
+            disk_path: Some("/tmp/unicode.txt".into()),
+        }]);
+        assert!(prompt.contains("first 4 chars"), "{prompt}");
+        assert!(prompt.contains("été😀"));
     }
 
     #[test]

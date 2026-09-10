@@ -20,7 +20,7 @@ import { RunDetail, RunStatusTrail } from './RunDetail';
 import { RunStatusCard } from '../RunStatusCard';
 import { workflowRunStatusCardModel } from '../../lib/runStatusCardModel';
 import { liveStepWaitingKey, runStatusTimeline } from '../../lib/workflowUiUtils';
-import { AgentSwitchPicker } from '../AgentSwitchPicker';
+import { AgentSwitchPicker, type AgentSwitchTarget } from '../AgentSwitchPicker';
 import { CopyIdPill } from '../CopyIdPill';
 import { WorkflowWizard } from './WorkflowWizard';
 import '../../pages/WorkflowsPage.css';
@@ -199,7 +199,8 @@ export interface WorkflowDetailProps {
   workflow: Workflow;
   runs: WorkflowRun[];
   availableAgentTypes?: AgentType[];
-  onChangeStepAgent?: (stepIndex: number, agent: AgentType, tier: ModelTier) => Promise<void>;
+  agentChoices?: AgentSwitchTarget[];
+  onChangeStepAgent?: (stepIndex: number, agent: AgentType, tier: ModelTier, connectionId?: string | null) => Promise<void>;
   totalRuns?: number;
   hasMoreRuns?: boolean;
   loadingMoreRuns?: boolean;
@@ -381,12 +382,13 @@ export function BatchItemsList({
   );
 }
 
-function StepCard({ step, index, agentAccess, projectId, t, quickPromptsById, workflowId, allSteps, availableAgentTypes, onChangeAgent, onSelectStep, onNavigatePage, nested = false }: {
+function StepCard({ step, index, agentAccess, projectId, t, quickPromptsById, workflowId, allSteps, availableAgentTypes, agentChoices, onChangeAgent, onSelectStep, onNavigatePage, nested = false }: {
   step: WorkflowStep; index: number; agentAccess?: AgentsConfig | null;
   projectId?: string | null; t: (key: string, ...args: (string | number)[]) => string;
   quickPromptsById?: Map<string, QuickPrompt>;
   availableAgentTypes?: AgentType[];
-  onChangeAgent?: (stepIndex: number, agent: AgentType, tier: ModelTier) => Promise<void>;
+  agentChoices?: AgentSwitchTarget[];
+  onChangeAgent?: WorkflowDetailProps['onChangeStepAgent'];
   onSelectStep?: (stepIndex: number) => void;
   onNavigatePage?: (pageId: string) => void;
   /** Workflow id is needed to key the dry-run test state cache (see module
@@ -789,6 +791,7 @@ function StepCard({ step, index, agentAccess, projectId, t, quickPromptsById, wo
             step={step}
             stepIndex={index}
             availableAgentTypes={availableAgentTypes}
+            agentChoices={agentChoices}
             onChange={onChangeAgent}
             modelTiers={agentAccess?.model_tiers}
             t={t}
@@ -1289,6 +1292,7 @@ function StepAgentSwitcher({
   step,
   stepIndex,
   availableAgentTypes = [],
+  agentChoices,
   onChange,
   modelTiers,
   t,
@@ -1297,7 +1301,8 @@ function StepAgentSwitcher({
   step: WorkflowStep;
   stepIndex: number;
   availableAgentTypes?: AgentType[];
-  onChange?: (stepIndex: number, agent: AgentType, tier: ModelTier) => Promise<void>;
+  agentChoices?: AgentSwitchTarget[];
+  onChange?: WorkflowDetailProps['onChangeStepAgent'];
   modelTiers?: AgentsConfig['model_tiers'];
   t: (key: string, ...args: (string | number)[]) => string;
   compact?: boolean;
@@ -1306,8 +1311,11 @@ function StepAgentSwitcher({
     <AgentSwitchPicker
       currentAgent={step.agent}
       availableAgents={availableAgentTypes}
+      availableTargets={agentChoices?.length ? agentChoices : undefined}
+      currentConnectionId={step.agent_settings?.connection_id}
+      currentModel={step.agent_settings?.model}
       currentTier={step.agent_settings?.tier ?? 'default'}
-      onSelectionChange={onChange ? (agent, tier) => onChange(stepIndex, agent, tier) : undefined}
+      onTargetSelectionChange={onChange ? (target, tier) => onChange(stepIndex, target.agent, tier, target.connectionId ?? null) : undefined}
       tierLabels={{
         economy: t('disc.tier.economy'),
         default: t('disc.tier.default'),
@@ -1539,7 +1547,7 @@ function SubWorkflowOverview({
   );
 }
 
-export function WorkflowDetail({ workflow, runs, availableAgentTypes, onChangeStepAgent, totalRuns, hasMoreRuns = false, loadingMoreRuns = false, onLoadMoreRuns, liveRun, onTrigger, onRefresh, onEdit, onDeleteRun, onDeleteAllRuns, triggering, agentAccess, onNavigateToBatch, onNavigateToWorkflow, onNavigateToRun, onNavigatePage, focusRunId, onExport, onGateDecided, onToggleEnabled, toast, projects = [], configLanguage }: WorkflowDetailProps) {
+export function WorkflowDetail({ workflow, runs, availableAgentTypes, agentChoices, onChangeStepAgent, totalRuns, hasMoreRuns = false, loadingMoreRuns = false, onLoadMoreRuns, liveRun, onTrigger, onRefresh, onEdit, onDeleteRun, onDeleteAllRuns, triggering, agentAccess, onNavigateToBatch, onNavigateToWorkflow, onNavigateToRun, onNavigatePage, focusRunId, onExport, onGateDecided, onToggleEnabled, toast, projects = [], configLanguage }: WorkflowDetailProps) {
   const { t } = useT();
   const [showRuns, setShowRuns] = useState(true);
   const [isWorkflowIdCopied, setIsWorkflowIdCopied] = useState(false);
@@ -1932,6 +1940,7 @@ export function WorkflowDetail({ workflow, runs, availableAgentTypes, onChangeSt
                               step={step}
                               stepIndex={i}
                               availableAgentTypes={availableAgentTypes}
+                              agentChoices={agentChoices}
                               onChange={onChangeStepAgent}
                               modelTiers={agentAccess?.model_tiers}
                               t={t}
@@ -2069,6 +2078,7 @@ export function WorkflowDetail({ workflow, runs, availableAgentTypes, onChangeSt
                     workflowId={workflow.id}
                     allSteps={workflow.steps}
                     availableAgentTypes={availableAgentTypes}
+                    agentChoices={agentChoices}
                     onChangeAgent={onChangeStepAgent}
                     onSelectStep={index => selectStep(index)}
                     onNavigatePage={onNavigatePage}
@@ -2087,6 +2097,7 @@ export function WorkflowDetail({ workflow, runs, availableAgentTypes, onChangeSt
                       initialStepId={selectedStep.id ?? undefined}
                       focusedStepOnly
                       installedAgentTypes={availableAgentTypes}
+                      agentChoices={agentChoices}
                       agentAccess={agentAccess}
                       configLanguage={configLanguage}
                       onNavigatePage={onNavigatePage}

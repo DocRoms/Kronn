@@ -4,7 +4,7 @@ import {
 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { workflows as workflowsApi } from '../lib/api';
-import { AGENT_LABELS, agentTextColor, modelForAgentTier } from '../lib/constants';
+import { AGENT_LABELS, agentTextColor } from '../lib/constants';
 import type {
   AgentType, BatchCompareDetails, BatchCompareEvaluation, Discussion,
   ModelTier, ModelTiersConfig,
@@ -44,12 +44,25 @@ function lastSystemCause(discussion: Discussion) {
   return null;
 }
 
-function lastRecordedModel(discussion: Discussion) {
-  for (let index = discussion.messages.length - 1; index >= 0; index -= 1) {
-    const model = discussion.messages[index].model?.trim();
+// Bounded to strictly before `before` (typically the compared answer) so a
+// later System/recovered-partial record can never masquerade as a model that
+// was already known when that answer was produced. Unbounded (`before` is
+// null, e.g. no answer at all) scans every message, since there is then no
+// answer to protect from future contamination.
+function lastRecordedModel(discussion: Discussion, before?: Discussion['messages'][number] | null) {
+  const messages = discussion.messages;
+  const boundIndex = before ? messages.indexOf(before) : messages.length;
+  const start = (boundIndex < 0 ? messages.length : boundIndex) - 1;
+  for (let index = start; index >= 0; index -= 1) {
+    const model = messages[index].model?.trim();
     if (model) return model;
   }
   return null;
+}
+
+function normalizeModelId(value: string | null | undefined) {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : null;
 }
 
 function compareAgentLabel(
@@ -432,15 +445,16 @@ export function BatchCompareDetailsPanel({
               const manualScore = evaluation?.manual_score ?? null;
               const ai = evaluation?.ai;
               const agentLabel = compareAgentLabel(discussion, externalConnections);
-              const concreteModel = answer?.model
-                ?? discussion.model
-                ?? lastRecordedModel(discussion)
-                ?? modelForAgentTier(
-                  discussion.agent,
-                  discussion.tier ?? 'default',
-                  modelTiers,
-                  t('disc.defaultAgentModel'),
-                );
+              // Three distinct provenances, never conflated: the answer's own
+              // attested model, an earlier message's recorded model (bounded
+              // to strictly before the answer, kept for reference, but not
+              // proof of what produced THIS answer), and a genuine unknown.
+              // `discussion.model` is a forward override for the NEXT run —
+              // it can be edited at any time and must never be shown as if it
+              // were the model that produced a past answer.
+              const attestedModel = normalizeModelId(answer?.model);
+              const recordedModel = attestedModel ?? lastRecordedModel(discussion, answer);
+              const concreteModel = recordedModel ?? t('disc.defaultAgentModel');
               const weighted = weightedQuality(evaluation, humanWeight);
               const failureCause = answer ? null : lastSystemCause(discussion);
               const tokens = answer?.tokens_used && answer.tokens_used > 0
@@ -460,7 +474,8 @@ export function BatchCompareDetailsPanel({
                   <div className="disc-compare-card-model" title={concreteModel}>
                     <Bot size={12} />
                     <span>{concreteModel}</span>
-                    {!answer?.model && <small>{t('disc.compare.modelInferred')}</small>}
+                    {attestedModel == null && recordedModel != null && <small>{t('disc.compare.modelRecorded')}</small>}
+                    {recordedModel == null && <small>{t('disc.compare.modelUnknown')}</small>}
                   </div>
 
                   <div className="disc-compare-all-metrics">

@@ -1,6 +1,13 @@
 import type { TranslationDict } from '../../i18n';
 
 const fr: TranslationDict = {
+  'agentPicker.search': 'Rechercher un agent, une connexion ou un modèle…',
+  'agentPicker.noMatch': 'Aucun agent ou modèle correspondant.',
+  "modelCatalog.lastChecked": "Dernière vérification : {0}",
+  "modelCatalog.notInCatalog": "Absent du catalogue chargé",
+  "modelCatalog.keepConfigured": "Valeur configurée conservée. Revérifiez le catalogue ou choisissez explicitement un remplacement.",
+  "modelCatalog.loadError": "Impossible de charger le catalogue de modèles. Les réglages existants sont conservés.",
+  "modelCatalog.reload": "Recharger le catalogue enregistré",
   'modelCatalog.title': 'Catalogues de modèles',
   'modelCatalog.description': 'Modèles détectés, mis en cache ou configurés manuellement pour chaque cible.',
   'modelCatalog.addHint': "Pour une cible dont la détection ne renvoie rien : le modèle est alors déclaré à la main.",
@@ -1026,7 +1033,8 @@ const fr: TranslationDict = {
   'disc.compare.notRated': 'Non évalué',
   'disc.compare.confidence': 'confiance {0} %',
   'disc.compare.aiFeedback': 'Détails du verdict IA',
-  'disc.compare.modelInferred': 'déduit du tier',
+  'disc.compare.modelRecorded': 'issu d’un message antérieur',
+  'disc.compare.modelUnknown': 'modèle inconnu',
   'disc.compare.selfJudgeWarning': 'Le juge fait partie des candidats : risque de préférence pour son propre style.',
   'disc.compare.cliJudgeWarning': 'Cet agent CLI reçoit bien le skill de jugement, mais Kronn ne peut pas retirer ses outils natifs. Pour une isolation structurelle et reproductible, préfère Ollama, LiteLLM ou NVIDIA.',
   'disc.compare.noSecureJudge': 'Configure Ollama, LiteLLM ou NVIDIA pour un jugement reproductible sans outils.',
@@ -2175,7 +2183,7 @@ const fr: TranslationDict = {
   'ollama.pullFailed': 'Le téléchargement n’a pas pu démarrer. Réessayez.',
   'ollama.installedModels': 'Modèles installés',
   'ollama.tierPickerTitle': 'Modèle par palier',
-  'ollama.tierAuto': 'Auto (défaut intégré)',
+  'ollama.tierAuto': 'Automatique',
   'ollama.tierPickerHint': 'Un modèle par palier — vide = repli sur le palier « Standard »',
   'ollama.tierGuidance': 'qwen3:8b suffit pour extraction, classification, résumé, sécu évidente. Un modèle plus gros (30b+) aide sur la review et le jugement nuancé — mais aucun modèle local n\'est fiable pour attraper des bugs subtils (garde un agent cloud pour ça).',
   'ollama.contextTitle': 'Fenêtre de contexte par modèle',

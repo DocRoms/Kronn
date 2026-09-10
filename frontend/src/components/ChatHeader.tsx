@@ -419,6 +419,7 @@ export function ChatHeader({
                   ariaLabel={t('disc.switchAgentAndTier')}
                   suffix={t('disc.targetDiscussionAgent')}
                   currentTier={discussion.tier ?? 'default'}
+                  currentModel={discussion.model}
                   tierLabels={{
                     economy: t('disc.tier.economy'),
                     default: t('disc.tier.default'),

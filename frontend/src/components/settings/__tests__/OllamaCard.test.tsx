@@ -3,41 +3,47 @@
  *
  * OllamaCard has 4 explicit states (not_installed / offline+unreachable /
  * online-zero-models / online+models) and an async default-model picker
- * with optimistic-rollback semantics. Pre-test : zero coverage. Pinned
+ * with confirmed-write semantics. Pinned
  * here :
  *  - the 4 states render their respective wizard / picker UI
  *  - the canirun.ai hint always renders (regression for the 2026-05-11
  *    user report where it was hidden too low)
- *  - default-model picker is optimistic ; rollback fires on POST failure
+ *  - default-model picker retains its confirmed value on POST failure
  *  - refresh button re-fetches health + models
  *  - health fetch errors degrade to an "offline" rendering without crash
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, act, cleanup, waitFor } from '@testing-library/react';
+import { buildApiMock } from '../../../test/apiMock';
+import type { CatalogModelEntry, ModelTiersConfig, OllamaModel } from '../../../types/generated';
 
-const { ollama, config } = vi.hoisted(() => ({
+const { ollama, config, catalogList } = vi.hoisted(() => ({
   ollama: { health: vi.fn(), models: vi.fn(), pull: vi.fn(), setContextOverride: vi.fn() },
   config: { getModelTiers: vi.fn(), setModelTiers: vi.fn() },
+  catalogList: vi.fn(),
 }));
 
-vi.mock('../../../lib/api', () => ({ ollama, config }));
+vi.mock('../../../lib/api', () => buildApiMock({ ollama, config, modelCatalogApi: { list: catalogList } }));
 
 import { OllamaCard } from '../OllamaCard';
 
 const t = (key: string, ...args: (string | number)[]) =>
   args.length ? `${key}(${args.join('|')})` : key;
 
-const baseTiers = {
+const baseTiers: ModelTiersConfig = {
   claude_code: { economy: null, reasoning: null, default: null },
   codex: { economy: null, reasoning: null, default: null },
+  open_code: { economy: null, reasoning: null, default: null },
   gemini_cli: { economy: null, reasoning: null, default: null },
   kiro: { economy: null, reasoning: null, default: null },
   vibe: { economy: null, reasoning: null, default: null },
   copilot_cli: { economy: null, reasoning: null, default: null },
   ollama: { economy: null, reasoning: null, default: null },
+  lite_llm: { economy: null, reasoning: null, default: null },
+  nvidia: { economy: null, reasoning: null, default: null },
 };
 
-const installedModel = (name: string, overrides: Record<string, unknown> = {}) => ({
+const installedModel = (name: string, overrides: Partial<OllamaModel> = {}): OllamaModel => ({
   name,
   size: '4.0 GB',
   modified: '2026-01-01',
@@ -49,6 +55,7 @@ const installedModel = (name: string, overrides: Record<string, unknown> = {}) =
 });
 
 beforeEach(() => {
+  for (const mock of [...Object.values(ollama), ...Object.values(config), catalogList]) mock.mockReset();
   ollama.health.mockResolvedValue({
     status: 'not_installed', version: null, endpoint: '', models_count: 0, hint: null,
   });
@@ -57,6 +64,18 @@ beforeEach(() => {
   ollama.setContextOverride.mockResolvedValue({ model: '', num_ctx: null, warnings: [] });
   config.getModelTiers.mockResolvedValue(baseTiers);
   config.setModelTiers.mockResolvedValue(undefined);
+  // Installed inventory and saved catalogue are distinct API contracts. Keep
+  // the pre-existing picker cases backed by an explicit catalogue fixture.
+  catalogList.mockResolvedValue({ targets: [{
+    runtime_target_id: 'agent:ollama', agent_type: 'Ollama', live_refresh_ok: true, stale: false,
+    models: ['llama3.2', 'llama3.2:latest', 'qwen2.5-coder:14b', 'qwen3:8b'].map((id): CatalogModelEntry => ({
+      id: `agent:ollama:${id}`, runtime_target_id: 'agent:ollama', agent_type: 'Ollama',
+      model_id: id, display_name: id, provenance: 'live', availability: 'available',
+      capabilities: ['chat'], reasoning_modes: [], manual_origin: false,
+      first_seen_at: '2026-09-10T00:00:00Z', last_checked_at: '2026-09-10T00:00:00Z',
+      created_at: '2026-09-10T00:00:00Z', updated_at: '2026-09-10T00:00:00Z',
+    })),
+  }] });
 });
 
 afterEach(() => { cleanup(); vi.clearAllMocks(); });
@@ -64,7 +83,7 @@ afterEach(() => { cleanup(); vi.clearAllMocks(); });
 async function mountCard(modelCostSuffix?: (model: string) => string) {
   let result: ReturnType<typeof render>;
   await act(async () => { result = render(<OllamaCard t={t} modelCostSuffix={modelCostSuffix} />); });
-  await act(async () => { await new Promise(r => setTimeout(r, 0)); });
+  await waitFor(() => expect(screen.getByLabelText('ollama.refresh')).not.toBeDisabled());
   return result!;
 }
 
@@ -219,6 +238,26 @@ describe('OllamaCard — per-model context policy', () => {
     expect(await screen.findByText('ollama.contextInvalid')).toBeTruthy();
     expect(ollama.setContextOverride).not.toHaveBeenCalled();
   });
+
+  it('serializes synchronous context saves and resets until the confirmed inventory returns', async () => {
+    ollama.models.mockResolvedValue({ models: [installedModel('qwen3:8b', { context_override: 8192 })] });
+    let resolveSave!: (result: { model: string; num_ctx: number | null; warnings: string[] }) => void;
+    ollama.setContextOverride.mockImplementation(() => new Promise(resolve => { resolveSave = resolve; }));
+    await mountCard();
+    fireEvent.click(screen.getByText('ollama.contextTitle'));
+    const input = screen.getByLabelText('ollama.contextOverrideFor(qwen3:8b)');
+    fireEvent.change(input, { target: { value: '16384' } });
+    const save = screen.getByRole('button', { name: 'ollama.contextSave' });
+    const reset = screen.getByRole('button', { name: 'ollama.contextReset' });
+    act(() => { save.click(); save.click(); reset.click(); });
+    const mutationCount = ollama.setContextOverride.mock.calls.length;
+    const wasDisabled = (input as HTMLInputElement).disabled;
+    await act(async () => resolveSave({ model: 'qwen3:8b', num_ctx: 16384, warnings: [] }));
+    expect(mutationCount).toBe(1);
+    expect(wasDisabled).toBe(true);
+    expect(ollama.setContextOverride).toHaveBeenCalledWith('qwen3:8b', 16384);
+    expect(save).not.toBeDisabled();
+  });
 });
 
 describe('OllamaCard — canirun.ai hint always visible', () => {
@@ -276,7 +315,7 @@ describe('OllamaCard — per-tier model picker', () => {
     await act(async () => {
       fireEvent.focus(defSelect);
       fireEvent.change(defSelect, { target: { value: 'llama3.2' } });
-      fireEvent.click(screen.getByRole('option', { name: /llama3\.2/ }));
+      fireEvent.click(screen.getByRole('option', { name: 'llama3.2' }));
     });
     await waitFor(() => expect(config.setModelTiers).toHaveBeenCalled());
     expect(config.setModelTiers.mock.calls[0][0].ollama.default).toBe('llama3.2');
@@ -286,14 +325,14 @@ describe('OllamaCard — per-tier model picker', () => {
     await act(async () => {
       fireEvent.focus(ecoSelect);
       fireEvent.change(ecoSelect, { target: { value: 'llama3.2' } });
-      fireEvent.click(screen.getByRole('option', { name: /llama3\.2/ }));
+      fireEvent.click(screen.getByRole('option', { name: 'llama3.2' }));
     });
     await waitFor(() => expect(config.setModelTiers.mock.calls.length).toBeGreaterThan(1));
     const last = config.setModelTiers.mock.calls.at(-1)![0];
     expect(last.ollama.economy).toBe('llama3.2');
   });
 
-  it('rolls back the select to its prior value when setModelTiers fails', async () => {
+  it('keeps the confirmed value when setModelTiers fails', async () => {
     ollama.health.mockResolvedValue({
       status: 'online', version: '0.3.12', endpoint: 'http://localhost:11434',
       models_count: 2, hint: null,
@@ -316,7 +355,7 @@ describe('OllamaCard — per-tier model picker', () => {
       fireEvent.click(screen.getByRole('option', { name: /qwen2\.5-coder:14b/ }));
     });
     await waitFor(() => expect(config.setModelTiers).toHaveBeenCalled());
-    // Optimistic flip reverted on failure → select shows the original model again.
+    // A failed write never replaces the confirmed model.
     await waitFor(() => expect(defSelect.value).toBe('llama3.2'));
     expect(document.querySelector('.set-ollama-card')).not.toBeNull();
   });
@@ -356,7 +395,7 @@ describe('OllamaCard — direct model downloads', () => {
     fireEvent.click(button);
     await waitFor(() => expect(ollama.pull).toHaveBeenCalledTimes(1));
     expect(screen.getByText(/1 MB.*4 MB.*25%/)).toBeTruthy();
-    resolvePull();
+    await act(async () => resolvePull());
   });
 
   it('cancels an in-flight pull and leaves it relaunchable', async () => {

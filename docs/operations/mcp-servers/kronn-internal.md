@@ -566,7 +566,15 @@ These reads reuse the existing list endpoints and do not mutate the library.
 ## Joined CLI worktrees
 
 - Call `disc_workspace_get({})` before editing when several peers may be
-  active. It is a compact read and derives this bridge's durable identity.
+  active. It derives this bridge's **active joined CLI identity**, not the
+  durable binding key used to restore the room after a restart. The same
+  identity rule applies to declaration and history leases. Omit the optional
+  identity arguments: matching values remain compatible, but foreign or
+  durable-key overrides are refused before HTTP. A missing joined session is
+  an error, never a reason to select another participant or reassign a worktree.
+  Restore this caller's binding before retrying; do not substitute a peer's id.
+  `[src: file: backend/scripts/disc-introspection-mcp.py:5992-6025]`
+  `[src: file: backend/src/api/disc_workspace.rs:235-259]`
 - Call `disc_workspace_set({task_ref: "KT-140"})` from the worktree root (or
   pass an explicit `workspace_path`) whenever the CLI changes worktree or
   branch. Kronn refreshes branch and HEAD from Git on each declaration.
@@ -652,6 +660,8 @@ When a user gives you a `kr-join-…` invite token :
 1. Call `disc_join({token: "kr-join-…"})`. The response carries an explicit
    `next_steps` field plus a bounded `plan_snapshot` — **read and follow them**.
 2. **Introduce yourself via `disc_append({content: "<intro>"})`** even if you're the first / only participant. Replying only in your local terminal is INVISIBLE to peers.
+   Then read `plan_get` (and `task_list` for the wider backlog) before a
+   substantive reply or task action; process the join's addressed initial turns.
 3. For a clear, actionable user request that has no matching planned task,
    check `plan_get` and `task_list` for duplicates before creating exactly one
    task with `task_create`. If intent, ownership, or scope is ambiguous, submit
@@ -661,12 +671,29 @@ When a user gives you a `kr-join-…` invite token :
    `task_exec_prepare` and `task_exec_launch` only after a launchable preflight.
    Do not invent child rooms or launch duplicate executions; observe existing
    work through `task_exec_status`.
-5. Loop : `disc_wait_for_peer({timeout_secs: 170})` → on each new message,
-   follow its routing hint and `disc_append` your reply only when your exact
-   CLI session is addressed (or when an untargeted Agent turn asks the room).
+5. Repeat bounded work → report → listen. Before each real step, announce the
+   task, scope and next action with `disc_append`. After each result, call
+   `disc_wait_for_peer({max_total_secs: 20})` before starting another step;
+   process addressed messages, report evidence/limits and continue the plan.
+   Keep the parent room informed of delegated milestones, not just the child.
+   Follow existing executions with `task_exec_status`, never duplicate launches.
+   Use the unbounded `disc_wait_for_peer()` only when no actionable work or
+   execution needs following: its quiet inner polls do not return to the model.
+   A backgrounded wait remains active; track that same call to its terminal
+   result, never start another wait or end on a progress summary. A completed
+   quiet result or interruption is not departure. Follow each message's routing
+   hint and reply only when your exact CLI is addressed (or an untargeted Agent
+   turn asks the room); `awareness` is context, not a turn to answer.
 6. Call `disc_leave()` when the task is done or the user says stop.
 
 [src: file: backend/src/api/disc_invite.rs:467-570]
+
+The Python catalogue distinguishes bounded work from idle listening, and one
+shared orientation supplies the join manual, wait manual and initialize text.
+This is a source instruction contract, not a guarantee that a running host has
+loaded or follows it. See [the diagnosis and qualification](../../gotchas/joined-cli-work-loop.md).
+[src: file: backend/scripts/disc-introspection-mcp.py:1250-1274]
+[src: file: backend/scripts/disc-introspection-mcp.py:9354-9371]
 
 The bridge auto-derives your `agent_type` from the MCP `clientInfo.name` handshake (Claude Code → ClaudeCode, Codex → Codex, …) so no env-var prep is needed.
 

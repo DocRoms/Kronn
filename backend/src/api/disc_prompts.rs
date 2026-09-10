@@ -1,9 +1,11 @@
 //! Pure prompt builders extracted from `api::discussions`.
 //!
-//! Three public entry points:
+//! Prompt-building entry points:
 //! - [`build_agent_prompt`] — serialise a discussion's history into the
 //!   prompt a single agent sees (with summary injection + budget-aware
 //!   truncation).
+//! - [`build_agent_delta_prompt`] — preserve every unseen message for a
+//!   continuation whose complete size is checked by the discussion layer.
 //! - [`build_orchestration_prompt`] — one debate round's prompt for a
 //!   specific agent, across up to 3 locales (fr/es/en-default).
 //! - [`build_synthesis_prompt`] — final-round synthesis prompt that
@@ -15,6 +17,7 @@
 //!
 //! See `disc_helpers.rs` for the small text/agent utilities reused here.
 
+use crate::core::context_files::nul_safe_prompt;
 use crate::models::{AgentType, Discussion, DiscussionMessage, MessageRole};
 
 use super::disc_helpers::{
@@ -60,7 +63,7 @@ pub fn build_orchestration_prompt(ctx: &OrchestrationContext) -> String {
         }
     };
 
-    if ctx.round == 1 {
+    let prompt = if ctx.round == 1 {
         match ctx.lang {
             "fr" => format!(
                 "Tu es {} dans un debat technique entre agents IA ({}).\n\
@@ -177,7 +180,8 @@ pub fn build_orchestration_prompt(ctx: &OrchestrationContext) -> String {
             )),
         }
         prompt
-    }
+    };
+    nul_safe_prompt(prompt)
 }
 
 pub fn build_synthesis_prompt(
@@ -252,7 +256,7 @@ pub fn build_synthesis_prompt(
             Be concise and structured. Respond in English.",
         ),
     }
-    ctx
+    nul_safe_prompt(ctx)
 }
 
 /// Build the agent prompt with conversation history, respecting the
@@ -365,7 +369,47 @@ pub fn build_agent_prompt(
     agent_type: &AgentType,
     extra_context_len: usize,
 ) -> String {
-    let budget = agent_prompt_budget(agent_type).saturating_sub(extra_context_len);
+    nul_safe_prompt(build_agent_prompt_inner(
+        disc,
+        agent_type,
+        extra_context_len,
+        false,
+    ))
+}
+
+/// Render every unseen message for a proven session continuation. The caller
+/// accepts this result only when it is smaller than the ordinary bounded full
+/// prompt; truncating a delta here would silently lose interleaved messages.
+/// Old summary indices and a pinned first message refer to the full history,
+/// not to the sliced delta, so neither may skip rows in this rendering.
+pub fn build_agent_delta_prompt(
+    disc: &Discussion,
+    agent_type: &AgentType,
+    extra_context_len: usize,
+) -> String {
+    let mut delta = disc.clone();
+    delta.summary_cache = None;
+    delta.summary_up_to_msg_idx = None;
+    delta.pin_first_message = false;
+    nul_safe_prompt(build_agent_prompt_inner(
+        &delta,
+        agent_type,
+        extra_context_len,
+        true,
+    ))
+}
+
+fn build_agent_prompt_inner(
+    disc: &Discussion,
+    agent_type: &AgentType,
+    extra_context_len: usize,
+    is_delta: bool,
+) -> String {
+    let budget = if is_delta {
+        usize::MAX
+    } else {
+        agent_prompt_budget(agent_type).saturating_sub(extra_context_len)
+    };
     let lang_instr = language_instruction(&disc.language);
 
     // Include discussion title as context if it's meaningful (not auto-generated placeholder)
@@ -581,7 +625,7 @@ pub fn build_agent_prompt(
     // agent may already have answered that first user message, though: in that
     // case the native principal must see and answer the peer, not replay the
     // original human prompt.
-    if user_msgs.len() <= 1 && !latest_is_peer_agent {
+    if !is_delta && user_msgs.len() <= 1 && !latest_is_peer_agent {
         let content = user_msgs
             .last()
             .map(|m| format!("{}{}", reply_context(m, &disc.messages), m.content))
@@ -949,6 +993,72 @@ mod tests {
         assert!(prompt.contains("Hello Claude"));
         assert!(prompt.contains("MUST respond in English"));
         assert!(!prompt.contains("Previous conversation"));
+    }
+
+    #[test]
+    fn kt633_legacy_nul_history_and_title_have_safe_execution_projections() {
+        let mut disc = disc_with_messages(vec![user_msg("hello\0world é😀")], "en");
+        disc.title = "legacy\0title".into();
+        let original = serde_json::to_value(&disc).unwrap();
+        for agent in [
+            AgentType::ClaudeCode,
+            AgentType::Codex,
+            AgentType::OpenCode,
+            AgentType::GeminiCli,
+            AgentType::Kiro,
+            AgentType::CopilotCli,
+            AgentType::Vibe,
+        ] {
+            for prompt in [
+                build_agent_prompt(&disc, &agent, 0),
+                build_agent_delta_prompt(&disc, &agent, 0),
+            ] {
+                assert!(!prompt.contains('\0'), "{agent:?} still carries a NUL");
+                assert!(prompt.contains("hello world é😀"));
+            }
+        }
+        assert_eq!(serde_json::to_value(&disc).unwrap(), original);
+    }
+
+    #[test]
+    fn kt633_legacy_summary_and_reply_metadata_cannot_poison_a_full_prompt() {
+        let mut first = user_msg("first\0message");
+        first.author_pseudo = Some("author\0name".into());
+        let mut last = user_msg("last\0message");
+        last.reply_to_message_id = Some(first.id.clone());
+        let mut disc = disc_with_messages(vec![first, last], "en");
+        disc.summary_cache = Some("summary\0context".into());
+        disc.summary_up_to_msg_idx = Some(0);
+        disc.pin_first_message = true;
+        let prompt = build_agent_prompt(&disc, &AgentType::Codex, 0);
+        assert!(!prompt.contains('\0'));
+        assert!(prompt.contains("summary context"));
+        assert!(prompt.contains("last message"));
+        assert_eq!(disc.summary_cache.as_deref(), Some("summary\0context"));
+    }
+
+    #[test]
+    fn kt633_debate_and_synthesis_project_nul_without_altering_the_rounds() {
+        let agents = vec!["Claude\0Code".into()];
+        let rounds = vec![vec![("Claude\0Code".into(), "response\0été".into())]];
+        for round in [1, 2] {
+            let prompt = build_orchestration_prompt(&OrchestrationContext {
+                question: "question\0text",
+                current_agent: &AgentType::ClaudeCode,
+                all_agents: &agents,
+                previous_rounds: &rounds,
+                round,
+                max_rounds: 2,
+                lang: "en",
+                conversation_context: "prior\0text",
+            });
+            assert!(!prompt.contains('\0'));
+            assert!(prompt.contains("question text"));
+        }
+        let prompt = build_synthesis_prompt("question\0text", &rounds, "en");
+        assert!(!prompt.contains('\0'));
+        assert!(prompt.contains("response été"));
+        assert_eq!(rounds[0][0].1, "response\0été");
     }
 
     #[test]

@@ -1,8 +1,158 @@
 #[cfg(test)]
 mod tests {
+    use crate::acp::{
+        AcpAgent, AcpCapability, AcpConfigOption, AcpError, AcpInitialize,
+        AcpNegotiatedCapabilities, AcpSessionEvent, AcpSessionTarget, AcpTransport,
+    };
     use crate::agents::runner::*;
     use crate::models::AgentType;
     use serial_test::serial;
+    use std::collections::BTreeSet;
+    use std::sync::{Arc, Mutex};
+
+    struct NativeRouteFixture {
+        created: std::sync::atomic::AtomicUsize,
+        resumed: std::sync::atomic::AtomicUsize,
+        prompts: Mutex<Vec<String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl AcpTransport for NativeRouteFixture {
+        async fn initialize(
+            &self,
+            _: AcpInitialize,
+        ) -> Result<AcpNegotiatedCapabilities, AcpError> {
+            Ok(AcpNegotiatedCapabilities {
+                protocol_version: 1,
+                capabilities: BTreeSet::from([
+                    AcpCapability::Sessions,
+                    AcpCapability::Resume,
+                    AcpCapability::Streaming,
+                    AcpCapability::Cancellation,
+                    AcpCapability::McpInjection,
+                ]),
+            })
+        }
+
+        async fn create_session(&self) -> Result<AcpSessionTarget, AcpError> {
+            self.created
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            AcpSessionTarget::new(AcpAgent::OpenCode, "native-route-session")
+        }
+
+        async fn config_options(&self) -> Vec<AcpConfigOption> {
+            Vec::new()
+        }
+
+        async fn set_config_option(
+            &self,
+            _: &AcpSessionTarget,
+            _: &str,
+            _: &str,
+        ) -> Result<(), AcpError> {
+            Ok(())
+        }
+
+        async fn resume_session(&self, _: &AcpSessionTarget) -> Result<(), AcpError> {
+            self.resumed
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn prompt(
+            &self,
+            _: &AcpSessionTarget,
+            prompt: &str,
+            events: tokio::sync::mpsc::Sender<AcpSessionEvent>,
+        ) -> Result<(), AcpError> {
+            self.prompts.lock().unwrap().push(prompt.to_owned());
+            events
+                .send(AcpSessionEvent::TextDelta("reply".into()))
+                .await
+                .unwrap();
+            events.send(AcpSessionEvent::Completed).await.unwrap();
+            Ok(())
+        }
+
+        async fn cancel(&self, _: &AcpSessionTarget) -> Result<(), AcpError> {
+            Ok(())
+        }
+
+        async fn shutdown(&self) -> Result<(), AcpError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn start_agent_with_config_native_route_uses_only_the_explicit_resume_delta() {
+        let fixture = Arc::new(NativeRouteFixture {
+            created: std::sync::atomic::AtomicUsize::new(0),
+            resumed: std::sync::atomic::AtomicUsize::new(0),
+            prompts: Mutex::new(Vec::new()),
+        });
+        let project = tempfile::tempdir().unwrap();
+        let tokens = crate::models::setup::TokensConfig {
+            anthropic: None,
+            openai: None,
+            google: None,
+            keys: Vec::new(),
+            disabled_overrides: Vec::new(),
+        };
+        let agent = AgentType::OpenCode;
+        let mut first = start_agent_with_config(AgentStartConfig {
+            test_acp_transport: Some(fixture.clone()),
+            ..AgentStartConfig::new(
+                &agent,
+                project.path().to_str().unwrap(),
+                "full history",
+                &tokens,
+            )
+        })
+        .await
+        .unwrap();
+        while first.next_line().await.is_some() {}
+        assert!(first.child.wait().await.unwrap().success());
+
+        let mut second = start_agent_with_config(AgentStartConfig {
+            cli_resume_id: Some("native-route-session"),
+            native_acp_full_prompt: Some("full history"),
+            test_acp_transport: Some(fixture.clone()),
+            ..AgentStartConfig::new(
+                &agent,
+                project.path().to_str().unwrap(),
+                "new peer input",
+                &tokens,
+            )
+        })
+        .await
+        .unwrap();
+        while second.next_line().await.is_some() {}
+        assert!(second.child.wait().await.unwrap().success());
+        assert_eq!(fixture.created.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(fixture.resumed.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let prompts = fixture.prompts.lock().unwrap();
+        assert_eq!(prompts.len(), 2);
+        // Every real turn carries the system context ahead of the caller's
+        // prompt (memory prelude, tool notices, …) — this fixture does not
+        // try to reproduce that prefix, only that each turn's own payload is
+        // exactly what the dispatcher decided to send, nothing more.
+        assert!(
+            prompts[0].ends_with("full history"),
+            "first turn (no store yet) must carry the full transcript, got: {}",
+            prompts[0]
+        );
+        assert!(
+            prompts[1].ends_with("new peer input"),
+            "the resumed turn must carry only the unseen delta, got: {}",
+            prompts[1]
+        );
+        assert!(
+            !prompts[1].contains("full history"),
+            "the production NativeAcp route must not resume when the dispatcher did not supply an id, and \
+             must never resend the transcript it already resumed: got {}",
+            prompts[1]
+        );
+    }
 
     #[test]
     fn acp_mcp_registry_uses_only_command_entries_without_environment_values() {
@@ -5870,56 +6020,100 @@ Suite de la réponse.";
     }
 
     #[cfg(unix)]
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn copilot_task_worker_preflight_times_out_and_terminates_the_child() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let pid_file = temp_dir.path().join("copilot-preflight.pid");
-        let script_path = temp_dir.path().join("slow-copilot-preflight.sh");
-        std::fs::write(
-            &script_path,
-            format!(
-                "#!/bin/sh\necho $$ > {}\nwhile :; do :; done\n",
-                pid_file.display()
-            ),
-        )
-        .unwrap();
-
-        let work_dir = temp_dir.path().to_path_buf();
-        let preflight = tokio::spawn(async move {
-            super::super::run_copilot_task_worker_preflight_with_timeout(
-                ("sh".into(), vec![script_path.display().to_string()], false),
-                &work_dir,
-                std::time::Duration::from_millis(100),
-            )
-            .await
-        });
-        tokio::time::timeout(std::time::Duration::from_secs(1), async {
-            while !pid_file.exists() {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("the slow preflight must have started");
-
-        assert_eq!(
-            preflight.await.unwrap(),
-            Err(CopilotTaskWorkerPreflight::TimedOut)
-        );
-        let pid: i32 = std::fs::read_to_string(&pid_file)
-            .unwrap()
-            .trim()
-            .parse()
+        let mut child = crate::core::cmd::async_cmd("sh")
+            .args(["-c", "read -r ignored"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
             .unwrap();
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let pid = child.id().expect("spawn gives us the real child identity") as i32;
+        // Hold stdin open: the child cannot complete the read, even if its
+        // startup is delayed. No CPU spin or race against an in-child PID file.
+        let _stdin = child.stdin.take().unwrap();
+        let result = super::super::wait_copilot_preflight_child_with_timeout(
+            child,
+            std::time::Duration::from_millis(100),
+        )
+        .await;
+
+        assert_eq!(result, Err(CopilotTaskWorkerPreflight::TimedOut));
         assert_eq!(
             unsafe { libc::kill(pid, 0) },
             -1,
-            "the timed-out child must be gone"
+            "the timed-out child must already be gone and collected"
+        );
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH)
         );
         assert_eq!(
             CopilotTaskWorkerPreflight::TimedOut.reason_code(),
             Some("copilot_preflight_timed_out")
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn copilot_preflight_capture_keeps_stdout_stderr_and_spawn_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = super::super::run_copilot_task_worker_preflight_with_timeout(
+            (
+                "sh".into(),
+                vec![
+                    "-c".into(),
+                    "printf 'fixture account'; printf 'fixture diagnostic' >&2; exit 7".into(),
+                ],
+                false,
+            ),
+            dir.path(),
+            super::super::COPILOT_TASK_WORKER_PREFLIGHT_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        assert_eq!(output.stdout, b"fixture account");
+        assert_eq!(output.stderr, b"fixture diagnostic");
+        assert_eq!(output.status.code(), Some(7));
+        assert_eq!(
+            super::super::run_copilot_task_worker_preflight_with_timeout(
+                (
+                    dir.path().join("absent-preflight").display().to_string(),
+                    Vec::new(),
+                    false
+                ),
+                dir.path(),
+                super::super::COPILOT_TASK_WORKER_PREFLIGHT_TIMEOUT,
+            )
+            .await,
+            Err(CopilotTaskWorkerPreflight::SpawnFailed)
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(start_paused = true)]
+    async fn copilot_preflight_full_spawn_path_preserves_its_four_second_deadline() {
+        let dir = tempfile::tempdir().unwrap();
+        let timeout = super::super::COPILOT_TASK_WORKER_PREFLIGHT_TIMEOUT;
+        assert_eq!(timeout, std::time::Duration::from_secs(4));
+        let started = tokio::time::Instant::now();
+        // No startup handshake is needed: a child that has not yet run is
+        // still a live child the deadline must terminate. The paused clock
+        // advances the production deadline without burning four wall seconds.
+        let result = super::super::run_copilot_task_worker_preflight_with_timeout(
+            (
+                "sh".into(),
+                vec!["-c".into(), "while :; do :; done".into()],
+                false,
+            ),
+            dir.path(),
+            timeout,
+        )
+        .await;
+        assert_eq!(result, Err(CopilotTaskWorkerPreflight::TimedOut));
+        assert_eq!(started.elapsed(), timeout);
     }
 
     #[test]
@@ -6808,20 +7002,35 @@ Suite de la réponse.";
     // ─── resolve_model_flag: tier mapping per agent ─────────────────────────────
 
     #[test]
-    fn resolve_model_flag_claude_code_tiers() {
+    fn ollama_command_builder_is_a_non_inference_http_sentinel() {
+        for model in [None, Some("explicit-operator-model")] {
+            let (binary, package, args, env_key, _, _) = super::super::agent_command(
+                &AgentType::Ollama,
+                "private prompt",
+                true,
+                "private context",
+                model,
+            );
+            assert_eq!(binary, "echo");
+            assert_eq!(package, None);
+            assert_eq!(env_key, "NONE");
+            assert_eq!(args, ["Ollama runs over HTTP, not as a CLI process"]);
+        }
+    }
+
+    #[test]
+    fn resolve_model_flag_without_catalog_assignments_returns_none() {
         use crate::models::ModelTier;
-        assert_eq!(
-            resolve_model_flag(&AgentType::ClaudeCode, ModelTier::Economy, None),
-            Some("haiku".into())
-        );
-        assert_eq!(
-            resolve_model_flag(&AgentType::ClaudeCode, ModelTier::Default, None),
-            Some("sonnet".into())
-        );
-        assert_eq!(
-            resolve_model_flag(&AgentType::ClaudeCode, ModelTier::Reasoning, None),
-            Some("opus".into())
-        );
+        for agent in [
+            AgentType::ClaudeCode,
+            AgentType::Codex,
+            AgentType::GeminiCli,
+            AgentType::Ollama,
+        ] {
+            for tier in [ModelTier::Economy, ModelTier::Default, ModelTier::Reasoning] {
+                assert_eq!(resolve_model_flag(&agent, tier, None), None);
+            }
+        }
     }
 
     #[test]
@@ -6842,19 +7051,19 @@ Suite de la réponse.";
             resolve_model_flag(&AgentType::ClaudeCode, ModelTier::Reasoning, Some(&cfg)),
             Some("fable".into())
         );
-        // unset tiers still fall through to the built-ins
+        // An unassigned tier has no runtime fallback.
         assert_eq!(
             resolve_model_flag(&AgentType::ClaudeCode, ModelTier::Economy, Some(&cfg)),
-            Some("haiku".into())
+            None
         );
     }
 
     #[test]
-    fn resolve_model_flag_codex_tiers() {
+    fn resolve_model_flag_codex_unassigned_tiers_are_not_guessed() {
         use crate::models::ModelTier;
         assert_eq!(
             resolve_model_flag(&AgentType::Codex, ModelTier::Economy, None),
-            Some("gpt-5.6-luna".into())
+            None
         );
         assert_eq!(
             resolve_model_flag(&AgentType::Codex, ModelTier::Default, None),
@@ -6862,16 +7071,16 @@ Suite de la réponse.";
         );
         assert_eq!(
             resolve_model_flag(&AgentType::Codex, ModelTier::Reasoning, None),
-            Some("gpt-5.6-sol".into())
+            None
         );
     }
 
     #[test]
-    fn resolve_model_flag_gemini_tiers() {
+    fn resolve_model_flag_gemini_unassigned_tiers_are_not_guessed() {
         use crate::models::ModelTier;
         assert_eq!(
             resolve_model_flag(&AgentType::GeminiCli, ModelTier::Economy, None),
-            Some("gemini-2.5-flash".into())
+            None
         );
         assert_eq!(
             resolve_model_flag(&AgentType::GeminiCli, ModelTier::Default, None),
@@ -6879,7 +7088,7 @@ Suite de la réponse.";
         );
         assert_eq!(
             resolve_model_flag(&AgentType::GeminiCli, ModelTier::Reasoning, None),
-            Some("gemini-3.1-pro-preview".into())
+            None
         );
     }
 
@@ -6916,14 +7125,14 @@ Suite de la réponse.";
             Some("custom-haiku-3".into()),
             "User override should take precedence over built-in"
         );
-        // Reasoning has no override → falls back to built-in
+        // Reasoning has no override and no catalog assignment.
         assert_eq!(
             resolve_model_flag(
                 &AgentType::ClaudeCode,
                 ModelTier::Reasoning,
                 Some(&overrides)
             ),
-            Some("opus".into()),
+            None,
         );
     }
 
@@ -6947,12 +7156,12 @@ Suite de la réponse.";
             Some("gemma3:27b".into()),
             "Default-tier user override must win over the built-in qwen3 fallback",
         );
-        // Without an override, the legacy built-in is still served.
+        // Without an override or catalog assignment, the launch has no model.
         let no_override = ModelTiersConfig::default();
         assert_eq!(
             resolve_model_flag(&AgentType::Ollama, ModelTier::Default, Some(&no_override)),
-            Some("qwen3:8b".into()),
-            "No override → portable built-in default (small, fits most machines), never a bare/absent name",
+            None,
+            "No override must not revive a historical migration seed",
         );
     }
 
@@ -6999,31 +7208,29 @@ Suite de la réponse.";
             Some("qwen3:32b".into()),
             "Empty reasoning slot falls back to the user's default, not the built-in",
         );
-        // The all-empty case is unchanged: portable built-ins per tier.
+        // The all-empty case has no runtime assignment.
         assert_eq!(
             resolve_model_flag(&AgentType::Ollama, ModelTier::Reasoning, None),
-            Some("qwen3:30b-a3b".into()),
+            None,
         );
     }
 
-    // ─── Ollama tier fallbacks are real, pullable tags (no opaque 404) ────────
+    // ─── Historical Ollama defaults remain migration input only ───────────────
     #[test]
-    fn resolve_model_flag_ollama_tiers_are_pullable_tags() {
+    fn migrated_ollama_defaults_are_not_runtime_fallbacks() {
         use crate::models::ModelTier;
-        // Regression: the old fallbacks were `llama3.2` (not pulled) and the
-        // bare `qwen3` (not a pullable tag) → opaque Ollama 404 at run time.
-        // Portability-first: Default is a small, universal model (qwen3:8b);
-        // Reasoning is the only heavy opt-in fallback.
+        // These values may seed a one-time migration, but resolution must use
+        // a current catalog assignment or an explicit configuration instead.
         assert_eq!(
-            resolve_model_flag(&AgentType::Ollama, ModelTier::Economy, None),
+            crate::core::model_catalog::migrated_default(&AgentType::Ollama, ModelTier::Economy),
             Some("qwen3:8b".into())
         );
         assert_eq!(
-            resolve_model_flag(&AgentType::Ollama, ModelTier::Default, None),
+            crate::core::model_catalog::migrated_default(&AgentType::Ollama, ModelTier::Default),
             Some("qwen3:8b".into())
         );
         assert_eq!(
-            resolve_model_flag(&AgentType::Ollama, ModelTier::Reasoning, None),
+            crate::core::model_catalog::migrated_default(&AgentType::Ollama, ModelTier::Reasoning),
             Some("qwen3:30b-a3b".into())
         );
     }
@@ -7367,10 +7574,20 @@ Suite de la réponse.";
 
     // ─── effective_model_flag: explicit model override beats tier ─────────────
     #[test]
+    fn unassigned_ollama_model_is_not_replaced_by_a_migrated_default() {
+        use crate::models::ModelTier;
+
+        assert_eq!(
+            effective_model_flag(None, &AgentType::Ollama, ModelTier::Default, None),
+            None,
+            "a missing runtime catalog assignment must refuse dispatch instead of reviving a seed",
+        );
+    }
+
+    #[test]
     fn effective_model_flag_override_wins_over_tier() {
         use crate::models::ModelTier;
-        // Explicit model beats the tier fallback — including the Economy tier
-        // that would otherwise resolve to the qwen3:8b built-in.
+        // Explicit model beats a missing tier assignment.
         assert_eq!(
             effective_model_flag(
                 Some("qwen3:30b-a3b"),
@@ -7385,15 +7602,15 @@ Suite de la réponse.";
     #[test]
     fn effective_model_flag_blank_or_none_falls_back_to_tier() {
         use crate::models::ModelTier;
-        // Blank override is treated as unset → tier resolution.
+        // Blank override is treated as unset → no model without an assignment.
         assert_eq!(
             effective_model_flag(Some("   "), &AgentType::Ollama, ModelTier::Default, None),
             resolve_model_flag(&AgentType::Ollama, ModelTier::Default, None),
         );
-        // None → identical to resolve_model_flag (here: Claude reasoning → opus).
+        // None → identical to resolve_model_flag.
         assert_eq!(
             effective_model_flag(None, &AgentType::ClaudeCode, ModelTier::Reasoning, None),
-            Some("opus".into()),
+            None,
         );
     }
 
@@ -7902,8 +8119,10 @@ Suite de la réponse.";
     }
 
     #[test]
-    fn plugin_invocation_rule_reaches_every_supported_agent_command() {
+    fn plugin_invocation_rule_reaches_every_supported_cli_command() {
         let rule = "Fastly production: API first via `api_call`";
+        // HTTP families return before this builder. Their sentinel must not
+        // carry the prompt/context; the Ollama sentinel has its own regression.
         let agents = [
             AgentType::ClaudeCode,
             AgentType::Codex,
@@ -7911,7 +8130,6 @@ Suite de la réponse.";
             AgentType::GeminiCli,
             AgentType::Kiro,
             AgentType::CopilotCli,
-            AgentType::Ollama,
         ];
 
         for agent in agents {

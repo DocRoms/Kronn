@@ -1,8 +1,40 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import { BatchComparePanel } from '../BatchComparePanel';
-import type { Discussion, MessageTarget } from '../../types/generated';
+import type { Discussion, MessageTarget, ModelTiersConfig } from '../../types/generated';
 import type { ExternalApiConnectionView } from '../../lib/api';
+
+const zeroModelTiers: ModelTiersConfig = {
+  claude_code: { economy: null, default: null, reasoning: null },
+  codex: { economy: null, default: null, reasoning: null },
+  open_code: { economy: null, default: null, reasoning: null },
+  gemini_cli: { economy: null, default: null, reasoning: null },
+  kiro: { economy: null, default: null, reasoning: null },
+  vibe: { economy: null, default: null, reasoning: null },
+  copilot_cli: { economy: null, default: null, reasoning: null },
+  ollama: { economy: null, default: null, reasoning: null },
+  lite_llm: { economy: null, default: null, reasoning: null },
+  nvidia: { economy: null, default: null, reasoning: null },
+};
+
+function customConnection(
+  overrides: Partial<ExternalApiConnectionView> & { id: string },
+): ExternalApiConnectionView {
+  return {
+    display_name: 'Gateway',
+    mention_alias: overrides.id,
+    endpoint: 'https://gateway.example/v1',
+    credential_slug: overrides.id,
+    origin_preset: 'other',
+    economy_model: null,
+    default_model: null,
+    reasoning_model: null,
+    created_at: '2026-09-01T00:00:00Z',
+    updated_at: '2026-09-01T00:00:00Z',
+    has_credential: true,
+    ...overrides,
+  };
+}
 
 const compareApi = vi.hoisted(() => ({
   get: vi.fn(),
@@ -439,5 +471,228 @@ describe('BatchComparePanel', () => {
     await waitFor(() => expect(compareApi.updateManual).toHaveBeenCalledWith('compare-free', 'disc-codex', 5));
     expect(compareApi.startJudge).not.toHaveBeenCalled();
     expect(compareApi.startImprovement).not.toHaveBeenCalled();
+  });
+
+  it('never guesses a missing historical model from a tier configuration that changed after the run', () => {
+    const noHistory = discussion('disc-no-history', 'Codex', 'reasoning', '');
+    noHistory.messages = [];
+    render(
+      <BatchComparePanel
+        runId="run-config-drifted"
+        label="Config drifted after the run"
+        discussions={[noHistory]}
+        loading={false}
+        error={null}
+        availableAgents={['Codex']}
+        modelTiers={{
+          ...zeroModelTiers,
+          codex: { economy: null, default: null, reasoning: 'codex-reasoning-v9-today' },
+        }}
+        runningIds={new Set()}
+        onRefresh={vi.fn()}
+        onOpenDiscussion={vi.fn()}
+        onClose={vi.fn()}
+        t={(key) => key}
+      />,
+    );
+
+    // The run never recorded what actually answered; today's config must not
+    // stand in for that missing history.
+    expect(screen.queryByText('codex-reasoning-v9-today')).not.toBeInTheDocument();
+    expect(screen.getByText('disc.defaultAgentModel')).toBeInTheDocument();
+  });
+
+  it('keeps each homonymous connection its own recorded model instead of blending them', () => {
+    const fromA = discussion('disc-gateway-a', 'Custom', 'default', 'Answer from A');
+    fromA.messages[0].model = 'model-from-a';
+    (fromA as Discussion & { message_targets: Record<string, MessageTarget[]> }).message_targets = {
+      [`m-${fromA.id}`]: [{
+        kind: 'discussion_agent', agent_type: 'Custom', connection_id: 'conn-gateway-a', tier: 'default',
+      }],
+    };
+    const fromB = discussion('disc-gateway-b', 'Custom', 'default', 'Answer from B');
+    fromB.messages[0].model = 'model-from-b';
+    (fromB as Discussion & { message_targets: Record<string, MessageTarget[]> }).message_targets = {
+      [`m-${fromB.id}`]: [{
+        kind: 'discussion_agent', agent_type: 'Custom', connection_id: 'conn-gateway-b', tier: 'default',
+      }],
+    };
+
+    render(
+      <BatchComparePanel
+        runId="run-homonyms"
+        label="Same display name, different connections"
+        discussions={[fromA, fromB]}
+        loading={false}
+        error={null}
+        availableAgents={['Custom']}
+        externalConnections={[
+          customConnection({ id: 'conn-gateway-a', default_model: 'a-default' }),
+          customConnection({ id: 'conn-gateway-b', default_model: 'b-default' }),
+        ]}
+        runningIds={new Set()}
+        onRefresh={vi.fn()}
+        onOpenDiscussion={vi.fn()}
+        onClose={vi.fn()}
+        t={(key) => key}
+      />,
+    );
+
+    expect(screen.getAllByText('Gateway')).toHaveLength(2);
+    const models = Array.from(document.querySelectorAll('.disc-compare-model')).map(node => node.textContent);
+    expect(models).toEqual(['model-from-a', 'model-from-b']);
+  });
+
+  it('prefers the response-attested model over an older recorded one', () => {
+    const withHistory = discussion('disc-attested', 'ClaudeCode', 'default', 'Final answer');
+    withHistory.messages = [
+      {
+        id: 'm-older', role: 'Agent', channel: 'main', content: 'Older answer',
+        agent_type: 'ClaudeCode', timestamp: '2026-09-01T09:00:00Z', tokens_used: 5, duration_ms: 50,
+        model: 'older-recorded-model',
+      },
+      withHistory.messages[0],
+    ] as Discussion['messages'];
+    withHistory.messages[1].model = 'final-attested-model';
+
+    render(
+      <BatchComparePanel
+        runId="run-attested"
+        label="Attested model wins"
+        discussions={[withHistory]}
+        loading={false}
+        error={null}
+        availableAgents={['ClaudeCode']}
+        runningIds={new Set()}
+        onRefresh={vi.fn()}
+        onOpenDiscussion={vi.fn()}
+        onClose={vi.fn()}
+        t={(key) => key}
+      />,
+    );
+
+    expect(screen.getByText('final-attested-model')).toBeInTheDocument();
+    expect(screen.queryByText('older-recorded-model')).not.toBeInTheDocument();
+    expect(screen.queryByText('disc.compare.modelRecorded')).not.toBeInTheDocument();
+    expect(screen.queryByText('disc.compare.modelUnknown')).not.toBeInTheDocument();
+  });
+
+  it('falls back to an older recorded model when the final answer model is blank, never the live discussion override', () => {
+    const missingFinalModel = discussion('disc-missing-final-model', 'ClaudeCode', 'default', 'Final answer, legacy row');
+    missingFinalModel.model = 'live-discussion-override';
+    missingFinalModel.messages = [
+      {
+        id: 'm-older', role: 'Agent', channel: 'main', content: 'Older answer',
+        agent_type: 'ClaudeCode', timestamp: '2026-09-01T09:00:00Z', tokens_used: 5, duration_ms: 50,
+        model: 'older-recorded-model',
+      },
+      missingFinalModel.messages[0],
+    ] as Discussion['messages'];
+    missingFinalModel.messages[1].model = '   ';
+
+    render(
+      <BatchComparePanel
+        runId="run-missing-final-model"
+        label="Config drift must not leak"
+        discussions={[missingFinalModel]}
+        loading={false}
+        error={null}
+        availableAgents={['ClaudeCode']}
+        runningIds={new Set()}
+        onRefresh={vi.fn()}
+        onOpenDiscussion={vi.fn()}
+        onClose={vi.fn()}
+        t={(key) => key}
+      />,
+    );
+
+    expect(screen.getByText('older-recorded-model')).toBeInTheDocument();
+    expect(screen.queryByText('live-discussion-override')).not.toBeInTheDocument();
+    expect(screen.getByText('disc.compare.modelRecorded')).toBeInTheDocument();
+  });
+
+  it('never treats a model recorded after the compared answer as evidence of what produced it', () => {
+    const laterRecordAfterAnswer = discussion('disc-later-record', 'ClaudeCode', 'default', 'Final answer, blank model');
+    laterRecordAfterAnswer.messages[0].model = '   ';
+    laterRecordAfterAnswer.messages = [
+      ...laterRecordAfterAnswer.messages,
+      {
+        id: 'm-system-after', role: 'System', channel: 'main', content: 'Retrying on a different backend',
+        agent_type: 'ClaudeCode', timestamp: '2026-09-01T09:05:00Z', model: 'attempted-after-model',
+      },
+    ] as Discussion['messages'];
+
+    render(
+      <BatchComparePanel
+        runId="run-later-record"
+        label="A later record must not count as prior knowledge"
+        discussions={[laterRecordAfterAnswer]}
+        loading={false}
+        error={null}
+        availableAgents={['ClaudeCode']}
+        runningIds={new Set()}
+        onRefresh={vi.fn()}
+        onOpenDiscussion={vi.fn()}
+        onClose={vi.fn()}
+        t={(key) => key}
+      />,
+    );
+
+    expect(screen.queryByText('attempted-after-model')).not.toBeInTheDocument();
+    expect(screen.getByText('disc.defaultAgentModel')).toBeInTheDocument();
+    expect(screen.getByText('disc.compare.modelUnknown')).toBeInTheDocument();
+  });
+
+  it('surfaces a System-recorded model when there is no answer at all to protect from it', () => {
+    const systemOnly = discussion('disc-system-only', 'ClaudeCode', 'default', 'unused');
+    systemOnly.messages = [{
+      id: 'm-system-only', role: 'System', channel: 'main', content: 'Attempted before failing',
+      agent_type: 'ClaudeCode', timestamp: '2026-09-01T09:00:00Z', model: 'attempted-model-no-answer',
+    }] as Discussion['messages'];
+
+    render(
+      <BatchComparePanel
+        runId="run-system-only"
+        label="No answer, only a System record"
+        discussions={[systemOnly]}
+        loading={false}
+        error={null}
+        availableAgents={['ClaudeCode']}
+        runningIds={new Set()}
+        onRefresh={vi.fn()}
+        onOpenDiscussion={vi.fn()}
+        onClose={vi.fn()}
+        t={(key) => key}
+      />,
+    );
+
+    expect(screen.getByText('attempted-model-no-answer')).toBeInTheDocument();
+    expect(screen.getByText('disc.compare.modelRecorded')).toBeInTheDocument();
+  });
+
+  it('never labels the live discussion override as the model behind a run with no response at all', () => {
+    const noResponse = discussion('disc-no-response-override', 'ClaudeCode', 'default', 'unused');
+    noResponse.model = 'live-discussion-override';
+    noResponse.messages = [];
+
+    render(
+      <BatchComparePanel
+        runId="run-no-response-override"
+        label="No response at all"
+        discussions={[noResponse]}
+        loading={false}
+        error={null}
+        availableAgents={['ClaudeCode']}
+        runningIds={new Set()}
+        onRefresh={vi.fn()}
+        onOpenDiscussion={vi.fn()}
+        onClose={vi.fn()}
+        t={(key) => key}
+      />,
+    );
+
+    expect(screen.queryByText('live-discussion-override')).not.toBeInTheDocument();
+    expect(screen.getByText('disc.defaultAgentModel')).toBeInTheDocument();
+    expect(screen.getByText('disc.compare.modelUnknown')).toBeInTheDocument();
   });
 });

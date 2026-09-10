@@ -28,6 +28,10 @@ const mockQuickPromptsApi = vi.hoisted(() => ({
   importQp: vi.fn(),
 }));
 
+const mockExternalApi = vi.hoisted(() => ({
+  list: vi.fn().mockResolvedValue([]),
+}));
+
 // 0.8.2 — WorkflowsPage now uses useWebSocket() to listen for live
 // WorkflowRunUpdated events. Stub it so the test runtime doesn't try
 // to open a real WebSocket inside jsdom.
@@ -67,6 +71,7 @@ vi.mock('../../lib/api', () => ({
   // KT-531 — AgentSwitchPicker reads the dynamic model catalog when its
   // popover opens.
   modelCatalogApi: { list: vi.fn().mockResolvedValue({ targets: [] }) },
+  externalApi: mockExternalApi,
 }));
 
 const defaultModelTiers = {
@@ -140,6 +145,8 @@ afterEach(() => {
   mockQuickPromptsApi.list.mockReset();
   mockQuickPromptsApi.update.mockReset();
   mockQuickPromptsApi.compareAgents.mockReset();
+  mockExternalApi.list.mockReset();
+  mockExternalApi.list.mockResolvedValue([]);
 });
 
 describe('WorkflowsPage — QP launch double-click race', () => {
@@ -157,7 +164,7 @@ describe('WorkflowsPage — QP launch double-click race', () => {
     mockQuickPromptsApi.update.mockResolvedValue({
       ...qp,
       agent: 'Codex',
-      agent_settings: { ...qp.agent_settings, model: null },
+      agent_settings: { ...qp.agent_settings, model: null, reasoning_effort: null, connection_id: null },
     });
 
     await wrap(
@@ -186,14 +193,17 @@ describe('WorkflowsPage — QP launch double-click race', () => {
         prompt_template: qp.prompt_template,
         agent: 'Codex',
         tier: 'reasoning',
+        connection_id: null,
         agent_settings: {
           model: null,
           tier: 'reasoning',
-          reasoning_effort: 'high',
+          reasoning_effort: null,
+          connection_id: null,
           max_tokens: 16000,
         },
       }),
     );
+    expect(qp.agent_settings).toMatchObject({ model: 'claude-opus', reasoning_effort: 'high', max_tokens: 16000 });
   });
 
   it('does not spawn duplicate discussions on two fast Enter presses (QP with variable)', async () => {
@@ -576,6 +586,59 @@ describe('WorkflowsPage — QP launch double-click race', () => {
     const payload = mockQuickPromptsApi.compareAgents.mock.calls[0][1];
     expect(payload.targets).toContainEqual({ agent: 'ClaudeCode', tier: 'reasoning' });
     expect(payload.targets).toContainEqual({ agent: 'ClaudeCode', tier: 'default' });
+  });
+
+  it('keeps a compare target’s own connection model instead of a generic value for an unset tier', async () => {
+    mockExternalApi.list.mockResolvedValue([{
+      id: 'conn-gateway',
+      display_name: 'Gateway',
+      mention_alias: 'gateway',
+      endpoint: 'https://gateway.example/v1',
+      credential_slug: 'gateway',
+      origin_preset: 'other',
+      economy_model: 'gateway-economy',
+      default_model: 'gateway-default',
+      reasoning_model: null,
+      created_at: '2026-09-01T00:00:00Z',
+      updated_at: '2026-09-01T00:00:00Z',
+      has_credential: true,
+    }]);
+    mockQuickPromptsApi.list.mockResolvedValue([sampleQpNoVar]);
+
+    await wrap(
+      <WorkflowsPage
+        projects={[]}
+        installedAgentTypes={['ClaudeCode', 'Codex']}
+        agentAccess={fullConfig}
+      />,
+    );
+    await act(async () => { fireEvent.click(await screen.findByText(/Quick Prompts/)); });
+    await act(async () => { fireEvent.click(await screen.findByTestId('qp-compare-agents-btn')); });
+
+    const chip = await screen.findByTestId('qp-compare-chip-conn-gateway');
+    const target = chip.closest('.qp-compare-target');
+    const picker = target?.querySelector<HTMLButtonElement>('.kr-agent-switch-btn');
+    expect(picker).not.toBeNull();
+    await act(async () => { fireEvent.click(picker!); });
+    const reasoning = document.querySelector<HTMLButtonElement>(
+      '.kr-agent-switch-tier-row[aria-label="Gateway"] .kr-agent-switch-tier-option[data-tier="reasoning"]',
+    );
+    expect(reasoning).not.toBeNull();
+    await act(async () => { fireEvent.click(reasoning!); });
+
+    // A tier switch changes the row's React key (it embeds the tier), so the
+    // picker button remounts — re-query it instead of the stale reference.
+    const refreshedPicker = () => screen.getByTestId('qp-compare-chip-conn-gateway')
+      .closest('.qp-compare-target')
+      ?.querySelector<HTMLButtonElement>('.kr-agent-switch-btn');
+    await waitFor(() => expect(
+      refreshedPicker()?.querySelector('.kr-agent-switch-current-tier')?.getAttribute('data-tier'),
+    ).toBe('reasoning'));
+
+    // The connection owns its own configuration: switching to a tier it
+    // never set must surface its own known default, never a blank/generic
+    // placeholder standing in for a "family" value it does not have.
+    expect(refreshedPicker()).toHaveTextContent('gateway-default');
   });
 
   it('offers usable OpenCode as a compare target and sends that native target unchanged', async () => {

@@ -445,6 +445,79 @@ describe('WorkflowWizard — step list handlers', () => {
     expect(stepName.value).toBe('renamed');
   });
 
+  it('keeps a saved reviewer tier null until an explicit picker choice, and Escape leaves the wizard open', async () => {
+    const reviewer = {
+      reviewer_agent: 'Codex' as const,
+      reviewer_tier: null,
+      debate_prompt: 'Review the result.',
+      max_rounds: 3,
+    };
+    toStepsPage([mkStep({ multi_agent_review: reviewer }), mkStep({ name: 'beta' })]);
+    fireEvent.click(screen.getAllByText('wiz.advanced')[0]);
+
+    const picker = screen.getByRole('button', { name: 'wiz.multiReview.reviewer' });
+    fireEvent.click(picker);
+    expect(screen.getByRole('searchbox', { name: 'agentPicker.search' })).toHaveFocus();
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(screen.queryByRole('searchbox', { name: 'agentPicker.search' })).toBeNull();
+    expect(screen.getByText('wiz.steps')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByText('wiz.next')); // Steps → Config
+    fireEvent.click(screen.getByText('wiz.next')); // Config → Summary
+    fireEvent.click(screen.getByText('wiz.save'));
+    await waitFor(() => expect(updateMock).toHaveBeenCalled());
+    expect(updateMock.mock.calls[0][1].steps[0].multi_agent_review).toEqual(reviewer);
+  });
+
+  it('persists the reviewer agent and tier selected from the shared picker', async () => {
+    toStepsPage([mkStep({ multi_agent_review: {
+      reviewer_agent: 'Codex', reviewer_tier: null, debate_prompt: 'Review the result.', max_rounds: 3,
+    } }), mkStep({ name: 'beta' })]);
+    fireEvent.click(screen.getAllByText('wiz.advanced')[0]);
+    fireEvent.click(screen.getByRole('button', { name: 'wiz.multiReview.reviewer' }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Codex · disc.tier.reasoning' }));
+    fireEvent.click(screen.getByText('wiz.next')); // Steps → Config
+    fireEvent.click(screen.getByText('wiz.next')); // Config → Summary
+    fireEvent.click(screen.getByText('wiz.save'));
+    await waitFor(() => expect(updateMock).toHaveBeenCalled());
+    expect(updateMock.mock.calls[0][1].steps[0].multi_agent_review).toMatchObject({
+      reviewer_agent: 'Codex', reviewer_tier: 'reasoning', debate_prompt: 'Review the result.', max_rounds: 3,
+    });
+  });
+
+  it('uses reasoning for a newly enabled review and preserves the other review settings', async () => {
+    toStepsPage([mkStep(), mkStep({ name: 'beta' })]);
+    fireEvent.click(screen.getAllByText('wiz.advanced')[0]);
+    fireEvent.click(screen.getByText('wiz.multiReview.toggle'));
+    expect(screen.getByRole('button', { name: 'wiz.multiReview.reviewer' })).toHaveTextContent('Codex');
+    expect(screen.getByLabelText('wiz.multiReview.rounds')).toHaveValue(3);
+    expect(screen.getByLabelText('wiz.multiReview.prompt')).toHaveValue('wiz.multiReview.defaultPrompt');
+    fireEvent.click(screen.getByText('wiz.next'));
+    fireEvent.click(screen.getByText('wiz.next'));
+    fireEvent.click(screen.getByText('wiz.save'));
+    await waitFor(() => expect(updateMock).toHaveBeenCalled());
+    expect(updateMock.mock.calls[0][1].steps[0].multi_agent_review).toMatchObject({
+      reviewer_agent: 'Codex', reviewer_tier: 'reasoning',
+      debate_prompt: 'wiz.multiReview.defaultPrompt', max_rounds: 3,
+    });
+  });
+
+  it('returns an existing reviewer explicitly to the agent default tier in the saved payload', async () => {
+    toStepsPage([mkStep({ multi_agent_review: {
+      reviewer_agent: 'Codex', reviewer_tier: 'reasoning', debate_prompt: 'Review the result.', max_rounds: 3,
+    } }), mkStep({ name: 'beta' })]);
+    fireEvent.click(screen.getAllByText('wiz.advanced')[0]);
+    fireEvent.click(screen.getByRole('button', { name: 'wiz.multiReview.reviewer' }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Codex · config.defaultModel' }));
+    fireEvent.click(screen.getByText('wiz.next'));
+    fireEvent.click(screen.getByText('wiz.next'));
+    fireEvent.click(screen.getByText('wiz.save'));
+    await waitFor(() => expect(updateMock).toHaveBeenCalled());
+    expect(updateMock.mock.calls[0][1].steps[0].multi_agent_review).toMatchObject({
+      reviewer_agent: 'Codex', reviewer_tier: null, debate_prompt: 'Review the result.', max_rounds: 3,
+    });
+  });
+
   it('adding a rollback (on_failure) step renders a Notify rollback row', () => {
     toStepsPage([mkStep(), mkStep({ name: 'beta' })]);
     const addRb = screen.getByText('wiz.addRollbackStep').closest('button') as HTMLButtonElement;
@@ -518,6 +591,58 @@ describe('WorkflowWizard — save handler', () => {
     const payload = updateMock.mock.calls[0][1];
     expect(payload.name).toBe('ExistingWorkflow');
     await waitFor(() => expect(onDone).toHaveBeenCalledTimes(1));
+  });
+
+  it.each([
+    ['Codex · disc.tier.default', 'Codex', 'default', null],
+    ['LiteLLM · disc.tier.economy', 'LiteLlm', 'economy', 'team-one'],
+  ] as const)('clears model-specific overrides only on explicit selection: %s', async (label, agent, tier, connectionId) => {
+    const settings = { model: 'old-model', connection_id: 'team-one', reasoning_effort: 'xhigh', max_tokens: 12345, tier: 'default' as const };
+    renderWizard({ installedAgentTypes: ['Codex'], editWorkflow: mkWorkflow({
+      steps: [mkStep({ agent: 'LiteLlm', agent_settings: settings })],
+    }) });
+    fireEvent.click(screen.getByText('wiz.next'));
+    fireEvent.click(screen.getByRole('button', { name: 'wiz.agentAndTierLabel' }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: label }));
+    fireEvent.click(screen.getByText('wiz.next'));
+    fireEvent.click(screen.getByText('wiz.save'));
+    await waitFor(() => expect(updateMock).toHaveBeenCalledTimes(1));
+    expect(updateMock.mock.calls[0][1].steps[0]).toMatchObject({
+      agent, agent_settings: { model: null, connection_id: connectionId, reasoning_effort: null, max_tokens: 12345, tier },
+    });
+    expect(settings).toEqual({ model: 'old-model', connection_id: 'team-one', reasoning_effort: 'xhigh', max_tokens: 12345, tier: 'default' });
+  });
+
+  it('preserves saved target and model-specific settings when editing without a target change', async () => {
+    const settings = { model: 'old-model', connection_id: 'team-one', reasoning_effort: 'xhigh', max_tokens: 12345, tier: 'default' as const };
+    renderWizard({ editWorkflow: mkWorkflow({ steps: [mkStep({ agent: 'LiteLlm', agent_settings: settings })] }) });
+    fireEvent.click(screen.getByText('wiz.next'));
+    fireEvent.click(screen.getByText('wiz.next'));
+    fireEvent.click(screen.getByText('wiz.save'));
+    await waitFor(() => expect(updateMock).toHaveBeenCalledTimes(1));
+    expect(updateMock.mock.calls[0][1].steps[0].agent_settings).toEqual(settings);
+  });
+
+  it('persists an explicit change between two named connections of the same family and tier', async () => {
+    renderWizard({ installedAgentTypes: ['Codex'],
+      agentChoices: [
+        { agent: 'Custom', connectionId: 'team-one', label: 'Team One' },
+        { agent: 'Custom', connectionId: 'team-two', label: 'Team Two' },
+      ],
+      editWorkflow: mkWorkflow({ steps: [mkStep({ agent: 'Custom', agent_settings: {
+        model: 'shared-model', connection_id: 'team-one', reasoning_effort: 'xhigh', max_tokens: 12345,
+      } })] }),
+    });
+    fireEvent.click(screen.getByText('wiz.next'));
+    fireEvent.click(screen.getByRole('button', { name: 'wiz.agentAndTierLabel' }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Team Two · disc.tier.default' }));
+    expect(screen.getByRole('button', { name: 'wiz.agentAndTierLabel' })).toHaveTextContent('Team Two');
+    fireEvent.click(screen.getByText('wiz.next'));
+    fireEvent.click(screen.getByText('wiz.save'));
+    await waitFor(() => expect(updateMock).toHaveBeenCalledTimes(1));
+    expect(updateMock.mock.calls[0][1].steps[0]).toMatchObject({ agent: 'Custom', agent_settings: {
+      connection_id: 'team-two', model: null, reasoning_effort: null, max_tokens: 12345, tier: 'default',
+    } });
   });
 
   it('can save a valid existing workflow without visiting the summary', async () => {

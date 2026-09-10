@@ -16,4 +16,12 @@ describe('findAgentMentionQuery', () => {
   it('supports unicode text surrounding the alias', () => {
     expect(findAgentMentionQuery('Équipe 👋 @ge', 13)).toEqual({ query: 'ge', start: 10, end: 13 });
   });
+
+  it.each(['Équipe', 'vendor/model.v2:fast', 'İ'])('accepts catalogue search text and preserves the original replacement range: %s', query => {
+    const text = `Avis @${query}`;
+    expect(findAgentMentionQuery(text, text.length)).toEqual({
+      query: query.toLowerCase(), start: 5, end: text.length,
+    });
+    expect(findAgentMentionQuery(`${text},`, text.length + 1)).toBeNull();
+  });
 });

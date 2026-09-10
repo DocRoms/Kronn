@@ -1,6 +1,13 @@
 import type { TranslationDict } from '../../i18n';
 
 const zh: TranslationDict = {
+  'agentPicker.search': '搜索代理、连接或模型…',
+  'agentPicker.noMatch': '没有匹配的代理或模型。',
+  "modelCatalog.lastChecked": "上次检查：{0}",
+  "modelCatalog.notInCatalog": "不在已加载的目录中",
+  "modelCatalog.keepConfigured": "已保留配置值。请重新检查目录或明确选择替代模型。",
+  "modelCatalog.loadError": "无法加载模型目录。现有设置保持不变。",
+  "modelCatalog.reload": "重新加载已保存的目录",
   "modelCatalog.title": "模型目录",
   "modelCatalog.description": "每个目标已检测、缓存或手动配置的模型。",
   "modelCatalog.addHint": "用于检测无结果的目标：此时手动声明模型。",
@@ -1001,7 +1008,8 @@ const zh: TranslationDict = {
   "disc.compare.notRated": "未评分",
   "disc.compare.confidence": "置信度 {0}%",
   "disc.compare.aiFeedback": "AI 评审详情",
-  "disc.compare.modelInferred": "根据层级推断",
+  "disc.compare.modelRecorded": "来自较早的消息",
+  "disc.compare.modelUnknown": "未知模型",
   "disc.compare.selfJudgeWarning": "评审代理也是候选者，可能偏好自身风格。",
   "disc.compare.cliJudgeWarning": "此 CLI 代理会收到评审技能，但 Kronn 无法移除其原生工具。若需结构化且可复现的隔离，请优先选择 Ollama、LiteLLM 或 NVIDIA。",
   "disc.compare.noSecureJudge": "请配置 Ollama、LiteLLM 或 NVIDIA，以运行可复现的无工具评审。",
@@ -2139,7 +2147,7 @@ const zh: TranslationDict = {
   "ollama.pullFailed": "无法开始下载，请重试。",
   "ollama.installedModels": "已安装模型",
   "ollama.tierPickerTitle": "每层级模型",
-  "ollama.tierAuto": "自动（内置默认）",
+  "ollama.tierAuto": "自动",
   "ollama.tierPickerHint": "每层级一个模型 — 空 = 回退至标准层级",
   "ollama.tierGuidance": "qwen3:8b 适用于提取、分类、摘要和明显安全场景。更大模型（30b+）有助于审查和细微判断 — 但本地模型无法可靠检测细微错误（需云代理处理）。",
   "ollama.contextTitle": "每个模型的上下文窗口",

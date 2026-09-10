@@ -410,6 +410,11 @@ pub fn list_runnable_ids(conn: &Connection, limit: usize) -> Result<Vec<String>>
            AND (
                (discussion.no_agent = 0 AND candidate.attempts < ?2)
                OR discussion.no_agent = 1
+               OR EXISTS (
+                   SELECT 1 FROM task_executions AS owner
+                   WHERE owner.sub_discussion_id = candidate.discussion_id
+                     AND owner.worker_target_kind = 'cli'
+               )
            )
          ORDER BY candidate.created_at, candidate.id LIMIT ?3",
     )?;
@@ -433,6 +438,11 @@ pub fn list_exhausted_ids(conn: &Connection, limit: usize) -> Result<Vec<String>
            AND candidate.available_at <= ?1
            AND candidate.attempts >= ?2
            AND discussion.no_agent = 0
+           AND NOT EXISTS (
+               SELECT 1 FROM task_executions AS owner
+               WHERE owner.sub_discussion_id = candidate.discussion_id
+                 AND owner.worker_target_kind = 'cli'
+           )
          ORDER BY candidate.created_at, candidate.id LIMIT ?3",
     )?;
     let rows = statement.query_map(
@@ -503,6 +513,11 @@ pub fn claim_with_limits(
                      AND discussion.no_agent = 0
                )
                AND NOT EXISTS (
+                   SELECT 1 FROM task_executions AS owner
+                   WHERE owner.sub_discussion_id = candidate.discussion_id
+                     AND owner.worker_target_kind = 'cli'
+               )
+               AND NOT EXISTS (
                    SELECT 1
                    FROM agent_dispatch_jobs AS same_discussion
                    WHERE same_discussion.discussion_id = candidate.discussion_id
@@ -555,7 +570,7 @@ pub fn claim_with_limits(
         // A human can disable the native responder after a route decided to
         // enqueue but before this claim. Refuse the launch atomically above,
         // then retire that stale obligation so it cannot hot-loop forever.
-        let cancelled = cancel_pending_job_if_agent_disabled(conn, id)?;
+        let cancelled = retire_job_without_native_authority(conn, id, false)?;
         if cancelled > 0 && !has_active_for_discussion_by_job(conn, id)? {
             conn.execute(
                 "UPDATE discussions
@@ -716,13 +731,34 @@ pub fn reset_running_after_restart(conn: &Connection) -> Result<u64> {
 pub fn mark_agent_started(conn: &Connection, id: &str) -> Result<bool> {
     let now = Utc::now().to_rfc3339();
     let changed = conn.execute(
-        "UPDATE agent_dispatch_jobs
+        "UPDATE agent_dispatch_jobs AS candidate
          SET agent_started_at = COALESCE(agent_started_at, ?2), updated_at = ?2,
              progress_phase = 'launching', progress_detail = NULL,
              last_progress_at = ?2
-         WHERE id = ?1 AND status = 'Running'",
+         WHERE id = ?1 AND status = 'Running'
+           AND EXISTS (
+               SELECT 1 FROM discussions AS discussion
+               WHERE discussion.id = candidate.discussion_id AND discussion.no_agent = 0
+           )
+           AND NOT EXISTS (
+               SELECT 1 FROM task_executions AS owner
+               WHERE owner.sub_discussion_id = candidate.discussion_id
+                 AND owner.worker_target_kind = 'cli'
+           )",
         params![id, now],
     )?;
+    if changed == 0 && retire_job_without_native_authority(conn, id, true)? > 0 {
+        conn.execute(
+            "UPDATE discussions SET awaiting_agent = 0
+                 WHERE id = (SELECT discussion_id FROM agent_dispatch_jobs WHERE id = ?1)
+                   AND NOT EXISTS (
+                       SELECT 1 FROM agent_dispatch_jobs AS active
+                       WHERE active.discussion_id = discussions.id
+                         AND active.status IN ('Pending', 'Running')
+                   )",
+            [id],
+        )?;
+    }
     Ok(changed > 0)
 }
 
@@ -952,20 +988,34 @@ pub fn cancel_pending_for_discussion(conn: &Connection, discussion_id: &str) -> 
     Ok(changed as u64)
 }
 
-fn cancel_pending_job_if_agent_disabled(conn: &Connection, id: &str) -> Result<u64> {
+/// Retire stale native work without spending a provider attempt. The start
+/// boundary can also retire a claimed job if ownership changed while it was
+/// waiting for the global permit. Ordinary running work is otherwise untouched.
+fn retire_job_without_native_authority(
+    conn: &Connection,
+    id: &str,
+    include_running: bool,
+) -> Result<u64> {
     let now = Utc::now().to_rfc3339();
     let changed = conn.execute(
         "UPDATE agent_dispatch_jobs AS candidate
          SET status = 'Cancelled', completed_at = ?2, updated_at = ?2,
-             last_error = 'agent_disabled'
+             last_error = CASE WHEN EXISTS (
+                 SELECT 1 FROM discussions AS discussion
+                 WHERE discussion.id = candidate.discussion_id AND discussion.no_agent = 1
+             ) THEN 'agent_disabled' ELSE 'cli_worker_owns_room' END
          WHERE id = ?1
-           AND status = 'Pending'
-           AND EXISTS (
+           AND (status = 'Pending' OR (?3 AND status = 'Running'))
+           AND (EXISTS (
                SELECT 1 FROM discussions AS discussion
                WHERE discussion.id = candidate.discussion_id
                  AND discussion.no_agent = 1
-           )",
-        params![id, now],
+           ) OR EXISTS (
+               SELECT 1 FROM task_executions AS owner
+               WHERE owner.sub_discussion_id = candidate.discussion_id
+                 AND owner.worker_target_kind = 'cli'
+           ))",
+        params![id, now, include_running],
     )?;
     Ok(changed as u64)
 }

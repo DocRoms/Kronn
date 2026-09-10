@@ -838,16 +838,17 @@ pub fn ensure_mirror_by_shared_id(
     }
 }
 
-/// F9 — whether this disc is "human-only" (no agent runner ever spawns).
-/// Read directly off the column (like `diverged_at`) so we don't have to thread
-/// the flag through the big `Discussion` struct + all its query sites.
+/// Whether native dispatch is disabled by F9 or durable CLI-worker ownership.
+/// Keep this effective mode outside the big `Discussion` struct so every
+/// routing site observes the current persisted assignment, not a stale flag.
 pub fn disc_is_no_agent(conn: &Connection, disc_id: &str) -> Result<bool> {
     Ok(get_disc_no_agent(conn, disc_id)?.unwrap_or(false))
 }
 
-/// Read the persisted native-agent mode while preserving "not found" for API
-/// callers. Routing uses [`disc_is_no_agent`] because it already has a loaded
-/// discussion and only needs the boolean.
+/// Read the effective native-agent mode, preserving "not found" for API callers.
+/// A CLI-owned execution room also forbids native dispatch, independently of
+/// its historical UI flag or the worker's transient presence. This is derived
+/// from ownership, not a backfill that would outlive an explicit reassignment.
 pub fn get_disc_no_agent(conn: &Connection, disc_id: &str) -> Result<Option<bool>> {
     let value = conn
         .query_row(
@@ -856,7 +857,11 @@ pub fn get_disc_no_agent(conn: &Connection, disc_id: &str) -> Result<Option<bool
             |row| row.get::<_, i64>(0),
         )
         .optional()?;
-    Ok(value.map(|disabled| disabled != 0))
+    value
+        .map(|disabled| {
+            Ok(disabled != 0 || super::orchestration::discussion_has_cli_worker(conn, disc_id)?)
+        })
+        .transpose()
 }
 
 /// Set/clear the F9 human-only flag on a disc. Disabling is one transaction
@@ -865,6 +870,9 @@ pub fn get_disc_no_agent(conn: &Connection, disc_id: &str) -> Result<Option<bool
 /// discussion existed.
 pub fn set_disc_no_agent(conn: &Connection, disc_id: &str, no_agent: bool) -> Result<bool> {
     let transaction = conn.unchecked_transaction()?;
+    if !no_agent && super::orchestration::discussion_has_cli_worker(&transaction, disc_id)? {
+        anyhow::bail!("this room is owned by a CLI worker; reassign the execution before enabling a native agent");
+    }
     let affected = transaction.execute(
         "UPDATE discussions SET no_agent = ?2, updated_at = ?3 WHERE id = ?1",
         params![disc_id, no_agent as i32, Utc::now().to_rfc3339()],
@@ -1001,9 +1009,21 @@ pub fn update_discussion_profile_ids(
     )
 }
 
+/// Primary target lookup without loading a potentially long message history.
+pub fn get_discussion_agent(conn: &Connection, id: &str) -> Result<Option<AgentType>> {
+    Ok(conn
+        .query_row("SELECT agent FROM discussions WHERE id = ?1", [id], |row| {
+            row.get::<_, String>(0)
+        })
+        .optional()?
+        .map(|agent| parse_agent_type(&agent)))
+}
+
 pub fn update_discussion_tier(conn: &Connection, id: &str, tier: &ModelTier) -> Result<bool> {
     let affected = conn.execute(
-        "UPDATE discussions SET model_tier = ?1, updated_at = ?2 WHERE id = ?3",
+        "UPDATE discussions
+         SET model = CASE WHEN model_tier IS NOT ?1 THEN NULL ELSE model END,
+             model_tier = ?1, updated_at = ?2 WHERE id = ?3",
         params![format_model_tier(tier), Utc::now().to_rfc3339(), id],
     )?;
     Ok(affected > 0)
@@ -1071,7 +1091,8 @@ pub fn update_discussion_agent(conn: &Connection, id: &str, agent: &AgentType) -
 
     tx.execute(
         "UPDATE discussions
-         SET agent = ?1, pending_agent_handoff_from = ?2, updated_at = ?3
+         SET model = CASE WHEN agent IS NOT ?1 THEN NULL ELSE model END,
+             agent = ?1, pending_agent_handoff_from = ?2, updated_at = ?3
          WHERE id = ?4",
         params![next_agent, next_pending, Utc::now().to_rfc3339(), id],
     )?;
@@ -1101,7 +1122,9 @@ pub fn update_discussion_connection(
     connection_id: Option<&str>,
 ) -> Result<bool> {
     let affected = conn.execute(
-        "UPDATE discussions SET connection_id = ?1, updated_at = ?2 WHERE id = ?3",
+        "UPDATE discussions
+         SET model = CASE WHEN connection_id IS NOT ?1 THEN NULL ELSE model END,
+             connection_id = ?1, updated_at = ?2 WHERE id = ?3",
         params![connection_id, Utc::now().to_rfc3339(), id],
     )?;
     Ok(affected > 0)
@@ -1707,6 +1730,43 @@ pub fn insert_native_agent_message_with_handoffs(
     globally_enabled: bool,
     paid_limit: Option<u32>,
 ) -> Result<NativeAgentMessageOutcome> {
+    insert_native_agent_message_with_checkpoint(
+        conn,
+        discussion_id,
+        msg,
+        child_run_was_success,
+        dispatch_job_id,
+        source_agent,
+        candidate_agents,
+        globally_enabled,
+        paid_limit,
+        None,
+    )
+}
+
+/// The completed conversation frontier and the native response are one
+/// durable unit. A failed insert/checkpoint cannot certify a missing response.
+#[allow(clippy::too_many_arguments)]
+pub fn insert_native_agent_message_with_checkpoint(
+    conn: &Connection,
+    discussion_id: &str,
+    msg: &DiscussionMessage,
+    child_run_was_success: bool,
+    dispatch_job_id: Option<&str>,
+    source_agent: &AgentType,
+    candidate_agents: &[AgentType],
+    globally_enabled: bool,
+    paid_limit: Option<u32>,
+    checkpoint: Option<&super::acp_runtime_sessions::TurnCompletion>,
+) -> Result<NativeAgentMessageOutcome> {
+    let checkpoint = checkpoint.filter(|_| child_run_was_success);
+    if checkpoint.is_some_and(|proof| {
+        proof.key.discussion_id != discussion_id
+            || proof.output_message_id != msg.id
+            || proof.key.agent_type != format!("{source_agent:?}")
+    }) {
+        anyhow::bail!("conversation checkpoint does not match its native response");
+    }
     let transaction = conn.unchecked_transaction()?;
     let (no_agent, discussion_disabled, primary_agent, participants_json): (
         i64,
@@ -1856,6 +1916,9 @@ pub fn insert_native_agent_message_with_handoffs(
             }
             set_awaiting_agent(&transaction, discussion_id, true)?;
         }
+        if let Some(proof) = checkpoint {
+            super::acp_runtime_sessions::complete_turn(&transaction, proof)?;
+        }
         transaction.commit()?;
         return Ok(NativeAgentMessageOutcome {
             sort_order,
@@ -1877,6 +1940,9 @@ pub fn insert_native_agent_message_with_handoffs(
     );
     if !mention_targets.is_empty() {
         replace_message_targets(&transaction, &msg.id, &mention_targets)?;
+    }
+    if let Some(proof) = checkpoint {
+        super::acp_runtime_sessions::complete_turn(&transaction, proof)?;
     }
     transaction.commit()?;
     Ok(NativeAgentMessageOutcome {

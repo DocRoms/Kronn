@@ -1,6 +1,13 @@
 import type { TranslationDict } from '../../i18n';
 
 const es: TranslationDict = {
+  'agentPicker.search': 'Buscar un agente, una conexión o un modelo…',
+  'agentPicker.noMatch': 'Ningún agente o modelo coincide.',
+  "modelCatalog.lastChecked": "Última comprobación: {0}",
+  "modelCatalog.notInCatalog": "Ausente del catálogo cargado",
+  "modelCatalog.keepConfigured": "Se conserva el valor configurado. Comprueba el catálogo o elige un reemplazo explícitamente.",
+  "modelCatalog.loadError": "No se puede cargar el catálogo de modelos. La configuración existente no ha cambiado.",
+  "modelCatalog.reload": "Recargar el catálogo guardado",
   'modelCatalog.title': 'Catálogos de modelos',
   'modelCatalog.description': 'Modelos detectados, almacenados en caché o configurados manualmente por destino.',
   'modelCatalog.addHint': 'Para un destino cuya detección no devuelve nada: el modelo se declara a mano.',
@@ -1016,7 +1023,8 @@ const es: TranslationDict = {
   'disc.compare.notRated': 'Sin evaluar',
   'disc.compare.confidence': 'confianza {0} %',
   'disc.compare.aiFeedback': 'Detalles del veredicto de IA',
-  'disc.compare.modelInferred': 'inferido del nivel',
+  'disc.compare.modelRecorded': 'de un mensaje anterior',
+  'disc.compare.modelUnknown': 'modelo desconocido',
   'disc.compare.selfJudgeWarning': 'El juez también es candidato: puede preferir su propio estilo.',
   'disc.compare.cliJudgeWarning': 'Este agente CLI recibe la skill de evaluación, pero Kronn no puede retirar sus herramientas nativas. Prefiere Ollama, LiteLLM o NVIDIA para un aislamiento estructural y reproducible.',
   'disc.compare.noSecureJudge': 'Configura Ollama, LiteLLM o NVIDIA para un juez reproducible sin herramientas.',
@@ -2165,7 +2173,7 @@ const es: TranslationDict = {
   'ollama.pullFailed': 'No se pudo iniciar la descarga. Inténtelo de nuevo.',
   'ollama.installedModels': 'Modelos instalados',
   'ollama.tierPickerTitle': 'Modelo por nivel',
-  'ollama.tierAuto': 'Auto (predeterminado)',
+  'ollama.tierAuto': 'Automático',
   'ollama.tierPickerHint': 'Un modelo por nivel — vacío = recurre al nivel Estándar',
   'ollama.tierGuidance': 'qwen3:8b basta para extracción, clasificación, resúmenes y seguridad evidente. Un modelo más grande (30b+) ayuda en la revisión y el juicio matizado — pero ningún modelo local es fiable para detectar bugs sutiles (deja un agente cloud para eso).',
   'ollama.contextTitle': 'Ventana de contexto por modelo',

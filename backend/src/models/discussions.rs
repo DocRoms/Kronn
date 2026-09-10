@@ -437,7 +437,11 @@ pub struct UpdateDiscussionRequest {
     /// `Some(None)` = clear, absent = no change — same convention as
     /// `project_id`. Validated against `agent` (post-update if both are
     /// present in the same request).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "super::deserialize_optional_field",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub connection_id: Option<Option<String>>,
     /// Change the auto-summary policy. Persists in `discussions.summary_strategy`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
