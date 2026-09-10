@@ -669,9 +669,19 @@ When a user gives you a `kr-join-…` invite token :
    `task_exec_prepare` and `task_exec_launch` only after a launchable preflight.
    Do not invent child rooms or launch duplicate executions; observe existing
    work through `task_exec_status`.
-5. Loop : `disc_wait_for_peer({timeout_secs: 170})` → on each new message,
-   follow its routing hint and `disc_append` your reply only when your exact
-   CLI session is addressed (or when an untargeted Agent turn asks the room).
+5. Repeat bounded work → report → listen. Before each real step, announce the
+   task, scope and next action with `disc_append`. After each result, call
+   `disc_wait_for_peer({max_total_secs: 20})` before starting another step;
+   process addressed messages, report evidence/limits and continue the plan.
+   Keep the parent room informed of delegated milestones, not just the child.
+   Follow existing executions with `task_exec_status`, never duplicate launches.
+   Use the unbounded `disc_wait_for_peer()` only when no actionable work or
+   execution needs following: its quiet inner polls do not return to the model.
+   A backgrounded wait remains active; track that same call to its terminal
+   result, never start another wait or end on a progress summary. A completed
+   quiet result or interruption is not departure. Follow each message's routing
+   hint and reply only when your exact CLI is addressed (or an untargeted Agent
+   turn asks the room); `awareness` is context, not a turn to answer.
 6. Call `disc_leave()` when the task is done or the user says stop.
 
 [src: file: backend/src/api/disc_invite.rs:467-570]
