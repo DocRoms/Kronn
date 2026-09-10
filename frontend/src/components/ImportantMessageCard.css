@@ -10,23 +10,26 @@
   margin: var(--kr-sp-4) 0;
   padding: var(--kr-sp-4);
   border: 1px solid var(--kr-border);
-  border-left: 3px solid var(--kr-cat, var(--kr-accent));
+  border-left: 3px solid var(--card-accent, var(--kr-accent));
   border-radius: var(--kr-r-md);
   background: var(--kr-bg-card);
 }
 
-/* One token per category, so the colour is the category rather than a mood
-   chosen per card. */
-.disc-important-card[data-category='decision'] { --kr-cat: var(--kr-accent); }
-.disc-important-card[data-category='scope_change'] { --kr-cat: var(--kr-purple); }
-.disc-important-card[data-category='dod_waiver'] { --kr-cat: var(--kr-warning); }
-.disc-important-card[data-category='blocking_alert'] { --kr-cat: var(--kr-error); }
-.disc-important-card[data-category='human_action_required'] { --kr-cat: var(--kr-cyan); }
-.disc-important-card[data-category='accepted_delivery'] { --kr-cat: var(--kr-success); }
+/* One colour per category, so the hue IS the category rather than a mood
+   chosen per card.
+   Deliberately NOT named `--kr-*`: that namespace is the design palette, and a
+   local variable wearing its prefix reads as a token that somebody could look
+   up and fail to find. */
+.disc-important-card[data-category='decision'] { --card-accent: var(--kr-accent); }
+.disc-important-card[data-category='scope_change'] { --card-accent: var(--kr-purple); }
+.disc-important-card[data-category='dod_waiver'] { --card-accent: var(--kr-warning); }
+.disc-important-card[data-category='blocking_alert'] { --card-accent: var(--kr-error); }
+.disc-important-card[data-category='human_action_required'] { --card-accent: var(--kr-cyan); }
+.disc-important-card[data-category='accepted_delivery'] { --card-accent: var(--kr-success); }
 
 .disc-important-card:target,
 .disc-important-card[data-focused='true'] {
-  border-color: var(--kr-cat, var(--kr-accent));
+  border-color: var(--card-accent, var(--kr-accent));
   box-shadow: var(--kr-shadow-md);
 }
 
@@ -40,7 +43,7 @@
 .disc-important-category {
   padding: 2px var(--kr-sp-2);
   border-radius: var(--kr-r-pill);
-  background: var(--kr-cat, var(--kr-accent));
+  background: var(--card-accent, var(--kr-accent));
   color: var(--kr-text-on-accent);
   font-size: var(--kr-fs-2xs);
   font-weight: 600;
@@ -102,7 +105,7 @@
 }
 
 .disc-important-action {
-  border-left: 2px solid var(--kr-cat, var(--kr-accent));
+  border-left: 2px solid var(--card-accent, var(--kr-accent));
   padding-left: var(--kr-sp-3);
 }
 

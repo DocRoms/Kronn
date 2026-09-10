@@ -5,7 +5,7 @@
 // URL, not in a query string. Reloading the page asks again, which is the
 // point — a secret that survives a reload is a secret sitting somewhere.
 
-import { useCallback, useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import { KeyRound, RotateCw, ShieldOff, Copy, Check } from 'lucide-react';
 import { publicationCredentials as api } from '../../lib/api';
 import type { GrantRole, HumanCredential } from '../../types/generated';
@@ -31,6 +31,25 @@ export function PublicationCredentialsSection({ toast, t }: Props) {
   const [role, setRole] = useState<GrantRole>('human');
   const [minted, setMinted] = useState<Minted | null>(null);
   const [copied, setCopied] = useState(false);
+  // `busy` is React state, so it is not observable until the next render. Two
+  // synchronous events — a double click, Enter on a focused button while the
+  // click lands — both see `busy === false` and both fire. For a mutation that
+  // MINTS A SECRET that is one secret too many, so the gate is a ref, which
+  // changes now.
+  const inFlight = useRef(false);
+
+  /// Run `work` at most once at a time, whatever the event loop does.
+  const once = useCallback(async (work: () => Promise<void>) => {
+    if (inFlight.current) return;
+    inFlight.current = true;
+    setBusy(true);
+    try {
+      await work();
+    } finally {
+      inFlight.current = false;
+      setBusy(false);
+    }
+  }, []);
 
   const load = useCallback(
     async (secret: string) => {
@@ -42,6 +61,11 @@ export function PublicationCredentialsSection({ toast, t }: Props) {
         // says the same thing: telling the user which guard they tripped would
         // tell an attacker what to try next.
         setCredentials(null);
+        // And drop any secret still on screen. After a failed reload we no
+        // longer know whether it is current — it may have been rotated away by
+        // the very call that failed — and a stale secret displayed as usable is
+        // worse than showing none.
+        setMinted(null);
         toast(t('settings.credentials.refused'), 'error');
       } finally {
         setBusy(false);
@@ -58,46 +82,46 @@ export function PublicationCredentialsSection({ toast, t }: Props) {
   const enrol = async (event: React.FormEvent) => {
     event.preventDefault();
     if (!label.trim()) return;
-    setBusy(true);
-    try {
-      const created = await api.enrol(authority.trim(), role, label.trim());
-      // The only moment this value exists outside the server.
-      setMinted({ label: created.credential.label, secret: created.secret });
-      setLabel('');
-      await load(authority.trim());
-    } catch {
-      toast(t('settings.credentials.enrolFailed'), 'error');
-    } finally {
-      setBusy(false);
-    }
+    await once(async () => {
+      try {
+        const created = await api.enrol(authority.trim(), role, label.trim());
+        // The only moment this value exists outside the server.
+        setMinted({ label: created.credential.label, secret: created.secret });
+        setLabel('');
+        await load(authority.trim());
+      } catch {
+        toast(t('settings.credentials.enrolFailed'), 'error');
+      }
+    });
   };
 
   const revoke = async (credential: HumanCredential) => {
     const reason = window.prompt(t('settings.credentials.revokeReason', credential.label));
     if (reason === null) return;
-    setBusy(true);
-    try {
-      await api.revoke(authority.trim(), credential.id, reason || '—');
-      await load(authority.trim());
-      toast(t('settings.credentials.revoked', credential.label), 'success');
-    } catch {
-      toast(t('settings.credentials.revokeFailed'), 'error');
-    } finally {
-      setBusy(false);
-    }
+    await once(async () => {
+      try {
+        await api.revoke(authority.trim(), credential.id, reason || '—');
+        await load(authority.trim());
+        toast(t('settings.credentials.revoked', credential.label), 'success');
+      } catch {
+        toast(t('settings.credentials.revokeFailed'), 'error');
+      }
+    });
   };
 
   const rotate = async (credential: HumanCredential) => {
-    setBusy(true);
-    try {
-      const secret = await api.rotate(authority.trim(), credential.id);
-      setMinted({ label: credential.label, secret });
-      await load(authority.trim());
-    } catch {
-      toast(t('settings.credentials.rotateFailed'), 'error');
-    } finally {
-      setBusy(false);
-    }
+    await once(async () => {
+      try {
+        const secret = await api.rotate(authority.trim(), credential.id);
+        setMinted({ label: credential.label, secret });
+        await load(authority.trim());
+      } catch {
+        // The displayed secret may already be the one that was replaced, and a
+        // stale secret shown as current is worse than none at all.
+        setMinted(null);
+        toast(t('settings.credentials.rotateFailed'), 'error');
+      }
+    });
   };
 
   const copySecret = async () => {

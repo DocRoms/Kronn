@@ -5476,6 +5476,17 @@ target_all?: boolean,
  */
 target_agents?: Array<AgentType>, target_agent?: AgentType | null, client_message_id?: string | null,
 /**
+ * KT-619 — the human's publication grant, when this message carries a
+ * `kronn-important` fence. Absent for every ordinary message, and absent
+ * is simply "no card": this endpoint has no caller identity of its own, so
+ * the grant is the only thing that can authorise one.
+ */
+publication_grant?: string | null,
+/**
+ * The single-use proof issued for this exact body, in this room.
+ */
+publication_proof?: string | null,
+/**
  * Persist the User turn and its dispatch obligations without claiming a
  * runner for this HTTP/SSE request. Used by the durable composer outbox:
  * the scheduler starts it only after the discussion's current run ends.

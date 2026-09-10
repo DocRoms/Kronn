@@ -171,6 +171,65 @@ describe('PublicationCredentialsSection', () => {
     expect(screen.getByLabelText('settings.credentials.revoke|Laptop')).toBeInTheDocument();
   });
 
+  it('mints one secret when two events land before a rerender', async () => {
+    const user = userEvent.setup();
+    mount();
+    await unlock(user);
+    await screen.findByLabelText('settings.credentials.newLabel');
+
+    // Hold the call open so both clicks land while the first is still running.
+    let release: (value: unknown) => void = () => {};
+    enrol.mockReturnValue(new Promise((resolve) => { release = resolve; }));
+
+    await user.type(screen.getByLabelText('settings.credentials.newLabel'), 'Phone');
+    const button = screen.getByRole('button', { name: 'settings.credentials.enrol' });
+
+    // Two synchronous submits. `busy` is React state and is not observable
+    // until the next render, so a state-only gate lets both through — and each
+    // one MINTS A SECRET.
+    button.click();
+    button.click();
+
+    release({ credential: credential({ label: 'Phone' }), secret: 'kr-human-one' });
+    await waitFor(() => expect(enrol).toHaveBeenCalledTimes(1));
+  });
+
+  it('rotates once when two clicks land before a rerender', async () => {
+    const user = userEvent.setup();
+    list.mockResolvedValue([credential({ label: 'Laptop' })]);
+    mount();
+    await unlock(user);
+    await screen.findByRole('table');
+
+    let release: (value: unknown) => void = () => {};
+    rotate.mockReturnValue(new Promise((resolve) => { release = resolve; }));
+
+    const button = screen.getByLabelText('settings.credentials.rotate|Laptop');
+    button.click();
+    button.click();
+
+    release('kr-human-rotated');
+    await waitFor(() => expect(rotate).toHaveBeenCalledTimes(1));
+  });
+
+  it('drops a displayed secret when the reload that follows is refused', async () => {
+    const user = userEvent.setup();
+    mount();
+    await unlock(user);
+    await screen.findByLabelText('settings.credentials.newLabel');
+
+    const secret = 'kr-human-possibly-stale';
+    enrol.mockResolvedValue({ credential: credential({ label: 'Phone' }), secret });
+    // The reload right after fails: we no longer know whether what is on screen
+    // is current, and a stale secret shown as usable is worse than none.
+    list.mockRejectedValue(new Error('forbidden'));
+
+    await user.type(screen.getByLabelText('settings.credentials.newLabel'), 'Phone');
+    await user.click(screen.getByRole('button', { name: 'settings.credentials.enrol' }));
+
+    await waitFor(() => expect(screen.queryByText(secret)).toBeNull());
+  });
+
   it('tells the operator that nothing publishes until something is enrolled', async () => {
     const user = userEvent.setup();
     list.mockResolvedValue([]);
