@@ -63,6 +63,7 @@ function AttributedDescription({ text, className }: { text: string; className?: 
 import { IdentitySection } from '../components/settings/IdentitySection';
 import { RecoverySection } from '../components/settings/RecoverySection';
 import { AntiHallucSection } from '../components/settings/AntiHallucSection';
+import { PublicationCredentialsSection } from '../components/settings/PublicationCredentialsSection';
 import { ContinualLearningSection } from '../components/settings/ContinualLearningSection';
 import { ProfilesSection } from '../components/settings/ProfilesSection';
 import { UsageSection } from '../components/settings/UsageSection';
@@ -634,6 +635,9 @@ export function SettingsPage({
       </div>
 
       <AntiHallucSection toast={toast} t={t} />
+      {/* KT-619 — who may publish an important card. Beside anti-hallucination
+          because both answer "what is this room allowed to assert". */}
+      <PublicationCredentialsSection toast={toast} t={t} />
 
       <ContinualLearningSection toast={toast} t={t} />
 

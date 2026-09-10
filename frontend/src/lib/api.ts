@@ -216,6 +216,8 @@ import type {
   SourceDirectoryListing,
   DiscussionQuestion,
   DiscussionQuestionList,
+  GrantRole,
+  HumanCredential,
   ImportantCategory,
   ImportantMessageList,
   AnswerDiscussionQuestionRequest,
@@ -3344,4 +3346,31 @@ export const learnings = {
   reject: (id: string) => api<void>('POST', `/learnings/${encodeURIComponent(id)}/reject`),
   forDiscussion: (discId: string) =>
     api<Learning[]>('GET', `/discussions/${encodeURIComponent(discId)}/learnings`),
+};
+
+/** KT-619 — publication credentials. Not discussion-scoped: a credential
+ *  belongs to the install, not to a room. */
+export const publicationCredentials = {
+  list: (authority: string) => api<HumanCredential[]>(
+    'POST',
+    '/human-credentials/list',
+    { authority },
+  ),
+  enrol: (authority: string, role: GrantRole, label: string) =>
+    api<{ credential: HumanCredential; secret: string }>(
+      'POST',
+      '/human-credentials/enrol',
+      { authority, role, label },
+    ),
+  revoke: (authority: string, credential_id: string, reason: string) =>
+    api<boolean>('POST', '/human-credentials/revoke', {
+      authority,
+      credential_id,
+      reason,
+    }),
+  rotate: (authority: string, credential_id: string) =>
+    api<string>('POST', '/human-credentials/rotate', {
+      authority,
+      credential_id,
+    }),
 };
