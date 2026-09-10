@@ -1,6 +1,13 @@
 import type { TranslationDict } from '../../i18n';
 
 const en: TranslationDict = {
+  'agentPicker.search': 'Search an agent, connection or model…',
+  'agentPicker.noMatch': 'No matching agent or model.',
+  "modelCatalog.lastChecked": "Last checked: {0}",
+  "modelCatalog.notInCatalog": "Not in loaded catalog",
+  "modelCatalog.keepConfigured": "Configured value retained. Recheck the catalog or choose a replacement explicitly.",
+  "modelCatalog.loadError": "Unable to load the model catalog. Existing settings are unchanged.",
+  "modelCatalog.reload": "Reload saved catalog",
   'modelCatalog.title': 'Model catalogs',
   'modelCatalog.description': 'Detected, cached or manually configured models for each target.',
   'modelCatalog.addHint': 'For a target whose detection returns nothing: the model is then declared by hand.',
@@ -1016,7 +1023,8 @@ const en: TranslationDict = {
   'disc.compare.notRated': 'Not rated',
   'disc.compare.confidence': '{0}% confidence',
   'disc.compare.aiFeedback': 'AI verdict details',
-  'disc.compare.modelInferred': 'inferred from tier',
+  'disc.compare.modelRecorded': 'from an earlier message',
+  'disc.compare.modelUnknown': 'unknown model',
   'disc.compare.selfJudgeWarning': 'The judge is also a candidate: self-style preference may bias the verdict.',
   'disc.compare.cliJudgeWarning': 'This CLI agent receives the judging skill, but Kronn cannot remove its native tools. Prefer Ollama, LiteLLM, or NVIDIA for structural and reproducible isolation.',
   'disc.compare.noSecureJudge': 'Configure Ollama, LiteLLM, or NVIDIA to run a reproducible tool-free judge.',
@@ -2165,7 +2173,7 @@ const en: TranslationDict = {
   'ollama.pullFailed': 'The download could not be started. Please try again.',
   'ollama.installedModels': 'Installed models',
   'ollama.tierPickerTitle': 'Model per tier',
-  'ollama.tierAuto': 'Auto (built-in default)',
+  'ollama.tierAuto': 'Automatic',
   'ollama.tierPickerHint': 'One model per tier — empty = falls back to the Standard tier',
   'ollama.tierGuidance': 'qwen3:8b is enough for extraction, classification, summaries, obvious security. A bigger model (30b+) helps for review and nuanced judgment — but no local model is reliable at catching subtle bugs (keep a cloud agent for that).',
   'ollama.contextTitle': 'Context window per model',

@@ -57,9 +57,9 @@ const MODEL_TIER_CONFIG_KEY: Partial<Record<AgentType, keyof ModelTiersConfig>> 
   Nvidia: 'nvidia',
 };
 
-/** Resolve the concrete model name Kronn will request for an agent/tier pair.
- * Some providers intentionally choose their own account-compatible default;
- * callers supply the human-facing fallback used for those unknown names. */
+/** Display an explicitly configured model, never an embedded catalogue guess.
+ * Callers with a runtime catalogue resolve its assignments separately; without
+ * either source, the caller supplies an honest unknown/default label. */
 export function modelForAgentTier(
   agent: AgentType,
   tier: ModelTier,
@@ -67,15 +67,11 @@ export function modelForAgentTier(
   defaultModelLabel: string,
 ): string {
   const configKey = MODEL_TIER_CONFIG_KEY[agent];
-  const configured = configKey ? modelTiers?.[configKey]?.[tier] : null;
+  const config = configKey ? modelTiers?.[configKey] : null;
+  const configured = config?.[tier];
   if (configured) return configured;
-
-  const builtin = ({
-    ClaudeCode: { economy: 'haiku', default: 'sonnet', reasoning: 'opus' },
-    Codex: { economy: 'gpt-5.6-luna', reasoning: 'gpt-5.6-sol' },
-    GeminiCli: { economy: 'gemini-2.5-flash', reasoning: 'gemini-3.1-pro-preview' },
-  } as Partial<Record<AgentType, Partial<Record<ModelTier, string>>>>)[agent]?.[tier];
-  return builtin ?? defaultModelLabel;
+  if (['Ollama', 'LiteLlm', 'Nvidia'].includes(agent) && config?.default) return config.default;
+  return defaultModelLabel;
 }
 
 export const AGENT_MENTIONS: ReadonlyArray<{

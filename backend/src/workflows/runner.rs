@@ -3784,7 +3784,7 @@ mod tests {
         // 2026-06-13 — step_model must be stamped so the UI shows the real
         // model on EVERY agent step. With no explicit tier (Default), Codex
         // resolves to None (no --model) → step_model None; with a reasoning
-        // tier it resolves to the concrete model + tier label.
+        // tier it resolves only an explicitly configured model + tier label.
         use crate::models::{AgentSettings, ModelTier};
         let mut step = mk_step_for_snapshot(StepType::Agent);
         step.agent = AgentType::ClaudeCode;
@@ -3797,8 +3797,14 @@ mod tests {
         });
         let mut r = empty_result();
         apply_step_snapshot(&step, &mut r, None);
-        // built-in ClaudeCode reasoning → opus, labelled with the tier
-        assert_eq!(r.step_model.as_deref(), Some("opus · reasoning"));
+        assert_eq!(r.step_model.as_deref(), Some("reasoning"));
+        let mut tiers = crate::models::ModelTiersConfig::default();
+        tiers.claude_code.reasoning = Some("operator-reasoning".into());
+        apply_step_snapshot(&step, &mut r, Some(&tiers));
+        assert_eq!(
+            r.step_model.as_deref(),
+            Some("operator-reasoning · reasoning")
+        );
         // explicit model override wins, default tier → bare model
         step.agent_settings = Some(AgentSettings {
             model: Some("o3".into()),

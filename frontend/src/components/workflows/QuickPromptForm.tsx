@@ -1,10 +1,11 @@
 import { useState, useRef, useEffect } from 'react';
 import { useT } from '../../lib/I18nContext';
 import { MarkdownEditor } from '../MarkdownComposerTools';
-import { config as configApi, mcps as mcpsApi, ollama as ollamaApi } from '../../lib/api';
+import { config as configApi, mcps as mcpsApi } from '../../lib/api';
 import { AgentSwitchPicker } from '../AgentSwitchPicker';
 import type { AgentSwitchTarget } from '../AgentSwitchPicker';
 import { SearchableSelect } from '../SearchableSelect';
+import { ModelCatalogPicker } from '../ModelCatalogPicker';
 import { PromptVariableControlEditor } from './PromptVariableControlEditor';
 import type {
   QuickPrompt,
@@ -72,15 +73,9 @@ export function QuickPromptForm({
   // `ServerConfig.default_model_tier` on mount (strict semantic — only
   // applied to new QPs, never overwrites an editPrompt's saved tier).
   const [tier, setTier] = useState<ModelTier>(editPrompt?.tier ?? 'default');
-  // 0.8.10 — optional explicit model (wins over tier at run time). Free text
-  // (any tag / remote host) with pulled Ollama models offered as suggestions.
+  // Explicit model and reasoning remain independent operator settings.
   const [model, setModel] = useState<string>(editPrompt?.agent_settings?.model ?? '');
-  const [ollamaModels, setOllamaModels] = useState<string[]>([]);
-  useEffect(() => {
-    ollamaApi.models()
-      .then(r => setOllamaModels((r.models ?? []).map(m => m.name)))
-      .catch(() => {});
-  }, []);
+  const [reasoningEffort, setReasoningEffort] = useState(editPrompt?.agent_settings?.reasoning_effort ?? '');
   // 0.8.5 — three binding axes mirroring the Discussion form.
   const [skillIds, setSkillIds] = useState<string[]>(editPrompt?.skill_ids ?? []);
   const [profileIds, setProfileIds] = useState<string[]>(editPrompt?.profile_ids ?? []);
@@ -192,8 +187,15 @@ export function QuickPromptForm({
         profile_ids: profileIds,
         directive_ids: directiveIds,
         tier,
-        agent_settings: model.trim()
-          ? { model: model.trim(), tier: null, reasoning_effort: null, max_tokens: null }
+        agent_settings: model.trim() || reasoningEffort || editPrompt?.agent_settings
+          ? {
+            ...editPrompt?.agent_settings,
+            model: model.trim() || null,
+            tier: null,
+            connection_id: connectionId || null,
+            reasoning_effort: reasoningEffort || null,
+            max_tokens: editPrompt?.agent_settings?.max_tokens ?? null,
+          }
           : null,
         description,
       });
@@ -245,11 +247,13 @@ export function QuickPromptForm({
             currentTargetLabel={selectedAgentChoice?.label}
             availableTargets={effectiveAgentChoices}
             currentTier={tier}
+            currentModel={model}
             onTargetSelectionChange={async (choice, nextTier) => {
               setAgent(choice.agent);
               setConnectionId(choice.connectionId ?? '');
               setTier(nextTier);
               setModel('');
+              setReasoningEffort('');
             }}
             tierLabels={{
               economy: t('disc.tier.economy'),
@@ -301,22 +305,13 @@ export function QuickPromptForm({
         </div>
       )}
 
-      {/* 0.8.10 — optional explicit model, wins over the tier at run time.
-          Free text (any tag / remote host); pulled Ollama models offered as
-          suggestions when the agent is Ollama. Empty = resolve from tier. */}
-      <label className="wf-label">{t('wiz.model')}</label>
-      <input
-        className="wf-input mb-4"
-        value={model}
-        onChange={e => setModel(e.target.value)}
-        placeholder={agent === 'Ollama' ? 'ex: qwen3:8b — vide = selon le tier' : 'vide = selon le tier'}
-        list={agent === 'Ollama' ? 'qp-ollama-models' : undefined}
-      />
-      {agent === 'Ollama' && ollamaModels.length > 0 && (
-        <datalist id="qp-ollama-models">
-          {ollamaModels.map(m => <option key={m} value={m} />)}
-        </datalist>
-      )}
+      <div className="mb-4">
+        <ModelCatalogPicker
+          agent={agent} connectionId={connectionId} value={model} onChange={setModel}
+          tier={tier} modelTiers={modelTiers} targetModelTiers={selectedAgentChoice?.modelTiers}
+          reasoningEffort={reasoningEffort} onReasoningChange={setReasoningEffort} disabled={saving}
+        />
+      </div>
 
       {/* Prompt description — documents what this QP does. */}
       <label className="wf-label">{t('qp.descriptionLabel')}</label>

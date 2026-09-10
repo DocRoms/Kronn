@@ -492,14 +492,9 @@ fn join_next_steps(
          this conversation. The human watching the Kronn UI needs to see you \
          are alive. Replying only in your local terminal is INVISIBLE to peers — \
          you MUST go through `disc_append`.\n\n\
-         STEP 2 :\n\
-         If `recent_messages` (above) contains user instructions or peer \
-         statements that demand a substantive first reply (e.g. 'start the \
-         match', 'propose a plan'), make that reply via a SECOND `disc_append` \
-         call right after your intro.\n\n\
-         STEP 3 — READ THE SHARED PLAN BEFORE ACTING :\n\
-         This room may already have an objective and tasks in flight. Call \
-         `plan_get` (current objective + active tasks) and `task_list` if you \
+         STEP 2 — READ THE SHARED PLAN BEFORE ACTING :\n\
+         This room may already have an objective and tasks in flight. \
+         Call `plan_get` (current objective + active tasks) and `task_list` if you \
          need the wider backlog, so you pick up the real work instead of \
          guessing or asking the human to re-explain. You may READ **and \
          UPDATE** those tasks — `task_create`, `task_update`, \
@@ -526,6 +521,12 @@ fn join_next_steps(
          read-only `plan_snapshot` in this join response, tell @user to \
          reconnect the Kronn MCP, and do not fabricate or claim any task \
          update.\n\n\
+         STEP 3 — PROCESS THE INITIAL MESSAGES :\n\
+         Read `recent_messages` after loading the plan. If an instruction \
+         addressed to your exact identity demands a substantive first reply, \
+         announce its scope as in step 4, then answer via `disc_append`. \
+         Context marked `awareness` is not a turn for you to answer. Do not \
+         start work already owned by a peer or infer a new task from context.\n\n\
          STEP 4 — ANNOUNCE BEFORE THE FIRST SUBSTANTIVE ACTION :\n\
          Before editing files, running a substantive command or triggering an \
          external action, call `disc_append` with a concise \
@@ -556,29 +557,38 @@ fn join_next_steps(
          your session has no durable identity, or it already belongs to another \
          discussion. Do not force a transfer on your own initiative; ask the \
          human first.\n\n\
-         STEP 5 — STAY IN THE ROOM AND FOLLOW IT (this is the part agents \
-         get wrong) :\n\
-         a. Call `disc_wait_for_peer()` to wait for the next message. The \
-         bridge chains quiet server polls instead of returning after each one. \
-         HOST CAVEAT: if your client says the tool call was moved to the \
-         background, the original wait is still active — do NOT start another \
-         wait. Wait for that task's terminal notification, then re-arm only if \
-         its completed result is quiet. Some hosts expose a model-visible \
-         background-task notification, so zero-turn silence is a host \
-         capability, not a universal bridge guarantee.\n\
-         b. If it returns `timed_out: true` with NO new messages (safety \
-         cap or interruption), that is NORMAL (the peer may still be \
-         thinking) — re-arm `disc_wait_for_peer` when you are ready to \
-         listen again. A quiet window is NOT the end of the conversation; \
-         never stop or leave just because a wait came back quiet.\n\
-         c. When messages arrive, read them, then call `disc_append({{content: \
-         \"<your reaction>\"}})` to reply.\n\
-         d. If the room stays quiet and you have nothing to answer, do NOT \
-         idle and do NOT end your turn on a summary: take the next actionable \
-         task from the plan, do it, and report it in the room. Silence from \
-         you is indistinguishable from having left, and the human WILL read it \
-         that way.\n\
-         e. Go back to (a).\n\n\
+         STEP 5 — REPEAT THE WORK / REPORT / LISTEN LOOP :\n\
+         a. Before each bounded step, announce task / scope / next action \
+         with `disc_append`, then do that step. After a real result (test, \
+         commit, review or worker milestone), call \
+         `disc_wait_for_peer({{max_total_secs: 20}})` BEFORE starting the next \
+         step. Use this bounded check while plan work or an execution needs \
+         following; an unbounded wait would prevent returning to that work.\n\
+         b. Read `attention_required` on any tool result immediately. Reply \
+         only to turns addressed to your exact identity (or an untargeted \
+         Agent question to the room); `awareness` is context, not your turn. \
+         Use the exact `reply_to_message_id` and CLI target. Report the result, \
+         evidence, limits and next action in the parent room as well when \
+         working in a delegated child; do not assume child-only updates are \
+         visible to the human following the parent. Never invent a native \
+         fallback if an exact CLI cannot be reached in that room.\n\
+         c. A completed `timed_out: true` with no messages is NORMAL, not an \
+         instruction to leave. Continue the next actionable task from the \
+         plan; follow existing workers with `task_exec_status`, never another \
+         launch. When there is no actionable work or execution to follow, \
+         use `disc_wait_for_peer()` to listen without spending model turns on \
+         quiet polls. A human gate pauses only its affected lot.\n\
+         d. HOST CAVEAT: a wait moved to the background remains active — \
+         do NOT start another wait or end the turn on a summary. Track that \
+         same call until its terminal result; then process it and continue \
+         this loop. Another MCP request may cause an interruption: handle \
+         that activity, then resume the loop. Backgrounding and interruption \
+         are not instructions to leave; zero-turn silence depends on the host.\n\
+         e. Omit `since_sort_order`: the bridge owns the durable read cursor. \
+         Never use an append receipt as a read cursor. Keep work and plan \
+         updates event-driven. Silence from you is indistinguishable from \
+         having left; reporting one milestone is not completion. Repeat (a) \
+         while work is ready, otherwise keep listening as in (c).\n\n\
          JOINING IS NOT THE TASK. Reporting progress is not the end of your \
          work either — the room is done when the plan is done or the human \
          says stop. To leave : `disc_leave()`, and only then.",
@@ -6569,6 +6579,51 @@ mod tests {
             steps.contains("each keeps its own `task_exec_status` and `task_exec_review`"),
             "each parallel lane must retain its own durable execution lifecycle",
         );
+    }
+
+    #[test]
+    fn join_protocol_reads_plan_before_substantive_first_reply() {
+        let steps = join_next_steps("d-1", "Room", 2, None);
+        let plan = steps.find("Call `plan_get`").unwrap_or(usize::MAX);
+        let first_reply = steps.find("substantive first reply").unwrap();
+        assert!(
+            plan < first_reply,
+            "load existing work before choosing the first reply"
+        );
+    }
+
+    #[test]
+    fn join_protocol_does_not_put_unbounded_wait_before_ready_work() {
+        let steps = join_next_steps("d-1", "Room", 2, None);
+        let work_loop = steps.split("STEP 5").nth(1).unwrap();
+        let bounded_check = work_loop.find("disc_wait_for_peer({max_total_secs: 20})");
+        let idle_wait = work_loop.find("disc_wait_for_peer()").unwrap();
+        assert!(bounded_check.is_some_and(|index| index < idle_wait));
+        assert!(work_loop.contains("no actionable work or execution to follow"));
+        assert!(work_loop.contains("task_exec_status"));
+    }
+
+    #[test]
+    fn join_protocol_reports_each_step_and_preserves_wait_ownership() {
+        let steps = join_next_steps("d-1", "Room", 2, None);
+        let work_loop = steps.split("STEP 5").nth(1).unwrap();
+        for contract in [
+            "Before each bounded step",
+            "parent room",
+            "attention_required",
+            "awareness",
+            "reply_to_message_id",
+            "background",
+            "do NOT start another",
+            "interruption",
+            "not an instruction to leave",
+            "durable read cursor",
+        ] {
+            assert!(
+                work_loop.contains(contract),
+                "missing room work contract: {contract}"
+            );
+        }
     }
 
     #[test]

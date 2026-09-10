@@ -5126,6 +5126,7 @@ export function DiscussionsPage({
                 setReplyToMessageId(null);
               }}
               modelTiers={agentAccess?.model_tiers}
+              externalConnections={externalConnections}
               toast={toast}
               t={t}
             />

@@ -36,8 +36,8 @@ The former runtime literals are inserted once during startup and the runner's
 hot-path tier lookup is then projected from catalog rows. Editing the manual
 catalog refreshes that projection; removing a migrated/manual row therefore
 does not make a hidden hard-coded fallback reappear.
-[src: file: backend/src/core/model_catalog/mod.rs:38-181]
-[src: file: backend/src/agents/runner.rs:2407-2488]
+[src: file: backend/src/core/model_catalog/mod.rs:38-219]
+[src: file: backend/src/agents/runner.rs:2650-2725]
 
 ## Discovery boundaries
 

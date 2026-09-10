@@ -1537,7 +1537,8 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
       model: 'claude-opus',
       tier: 'reasoning',
       reasoning_effort: 'high',
-      max_tokens: null,
+      max_tokens: 12345,
+      connection_id: 'previous-target',
     } as const;
     const workflow = labWorkflow({
       steps: [
@@ -1594,6 +1595,8 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
       agent_settings: {
         ...agentSettings,
         model: null,
+        reasoning_effort: null,
+        connection_id: null,
         tier: 'reasoning',
       },
     });
@@ -1734,7 +1737,8 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
       profile_ids: [],
       directive_ids: [],
       tier: 'default',
-      agent_settings: { model: 'opus', tier: 'default', reasoning_effort: null, max_tokens: null },
+      connection_id: 'previous-target',
+      agent_settings: { model: 'opus', tier: 'default', reasoning_effort: 'xhigh', max_tokens: 12345, connection_id: 'previous-target' },
       created_at: '2026-01-01T00:00:00Z',
       updated_at: '2026-01-01T00:00:00Z',
     };
@@ -1756,7 +1760,8 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
       name: /Changer l'agent ou le mode IA du QP « Review release »/,
     });
     expect(trigger).toHaveTextContent('🎯');
-    expect(trigger).toHaveAttribute('title', expect.stringContaining('sonnet'));
+    // The saved per-QP override wins over the tier mapping until a new choice clears it.
+    expect(trigger).toHaveAttribute('title', expect.stringContaining('opus'));
     fireEvent.click(trigger);
     await act(async () => {
       fireEvent.click(screen.getByRole('menuitem', { name: 'Codex · Avancé' }));
@@ -1767,7 +1772,8 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
       expect.objectContaining({
         agent: 'Codex',
         tier: 'reasoning',
-        agent_settings: expect.objectContaining({ model: null, tier: 'reasoning' }),
+        connection_id: null,
+        agent_settings: expect.objectContaining({ model: null, tier: 'reasoning', reasoning_effort: null, max_tokens: 12345, connection_id: null }),
       }),
     ));
   });

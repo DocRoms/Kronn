@@ -9698,8 +9698,10 @@ mod tests {
             },
             Some("@codex-cli".into()),
         )];
+        let mut config = crate::core::config::default_config();
+        config.agents.model_tiers.ollama.default = Some("operator-ollama".into());
         let catalogue = build_task_worker_catalogue(
-            &crate::core::config::default_config(),
+            &config,
             &detections,
             &joined,
             &[
@@ -9728,7 +9730,8 @@ mod tests {
         assert_eq!(ollama.worker.kind, MessageTargetKind::DiscussionAgent);
         assert_eq!(ollama.worker.tier, Some(ModelTier::Default));
         assert!(ollama.tiers.iter().any(|tier| {
-            tier.tier == ModelTier::Default && tier.resolved_model.as_deref() == Some("qwen3:8b")
+            tier.tier == ModelTier::Default
+                && tier.resolved_model.as_deref() == Some("operator-ollama")
         }));
         assert!(worker_static_refusal(&ollama.worker).is_none());
 
@@ -15153,6 +15156,274 @@ mod tests {
             other => panic!("expected Attached, got {other:?}"),
         };
         (task_ref, parent_id, child_id, exec_id)
+    }
+
+    /// KT-624: an unavailable CLI still owns its execution room. A status
+    /// append is not permission to start another provider in that worktree.
+    #[tokio::test]
+    async fn cli_worker_room_append_never_falls_back_to_a_native_worker() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let (_, _, child, exec_id) = attached_cli_worker(&db, repo.path()).await;
+        db.with_conn(|conn| {
+            // Reproduce the legacy child whose UI flag never disabled the
+            // native default, after its joined worker became unavailable.
+            conn.execute(
+                "UPDATE discussion_sessions SET status = 'left' WHERE id = 101",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let state = AppState::new_defaults(
+            std::sync::Arc::new(tokio::sync::RwLock::new(
+                crate::core::config::default_config(),
+            )),
+            db.clone(),
+            crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+        );
+        let Json(response) = crate::api::disc_source::disc_append(
+            State(state),
+            Json(crate::api::disc_source::DiscAppendRequest {
+                disc_id: child.clone(),
+                session_id: Some("sess-a".into()),
+                since_sort_order: None,
+                messages: vec![crate::api::disc_source::DiscAppendMessage {
+                    source_msg_id: "kt624-worker-status".into(),
+                    role: crate::models::MessageRole::Agent,
+                    channel: crate::models::MessageChannel::Main,
+                    content: "Work remains in progress; no delivery yet.".into(),
+                    agent_type: Some(AgentType::ClaudeCode),
+                    targets: vec![],
+                    target_agent: None,
+                    reply_to_message_id: None,
+                }],
+            }),
+        )
+        .await;
+        assert!(
+            response.success,
+            "the worker's message must remain publishable"
+        );
+        assert_eq!(response.data.unwrap().appended, 1);
+        let jobs = db
+            .with_conn(move |conn| {
+                crate::db::agent_dispatch::list_active_for_discussion(
+                    conn,
+                    &child,
+                    &AgentType::ClaudeCode,
+                )
+            })
+            .await
+            .unwrap();
+        assert!(
+            jobs.is_empty(),
+            "a CLI-owned room must not enqueue a native fallback: {jobs:?}"
+        );
+        let execution = exec_of(&db, &exec_id).await;
+        assert_eq!(execution.worker_cli_session_id, Some(101));
+        assert_eq!(execution.status, TaskExecutionStatus::Working);
+        assert_eq!(execution.attempt_no, 0);
+    }
+
+    fn cli_worker_room_legacy_job(
+        conn: &rusqlite::Connection,
+        child: &str,
+        id: &str,
+    ) -> anyhow::Result<crate::db::agent_dispatch::AgentDispatchJob> {
+        let (message_id, sort_order): (String, i64) = conn.query_row(
+            "SELECT id, sort_order FROM messages WHERE discussion_id = ?1 ORDER BY sort_order DESC LIMIT 1",
+            [child],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        crate::db::agent_dispatch::enqueue(
+            conn,
+            crate::db::agent_dispatch::NewAgentDispatchJob {
+                id,
+                discussion_id: child,
+                trigger_message_id: &message_id,
+                trigger_sort_order: sort_order,
+                dedupe_key: id,
+                agent_override: Some(&AgentType::ClaudeCode),
+                chain_prompt_ids: &[],
+                batch_item: None,
+                group_id: None,
+                group_concurrency_limit: None,
+            },
+        )
+    }
+
+    #[tokio::test]
+    async fn cli_worker_room_retires_a_legacy_native_job_before_claim() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (_, _, child, _) = attached_cli_worker(&db, repo.path()).await;
+        db.with_conn(move |conn| {
+            // Represents work persisted by the old version before restart,
+            // not a second authorized task execution.
+            let job = cli_worker_room_legacy_job(conn, &child, "kt624-stale-native")?;
+            assert!(
+                crate::db::agent_dispatch::claim(conn, &job.id)?.is_none(),
+                "the scheduler must recheck durable CLI ownership, not just the room flag"
+            );
+            let retired = crate::db::agent_dispatch::get(conn, &job.id)?.unwrap();
+            assert_eq!(
+                retired.status,
+                crate::db::agent_dispatch::DispatchStatus::Cancelled
+            );
+            assert_eq!(retired.attempts, 0, "no provider attempt was admitted");
+            assert!(crate::db::agent_dispatch::list_runnable_ids(conn, 10)?.is_empty());
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn cli_worker_room_explicit_native_reassignment_releases_the_room() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (_, _, child, exec_id) = attached_cli_worker(&db, repo.path()).await;
+        db.with_conn(move |conn| {
+            assert_eq!(
+                crate::db::discussions::get_disc_no_agent(conn, &child)?,
+                Some(true)
+            );
+            assert!(crate::db::discussions::set_disc_no_agent(conn, &child, false).is_err());
+            // Also cover a child explicitly confined by its principal before
+            // the product fix, like the observed KT-619 room.
+            crate::db::discussions::set_disc_no_agent(conn, &child, true)?;
+            cli_worker_room_legacy_job(conn, &child, "kt624-stale-before-reassignment")?;
+            crate::db::orchestration::reassign_execution_worker(
+                conn,
+                &exec_id,
+                &crate::models::CampaignWorkerSelection {
+                    target: MessageTarget::agent(AgentType::Codex),
+                    model: None,
+                    profile_id: None,
+                },
+                "explicit principal-authorized native reassignment",
+                &backend_actor(),
+            )?;
+            assert_eq!(
+                crate::db::discussions::get_disc_no_agent(conn, &child)?,
+                Some(false),
+                "explicit native reassignment must release the former CLI confinement"
+            );
+            assert_eq!(
+                crate::db::agent_dispatch::get(conn, "kt624-stale-before-reassignment")?
+                    .unwrap()
+                    .status,
+                crate::db::agent_dispatch::DispatchStatus::Cancelled,
+                "changing the owner must not resurrect a legacy native obligation"
+            );
+            let job = cli_worker_room_legacy_job(conn, &child, "kt624-native-reassigned")?;
+            assert!(crate::db::agent_dispatch::claim(conn, &job.id)?.is_some());
+            assert!(crate::db::agent_dispatch::mark_agent_started(
+                conn, &job.id
+            )?);
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn cli_worker_room_rechecks_ownership_after_claim_before_provider_start() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (_, _, child, exec_id) = attached_cli_worker(&db, repo.path()).await;
+        db.with_conn(move |conn| {
+            crate::db::orchestration::reassign_execution_worker(
+                conn,
+                &exec_id,
+                &crate::models::CampaignWorkerSelection {
+                    target: MessageTarget::agent(AgentType::Codex),
+                    model: None,
+                    profile_id: None,
+                },
+                "first explicit native assignment",
+                &backend_actor(),
+            )?;
+            let job = cli_worker_room_legacy_job(conn, &child, "kt624-claimed-native")?;
+            crate::db::discussions::set_awaiting_agent(conn, &child, true)?;
+            assert!(crate::db::agent_dispatch::claim(conn, &job.id)?.is_some());
+            crate::db::orchestration::reassign_execution_worker(
+                conn,
+                &exec_id,
+                &crate::models::CampaignWorkerSelection {
+                    target: MessageTarget::cli(AgentType::ClaudeCode, 101),
+                    model: None,
+                    profile_id: None,
+                },
+                "principal replaces native with exact CLI before provider start",
+                &backend_actor(),
+            )?;
+            assert!(!crate::db::agent_dispatch::mark_agent_started(
+                conn, &job.id
+            )?);
+            let retired = crate::db::agent_dispatch::get(conn, &job.id)?.unwrap();
+            assert_eq!(
+                retired.status,
+                crate::db::agent_dispatch::DispatchStatus::Cancelled
+            );
+            assert_eq!(retired.last_error.as_deref(), Some("cli_worker_owns_room"));
+            assert!(retired.agent_started_at.is_none());
+            assert_eq!(
+                conn.query_row(
+                    "SELECT awaiting_agent FROM discussions WHERE id = ?1",
+                    [&child],
+                    |row| row.get::<_, i64>(0)
+                )?,
+                0
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn cli_worker_room_reopen_retires_even_an_exhausted_legacy_native_job() {
+        let repo = init_repo();
+        let storage = tempfile::tempdir().unwrap();
+        let path = storage.path().join("kt624.sqlite");
+        let db = Database::open_path(&path).unwrap();
+        let (_, _, child, _) = attached_cli_worker(&db, repo.path()).await;
+        let child_before = child.clone();
+        db.with_conn(move |conn| {
+            cli_worker_room_legacy_job(conn, &child_before, "kt624-reopened-native")?;
+            conn.execute(
+                "UPDATE agent_dispatch_jobs SET attempts = ?1 WHERE id = 'kt624-reopened-native'",
+                [crate::db::agent_dispatch::MAX_DISPATCH_ATTEMPTS],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        drop(db);
+        let reopened = Database::open_path(&path).unwrap();
+        reopened
+            .with_conn(move |conn| {
+                assert!(crate::db::discussions::disc_is_no_agent(conn, &child)?);
+                assert!(crate::db::agent_dispatch::list_exhausted_ids(conn, 10)?.is_empty());
+                assert_eq!(
+                    crate::db::agent_dispatch::list_runnable_ids(conn, 10)?,
+                    vec!["kt624-reopened-native"]
+                );
+                assert!(crate::db::agent_dispatch::claim(conn, "kt624-reopened-native")?.is_none());
+                assert!(crate::db::agent_dispatch::list_runnable_ids(conn, 10)?.is_empty());
+                assert_eq!(
+                    crate::db::agent_dispatch::get(conn, "kt624-reopened-native")?
+                        .unwrap()
+                        .status,
+                    crate::db::agent_dispatch::DispatchStatus::Cancelled
+                );
+                Ok(())
+            })
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

@@ -454,10 +454,33 @@ describe('WorkflowDetail — focused steps pipeline', () => {
     expect(trigger).toHaveClass('kr-agent-switch-btn');
     fireEvent.click(trigger!);
     expect(trigger!.closest('.kr-agent-switch')).toHaveAttribute('data-open', 'true');
-    expect(screen.getByRole('menu').parentElement).toBe(document.body);
+    const picker = screen.getByRole('dialog', { name: 'wf.stepAgentSwitchLabel' });
+    expect(picker.parentElement).toBe(document.body);
+    expect(picker).toContainElement(screen.getByRole('menu'));
+    expect(screen.getByRole('menu')).not.toContainElement(screen.getByRole('searchbox', { name: 'agentPicker.search' }));
     fireEvent.click(screen.getByRole('menuitem', { name: 'Codex · disc.tier.default' }));
 
-    await waitFor(() => expect(onChangeStepAgent).toHaveBeenCalledWith(0, 'Codex', 'default'));
+    await waitFor(() => expect(onChangeStepAgent).toHaveBeenCalledWith(0, 'Codex', 'default', null));
     expect(screen.getByTestId('wf-steps-detail')).toBeInTheDocument();
+  });
+
+  it('passes the exact named connection from the pipeline even when agent and tier stay unchanged', async () => {
+    const onChangeStepAgent = vi.fn().mockResolvedValue(undefined);
+    const { container } = renderDetail([
+      { ...mixedSteps[0], agent: 'Custom', agent_settings: { connection_id: 'one', model: 'saved-model' } },
+      ...mixedSteps.slice(1),
+    ], {
+      agentChoices: [
+        { agent: 'Custom', connectionId: 'one', label: 'Team One' },
+        { agent: 'Custom', connectionId: 'two', label: 'Team Two' },
+      ],
+      onChangeStepAgent,
+    });
+    const trigger = container.querySelector<HTMLButtonElement>('.wf-steps-pipeline [aria-label="wf.stepAgentSwitchLabel"]');
+    expect(trigger).toHaveTextContent('Team One');
+    expect(trigger).toHaveAttribute('title', expect.stringContaining('saved-model'));
+    fireEvent.click(trigger!);
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Team Two · disc.tier.default' }));
+    await waitFor(() => expect(onChangeStepAgent).toHaveBeenCalledExactlyOnceWith(0, 'Custom', 'default', 'two'));
   });
 });

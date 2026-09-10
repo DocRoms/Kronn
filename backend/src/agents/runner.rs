@@ -2056,6 +2056,8 @@ pub(crate) fn codex_kronn_internal_env_override() -> String {
 pub struct AcpSessionStore {
     db: Arc<crate::db::Database>,
     discussion_id: String,
+    turn_id: String,
+    cli_print_started: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl AcpSessionStore {
@@ -2063,6 +2065,8 @@ impl AcpSessionStore {
         Self {
             db,
             discussion_id: discussion_id.into(),
+            turn_id: uuid::Uuid::new_v4().to_string(),
+            cli_print_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -2085,28 +2089,64 @@ impl AcpSessionStore {
         Self::runtime(agent_type).is_some()
     }
 
-    async fn load(
+    /// Native OpenCode sessions support a discussion cursor, allowing the next
+    /// prompt to contain only messages committed after the prior response.
+    pub fn tracks_native_delta(agent_type: &AgentType) -> bool {
+        matches!(agent_type, AgentType::OpenCode)
+    }
+
+    fn session_key(
         &self,
         agent_type: &AgentType,
         project_scope: &Path,
-    ) -> Result<Option<String>, String> {
-        let runtime = Self::runtime(agent_type)
-            .ok_or_else(|| format!("{agent_type:?} has no durable ACP adapter session"))?;
-        let discussion_id = self.discussion_id.clone();
-        let agent_type = format!("{agent_type:?}");
-        let project_scope = project_scope.to_string_lossy().into_owned();
+        cli_print: bool,
+    ) -> Option<crate::db::acp_runtime_sessions::SessionKey> {
+        let runtime = if cli_print {
+            Self::tracks_cli_print(agent_type).then_some(Self::CLI_PRINT_RUNTIME)
+        } else {
+            Self::runtime(agent_type)
+        }?;
+        Some(crate::db::acp_runtime_sessions::SessionKey {
+            discussion_id: self.discussion_id.clone(),
+            agent_type: format!("{agent_type:?}"),
+            runtime: runtime.to_owned(),
+            project_scope: project_scope.to_string_lossy().into_owned(),
+        })
+    }
+
+    pub async fn load_completed_checkpoint(
+        &self,
+        agent_type: &AgentType,
+        project_scope: &Path,
+        cli_print: bool,
+    ) -> Result<Option<crate::db::acp_runtime_sessions::CompletedCheckpoint>, String> {
+        let Some(key) = self.session_key(agent_type, project_scope, cli_print) else {
+            return Ok(None);
+        };
         self.db
             .with_conn(move |conn| {
-                crate::db::acp_runtime_sessions::get(
-                    conn,
-                    &discussion_id,
-                    &agent_type,
-                    runtime,
-                    &project_scope,
-                )
+                crate::db::acp_runtime_sessions::get_completed_checkpoint(conn, &key)
             })
             .await
-            .map_err(|error| format!("load ACP conversation id: {error}"))
+            .map_err(|error| format!("load completed conversation checkpoint: {error}"))
+    }
+
+    /// The response writer commits this proof in its existing transaction.
+    /// The per-turn id prevents delayed work from certifying another session.
+    pub fn completion_checkpoint(
+        &self,
+        agent_type: &AgentType,
+        project_scope: &Path,
+        cli_print: bool,
+        input_message_id: &str,
+        output_message_id: &str,
+    ) -> Option<crate::db::acp_runtime_sessions::TurnCompletion> {
+        Some(crate::db::acp_runtime_sessions::TurnCompletion {
+            key: self.session_key(agent_type, project_scope, cli_print)?,
+            turn_id: self.turn_id.clone(),
+            input_message_id: input_message_id.to_owned(),
+            output_message_id: output_message_id.to_owned(),
+        })
     }
 
     async fn persist(
@@ -2115,25 +2155,41 @@ impl AcpSessionStore {
         project_scope: &Path,
         conversation_id: &str,
     ) -> Result<(), String> {
-        let runtime = Self::runtime(agent_type)
+        let key = self
+            .session_key(agent_type, project_scope, false)
             .ok_or_else(|| format!("{agent_type:?} has no durable ACP adapter session"))?;
-        let discussion_id = self.discussion_id.clone();
-        let agent_type = format!("{agent_type:?}");
-        let project_scope = project_scope.to_string_lossy().into_owned();
+        let turn_id = self.turn_id.clone();
         let conversation_id = conversation_id.to_owned();
         self.db
             .with_conn(move |conn| {
-                crate::db::acp_runtime_sessions::upsert(
+                crate::db::acp_runtime_sessions::begin_turn(conn, &key, &conversation_id, &turn_id)
+            })
+            .await
+            .map_err(|error| format!("persist ACP conversation id: {error}"))
+    }
+
+    async fn persist_native_session_id(
+        &self,
+        agent_type: &AgentType,
+        project_scope: &Path,
+        conversation_id: &str,
+    ) -> Result<(), String> {
+        let key = self
+            .session_key(agent_type, project_scope, false)
+            .ok_or_else(|| format!("{agent_type:?} has no durable ACP adapter session"))?;
+        let turn_id = self.turn_id.clone();
+        let conversation_id = conversation_id.to_owned();
+        self.db
+            .with_conn(move |conn| {
+                crate::db::acp_runtime_sessions::update_turn_session(
                     conn,
-                    &discussion_id,
-                    &agent_type,
-                    runtime,
-                    &project_scope,
+                    &key,
+                    &turn_id,
                     &conversation_id,
                 )
             })
             .await
-            .map_err(|error| format!("persist ACP conversation id: {error}"))
+            .map_err(|error| format!("persist ACP native session id: {error}"))
     }
 
     /// The `--print` CLI's own conversation, kept under its own runtime key.
@@ -2152,6 +2208,24 @@ impl AcpSessionStore {
         matches!(agent_type, AgentType::ClaudeCode)
     }
 
+    /// The direct CLI can fail before emitting init, so do not wait for that
+    /// event to retire a completed checkpoint from the previous turn.
+    async fn prepare_cli_print_turn(
+        &self,
+        agent_type: &AgentType,
+        project_scope: &Path,
+    ) -> Result<(), String> {
+        let Some(key) = self.session_key(agent_type, project_scope, true) else {
+            return Ok(());
+        };
+        self.db
+            .with_conn(move |conn| {
+                crate::db::acp_runtime_sessions::invalidate_checkpoint(conn, &key)
+            })
+            .await
+            .map_err(|error| format!("prepare CLI conversation checkpoint: {error}"))
+    }
+
     pub async fn persist_cli_print(
         &self,
         agent_type: &AgentType,
@@ -2161,86 +2235,34 @@ impl AcpSessionStore {
         if !Self::tracks_cli_print(agent_type) {
             return Ok(());
         }
-        let discussion_id = self.discussion_id.clone();
-        let agent_type = format!("{agent_type:?}");
-        let project_scope = project_scope.to_string_lossy().into_owned();
+        let key = self
+            .session_key(agent_type, project_scope, true)
+            .ok_or_else(|| format!("{agent_type:?} has no CLI-print session"))?;
+        let turn_id = self.turn_id.clone();
         let conversation_id = conversation_id.to_owned();
+        let first = !self
+            .cli_print_started
+            .swap(true, std::sync::atomic::Ordering::SeqCst);
         self.db
             .with_conn(move |conn| {
-                crate::db::acp_runtime_sessions::upsert(
-                    conn,
-                    &discussion_id,
-                    &agent_type,
-                    Self::CLI_PRINT_RUNTIME,
-                    &project_scope,
-                    &conversation_id,
-                )
+                if first {
+                    crate::db::acp_runtime_sessions::begin_turn(
+                        conn,
+                        &key,
+                        &conversation_id,
+                        &turn_id,
+                    )
+                } else {
+                    crate::db::acp_runtime_sessions::update_turn_session(
+                        conn,
+                        &key,
+                        &turn_id,
+                        &conversation_id,
+                    )
+                }
             })
             .await
             .map_err(|error| format!("persist CLI conversation id: {error}"))
-    }
-
-    /// The resumable conversation and the last message it was shown.
-    ///
-    /// `Some((id, None))` is a session whose extent is unknown — recorded
-    /// before this was tracked, or by a turn that died before persisting its
-    /// reply. The caller must then send the full prompt: correct, only
-    /// expensive. Guessing a delta there would drop messages in silence.
-    pub async fn load_cli_print(
-        &self,
-        agent_type: &AgentType,
-        project_scope: &Path,
-    ) -> Result<Option<(String, Option<String>)>, String> {
-        if !Self::tracks_cli_print(agent_type) {
-            return Ok(None);
-        }
-        let discussion_id = self.discussion_id.clone();
-        let agent_type = format!("{agent_type:?}");
-        let project_scope = project_scope.to_string_lossy().into_owned();
-        self.db
-            .with_conn(move |conn| {
-                crate::db::acp_runtime_sessions::get_with_progress(
-                    conn,
-                    &discussion_id,
-                    &agent_type,
-                    Self::CLI_PRINT_RUNTIME,
-                    &project_scope,
-                )
-            })
-            .await
-            .map_err(|error| format!("load CLI conversation id: {error}"))
-    }
-
-    /// Record what this agent has now been shown, once its reply is durable.
-    ///
-    /// Called at the END of a turn on purpose: claiming at the start that
-    /// messages have been seen would skip them for good if the turn then died.
-    pub async fn record_cli_print_progress(
-        &self,
-        agent_type: &AgentType,
-        project_scope: &Path,
-        last_seen_message_id: &str,
-    ) -> Result<(), String> {
-        if !Self::tracks_cli_print(agent_type) {
-            return Ok(());
-        }
-        let discussion_id = self.discussion_id.clone();
-        let agent_type = format!("{agent_type:?}");
-        let project_scope = project_scope.to_string_lossy().into_owned();
-        let last_seen_message_id = last_seen_message_id.to_owned();
-        self.db
-            .with_conn(move |conn| {
-                crate::db::acp_runtime_sessions::record_progress(
-                    conn,
-                    &discussion_id,
-                    &agent_type,
-                    Self::CLI_PRINT_RUNTIME,
-                    &project_scope,
-                    &last_seen_message_id,
-                )
-            })
-            .await
-            .map_err(|error| format!("record CLI conversation progress: {error}"))
     }
 }
 
@@ -2313,6 +2335,10 @@ pub struct AgentStartConfig<'a> {
     /// externally joined CLI participants and affect presence/routing, whereas
     /// this state belongs to Kronn's own provider invocation.
     pub acp_session_store: Option<AcpSessionStore>,
+    /// Complete discussion prompt retained when a native ACP continuation
+    /// cannot reopen the recorded conversation.  A resumed native turn carries
+    /// only its delta, but a fresh replacement session must receive history.
+    pub native_acp_full_prompt: Option<&'a str>,
     /// Continue this `--print` conversation instead of starting a new one.
     ///
     /// Set ONLY by a caller that also shortened `prompt` to what the agent has
@@ -2353,6 +2379,10 @@ pub struct AgentStartConfig<'a> {
     /// agents derive a child token from it so cancellation also interrupts the
     /// initial request, before an `AgentProcess`/lifeline exists.
     pub cancel_token: Option<tokio_util::sync::CancellationToken>,
+    /// Test-only ACP boundary injection.  Production always spawns the
+    /// vendor-native JSON-RPC transport in `start_native_acp`.
+    #[cfg(test)]
+    pub test_acp_transport: Option<std::sync::Arc<dyn crate::acp::AcpTransport>>,
 }
 
 impl<'a> AgentStartConfig<'a> {
@@ -2400,6 +2430,7 @@ impl<'a> AgentStartConfig<'a> {
             context_files_prompt: "",
             discussion_id: None,
             acp_session_store: None,
+            native_acp_full_prompt: None,
             cli_resume_id: None,
             task_worker_context: None,
             ollama_format: None,
@@ -2407,6 +2438,8 @@ impl<'a> AgentStartConfig<'a> {
             ollama_context_overrides: None,
             http_request_timeout: None,
             cancel_token: None,
+            #[cfg(test)]
+            test_acp_transport: None,
         }
     }
 }
@@ -2612,9 +2645,9 @@ pub(crate) fn http_agent_identity_context(agent_type: &AgentType, model: &str) -
     }
 }
 
-/// Resolve a ModelTier to a concrete --model flag value for a given agent.
-/// Returns None for Default tier or agents without --model support.
-pub(crate) fn resolve_model_flag(
+/// Resolve only explicit operator configuration, without consulting the cache.
+/// Preflight must inspect durable unavailable assignments before any fallback.
+pub(crate) fn configured_model_flag(
     agent_type: &AgentType,
     tier: ModelTier,
     overrides: Option<&ModelTiersConfig>,
@@ -2637,58 +2670,53 @@ pub(crate) fn resolve_model_flag(
         let override_val = match tier {
             ModelTier::Economy => &agent_cfg.economy,
             ModelTier::Reasoning => &agent_cfg.reasoning,
-            // `Default` tier now honors a user override too — primarily
-            // for Ollama, where the OllamaCard picker writes here so the
-            // user's preferred model wins over the built-in qwen3 fallback
-            // below. Backward compatible: `None` (the common case) falls
-            // through to the built-in match.
+            // `Default` tier honors an explicit user override too — primarily
+            // for Ollama, where the OllamaCard picker writes the preferred
+            // model into this slot.
             ModelTier::Default => &agent_cfg.default,
         };
         if let Some(ref val) = override_val {
-            if !val.is_empty() {
+            if !val.trim().is_empty() {
                 return Some(val.clone());
             }
         }
 
-        // Ollama has no built-in notion of tiers: the user picks ONE model in
+        // Ollama has no intrinsic tier notion: the user picks ONE model in
         // the OllamaCard, which writes the `default` slot. So an empty
         // economy/reasoning slot must fall back to that single configured model
-        // — NOT to a portability fallback the user never asked for. Without
-        // this, someone who set "qwen3:32b" as their Ollama default but whose
-        // discussions run at the reasoning tier would silently get
-        // "qwen3:30b-a3b" instead. (Cloud agents keep distinct per-tier
-        // built-ins below, since haiku/sonnet/opus are genuinely different.)
+        // — not to a different model. This keeps a configured default stable
+        // when a discussion uses Economy or Reasoning.
         if is_http_chat_agent(agent_type) {
             if let Some(ref d) = agent_cfg.default {
-                if !d.is_empty() {
+                if !d.trim().is_empty() {
                     return Some(d.clone());
                 }
             }
         }
     }
 
+    None
+}
+
+/// Resolve a ModelTier to a concrete model without embedded runtime defaults.
+pub(crate) fn resolve_model_flag(
+    agent_type: &AgentType,
+    tier: ModelTier,
+    overrides: Option<&ModelTiersConfig>,
+) -> Option<String> {
+    if let Some(model) = configured_model_flag(agent_type, tier, overrides) {
+        return Some(model);
+    }
     // The durable catalog is the runtime source. Former built-ins are seeded
     // once by `migrate_hardcoded_catalog_once`; keeping literals here would
     // silently revive them after an operator removes or replaces a model.
-    let catalog_model = crate::core::model_catalog::assigned_model_for_agent(agent_type, tier)
-        .or_else(|| {
-            is_http_chat_agent(agent_type)
-                .then(|| {
-                    crate::core::model_catalog::assigned_model_for_agent(
-                        agent_type,
-                        ModelTier::Default,
-                    )
-                })
-                .flatten()
-        });
-    #[cfg(test)]
-    {
-        catalog_model.or_else(|| crate::core::model_catalog::migrated_default(agent_type, tier))
-    }
-    #[cfg(not(test))]
-    {
-        catalog_model
-    }
+    crate::core::model_catalog::assigned_model_for_agent(agent_type, tier).or_else(|| {
+        is_http_chat_agent(agent_type)
+            .then(|| {
+                crate::core::model_catalog::assigned_model_for_agent(agent_type, ModelTier::Default)
+            })
+            .flatten()
+    })
 }
 
 /// Resolve the effective `--model` value for a run: an explicit per-step /
@@ -2706,6 +2734,10 @@ pub(crate) fn effective_model_flag(
         Some(m) if !m.trim().is_empty() => Some(m.to_string()),
         _ => resolve_model_flag(agent_type, tier, model_tiers),
     }
+}
+
+fn missing_ollama_model_error() -> String {
+    "No Ollama model configured. Choose an available model for the selected tier in Settings → Agents → Ollama, or set a model override on the step.".into()
 }
 
 /// Start an agent process with minimal config (no skills/directives/profiles).
@@ -3042,7 +3074,15 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                         .into(),
                 )
             }
-            _ => "qwen3:8b",
+            (AgentType::Ollama, _) => {
+                return Err(missing_ollama_model_error())
+            }
+            _ => {
+                return Err(
+                    "No model configured for this HTTP provider. Choose an available model for the selected tier in Settings → Agents, or set a model override on the step."
+                        .into(),
+                )
+            }
         };
         // Both OpenAI-compatible providers read their endpoint and key from their
         // own slot: LiteLLM's proxy is operator-hosted (config or env), NVIDIA's
@@ -3118,20 +3158,11 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
     // model output. The ACP host owns initialize/session/prompt/cancel and
     // forwards only normalized text updates to the existing stream consumer.
     let acp_route = crate::acp::resolve_acp_route(config.agent_type);
-    // Deliberately NOT widened to the native route yet. Resuming a session
-    // only pays off if the prompt shrinks to the new message: `build_agent_prompt`
-    // still rebuilds the whole history regardless, so a resumed session would
-    // be told everything it already knows — more context per call, not less.
-    // The id is recorded below so the reduction can be built on it; reading it
-    // back is the second half of that work.
-    let acp_resume_id = if acp_route == crate::acp::AcpProductionRoute::AdaptedAcp && !task_worker {
-        match config.acp_session_store.as_ref() {
-            Some(store) => store.load(config.agent_type, &work_dir).await?,
-            None => None,
-        }
-    } else {
-        None
-    };
+    // The discussion dispatcher proves the cursor, identity and worthwhile
+    // delta as one unit. Never reload a durable id here: doing so would pair a
+    // rejected full transcript with a resumed native session and duplicate its
+    // history.
+    let acp_resume_id = (!task_worker).then_some(config.cli_resume_id).flatten();
     match acp_route {
         crate::acp::AcpProductionRoute::NativeAcp => {
             // Kiro ships as a host binary; the Linux container needs its own
@@ -3139,22 +3170,24 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
             if matches!(config.agent_type, AgentType::Kiro) {
                 ensure_kiro_cli_available().await?;
             }
-            return start_native_acp(
-                AcpSessionRequest {
-                    agent_type: config.agent_type,
-                    work_dir: &work_dir,
-                    prompt: config.prompt,
-                    system_context: &extra_context,
-                    project_path: config.project_path,
-                    model_flag: model_flag.as_deref(),
-                    parent_cancel: config.cancel_token.as_ref(),
-                    discussion_id: config.discussion_id,
-                    resume_id: None,
-                    session_store: None,
-                },
-                config.full_access,
-            )
-            .await;
+            let request = AcpSessionRequest {
+                agent_type: config.agent_type,
+                work_dir: &work_dir,
+                prompt: config.prompt,
+                system_context: &extra_context,
+                project_path: config.project_path,
+                model_flag: model_flag.as_deref(),
+                parent_cancel: config.cancel_token.as_ref(),
+                discussion_id: config.discussion_id,
+                resume_id: acp_resume_id,
+                session_store: config.acp_session_store.clone(),
+                fallback_prompt: config.native_acp_full_prompt,
+            };
+            #[cfg(test)]
+            if let Some(transport) = config.test_acp_transport.clone() {
+                return run_acp_session(request, transport).await;
+            }
+            return start_native_acp(request, config.full_access).await;
         }
         // Task workers keep the narrow, isolated worktree policy the direct
         // CLI builder already applies below (`--setting-sources ""`,
@@ -3168,22 +3201,31 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                 "KRONN_ACP_ADAPTER_* opt-in active: starting an isolated ACP adapter session \
                  (unset the variable to fall back to direct CLI migration)"
             );
-            return start_adapted_acp(
-                AcpSessionRequest {
-                    agent_type: config.agent_type,
-                    work_dir: &work_dir,
-                    prompt: config.prompt,
-                    system_context: &extra_context,
-                    project_path: config.project_path,
-                    model_flag: model_flag.as_deref(),
-                    parent_cancel: config.cancel_token.as_ref(),
-                    discussion_id: config.discussion_id,
-                    resume_id: acp_resume_id.as_deref(),
-                    session_store: config.acp_session_store.clone(),
-                },
-                config.full_access,
-            )
-            .await;
+            let request = AcpSessionRequest {
+                agent_type: config.agent_type,
+                work_dir: &work_dir,
+                prompt: config.prompt,
+                system_context: &extra_context,
+                project_path: config.project_path,
+                model_flag: model_flag.as_deref(),
+                parent_cancel: config.cancel_token.as_ref(),
+                discussion_id: config.discussion_id,
+                resume_id: acp_resume_id,
+                session_store: config.acp_session_store.clone(),
+                fallback_prompt: config.native_acp_full_prompt,
+            };
+            #[cfg(test)]
+            if let Some(transport) = config.test_acp_transport.clone() {
+                return run_acp_session(
+                    AcpSessionRequest {
+                        model_flag: None,
+                        ..request
+                    },
+                    transport,
+                )
+                .await;
+            }
+            return start_adapted_acp(request, config.full_access).await;
         }
         _ => {}
     }
@@ -3270,6 +3312,17 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
     }
     if task_worker && *config.agent_type == AgentType::CopilotCli {
         probe_copilot_task_worker_auth(binary, npx_pkg, &work_dir).await?;
+    }
+
+    // Invalidate before spawning, not when an init event happens to arrive.
+    // Failure must stop here: retaining an old frontier after a new provider
+    // prompt would make a later resume replay already-processed input.
+    if !task_worker && AcpSessionStore::tracks_cli_print(config.agent_type) {
+        if let Some(store) = config.acp_session_store.as_ref() {
+            store
+                .prepare_cli_print_turn(config.agent_type, &work_dir)
+                .await?;
+        }
     }
 
     // Try direct binary first, then npx fallback
@@ -3427,6 +3480,7 @@ struct AcpSessionRequest<'a> {
     discussion_id: Option<&'a str>,
     resume_id: Option<&'a str>,
     session_store: Option<AcpSessionStore>,
+    fallback_prompt: Option<&'a str>,
 }
 
 async fn start_native_acp(
@@ -3534,6 +3588,7 @@ async fn run_acp_session(
         discussion_id: _,
         resume_id,
         session_store,
+        fallback_prompt,
     } = request;
     use crate::acp::{
         acp_agent, AcpCapability, AcpHost, AcpInitialize, AcpSessionEvent, AcpSessionTarget,
@@ -3555,30 +3610,28 @@ async fn run_acp_session(
                 format!("{agent_type:?} ACP cannot start with the project MCP registry: {error}")
             })?;
     }
-    let resumed = match resume_id {
+    let (resumed, resume_failed) = match resume_id {
         Some(conversation_id) => {
             let agent = acp_agent(agent_type)
                 .ok_or_else(|| format!("{agent_type:?} has no ACP session identity"))?;
             let target = AcpSessionTarget::new(agent, conversation_id.to_owned())
                 .map_err(|error| format!("{agent_type:?} ACP resume target is invalid: {error}"))?;
             match host.resume_session(&target).await {
-                Ok(()) => Some(target),
-                // A recorded id outlives the process that issued it: an ACP
-                // session lives in the CLI's memory, so the first turn after
-                // the agent restarted would fail — and every turn after it,
-                // for good, since the dead id stays recorded. Starting fresh
-                // loses the thread; refusing loses the agent.
+                Ok(()) => (Some(target), false),
+                // Capability absence and a positively identified missing
+                // session are safe before a prompt has any external effect.
+                // Authentication, timeout and transport errors are ambiguous:
+                // returning them avoids a potentially duplicate prompt.
+                Err(crate::acp::AcpError::CapabilityUnavailable {
+                    capability: AcpCapability::Resume,
+                }) => (None, true),
+                Err(crate::acp::AcpError::SessionNotFound) => (None, true),
                 Err(error) => {
-                    tracing::info!(
-                        agent = ?agent_type,
-                        %error,
-                        "ACP session could not be resumed; starting a new one",
-                    );
-                    None
+                    return Err(format!("{agent_type:?} ACP session resume failed: {error}"));
                 }
             }
         }
-        None => None,
+        None => (None, false),
     };
     let session = match resumed {
         Some(target) => target,
@@ -3615,10 +3668,15 @@ async fn run_acp_session(
         }
     }
 
-    let full_prompt = if system_context.is_empty() {
-        prompt.to_owned()
+    let prompt_for_session = if resume_failed {
+        fallback_prompt.unwrap_or(prompt)
     } else {
-        format!("{system_context}\n\n{prompt}")
+        prompt
+    };
+    let full_prompt = if system_context.is_empty() {
+        prompt_for_session.to_owned()
+    } else {
+        format!("{system_context}\n\n{prompt_for_session}")
     };
     let (tx, rx) = mpsc::channel::<String>(256);
     let stderr_capture = Arc::new(Mutex::new(Vec::new()));
@@ -3684,7 +3742,11 @@ async fn run_acp_session(
                     AcpSessionEvent::NativeSessionId(conversation_id) => {
                         if let Some(store) = event_store.as_ref() {
                             if let Err(error) = store
-                                .persist(&event_agent_type, &event_work_dir, &conversation_id)
+                                .persist_native_session_id(
+                                    &event_agent_type,
+                                    &event_work_dir,
+                                    &conversation_id,
+                                )
                                 .await
                             {
                                 *forwarder_error.lock().unwrap() = Some(error);
@@ -8171,13 +8233,66 @@ async fn run_copilot_task_worker_preflight_with_timeout(
         .args(args)
         .current_dir(effective_work_dir)
         .stdin(Stdio::null())
-        // `timeout` drops the output future. Ensure that cancellation also
-        // terminates the preflight child instead of leaving a CLI process alive.
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        // Preserve cancellation safety if the enclosing task is dropped.
         .kill_on_drop(true);
-    match tokio::time::timeout(timeout, command.output()).await {
+    let started = tokio::time::Instant::now();
+    let child = command
+        .spawn()
+        .map_err(|_| CopilotTaskWorkerPreflight::SpawnFailed)?;
+    wait_copilot_preflight_child_with_timeout(child, timeout.saturating_sub(started.elapsed()))
+        .await
+}
+
+async fn wait_copilot_preflight_child_with_timeout(
+    mut child: tokio::process::Child,
+    timeout: Duration,
+) -> Result<std::process::Output, CopilotTaskWorkerPreflight> {
+    use tokio::io::AsyncReadExt;
+
+    let mut stdout = child.stdout.take();
+    let mut stderr = child.stderr.take();
+    // Keep ownership of the child outside the timed future. Merely dropping
+    // wait_with_output requests a kill, but does not await process collection.
+    let captured = {
+        let output = async {
+            let read_stdout = async {
+                let mut bytes = Vec::new();
+                if let Some(pipe) = stdout.as_mut() {
+                    pipe.read_to_end(&mut bytes).await?;
+                }
+                Ok::<_, std::io::Error>(bytes)
+            };
+            let read_stderr = async {
+                let mut bytes = Vec::new();
+                if let Some(pipe) = stderr.as_mut() {
+                    pipe.read_to_end(&mut bytes).await?;
+                }
+                Ok::<_, std::io::Error>(bytes)
+            };
+            let (status, stdout, stderr) =
+                tokio::try_join!(child.wait(), read_stdout, read_stderr)?;
+            Ok::<_, std::io::Error>(std::process::Output {
+                status,
+                stdout,
+                stderr,
+            })
+        };
+        tokio::time::timeout(timeout, output).await
+    };
+    match captured {
         Ok(Ok(output)) => Ok(output),
-        Ok(Err(_)) => Err(CopilotTaskWorkerPreflight::SpawnFailed),
-        Err(_) => Err(CopilotTaskWorkerPreflight::TimedOut),
+        Ok(Err(_)) => {
+            let _ = child.kill().await;
+            Err(CopilotTaskWorkerPreflight::SpawnFailed)
+        }
+        Err(_) => {
+            // kill() also waits/reaps. Return only after the owned process is
+            // collected, without a scheduler-dependent post-timeout sleep.
+            let _ = child.kill().await;
+            Err(CopilotTaskWorkerPreflight::TimedOut)
+        }
     }
 }
 
@@ -8630,29 +8745,16 @@ fn agent_command_with_task_worker_policy(
                 OutputMode::Text,
             )
         }
-        AgentType::Ollama => {
-            // Ollama: local LLM inference via `ollama run <model> <prompt>`
-            let model = model_flag.unwrap_or("qwen3:8b");
-            let full_prompt = if mcp_context.is_empty() {
-                prompt.into()
-            } else {
-                format!("{}\n\n{}", mcp_context, prompt)
-            };
-            let args = vec![
-                "run".into(),
-                "--nowordwrap".into(),
-                model.into(),
-                full_prompt,
-            ];
-            (
-                "ollama",
-                None,
-                args,
-                "OLLAMA_HOST",
-                StderrMode::StdoutOnly,
-                OutputMode::Text,
-            )
-        }
+        // The production caller already returned through the HTTP path.
+        // Do not retain a second inference command or an embedded model here.
+        AgentType::Ollama => (
+            "echo",
+            None,
+            vec!["Ollama runs over HTTP, not as a CLI process".into()],
+            "NONE",
+            StderrMode::Merge,
+            OutputMode::Text,
+        ),
         // Unreachable in practice: `start_agent_with_config` returns via the
         // HTTP path before building a command line. Kept explicit (rather than
         // folded into a catch-all) so a future CLI-mode LiteLLM has to make a
@@ -9831,13 +9933,25 @@ mod acp_resume_tests {
         WaitForCancel,
     }
 
+    #[derive(Clone, Copy)]
+    enum ResumeOutcome {
+        Ok,
+        Missing,
+        CapabilityUnavailable,
+        Auth,
+        Transport,
+        Timeout,
+    }
+
     struct RunnerTransport {
-        resume_ok: bool,
+        agent: AcpAgent,
+        resume_outcome: ResumeOutcome,
         prompt_outcome: PromptOutcome,
         native_session_id: Option<String>,
         created: AtomicUsize,
         resumed: AtomicUsize,
         cancelled: AtomicUsize,
+        prompts: Mutex<Vec<String>>,
     }
 
     #[async_trait::async_trait]
@@ -9859,7 +9973,7 @@ mod acp_resume_tests {
         }
         async fn create_session(&self) -> Result<AcpSessionTarget, AcpError> {
             self.created.fetch_add(1, Ordering::SeqCst);
-            AcpSessionTarget::new(AcpAgent::OpenCode, "fresh-session")
+            AcpSessionTarget::new(self.agent, "fresh-session")
         }
         async fn config_options(&self) -> Vec<AcpConfigOption> {
             Vec::new()
@@ -9874,18 +9988,24 @@ mod acp_resume_tests {
         }
         async fn resume_session(&self, _: &AcpSessionTarget) -> Result<(), AcpError> {
             self.resumed.fetch_add(1, Ordering::SeqCst);
-            if self.resume_ok {
-                Ok(())
-            } else {
-                Err(AcpError::Transport("session not found".into()))
+            match self.resume_outcome {
+                ResumeOutcome::Ok => Ok(()),
+                ResumeOutcome::Missing => Err(AcpError::SessionNotFound),
+                ResumeOutcome::CapabilityUnavailable => Err(AcpError::CapabilityUnavailable {
+                    capability: AcpCapability::Resume,
+                }),
+                ResumeOutcome::Auth => Err(AcpError::Transport("authentication refused".into())),
+                ResumeOutcome::Transport => Err(AcpError::Transport("network unavailable".into())),
+                ResumeOutcome::Timeout => Err(AcpError::Timeout("session/resume".into())),
             }
         }
         async fn prompt(
             &self,
             _: &AcpSessionTarget,
-            _: &str,
+            prompt: &str,
             events: tokio::sync::mpsc::Sender<AcpSessionEvent>,
         ) -> Result<(), AcpError> {
+            self.prompts.lock().unwrap().push(prompt.to_owned());
             match &self.prompt_outcome {
                 PromptOutcome::Complete => {
                     events
@@ -9927,14 +10047,19 @@ mod acp_resume_tests {
         }
     }
 
-    fn transport(resume_ok: bool, prompt_outcome: PromptOutcome) -> Arc<RunnerTransport> {
+    fn transport(
+        resume_outcome: ResumeOutcome,
+        prompt_outcome: PromptOutcome,
+    ) -> Arc<RunnerTransport> {
         Arc::new(RunnerTransport {
-            resume_ok,
+            agent: AcpAgent::OpenCode,
+            resume_outcome,
             prompt_outcome,
             native_session_id: None,
             created: AtomicUsize::new(0),
             resumed: AtomicUsize::new(0),
             cancelled: AtomicUsize::new(0),
+            prompts: Mutex::new(Vec::new()),
         })
     }
 
@@ -9944,6 +10069,7 @@ mod acp_resume_tests {
         resume_id: Option<&str>,
         parent_cancel: Option<&tokio_util::sync::CancellationToken>,
         session_store: Option<AcpSessionStore>,
+        fallback_prompt: Option<&str>,
     ) -> AgentProcess {
         run_acp_session(
             AcpSessionRequest {
@@ -9957,6 +10083,7 @@ mod acp_resume_tests {
                 discussion_id: None,
                 resume_id,
                 session_store,
+                fallback_prompt,
             },
             transport,
         )
@@ -9972,6 +10099,73 @@ mod acp_resume_tests {
         output
     }
 
+    #[tokio::test]
+    #[serial_test::serial(acp_adapter_env_toggle)]
+    async fn adapted_acp_start_passes_the_full_prompt_to_safe_resume_fallback() {
+        struct RestoreAdapters([(&'static str, Option<std::ffi::OsString>); 2]);
+        impl Drop for RestoreAdapters {
+            fn drop(&mut self) {
+                for (name, previous) in &self.0 {
+                    if let Some(value) = previous {
+                        std::env::set_var(name, value);
+                    } else {
+                        std::env::remove_var(name);
+                    }
+                }
+            }
+        }
+        let restore = RestoreAdapters([
+            (
+                "KRONN_ACP_ADAPTER_CLAUDE",
+                std::env::var_os("KRONN_ACP_ADAPTER_CLAUDE"),
+            ),
+            (
+                "KRONN_ACP_ADAPTER_CODEX",
+                std::env::var_os("KRONN_ACP_ADAPTER_CODEX"),
+            ),
+        ]);
+        for (name, _) in &restore.0 {
+            std::env::set_var(name, "1");
+        }
+        let project = tempfile::tempdir().unwrap();
+        let tokens = TokensConfig {
+            anthropic: None,
+            openai: None,
+            google: None,
+            keys: vec![],
+            disabled_overrides: vec![],
+        };
+        for agent in [AgentType::ClaudeCode, AgentType::Codex] {
+            for missing in [ResumeOutcome::Missing, ResumeOutcome::CapabilityUnavailable] {
+                let mut fixture = transport(missing, PromptOutcome::Complete);
+                Arc::get_mut(&mut fixture).unwrap().agent = crate::acp::acp_agent(&agent).unwrap();
+                let mut process = start_agent_with_config(AgentStartConfig {
+                    cli_resume_id: Some("expired-adapter-session"),
+                    native_acp_full_prompt: Some(
+                        "full retained conversation including all earlier input",
+                    ),
+                    test_acp_transport: Some(fixture.clone()),
+                    ..AgentStartConfig::new(
+                        &agent,
+                        project.path().to_str().unwrap(),
+                        "unseen-turn-only",
+                        &tokens,
+                    )
+                })
+                .await
+                .unwrap();
+                collect_output(&mut process).await;
+                assert!(process.child.wait().await.unwrap().success());
+                assert_eq!(fixture.created.load(Ordering::SeqCst), 1);
+                assert_eq!(fixture.resumed.load(Ordering::SeqCst), 1);
+                let prompts = fixture.prompts.lock().unwrap();
+                assert_eq!(prompts.len(), 1, "no duplicate provider prompt");
+                assert!(prompts[0].ends_with("full retained conversation including all earlier input"),
+                    "the real adapted start branch must not create a fresh session with only a delta");
+            }
+        }
+    }
+
     #[test]
     fn a_native_acp_agent_gets_a_durable_session_like_the_adapted_ones() {
         // Without this, OpenCode started a stranger on every turn while Codex
@@ -9985,10 +10179,120 @@ mod acp_resume_tests {
     }
 
     #[tokio::test]
+    async fn cli_print_checkpoint_requires_the_same_turn_store_and_is_retired_before_init() {
+        use crate::db::acp_runtime_sessions;
+        let db = Arc::new(crate::db::Database::open_in_memory().unwrap());
+        db.with_conn(|conn| {
+            conn.execute("INSERT INTO discussions (id, title, agent, created_at, updated_at) VALUES ('print-turn', 'Print turn', 'ClaudeCode', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')", [])?;
+            Ok(())
+        }).await.unwrap();
+        let scope = Path::new("/fixture/print-project");
+        let agent = AgentType::ClaudeCode;
+        let first = AcpSessionStore::new(db.clone(), "print-turn");
+        first.prepare_cli_print_turn(&agent, scope).await.unwrap();
+        first
+            .persist_cli_print(&agent, scope, "print-session")
+            .await
+            .unwrap();
+        let foreign = AcpSessionStore::new(db.clone(), "print-turn")
+            .completion_checkpoint(&agent, scope, true, "input-1", "output-1")
+            .unwrap();
+        assert!(!db
+            .with_conn(move |conn| acp_runtime_sessions::complete_turn(conn, &foreign))
+            .await
+            .unwrap());
+        let proof = first
+            .clone()
+            .completion_checkpoint(&agent, scope, true, "input-1", "output-1")
+            .unwrap();
+        assert!(db
+            .with_conn(move |conn| acp_runtime_sessions::complete_turn(conn, &proof))
+            .await
+            .unwrap());
+        assert_eq!(
+            first
+                .load_completed_checkpoint(&agent, scope, true)
+                .await
+                .unwrap()
+                .unwrap()
+                .conversation_id,
+            "print-session"
+        );
+
+        let adapter = AcpSessionStore::new(db.clone(), "print-turn");
+        adapter
+            .persist(&agent, scope, "adapter-session")
+            .await
+            .unwrap();
+        let adapter_proof = adapter
+            .completion_checkpoint(&agent, scope, false, "adapter-input", "adapter-output")
+            .unwrap();
+        assert!(db
+            .with_conn(move |conn| acp_runtime_sessions::complete_turn(conn, &adapter_proof))
+            .await
+            .unwrap());
+        let next = AcpSessionStore::new(db.clone(), "print-turn");
+        next.prepare_cli_print_turn(&agent, scope).await.unwrap();
+        assert!(
+            next.load_completed_checkpoint(&agent, scope, true)
+                .await
+                .unwrap()
+                .is_none(),
+            "crash before init must not leave the old input frontier resumable"
+        );
+        assert_eq!(
+            next.load_completed_checkpoint(&agent, scope, false)
+                .await
+                .unwrap()
+                .unwrap()
+                .conversation_id,
+            "adapter-session",
+            "the direct CLI cannot retire the adapter runtime's checkpoint"
+        );
+        next.persist_cli_print(&agent, scope, "print-session")
+            .await
+            .unwrap();
+        // A repeated identity notification must keep this turn's ownership.
+        next.clone()
+            .persist_cli_print(&agent, scope, "print-session")
+            .await
+            .unwrap();
+        let next_proof = next
+            .completion_checkpoint(&agent, scope, true, "input-2", "output-2")
+            .unwrap();
+        assert!(db
+            .with_conn(move |conn| acp_runtime_sessions::complete_turn(conn, &next_proof))
+            .await
+            .unwrap());
+        assert_eq!(
+            next.load_completed_checkpoint(&agent, scope, true)
+                .await
+                .unwrap()
+                .unwrap()
+                .output_message_id,
+            "output-2"
+        );
+
+        db.with_conn(|conn| { conn.execute_batch("CREATE TRIGGER reject_checkpoint_invalidation BEFORE UPDATE ON acp_runtime_sessions BEGIN SELECT RAISE(FAIL, 'fixture cannot invalidate'); END;")?; Ok(()) }).await.unwrap();
+        assert!(AcpSessionStore::new(db, "print-turn")
+            .prepare_cli_print_turn(&agent, scope)
+            .await
+            .unwrap_err()
+            .contains("prepare CLI conversation checkpoint"));
+    }
+
+    #[tokio::test]
     async fn run_acp_session_streams_usage_through_agent_process() {
-        let transport = transport(false, PromptOutcome::Complete);
-        let mut process =
-            run_fixture(transport.clone(), &AgentType::OpenCode, None, None, None).await;
+        let transport = transport(ResumeOutcome::Missing, PromptOutcome::Complete);
+        let mut process = run_fixture(
+            transport.clone(),
+            &AgentType::OpenCode,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
 
         assert_eq!(
             collect_output(&mut process).await,
@@ -10001,11 +10305,12 @@ mod acp_resume_tests {
 
     #[tokio::test]
     async fn run_acp_session_uses_resume_and_keeps_the_existing_fallback() {
-        let resumed = transport(true, PromptOutcome::Complete);
+        let resumed = transport(ResumeOutcome::Ok, PromptOutcome::Complete);
         let mut resumed_process = run_fixture(
             resumed.clone(),
             &AgentType::OpenCode,
             Some("recorded-session"),
+            None,
             None,
             None,
         )
@@ -10020,13 +10325,14 @@ mod acp_resume_tests {
         assert_eq!(resumed.resumed.load(Ordering::SeqCst), 1);
         assert_eq!(resumed.created.load(Ordering::SeqCst), 0);
 
-        let fallback = transport(false, PromptOutcome::Complete);
+        let fallback = transport(ResumeOutcome::Missing, PromptOutcome::Complete);
         let mut fallback_process = run_fixture(
             fallback.clone(),
             &AgentType::OpenCode,
             Some("stale-session"),
             None,
             None,
+            Some("complete history"),
         )
         .await;
         collect_output(&mut fallback_process).await;
@@ -10038,17 +10344,77 @@ mod acp_resume_tests {
             .success());
         assert_eq!(fallback.resumed.load(Ordering::SeqCst), 1);
         assert_eq!(fallback.created.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            fallback.prompts.lock().unwrap().as_slice(),
+            ["complete history"],
+            "a disappeared native session must receive the full prompt, never the delta"
+        );
+
+        let absent = transport(
+            ResumeOutcome::CapabilityUnavailable,
+            PromptOutcome::Complete,
+        );
+        let mut absent_process = run_fixture(
+            absent.clone(),
+            &AgentType::OpenCode,
+            Some("recorded-session"),
+            None,
+            None,
+            Some("complete history"),
+        )
+        .await;
+        collect_output(&mut absent_process).await;
+        assert_eq!(absent.created.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            absent.prompts.lock().unwrap().as_slice(),
+            ["complete history"]
+        );
+    }
+
+    #[tokio::test]
+    async fn ambiguous_resume_failures_never_create_or_prompt_a_replacement_session() {
+        for outcome in [
+            ResumeOutcome::Auth,
+            ResumeOutcome::Transport,
+            ResumeOutcome::Timeout,
+        ] {
+            let transport = transport(outcome, PromptOutcome::Complete);
+            let result = run_acp_session(
+                AcpSessionRequest {
+                    agent_type: &AgentType::OpenCode,
+                    work_dir: Path::new("."),
+                    prompt: "delta only",
+                    system_context: "",
+                    project_path: "",
+                    model_flag: None,
+                    parent_cancel: None,
+                    discussion_id: None,
+                    resume_id: Some("recorded-session"),
+                    session_store: None,
+                    fallback_prompt: Some("complete history"),
+                },
+                transport.clone(),
+            )
+            .await;
+            let Err(error) = result else {
+                panic!("ambiguous resume failures must be surfaced");
+            };
+            assert!(error.contains("ACP session resume failed"));
+            assert_eq!(transport.created.load(Ordering::SeqCst), 0);
+            assert!(transport.prompts.lock().unwrap().is_empty());
+        }
     }
 
     #[tokio::test]
     async fn run_acp_session_cancellation_is_not_reported_as_success() {
-        let transport = transport(false, PromptOutcome::WaitForCancel);
+        let transport = transport(ResumeOutcome::Missing, PromptOutcome::WaitForCancel);
         let cancellation = tokio_util::sync::CancellationToken::new();
         let mut process = run_fixture(
             transport.clone(),
             &AgentType::OpenCode,
             None,
             Some(&cancellation),
+            None,
             None,
         )
         .await;
@@ -10062,13 +10428,13 @@ mod acp_resume_tests {
     #[tokio::test]
     async fn run_acp_session_reports_redacted_prompt_and_persistence_failures() {
         let prompt_failure = transport(
-            false,
+            ResumeOutcome::Missing,
             PromptOutcome::Fail(
                 "prompt exploded: APP_SECRET=fixture-value api_key: fixture-key".into(),
             ),
         );
         let mut prompt_process =
-            run_fixture(prompt_failure, &AgentType::OpenCode, None, None, None).await;
+            run_fixture(prompt_failure, &AgentType::OpenCode, None, None, None, None).await;
         collect_output(&mut prompt_process).await;
         assert!(!prompt_process
             .child
@@ -10088,12 +10454,14 @@ mod acp_resume_tests {
         }));
 
         let persistence_failure = Arc::new(RunnerTransport {
-            resume_ok: false,
+            agent: AcpAgent::OpenCode,
+            resume_outcome: ResumeOutcome::Missing,
             prompt_outcome: PromptOutcome::Complete,
             native_session_id: Some("runtime-session".into()),
             created: AtomicUsize::new(0),
             resumed: AtomicUsize::new(0),
             cancelled: AtomicUsize::new(0),
+            prompts: Mutex::new(Vec::new()),
         });
         let mut process = run_fixture(
             persistence_failure,
@@ -10104,6 +10472,7 @@ mod acp_resume_tests {
                 Arc::new(crate::db::Database::open_in_memory().expect("test database")),
                 "fixture-discussion",
             )),
+            None,
         )
         .await;
         collect_output(&mut process).await;

@@ -549,6 +549,19 @@ pub fn discussion_is_execution_room(conn: &Connection, discussion_id: &str) -> R
     Ok(found.is_some())
 }
 
+/// A worker's durable assignment owns its room even when its CLI is absent,
+/// left, or not polling. Only an explicit execution reassignment changes this
+/// authority; presence must never create a second writer in the worktree.
+pub fn discussion_has_cli_worker(conn: &Connection, discussion_id: &str) -> Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM task_executions
+          WHERE sub_discussion_id = ?1 AND worker_target_kind = 'cli')",
+        [discussion_id],
+        |row| row.get(0),
+    )
+    .map_err(Into::into)
+}
+
 /// Resolve the durable execution that owns a worker room, including any
 /// principal-authored mechanical scope consumed by the HTTP runner.
 pub fn get_execution_for_sub_discussion(
@@ -4488,6 +4501,16 @@ pub fn reassign_execution_worker(
                 dispatch_id,
             )?;
         }
+        // A CLI-owned room cannot have an authorized native obligation. Retire
+        // any legacy pending jobs before changing that owner, or the explicit
+        // switch to native would make old parasitic work runnable again.
+        if execution.worker_target_kind == Some(MessageTargetKind::Cli)
+            || selection.target.kind == MessageTargetKind::Cli
+        {
+            if let Some(child) = execution.sub_discussion_id.as_deref() {
+                crate::db::agent_dispatch::cancel_pending_for_discussion(conn, child)?;
+            }
+        }
         crate::db::worker_offers::cancel_live_offers_for_execution(conn, exec_id)?;
         let now = Utc::now().to_rfc3339();
         // Repair historical rework rows that still point at an already-reviewed attempt.
@@ -4551,6 +4574,19 @@ pub fn reassign_execution_worker(
                 selection.target.connection_id,
             ],
         )?;
+        if execution.worker_target_kind == Some(MessageTargetKind::Cli)
+            && selection.target.kind != MessageTargetKind::Cli
+        {
+            if let Some(child) = execution.sub_discussion_id.as_deref() {
+                // This guarded, audited reassignment explicitly authorizes a
+                // native worker. Release any earlier CLI containment in the
+                // same savepoint, never via an unrelated room toggle.
+                conn.execute(
+                    "UPDATE discussions SET no_agent = 0, updated_at = ?2 WHERE id = ?1",
+                    params![child, now],
+                )?;
+            }
+        }
         conn.execute(
             "INSERT INTO task_execution_assignment_events (\
                  id, task_execution_id, generation, worker_target_kind, worker_cli_session_id, \

@@ -41,23 +41,97 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import urllib.request
 from pathlib import Path
 from unittest import mock
 
 _SCRIPT = Path(__file__).resolve().parent / "disc-introspection-mcp.py"
 
 
-def _load_module():
+# Every loaded module points here instead of `~/.config/kronn`, for the whole
+# test process. Kept alive at module scope so it outlives each `_load_module()`.
+_ISOLATED_BINDING_DIR = tempfile.TemporaryDirectory(prefix="kronn-test-bindings-")
+_AMBIENT_URLOPEN = mock.Mock(
+    side_effect=AssertionError("un-mocked urlopen — patch the transport in this test")
+)
+
+
+def setUpModule():
+    # The bridge has direct urlopen paths as well as its _http wrapper. Record
+    # even swallowed errors so a passing suite cannot hide an ambient request.
+    _AMBIENT_URLOPEN.reset_mock()
+    guard = mock.patch("urllib.request.urlopen", _AMBIENT_URLOPEN)
+    guard.start()
+    unittest.addModuleCleanup(guard.stop)
+
+
+def tearDownModule():
+    unittest.TestCase().assertIs(urllib.request.urlopen, _AMBIENT_URLOPEN)
+    _AMBIENT_URLOPEN.assert_not_called()
+
+
+def _refuse_ambient_http(*args, **kwargs):
+    """Stand-in for `_http` in a module nobody mocked.
+
+    A test that reaches a real backend passes or fails on whatever happens to be
+    running, which is not a test. Failing loudly here says which one forgot to
+    mock, instead of leaving the suite quietly dependent on the machine.
+    """
+    raise AssertionError(
+        f"un-mocked _http{args[:2]} — patch `_http` in this test, "
+        "or the suite depends on an ambient backend"
+    )
+
+
+def _load_module(isolate=True, isolate_http=None, isolate_telemetry=True):
     """Load disc-introspection-mcp.py despite the kebab-case filename.
 
     Standard `import` can't handle the hyphens, so we use importlib's
     file-loader API. Re-loaded fresh in `setUp` so per-process caches
     (`_CURRENT_DISC_META_CACHE`) don't leak between tests.
+
+    `isolate` (the default) redirects the binding directory into a temporary
+    one and disarms un-mocked HTTP, so a test cannot touch the developer's real
+    `~/.config/kronn` or a backend that happens to be up. Tests that exercise
+    binding persistence for real override `_BINDING_DIR` themselves with their
+    own directory — this default is a floor, not a ceiling.
+
+    `isolate_http=False` keeps the real `_http`, for the handful of tests whose
+    subject IS `_http` (they mock the transport underneath it instead). Kept a
+    separate switch so keeping real HTTP never silently un-isolates the binding
+    directory too.
+
+    Wait tests do not collect real provider transcripts. Telemetry tests opt in
+    to the real trigger and mock its thread/collector boundaries explicitly.
     """
     spec = importlib.util.spec_from_file_location("kronn_mcp", _SCRIPT)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    if isolate:
+        module._BINDING_DIR = _ISOLATED_BINDING_DIR.name
+    if isolate_http if isolate_http is not None else isolate:
+        module._http = _refuse_ambient_http
+    if isolate_telemetry:
+        module._maybe_report_telemetry = mock.Mock()
     return module
+
+
+class BridgeHarnessIsolationTests(unittest.TestCase):
+    def test_default_loader_isolates_bindings_http_and_telemetry(self):
+        module = _load_module()
+        self.assertEqual(module._BINDING_DIR, _ISOLATED_BINDING_DIR.name)
+        with self.assertRaisesRegex(AssertionError, "un-mocked _http"):
+            module._http("GET", "/api/disc/workspace")
+        with mock.patch.object(module.threading, "Thread") as thread:
+            module._maybe_report_telemetry()
+        thread.assert_not_called()
+        self.assertIsInstance(module._maybe_report_telemetry, mock.Mock)
+
+    def test_subject_opt_ins_keep_binding_isolation(self):
+        module = _load_module(isolate_http=False, isolate_telemetry=False)
+        self.assertEqual(module._BINDING_DIR, _ISOLATED_BINDING_DIR.name)
+        self.assertIsNot(module._http, _refuse_ambient_http)
+        self.assertNotIsInstance(module._maybe_report_telemetry, mock.Mock)
 
 
 class DiscussionQuestionReadTests(unittest.TestCase):
@@ -4070,7 +4144,10 @@ class DiscCreateRoomTests(unittest.TestCase):
         # Pre-fix, agents silently created the room and never told the
         # user → easy to lose context.
         self.mod._CURRENT_DISC_ID = "disc-original-context"
-        result = self.mod.call_disc_create_room({"title": "New room"})
+        with mock.patch.object(self.mod, "_current_disc_meta", return_value={
+            "id": "disc-original-context", "project_id": None, "agent": "ClaudeCode",
+        }):
+            result = self.mod.call_disc_create_room({"title": "New room"})
         self.assertIn("next_step", result)
         ns = result["next_step"]
         # Hint MUST mention the current binding is preserved (we
@@ -6318,7 +6395,9 @@ class HttpAuthHeaderTests(unittest.TestCase):
     own sidecar (was a silent 401 before the boot injects the token)."""
 
     def setUp(self):
-        self.mod = _load_module()
+        # `_http` is the SUBJECT here, so it must be the real one; the transport
+        # underneath it is mocked instead. The binding directory stays isolated.
+        self.mod = _load_module(isolate_http=False)
 
     def _ok_response(self):
         cm = mock.MagicMock()
@@ -9407,9 +9486,12 @@ class CodexOpenRolloutProbeTests(unittest.TestCase):
     def setUp(self):
         self.mod = _load_module()
         # One fake ancestor, then init.
-        mock.patch.object(self.mod.os, "getppid", return_value=100).start()
-        mock.patch.object(self.mod, "_ppid_of", side_effect=lambda pid: 1).start()
-        self.addCleanup(mock.patch.stopall)
+        for patch in (
+            mock.patch.object(self.mod.os, "getppid", return_value=100),
+            mock.patch.object(self.mod, "_ppid_of", side_effect=lambda pid: 1),
+        ):
+            patch.start()
+            self.addCleanup(patch.stop)
 
     def _probe(self, paths_by_pid, meta):
         with mock.patch.object(
@@ -9466,6 +9548,19 @@ class CodexOpenRolloutProbeTests(unittest.TestCase):
 class DiscussionWorkspaceToolTests(unittest.TestCase):
     def setUp(self):
         self.mod = _load_module()
+        self.mod._agent_type_for_session = lambda: "Codex"
+        self.mod._session_id_for_caller = lambda: "active-joined-session"
+        self.mod._durable_session_id = lambda: "durable-link-only"
+
+    def test_workspace_catalogue_names_active_identity_not_durable_binding(self):
+        for tool in self.mod.TOOLS:
+            if tool["name"] in ("disc_workspace_get", "disc_workspace_set"):
+                identity = tool["inputSchema"]["properties"]["source_session_id"]
+                self.assertIn("active", identity["description"])
+                self.assertNotIn("durable", identity["description"])
+            if tool["name"] == "disc_workspace_get":
+                self.assertIn("active", tool["description"])
+                self.assertNotIn("durable", tool["description"])
 
     def test_tools_are_discoverable_and_dispatched(self):
         names = {tool["name"] for tool in self.mod.TOOLS}
@@ -9485,11 +9580,11 @@ class DiscussionWorkspaceToolTests(unittest.TestCase):
             self.mod.call_disc_workspace_history_lease,
         )
 
-    def test_get_derives_durable_identity(self):
+    def test_get_derives_active_identity(self):
         with mock.patch.object(
             self.mod, "_agent_type_for_session", return_value="Codex"
         ), mock.patch.object(
-            self.mod, "_durable_session_id", return_value="sess-1"
+            self.mod, "_session_id_for_caller", return_value="sess-1"
         ), mock.patch.object(
             self.mod,
             "_http",
@@ -9508,7 +9603,7 @@ class DiscussionWorkspaceToolTests(unittest.TestCase):
         with mock.patch.object(
             self.mod, "_agent_type_for_session", return_value="ClaudeCode"
         ), mock.patch.object(
-            self.mod, "_durable_session_id", return_value="sess-2"
+            self.mod, "_session_id_for_caller", return_value="sess-2"
         ), mock.patch.object(
             self.mod.os, "getcwd", return_value="/tmp/kronn-kt140"
         ), mock.patch.object(
@@ -9546,7 +9641,7 @@ class DiscussionWorkspaceToolTests(unittest.TestCase):
         with mock.patch.object(
             self.mod, "_agent_type_for_session", return_value="Codex"
         ), mock.patch.object(
-            self.mod, "_durable_session_id", return_value="sess-3"
+            self.mod, "_session_id_for_caller", return_value="sess-3"
         ), mock.patch.object(
             self.mod,
             "_http",
@@ -9569,7 +9664,7 @@ class DiscussionWorkspaceToolTests(unittest.TestCase):
         with mock.patch.object(
             self.mod, "_agent_type_for_session", return_value="Codex"
         ), mock.patch.object(
-            self.mod, "_durable_session_id", return_value="sess-rewrite"
+            self.mod, "_session_id_for_caller", return_value="sess-rewrite"
         ), mock.patch.object(
             self.mod,
             "_http",
@@ -9601,7 +9696,7 @@ class DiscussionWorkspaceToolTests(unittest.TestCase):
         with mock.patch.object(
             self.mod, "_agent_type_for_session", return_value="ClaudeCode"
         ), mock.patch.object(
-            self.mod, "_durable_session_id", return_value="sess-release"
+            self.mod, "_session_id_for_caller", return_value="sess-release"
         ), mock.patch.object(
             self.mod,
             "_http",
@@ -9617,7 +9712,7 @@ class DiscussionWorkspaceToolTests(unittest.TestCase):
         with mock.patch.object(
             self.mod, "_agent_type_for_session", return_value="Codex"
         ), mock.patch.object(
-            self.mod, "_durable_session_id", return_value="sess-rewrite"
+            self.mod, "_session_id_for_caller", return_value="sess-rewrite"
         ), mock.patch.object(self.mod, "_http") as http:
             for backup_ref in (None, "refs/heads/main", ""):
                 with self.assertRaisesRegex(RuntimeError, "refs/kronn-backup"):
@@ -9625,6 +9720,82 @@ class DiscussionWorkspaceToolTests(unittest.TestCase):
                         {"action": "acquire", "backup_ref": backup_ref}
                     )
         http.assert_not_called()
+
+    def _workspace_calls(self):
+        return [
+            (self.mod.call_disc_workspace_get, {}),
+            (self.mod.call_disc_workspace_set, {"workspace_path": "/tmp/isolated-worktree"}),
+            (self.mod.call_disc_workspace_history_lease, {
+                "action": "acquire", "backup_ref": "refs/kronn-backup/isolated",
+            }),
+            (self.mod.call_disc_workspace_history_lease, {"action": "release"}),
+        ]
+
+    def test_all_workspace_tools_use_active_identity_after_durable_resume(self):
+        with mock.patch.object(self.mod, "_durable_session_id", return_value="durable-link-only") as durable:
+            for handler, args in self._workspace_calls():
+                with mock.patch.object(self.mod, "_http", return_value={"success": True, "data": {}}) as http:
+                    handler(args)
+                    method, endpoint, *body = http.call_args.args
+                    if method == "GET":
+                        query = self.mod.urllib.parse.parse_qs(self.mod.urllib.parse.urlparse(endpoint).query)
+                        actual = query["source_session_id"][0]
+                    else:
+                        actual = body[0]["source_session_id"]
+                    self.assertEqual(actual, "active-joined-session")
+            durable.assert_not_called()
+
+    def test_foreign_or_durable_identity_overrides_are_refused_without_http(self):
+        for handler, args in self._workspace_calls():
+            for override in [
+                {"source_session_id": "another-cli"},
+                {"source_session_id": "durable-link-only"},
+                {"source_agent": "ClaudeCode"},
+                {"source_agent": ""},
+                {"source_session_id": ""},
+            ]:
+                with mock.patch.object(self.mod, "_http", return_value={"success": True, "data": {}}) as http:
+                    with self.assertRaisesRegex(RuntimeError, "caller.*identity"):
+                        handler({**args, **override})
+                    http.assert_not_called()
+
+    def test_matching_explicit_identity_remains_compatible(self):
+        for handler, args in self._workspace_calls():
+            with mock.patch.object(self.mod, "_http", return_value={"success": True, "data": {"ok": True}}) as http:
+                self.assertEqual(handler({
+                    **args, "source_agent": "Codex", "source_session_id": "active-joined-session",
+                }), {"ok": True})
+                http.assert_called_once()
+
+    def test_missing_active_identity_cannot_be_supplied_by_an_override(self):
+        for agent, active in [(None, "sid"), ("Unknown", "sid"), (" ", "sid"), ("Codex", None), ("Codex", ""), ("Codex", " "), ("Codex", 42)]:
+            for handler, args in self._workspace_calls():
+                with mock.patch.object(self.mod, "_agent_type_for_session", return_value=agent), mock.patch.object(
+                    self.mod, "_session_id_for_caller", return_value=active
+                ), mock.patch.object(self.mod, "_http", return_value={"success": True, "data": {}}) as http:
+                    with self.assertRaisesRegex(RuntimeError, "active CLI identity"):
+                        handler({**args, "source_agent": "Codex", "source_session_id": "claimed-id"})
+                    http.assert_not_called()
+
+    def test_backend_missing_session_is_not_retried_with_durable_or_foreign_identity(self):
+        with mock.patch.object(self.mod, "_http", return_value={
+            "success": False, "error": "joined CLI session not found", "data": None,
+        }) as http:
+            with self.assertRaisesRegex(RuntimeError, "joined CLI session not found"):
+                self.mod.call_disc_workspace_get({})
+            http.assert_called_once()
+            self.assertIn("source_session_id=active-joined-session", http.call_args.args[1])
+
+    def test_two_active_clients_do_not_collapse_into_the_same_durable_link(self):
+        identities = []
+        for active in ("joined-client-one", "joined-client-two"):
+            with mock.patch.object(self.mod, "_session_id_for_caller", return_value=active), mock.patch.object(
+                self.mod, "_http", return_value={"success": True, "data": {}}
+            ) as http:
+                self.mod.call_disc_workspace_get({})
+                query = self.mod.urllib.parse.parse_qs(self.mod.urllib.parse.urlparse(http.call_args.args[1]).query)
+                identities.append(query["source_session_id"][0])
+        self.assertEqual(identities, ["joined-client-one", "joined-client-two"])
 
 
 class RoomReachesTheAgentTests(unittest.TestCase):
@@ -9845,6 +10016,59 @@ class RoomReachesTheAgentTests(unittest.TestCase):
         """Shapes callers already parse are never rewritten to carry a hint."""
         payload = self._call(data=["a", "b"], wait=lambda args: self._peer_turn())
         self.assertEqual(payload, ["a", "b"])
+
+
+class JoinedRoomWorkProtocolTests(unittest.TestCase):
+    """KT-629 — emitted instructions must not strand ready work behind a wait."""
+
+    def setUp(self):
+        self.mod = _load_module()
+        self.mod._CURRENT_DISC_ID = "disc-protocol"
+
+    def assert_work_loop(self, text):
+        self.assertIn("plan_get", text)
+        self.assertIn("disc_append", text)
+        self.assertLess(text.index("plan_get"), text.index("disc_append"))
+        self.assertIn("disc_wait_for_peer({max_total_secs: 20})", text)
+        self.assertIn("no actionable work or execution to follow", text)
+        self.assertIn("task_exec_status", text)
+        for term in (
+            "parent room", "attention_required", "awareness",
+            "reply_to_message_id", "background", "terminal result",
+            "DO NOT start another wait", "interruption",
+            "not an instruction to leave", "durable read cursor",
+        ):
+            with self.subTest(contract=term):
+                self.assertIn(term, text)
+
+    def test_wait_catalogue_distinguishes_active_work_from_idle_listening(self):
+        tool = next(item for item in self.mod.TOOLS
+                    if item["name"] == "disc_wait_for_peer")
+        description = tool["description"]
+        self.assertIn("max_total_secs: 20", description)
+        self.assertIn("idle", description)
+        self.assertIn("terminal result", description)
+        budget = tool["inputSchema"]["properties"]["max_total_secs"]["description"]
+        self.assertIn("20", budget)
+        self.assertIn("work", budget)
+        self.assertIn("idle", budget)
+        self.assertNotIn("Omit it in normal use", budget)
+
+    def test_join_and_wait_manuals_expose_the_complete_work_loop(self):
+        for name in ("disc_join", "disc_wait_for_peer"):
+            with self.subTest(manual=name):
+                manual = self.mod.call_tool_manual({"tool": name})["manual"]
+                self.assert_work_loop(manual)
+
+    def test_initialize_orients_work_before_unbounded_listening(self):
+        response = self.mod._handle({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {},
+        })
+        instructions = response["result"]["instructions"]
+        room = instructions.split("• **Working in a room:**", 1)[1].split("\n• ", 1)[0]
+        self.assert_work_loop(room)
+        self.assertNotIn("never re-delivers", room)
+        self.assertNotIn("a quiet return costs nothing", room)
 
 
 class WaitOutsideLlmLoopTests(unittest.TestCase):
@@ -10406,7 +10630,7 @@ class TelemetryTriggerTests(unittest.TestCase):
     """
 
     def setUp(self):
-        self.mod = _load_module()
+        self.mod = _load_module(isolate_telemetry=False)
         self.mod._TELEMETRY_STATE.clear()
         self.mod._TELEMETRY_STATE.update({"last_run": 0.0, "in_flight": False})
 
@@ -10480,7 +10704,8 @@ class TelemetryTriggerTests(unittest.TestCase):
     def test_a_failing_collection_clears_the_in_flight_flag(self):
         # Otherwise one failure would silence telemetry for the whole session.
         self.mod._TELEMETRY_STATE["in_flight"] = True
-        with mock.patch.object(self.mod, "_http", side_effect=RuntimeError("nope")):
+        with mock.patch.object(self.mod.importlib.util, "spec_from_file_location",
+                               side_effect=RuntimeError("fixture collector unavailable")):
             self.mod._collect_and_report_telemetry("d-1", "cli-1", "claude-code")
         self.assertFalse(self.mod._TELEMETRY_STATE["in_flight"])
 

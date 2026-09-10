@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, type CSSProperties, type ReactNode } from 'react';
-import { config as configApi, agents as agentsApi, usage as usageApi, nvidia as nvidiaApi } from '../../lib/api';
+import { config as configApi, agents as agentsApi, usage as usageApi, nvidia as nvidiaApi, modelCatalogApi } from '../../lib/api';
+import { catalogModelOptions, modelRuntimeTargetId } from '../../lib/modelCatalogSelection';
 import { userError } from '../../lib/userError';
 import { useAsyncGuard } from '../../hooks/useAsyncGuard';
 import { useIsMobile } from '../../hooks/useMediaQuery';
@@ -10,7 +11,7 @@ import { CompressionSection } from './CompressionSection';
 import { ContextHelp } from '../ContextHelp';
 import { SearchableSelect } from '../SearchableSelect';
 import { useApi } from '../../hooks/useApi';
-import type { AgentConfig, AgentDetection, AgentsConfig, AgentType, ModelTiersConfig, UsageReport } from '../../types/generated';
+import type { AgentConfig, AgentDetection, AgentsConfig, AgentType, ModelTier, ModelTiersConfig, UsageReport } from '../../types/generated';
 
 /** Where each agent's config lives, and how many runs it allows by default.
  *  `null` = unlimited: a remote endpoint someone else scales is not this
@@ -90,9 +91,10 @@ interface AgentsSectionProps {
 
 // KT-586 — hoisted so the card can show a read-only tier preview outside the
 // fold and the fold can edit the same values: one source, two readers.
-const AGENT_TIER_KEY: Partial<Record<AgentType, string>> = {
+const AGENT_TIER_KEY: Partial<Record<AgentType, keyof ModelTiersConfig>> = {
               ClaudeCode: 'claude_code',
               Codex: 'codex',
+              OpenCode: 'open_code',
               GeminiCli: 'gemini_cli',
               Kiro: 'kiro',
               Vibe: 'vibe',
@@ -103,51 +105,19 @@ const AGENT_TIER_KEY: Partial<Record<AgentType, string>> = {
               Nvidia: 'nvidia',
 };
 
-const AGENT_TIER_MODELS: Record<string, {
-  options: string[];
-  fallbackEconomy: string | null; fallbackDefault: string | null; fallbackReasoning: string | null;
-  modelsUrl: string;
-}> = {
-  claude_code: {
-    options: ['haiku', 'sonnet', 'fable', 'opus'],
-    fallbackEconomy: 'haiku', fallbackDefault: 'sonnet', fallbackReasoning: 'opus',
-    modelsUrl: 'https://docs.anthropic.com/en/docs/about-claude/models',
-  },
-  codex: {
-    options: [
-      'gpt-5.6-luna', 'gpt-5.6-terra', 'gpt-5.6-sol',
-      'gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini', 'gpt-5-codex-mini',
-    ],
-    fallbackEconomy: 'gpt-5.6-luna', fallbackDefault: null, fallbackReasoning: 'gpt-5.6-sol',
-    modelsUrl: 'https://developers.openai.com/codex/models',
-  },
-  gemini_cli: {
-    options: [
-      'gemini-2.5-flash-lite', 'gemini-2.5-flash',
-      'gemini-3-flash-preview', 'gemini-2.5-pro', 'gemini-3.1-pro-preview',
-    ],
-    fallbackEconomy: 'gemini-2.5-flash', fallbackDefault: null, fallbackReasoning: 'gemini-3.1-pro-preview',
-    modelsUrl: 'https://ai.google.dev/gemini-api/docs/models',
-  },
-  kiro: { options: [], fallbackEconomy: null, fallbackDefault: null, fallbackReasoning: null, modelsUrl: '' },
-  vibe: { options: [], fallbackEconomy: null, fallbackDefault: null, fallbackReasoning: null, modelsUrl: '' },
-  nvidia: {
-    // Filled at runtime from /v1/models (see nvidiaCatalogue).
-    options: [],
-    // No built-in default on purpose: the backend refuses to guess
-    // an id, because a wrong one 404s or hangs.
-    fallbackEconomy: null, fallbackDefault: null, fallbackReasoning: null,
-    modelsUrl: 'https://build.nvidia.com/models',
-  },
-  copilot_cli: {
-    // Copilot's enabled models depend on the account and its
-    // policy. Keep only current CLI identifiers here; an empty
-    // tier lets Copilot choose an account-compatible model.
-    options: ['auto', 'claude-sonnet-4-5', 'claude-sonnet-4', 'gpt-5'],
-    fallbackEconomy: null, fallbackDefault: null, fallbackReasoning: null,
-    modelsUrl: 'https://docs.github.com/en/copilot',
-  },
+const AGENT_MODELS_URL: Partial<Record<keyof ModelTiersConfig, string>> = {
+  claude_code: 'https://docs.anthropic.com/en/docs/about-claude/models',
+  codex: 'https://developers.openai.com/codex/models',
+  gemini_cli: 'https://ai.google.dev/gemini-api/docs/models',
+  nvidia: 'https://build.nvidia.com/models',
+  copilot_cli: 'https://docs.github.com/en/copilot',
 };
+
+function editableTiers(tiers: ModelTiersConfig) {
+  return Object.fromEntries(Object.entries(tiers).map(([key, value]) => [key, {
+    economy: value.economy ?? '', default: value.default ?? '', reasoning: value.reasoning ?? '',
+  }]));
+}
 
 export function AgentsSection({
   agents,
@@ -179,6 +149,23 @@ export function AgentsSection({
     }
   });
   const [tierEditing, setTierEditing] = useState<Record<string, { economy: string; default: string; reasoning: string }>>({});
+  const [savingTiers, setSavingTiers] = useState(false);
+  const catalog = useApi(() => modelCatalogApi.list(), []);
+  const saveModelTier = useAsyncGuard(async (agentKey: keyof ModelTiersConfig, field: ModelTier, value: string) => {
+    setSavingTiers(true);
+    try {
+      // Other cards edit this same document; never replace it from our mount-time snapshot.
+      const current = await configApi.getModelTiers();
+      const next: ModelTiersConfig = { ...current, [agentKey]: { ...current[agentKey], [field]: value || null } };
+      await configApi.setModelTiers(next);
+      setTierEditing(editableTiers(next));
+      toast(t('config.saved'), 'success');
+    } catch {
+      toast(t('config.saveError'), 'error');
+    } finally {
+      setSavingTiers(false);
+    }
+  });
   // KT-337 — NVIDIA's catalogue is fetched, never hardcoded: ~100 ids across 25
   // vendors, and several are listed but not callable by this account. Loaded on
   // demand (one click) rather than on mount, so opening Settings costs nothing.
@@ -448,15 +435,11 @@ export function AgentsSection({
   }, []);
 
   useEffect(() => {
+    let cancelled = false;
     configApi.getModelTiers().then(tiers => {
-      if (tiers) {
-        const editing: Record<string, { economy: string; default: string; reasoning: string }> = {};
-        for (const key of ['claude_code', 'codex', 'gemini_cli', 'kiro', 'vibe', 'copilot_cli', 'ollama', 'lite_llm', 'nvidia'] as const) {
-          editing[key] = { economy: tiers[key]?.economy ?? '', default: tiers[key]?.default ?? '', reasoning: tiers[key]?.reasoning ?? '' };
-        }
-        setTierEditing(editing);
-      }
+      if (tiers && !cancelled) setTierEditing(editableTiers(tiers));
     }).catch(() => {});
+    return () => { cancelled = true; };
   }, []);
 
   // System model-error messages leave a short-lived deep-link target before
@@ -464,7 +447,7 @@ export function AgentsSection({
   // so retry briefly, then focus + animate the exact agent/tier picker rather
   // than dropping the user at the top of a long settings section.
   useEffect(() => {
-    if (Object.keys(tierEditing).length === 0) return;
+    if (Object.keys(tierEditing).length === 0 || catalog.loading) return;
     let target: { agentType?: string; tier?: string } | null = null;
     try {
       target = JSON.parse(sessionStorage.getItem('kronn:model-config-target') ?? 'null');
@@ -490,7 +473,7 @@ export function AgentsSection({
     };
     focusTarget();
     return () => { if (timer) clearTimeout(timer); };
-  }, [tierEditing]);
+  }, [tierEditing, catalog.loading]);
 
   // Synchronous re-entry guard — `setInstalling(...)` is async-rendered,
   // so two fast clicks on the same install button (or two different ones)
@@ -615,13 +598,8 @@ export function AgentsSection({
     const agentKey = AGENT_TIER_KEY[agent.agent_type];
     if (!agentKey) return null;
     const editing = tierEditing[agentKey];
-    const known = AGENT_TIER_MODELS[agentKey];
-    if (!editing || !known) return null;
-    const fallbacks = {
-      economy: known.fallbackEconomy,
-      default: known.fallbackDefault,
-      reasoning: known.fallbackReasoning,
-    } as const;
+    const target = catalog.data?.targets.find(view => view.runtime_target_id === modelRuntimeTargetId(agent.agent_type));
+    if (!editing) return null;
     const icons = { economy: '\u26A1', default: '\uD83C\uDFAF', reasoning: '\uD83E\uDDE0' } as const;
     return (
       <div
@@ -633,7 +611,7 @@ export function AgentsSection({
         {(['economy', 'default', 'reasoning'] as const).map(tier => {
           // The override if there is one, else what the backend falls back to.
           // "Par défaut" alone would hide which model actually runs.
-          const model = editing[tier] || fallbacks[tier] || t('config.defaultModel');
+          const model = editing[tier] || target?.models.find(entry => entry.tier_assignment === tier)?.model_id || t('config.defaultModel');
           return (
             <div key={tier} className="set-ext-api-conn-tier" data-tier={tier}>
               <span className="set-ext-api-conn-tier-label">
@@ -1177,35 +1155,9 @@ export function AgentsSection({
               if (!agentKey) return null;
               const editing = tierEditing[agentKey];
               if (!editing) return null;
-              const knownModels = AGENT_TIER_MODELS;
-              const models = knownModels[agentKey];
-
-              const saveTiers = async (field: 'economy' | 'default' | 'reasoning', value: string) => {
-                const newEditing = { ...tierEditing, [agentKey]: { ...editing, [field]: value } };
-                setTierEditing(newEditing);
-                // `default` is included for EVERY agent — pre-fix it was
-                // omitted from this payload, so any save here silently wiped
-                // the Default-tier override (e.g. the Ollama model picked
-                // via OllamaCard, which writes the same field).
-                const tierOf = (k: string) => ({
-                  economy: newEditing[k]?.economy || null,
-                  default: newEditing[k]?.default || null,
-                  reasoning: newEditing[k]?.reasoning || null,
-                });
-                const newTiers: ModelTiersConfig = {
-                  claude_code: tierOf('claude_code'),
-                  codex: tierOf('codex'),
-                  open_code: tierOf('open_code'),
-                  gemini_cli: tierOf('gemini_cli'),
-                  kiro: tierOf('kiro'),
-                  vibe: tierOf('vibe'),
-                  copilot_cli: tierOf('copilot_cli'),
-                  ollama: tierOf('ollama'),
-                  lite_llm: tierOf('lite_llm'),
-                  nvidia: tierOf('nvidia'),
-                };
-                try { await configApi.setModelTiers(newTiers); toast(t('config.saved'), 'success'); } catch { toast(t('config.saveError'), 'error'); }
-              };
+              const modelsUrl = AGENT_MODELS_URL[agentKey];
+              const target = catalog.data?.targets.find(view => view.runtime_target_id === modelRuntimeTargetId(agent.agent_type));
+              const saveTiers = (field: ModelTier, value: string) => saveModelTier(agentKey, field, value);
 
               // KT-337 — a fetched-catalogue provider needs a free-text field, not a
               // dropdown: the catalogue is long, partly uncallable, and a pasted id
@@ -1260,28 +1212,26 @@ export function AgentsSection({
                 );
               };
 
-              const renderSelect = (field: 'economy' | 'default' | 'reasoning', options: string[], icon: string, iconColor: string, fallback: string | null) => {
+              const renderSelect = (field: ModelTier, icon: string, iconColor: string) => {
                 if (agent.agent_type === 'Nvidia') return renderCatalogueInput(field, icon, iconColor);
-                if (options.length === 0) return (
-                  <span className="text-2xs text-ghost" style={{ padding: '2px 6px' }}>{icon} N/A</span>
-                );
+                const fallback = target?.models.find(model => model.tier_assignment === field);
+                const options = catalogModelOptions(target && catalog.error ? { ...target, stale: true } : target, editing[field], t, modelCostSuffix);
+                const fallbackDetail = fallback?.availability === 'unavailable'
+                  ? ` — ${t('modelCatalog.unavailable')}` : fallback ? modelCostSuffix(fallback.model_id) : '';
+                const clearLabel = `${t('config.defaultModel')}${fallback ? ` (${fallback.model_id}${fallbackDetail})` : ''}`;
                 return (
                   <div className="flex-row gap-2">
                     <span className="text-2xs" style={{ color: iconColor, width: 14 }} title={field}>{icon}</span>
                     <SearchableSelect
                       className="searchable-select--compact set-agent-model-select"
                       value={editing[field]}
-                      options={options.map(model => ({
-                        value: model,
-                        label: model,
-                        keywords: model.replaceAll('/', ' '),
-                        description: modelCostSuffix(model) || undefined,
-                      }))}
+                      options={options}
+                      disabled={savingTiers || catalog.loading}
                       onChange={value => void saveTiers(field, value)}
                       label={`${t('disc.modelTier')} ${field}`}
-                      placeholder={t('config.searchModel')}
-                      emptyLabel={t('config.searchModelEmpty')}
-                      clearLabel={`${t('config.defaultModel')}${fallback ? ` (${fallback}${modelCostSuffix(fallback)})` : ''}`}
+                      placeholder={editing[field] ? t('config.searchModel') : clearLabel}
+                      emptyLabel={t('modelCatalog.empty')}
+                      clearLabel={clearLabel}
                       dataModelTierAgent={agent.agent_type}
                       dataModelTier={field}
                     />
@@ -1298,14 +1248,18 @@ export function AgentsSection({
                         <p>{t('config.modelCostObservedHelp')}</p>
                       </ContextHelp>
                     )}
-                    {models.modelsUrl && (
-                      <a href={models.modelsUrl} target="_blank" rel="noopener noreferrer"
+                    {modelsUrl && (
+                      <a href={modelsUrl} target="_blank" rel="noopener noreferrer"
                         title={t('config.viewModels')}
                       >
                         <ExternalLink size={8} /> {t('config.viewModels')}
                       </a>
                     )}
                   </div>
+                  {catalog.loading && <p className="set-hint" role="status">{t('common.loading')}</p>}
+                  {catalog.error && <p className="set-hint" role="alert">{t('modelCatalog.loadError')} <button type="button" className="set-icon-btn" onClick={catalog.refetch}>{t('modelCatalog.reload')}</button></p>}
+                  {!catalog.loading && !catalog.error && !target?.models.length && <p className="set-hint">{t('modelCatalog.empty')}</p>}
+                  {target?.stale && <p className="set-hint">{t('modelCatalog.stale')}{target.last_error_reason ? ` — ${target.last_error_reason}` : ''}</p>}
                   <div className="flex-row gap-5">
                     {agent.agent_type === 'Nvidia' && (
                       <>
@@ -1323,9 +1277,9 @@ export function AgentsSection({
                         </button>
                       </>
                     )}
-                    {renderSelect('economy', models.options, '\u26A1', 'rgba(var(--kr-success-rgb), 0.6)', models.fallbackEconomy)}
-                    {renderSelect('default', models.options, '\uD83C\uDFAF', 'rgba(var(--kr-info-rgb), 0.6)', models.fallbackDefault)}
-                    {renderSelect('reasoning', models.options, '\uD83E\uDDE0', 'rgba(var(--kr-warning-amber-rgb), 0.6)', models.fallbackReasoning)}
+                    {renderSelect('economy', '\u26A1', 'rgba(var(--kr-success-rgb), 0.6)')}
+                    {renderSelect('default', '\uD83C\uDFAF', 'rgba(var(--kr-info-rgb), 0.6)')}
+                    {renderSelect('reasoning', '\uD83E\uDDE0', 'rgba(var(--kr-warning-amber-rgb), 0.6)')}
                   </div>
                 </div>
               );
@@ -1713,7 +1667,7 @@ export function AgentsSection({
 
         {/* After the modes: a catalogue is what the modes draw from, not a
             fourth way of reaching a model. */}
-        <ModelCatalogSection />
+        <ModelCatalogSection onCatalogChanged={catalog.refetch} />
 
         {/* Best practices links */}
         <div className="set-best-practices">

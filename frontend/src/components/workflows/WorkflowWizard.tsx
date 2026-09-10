@@ -1,14 +1,16 @@
 import { useState, useRef, useEffect } from 'react';
 import { buildBlankStep, jsonPathToTarget } from '../../lib/workflowUiUtils';
 import { useT } from '../../lib/I18nContext';
-import { workflows as workflowsApi, pages as pagesApi, skills as skillsApi, profiles as profilesApi, directives as directivesApi, quickPrompts as quickPromptsApi, quickApis as quickApisApi, quickExecs as quickExecsApi, mcps as mcpsApi, config as configApi, ollama as ollamaApi } from '../../lib/api';
+import { workflows as workflowsApi, pages as pagesApi, skills as skillsApi, profiles as profilesApi, directives as directivesApi, quickPrompts as quickPromptsApi, quickApis as quickApisApi, quickExecs as quickExecsApi, mcps as mcpsApi, config as configApi } from '../../lib/api';
 import { ApiCallStepCard, JsonTreeViewer, type ApiPluginOption } from './ApiCallStepCard';
 import { STARTER_TEMPLATES, cloneTemplateSteps } from '../../lib/workflow-templates/chartbeat-top5';
 import { buildV07Presets, type ChildWorkflowPreset } from '../../lib/workflow-templates/v07-presets';
 import { WorkflowQuickStartPicker } from './WorkflowQuickStartPicker';
 import { CopyIdPill } from '../CopyIdPill';
-import { AgentSwitchPicker } from '../AgentSwitchPicker';
+import { AgentSwitchPicker, type AgentSwitchTarget } from '../AgentSwitchPicker';
+import { agentSettingsForSelection } from '../../lib/agentSelection';
 import { SearchableSelect } from '../SearchableSelect';
+import { ModelCatalogPicker } from '../ModelCatalogPicker';
 import { MarkdownEditor } from '../MarkdownComposerTools';
 import { buildQuickStartCatalogue, type UnifiedQuickStart } from '../../lib/workflow-quick-start';
 import { parseRepoUrl, buildOldestIssueRequest, inferTrackerSlugFromRepoUrl } from '../../lib/constants';
@@ -227,6 +229,7 @@ export interface WorkflowWizardProps {
   onDone: () => void;
   onCancel: () => void;
   installedAgentTypes?: AgentType[];
+  agentChoices?: AgentSwitchTarget[];
   agentAccess?: AgentsConfig;
   /** Backend "agent output language" (Settings → Output language). Distinct from
    *  the UI locale (`useT()`): UI labels follow the user's interface language,
@@ -250,24 +253,27 @@ export interface WorkflowWizardProps {
   onNavigatePage?: (pageId: string) => void;
 }
 
-export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, installedAgentTypes, agentAccess, configLanguage, initialPresetId, initialProjectId, initialStepId, focusedStepOnly = false, onNavigatePage }: WorkflowWizardProps) {
+export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, installedAgentTypes, agentChoices, agentAccess, configLanguage, initialPresetId, initialProjectId, initialStepId, focusedStepOnly = false, onNavigatePage }: WorkflowWizardProps) {
   const { t } = useT();
   const availableAgents = (installedAgentTypes && installedAgentTypes.length > 0
     ? installedAgentTypes
     : ALL_AGENT_TYPES
   ).map(at => ({ type: at, label: AGENT_LABELS[at] ?? at }));
-  const renderAgentTierPicker = (step: WorkflowStep, index: number, compact = false) => (
+  const renderAgentTierPicker = (step: WorkflowStep, onUpdate: (patch: Partial<WorkflowStep>) => void, compact = false) => (
     <AgentSwitchPicker
       currentAgent={step.agent}
       availableAgents={availableAgents.map(agent => agent.type)}
+      availableTargets={agentChoices?.length ? agentChoices : undefined}
       currentTier={step.agent_settings?.tier ?? 'default'}
-      onSelectionChange={async (agent, tier) => {
+      currentModel={step.agent_settings?.model}
+      currentConnectionId={step.agent_settings?.connection_id}
+      onTargetSelectionChange={async (target, tier) => {
         // A concrete expert model has higher runtime priority than the tier.
         // Clear it when the user explicitly selects an agent × mode pair so
         // the visible choice is guaranteed to be the one that executes.
-        updateStep(index, {
-          agent,
-          agent_settings: { ...step.agent_settings, model: null, tier },
+        onUpdate({
+          agent: target.agent,
+          agent_settings: agentSettingsForSelection(step.agent_settings, tier, target.connectionId),
         });
       }}
       tierLabels={{
@@ -305,15 +311,6 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
   const [expandedStepTypePicker, setExpandedStepTypePicker] = useState<number | null>(null);
   const [name, setName] = useState(editWorkflow?.name ?? '');
   const [projectId, setProjectId] = useState<string>(editWorkflow?.project_id ?? '');
-  // Pulled Ollama models → suggestions for the per-step model picker.
-  // Best-effort: stays empty when Ollama is offline, so the model field
-  // simply remains a free-text input (any tag / remote host still typable).
-  const [ollamaModels, setOllamaModels] = useState<string[]>([]);
-  useEffect(() => {
-    ollamaApi.models()
-      .then(r => setOllamaModels((r.models ?? []).map(m => m.name)))
-      .catch(() => {});
-  }, []);
   const [triggerType, setTriggerType] = useState<'Cron' | 'Tracker' | 'Manual'>(initTrigger?.type ?? 'Manual');
   const [cronEvery, setCronEvery] = useState(initCron?.every ?? 5);
   const [cronUnit, setCronUnit] = useState<'minutes' | 'hours' | 'days' | 'weeks' | 'months'>(initCron?.unit ?? 'minutes');
@@ -1433,7 +1430,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
             {t('wiz.agentAndTierLabel')} <HelpTip hint={t('wiz.helpAgent')} />
           </label>
           <div className="wf-wizard-agent-tier mb-6">
-            {steps[0] && renderAgentTierPicker(steps[0], 0)}
+            {steps[0] && renderAgentTierPicker(steps[0], patch => updateStep(0, patch))}
           </div>
 
           <label className="wf-label">
@@ -2089,7 +2086,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                 {activeStepType === 'Agent' && (
                   <div className="wf-step-agent-routing">
                     <label className="wf-label">{t('wiz.agentAndTierLabel')}</label>
-                    {renderAgentTierPicker(step, i)}
+                    {renderAgentTierPicker(step, patch => updateStep(i, patch))}
                   </div>
                 )}
                 {step.step_type?.type !== 'BatchQuickPrompt' && checkAgentRestricted(agentAccess, step.agent) && (
@@ -4131,38 +4128,22 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                         <label className="wf-label">{t('wiz.agentSettings')}</label>
                         <div className="flex-row gap-3">
                           <div className="flex-1">
-                            <label className="wf-label text-2xs">{t('wiz.model')}</label>
-                            <input
-                              className="wf-input"
+                            <ModelCatalogPicker
+                              agent={step.agent}
+                              connectionId={step.agent_settings?.connection_id}
+                              tier={step.agent_settings?.tier ?? 'default'}
+                              modelTiers={agentAccess?.model_tiers}
+                              targetModelTiers={agentChoices?.find(target => target.agent === step.agent
+                                && (target.connectionId ?? null) === (step.agent_settings?.connection_id ?? null))?.modelTiers}
                               value={step.agent_settings?.model ?? ''}
-                              onChange={e => updateStep(i, {
-                                agent_settings: { ...step.agent_settings, model: e.target.value || null }
+                              onChange={model => updateStep(i, {
+                                agent_settings: { ...step.agent_settings, model: model || null }
                               })}
-                              placeholder={step.agent === 'Ollama' ? 'ex: qwen3:8b' : 'ex: o3'}
-                              list={step.agent === 'Ollama' ? `ollama-models-${i}` : undefined}
-                              aria-label={t('wiz.model')}
+                              reasoningEffort={step.agent_settings?.reasoning_effort ?? ''}
+                              onReasoningChange={mode => updateStep(i, {
+                                agent_settings: { ...step.agent_settings, reasoning_effort: mode || null }
+                              })}
                             />
-                            {step.agent === 'Ollama' && ollamaModels.length > 0 && (
-                              <datalist id={`ollama-models-${i}`}>
-                                {ollamaModels.map(m => <option key={m} value={m} />)}
-                              </datalist>
-                            )}
-                          </div>
-                          <div className="flex-1">
-                            <label className="wf-label text-2xs">{t('wiz.reasoningEffort')}</label>
-                            <select
-                              className="wf-select"
-                              value={step.agent_settings?.reasoning_effort ?? ''}
-                              aria-label={t('wiz.reasoningEffort')}
-                              onChange={e => updateStep(i, {
-                                agent_settings: { ...step.agent_settings, reasoning_effort: e.target.value || null }
-                              })}
-                            >
-                              <option value="">default</option>
-                              <option value="low">low</option>
-                              <option value="medium">medium</option>
-                              <option value="high">high</option>
-                            </select>
                           </div>
                           <div className="flex-1">
                             <label className="wf-label text-2xs">{t('wiz.maxTokens')}</label>
@@ -4211,33 +4192,38 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                             <div className="flex-row gap-3">
                               <div className="flex-1">
                                 <label className="wf-label text-2xs">{t('wiz.multiReview.reviewer')}</label>
-                                <select
-                                  className="wf-select"
-                                  value={multiAgentReview.reviewer_agent}
-                                  aria-label={t('wiz.multiReview.reviewer')}
-                                  onChange={e => updateStep(i, {
-                                    multi_agent_review: { ...multiAgentReview, reviewer_agent: e.target.value as AgentType },
-                                  })}
-                                >
-                                  {availableAgents.map(a => (
-                                    <option key={a.type} value={a.type}>{a.label}</option>
-                                  ))}
-                                </select>
-                              </div>
-                              <div className="flex-1">
-                                <label className="wf-label text-2xs">{t('wiz.multiReview.tier')}</label>
-                                <select
-                                  className="wf-select"
-                                  value={multiAgentReview.reviewer_tier ?? ''}
-                                  aria-label={t('wiz.multiReview.tier')}
-                                  onChange={e => updateStep(i, {
-                                    multi_agent_review: { ...multiAgentReview, reviewer_tier: (e.target.value || null) as typeof multiAgentReview.reviewer_tier },
-                                  })}
-                                >
-                                  <option value="">default</option>
-                                  <option value="economy">economy</option>
-                                  <option value="reasoning">reasoning</option>
-                                </select>
+                                <AgentSwitchPicker
+                                  currentAgent={multiAgentReview.reviewer_agent}
+                                  availableAgents={availableAgents.map(agent => agent.type)}
+                                  currentTier={multiAgentReview.reviewer_tier}
+                                  onTargetSelectionChange={async (target, tier) => {
+                                    updateStep(i, {
+                                      multi_agent_review: {
+                                        ...multiAgentReview,
+                                        reviewer_agent: target.agent,
+                                        reviewer_tier: tier,
+                                      },
+                                    });
+                                  }}
+                                  onDefaultTierSelection={async target => {
+                                    updateStep(i, {
+                                      multi_agent_review: {
+                                        ...multiAgentReview,
+                                        reviewer_agent: target.agent,
+                                        reviewer_tier: null,
+                                      },
+                                    });
+                                  }}
+                                  tierLabels={{
+                                    economy: t('disc.tier.economy'),
+                                    default: t('disc.tier.default'),
+                                    reasoning: t('disc.tier.reasoning'),
+                                  }}
+                                  modelTiers={agentAccess?.model_tiers}
+                                  defaultModelLabel={t('config.defaultModel')}
+                                  title={t('wiz.multiReview.reviewer')}
+                                  ariaLabel={t('wiz.multiReview.reviewer')}
+                                />
                               </div>
                               <div style={{ width: 90 }}>
                                 <label className="wf-label text-2xs">{t('wiz.multiReview.rounds')}</label>
@@ -4567,17 +4553,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                   {rbKind === 'Agent' && (
                     <>
                       <div className="flex-row gap-2 mb-2">
-                        <select
-                          className="wf-select text-sm"
-                          style={{ width: 180 }}
-                          value={rb.agent}
-                          onChange={e => updateRb({ agent: e.target.value as AgentType })}
-                          aria-label={t('wiz.agentLabel')}
-                        >
-                          {ALL_AGENT_TYPES.map(a => (
-                            <option key={a} value={a}>{AGENT_LABELS[a] ?? a}</option>
-                          ))}
-                        </select>
+                        {renderAgentTierPicker(rb, updateRb)}
                       </div>
                       <div className="wf-markdown-prompt-field">
                         <MarkdownEditor content={rb.prompt_template}>

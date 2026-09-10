@@ -44,7 +44,7 @@ describe('constants', () => {
   });
 
   describe('model tier display', () => {
-    it('uses configured models before built-in and provider defaults', () => {
+    it('preserves configured models and does not invent a model without runtime data', () => {
       const modelTiers = {
         claude_code: {},
         codex: { reasoning: 'gpt-company-review' },
@@ -61,7 +61,11 @@ describe('constants', () => {
       expect(modelForAgentTier('Codex', 'reasoning', modelTiers, 'Provider default'))
         .toBe('gpt-company-review');
       expect(modelForAgentTier('ClaudeCode', 'economy', null, 'Provider default'))
-        .toBe('haiku');
+        .toBe('Provider default');
+      expect(modelForAgentTier('Codex', 'reasoning', null, 'Provider default'))
+        .toBe('Provider default');
+      expect(modelForAgentTier('GeminiCli', 'reasoning', null, 'Provider default'))
+        .toBe('Provider default');
       expect(modelForAgentTier('LiteLlm', 'default', null, 'Provider default'))
         .toBe('Provider default');
     });
@@ -72,6 +76,19 @@ describe('constants', () => {
         default: '🎯',
         reasoning: '🧠',
       });
+    });
+
+    it('uses an explicit HTTP default for an unset tier, but not for a CLI tier', () => {
+      const configured = {
+        claude_code: { default: 'cli-default' }, codex: {}, open_code: {}, gemini_cli: {},
+        kiro: {}, vibe: {}, copilot_cli: {}, ollama: { default: 'local-model' },
+        lite_llm: { default: 'proxy-model', reasoning: 'proxy-review' }, nvidia: { default: 'hosted-model' },
+      };
+      expect(modelForAgentTier('Ollama', 'economy', configured, 'Unknown')).toBe('local-model');
+      expect(modelForAgentTier('LiteLlm', 'economy', configured, 'Unknown')).toBe('proxy-model');
+      expect(modelForAgentTier('LiteLlm', 'reasoning', configured, 'Unknown')).toBe('proxy-review');
+      expect(modelForAgentTier('Nvidia', 'reasoning', configured, 'Unknown')).toBe('hosted-model');
+      expect(modelForAgentTier('ClaudeCode', 'reasoning', configured, 'Unknown')).toBe('Unknown');
     });
   });
 

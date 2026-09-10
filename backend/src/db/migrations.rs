@@ -655,6 +655,11 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "171_cli_worker_bindings",
         include_str!("sql/171_cli_worker_bindings.sql"),
     ),
+    // 172 belongs to the independently developed important-message contract.
+    (
+        "173_acp_completed_turn_checkpoint",
+        include_str!("sql/173_acp_completed_turn_checkpoint.sql"),
+    ),
 ];
 
 /// Apply one migration inside the caller-owned transaction.

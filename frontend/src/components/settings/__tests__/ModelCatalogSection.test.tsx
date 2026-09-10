@@ -105,7 +105,10 @@ describe('ModelCatalogSection', () => {
     render(<ModelCatalogSection />);
     await findSourceChip('Router one');
     fireEvent.click(screen.getByText('modelCatalog.add'));
-    fireEvent.change(screen.getByLabelText('modelCatalog.target'), { target: { value: 'http:two' } });
+    const target = screen.getByRole('combobox', { name: 'modelCatalog.target' });
+    fireEvent.focus(target);
+    fireEvent.change(target, { target: { value: 'Router two' } });
+    fireEvent.click(screen.getByRole('option', { name: 'Router two' }));
     fireEvent.change(screen.getByLabelText('modelCatalog.modelId'), { target: { value: 'new-model' } });
     fireEvent.change(screen.getByLabelText('modelCatalog.displayName'), { target: { value: 'New model' } });
     fireEvent.click(screen.getByText('common.save'));
@@ -114,6 +117,39 @@ describe('ModelCatalogSection', () => {
       runtime_target_id: 'http:two',
       agent_type: 'Custom',
       model_id: 'new-model',
+    })));
+  });
+
+  it('keeps an edited model on its saved target without a replacement selection', async () => {
+    render(<ModelCatalogSection />);
+    await findSourceChip('Router one');
+    fireEvent.click(screen.getByText('Shared two'));
+
+    const target = screen.getByRole('combobox', { name: 'modelCatalog.target' });
+    expect(target).toBeDisabled();
+    expect(target).toHaveValue('Router two');
+  });
+
+  it('does not describe a failed live refresh as a verified catalog and keeps same-label targets distinct', async () => {
+    listMock.mockResolvedValue({ targets: [
+      { ...snapshot.targets[0], runtime_target_id: 'http:one', target_label: 'Shared router', live_refresh_ok: false, stale: false },
+      { ...snapshot.targets[1], runtime_target_id: 'http:two', target_label: 'Shared router', live_refresh_ok: true, stale: false },
+    ] });
+    render(<ModelCatalogSection />);
+    await screen.findByTestId('model-catalog-table');
+    fireEvent.click(screen.getByText('modelCatalog.add'));
+    const target = screen.getByRole('combobox', { name: 'modelCatalog.target' });
+    fireEvent.focus(target);
+    const options = screen.getAllByRole('option', { name: 'Shared router' });
+    expect(options).toHaveLength(2);
+    expect(options[0]).toHaveTextContent('modelCatalog.stale');
+    expect(options[1]).toHaveTextContent('modelCatalog.current');
+    fireEvent.click(options[1]);
+    fireEvent.change(screen.getByLabelText('modelCatalog.modelId'), { target: { value: 'shared' } });
+    fireEvent.change(screen.getByLabelText('modelCatalog.displayName'), { target: { value: 'Shared' } });
+    fireEvent.click(screen.getByText('common.save'));
+    await waitFor(() => expect(createMock).toHaveBeenCalledWith(expect.objectContaining({
+      runtime_target_id: 'http:two', agent_type: 'Custom',
     })));
   });
 

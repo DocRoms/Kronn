@@ -115,6 +115,16 @@ success from a stale `Running` row. When Kronn cannot prove the safe next step,
 the execution becomes interrupted, blocked or escalated with a reason instead
 of silently continuing.
 
+A child assigned to an exact joined CLI is CLI-owned even when that session
+is idle, has left, or has not reconnected after a restart. Its durable execution
+assignment disables the native responder: an untargeted worker message cannot
+silently launch a second agent into the same worktree. Legacy queued native
+jobs are retired without another provider attempt, and ownership is checked
+again immediately before provider start. The room toggle cannot override this
+assignment. Reassign the execution explicitly to a native worker to release
+CLI-only containment; this cancels stale pending jobs before enabling the new
+worker. Ordinary rooms retain their existing native-agent toggle.
+
 ## Review and integrate
 
 When the worker delivers, the execution enters **Awaiting review**. Inspect the
