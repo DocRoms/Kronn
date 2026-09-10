@@ -29,6 +29,45 @@ They mock the API and do not mutate provider accounts or user settings.
 
 ## Shared picker identity and provenance
 
+### One-time catalogue bootstrap
+
+Historical model IDs are initial migration data, not normal runtime fallbacks.
+On an unbootstrapped database, an old default no longer claims a tier explicitly
+configured to another model. Configured Ollama tiers are imported alongside
+the CLI tiers. Seed insertion preserves an existing model row and fills only
+an unassigned tier in the exact runtime namespace; it does not overwrite a
+manual/live row or compete with an unavailable existing assignment.
+[src: file: backend/src/core/model_catalog/mod.rs:101-219]
+[src: file: backend/src/db/model_catalog.rs:799-830]
+
+Bootstrap records its durable marker in the same database operation. Reopening
+the database and invoking bootstrap again leaves rows and timestamps unchanged,
+does not restore deleted seeds, and does not import later configuration edits.
+This correction does not reset that marker or repair already-bootstrapped
+databases. No user database or configuration was changed during qualification.
+[src: file: backend/tests/model_catalog_migration.rs:39-87]
+
+Configuration remains unchanged and retains priority at resolution/preflight.
+Several explicitly configured tiers can still name the same model even though
+one catalogue row has only one tier assignment. The integration tests preserve
+that distinction, including an existing historical identity assigned to another
+tier and a refusal for the explicitly configured unavailable model.
+[src: file: backend/tests/model_catalog_migration.rs:159-263]
+[src: file: backend/src/agents/runner.rs:2650-2725]
+
+Qualification on backend tree `189eb0f577ac44372ea5e85540ff5052321729e7`:
+the first five migration controls produced four failures on unchanged code;
+the later Ollama control separately failed before its fix. Final focused
+production-library replay: 20 PASS across migration, HTTP resolution and
+catalogue API suites. Full unfiltered offline run 12790: 6,866 PASS, 0 failed,
+6 historical ignored tests, 22 suite results; library 380.31 seconds and cold
+API 155.04 seconds. All-target strict Clippy passed in 15.31 seconds. Existing
+ts-rs diagnostics and a linker compact-unwind-size warning remain. Frontend
+tree `9f9df7f4` is unchanged; no new browser, coverage, provider or final KT-531
+qualification is implied. The remaining selector inventory is separate.
+
+### Resolution precedence
+
 An explicit configured model wins over a different catalogue tier assignment.
 An unknown explicit ID remains visible, never silently replaced by a known
 assignment. A named HTTP connection cannot inherit another connection's

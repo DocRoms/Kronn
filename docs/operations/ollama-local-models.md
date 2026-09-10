@@ -258,7 +258,7 @@ test-only and is not called by the resolver.
 [src: file: backend/src/agents/runner.rs:2739-2741]
 [src: file: backend/src/agents/runner.rs:3036-3090]
 [src: file: backend/src/core/model_catalog/mod.rs:62-77]
-[src: file: backend/src/core/model_catalog/mod.rs:98-207]
+[src: file: backend/src/core/model_catalog/mod.rs:98-219]
 
 Ollama is always routed through HTTP before the production command-builder
 call. Its obsolete `ollama run` branch is a non-inference diagnostic sentinel,
@@ -276,7 +276,7 @@ another model or a CLI default. Explicit operator settings still take priority;
 failed assignment reads refuse launch. A target with no selected or assigned
 identity keeps the existing no-model preflight behavior; this change does not
 introduce new discovery for unconfigured runtimes.
-[src: file: backend/src/core/model_catalog/mod.rs:481-537]
+[src: file: backend/src/core/model_catalog/mod.rs:493-549]
 
 The production integration fixture links the library without `cfg(test)` and
 uses isolated SQLite plus explicit loopback endpoints. It actually creates,
