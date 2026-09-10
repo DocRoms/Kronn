@@ -2173,7 +2173,7 @@ const en: TranslationDict = {
   'ollama.pullFailed': 'The download could not be started. Please try again.',
   'ollama.installedModels': 'Installed models',
   'ollama.tierPickerTitle': 'Model per tier',
-  'ollama.tierAuto': 'Auto (built-in default)',
+  'ollama.tierAuto': 'Automatic',
   'ollama.tierPickerHint': 'One model per tier — empty = falls back to the Standard tier',
   'ollama.tierGuidance': 'qwen3:8b is enough for extraction, classification, summaries, obvious security. A bigger model (30b+) helps for review and nuanced judgment — but no local model is reliable at catching subtle bugs (keep a cloud agent for that).',
   'ollama.contextTitle': 'Context window per model',

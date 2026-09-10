@@ -4,10 +4,13 @@
 // 1. not_installed → Install instructions + link
 // 2. offline/unreachable → Launch instructions (contextual WSL/macOS/Linux)
 // 3. online, 0 models → Pull suggestions
-// 4. online + models → Model picker dropdown
+// 4. online + models → Context-window controls
+// Durable catalogue model choices remain visible in every settled state.
 
 import { useState, useEffect, useCallback, useRef, type ReactNode } from 'react';
-import { ollama as ollamaApi, config as configApi, type OllamaPullProgress } from '../../lib/api';
+import { ollama as ollamaApi, config as configApi, modelCatalogApi, type OllamaPullProgress } from '../../lib/api';
+import { useApi } from '../../hooks/useApi';
+import { catalogModelOptions, catalogTierEntry, modelRuntimeTargetId } from '../../lib/modelCatalogSelection';
 import type { OllamaHealthResponse, OllamaModel, ModelTiersConfig } from '../../types/generated';
 import { RefreshCw, ExternalLink, Download, AlertTriangle, Loader2, Save, RotateCcw } from 'lucide-react';
 import { SUGGESTED_MODELS } from './ollamaModels';
@@ -76,10 +79,17 @@ export function OllamaCard({ t, modelCostSuffix, headerAccessory, title }: Ollam
   // Source of truth for the per-tier model choice is `tiers.ollama.{economy,
   // default,reasoning}`; the selects read it directly.
   const [tiers, setTiers] = useState<ModelTiersConfig | null>(null);
-  // Which tier row is mid-save (disables just that <select>).
+  // A tier save locks all tier controls until the confirmed write settles.
   const [savingTier, setSavingTier] = useState<'economy' | 'default' | 'reasoning' | null>(null);
+  const savingTierRef = useRef(false);
+  const refreshingRef = useRef(false);
+  const [tierError, setTierError] = useState<string | null>(null);
+  const [tiersLoadError, setTiersLoadError] = useState(false);
+  const catalog = useApi(() => modelCatalogApi.list(), []);
+  const reloadCatalog = catalog.refetch;
   const [contextDrafts, setContextDrafts] = useState<Record<string, string>>({});
   const [savingContext, setSavingContext] = useState<string | null>(null);
+  const savingContextRef = useRef(false);
   const [contextFeedback, setContextFeedback] = useState<Record<string, ContextFeedback>>({});
   const [pulls, setPulls] = useState<Record<string, PullState>>({});
   const [activePulls, setActivePulls] = useState<Set<string>>(() => new Set());
@@ -93,6 +103,8 @@ export function OllamaCard({ t, modelCostSuffix, headerAccessory, title }: Ollam
   }, []);
 
   const refresh = useCallback(async () => {
+    if (refreshingRef.current || savingTierRef.current || savingContextRef.current) return;
+    refreshingRef.current = true;
     setLoading(true);
     try {
       const [h, t] = await Promise.all([
@@ -100,6 +112,7 @@ export function OllamaCard({ t, modelCostSuffix, headerAccessory, title }: Ollam
         configApi.getModelTiers().catch(() => null),
       ]);
       setHealth(h);
+      setTiersLoadError(t === null);
       if (t) {
         setTiers(t);
       }
@@ -112,9 +125,11 @@ export function OllamaCard({ t, modelCostSuffix, headerAccessory, title }: Ollam
     } catch {
       setHealth({ status: 'offline', version: null, endpoint: '', models_count: 0, hint: null });
     } finally {
+      reloadCatalog();
+      refreshingRef.current = false;
       setLoading(false);
     }
-  }, [syncModels]);
+  }, [syncModels, reloadCatalog]);
 
   useEffect(() => {
     let active = true;
@@ -125,6 +140,7 @@ export function OllamaCard({ t, modelCostSuffix, headerAccessory, title }: Ollam
       .then(async ([nextHealth, nextTiers]) => {
         if (!active) return;
         setHealth(nextHealth);
+        setTiersLoadError(nextTiers === null);
         if (nextTiers) setTiers(nextTiers);
         if (nextHealth.status === 'online') {
           const nextModels = await ollamaApi.models();
@@ -139,41 +155,41 @@ export function OllamaCard({ t, modelCostSuffix, headerAccessory, title }: Ollam
         }
       })
       .finally(() => {
-        if (active) setLoading(false);
+        if (active) {
+          setLoading(false);
+          reloadCatalog();
+        }
       });
     return () => { active = false; };
-  }, [syncModels]);
+  }, [syncModels, reloadCatalog]);
 
-  // Assign an installed model to a tier (economy/default/reasoning) — ISO with
-  // the per-tier picking every other agent gets in AgentsSection. `null` clears
-  // the slot back to the backend built-in. Empty economy/reasoning slots fall
-  // back to the `default` slot for Ollama (runner::resolve_model_flag), so
-  // setting only `default` still applies everywhere — these two just let you
-  // pick a lighter model for cheap steps and a stronger one for reasoning.
+  // Explicit overrides only. Automatic resolution uses durable assignments,
+  // never an embedded model. Merge one field into fresh settings so editing a
+  // local model preserves other fields changed since this card was loaded.
+  // This read/merge/write is not a cross-client transaction.
   const pickTierModel = useCallback(async (
     tier: 'economy' | 'default' | 'reasoning',
     name: string | null,
   ) => {
-    if (!tiers) return;
+    if (!tiers || loading || refreshingRef.current || savingTierRef.current) return;
+    savingTierRef.current = true;
     setSavingTier(tier);
-    const prev = tiers;
-    const next: ModelTiersConfig = {
-      ...tiers,
-      ollama: { ...tiers.ollama, [tier]: name },
-    };
-    // Optimistic — reflect immediately; rollback on failure.
-    setTiers(next);
+    setTierError(null);
     try {
+      const fresh = await configApi.getModelTiers();
+      const next: ModelTiersConfig = { ...fresh, ollama: { ...fresh.ollama, [tier]: name } };
       await configApi.setModelTiers(next);
-    } catch (err) {
-      console.warn('Failed to save Ollama tier model:', err);
-      setTiers(prev);
+      setTiers(next);
+    } catch {
+      setTierError(t('config.saveError'));
     } finally {
+      savingTierRef.current = false;
       setSavingTier(null);
     }
-  }, [tiers]);
+  }, [tiers, loading, t]);
 
   const saveContextOverride = useCallback(async (model: OllamaModel, reset = false) => {
+    if (savingContextRef.current || refreshingRef.current || loading) return;
     const raw = contextDrafts[model.name]?.trim() ?? '';
     const parsed = Number(raw);
     if (!reset && (
@@ -188,6 +204,7 @@ export function OllamaCard({ t, modelCostSuffix, headerAccessory, title }: Ollam
     }
     const value = reset ? null : parsed;
 
+    savingContextRef.current = true;
     setSavingContext(model.name);
     setContextFeedback(prev => ({ ...prev, [model.name]: { warnings: [] } }));
     try {
@@ -195,6 +212,7 @@ export function OllamaCard({ t, modelCostSuffix, headerAccessory, title }: Ollam
       try {
         const refreshed = await ollamaApi.models();
         syncModels(refreshed.models);
+        reloadCatalog();
       } catch {
         // The mutation is already durable. Keep the UI honest even if the
         // follow-up probe temporarily fails; the Refresh button can recover
@@ -223,9 +241,10 @@ export function OllamaCard({ t, modelCostSuffix, headerAccessory, title }: Ollam
         },
       }));
     } finally {
+      savingContextRef.current = false;
       setSavingContext(null);
     }
-  }, [contextDrafts, syncModels, t]);
+  }, [contextDrafts, syncModels, t, reloadCatalog, loading]);
 
   const startPull = useCallback(async (model: string) => {
     if (pullControllers.current.has(model)) return;
@@ -253,6 +272,7 @@ export function OllamaCard({ t, modelCostSuffix, headerAccessory, title }: Ollam
         try {
           const refreshed = await ollamaApi.models();
           syncModels(refreshed.models);
+          reloadCatalog();
           setHealth(prev => prev ? { ...prev, models_count: refreshed.models.length } : prev);
         } catch (error) {
           setPulls(prev => ({
@@ -286,7 +306,7 @@ export function OllamaCard({ t, modelCostSuffix, headerAccessory, title }: Ollam
         });
       }
     }
-  }, [syncModels, t]);
+  }, [syncModels, t, reloadCatalog]);
 
   const cancelPull = useCallback((model: string) => {
     pullControllers.current.get(model)?.abort();
@@ -310,6 +330,10 @@ export function OllamaCard({ t, modelCostSuffix, headerAccessory, title }: Ollam
         ? t('ollama.unreachable')
         : t('ollama.notInstalled');
 
+  const savedTarget = catalog.data?.targets.find(view => view.runtime_target_id === modelRuntimeTargetId('Ollama'));
+  const target = savedTarget && (catalog.error || catalog.loading || health?.status !== 'online')
+    ? { ...savedTarget, stale: true, live_refresh_ok: false } : savedTarget;
+
   return (
     <div className="set-ollama-card">
       {/* Header with status pill */}
@@ -322,7 +346,7 @@ export function OllamaCard({ t, modelCostSuffix, headerAccessory, title }: Ollam
           </span>
           <div className="set-ollama-header-actions">
             {headerAccessory}
-            <button className="set-icon-btn" onClick={refresh} title={t('ollama.refresh')} aria-label={t('ollama.refresh')}>
+            <button className="set-icon-btn" onClick={refresh} disabled={loading || savingTier !== null || savingContext !== null} title={t('ollama.refresh')} aria-label={t('ollama.refresh')}>
               <RefreshCw size={11} className={loading ? 'spin' : ''} />
             </button>
           </div>
@@ -434,18 +458,29 @@ export function OllamaCard({ t, modelCostSuffix, headerAccessory, title }: Ollam
             </div>
           )}
 
-          {/* ── Online + models → per-tier pickers ──
-           *  One selector per model tier (economy/default/reasoning), ISO with
-           *  the per-tier model choice every other agent gets in AgentsSection.
-           *  Writes `ModelTierConfig.{economy,default,reasoning}` for Ollama,
-           *  read by `runner.rs:resolve_model_flag`. Empty economy/reasoning
-           *  fall back to `default` (Ollama has no built-in tiers). Effective
-           *  immediately — no Save button. */}
-          {health.status === 'online' && models.length > 0 && (
-            <div className="set-ollama-models">
-              <div className="text-xs text-muted mb-2">{t('ollama.tierPickerTitle')}</div>
-              <div className="set-ollama-tier-grid">
-                {(['economy', 'default', 'reasoning'] as const).map(tier => (
+          {/* Catalogue choices remain visible offline; installed inventory is
+              used only for local context/download controls and size hints. */}
+          <div className="set-ollama-models">
+            <div className="text-xs text-muted mb-2">{t('ollama.tierPickerTitle')}</div>
+            {tiersLoadError && <p className="set-ollama-context-error" role="alert">{t('common.error')} — {t('ollama.tierPickerTitle')}</p>}
+            {tierError && <p className="set-ollama-context-error" role="alert">{tierError}</p>}
+            {catalog.error && <p className="set-hint" role="alert">
+              {t('modelCatalog.loadError')}{' '}
+              <button type="button" className="set-icon-btn" disabled={catalog.loading} onClick={reloadCatalog}>{t('modelCatalog.reload')}</button>
+            </p>}
+            {catalog.loading && <p className="set-hint" role="status">{t('common.loading')}</p>}
+            {!catalog.loading && !catalog.error && !target?.models.length && <p className="set-hint">{t('modelCatalog.empty')}</p>}
+            {target?.stale && <p className="set-hint">{t('modelCatalog.stale')}{target.last_error_reason ? ` — ${target.last_error_reason}` : ''}</p>}
+            <div className="set-ollama-tier-grid">
+              {(['economy', 'default', 'reasoning'] as const).map(tier => {
+                const configuredDefault = tier === 'default' ? '' : tiers?.ollama.default || '';
+                const fallback = catalogTierEntry(target, tier, configuredDefault, true);
+                const fallbackId = configuredDefault || fallback?.model_id;
+                const fallbackDetail = fallback?.availability === 'unavailable' ? ` — ${t('modelCatalog.unavailable')}` : '';
+                const clearLabel = `${t('ollama.tierAuto')}${fallbackId ? ` (${fallbackId}${fallbackDetail})` : ''}`;
+                const options = catalogModelOptions(target, tiers?.ollama[tier] ?? '', t, model => modelCostSuffix?.(model) ?? '')
+                  .map(option => ({ ...option, description: [option.description, models.find(model => model.name === option.value)?.size].filter(Boolean).join(' · ') }));
+                return (
                   <div key={tier} className="set-ollama-tier-row">
                     {/* Same tier emotes as every other agent (AgentsSection). */}
                     <span className="set-ollama-tier-label">
@@ -457,112 +492,107 @@ export function OllamaCard({ t, modelCostSuffix, headerAccessory, title }: Ollam
                     <SearchableSelect
                       className="searchable-select--compact"
                       value={tiers?.ollama?.[tier] ?? ''}
-                      options={models.map(model => ({
-                        value: model.name,
-                        label: model.name,
-                        keywords: model.name.replaceAll('/', ' '),
-                        description: `${model.size}${modelCostSuffix?.(model.name) ?? ''}`,
-                      }))}
-                      disabled={savingTier === tier}
+                      options={options}
+                      disabled={!tiers || savingTier !== null || catalog.loading}
                       onChange={value => void pickTierModel(tier, value || null)}
                       label={t(`disc.tier.${tier}`)}
-                      placeholder={t('config.searchModel')}
-                      emptyLabel={t('config.searchModelEmpty')}
-                      clearLabel={t('ollama.tierAuto')}
+                      placeholder={tiers?.ollama[tier] ? t('config.searchModel') : clearLabel}
+                      emptyLabel={t('modelCatalog.empty')}
+                      clearLabel={clearLabel}
                       dataModelTierAgent="Ollama"
                       dataModelTier={tier}
                     />
                   </div>
-                ))}
-              </div>
-              {/* Bench-based guidance (2026-07) — which local model fits which
-                  job, so users don't put a weak model on a demanding step. */}
-              <div className="set-ollama-tier-guidance">💡 {t('ollama.tierGuidance')}</div>
-              <details className="set-ollama-context-section">
-                <summary className="set-ollama-context-summary text-xs text-muted">
-                  {t('ollama.contextTitle')}
-                </summary>
-                <div className="set-ollama-context-list">
-                  {models.map(model => {
-                    const feedback = contextFeedback[model.name];
-                    const isSaving = savingContext === model.name;
-                    return (
-                      <div className="set-ollama-context-card" key={model.name}>
-                        <div className="set-ollama-context-head">
-                          <code className="set-ollama-model-name">{model.name}</code>
-                          <span className="text-2xs text-muted">{model.size}</span>
-                        </div>
-                        <div className="set-ollama-context-metrics">
-                          <span>{t('ollama.contextAdvertised')} <strong>{formatContextTokens(model.advertised_context)}</strong></span>
-                          <span>{t('ollama.contextCeiling')} <strong>{formatContextTokens(model.context_ceiling)}</strong></span>
-                          <span>{t('ollama.contextOriginLabel')} <strong>{t(`ollama.contextOrigin.${model.context_origin}`)}</strong></span>
-                        </div>
-                        {model.context_origin === 'portable_fallback' && (
-                          <div className="set-ollama-context-alert" role="alert">
-                            <AlertTriangle size={12} />
-                            <span>{t('ollama.contextFallbackWarning')}</span>
-                          </div>
-                        )}
-                        <div className="set-ollama-context-editor">
-                          <label htmlFor={`ollama-context-${model.name}`}>{t('ollama.contextOverride')}</label>
-                          <input
-                            id={`ollama-context-${model.name}`}
-                            type="number"
-                            min={CONTEXT_FLOOR}
-                            max={CONTEXT_OVERRIDE_MAX}
-                            step={1024}
-                            value={contextDrafts[model.name] ?? ''}
-                            placeholder={t('ollama.contextAuto')}
-                            disabled={isSaving}
-                            aria-label={t('ollama.contextOverrideFor', model.name)}
-                            onChange={event => setContextDrafts(prev => ({
-                              ...prev,
-                              [model.name]: event.target.value,
-                            }))}
-                          />
-                          <button
-                            type="button"
-                            className="set-ollama-context-action"
-                            disabled={isSaving}
-                            onClick={() => saveContextOverride(model)}
-                          >
-                            {isSaving ? <Loader2 size={11} className="spin" /> : <Save size={11} />}
-                            {t('ollama.contextSave')}
-                          </button>
-                          <button
-                            type="button"
-                            className="set-ollama-context-action"
-                            disabled={isSaving || model.context_override == null}
-                            onClick={() => saveContextOverride(model, true)}
-                          >
-                            <RotateCcw size={11} />
-                            {t('ollama.contextReset')}
-                          </button>
-                        </div>
-                        {feedback?.error && (
-                          <div className="set-ollama-context-error" role="alert">{feedback.error}</div>
-                        )}
-                        {feedback?.warnings.map(warning => (
-                          <div className="set-ollama-context-alert" role="alert" key={warning}>
-                            <AlertTriangle size={12} />
-                            <span>{warning}</span>
-                          </div>
-                        ))}
-                      </div>
-                    );
-                  })}
-                </div>
-                <p className="set-ollama-context-hint">{t('ollama.contextHint')}</p>
-              </details>
-              <div className="set-ollama-pull-hint">
-                <span className="text-2xs text-muted">
-                  {t('ollama.tierPickerHint')}
-                  {' · '}
-                  {t('ollama.pullMoreHint')}
-                </span>
-              </div>
+                );
+              })}
             </div>
-          )}
+            {/* Bench-based guidance (2026-07) — which local model fits which
+                job, so users don't put a weak model on a demanding step. */}
+            <div className="set-ollama-tier-guidance">💡 {t('ollama.tierGuidance')}</div>
+            {health.status === 'online' && models.length > 0 && <details className="set-ollama-context-section">
+              <summary className="set-ollama-context-summary text-xs text-muted">
+                {t('ollama.contextTitle')}
+              </summary>
+              <div className="set-ollama-context-list">
+                {models.map(model => {
+                  const feedback = contextFeedback[model.name];
+                  const isSaving = savingContext === model.name;
+                  return (
+                    <div className="set-ollama-context-card" key={model.name}>
+                      <div className="set-ollama-context-head">
+                        <code className="set-ollama-model-name">{model.name}</code>
+                        <span className="text-2xs text-muted">{model.size}</span>
+                      </div>
+                      <div className="set-ollama-context-metrics">
+                        <span>{t('ollama.contextAdvertised')} <strong>{formatContextTokens(model.advertised_context)}</strong></span>
+                        <span>{t('ollama.contextCeiling')} <strong>{formatContextTokens(model.context_ceiling)}</strong></span>
+                        <span>{t('ollama.contextOriginLabel')} <strong>{t(`ollama.contextOrigin.${model.context_origin}`)}</strong></span>
+                      </div>
+                      {model.context_origin === 'portable_fallback' && (
+                        <div className="set-ollama-context-alert" role="alert">
+                          <AlertTriangle size={12} />
+                          <span>{t('ollama.contextFallbackWarning')}</span>
+                        </div>
+                      )}
+                      <div className="set-ollama-context-editor">
+                        <label htmlFor={`ollama-context-${model.name}`}>{t('ollama.contextOverride')}</label>
+                        <input
+                          id={`ollama-context-${model.name}`}
+                          type="number"
+                          min={CONTEXT_FLOOR}
+                          max={CONTEXT_OVERRIDE_MAX}
+                          step={1024}
+                          value={contextDrafts[model.name] ?? ''}
+                          placeholder={t('ollama.contextAuto')}
+                          disabled={savingContext !== null}
+                          aria-label={t('ollama.contextOverrideFor', model.name)}
+                          onChange={event => setContextDrafts(prev => ({
+                            ...prev,
+                            [model.name]: event.target.value,
+                          }))}
+                        />
+                        <button
+                          type="button"
+                          className="set-ollama-context-action"
+                          disabled={savingContext !== null}
+                          onClick={() => saveContextOverride(model)}
+                        >
+                          {isSaving ? <Loader2 size={11} className="spin" /> : <Save size={11} />}
+                          {t('ollama.contextSave')}
+                        </button>
+                        <button
+                          type="button"
+                          className="set-ollama-context-action"
+                          disabled={savingContext !== null || model.context_override == null}
+                          onClick={() => saveContextOverride(model, true)}
+                        >
+                          <RotateCcw size={11} />
+                          {t('ollama.contextReset')}
+                        </button>
+                      </div>
+                      {feedback?.error && (
+                        <div className="set-ollama-context-error" role="alert">{feedback.error}</div>
+                      )}
+                      {feedback?.warnings.map(warning => (
+                        <div className="set-ollama-context-alert" role="alert" key={warning}>
+                          <AlertTriangle size={12} />
+                          <span>{warning}</span>
+                        </div>
+                      ))}
+                    </div>
+                  );
+                })}
+              </div>
+              <p className="set-ollama-context-hint">{t('ollama.contextHint')}</p>
+            </details>}
+            <div className="set-ollama-pull-hint">
+              <span className="text-2xs text-muted">
+                {t('ollama.tierPickerHint')}
+                {' · '}
+                {t('ollama.pullMoreHint')}
+              </span>
+            </div>
+          </div>
 
         </div>
       )}

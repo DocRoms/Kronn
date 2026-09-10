@@ -2183,7 +2183,7 @@ const fr: TranslationDict = {
   'ollama.pullFailed': 'Le téléchargement n’a pas pu démarrer. Réessayez.',
   'ollama.installedModels': 'Modèles installés',
   'ollama.tierPickerTitle': 'Modèle par palier',
-  'ollama.tierAuto': 'Auto (défaut intégré)',
+  'ollama.tierAuto': 'Automatique',
   'ollama.tierPickerHint': 'Un modèle par palier — vide = repli sur le palier « Standard »',
   'ollama.tierGuidance': 'qwen3:8b suffit pour extraction, classification, résumé, sécu évidente. Un modèle plus gros (30b+) aide sur la review et le jugement nuancé — mais aucun modèle local n\'est fiable pour attraper des bugs subtils (garde un agent cloud pour ça).',
   'ollama.contextTitle': 'Fenêtre de contexte par modèle',

@@ -40,4 +40,10 @@ describe('OllamaCard suggested models', () => {
       }
     }
   });
+
+  it('labels automatic resolution without promising an embedded model fallback', () => {
+    for (const [locale, expected] of Object.entries({ fr: 'Automatique', en: 'Automatic', es: 'Automático', zh: '自动' })) {
+      expect(dictionaries[locale as keyof typeof dictionaries]['ollama.tierAuto']).toBe(expected);
+    }
+  });
 });

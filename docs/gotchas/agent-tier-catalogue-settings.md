@@ -27,6 +27,36 @@ explicit clearing, independent Ollama edits, duplicate clicks and write failure.
 They mock the API and do not mutate provider accounts or user settings.
 [src: file: frontend/src/components/settings/__tests__/AgentsSection.catalog.test.tsx:75-235]
 
+## Ollama settings use the same catalogue
+
+Ollama's card selects only `agent:ollama` from the saved snapshot; the installed
+inventory remains separate input for download/context controls and size hints.
+Its three tier controls remain visible offline or without installed models.
+Unknown configured IDs and unavailable rows stay visible and disabled; failed
+or pending snapshot reads and offline health never turn cached data into live
+discovery. Reloading that snapshot or typing a query does not probe Ollama.
+[src: file: frontend/src/components/settings/OllamaCard.tsx:333-335]
+[src: file: frontend/src/components/settings/OllamaCard.tsx:461-511]
+
+Tier writes reread the complete settings document, merge only the selected
+field, reject synchronous re-entry and replace the displayed value only after
+confirmation. This preserves earlier changes made by another editor, not a
+cross-client transaction between GET and POST. Initial settings-load errors
+are visible and recover through the explicit refresh button. Context saves
+and resets also use a synchronous guard, including their follow-up inventory
+read; the manual refresh cannot race those writes. Automatic labels no longer
+promise an embedded default model: the known configured/catalogue fallback ID
+is appended separately.
+[src: file: frontend/src/components/settings/OllamaCard.tsx:106-266]
+[src: file: frontend/src/components/settings/OllamaCard.tsx:465-506]
+[src: file: frontend/src/components/settings/__tests__/OllamaCard.catalog.test.tsx:61-183]
+[src: file: frontend/src/components/settings/__tests__/OllamaCard.test.tsx:241-261]
+[src: file: frontend/src/components/settings/__tests__/OllamaCard.models.test.ts:44-48]
+
+These component regressions do not prove the backend discovery/reconciliation
+boundary. That remaining work is tracked by KT-634, and the frontend change
+must not be treated as completion of the global KT-531 catalogue contract.
+
 ## Shared picker identity and provenance
 
 ### One-time catalogue bootstrap

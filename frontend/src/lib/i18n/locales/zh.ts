@@ -2147,7 +2147,7 @@ const zh: TranslationDict = {
   "ollama.pullFailed": "无法开始下载，请重试。",
   "ollama.installedModels": "已安装模型",
   "ollama.tierPickerTitle": "每层级模型",
-  "ollama.tierAuto": "自动（内置默认）",
+  "ollama.tierAuto": "自动",
   "ollama.tierPickerHint": "每层级一个模型 — 空 = 回退至标准层级",
   "ollama.tierGuidance": "qwen3:8b 适用于提取、分类、摘要和明显安全场景。更大模型（30b+）有助于审查和细微判断 — 但本地模型无法可靠检测细微错误（需云代理处理）。",
   "ollama.contextTitle": "每个模型的上下文窗口",
