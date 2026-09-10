@@ -9,6 +9,8 @@ import {
 import { useT } from '../lib/I18nContext';
 import { userError } from '../lib/userError';
 import { orchestrationResolution } from './taskLaunchResolution';
+import { AgentSwitchPicker } from './AgentSwitchPicker';
+import { ModelCatalogPicker } from './ModelCatalogPicker';
 import type {
   AgentDetection,
   AgentProfile,
@@ -95,7 +97,8 @@ function TaskLaunchDialogContent({
     const previousFocus = document.activeElement as HTMLElement | null;
     dialogRef.current?.querySelector<HTMLElement>('select, input, button, textarea')?.focus();
     const close = (event: KeyboardEvent) => {
-      if (event.key === 'Escape' && !inFlight.current) onClose();
+      const targetIsAgentPicker = document.querySelector('.kr-agent-switch-popover')?.contains(event.target as Node);
+      if (event.key === 'Escape' && !event.defaultPrevented && !targetIsAgentPicker && !inFlight.current) onClose();
       if (event.key !== 'Tab' || !dialogRef.current) return;
       const focusable = Array.from(dialogRef.current.querySelectorAll<HTMLElement>(
         'button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled)',
@@ -123,6 +126,23 @@ function TaskLaunchDialogContent({
   const profilesForAgent = useMemo(() => availableProfiles, [availableProfiles]);
 
   const policyLocked = campaign !== null;
+  const pickerAgents = useMemo(() => {
+    const detected = detections.length
+      ? detections.map(item => item.agent_type)
+      : [defaultAgent];
+    const permitted = policyLocked && campaign?.run.allowed_agents.length
+      ? campaign.run.allowed_agents
+      : detected;
+    return Array.from(new Set([initialAgent, ...permitted]));
+  }, [campaign, defaultAgent, detections, initialAgent, policyLocked]);
+
+  const selectAgent = async (next: AgentType) => {
+    if (next === agent) return;
+    setAgent(next);
+    // A model override belongs to one runtime target.  Only an explicit target
+    // choice clears it; opening or loading either picker must leave it intact.
+    setModel('');
+  };
 
   const submit = async () => {
     if (inFlight.current) return;
@@ -191,18 +211,24 @@ function TaskLaunchDialogContent({
         {policyLocked && <p className="orch-policy-note">{t('orch.config.existingPolicy')}</p>}
 
         <div className="orch-launch-grid">
-          <label>
-            <span>{t('orch.config.agent')}</span>
-            <select value={agent} onChange={event => setAgent(event.target.value as AgentType)}>
-              {(detections.length ? detections.map(item => item.agent_type) : [defaultAgent])
-                .filter((value, index, list) => list.indexOf(value) === index)
-                .map(value => <option value={value} key={value}>{value}</option>)}
-            </select>
-          </label>
-          <label>
-            <span>{t('orch.config.model')}</span>
-            <input value={model} onChange={event => setModel(event.target.value)} placeholder={t('orch.config.modelDefault')} />
-          </label>
+          <div className="orch-launch-catalogue-field">
+            <AgentSwitchPicker
+              currentAgent={agent}
+              availableAgents={pickerAgents}
+              onChange={selectAgent}
+              disabled={busy}
+              title={t('orch.config.agent')}
+              ariaLabel={t('orch.config.agent')}
+            />
+          </div>
+          <div className="orch-launch-catalogue-field">
+            <ModelCatalogPicker
+              agent={agent}
+              value={model}
+              onChange={setModel}
+              disabled={busy}
+            />
+          </div>
           <label>
             <span>{t('orch.config.profile')}</span>
             <select value={profileId} onChange={event => setProfileId(event.target.value)}>
