@@ -1,5 +1,10 @@
 # Orchestrator grant — identity, delivery, resume
 
+> **Superseded by [`docs/architecture/important-message-publication-authority.md`](../architecture/important-message-publication-authority.md).**
+> Kept for the reasoning that led there — three proposals were refused,
+> and why each failed is worth not rediscovering. Where this note and the
+> contract disagree, the contract is right.
+
 Short design for review, 2026-09-09. **Nothing implemented.** Answers the three
 open points on converging the card authorities: what the grant is bound to, how
 its secret reaches a bridge, and what resume and rotation do to it.

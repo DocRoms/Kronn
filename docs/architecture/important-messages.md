@@ -24,52 +24,22 @@ whole parse if a caller tries to inject them; Kronn derives them server-side.
 
 ## Who can publish
 
-Today, only the orchestrator's own CLI/bridge session can publish. A worker
-cannot create, prepare or publish a card — including by calling the ingest
-path directly with a forged `author_kind`, an empty session, or a different
-target room. Authority is resolved from the CALLER's own durable identity,
-never from a field the payload claims:
+**The contract lives in
+[`important-message-publication-authority.md`](important-message-publication-authority.md)**,
+decided 2026-09-09. In short: a card needs an enrolled grant and a single-use
+proof, both held rather than named, and neither reachable by inviting, joining,
+transferring or rebinding.
 
-- `disc_append` (the CLI/bridge channel) resolves the caller's session by
-  `session_id` alone — no `disc_id` filter, so a worker's session is found and
-  refused even when it targets its parent room, and no gate on "one live Agent
-  message" so a bulk import can't slip past by shape. An identity this cannot
-  verify (missing session, one that no longer resolves) refuses; there is no
-  legitimate "unknown caller" case on this endpoint, and no legitimate human
-  turn either.
-  [src: file: backend/src/api/disc_source.rs:749-825]
-  [src: file: backend/src/db/discussion_important.rs:458-502]
+Two consequences worth carrying here:
 
-**Human publication is not yet wired — deliberately.** `send_message` (the
-human chat composer) takes no caller identity at all (`State`/`Path`/`Json`
-only), and Kronn's whole trust model treats every LOCAL caller as the human
-(`auth_middleware`'s loopback bypass exists because a self-hosted instance
-assumes "the user is always on the same machine") — a worker calling this
-endpoint directly is indistinguishable from the browser. An earlier version
-of this lot granted `ImportantPublisher::Human` from this endpoint on the
-assumption that "no session/role field to spoof" made it safe; it does not,
-because there is no verification of ANY KIND, which is a weaker guarantee
-than the one already rejected for `disc_append`. A human decision
-(`kt619-human-publication-boundary`, answered `verified-publication`)
-confirmed: ship nothing rather than a label-only grant. `send_message` now
-logs and refuses every `kronn-important` fence; the fence stays in the
-transcript and the card renders as "not recorded" — the same honest failure
-mode as a malformed spec.
-[src: file: backend/src/api/discussions/messaging.rs:671-693]
-[src: file: backend/src/lib.rs:389-453]
+- **an install with no grant publishes no card.** That is every install today,
+  and it is deliberate;
+- **a worker never publishes**, even holding a valid grant and a valid proof —
+  a principal delegated afterwards is refused while it is working, read from its
+  exact active assignment rather than from the room it sits in.
 
-A card also attaches only to the message the caller just wrote:
-`is_newest_message` checks the message about to receive a card is the newest
-in its discussion, so an old ordinary message cannot be converted after the
-fact. `UNIQUE(message_id)` alone would only stop a SECOND card on a message
-that already had one — it says nothing about the first.
-[src: file: backend/src/db/discussion_important.rs:311-328]
-
-**Scope of the guarantee**: this is enforced in the service. A privileged
-SQL client writing directly to `discussion_important_messages` is not
-constrained by any of it — the `author_kind` CHECK constrains the *value*, not
-who chose it.
-[src: file: backend/src/db/sql/172_discussion_important_messages.sql:6-13]
+What it proves is an API identity, not physical presence, and OS-level theft of
+a secret is outside the guarantee by decision.
 
 ## Distinction from `delivery_summary`
 
@@ -129,16 +99,14 @@ first GET while a new card lands.
 
 ## Known limitations
 
-- **The human half of DoD `ddf34a4e` is not met yet.** The contract asks for
-  an explicit human publish path; today there is none — `send_message` refuses
-  every `kronn-important` fence rather than ship an unverified one (see
-  "Who can publish" above). This is a deliberate, human-approved deferral
-  (`kt619-human-publication-boundary` → `verified-publication`), not an
-  oversight: Kronn has no existing verified-human primitive distinct from "any
-  local caller" to hook into, and inventing a weak one was explicitly
-  rejected. A follow-up needs its own design (e.g. a confirmation tied to
-  content hash + room + nonce + expiry, or another human-approved mechanism)
-  and its own arbitration before implementation.
+- **What the authority proves is an API identity, not a person.** A `human`
+  grant is held by whoever holds its secret. The arbitration that chose this
+  (`kt619-human-credential-bootstrap` → `dedicated-human-credential`) excluded
+  OS-level secret theft and direct database writes from scope, so an operator
+  whose grant file is readable has given it away and nothing here notices.
+- **Every existing install publishes nothing until it is bootstrapped.** No
+  grant exists anywhere, and there is no trust-on-first-use to fall back on.
+  Deliberate, and a real behaviour change rather than a silent tightening.
 - A bulk `disc_append` (several messages in one call) reports only the LAST
   message's `ImportantIngest` in the response; earlier messages' outcomes are
   not summed into it. The database is still authoritative — nothing is lost —

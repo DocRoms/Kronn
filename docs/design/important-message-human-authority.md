@@ -1,5 +1,10 @@
 # Publication authority for important messages — threat model and options
 
+> **Superseded by [`docs/architecture/important-message-publication-authority.md`](../architecture/important-message-publication-authority.md).**
+> Kept for the reasoning that led there — three proposals were refused,
+> and why each failed is worth not rediscovering. Where this note and the
+> contract disagree, the contract is right.
+
 Design note for arbitration. **Nothing here is implemented**, no migration is
 reserved, and no table, endpoint or key exists.
 
