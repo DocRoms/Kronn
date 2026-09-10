@@ -587,6 +587,15 @@ pub struct SendMessageRequest {
     pub target_agent: Option<AgentType>,
     #[serde(default)]
     pub client_message_id: Option<String>,
+    /// KT-619 — the human's publication grant, when this message carries a
+    /// `kronn-important` fence. Absent for every ordinary message, and absent
+    /// is simply "no card": this endpoint has no caller identity of its own, so
+    /// the grant is the only thing that can authorise one.
+    #[serde(default)]
+    pub publication_grant: Option<String>,
+    /// The single-use proof issued for this exact body, in this room.
+    #[serde(default)]
+    pub publication_proof: Option<String>,
     /// Persist the User turn and its dispatch obligations without claiming a
     /// runner for this HTTP/SSE request. Used by the durable composer outbox:
     /// the scheduler starts it only after the discussion's current run ends.

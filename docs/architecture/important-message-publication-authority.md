@@ -64,9 +64,14 @@ caller wins is not an authorisation.
 | **rotation** | possession of the current secret, or an administering authority; the role is absent from the write |
 | **revocation** | administering authority only; immediate, and no un-revoke |
 
-An `orchestrator` cannot enrol, list, revoke or rotate anything, including
-itself. Letting it would have let the role that administers nothing reach the
-role that administers everything, in one step.
+An `orchestrator` cannot enrol, list or revoke anything. It **can** rotate its
+own secret, by presenting that secret — and only its own: a credential aimed at
+another's id is refused, which the route tests check both ways.
+
+That exception is deliberate and narrow. Rotating one's own secret changes
+nothing about what one may do, so it is not a step towards privilege; refusing
+it would mean a compromised orchestrator could not replace its own secret
+without an administrator, which costs availability and buys nothing.
 
 Rotation and revocation bump an epoch, and proofs carry the epoch they were
 issued under — so everything in flight dies at once rather than being hunted

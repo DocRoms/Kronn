@@ -315,6 +315,8 @@ fn a_left_session_no_longer_authenticates() {
 fn a_grant_publishes_and_a_working_session_still_cannot() {
     let conn = database();
     let worker = execution_room(&conn);
+    // A session that is NOT a worker: the ordinary identity of a principal.
+    let principal = session(&conn, ROOM, "principal-session");
     let admin = crate::db::human_credentials::create_admin_secret(&conn, "/p").unwrap();
     let authority = crate::db::human_credentials::authorise_enrolment(&conn, &admin)
         .unwrap()
@@ -335,12 +337,29 @@ fn a_grant_publishes_and_a_working_session_still_cannot() {
         "holding an authority is not the same as having been issued this card"
     );
 
-    // Grant plus its proof publishes.
+    // A grant with no session identity publishes nothing: omitting the
+    // credential was a way to walk past the worker check.
+    let orphan =
+        crate::db::human_credentials::issue_proof(&conn, &grant, ROOM, BODY_FOR_PROOF, Utc::now())
+            .unwrap();
+    assert_eq!(
+        resolve(&conn, Some(grant.expose()), Some(&orphan), None, "Codex"),
+        ImportantPublisher::Unverified,
+        "a caller that will not say who it is cannot publish"
+    );
+
+    // Grant plus its proof, presented by an identified non-worker, publishes.
     let proof =
         crate::db::human_credentials::issue_proof(&conn, &grant, ROOM, BODY_FOR_PROOF, Utc::now())
             .unwrap();
     assert!(matches!(
-        resolve(&conn, Some(grant.expose()), Some(&proof), None, "Codex"),
+        resolve(
+            &conn,
+            Some(grant.expose()),
+            Some(&proof),
+            Some(&principal),
+            "Codex"
+        ),
         ImportantPublisher::Orchestrator(_)
     ));
 
@@ -365,13 +384,25 @@ fn a_grant_publishes_and_a_working_session_still_cannot() {
     // And the worker refusal ran BEFORE the proof was spent, so the legitimate
     // holder can still use it.
     assert!(matches!(
-        resolve(&conn, Some(grant.expose()), Some(&second), None, "Codex"),
+        resolve(
+            &conn,
+            Some(grant.expose()),
+            Some(&second),
+            Some(&principal),
+            "Codex"
+        ),
         ImportantPublisher::Orchestrator(_)
     ));
 
     // Spent once: the same proof cannot publish a second card.
     assert_eq!(
-        resolve(&conn, Some(grant.expose()), Some(&second), None, "Codex"),
+        resolve(
+            &conn,
+            Some(grant.expose()),
+            Some(&second),
+            Some(&principal),
+            "Codex"
+        ),
         ImportantPublisher::Unverified,
         "a proof is single use"
     );
@@ -601,4 +632,69 @@ fn every_category_round_trips_through_the_database_check() {
     let mut invented: serde_json::Value = serde_json::from_str(&spec_json("k")).unwrap();
     invented["category"] = serde_json::json!("very_important");
     assert!(parse_spec(&invented.to_string()).is_none());
+}
+
+#[test]
+fn only_a_human_grant_signs_a_human_card() {
+    let conn = database();
+    let admin = crate::db::human_credentials::create_admin_secret(&conn, "/p").unwrap();
+    let authority = crate::db::human_credentials::authorise_enrolment(&conn, &admin)
+        .unwrap()
+        .unwrap();
+    let (_row, orchestrator) = crate::db::human_credentials::enrol(
+        &conn,
+        &authority,
+        crate::db::human_credentials::GrantRole::Orchestrator,
+        "principal",
+    )
+    .unwrap();
+
+    // The human composer takes no session, so the ROLE is the only thing that
+    // keeps the two apart. A card signed "human" has to mean one.
+    let proof = crate::db::human_credentials::issue_proof(
+        &conn,
+        &orchestrator,
+        ROOM,
+        BODY_FOR_PROOF,
+        Utc::now(),
+    )
+    .unwrap();
+    assert_eq!(
+        publisher_for_human_grant(
+            &conn,
+            orchestrator.expose(),
+            &proof,
+            ROOM,
+            BODY_FOR_PROOF,
+            Utc::now()
+        )
+        .unwrap(),
+        ImportantPublisher::Unverified,
+        "an orchestrator must not sign a human card"
+    );
+
+    // And the refusal happened before the proof was spent, so it is not a way
+    // to burn somebody else's.
+    let (_row, human) = crate::db::human_credentials::enrol(
+        &conn,
+        &authority,
+        crate::db::human_credentials::GrantRole::Human,
+        "Romu",
+    )
+    .unwrap();
+    let mine =
+        crate::db::human_credentials::issue_proof(&conn, &human, ROOM, BODY_FOR_PROOF, Utc::now())
+            .unwrap();
+    assert!(matches!(
+        publisher_for_human_grant(
+            &conn,
+            human.expose(),
+            &mine,
+            ROOM,
+            BODY_FOR_PROOF,
+            Utc::now()
+        )
+        .unwrap(),
+        ImportantPublisher::Human(_)
+    ));
 }

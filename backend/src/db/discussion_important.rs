@@ -507,16 +507,22 @@ pub fn publisher_for_grant(
     label: &str,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<ImportantPublisher> {
-    // The worker check runs first and unconditionally: a valid grant must not
-    // buy its way past it.
-    if let Some(secret) = session_credential {
-        if let Some((session_pk, _home)) =
-            crate::db::discussion_sessions::authenticate_by_resume_credential(conn, secret)?
-        {
-            if session_is_working(conn, session_pk)? {
-                return Ok(ImportantPublisher::Worker);
-            }
-        }
+    // The worker check runs first, and it must not be skippable by leaving
+    // something out. An earlier version put it behind `if let Some(credential)`
+    // — a branch the CALLER chooses — so a worker holding a legitimate grant
+    // could omit its session credential and walk past. Publishing therefore
+    // requires proving BOTH who you are and what you may do; an unidentified
+    // caller is refused rather than assumed not to be a worker.
+    let Some(session_secret) = session_credential else {
+        return Ok(ImportantPublisher::Unverified);
+    };
+    let Some((session_pk, _home)) =
+        crate::db::discussion_sessions::authenticate_by_resume_credential(conn, session_secret)?
+    else {
+        return Ok(ImportantPublisher::Unverified);
+    };
+    if session_is_working(conn, session_pk)? {
+        return Ok(ImportantPublisher::Worker);
     }
 
     let (Some(grant), Some(proof_id)) = (grant, proof_id) else {
@@ -557,6 +563,60 @@ pub fn publisher_for_grant(
             ImportantPublisher::Orchestrator(label.to_string())
         }
     })
+}
+
+/// Resolve a HUMAN publisher from a grant and its proof, with no session in
+/// play.
+///
+/// `send_message` is the browser's composer: it carries no session credential,
+/// so the worker check that `publisher_for_grant` performs has nothing to read.
+/// That is safe here for a reason worth stating rather than assuming — a worker
+/// does not reach this endpoint with a grant, because a grant is enrolled by an
+/// authority the operator established and no delegation hands one out. What
+/// this proves is possession of an enrolled human credential, and the contract
+/// says plainly that is an API identity rather than a person.
+///
+/// Only a `human` grant is accepted. An `orchestrator` presenting itself on the
+/// human composer is refused: the roles exist to be distinguishable, and a card
+/// signed "human" must mean one.
+pub fn publisher_for_human_grant(
+    conn: &Connection,
+    grant: &str,
+    proof_id: &str,
+    discussion_id: &str,
+    content: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<ImportantPublisher> {
+    let secret = crate::db::human_credentials::Secret::new(grant);
+    match crate::db::human_credentials::authenticate(conn, &secret) {
+        Ok((_id, crate::db::human_credentials::GrantRole::Human, _epoch)) => {}
+        _ => return Ok(ImportantPublisher::Unverified),
+    }
+    if crate::db::human_credentials::consume_proof(
+        conn,
+        proof_id,
+        &secret,
+        discussion_id,
+        content,
+        now,
+    )
+    .is_err()
+    {
+        return Ok(ImportantPublisher::Unverified);
+    }
+    // The label is attached by the caller, which knows the human's pseudo.
+    Ok(ImportantPublisher::Human(String::new()))
+}
+
+impl ImportantPublisher {
+    /// Attach the display label once the caller knows it.
+    pub fn with_label(self, label: String) -> Self {
+        match self {
+            Self::Human(_) => Self::Human(label),
+            Self::Orchestrator(_) => Self::Orchestrator(label),
+            other => other,
+        }
+    }
 }
 
 /// What one message's fences produced. Counts are reported back so a refused

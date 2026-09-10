@@ -221,6 +221,27 @@ async fn main() -> anyhow::Result<()> {
         config::config_dir().unwrap().display()
     );
 
+    // KT-619 — mint the publication bootstrap on a fresh install, so the
+    // operator finds it without being told to run anything. Idempotent: a
+    // second boot sees the row and does nothing.
+    //
+    // The PATH is logged, never the secret. A failure here is not fatal: no
+    // secret means no important card can be published, which is the fail-closed
+    // state the contract already describes — refusing to start would be worse.
+    match database
+        .with_conn(kronn::core::operator_secret::ensure_bootstrap)
+        .await
+    {
+        Ok(Some(path)) => tracing::info!(
+            "Publication bootstrap written to {} — enrol a credential in Settings to publish important cards",
+            path.display()
+        ),
+        Ok(None) => {}
+        Err(error) => tracing::warn!(
+            "Publication bootstrap unavailable ({error}); important cards cannot be published until it exists"
+        ),
+    }
+
     // Resolve/repair the encryption key now that the DB is open — `config::load`
     // deliberately never mints one. This adopts the legacy config.toml key,
     // restores it from the keychain/sidecar, or mints on a genuinely empty

@@ -4073,6 +4073,24 @@ mod tests {
             .await
             .unwrap();
 
+        // A grant is no longer enough on its own: publishing also requires
+        // saying who you are, so an active worker cannot skip its own check by
+        // leaving the session credential out.
+        state
+            .db
+            .with_conn(|conn| {
+                crate::db::discussion_sessions::create_session(
+                    conn,
+                    IMPORTANT_PARENT,
+                    "ClaudeCode",
+                    Some(IMPORTANT_ORCH_SESSION),
+                    "peer",
+                )
+            })
+            .await
+            .unwrap();
+        hold_credential(&state, IMPORTANT_ORCH_SESSION, IMPORTANT_ORCH_SECRET).await;
+
         let response = disc_append(
             axum::extract::State(state.clone()),
             Json(DiscAppendRequest {
@@ -4080,7 +4098,9 @@ mod tests {
                 messages: vec![agent_msg("m1", &content)],
                 session_id: None,
                 since_sort_order: None,
-                session_credential: None,
+                session_credential: Some(
+                    serde_json::from_value(serde_json::json!(IMPORTANT_ORCH_SECRET)).unwrap(),
+                ),
                 publication_grant: Some(serde_json::from_value(serde_json::json!(grant)).unwrap()),
                 publication_proof: Some(proof),
             }),

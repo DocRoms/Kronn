@@ -152,6 +152,20 @@ pub fn bootstrap(conn: &rusqlite::Connection) -> Result<Delivered> {
     Ok(Delivered { path })
 }
 
+/// Mint the bootstrap if this install has none, and say where it landed.
+///
+/// Idempotent, and deliberately quiet on the common path: `None` means one
+/// already exists. Called at boot so a fresh install delivers the secret
+/// without the operator having to know a command — the feature was unusable
+/// while this had no caller, and a mechanism nobody can start is not a
+/// mechanism.
+pub fn ensure_bootstrap(conn: &rusqlite::Connection) -> Result<Option<PathBuf>> {
+    if crate::db::human_credentials::admin_secret_exists(conn)? {
+        return Ok(None);
+    }
+    Ok(Some(bootstrap(conn)?.path))
+}
+
 /// Read the secret back, for an operator-side check that delivery worked.
 /// Refuses a file that is not private, rather than returning what it holds.
 pub fn read_delivered() -> Result<crate::db::human_credentials::Secret> {
