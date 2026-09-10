@@ -117,12 +117,22 @@ pub async fn migrate_hardcoded_catalog_once(
                             tier: ModelTier,
                             reasoning: &[&str]|
                  -> anyhow::Result<()> {
+                    // Historical defaults are fallback data, not competing
+                    // assignments for a tier the operator already configured.
+                    let tier_assignment = match crate::agents::runner::configured_model_flag(
+                        &agent,
+                        tier,
+                        Some(&tiers),
+                    ) {
+                        Some(configured) if configured != model => None,
+                        _ => Some(tier),
+                    };
                     db::insert_migrated_seed(
                         conn,
                         &agent,
                         model,
                         model,
-                        Some(tier),
+                        tier_assignment,
                         &chat,
                         &reasoning
                             .iter()
@@ -196,6 +206,7 @@ pub async fn migrate_hardcoded_catalog_once(
                     (AgentType::Kiro, &tiers.kiro),
                     (AgentType::CopilotCli, &tiers.copilot_cli),
                     (AgentType::Vibe, &tiers.vibe),
+                    (AgentType::Ollama, &tiers.ollama),
                 ] {
                     seed_configured_tiers(conn, agent, cfg)?;
                 }

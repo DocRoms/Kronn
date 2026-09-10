@@ -810,6 +810,19 @@ pub fn insert_migrated_seed_for_target(
     if get(conn, runtime_target_id, model_id)?.is_some() {
         return Ok(());
     }
+    // Bootstrap fills empty tiers only. Existing operator/live assignments,
+    // including unavailable ones, must not compete with a historical seed.
+    let tier_assignment = if let Some(tier) = tier_assignment {
+        let occupied: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM model_catalog_entries \
+             WHERE runtime_target_id = ?1 AND tier_assignment = ?2)",
+            params![runtime_target_id, format_tier(tier)],
+            |row| row.get(0),
+        )?;
+        (!occupied).then_some(tier)
+    } else {
+        None
+    };
     let id = canonical_id(runtime_target_id, model_id);
     let now = Utc::now().to_rfc3339();
     conn.execute(
