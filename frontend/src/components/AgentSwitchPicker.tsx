@@ -1,19 +1,17 @@
 import { useCallback, useEffect, useId, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { createPortal } from 'react-dom';
 import { Check, ChevronDown, Loader2, RefreshCw } from 'lucide-react';
-import { modelCatalogApi } from '../lib/api';
-import { catalogModelProvenance, catalogTierEntry, modelRuntimeTargetId } from '../lib/modelCatalogSelection';
+import { resolveCatalogTier, modelRuntimeTargetId } from '../lib/modelCatalogSelection';
+import { useModelCatalogSnapshot } from '../hooks/useModelCatalogSnapshot';
 import { useT } from '../lib/I18nContext';
 import {
   AGENT_COLORS,
   AGENT_LABELS,
   MODEL_TIER_ICONS,
   agentTextColor,
-  modelForAgentTier,
 } from '../lib/constants';
 import type {
   AgentType,
-  ModelCatalogSnapshot,
   ModelTier,
   ModelTierConfig,
   ModelTiersConfig,
@@ -83,8 +81,7 @@ export function AgentSwitchPicker({
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
   const [saving, setSaving] = useState(false);
-  const [catalog, setCatalog] = useState<ModelCatalogSnapshot | null>(null);
-  const [catalogError, setCatalogError] = useState(false);
+  const { catalog, catalogError } = useModelCatalogSnapshot(open);
   const [popoverPosition, setPopoverPosition] = useState<{ top: number; left: number; maxHeight: number } | null>(null);
   const savingRef = useRef(false);
   const restoreFocusRef = useRef(false);
@@ -117,26 +114,15 @@ export function AgentSwitchPicker({
   const targetLabel = (target: AgentSwitchTarget) =>
     target.label ?? AGENT_LABELS[target.agent] ?? target.agent;
   const runtimeTargetId = (target: AgentSwitchTarget) => modelRuntimeTargetId(target.agent, target.connectionId);
-  const catalogView = (target: AgentSwitchTarget) =>
-    catalog?.targets.find(view => view.runtime_target_id === runtimeTargetId(target));
-  const isHttpTarget = (target: AgentSwitchTarget) => Boolean(target.connectionId)
-    || ['Ollama', 'LiteLlm', 'Nvidia'].includes(target.agent);
-  const configuredModel = (target: AgentSwitchTarget, tier: ModelTier) => {
-    if (currentModel?.trim() && targetKey(target) === targetKey(currentTarget) && tier === currentTier) {
-      return currentModel;
-    }
-    const configured = target.modelTiers?.[tier]
-      || (isHttpTarget(target) ? target.modelTiers?.default : null);
-    // A named connection owns its configuration; family defaults belong to a different target.
-    return configured || (target.connectionId ? '' : modelForAgentTier(target.agent, tier, modelTiers, ''));
-  };
+  const resolvedTier = (target: AgentSwitchTarget, tier: ModelTier) => resolveCatalogTier(
+    catalog, target, tier, modelTiers,
+    targetKey(target) === targetKey(currentTarget) && tier === currentTier ? currentModel : null,
+  );
+  const configuredModel = (target: AgentSwitchTarget, tier: ModelTier) => resolvedTier(target, tier).configured;
   const catalogEntry = (target: AgentSwitchTarget, tier: ModelTier) =>
-    catalogTierEntry(catalogView(target), tier, configuredModel(target, tier), isHttpTarget(target));
-  const targetModel = (target: AgentSwitchTarget, tier: ModelTier) => {
-    const entry = catalogEntry(target, tier);
-    return entry?.display_alias ?? entry?.display_name ?? entry?.model_id
-      ?? (configuredModel(target, tier) || defaultModelLabel);
-  };
+    resolvedTier(target, tier).entry;
+  const targetModel = (target: AgentSwitchTarget, tier: ModelTier) =>
+    resolvedTier(target, tier).model || defaultModelLabel;
   const tierTitle = (target: AgentSwitchTarget, tier: ModelTier) =>
     `${tierLabels?.[tier] ?? tier} · ${targetModel(target, tier)}`;
   const effectiveSuffix = suffix
@@ -239,23 +225,6 @@ export function AgentSwitchPicker({
   useEffect(() => {
     if (!open) return;
     searchRef.current?.focus();
-    let active = true;
-    void modelCatalogApi.list()
-      .then(snapshot => {
-        if (active) {
-          setCatalog(snapshot);
-          setCatalogError(false);
-        }
-      })
-      .catch(() => {
-        if (!active) return;
-        setCatalogError(true);
-        // Keep known identities, but do not present the previous snapshot as fresh.
-        setCatalog(previous => previous ? {
-          ...previous,
-          targets: previous.targets.map(target => ({ ...target, stale: true, live_refresh_ok: false })),
-        } : null);
-      });
     updatePopoverPosition();
     const closeOutside = (event: MouseEvent) => {
       const target = event.target as Node;
@@ -277,7 +246,6 @@ export function AgentSwitchPicker({
     window.addEventListener('resize', updatePopoverPosition);
     window.addEventListener('scroll', updatePopoverPosition, true);
     return () => {
-      active = false;
       document.removeEventListener('mousedown', closeOutside);
       document.removeEventListener('keydown', closeOnEscape);
       window.removeEventListener('resize', updatePopoverPosition);
@@ -382,7 +350,7 @@ export function AgentSwitchPicker({
                   const entry = catalogEntry(target, tier);
                   const unavailable = entry?.availability === 'unavailable';
                   const provenance = entry
-                    ? t(`modelCatalog.provenance.${catalogModelProvenance(entry, catalogView(target))}`)
+                    ? t(`modelCatalog.provenance.${resolvedTier(target, tier).provenance}`)
                     : null;
                   const descriptionId = `${pickerId}-${targetIndex}-${tier}`;
                   return (

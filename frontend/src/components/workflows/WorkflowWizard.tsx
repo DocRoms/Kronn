@@ -259,7 +259,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
     ? installedAgentTypes
     : ALL_AGENT_TYPES
   ).map(at => ({ type: at, label: AGENT_LABELS[at] ?? at }));
-  const renderAgentTierPicker = (step: WorkflowStep, index: number, compact = false) => (
+  const renderAgentTierPicker = (step: WorkflowStep, onUpdate: (patch: Partial<WorkflowStep>) => void, compact = false) => (
     <AgentSwitchPicker
       currentAgent={step.agent}
       availableAgents={availableAgents.map(agent => agent.type)}
@@ -271,7 +271,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
         // A concrete expert model has higher runtime priority than the tier.
         // Clear it when the user explicitly selects an agent × mode pair so
         // the visible choice is guaranteed to be the one that executes.
-        updateStep(index, {
+        onUpdate({
           agent: target.agent,
           agent_settings: agentSettingsForSelection(step.agent_settings, tier, target.connectionId),
         });
@@ -1430,7 +1430,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
             {t('wiz.agentAndTierLabel')} <HelpTip hint={t('wiz.helpAgent')} />
           </label>
           <div className="wf-wizard-agent-tier mb-6">
-            {steps[0] && renderAgentTierPicker(steps[0], 0)}
+            {steps[0] && renderAgentTierPicker(steps[0], patch => updateStep(0, patch))}
           </div>
 
           <label className="wf-label">
@@ -2086,7 +2086,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                 {activeStepType === 'Agent' && (
                   <div className="wf-step-agent-routing">
                     <label className="wf-label">{t('wiz.agentAndTierLabel')}</label>
-                    {renderAgentTierPicker(step, i)}
+                    {renderAgentTierPicker(step, patch => updateStep(i, patch))}
                   </div>
                 )}
                 {step.step_type?.type !== 'BatchQuickPrompt' && checkAgentRestricted(agentAccess, step.agent) && (
@@ -4548,17 +4548,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                   {rbKind === 'Agent' && (
                     <>
                       <div className="flex-row gap-2 mb-2">
-                        <select
-                          className="wf-select text-sm"
-                          style={{ width: 180 }}
-                          value={rb.agent}
-                          onChange={e => updateRb({ agent: e.target.value as AgentType })}
-                          aria-label={t('wiz.agentLabel')}
-                        >
-                          {ALL_AGENT_TYPES.map(a => (
-                            <option key={a} value={a}>{AGENT_LABELS[a] ?? a}</option>
-                          ))}
-                        </select>
+                        {renderAgentTierPicker(rb, updateRb)}
                       </div>
                       <div className="wf-markdown-prompt-field">
                         <MarkdownEditor content={rb.prompt_template}>

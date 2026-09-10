@@ -1,5 +1,37 @@
 import type { SearchableSelectOption } from '../components/SearchableSelect';
-import type { AgentType, CatalogModelEntry, ModelCatalogView, ModelTier } from '../types/generated';
+import type { AgentType, CatalogModelEntry, ModelCatalogSnapshot, ModelCatalogView, ModelTier, ModelTierConfig, ModelTiersConfig } from '../types/generated';
+import { modelForAgentTier } from './constants';
+
+export interface CatalogAgentTarget {
+  agent: AgentType;
+  connectionId?: string | null;
+  modelTiers?: ModelTierConfig;
+}
+
+/** Resolve configuration and catalogue in one exact runtime namespace. */
+export function resolveCatalogTier(
+  snapshot: ModelCatalogSnapshot | null,
+  target: CatalogAgentTarget,
+  tier: ModelTier,
+  familyTiers?: ModelTiersConfig | null,
+  explicitModel?: string | null,
+) {
+  const runtimeId = modelRuntimeTargetId(target.agent, target.connectionId);
+  const view = snapshot?.targets.find(candidate => candidate.runtime_target_id === runtimeId);
+  const http = Boolean(target.connectionId) || ['Ollama', 'LiteLlm', 'Nvidia'].includes(target.agent);
+  const configured = explicitModel?.trim() || target.modelTiers?.[tier]
+    || (http ? target.modelTiers?.default : null)
+    || (target.connectionId ? '' : modelForAgentTier(target.agent, tier, familyTiers, ''));
+  const entry = catalogTierEntry(view, tier, configured, http);
+  return {
+    configured, entry, view,
+    model: entry?.display_alias ?? entry?.display_name ?? entry?.model_id ?? configured,
+    unavailable: entry?.availability === 'unavailable',
+    provenance: entry ? catalogModelProvenance(entry, view) : null,
+  };
+}
+
+export type ResolvedCatalogTier = ReturnType<typeof resolveCatalogTier>;
 
 const AGENT_RUNTIME_TARGETS: Record<AgentType, string> = {
   ClaudeCode: 'agent:claude-code', Codex: 'agent:codex', OpenCode: 'agent:opencode',

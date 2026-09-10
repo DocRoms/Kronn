@@ -20,7 +20,6 @@ import {
   MODEL_TIER_ICONS,
   agentTextColor,
   isUsable,
-  modelForAgentTier,
 } from '../lib/constants';
 import { audioBufferToFloat32, transcribeAudio } from '../lib/stt-engine';
 import {
@@ -37,6 +36,11 @@ import {
 import { quoteMultilinePaste } from '../lib/quoteMultilinePaste';
 import { formatRelativeTime } from '../lib/relativeTime';
 import { discussions as discussionsApi, autoTriggersApi, config as configApi } from '../lib/api';
+import type { ExternalApiConnectionView } from '../lib/api';
+import { resolveCatalogTier } from '../lib/modelCatalogSelection';
+import { useModelCatalogSnapshot } from '../hooks/useModelCatalogSnapshot';
+import { MentionTierChoices } from './MentionTierChoices';
+import { MENTION_TIER_CHOICES, nextMentionTierIndex } from '../lib/mentionTierSelection';
 import { detectTriggeredSkills } from '../lib/autoTriggers';
 import {
   MESSAGE_SEND_SETTLED_EVENT,
@@ -61,8 +65,6 @@ import {
   targetsFromComposerText,
 } from '../lib/messageTargets';
 import { findAgentMentionQuery, type AgentMentionQuery } from '../lib/mention-autocomplete';
-
-const MENTION_TIER_CHOICES: ModelTier[] = ['economy', 'default', 'reasoning'];
 
 let sttWorker: Worker | null = null;
 function getSttWorker(): Worker {
@@ -123,6 +125,7 @@ export interface ChatInputProps {
   onToggleDiscussionNotes?: () => void;
   onCancelReply?: () => void;
   modelTiers?: ModelTiersConfig | null;
+  externalConnections?: ExternalApiConnectionView[];
   toast: ToastFn;
   t: (key: string, ...args: (string | number)[]) => string;
 }
@@ -163,6 +166,7 @@ export function ChatInput({
   onToggleDiscussionNotes,
   onCancelReply,
   modelTiers,
+  externalConnections = [],
   toast,
   t,
 }: ChatInputProps) {
@@ -444,6 +448,7 @@ export function ChatInput({
   }, [flushDraftNow, updateChatInput, updateMentionTierOverrides]);
 
   const [mentionQuery, setMentionQuery] = useState<string | null>(null);
+  const { catalog, catalogError } = useModelCatalogSnapshot(mentionQuery !== null);
   const [mentionIndex, setMentionIndex] = useState(0);
   // Keyboard tier pick inside the mention palette. `null` means UNTOUCHED, and
   // that distinction is load-bearing: Tab/Enter must keep sending no tier at all
@@ -670,6 +675,17 @@ export function ChatInput({
       ),
     [mentionQuery, DISABLED_MENTION_OPTIONS],
   );
+  const mentionTierResolution = useCallback((mention: (typeof AGENT_MENTIONS)[number], tier: ModelTier, explicitModel?: string | null) => {
+    const agent = mention.target?.agent_type ?? mention.type;
+    if (!agent) throw new Error('Only agent mentions resolve a model');
+    const connectionId = mention.target?.kind === 'discussion_agent' ? discussion?.connection_id : null;
+    const connection = connectionId ? externalConnections.find(item => item.id === connectionId) : undefined;
+    return resolveCatalogTier(catalog, {
+      agent,
+      connectionId,
+      modelTiers: connection ? { economy: connection.economy_model, default: connection.default_model, reasoning: connection.reasoning_model } : undefined,
+    }, tier, modelTiers, explicitModel);
+  }, [catalog, discussion, externalConnections, modelTiers]);
   const mentionRoutingMode = useCallback((mention: (typeof AGENT_MENTIONS)[number]) => {
     const target = mention.target;
     if (!target || !discussion) return null;
@@ -684,24 +700,23 @@ export function ChatInput({
     const isPrincipal = target.kind === 'discussion_agent';
     const tier = selectedTier
       ?? (isPrincipal ? discussion.tier : target.tier ?? 'default');
-    const model = isPrincipal && !selectedTier && discussion.model?.trim()
-      ? discussion.model.trim()
-      : modelForAgentTier(
-        target.agent_type,
-        tier,
-        modelTiers,
-        t('disc.defaultAgentModel'),
-      );
+    const resolved = mentionTierResolution(mention, tier, isPrincipal && !selectedTier ? discussion.model : null);
     return {
       icon: MODEL_TIER_ICONS[tier],
       title: t(
         isPrincipal && !selectedTier ? 'disc.routingNativeTier' : 'disc.routingTargetTier',
         t(`disc.tier.${tier}`),
-        model,
+        resolved.model || t('disc.defaultAgentModel'),
       ),
       tier,
+      unavailable: resolved.unavailable,
     };
-  }, [discussion, mentionTierOverrides, modelTiers, preferredTiers, t]);
+  }, [discussion, mentionTierOverrides, mentionTierResolution, preferredTiers, t]);
+  const selectMention = (mention: (typeof AGENT_MENTIONS)[number], tier?: ModelTier) => {
+    const unavailable = tier ? mentionTierResolution(mention, tier).unavailable : mentionRoutingMode(mention)?.unavailable;
+    if (unavailable) return;
+    applyMentionSuggestion(mention.trigger, mention.target?.kind === 'cli' ? undefined : mention.type, tier);
+  };
   const pruneMentionTierOverrides = useCallback((text: string) => {
     const activeAgents = new Set(
       targetsFromComposerText(text, AGENT_MENTIONS).targets
@@ -716,13 +731,14 @@ export function ChatInput({
       updateMentionTierOverrides(next);
     }
   }, [AGENT_MENTIONS, updateMentionTierOverrides]);
-  const mentionTierChoiceTitle = useCallback((agent: AgentType, tier: ModelTier) => (
-    t(
+  const mentionTierChoiceTitle = useCallback((agent: AgentType, tier: ModelTier) => {
+    const mention = AGENT_MENTIONS.find(item => item.type === agent && item.target?.kind !== 'cli');
+    return t(
       'disc.routingInvokeTier',
       t(`disc.tier.${tier}`),
-      modelForAgentTier(agent, tier, modelTiers, t('disc.defaultAgentModel')),
-    )
-  ), [modelTiers, t]);
+      (mention ? mentionTierResolution(mention, tier).model : '') || t('disc.defaultAgentModel'),
+    );
+  }, [AGENT_MENTIONS, mentionTierResolution, t]);
   const routingHelp = useMemo(() => {
     if (!discussion) {
       return {
@@ -1320,6 +1336,7 @@ export function ChatInput({
           && (filteredMentionOptions.length > 0 || filteredDisabledMentionOptions.length > 0)
           && (
             <div className="disc-mention-popover">
+              {catalogError && <div role="status">{t('modelCatalog.loadError')}</div>}
               {filteredMentionOptions.map(({ mention: m, group }, i) => (
                 <Fragment key={m.trigger}>
                   {(i === 0 || filteredMentionOptions[i - 1].group !== group) && (
@@ -1332,14 +1349,15 @@ export function ChatInput({
                   <div
                     className="disc-mention-item"
                     data-highlighted={i === mentionIndex}
-                    onMouseEnter={() => setMentionIndex(i)}
+                    onMouseEnter={() => { setMentionIndex(i); setMentionTierIndex(null); }}
                   >
                     <button
                       type="button"
                       className="disc-mention-main"
+                      disabled={mentionRoutingMode(m)?.unavailable}
                       onMouseDown={e => {
                         e.preventDefault();
-                        applyMentionSuggestion(m.trigger, m.type);
+                        selectMention(m);
                       }}
                     >
                       {m.type
@@ -1363,34 +1381,15 @@ export function ChatInput({
                       )}
                     </button>
                     {m.type && m.target && m.target.kind !== 'cli' && (
-                        <span
-                          className="disc-mention-tier-choices"
-                          aria-label={mentionRoutingMode(m)?.title}
-                        >
-                          {MENTION_TIER_CHOICES.map(tier => (
-                            <button
-                              key={tier}
-                              type="button"
-                              className="disc-mention-tier-choice"
-                              data-tier={tier}
-                              data-current={mentionRoutingMode(m)?.tier === tier}
-                              data-keyboard-selected={
-                                i === mentionIndex
-                                && mentionTierIndex !== null
-                                && MENTION_TIER_CHOICES[mentionTierIndex] === tier
-                              }
-                              aria-label={`${m.displayTrigger} · ${mentionTierChoiceTitle(m.type as AgentType, tier)}`}
-                              title={mentionTierChoiceTitle(m.type as AgentType, tier)}
-                              onMouseDown={event => {
-                                event.preventDefault();
-                                event.stopPropagation();
-                                applyMentionSuggestion(m.trigger, m.type, tier);
-                              }}
-                            >
-                              <span aria-hidden="true">{MODEL_TIER_ICONS[tier]}</span>
-                            </button>
-                          ))}
-                        </span>
+                        <MentionTierChoices
+                          trigger={m.displayTrigger}
+                          currentTier={mentionRoutingMode(m)?.tier}
+                          keyboardTier={i === mentionIndex && mentionTierIndex !== null ? MENTION_TIER_CHOICES[mentionTierIndex] : undefined}
+                          ariaLabel={mentionRoutingMode(m)?.title}
+                          resolve={tier => mentionTierResolution(m, tier)}
+                          onSelect={tier => selectMention(m, tier)}
+                          t={t}
+                        />
                     )}
                   </div>
                 </Fragment>
@@ -1741,27 +1740,16 @@ export function ChatInput({
                 e.preventDefault();
                 tierKeyConsumedRef.current = true;
                 const step = e.key === 'ArrowRight' ? 1 : -1;
-                setMentionTierIndex(current => {
-                  // Start from what is already in effect for this row rather than
-                  // from index 0, so one keypress moves one step from what the user
-                  // can see highlighted.
-                  const from = current
-                    ?? Math.max(
-                      0,
-                      MENTION_TIER_CHOICES.indexOf(
-                        (mentionRoutingMode(highlighted)?.tier as ModelTier | undefined) ?? 'default',
-                      ),
-                    );
-                  return Math.min(Math.max(from + step, 0), MENTION_TIER_CHOICES.length - 1);
-                });
+                setMentionTierIndex(current => nextMentionTierIndex(current,
+                  mentionRoutingMode(highlighted)?.tier ?? 'default', step,
+                  tier => mentionTierResolution(highlighted, tier)));
                 return;
               }
               if ((e.key === 'Tab' || e.key === 'Enter') && filtered.length > 0) {
                 e.preventDefault();
                 const selectedMention = filtered[mentionIndex].mention;
-                applyMentionSuggestion(
-                  selectedMention.trigger,
-                  selectedMention.type,
+                selectMention(
+                  selectedMention,
                   mentionTierIndex === null ? undefined : MENTION_TIER_CHOICES[mentionTierIndex],
                 );
                 return;

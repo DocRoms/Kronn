@@ -8,7 +8,11 @@ import { SearchableSelect } from './SearchableSelect';
 import { skills as skillsApi, profiles as profilesApi, directives as directivesApi, config as configApi } from '../lib/api';
 import type { ExternalApiConnectionView } from '../lib/api';
 import type { Project, AgentDetection, AgentType, AgentsConfig, Skill, AgentProfile, Directive, MessageTarget, ModelTier, ModelTierConfig } from '../types/generated';
-import { AGENT_LABELS, AGENT_MENTIONS, MODEL_TIER_ICONS, agentTextColor, modelForAgentTier, isAgentRestricted as isAgentRestrictedUtil, isUsable, isHiddenPath, RTK_APPLICABLE, isRtkActive } from '../lib/constants';
+import { AGENT_LABELS, AGENT_MENTIONS, MODEL_TIER_ICONS, agentTextColor, isAgentRestricted as isAgentRestrictedUtil, isUsable, isHiddenPath, RTK_APPLICABLE, isRtkActive } from '../lib/constants';
+import { resolveCatalogTier } from '../lib/modelCatalogSelection';
+import { useModelCatalogSnapshot } from '../hooks/useModelCatalogSnapshot';
+import { MentionTierChoices } from './MentionTierChoices';
+import { MENTION_TIER_CHOICES, nextMentionTierIndex } from '../lib/mentionTierSelection';
 import { clearDraft, loadDraft, NEW_DISCUSSION_DRAFT_ID, saveDraft, type DraftRoutingTiers } from '../lib/chat-drafts';
 import { externalAgentTargets } from '../lib/externalAgentIdentity';
 import { loadDefaultDiscussionProject, saveDefaultDiscussionProject } from '../lib/new-discussion-preferences';
@@ -27,8 +31,6 @@ import {
   Settings, Check, Zap, UserCircle, FileText, Paperclip, Image,
   Clapperboard, Cpu,
 } from 'lucide-react';
-
-const MENTION_TIER_CHOICES: ModelTier[] = ['economy', 'default', 'reasoning'];
 
 interface LaunchTarget {
   agent: AgentType;
@@ -170,6 +172,9 @@ export function NewDiscussionForm({
   const autocompleteRef = useRef<HTMLDivElement>(null);
   const [mentionMatch, setMentionMatch] = useState<AgentMentionQuery | null>(null);
   const mentionQuery = mentionMatch?.query ?? null;
+  const { catalog, catalogError } = useModelCatalogSnapshot(mentionQuery !== null);
+  const targetTierResolution = (target: LaunchTarget, tier: ModelTier) =>
+    resolveCatalogTier(catalog, target, tier, agentAccess?.model_tiers);
   const [mentionIndex, setMentionIndex] = useState(0);
   const [mentionTierIndex, setMentionTierIndex] = useState<number | null>(null);
   const tierKeyConsumedRef = useRef(false);
@@ -451,6 +456,7 @@ export function NewDiscussionForm({
   ) => {
     const range = mentionMatch;
     if (!range) return;
+    if (target && targetTierResolution(target, tier ?? promptAgentTiers[launchTargetKey(target)] ?? newDiscTier).unavailable) return;
     const trailing = newDiscPrompt.slice(range.end);
     const spacer = trailing.length === 0 || !/^\s/.test(trailing) ? ' ' : '';
     const next = `${newDiscPrompt.slice(0, range.start)}${trigger}${spacer}${trailing}`;
@@ -695,6 +701,7 @@ export function NewDiscussionForm({
                     data-placement="below"
                     style={{ maxHeight: 250 }}
                   >
+                    {catalogError && <div role="status">{t('modelCatalog.loadError')}</div>}
                     {available.length > 0 && (
                       <div className="disc-mention-group">{t('disc.routingAvailableAgents')}</div>
                     )}
@@ -706,6 +713,7 @@ export function NewDiscussionForm({
                           key={targetKey}
                           role="option"
                           aria-selected={index === mentionIndex}
+                          aria-disabled={targetTierResolution(target, currentTier).unavailable}
                           className="disc-mention-item"
                           data-highlighted={index === mentionIndex}
                           onMouseEnter={() => {
@@ -713,6 +721,9 @@ export function NewDiscussionForm({
                             setMentionTierIndex(null);
                           }}
                           onMouseDown={event => {
+                            // Disabled buttons can still bubble pointer events to the row.
+                            // Never turn a refused tier choice into an implicit default.
+                            if (event.target instanceof Element && event.target.closest('button')) return;
                             event.preventDefault();
                             applyMentionSuggestion(target.trigger, newDiscPromptRef.current, target);
                           }}
@@ -722,41 +733,10 @@ export function NewDiscussionForm({
                             <span className="font-semibold" style={{ color: agentTextColor(target.agent) }}>{target.trigger}</span>
                             <span className="text-muted">{target.label}</span>
                           </div>
-                          <span className="disc-mention-tier-choices" aria-label={t('disc.modelTier')}>
-                            {(['economy', 'default', 'reasoning'] as const).map(tier => {
-                              const model = target.modelTiers?.[tier]
-                                ?? modelForAgentTier(
-                                  target.agent,
-                                  tier,
-                                  agentAccess?.model_tiers,
-                                  t('disc.defaultAgentModel'),
-                                );
-                              const title = t('disc.routingInvokeTier', t(`disc.tier.${tier}`), model);
-                              return (
-                                <button
-                                  key={tier}
-                                  type="button"
-                                  className="disc-mention-tier-choice"
-                                  data-tier={tier}
-                                  data-current={currentTier === tier}
-                                  data-keyboard-selected={
-                                    index === mentionIndex
-                                    && mentionTierIndex !== null
-                                    && MENTION_TIER_CHOICES[mentionTierIndex] === tier
-                                  }
-                                  aria-label={`${target.trigger} · ${title}`}
-                                  title={title}
-                                  onMouseDown={event => {
-                                    event.preventDefault();
-                                    event.stopPropagation();
-                                    applyMentionSuggestion(target.trigger, newDiscPromptRef.current, target, tier);
-                                  }}
-                                >
-                                  <span aria-hidden="true">{MODEL_TIER_ICONS[tier]}</span>
-                                </button>
-                              );
-                            })}
-                          </span>
+                          <MentionTierChoices trigger={target.trigger} currentTier={currentTier}
+                            keyboardTier={index === mentionIndex && mentionTierIndex !== null ? MENTION_TIER_CHOICES[mentionTierIndex] : undefined}
+                            ariaLabel={t('disc.modelTier')} resolve={tier => targetTierResolution(target, tier)}
+                            onSelect={tier => applyMentionSuggestion(target.trigger, newDiscPromptRef.current, target, tier)} t={t} />
                         </div>
                       );
                     })}
@@ -864,14 +844,9 @@ export function NewDiscussionForm({
                         e.preventDefault();
                         tierKeyConsumedRef.current = true;
                         const step = e.key === 'ArrowRight' ? 1 : -1;
-                        setMentionTierIndex(current => {
-                          const effectiveTier = promptAgentTiers[launchTargetKey(highlighted)] ?? newDiscTier;
-                          const from = current ?? MENTION_TIER_CHOICES.indexOf(effectiveTier);
-                          return Math.min(
-                            Math.max(from + step, 0),
-                            MENTION_TIER_CHOICES.length - 1,
-                          );
-                        });
+                        setMentionTierIndex(current => nextMentionTierIndex(current,
+                          promptAgentTiers[launchTargetKey(highlighted)] ?? newDiscTier, step,
+                          tier => targetTierResolution(highlighted, tier)));
                         return;
                       }
                       if ((e.key === 'Tab' || e.key === 'Enter') && highlighted) {
@@ -1153,13 +1128,8 @@ export function NewDiscussionForm({
                 </span>
               ) : promptMentionedTargets.map(target => {
                 const selectedTier = promptAgentTiers[launchTargetKey(target)] ?? newDiscTier;
-                const selectedModel = target.modelTiers?.[selectedTier]
-                  ?? modelForAgentTier(
-                    target.agent,
-                    selectedTier,
-                    agentAccess?.model_tiers,
-                    t('disc.defaultAgentModel'),
-                  );
+                const resolved = targetTierResolution(target, selectedTier);
+                const selectedModel = resolved.model || t('disc.defaultAgentModel');
                 return (
                   <span
                     key={launchTargetKey(target)}
@@ -1176,6 +1146,8 @@ export function NewDiscussionForm({
                         {t(`disc.tier.${selectedTier}`)}
                       </span>
                     )}
+                    {resolved.unavailable && <span>{t('modelCatalog.unavailable')}</span>}
+                    {resolved.provenance && <span>{t(`modelCatalog.provenance.${resolved.provenance}`)}</span>}
                   </span>
                 );
               })}
