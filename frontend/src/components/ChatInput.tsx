@@ -17,6 +17,7 @@ import type {
 } from '../types/generated';
 import {
   AGENT_MENTIONS as ALL_AGENT_MENTIONS,
+  AGENT_LABELS,
   MODEL_TIER_ICONS,
   agentTextColor,
   isUsable,
@@ -37,7 +38,7 @@ import { quoteMultilinePaste } from '../lib/quoteMultilinePaste';
 import { formatRelativeTime } from '../lib/relativeTime';
 import { discussions as discussionsApi, autoTriggersApi, config as configApi } from '../lib/api';
 import type { ExternalApiConnectionView } from '../lib/api';
-import { resolveCatalogTier } from '../lib/modelCatalogSelection';
+import { resolveCatalogTier, matchesCatalogSearch, catalogTargetSearchTerms } from '../lib/modelCatalogSelection';
 import { useModelCatalogSnapshot } from '../hooks/useModelCatalogSnapshot';
 import { MentionTierChoices } from './MentionTierChoices';
 import { MENTION_TIER_CHOICES, nextMentionTierIndex } from '../lib/mentionTierSelection';
@@ -64,7 +65,7 @@ import {
   composerMentions,
   targetsFromComposerText,
 } from '../lib/messageTargets';
-import { findAgentMentionQuery, type AgentMentionQuery } from '../lib/mention-autocomplete';
+import { findAgentMentionQuery, mentionMatchRank, type AgentMentionQuery } from '../lib/mention-autocomplete';
 
 let sttWorker: Worker | null = null;
 function getSttWorker(): Worker {
@@ -659,22 +660,6 @@ export function ChatInput({
       : [],
     [AGENT_MENTIONS, nativeAgentDisabled],
   );
-  const filteredMentionOptions = useMemo(
-    () => mentionQuery === null
-      ? []
-      : MENTION_OPTIONS.filter(
-        ({ mention }) => mention.trigger.slice(1).startsWith(mentionQuery),
-      ),
-    [mentionQuery, MENTION_OPTIONS],
-  );
-  const filteredDisabledMentionOptions = useMemo(
-    () => mentionQuery === null
-      ? []
-      : DISABLED_MENTION_OPTIONS.filter(
-        mention => mention.trigger.slice(1).startsWith(mentionQuery),
-      ),
-    [mentionQuery, DISABLED_MENTION_OPTIONS],
-  );
   const mentionTierResolution = useCallback((mention: (typeof AGENT_MENTIONS)[number], tier: ModelTier, explicitModel?: string | null) => {
     const agent = mention.target?.agent_type ?? mention.type;
     if (!agent) throw new Error('Only agent mentions resolve a model');
@@ -686,6 +671,29 @@ export function ChatInput({
       modelTiers: connection ? { economy: connection.economy_model, default: connection.default_model, reasoning: connection.reasoning_model } : undefined,
     }, tier, modelTiers, explicitModel);
   }, [catalog, discussion, externalConnections, modelTiers]);
+  const mentionMatchesQuery = useCallback((mention: (typeof AGENT_MENTIONS)[number], query: string) => {
+    const agent = mention.target?.agent_type ?? mention.type;
+    const principal = mention.target?.kind === 'discussion_agent';
+    const connection = principal ? externalConnections.find(item => item.id === discussion?.connection_id) : undefined;
+    // An external CLI owns its model: never search it through native tier assignments.
+    const tiers = agent && mention.target?.kind !== 'cli'
+      ? MENTION_TIER_CHOICES.map(tier => mentionTierResolution(mention, tier)) : [];
+    return matchesCatalogSearch(query, [mention.trigger, mention.label, agent ? AGENT_LABELS[agent] : null,
+      connection?.display_name, connection?.mention_alias,
+      principal ? discussion?.model : null,
+      ...(agent ? catalogTargetSearchTerms({ agent, connectionId: principal ? discussion?.connection_id : null }, tiers) : []),
+    ]);
+  }, [discussion, externalConnections, mentionTierResolution]);
+  const filteredMentionOptions = useMemo(
+    () => mentionQuery === null ? [] : MENTION_OPTIONS.filter(({ mention }) => mentionMatchesQuery(mention, mentionQuery))
+      .sort((a, b) => mentionMatchRank(a.mention.trigger, mentionQuery) - mentionMatchRank(b.mention.trigger, mentionQuery)),
+    [mentionQuery, MENTION_OPTIONS, mentionMatchesQuery],
+  );
+  const filteredDisabledMentionOptions = useMemo(
+    () => mentionQuery === null ? [] : DISABLED_MENTION_OPTIONS.filter(mention => mentionMatchesQuery(mention, mentionQuery))
+      .sort((a, b) => mentionMatchRank(a.trigger, mentionQuery) - mentionMatchRank(b.trigger, mentionQuery)),
+    [mentionQuery, DISABLED_MENTION_OPTIONS, mentionMatchesQuery],
+  );
   const mentionRoutingMode = useCallback((mention: (typeof AGENT_MENTIONS)[number]) => {
     const target = mention.target;
     if (!target || !discussion) return null;
@@ -1729,7 +1737,7 @@ export function ChatInput({
                 && highlighted.target
                 && highlighted.target.kind !== 'cli',
               );
-              if (e.key === 'ArrowDown') { e.preventDefault(); setMentionIndex(i => Math.min(i + 1, filtered.length - 1)); setMentionTierIndex(null); return; }
+              if (e.key === 'ArrowDown') { e.preventDefault(); setMentionIndex(i => Math.max(0, Math.min(i + 1, filtered.length - 1))); setMentionTierIndex(null); return; }
               if (e.key === 'ArrowUp') { e.preventDefault(); setMentionIndex(i => Math.max(i - 1, 0)); setMentionTierIndex(null); return; }
               if (tierable && highlighted && (e.key === 'ArrowRight' || e.key === 'ArrowLeft')) {
                 // preventDefault keeps the caret still, so the query survives —
@@ -1745,11 +1753,10 @@ export function ChatInput({
                   tier => mentionTierResolution(highlighted, tier)));
                 return;
               }
-              if ((e.key === 'Tab' || e.key === 'Enter') && filtered.length > 0) {
+              if ((e.key === 'Tab' || e.key === 'Enter') && highlighted) {
                 e.preventDefault();
-                const selectedMention = filtered[mentionIndex].mention;
                 selectMention(
-                  selectedMention,
+                  highlighted,
                   mentionTierIndex === null ? undefined : MENTION_TIER_CHOICES[mentionTierIndex],
                 );
                 return;

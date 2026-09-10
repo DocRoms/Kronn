@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useId, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { createPortal } from 'react-dom';
 import { Check, ChevronDown, Loader2, RefreshCw } from 'lucide-react';
-import { resolveCatalogTier, modelRuntimeTargetId } from '../lib/modelCatalogSelection';
+import { resolveCatalogTier, matchesCatalogSearch, catalogTargetSearchTerms } from '../lib/modelCatalogSelection';
 import { useModelCatalogSnapshot } from '../hooks/useModelCatalogSnapshot';
 import { useT } from '../lib/I18nContext';
 import {
@@ -113,7 +113,6 @@ export function AgentSwitchPicker({
 
   const targetLabel = (target: AgentSwitchTarget) =>
     target.label ?? AGENT_LABELS[target.agent] ?? target.agent;
-  const runtimeTargetId = (target: AgentSwitchTarget) => modelRuntimeTargetId(target.agent, target.connectionId);
   const resolvedTier = (target: AgentSwitchTarget, tier: ModelTier) => resolveCatalogTier(
     catalog, target, tier, modelTiers,
     targetKey(target) === targetKey(currentTarget) && tier === currentTier ? currentModel : null,
@@ -127,16 +126,11 @@ export function AgentSwitchPicker({
     `${tierLabels?.[tier] ?? tier} · ${targetModel(target, tier)}`;
   const effectiveSuffix = suffix
     ?? (tierPicker && currentTier ? targetModel(currentTarget, currentTier) : undefined);
-  const searchText = (value: string) => value.normalize('NFKD').replace(/\p{Diacritic}/gu, '').toLowerCase();
-  const normalizedQuery = searchText(query.trim());
-  const visibleChoices = choices.filter(target => !normalizedQuery || searchText([
-    targetLabel(target), target.agent, target.connectionId, runtimeTargetId(target),
-    ...tierChoices.flatMap(tier => {
-      const entry = catalogEntry(target, tier);
-      return [tier, tierLabels?.[tier], configuredModel(target, tier),
-        entry?.model_id, entry?.display_name, entry?.display_alias];
-    }),
-  ].filter(Boolean).join(' ')).includes(normalizedQuery));
+  const visibleChoices = choices.filter(target => matchesCatalogSearch(query, [
+    targetLabel(target),
+    ...catalogTargetSearchTerms(target, tierChoices.map(tier => resolvedTier(target, tier))),
+    ...tierChoices.flatMap(tier => [tier, tierLabels?.[tier]]),
+  ]));
 
   const navigateChoices = (event: ReactKeyboardEvent<HTMLSpanElement>) => {
     if (event.nativeEvent.isComposing) return;

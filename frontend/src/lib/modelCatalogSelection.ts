@@ -33,6 +33,17 @@ export function resolveCatalogTier(
 
 export type ResolvedCatalogTier = ReturnType<typeof resolveCatalogTier>;
 
+/** Search the displayed target and its already-resolved identities; never refresh or select. */
+export function matchesCatalogSearch(query: string, terms: Array<string | null | undefined>): boolean {
+  const normalize = (value: string) => value.normalize('NFKD').replace(/\p{Diacritic}/gu, '').toLowerCase();
+  return normalize(terms.filter(Boolean).join(' ')).includes(normalize(query.trim()));
+}
+
+export function catalogTargetSearchTerms(target: CatalogAgentTarget, tiers: ResolvedCatalogTier[]): Array<string | null | undefined> {
+  return [target.agent, target.connectionId, modelRuntimeTargetId(target.agent, target.connectionId),
+    ...tiers.flatMap(({ configured, entry }) => [configured, entry?.model_id, entry?.display_name, entry?.display_alias])];
+}
+
 const AGENT_RUNTIME_TARGETS: Record<AgentType, string> = {
   ClaudeCode: 'agent:claude-code', Codex: 'agent:codex', OpenCode: 'agent:opencode',
   Vibe: 'agent:vibe', GeminiCli: 'agent:gemini-cli', Kiro: 'agent:kiro',

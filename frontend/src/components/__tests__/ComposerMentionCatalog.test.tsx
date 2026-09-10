@@ -70,6 +70,67 @@ beforeEach(() => { localStorage.clear(); list.mockReset().mockResolvedValue(snap
 afterEach(cleanup);
 
 describe('composer mentions — shared exact catalogue contract', () => {
+  it.each(['chat', 'new'] as const)('searches the connection display name independently of its model alias (%s)', async mode => {
+    const patch = { display_name: 'Bureau privé' };
+    const { textarea } = mode === 'chat' ? await showChat(undefined, patch) : await showNew(patch);
+    fireEvent.change(textarea, { target: { value: '@bureau' } });
+    expect(document.querySelector('.disc-mention-popover')).toBeInTheDocument();
+    fireEvent.keyDown(textarea, { key: 'Enter' });
+    expect(textarea).toHaveValue(mode === 'chat' ? '@litellm ' : '@team-a ');
+  });
+
+  it.each(['chat', 'new'] as const)('keeps a valid keyboard index while catalogue search results arrive (%s)', async mode => {
+    let resolve!: (value: ReturnType<typeof snapshot>) => void;
+    list.mockReturnValue(new Promise(value => { resolve = value; }));
+    const { textarea } = mode === 'chat' ? await showChat() : await showNew();
+    fireEvent.change(textarea, { target: { value: '@modèle' } });
+    expect(document.querySelector('.disc-mention-popover')).toBeNull();
+    fireEvent.keyDown(textarea, { key: 'ArrowDown' });
+    await act(async () => { resolve(snapshot()); });
+    expect(tierButton('default')).toBeInTheDocument();
+    fireEvent.keyDown(textarea, { key: 'Enter' });
+    expect(textarea).toHaveValue(mode === 'chat' ? '@litellm ' : '@team-a ');
+  });
+
+  it.each(['chat', 'new'] as const)('searches model aliases and exact IDs without refetch or preference changes (%s)', async mode => {
+    const { textarea } = mode === 'chat' ? await showChat() : await showNew();
+    for (const query of ['equipe', 'Équipe', 'same-id']) {
+      fireEvent.change(textarea, { target: { value: `@${query}` } });
+      expect(document.querySelector('.disc-mention-popover')).toBeInTheDocument();
+      expect(tierButton('default')).toHaveAccessibleDescription(expect.stringContaining('modelCatalog.provenance.cached'));
+    }
+    expect(list).toHaveBeenCalledTimes(1);
+    expect(loadDiscussionRoutingPreferences('catalog-mentions')).toEqual({});
+    fireEvent.change(textarea, { target: { value: '@Foreign' } });
+    expect(document.querySelector('.disc-mention-popover')).toBeNull();
+    fireEvent.change(textarea, { target: { value: '@equipe' } });
+    fireEvent.keyDown(textarea, { key: 'Enter' });
+    expect(textarea).toHaveValue(mode === 'chat' ? '@litellm ' : '@team-a ');
+    expect(loadDiscussionRoutingPreferences('catalog-mentions')).toEqual({});
+  });
+
+  it.each(['chat', 'new'] as const)('finds an unknown configured model ID and inserts only the canonical target (%s)', async mode => {
+    const patch = { default_model: 'vendor/model.v2:fast' };
+    const { textarea } = mode === 'chat' ? await showChat(undefined, patch) : await showNew(patch);
+    fireEvent.change(textarea, { target: { value: '@vendor/model.v2:fast' } });
+    expect(document.querySelector('.disc-mention-popover')).toBeInTheDocument();
+    expect(tierButton('default')).toHaveTextContent('modelCatalog.notInCatalog');
+    fireEvent.keyDown(textarea, { key: 'Enter' });
+    expect(textarea).toHaveValue(mode === 'chat' ? '@litellm ' : '@team-a ');
+    expect(list).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['chat', 'new'] as const)('keeps searched unavailable models visible without keyboard or pointer substitution (%s)', async mode => {
+    list.mockResolvedValue(snapshot({ availability: 'unavailable' }));
+    const { textarea } = mode === 'chat' ? await showChat() : await showNew();
+    fireEvent.change(textarea, { target: { value: '@equipe' } });
+    expect(tierButton('default')).toBeDisabled();
+    expect(tierButton('default')).toHaveTextContent('modelCatalog.unavailable');
+    fireEvent.keyDown(textarea, { key: 'Enter' });
+    fireEvent.mouseDown(tierButton('default'));
+    expect(textarea).toHaveValue('@equipe');
+  });
+
   it('resolves the principal HTTP connection and cached provenance, not a colliding model or family default', async () => {
     await showChat();
     expect(tierButton('reasoning')).toHaveAttribute('title', expect.stringContaining('Modèle équipe A'));
@@ -158,10 +219,19 @@ describe('composer mentions — shared exact catalogue contract', () => {
       presence_state: 'listening', read_live: true, write_state: 'ok', wake_mode: 'external_poll', next_poll_at: null,
       last_write_at: null, resume_reason: null, resume_since: null, model: 'cli-declared-model', conversation_id: null, cli_ordinal: 4 };
     vi.mocked(discussionsApi.participants).mockResolvedValueOnce([participant]);
+    const data = snapshot();
+    data.targets.push({ runtime_target_id: 'agent:codex', agent_type: 'Codex', stale: false, live_refresh_ok: true,
+      models: [model('agent:codex', { agent_type: 'Codex', model_id: 'native-only', display_alias: 'Native assignment' })] });
+    list.mockResolvedValue(data);
     const { textarea, onSend } = await showChat();
     await act(async () => { fireEvent.change(textarea, { target: { value: '@codex-cli-4' } }); });
     expect(document.querySelector('.disc-mention-tier-choices')).toBeNull();
     expect(screen.getByLabelText('disc.routingCliModelManaged')).toBeInTheDocument();
+    fireEvent.change(textarea, { target: { value: '@cli-4' } });
+    expect(screen.getByLabelText('disc.routingCliModelManaged')).toBeInTheDocument();
+    fireEvent.change(textarea, { target: { value: '@native-only' } });
+    expect(document.querySelector('.disc-mention-popover')).toBeNull();
+    fireEvent.change(textarea, { target: { value: '@cli-4' } });
     fireEvent.keyDown(textarea, { key: 'ArrowRight' });
     fireEvent.keyDown(textarea, { key: 'Enter' });
     expect(textarea).toHaveValue('@codex-cli-4 ');

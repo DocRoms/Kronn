@@ -9,14 +9,14 @@ import { skills as skillsApi, profiles as profilesApi, directives as directivesA
 import type { ExternalApiConnectionView } from '../lib/api';
 import type { Project, AgentDetection, AgentType, AgentsConfig, Skill, AgentProfile, Directive, MessageTarget, ModelTier, ModelTierConfig } from '../types/generated';
 import { AGENT_LABELS, AGENT_MENTIONS, MODEL_TIER_ICONS, agentTextColor, isAgentRestricted as isAgentRestrictedUtil, isUsable, isHiddenPath, RTK_APPLICABLE, isRtkActive } from '../lib/constants';
-import { resolveCatalogTier } from '../lib/modelCatalogSelection';
+import { resolveCatalogTier, matchesCatalogSearch, catalogTargetSearchTerms } from '../lib/modelCatalogSelection';
 import { useModelCatalogSnapshot } from '../hooks/useModelCatalogSnapshot';
 import { MentionTierChoices } from './MentionTierChoices';
 import { MENTION_TIER_CHOICES, nextMentionTierIndex } from '../lib/mentionTierSelection';
 import { clearDraft, loadDraft, NEW_DISCUSSION_DRAFT_ID, saveDraft, type DraftRoutingTiers } from '../lib/chat-drafts';
 import { externalAgentTargets } from '../lib/externalAgentIdentity';
 import { loadDefaultDiscussionProject, saveDefaultDiscussionProject } from '../lib/new-discussion-preferences';
-import { findAgentMentionQuery, type AgentMentionQuery } from '../lib/mention-autocomplete';
+import { findAgentMentionQuery, mentionMatchRank, type AgentMentionQuery } from '../lib/mention-autocomplete';
 import { quoteMultilinePaste } from '../lib/quoteMultilinePaste';
 import {
   applyEmojiReplacement,
@@ -206,6 +206,11 @@ export function NewDiscussionForm({
       available: true,
     })),
   ], [externalConnections, installedAgentTypes]);
+  const matchingMentionTargets = mentionQuery === null ? [] : launchTargets.filter(target => matchesCatalogSearch(mentionQuery, [
+    target.trigger, target.label,
+    ...catalogTargetSearchTerms(target, MENTION_TIER_CHOICES.map(tier => targetTierResolution(target, tier))),
+  ])).sort((a, b) => mentionMatchRank(a.trigger, mentionQuery) - mentionMatchRank(b.trigger, mentionQuery));
+  const availableMentionTargets = matchingMentionTargets.filter(target => target.available);
   const availableSwitchTargets = useMemo<AgentSwitchTarget[]>(() =>
     launchTargets
       .filter(target => target.available)
@@ -686,10 +691,8 @@ export function NewDiscussionForm({
                 />
               ) : <>
               {mentionQuery !== null && (() => {
-                const matching = launchTargets.filter(target => (
-                  target.trigger.slice(1).startsWith(mentionQuery)
-                ));
-                const available = matching.filter(target => target.available);
+                const matching = matchingMentionTargets;
+                const available = availableMentionTargets;
                 const unavailable = matching.filter(target => !target.available);
                 if (matching.length === 0) return null;
                 return (
@@ -833,11 +836,8 @@ export function NewDiscussionForm({
                       if (e.key === 'Escape') { e.preventDefault(); setEmojiMatch(null); setEmojiSuggestions([]); return; }
                     }
                     if (mentionQuery !== null) {
-                      const matching = launchTargets.filter(target => (
-                        target.available
-                        && target.trigger.slice(1).startsWith(mentionQuery)
-                      ));
-                      if (e.key === 'ArrowDown') { e.preventDefault(); setMentionIndex(index => Math.min(index + 1, matching.length - 1)); setMentionTierIndex(null); return; }
+                      const matching = availableMentionTargets;
+                      if (e.key === 'ArrowDown') { e.preventDefault(); setMentionIndex(index => Math.max(0, Math.min(index + 1, matching.length - 1))); setMentionTierIndex(null); return; }
                       if (e.key === 'ArrowUp') { e.preventDefault(); setMentionIndex(index => Math.max(index - 1, 0)); setMentionTierIndex(null); return; }
                       const highlighted = matching[mentionIndex];
                       if (highlighted && (e.key === 'ArrowRight' || e.key === 'ArrowLeft')) {

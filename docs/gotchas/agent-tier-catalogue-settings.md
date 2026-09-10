@@ -10,7 +10,7 @@ and preserves an unknown configured model as a disabled, explicitly labelled
 option. Cache provenance never becomes a live discovery merely because the
 snapshot request succeeded. Clearing an override is an explicit action; its
 placeholder and card preview show the catalogue's tier assignment when known.
-[src: file: frontend/src/lib/modelCatalogSelection.ts:65-102]
+[src: file: frontend/src/lib/modelCatalogSelection.ts:76-113]
 [src: file: frontend/src/components/settings/AgentsSection.tsx:1215-1238]
 
 The settings endpoint replaces the whole model-tier document. Before a save,
@@ -37,7 +37,7 @@ namespace. HTTP tiers may fall back to their own configured default, unlike
 CLI tiers. No embedded model list participates in the display helper anymore.
 [src: file: frontend/src/lib/constants.ts:60-75]
 [src: file: frontend/src/lib/modelCatalogSelection.ts:12-31]
-[src: file: frontend/src/components/AgentSwitchPicker.tsx:117-129]
+[src: file: frontend/src/components/AgentSwitchPicker.tsx:116-128]
 
 The shared picker keeps an unavailable configured entry disabled. A failed
 snapshot read reports the error and retains previous data as cached, not live.
@@ -50,8 +50,8 @@ caller still explicitly clears its old override when choosing a new agent/tier.
 [src: file: frontend/src/pages/WorkflowsPage.tsx:2850-2857]
 
 KT-627 separately removed the HTTP runner's embedded fallback and qualified
-production-library resolution/preflight. Remaining custom selector/display
-paths still keep KT-531 open; a historical test result never qualifies a later
+production-library resolution/preflight. The final migration and cross-surface
+audit still keeps KT-531 open; a historical test result never qualifies a later
 candidate by itself.
 [src: file: backend/tests/http_model_resolution.rs:1]
 
@@ -63,8 +63,9 @@ without rewriting the selected identity. Typing never selects a target or
 refetches the catalogue. An unknown configured ID remains searchable, and a
 known unavailable choice remains disabled; accessible descriptions retain the
 model, provenance and unavailable state after filtering.
-[src: file: frontend/src/components/AgentSwitchPicker.tsx:130-166]
-[src: file: frontend/src/components/AgentSwitchPicker.tsx:341-380]
+[src: file: frontend/src/lib/modelCatalogSelection.ts:36-45]
+[src: file: frontend/src/components/AgentSwitchPicker.tsx:129-159]
+[src: file: frontend/src/components/AgentSwitchPicker.tsx:334-373]
 
 The search field is outside the menu, within a portalled non-modal dialog.
 Arrow keys move among enabled choices; Home/End retain their caret behavior in
@@ -72,14 +73,15 @@ search and navigate choices when an option has focus. Escape inside the picker
 does not propagate to its parent form. Closing with Escape or completing an
 asynchronous selection restores trigger focus. Reopening clears the query,
 an empty result is explicit, and the popup's height is bounded by the viewport.
-[src: file: frontend/src/components/AgentSwitchPicker.tsx:141-223]
-[src: file: frontend/src/components/AgentSwitchPicker.tsx:303-328]
+[src: file: frontend/src/components/AgentSwitchPicker.tsx:134-216]
+[src: file: frontend/src/components/AgentSwitchPicker.tsx:296-321]
 [src: file: frontend/src/components/__tests__/AgentSwitchPicker.catalog.test.tsx:123-247]
 [src: file: frontend/src/components/__tests__/AgentSwitchPicker.accessibility.test.tsx:42-73]
 
 These are component regressions, not a new browser layout qualification.
-The remaining KT-531 review still covers search consistency across custom
-surfaces and the separately delegated comparison display paths.
+The remaining KT-531 review covers the final cross-surface inventory. Comparison
+and orchestration deliveries are recorded separately, without carrying these
+component results forward as browser qualification.
 
 ### Composer mention catalogue contract
 
@@ -92,7 +94,7 @@ and an explicit error; typing within an open palette does not refetch.
 [src: file: frontend/src/lib/modelCatalogSelection.ts:12-31]
 [src: file: frontend/src/hooks/useModelCatalogSnapshot.ts:5-27]
 [src: file: frontend/src/components/MentionTierChoices.tsx:7]
-[src: file: frontend/src/components/ChatInput.tsx:678-720]
+[src: file: frontend/src/components/ChatInput.tsx:663-725]
 
 Untouched principal insertion preserves its saved model override and does not
 write a tier preference. Explicit tier choices resolve their own configuration.
@@ -103,12 +105,49 @@ keep their exact session and stable ordinal, expose no model tier, and do not
 change native preferences. New-discussion submissions retain the immutable
 connection and explicitly selected tier.
 [src: file: frontend/src/lib/mentionTierSelection.ts:6-16]
-[src: file: frontend/src/components/NewDiscussionForm.tsx:715-743]
-[src: file: frontend/src/components/__tests__/ComposerMentionCatalog.test.tsx:72-185]
+[src: file: frontend/src/components/NewDiscussionForm.tsx:717-745]
+[src: file: frontend/src/components/__tests__/ComposerMentionCatalog.test.tsx:142-256]
 
 The new regressions use API fixtures, including colliding IDs in two HTTP
 namespaces and a real send/creation callback assertion. They neither call a
 provider nor qualify browser layout or the separate comparison worker.
+
+### Shared mention search
+
+Both palettes and `AgentSwitchPicker` now share the same case/diacritic-insensitive
+search over exact target namespaces and already-resolved configured IDs/model
+aliases. Connection names are searchable independently of model aliases. Known
+unavailable models remain visible and disabled; unknown configured IDs stay
+explicitly unverified. A joined CLI's results never inherit a native catalogue
+tier. Canonical alias prefixes rank before additional substring matches, so
+typing `@co` still highlights Codex before a Claude Code substring result.
+[src: file: frontend/src/lib/modelCatalogSelection.ts:36-45]
+[src: file: frontend/src/components/ChatInput.tsx:674-695]
+[src: file: frontend/src/components/NewDiscussionForm.tsx:209-213]
+[src: file: frontend/src/lib/mention-autocomplete.ts:7-26]
+
+The unfinished search token accepts Unicode letters and common model-ID
+characters (`/`, `.`, `:`). This changes autocomplete only: selection replaces
+the original caret range with the canonical trigger. Dispatch parsing is
+unchanged, and typing alone never changes preferences or submits an agent.
+ArrowDown on an empty result keeps a nonnegative index; when the catalogue
+arrives, Enter can select the displayed row rather than indexing `-1` or
+throwing. Display and keyboard use the same filtered list.
+[src: file: frontend/src/components/__tests__/ComposerMentionCatalog.test.tsx:73-140]
+[src: file: frontend/src/components/__tests__/ComposerMentionCatalog.test.tsx:216-247]
+[src: file: frontend/src/lib/__tests__/mention-autocomplete.test.ts:20-27]
+
+Qualification on frontend tree `9f9df7f4f06401a83b4e5383179fefa614c2f46e`:
+10 initial RED controls, then three additional valid RED cases for connection
+name and asynchronous keyboard results. The first asynchronous new-form fixture
+incorrectly matched a connection name before catalogue arrival; it was corrected
+and the intended RED reproduced. Expanded replay: 103 tests PASS in 1.85 seconds.
+Unfiltered frontend run 13486: 313 files / 4,084 tests PASS in 56.98 seconds.
+Both TypeScript compilers, Oxlint, ESLint (0 errors/63 existing warnings), i18n
+(4,481 keys × 4, 708 static unused warnings) and Vite (7.14 seconds) passed.
+Existing harness warnings remain; no rule was disabled, test excluded or
+threshold relaxed. Backend tree `6040c898` is unchanged. No new browser,
+coverage, provider or final KT-531 approval is implied.
 
 ## Quick Prompt and workflow model editors
 
@@ -137,8 +176,8 @@ catalogue read or failure never changes either value.
 The regressions exercise the actual form payload, explicit unknown Unicode IDs,
 reload failures, namespace switching, disabled entries and per-model reasoning.
 They use API fixtures only; these tests are not provider discovery or a browser
-layout qualification. Other custom launch selectors, mentions and comparison
-labels still require the remaining KT-531 audit. Discussion target persistence
+layout qualification. The final cross-surface inventory and migration proof
+still require the remaining KT-531 audit. Discussion target persistence
 is covered separately below.
 [src: file: frontend/src/components/workflows/__tests__/QuickPromptForm.catalog.test.tsx:37-88]
 [src: file: frontend/src/components/__tests__/ModelCatalogPicker.test.tsx:25-66]
