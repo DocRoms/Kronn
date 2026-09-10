@@ -1585,7 +1585,13 @@ session_credential?: SessionCredential | null,
  * its own private file and injected here. Attached to no session, so no
  * amount of inviting, joining or transferring produces one.
  */
-publication_grant?: SessionCredential | null, };
+publication_grant?: SessionCredential | null,
+/**
+ * KT-619 — the single-use proof issued for THIS card, in this room, over
+ * this body. An id rather than a secret, so it is the one publication
+ * field that is not sensitive; it is still useless without the grant.
+ */
+publication_proof?: string | null, };
 
 export type DiscAppendResponse = { appended: number, skipped_as_duplicates: number,
 /**

@@ -269,6 +269,11 @@ pub struct DiscAppendRequest {
     /// amount of inviting, joining or transferring produces one.
     #[serde(default)]
     pub publication_grant: Option<SessionCredential>,
+    /// KT-619 — the single-use proof issued for THIS card, in this room, over
+    /// this body. An id rather than a secret, so it is the one publication
+    /// field that is not sensitive; it is still useless without the grant.
+    #[serde(default)]
+    pub publication_proof: Option<String>,
 }
 
 /// Compact lint feedback echoed to the POSTING agent (tool result), so it can
@@ -751,6 +756,7 @@ pub async fn disc_append(
         // leave a bare secret in scope, protected by nothing but care.
         let important_credential = req.session_credential.clone();
         let important_grant = req.publication_grant.clone();
+        let important_proof = req.publication_proof.clone();
         let dispatch_jobs = dispatch_agents
             .iter()
             .cloned()
@@ -807,8 +813,12 @@ pub async fn disc_append(
                     let publisher = crate::db::discussion_important::publisher_for_grant(
                         &tx,
                         important_grant.as_ref().map(SessionCredential::expose),
+                        important_proof.as_deref(),
+                        &did_insert,
+                        &msg_clone.content,
                         important_credential.as_ref().map(SessionCredential::expose),
                         &label,
+                        msg_clone.timestamp,
                     )?;
                     crate::db::discussion_important::ingest_message_important(
                         &tx,
@@ -1715,6 +1725,7 @@ mod tests {
                 since_sort_order: None,
                 session_credential: None,
                 publication_grant: None,
+                publication_proof: None,
             }),
         )
         .await;
@@ -1745,6 +1756,7 @@ mod tests {
                 session_credential: credential
                     .map(|c| serde_json::from_value(serde_json::json!(c)).unwrap()),
                 publication_grant: None,
+                publication_proof: None,
             }),
         )
         .await;
@@ -1768,6 +1780,7 @@ mod tests {
                 session_credential: credential
                     .map(|c| serde_json::from_value(serde_json::json!(c)).unwrap()),
                 publication_grant: None,
+                publication_proof: None,
             }),
         )
         .await;
@@ -1918,6 +1931,7 @@ mod tests {
                 since_sort_order: Some(0),
                 session_credential: None,
                 publication_grant: None,
+                publication_proof: None,
             }),
         )
         .await
@@ -1960,6 +1974,7 @@ mod tests {
                 since_sort_order: Some(0),
                 session_credential: None,
                 publication_grant: None,
+                publication_proof: None,
             }),
         )
         .await
@@ -2036,6 +2051,7 @@ mod tests {
                 since_sort_order: Some(0),
                 session_credential: None,
                 publication_grant: None,
+                publication_proof: None,
             }),
         )
         .await
@@ -2108,6 +2124,7 @@ mod tests {
                 since_sort_order: Some(cursor),
                 session_credential: None,
                 publication_grant: None,
+                publication_proof: None,
             }),
         )
         .await
@@ -2173,6 +2190,7 @@ mod tests {
                 since_sort_order: None,
                 session_credential: None,
                 publication_grant: None,
+                publication_proof: None,
             }),
         )
         .await;
@@ -3776,6 +3794,7 @@ mod tests {
                     serde_json::from_value(serde_json::json!(IMPORTANT_ORCH_SECRET)).unwrap(),
                 ),
                 publication_grant: None,
+                publication_proof: None,
             }),
         )
         .await;
@@ -3915,6 +3934,7 @@ mod tests {
             publication_grant: Some(
                 serde_json::from_value(serde_json::json!("kr-human-also-never-appears")).unwrap(),
             ),
+            publication_proof: Some("proof-visible-and-harmless".into()),
         };
         let printed = format!("{request:?}");
         assert!(
@@ -3958,15 +3978,35 @@ mod tests {
             .await
             .unwrap();
 
+        // The proof is issued over the exact body about to be posted.
+        let content = important_fence("kt-619.granted");
+        let grant_for_proof = grant.clone();
+        let body_for_proof = content.clone();
+        let proof = state
+            .db
+            .with_conn(move |conn| {
+                Ok(crate::db::human_credentials::issue_proof(
+                    conn,
+                    &crate::db::human_credentials::Secret::new(grant_for_proof),
+                    IMPORTANT_PARENT,
+                    &body_for_proof,
+                    chrono::Utc::now(),
+                )
+                .expect("the grant is live"))
+            })
+            .await
+            .unwrap();
+
         let response = disc_append(
             axum::extract::State(state.clone()),
             Json(DiscAppendRequest {
                 disc_id: IMPORTANT_PARENT.into(),
-                messages: vec![agent_msg("m1", &important_fence("kt-619.granted"))],
+                messages: vec![agent_msg("m1", &content)],
                 session_id: None,
                 since_sort_order: None,
                 session_credential: None,
                 publication_grant: Some(serde_json::from_value(serde_json::json!(grant)).unwrap()),
+                publication_proof: Some(proof),
             }),
         )
         .await;

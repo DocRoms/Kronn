@@ -496,11 +496,16 @@ fn session_is_working(conn: &Connection, session_pk: i64) -> Result<bool> {
 ///    principal that holds an orchestrator grant and is later delegated must not
 ///    publish steering cards while it is working on someone else's task. That is
 ///    read from the exact active assignment, never from the room.
+#[allow(clippy::too_many_arguments)]
 pub fn publisher_for_grant(
     conn: &Connection,
     grant: Option<&str>,
+    proof_id: Option<&str>,
+    discussion_id: &str,
+    content: &str,
     session_credential: Option<&str>,
     label: &str,
+    now: chrono::DateTime<chrono::Utc>,
 ) -> Result<ImportantPublisher> {
     // The worker check runs first and unconditionally: a valid grant must not
     // buy its way past it.
@@ -514,21 +519,44 @@ pub fn publisher_for_grant(
         }
     }
 
-    let Some(grant) = grant else {
+    let (Some(grant), Some(proof_id)) = (grant, proof_id) else {
+        // A grant with no proof is as unpublishable as no grant: holding an
+        // authority is not the same as having been issued this publication.
         return Ok(ImportantPublisher::Unverified);
     };
-    match crate::db::human_credentials::authenticate(
+    let secret = crate::db::human_credentials::Secret::new(grant);
+    let role = match crate::db::human_credentials::authenticate(conn, &secret) {
+        Ok((_id, role, _epoch)) => role,
+        Err(_) => return Ok(ImportantPublisher::Unverified),
+    };
+
+    // Spend the proof HERE, inside the caller's transaction. A proof consumed
+    // in one unit and a card written in another would leave the proof burnt on
+    // a publication that never landed.
+    if crate::db::human_credentials::consume_proof(
         conn,
-        &crate::db::human_credentials::Secret::new(grant),
-    ) {
-        Ok((_id, crate::db::human_credentials::GrantRole::Human, _epoch)) => {
-            Ok(ImportantPublisher::Human(label.to_string()))
-        }
-        Ok((_id, crate::db::human_credentials::GrantRole::Orchestrator, _epoch)) => {
-            Ok(ImportantPublisher::Orchestrator(label.to_string()))
-        }
-        Err(_) => Ok(ImportantPublisher::Unverified),
+        proof_id,
+        &secret,
+        discussion_id,
+        content,
+        now,
+    )
+    .is_err()
+    {
+        // Expired, replayed, issued for another room or another body, or minted
+        // under an epoch the credential has since left. All of them refuse, and
+        // none of them says which.
+        return Ok(ImportantPublisher::Unverified);
     }
+
+    Ok(match role {
+        crate::db::human_credentials::GrantRole::Human => {
+            ImportantPublisher::Human(label.to_string())
+        }
+        crate::db::human_credentials::GrantRole::Orchestrator => {
+            ImportantPublisher::Orchestrator(label.to_string())
+        }
+    })
 }
 
 /// What one message's fences produced. Counts are reported back so a refused

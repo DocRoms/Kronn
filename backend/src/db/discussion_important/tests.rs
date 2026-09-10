@@ -149,6 +149,30 @@ fn append_as(
     .unwrap()
 }
 
+/// `publisher_for_grant` with the fields these tests do not vary.
+fn resolve(
+    conn: &Connection,
+    grant: Option<&str>,
+    proof: Option<&str>,
+    session: Option<&str>,
+    label: &str,
+) -> ImportantPublisher {
+    publisher_for_grant(
+        conn,
+        grant,
+        proof,
+        ROOM,
+        BODY_FOR_PROOF,
+        session,
+        label,
+        Utc::now(),
+    )
+    .unwrap()
+}
+
+/// The body a proof is issued over in these tests.
+const BODY_FOR_PROOF: &str = "proof-body";
+
 fn orchestrator() -> ImportantPublisher {
     ImportantPublisher::Orchestrator("Codex".into())
 }
@@ -183,7 +207,7 @@ fn a_worker_is_refused_and_told_so() {
     let conn = database();
     let worker = execution_room(&conn);
 
-    let publisher = publisher_for_grant(&conn, None, Some(&worker), "ClaudeCode").unwrap();
+    let publisher = resolve(&conn, None, None, Some(&worker), "ClaudeCode");
     assert_eq!(publisher, ImportantPublisher::Worker);
 
     let ingest = append(
@@ -207,7 +231,7 @@ fn a_worker_targeting_the_parent_room_is_still_refused() {
 
     // The route bypass: name the principal's room instead of its own. Authority
     // is read from where the session sits, so the target changes nothing.
-    let publisher = publisher_for_grant(&conn, None, Some(&worker), "ClaudeCode").unwrap();
+    let publisher = resolve(&conn, None, None, Some(&worker), "ClaudeCode");
     assert_eq!(publisher, ImportantPublisher::Worker);
     let ingest = append(&conn, ROOM, "m1", fenced(&spec_json("k")), &publisher);
     assert_eq!(ingest.refused_worker, 1);
@@ -221,7 +245,7 @@ fn a_worker_claiming_the_human_role_is_still_refused() {
 
     // The payload bypass: label the turn `User` to be taken for the human.
     // The label is display-only and never consulted for authority.
-    let publisher = publisher_for_grant(&conn, None, Some(&worker), "Human").unwrap();
+    let publisher = resolve(&conn, None, None, Some(&worker), "Human");
     assert_eq!(publisher, ImportantPublisher::Worker);
     let ingest = append_as(
         &conn,
@@ -246,7 +270,7 @@ fn a_caller_that_proves_nothing_gets_nothing() {
     // more useful than calling it an impostor.
     for absent in [Some("kr-resume-nobody"), None] {
         assert_eq!(
-            publisher_for_grant(&conn, absent, None, "ClaudeCode").unwrap(),
+            resolve(&conn, absent, None, None, "ClaudeCode"),
             ImportantPublisher::Unverified
         );
     }
@@ -260,12 +284,12 @@ fn a_session_credential_is_no_longer_an_authority_at_all() {
     // inviting and joining, which anybody local can do.
     let secret = session(&conn, ROOM, "orchestrator-session");
     assert_eq!(
-        publisher_for_grant(&conn, None, Some(&secret), "Codex").unwrap(),
+        resolve(&conn, None, None, Some(&secret), "Codex"),
         ImportantPublisher::Unverified
     );
     // And presenting it as though it were a grant buys nothing either.
     assert_eq!(
-        publisher_for_grant(&conn, Some(&secret), None, "Codex").unwrap(),
+        resolve(&conn, Some(&secret), None, None, "Codex"),
         ImportantPublisher::Unverified
     );
 }
@@ -282,7 +306,7 @@ fn a_left_session_no_longer_authenticates() {
     // The credential is still correct; the session is gone. Authority goes with
     // the session, not with the bytes.
     assert_eq!(
-        publisher_for_grant(&conn, Some(&secret), None, "Codex").unwrap(),
+        resolve(&conn, Some(&secret), None, None, "Codex"),
         ImportantPublisher::Unverified
     );
 }
@@ -303,19 +327,53 @@ fn a_grant_publishes_and_a_working_session_still_cannot() {
     )
     .unwrap();
 
-    // The grant alone publishes.
+    // A grant alone is not enough any more: the publication it is making must
+    // be the one the server issued a proof for.
+    assert_eq!(
+        resolve(&conn, Some(grant.expose()), None, None, "Codex"),
+        ImportantPublisher::Unverified,
+        "holding an authority is not the same as having been issued this card"
+    );
+
+    // Grant plus its proof publishes.
+    let proof =
+        crate::db::human_credentials::issue_proof(&conn, &grant, ROOM, BODY_FOR_PROOF, Utc::now())
+            .unwrap();
     assert!(matches!(
-        publisher_for_grant(&conn, Some(grant.expose()), None, "Codex").unwrap(),
+        resolve(&conn, Some(grant.expose()), Some(&proof), None, "Codex"),
         ImportantPublisher::Orchestrator(_)
     ));
 
-    // The same grant, presented by a session that is CURRENTLY a worker, does
-    // not. A principal delegated afterwards must not publish steering cards
-    // while it is working on someone else's task.
+    // The same grant, with a fresh proof, presented by a session that is
+    // CURRENTLY a worker: refused. A principal delegated afterwards must not
+    // publish steering cards while working on someone else's task.
+    let second =
+        crate::db::human_credentials::issue_proof(&conn, &grant, ROOM, BODY_FOR_PROOF, Utc::now())
+            .unwrap();
     assert_eq!(
-        publisher_for_grant(&conn, Some(grant.expose()), Some(&worker), "Codex").unwrap(),
+        resolve(
+            &conn,
+            Some(grant.expose()),
+            Some(&second),
+            Some(&worker),
+            "Codex"
+        ),
         ImportantPublisher::Worker,
-        "a valid grant must not buy its way past the worker refusal"
+        "a valid grant and a valid proof must not buy their way past the worker refusal"
+    );
+
+    // And the worker refusal ran BEFORE the proof was spent, so the legitimate
+    // holder can still use it.
+    assert!(matches!(
+        resolve(&conn, Some(grant.expose()), Some(&second), None, "Codex"),
+        ImportantPublisher::Orchestrator(_)
+    ));
+
+    // Spent once: the same proof cannot publish a second card.
+    assert_eq!(
+        resolve(&conn, Some(grant.expose()), Some(&second), None, "Codex"),
+        ImportantPublisher::Unverified,
+        "a proof is single use"
     );
 }
 
