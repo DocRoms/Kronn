@@ -445,6 +445,46 @@ describe('WorkflowWizard — step list handlers', () => {
     expect(stepName.value).toBe('renamed');
   });
 
+  it('keeps a saved reviewer tier null until an explicit picker choice, and Escape leaves the wizard open', async () => {
+    const reviewer = {
+      reviewer_agent: 'Codex' as const,
+      reviewer_tier: null,
+      debate_prompt: 'Review the result.',
+      max_rounds: 3,
+    };
+    toStepsPage([mkStep({ multi_agent_review: reviewer }), mkStep({ name: 'beta' })]);
+    fireEvent.click(screen.getAllByText('wiz.advanced')[0]);
+
+    const picker = screen.getByRole('button', { name: 'wiz.multiReview.reviewer' });
+    fireEvent.click(picker);
+    expect(screen.getByRole('searchbox', { name: 'agentPicker.search' })).toHaveFocus();
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(screen.queryByRole('searchbox', { name: 'agentPicker.search' })).toBeNull();
+    expect(screen.getByText('wiz.steps')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByText('wiz.next')); // Steps → Config
+    fireEvent.click(screen.getByText('wiz.next')); // Config → Summary
+    fireEvent.click(screen.getByText('wiz.save'));
+    await waitFor(() => expect(updateMock).toHaveBeenCalled());
+    expect(updateMock.mock.calls[0][1].steps[0].multi_agent_review).toEqual(reviewer);
+  });
+
+  it('persists the reviewer agent and tier selected from the shared picker', async () => {
+    toStepsPage([mkStep({ multi_agent_review: {
+      reviewer_agent: 'Codex', reviewer_tier: null, debate_prompt: 'Review the result.', max_rounds: 3,
+    } }), mkStep({ name: 'beta' })]);
+    fireEvent.click(screen.getAllByText('wiz.advanced')[0]);
+    fireEvent.click(screen.getByRole('button', { name: 'wiz.multiReview.reviewer' }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Codex · disc.tier.reasoning' }));
+    fireEvent.click(screen.getByText('wiz.next')); // Steps → Config
+    fireEvent.click(screen.getByText('wiz.next')); // Config → Summary
+    fireEvent.click(screen.getByText('wiz.save'));
+    await waitFor(() => expect(updateMock).toHaveBeenCalled());
+    expect(updateMock.mock.calls[0][1].steps[0].multi_agent_review).toMatchObject({
+      reviewer_agent: 'Codex', reviewer_tier: 'reasoning', debate_prompt: 'Review the result.', max_rounds: 3,
+    });
+  });
+
   it('adding a rollback (on_failure) step renders a Notify rollback row', () => {
     toStepsPage([mkStep(), mkStep({ name: 'beta' })]);
     const addRb = screen.getByText('wiz.addRollbackStep').closest('button') as HTMLButtonElement;

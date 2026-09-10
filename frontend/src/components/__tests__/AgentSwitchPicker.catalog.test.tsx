@@ -37,6 +37,15 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe('AgentSwitchPicker — configured identity and catalogue provenance', () => {
+  it('offers reviewer choices from a null tier only after an explicit selection', async () => {
+    const select = vi.fn();
+    render(<AgentSwitchPicker currentAgent="ClaudeCode" availableAgents={['ClaudeCode']}
+      currentTier={null} onSelectionChange={select} title="Choose" ariaLabel="Choose" />);
+    fireEvent.click(screen.getByRole('button', { name: 'Choose' }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: /Claude Code.*reasoning/ }));
+    expect(select).toHaveBeenCalledWith('ClaudeCode', 'reasoning');
+  });
+
   it('uses the explicit tier override before a different catalogue assignment', async () => {
     await show('operator-choice');
     await screen.findByText('modelCatalog.provenance.live');

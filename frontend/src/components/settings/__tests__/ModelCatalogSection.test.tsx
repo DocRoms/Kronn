@@ -105,7 +105,10 @@ describe('ModelCatalogSection', () => {
     render(<ModelCatalogSection />);
     await findSourceChip('Router one');
     fireEvent.click(screen.getByText('modelCatalog.add'));
-    fireEvent.change(screen.getByLabelText('modelCatalog.target'), { target: { value: 'http:two' } });
+    const target = screen.getByRole('combobox', { name: 'modelCatalog.target' });
+    fireEvent.focus(target);
+    fireEvent.change(target, { target: { value: 'Router two' } });
+    fireEvent.click(screen.getByRole('option', { name: 'Router two' }));
     fireEvent.change(screen.getByLabelText('modelCatalog.modelId'), { target: { value: 'new-model' } });
     fireEvent.change(screen.getByLabelText('modelCatalog.displayName'), { target: { value: 'New model' } });
     fireEvent.click(screen.getByText('common.save'));
@@ -115,6 +118,16 @@ describe('ModelCatalogSection', () => {
       agent_type: 'Custom',
       model_id: 'new-model',
     })));
+  });
+
+  it('keeps an edited model on its saved target without a replacement selection', async () => {
+    render(<ModelCatalogSection />);
+    await findSourceChip('Router one');
+    fireEvent.click(screen.getByText('Shared two'));
+
+    const target = screen.getByRole('combobox', { name: 'modelCatalog.target' });
+    expect(target).toBeDisabled();
+    expect(target).toHaveValue('Router two');
   });
 
   it('shows the catalog-driven cost hint and privacy note for an OpenCode Zen model, never a hardcoded name (KT-543)', async () => {

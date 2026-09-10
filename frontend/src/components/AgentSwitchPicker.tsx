@@ -32,7 +32,7 @@ interface AgentSwitchPickerProps {
   currentTargetLabel?: string;
   availableTargets?: AgentSwitchTarget[];
   onChange?: (agent: AgentType) => Promise<void>;
-  currentTier?: ModelTier;
+  currentTier?: ModelTier | null;
   /** Saved per-discussion/QP override; alternative selections resolve their own tiers. */
   currentModel?: string | null;
   onSelectionChange?: (agent: AgentType, tier: ModelTier) => Promise<void>;

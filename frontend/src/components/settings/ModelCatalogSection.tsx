@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { ArrowDown, ArrowUp, Plus, RefreshCw, Search, Trash2, X } from 'lucide-react';
 import { modelCatalogApi } from '../../lib/api';
 import { useT } from '../../lib/I18nContext';
+import { SearchableSelect, type SearchableSelectOption } from '../SearchableSelect';
 import type {
   AgentType,
   CatalogModelEntry,
@@ -161,6 +162,23 @@ export function ModelCatalogSection({ onCatalogChanged }: { onCatalogChanged?: (
     });
     setError(null);
   };
+  const targetOptions: SearchableSelectOption[] = (snapshot?.targets ?? []).map(target => ({
+    value: target.runtime_target_id,
+    label: target.target_label ?? target.runtime_target_id,
+    keywords: `${target.runtime_target_id} ${target.agent_type}`,
+    description: target.stale ? t('modelCatalog.stale') : t('modelCatalog.current'),
+  }));
+  // A saved manual entry can outlive a target returned by the latest snapshot.
+  // Keep that identity visible and immutable while editing; only an explicit
+  // create-form selection may move a model to another runtime namespace.
+  if (form && !targetOptions.some(target => target.value === form.runtimeTargetId)) {
+    targetOptions.push({
+      value: form.runtimeTargetId,
+      label: form.runtimeTargetId,
+      keywords: `${form.runtimeTargetId} ${form.agentType}`,
+      description: t('modelCatalog.notInCatalog'),
+    });
+  }
   const save = async () => {
     if (!form || !form.modelId.trim() || !form.displayName.trim()) return;
     setBusy(true);
@@ -221,25 +239,24 @@ export function ModelCatalogSection({ onCatalogChanged }: { onCatalogChanged?: (
           <div className="set-ext-api-fields">
             <label className="set-litellm-field">
               <span className="set-litellm-label">{t('modelCatalog.target')}</span>
-              <select
+              <SearchableSelect
                 className="set-litellm-input"
                 value={form.runtimeTargetId}
                 disabled={Boolean(editing)}
-                onChange={event => {
-                  const target = snapshot?.targets.find(value => value.runtime_target_id === event.target.value);
+                options={targetOptions}
+                label={t('modelCatalog.target')}
+                placeholder={t('modelCatalog.searchPlaceholder')}
+                emptyLabel={t('modelCatalog.noMatch')}
+                clearable={false}
+                onChange={runtimeTargetId => {
+                  const target = snapshot?.targets.find(value => value.runtime_target_id === runtimeTargetId);
                   if (target) setForm(current => current && ({
                     ...current,
                     runtimeTargetId: target.runtime_target_id,
                     agentType: target.agent_type,
                   }));
                 }}
-              >
-                {snapshot?.targets.map(target => (
-                  <option key={target.runtime_target_id} value={target.runtime_target_id}>
-                    {target.target_label ?? target.runtime_target_id}
-                  </option>
-                ))}
-              </select>
+              />
             </label>
             <label className="set-litellm-field">
               <span className="set-litellm-label">{t('modelCatalog.modelId')}</span>

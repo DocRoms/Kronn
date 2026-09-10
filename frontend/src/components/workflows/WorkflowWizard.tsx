@@ -4175,7 +4175,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                               multi_agent_review: e.target.checked
                                 ? (step.multi_agent_review ?? {
                                     reviewer_agent: availableAgents.find(a => a.type !== step.agent)?.type ?? 'Codex',
-                                    reviewer_tier: 'reasoning',
+                                    reviewer_tier: null,
                                     debate_prompt: t('wiz.multiReview.defaultPrompt'),
                                     max_rounds: 3,
                                   })
@@ -4192,33 +4192,29 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                             <div className="flex-row gap-3">
                               <div className="flex-1">
                                 <label className="wf-label text-2xs">{t('wiz.multiReview.reviewer')}</label>
-                                <select
-                                  className="wf-select"
-                                  value={multiAgentReview.reviewer_agent}
-                                  aria-label={t('wiz.multiReview.reviewer')}
-                                  onChange={e => updateStep(i, {
-                                    multi_agent_review: { ...multiAgentReview, reviewer_agent: e.target.value as AgentType },
-                                  })}
-                                >
-                                  {availableAgents.map(a => (
-                                    <option key={a.type} value={a.type}>{a.label}</option>
-                                  ))}
-                                </select>
-                              </div>
-                              <div className="flex-1">
-                                <label className="wf-label text-2xs">{t('wiz.multiReview.tier')}</label>
-                                <select
-                                  className="wf-select"
-                                  value={multiAgentReview.reviewer_tier ?? ''}
-                                  aria-label={t('wiz.multiReview.tier')}
-                                  onChange={e => updateStep(i, {
-                                    multi_agent_review: { ...multiAgentReview, reviewer_tier: (e.target.value || null) as typeof multiAgentReview.reviewer_tier },
-                                  })}
-                                >
-                                  <option value="">default</option>
-                                  <option value="economy">economy</option>
-                                  <option value="reasoning">reasoning</option>
-                                </select>
+                                <AgentSwitchPicker
+                                  currentAgent={multiAgentReview.reviewer_agent}
+                                  availableAgents={availableAgents.map(agent => agent.type)}
+                                  currentTier={multiAgentReview.reviewer_tier}
+                                  onTargetSelectionChange={async (target, tier) => {
+                                    updateStep(i, {
+                                      multi_agent_review: {
+                                        ...multiAgentReview,
+                                        reviewer_agent: target.agent,
+                                        reviewer_tier: tier,
+                                      },
+                                    });
+                                  }}
+                                  tierLabels={{
+                                    economy: t('disc.tier.economy'),
+                                    default: t('disc.tier.default'),
+                                    reasoning: t('disc.tier.reasoning'),
+                                  }}
+                                  modelTiers={agentAccess?.model_tiers}
+                                  defaultModelLabel={t('config.defaultModel')}
+                                  title={t('wiz.multiReview.reviewer')}
+                                  ariaLabel={t('wiz.multiReview.reviewer')}
+                                />
                               </div>
                               <div style={{ width: 90 }}>
                                 <label className="wf-label text-2xs">{t('wiz.multiReview.rounds')}</label>
