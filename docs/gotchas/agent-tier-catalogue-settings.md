@@ -165,6 +165,24 @@ connection callback; these are not live workflow/provider executions.
 [src: file: frontend/src/components/workflows/__tests__/WorkflowWizard.test.tsx:523-574]
 [src: file: frontend/src/components/workflows/__tests__/WorkflowDetail.steps.test.tsx:444-483]
 
+## Workflow compensation targets
+
+The workflow's `on_failure` Agent steps use the same agent/tier picker and
+selection callback contract as its ordinary steps. An explicit connection,
+agent or tier change clears the old model and reasoning override while retaining
+`max_tokens`; saving without changing the target preserves the entire rollback
+configuration. The callback updates only the compensation step, not the main
+pipeline. Search, exact connection namespaces, provenance and unavailable tiers
+therefore share the existing picker behavior.
+[src: file: frontend/src/components/workflows/WorkflowWizard.tsx:262-298]
+[src: file: frontend/src/components/workflows/WorkflowWizard.tsx:4469-4473]
+[src: file: frontend/src/components/workflows/WorkflowWizard.tsx:4548-4553]
+[src: file: frontend/src/components/workflows/__tests__/WorkflowWizard.coverage.test.tsx:829-895]
+
+Five picker controls failed against the previous compensation form; the
+unchanged-target control passed. The corrected two wizard suites pass 108 tests.
+These are form/callback tests, not actual compensation or provider executions.
+
 ## Discussion target persistence
 
 Discussion PATCH has no explicit model-override field. Its backend setters now

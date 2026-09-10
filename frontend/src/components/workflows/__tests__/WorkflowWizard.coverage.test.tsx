@@ -18,7 +18,7 @@
 // key-passthrough i18n stub, confirm stub, ComponentProps<typeof X> props.
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, cleanup, within } from '@testing-library/react';
 import type { ComponentProps } from 'react';
 import { buildApiMock } from '../../../test/apiMock';
 import type {
@@ -822,9 +822,74 @@ describe('WorkflowWizard — rollback step kinds', () => {
     const prompt = screen.getByPlaceholderText('wiz.rollbackAgentPromptPlaceholder') as HTMLTextAreaElement;
     fireEvent.change(prompt, { target: { value: 'roll it back' } });
     expect(prompt.value).toBe('roll it back');
-    // Switch the agent picker in the rollback row.
-    const agentSelect = prompt.closest('.wf-rollback-step')!.querySelector('select') as HTMLSelectElement;
-    expect(agentSelect).toBeInTheDocument();
+    const row = prompt.closest('.wf-rollback-step') as HTMLElement;
+    expect(within(row).getByRole('button', { name: 'wiz.agentAndTierLabel' })).toBeInTheDocument();
+  });
+
+  it.each([
+    ['Team Two · disc.tier.default', 'Custom', 'default', 'team-two'],
+    ['Team One · disc.tier.reasoning', 'Custom', 'reasoning', 'team-one'],
+    ['Codex · disc.tier.default', 'Codex', 'default', null],
+  ] as const)('saves an explicit rollback target selection without the old override: %s', async (label, agent, tier, connectionId) => {
+    const settings = { connection_id: 'team-one', model: 'old-model', reasoning_effort: 'xhigh', max_tokens: 12345, tier: 'default' as const };
+    const main = mkStep();
+    renderWizard({ initialStepId: 'main', agentChoices: [
+      { agent: 'Custom', connectionId: 'team-one', label: 'Team One' },
+      { agent: 'Custom', connectionId: 'team-two', label: 'Team Two' },
+      { agent: 'Codex' },
+    ], editWorkflow: mkWorkflow({ steps: [main], on_failure: [mkStep({ name: 'recover', agent: 'Custom', agent_settings: settings })] }) });
+    const row = screen.getByDisplayValue('recover').closest('.wf-rollback-step') as HTMLElement;
+    fireEvent.click(within(row).getByRole('button', { name: 'wiz.agentAndTierLabel' }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: label }));
+    fireEvent.click(screen.getByText('wiz.save'));
+    await waitFor(() => expect(updateMock).toHaveBeenCalledTimes(1));
+    expect(updateMock.mock.calls[0][1].on_failure[0]).toMatchObject({
+      agent, agent_settings: { connection_id: connectionId, model: null, reasoning_effort: null, max_tokens: 12345, tier },
+    });
+    expect(updateMock.mock.calls[0][1].steps).toEqual([main]);
+    expect(settings.model).toBe('old-model');
+  });
+
+  it('preserves rollback settings when the target is not changed', async () => {
+    const rollback = mkStep({ name: 'recover', agent: 'Custom', agent_settings: {
+      connection_id: 'team-one', model: 'old-model', reasoning_effort: 'xhigh', max_tokens: 12345,
+    } });
+    renderWizard({ initialStepId: 'main', editWorkflow: mkWorkflow({ on_failure: [rollback] }) });
+    fireEvent.click(screen.getByText('wiz.save'));
+    await waitFor(() => expect(updateMock).toHaveBeenCalledTimes(1));
+    expect(updateMock.mock.calls[0][1].on_failure).toEqual([rollback]);
+  });
+
+  it('searches rollback models in their exact connection and keeps unavailable tiers disabled', async () => {
+    const model = (runtime: string, unavailable: boolean): CatalogModelEntry => ({
+      id: runtime, model_id: 'shared-model', runtime_target_id: runtime, agent_type: 'Custom',
+      display_name: 'shared-model', display_alias: 'Récupération', provenance: 'manual',
+      availability: unavailable ? 'unavailable' : 'available', capabilities: ['chat'], reasoning_modes: [],
+      tier_assignment: 'reasoning', manual_origin: true, first_seen_at: '2026-09-09T00:00:00Z',
+      last_checked_at: '2026-09-09T00:00:00Z', created_at: '2026-09-09T00:00:00Z', updated_at: '2026-09-09T00:00:00Z',
+    });
+    catalogListMock.mockResolvedValue({ targets: ['one', 'two'].map(id => ({
+      runtime_target_id: `http:${id}`, agent_type: 'Custom', stale: true, live_refresh_ok: false,
+      models: [model(`http:${id}`, id === 'one')],
+    })) });
+    renderWizard({ initialStepId: 'main', agentChoices: [
+      { agent: 'Custom', connectionId: 'one', label: 'One' },
+      { agent: 'Custom', connectionId: 'two', label: 'Two' },
+    ], editWorkflow: mkWorkflow({ on_failure: [mkStep({ name: 'recover' })] }) });
+    const row = screen.getByDisplayValue('recover').closest('.wf-rollback-step') as HTMLElement;
+    fireEvent.click(within(row).getByRole('button', { name: 'wiz.agentAndTierLabel' }));
+    const unavailable = await screen.findByRole('menuitem', { name: 'One · disc.tier.reasoning' });
+    await waitFor(() => expect(unavailable).toBeDisabled());
+    fireEvent.change(screen.getByRole('searchbox', { name: 'agentPicker.search' }), { target: { value: 'recuperation' } });
+    expect(screen.queryByRole('group', { name: 'Claude Code' })).not.toBeInTheDocument();
+    expect(unavailable).toHaveTextContent('modelCatalog.unavailable');
+    expect(screen.getByRole('menuitem', { name: 'Two · disc.tier.reasoning' })).toHaveTextContent('modelCatalog.provenance.manual');
+    fireEvent.click(unavailable);
+    expect(updateMock).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Two · disc.tier.reasoning' }));
+    fireEvent.click(screen.getByText('wiz.save'));
+    await waitFor(() => expect(updateMock).toHaveBeenCalledTimes(1));
+    expect(updateMock.mock.calls[0][1].on_failure[0]).toMatchObject({ agent: 'Custom', agent_settings: { connection_id: 'two', tier: 'reasoning' } });
   });
 
   it('switches a rollback step to ApiCall (mounts the ApiCall card)', () => {
