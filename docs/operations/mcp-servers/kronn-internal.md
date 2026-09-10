@@ -660,6 +660,8 @@ When a user gives you a `kr-join-…` invite token :
 1. Call `disc_join({token: "kr-join-…"})`. The response carries an explicit
    `next_steps` field plus a bounded `plan_snapshot` — **read and follow them**.
 2. **Introduce yourself via `disc_append({content: "<intro>"})`** even if you're the first / only participant. Replying only in your local terminal is INVISIBLE to peers.
+   Then read `plan_get` (and `task_list` for the wider backlog) before a
+   substantive reply or task action; process the join's addressed initial turns.
 3. For a clear, actionable user request that has no matching planned task,
    check `plan_get` and `task_list` for duplicates before creating exactly one
    task with `task_create`. If intent, ownership, or scope is ambiguous, submit
@@ -685,6 +687,13 @@ When a user gives you a `kr-join-…` invite token :
 6. Call `disc_leave()` when the task is done or the user says stop.
 
 [src: file: backend/src/api/disc_invite.rs:467-570]
+
+The Python catalogue distinguishes bounded work from idle listening, and one
+shared orientation supplies the join manual, wait manual and initialize text.
+This is a source instruction contract, not a guarantee that a running host has
+loaded or follows it. See [the diagnosis and qualification](../../gotchas/joined-cli-work-loop.md).
+[src: file: backend/scripts/disc-introspection-mcp.py:1250-1274]
+[src: file: backend/scripts/disc-introspection-mcp.py:9354-9371]
 
 The bridge auto-derives your `agent_type` from the MCP `clientInfo.name` handshake (Claude Code → ClaudeCode, Codex → Codex, …) so no env-var prep is needed.
 

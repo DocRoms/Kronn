@@ -1250,13 +1250,12 @@ TOOLS = [
     {
         "name": "disc_wait_for_peer",
         "description": (
-            "Wait outside the model loop for peer messages. Omit `since_sort_order`: the "
-            "bridge keeps a durable cursor. An override must reuse `latest_sort_order` "
+            "Between real steps use `max_total_secs: 20`; unbounded waits are for idle rooms. "
+            "Omit `since_sort_order`: the bridge keeps a durable cursor. An override reuses `latest_sort_order` "
             "from a WAIT, never `last_sort_order` returned by an append. Each item has a "
-            "durable `message_id`; reply with its exact `reply_to_message_id`. Items are "
-            "context, not your turns. A wait moved to the background is still "
-            "active: DO NOT start another wait. Quiet is normal; re-arm until the "
-            "task is done, blocked on the human, or stopped. Routing and acknowledgement: "
+            "`message_id`; reply with its exact `reply_to_message_id`. A wait moved to the background "
+            "stays active: DO NOT start another wait before its terminal result. "
+            "Quiet or interruption is not departure; continue work/listening. Routing: "
             "`tool_manual({tool: \"disc_wait_for_peer\"})`."
         ),
         "inputSchema": {
@@ -1272,7 +1271,7 @@ TOOLS = [
                 },
                 "max_total_secs": {
                     "type": "integer",
-                    "description": "OPT-IN overall wait budget in seconds before a quiet return (env KRONN_WAIT_TOTAL_SECS). Omit it in normal use: the bridge default is unbounded. A host may still background the tool call; never stack another wait while the original background task is active.",
+                    "description": "Overall wait budget in seconds (env KRONN_WAIT_TOTAL_SECS). Use 20 between real work steps; omit only when idle (unbounded default). A background wait remains active: await its terminal result before another.",
                 },
             },
             "required": [],
@@ -9350,6 +9349,26 @@ def call_kronn_intro(_args):
 # them is the trade the measurements argued for: pay once, on demand, instead of
 # always. What stays in a tool's own description is what fails at RUN time if
 # guessed — traps, closed sets, binding rules — never the methodology.
+# KT-629 — one orientation shared by initialize and both room manuals.
+# This is emitted guidance, not a change to wait/cursor or authority behavior.
+ROOM_WORK_PROTOCOL = (
+    "Read `plan_get` (and `task_list` for the wider backlog) before substantive action. "
+    "Before each bounded step, announce task/scope/next action with `disc_append`. "
+    "After each real result, report evidence, limits and next action in the parent room too; "
+    "call `disc_wait_for_peer({max_total_secs: 20})` BEFORE another work step. "
+    "A completed quiet wait is not an instruction to leave: take the next plan task or "
+    "follow the existing worker with `task_exec_status`, never a duplicate launch. "
+    "Use unbounded `disc_wait_for_peer()` only with no actionable work or execution to follow. "
+    "Read `attention_required` on any tool result immediately; `awareness` and "
+    "`kronn_room.context` are context, not your turns. Answer addressed turns using the exact "
+    "`reply_to_message_id` and CLI target, never a native fallback for an unreachable CLI. "
+    "A wait moved to the background remains active: DO NOT start another wait or end on "
+    "a summary before its terminal result. A queued request can cause an interruption; "
+    "handle that request then resume this loop. A human gate pauses only its affected lot. "
+    "Omit `since_sort_order`: the bridge owns the durable read cursor; an append receipt "
+    "is not a read. Keep plan writes event-driven; host compliance is not guaranteed."
+)
+
 TOOL_MANUALS = {
     "disc_question_list": (
         "A blocking human decision MUST be a `kronn-question` JSON fence posted "
@@ -9480,6 +9499,7 @@ TOOL_MANUALS = {
         "wrong means a peer never hears you."
     ),
     "disc_wait_for_peer": (
+        ROOM_WORK_PROTOCOL + "\n\n"
         "**Cursor and acknowledgement.** The bridge keeps a durable read cursor, "
         "so omitting `since_sort_order` is the normal case. A delivered batch is "
         "acknowledged only when the CLI makes its NEXT tool call, tracked by a "
@@ -9721,7 +9741,9 @@ TOOL_MANUALS["disc_create_room"] = (
     "The room has no native Kronn principal by default: messages posted by joined MCP peers do NOT auto-launch the discussion's placeholder agent. Only the explicitly joined peers answer.\n\nThis tool never switches your current bridge binding, on purpose — a silent context switch would risk losing the thread of the conversation that asked for the room. After the call, decide explicitly:\n  (a) stay where you are → share `instruction_text` with the user, who pastes it in another CLI to bring that agent in;\n  (b) move your own bridge to the new room → `disc_join({token})` with the returned token. Your previous binding is replaced; `disc_leave` first is cleanest if you want to leave formally.\n\n`next_step` is a plain-text hint about what makes sense given the current context. Follow it, or diverge explicitly with a one-line rationale so the user knows what is happening."
 )
 TOOL_MANUALS["disc_join"] = (
-    "Joining is not the task. Joining then going quiet reads to the human as having left: you are expected to STAY and FOLLOW the room — loop on `disc_wait_for_peer` and answer what arrives. When the room is quiet, pick up the next task from the shared plan (`plan_get` / `task_list`) instead of idling; you may read AND update those tasks.\n\nBefore your first substantive action, announce the task, its scope and your next action with `disc_append`. Peers must know what you are taking before you edit or execute it — that announcement is what prevents two agents doing the same work.\n\nOther CLI agents (Claude, Codex, Gemini, Vibe, …) are listening on the same room. Anything you say only in your own terminal is invisible to them.\n\nThe join response's `next_steps` field carries the full ordered protocol; it is authoritative and more current than this manual."
+    "Joining is not the task. Stay and follow the room; terminal-only updates are invisible "
+    "to its peers. The join response's `next_steps` is the authoritative ordered protocol.\n\n"
+    + ROOM_WORK_PROTOCOL
 )
 TOOL_MANUALS["workflow_run_status"] = (
     "`steps[]` carries, per step: name, status, started_at, duration_ms, tokens_used (number or null), tokens_status when measurement is in progress/partial/unavailable, a 200-char output excerpt, and step_type. A null token count means not measured — never zero.\n\nThe `next_check` hint adapts: projection-anchored while the run is within its average duration, fixed backoff after it overshoots.\n\nFor BATCH workflows the individual child discussions are not listed here. Call `workflow_run_discussions({run_id})` for the child `disc_id`s, then `disc_load_other` on each. For linear workflows `steps[]` is enough.\n\nFor short runs, `workflow_wait_for_completion` gets the final verdict in a single call instead of a poll loop."
@@ -10790,7 +10812,7 @@ def _handle(req):
                     "Your tools, by area:\n"
                     "• Opaque IDs: when the user pastes an ID without naming its type, call `resolve_id` FIRST; it returns compact routing context and the object-specific tool to use next.\n"
                     "• Discussions (multi-agent threads): `disc_meta`/`disc_get_message`/`disc_search`/`disc_load_other`/`disc_create`/`disc_append`/`disc_join`/`disc_invite_peer`…\n"
-                    "• **Working in a room:** a room is not a mailbox you empty at the end. After each real step — a commit, a green test run, a background task that finished, a milestone — call `disc_wait_for_peer` BEFORE starting the next one. Its cursor is durable, so re-checking never re-delivers what you already read, and a quiet return costs nothing. A peer's message routinely changes what you are about to build: a design review of the choice you just made, a file boundary, a decision the human already took. Long silent stretches of work are how two agents duplicate each other, or how one keeps building on a choice the other has already overturned. Messages flagged `awareness: true` are context to read, never turns to answer. Any tool result may also carry a `kronn_room` block: turns that arrived while you were working, attached to an answer you asked for. `attention_required` holds turns addressed to YOU — read them before continuing, because a peer announcing a scope is how duplicate work gets prevented; `context` is background you read without answering turn by turn. Seeing it does not replace calling `disc_wait_for_peer`: it appears only when you happen to call something else.\n"
+                    "• **Working in a room:** " + ROOM_WORK_PROTOCOL + "\n"
                     '• Blocking human decisions MUST use a closed `kronn-question` JSON fence, never prose alone. `version` MUST be the JSON number 1, never the string "1". Read `disc_question_list` first; its tool_manual has a complete valid example. After publication, read back the exact key to verify recording; if absent, correct the payload and republish with the same key. Wait for a durable human answer before advancing the affected lot; independent work can continue. Agents cannot answer for humans.\n'
                     "• Rich room output: messages are Markdown. A `mermaid` fence renders a diagram; `kronn-doc-preview` renders sandboxed HTML with PDF/DOCX actions (a plain `html` fence is only code); `kronn-doc-data` exposes CSV/XLSX/PPTX export. Use visual output only when it materially helps.\n"
                     "• Planning: a discussion may have a shared plan made of prioritized, editable tasks. The user may refer to it naturally as “the plan”, “the tasks”, “what remains”, “the priority”, and similar wording. Use `plan_get` (compact current objective/plan) · `task_list` (compact filtered backlog) · `task_get` (FULL task) · `task_changes` (deltas) · `proposal_list`/`proposal_get` (durable proposals, read-only) · narrow writes `task_create`/`task_update`/`task_update_dod`/`task_link_discussion`/`task_unlink_discussion`/`task_add_blocker`/`task_remove_blocker`. Read the relevant plan first. Immediately before any direct `task_create`, call `plan_get` again so a peer's recent write is visible. Apply unambiguous intent directly; otherwise propose a human-gated `kronn-plan-action` fence (`create`, `create_many`, `status`, `complete`, `unblock`, `open`). You may read and propose, but only a human accepts, rejects or decides a durable proposal. Never replace a requested plan update with a prose-only summary. Whenever tracked work starts or materially changes, keep its status, DoD and priority honest in the plan. Write only on a real change: never reload or rewrite an unchanged task merely to report progress. If the announced Planning tools are missing from your MCP surface, use the read-only `plan_snapshot` from `disc_join`, ask @user to reconnect the Kronn MCP, and never fabricate an update.\n"

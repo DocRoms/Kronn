@@ -10018,6 +10018,59 @@ class RoomReachesTheAgentTests(unittest.TestCase):
         self.assertEqual(payload, ["a", "b"])
 
 
+class JoinedRoomWorkProtocolTests(unittest.TestCase):
+    """KT-629 — emitted instructions must not strand ready work behind a wait."""
+
+    def setUp(self):
+        self.mod = _load_module()
+        self.mod._CURRENT_DISC_ID = "disc-protocol"
+
+    def assert_work_loop(self, text):
+        self.assertIn("plan_get", text)
+        self.assertIn("disc_append", text)
+        self.assertLess(text.index("plan_get"), text.index("disc_append"))
+        self.assertIn("disc_wait_for_peer({max_total_secs: 20})", text)
+        self.assertIn("no actionable work or execution to follow", text)
+        self.assertIn("task_exec_status", text)
+        for term in (
+            "parent room", "attention_required", "awareness",
+            "reply_to_message_id", "background", "terminal result",
+            "DO NOT start another wait", "interruption",
+            "not an instruction to leave", "durable read cursor",
+        ):
+            with self.subTest(contract=term):
+                self.assertIn(term, text)
+
+    def test_wait_catalogue_distinguishes_active_work_from_idle_listening(self):
+        tool = next(item for item in self.mod.TOOLS
+                    if item["name"] == "disc_wait_for_peer")
+        description = tool["description"]
+        self.assertIn("max_total_secs: 20", description)
+        self.assertIn("idle", description)
+        self.assertIn("terminal result", description)
+        budget = tool["inputSchema"]["properties"]["max_total_secs"]["description"]
+        self.assertIn("20", budget)
+        self.assertIn("work", budget)
+        self.assertIn("idle", budget)
+        self.assertNotIn("Omit it in normal use", budget)
+
+    def test_join_and_wait_manuals_expose_the_complete_work_loop(self):
+        for name in ("disc_join", "disc_wait_for_peer"):
+            with self.subTest(manual=name):
+                manual = self.mod.call_tool_manual({"tool": name})["manual"]
+                self.assert_work_loop(manual)
+
+    def test_initialize_orients_work_before_unbounded_listening(self):
+        response = self.mod._handle({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {},
+        })
+        instructions = response["result"]["instructions"]
+        room = instructions.split("• **Working in a room:**", 1)[1].split("\n• ", 1)[0]
+        self.assert_work_loop(room)
+        self.assertNotIn("never re-delivers", room)
+        self.assertNotIn("a quiet return costs nothing", room)
+
+
 class WaitOutsideLlmLoopTests(unittest.TestCase):
     """KT-189 — disc_wait_for_peer holds quiet waits bridge-side.
 

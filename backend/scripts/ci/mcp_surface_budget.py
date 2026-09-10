@@ -39,7 +39,7 @@ BRIDGE = "backend/scripts/disc-introspection-mcp.py"
 # to make a build pass.
 # KT-546: compact media guidance retains the billing/slot/wait contract and
 # removes stale numeric examples. Pin the smaller measured payload, no slack.
-CATALOGUE_MAX_BYTES = 86_900
+CATALOGUE_MAX_BYTES = 86_824
 
 # Per-declaration ceiling. The five heaviest tools were 29% of the catalogue for
 # 6% of the tools; their descriptions had grown into manuals. A per-tool cap is
