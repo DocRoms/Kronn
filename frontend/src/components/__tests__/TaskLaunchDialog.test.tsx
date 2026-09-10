@@ -151,6 +151,100 @@ describe('TaskLaunchDialog', () => {
     expect(mocks.launch).not.toHaveBeenCalled();
   });
 
+  it('keeps the dialog open when Escape closes the model picker, then closes and restores focus outside a picker', async () => {
+    const trigger = document.createElement('button');
+    document.body.appendChild(trigger);
+    trigger.focus();
+    const props = renderDialog();
+    const model = screen.getByRole('combobox', { name: 'wiz.model' });
+
+    fireEvent.focus(model);
+    fireEvent.keyDown(model, { key: 'Escape' });
+    expect(props.onClose).not.toHaveBeenCalled();
+    expect(mocks.launch).not.toHaveBeenCalled();
+
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(props.onClose).toHaveBeenCalledTimes(1);
+    trigger.remove();
+  });
+
+  it('keeps the dialog open when Escape closes the agent picker portal and restores focus to its trigger', async () => {
+    mocks.detect.mockResolvedValue([
+      { name: 'Codex', agent_type: 'Codex', installed: true, enabled: true, runtime_available: false, auth_ready: true },
+      { name: 'OpenCode', agent_type: 'OpenCode', installed: true, enabled: true, runtime_available: false, auth_ready: true },
+    ]);
+    const props = renderDialog();
+    const agent = await screen.findByRole('button', { name: 'orch.config.agent' });
+    fireEvent.click(agent);
+    const search = screen.getByRole('searchbox', { name: 'agentPicker.search' });
+    fireEvent.keyDown(search, { key: 'Escape' });
+
+    await waitFor(() => expect(screen.queryByRole('searchbox', { name: 'agentPicker.search' })).not.toBeInTheDocument());
+    expect(props.onClose).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(agent);
+    expect(mocks.launch).not.toHaveBeenCalled();
+  });
+
+  it('does not nest catalogue picker labels', () => {
+    renderDialog();
+    const dialog = screen.getByRole('dialog');
+    expect(dialog.querySelector('label label')).toBeNull();
+    expect(screen.getByText('Codex')).toBeInTheDocument();
+    expect(screen.getByRole('combobox', { name: 'wiz.model' })).toBeInTheDocument();
+  });
+
+  it('shows a known unavailable model as non-selectable', async () => {
+    mocks.catalog.mockResolvedValue({ targets: [{
+      runtime_target_id: 'agent:codex', agent_type: 'Codex', stale: false, live_refresh_ok: true,
+      models: [{ id: 'offline-model', runtime_target_id: 'agent:codex', agent_type: 'Codex',
+        model_id: 'offline-model', display_name: 'Offline model', tier_assignment: null, provenance: 'live',
+        availability: 'unavailable', capabilities: ['chat'], reasoning_modes: [], manual_origin: false,
+        first_seen_at: '2026-09-09T00:00:00Z', last_checked_at: '2026-09-09T00:00:00Z',
+        created_at: '2026-09-09T00:00:00Z', updated_at: '2026-09-09T00:00:00Z' }],
+    }] });
+    renderDialog();
+    const model = screen.getByRole('combobox', { name: 'wiz.model' });
+    fireEvent.focus(model);
+    expect(await screen.findByRole('option', { name: 'Offline model — modelCatalog.unavailable' })).toBeDisabled();
+  });
+
+  it('keeps and submits a historical model override when the saved catalogue is unavailable', async () => {
+    mocks.catalog.mockRejectedValue(new Error('catalogue unavailable'));
+    const historicalCampaign = {
+      ...campaign,
+      run: {
+        ...campaign.run,
+        default_worker: {
+          target: { kind: 'agent', agent_type: 'Codex', cli_session_id: null, tier: null },
+          model: 'historical-override', profile_id: null,
+        },
+      },
+    } as CampaignView;
+    const props = renderDialog({ campaign: historicalCampaign });
+    const model = screen.getByRole('combobox', { name: 'wiz.model' });
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('modelCatalog.loadError'));
+    expect(model).toHaveValue('historical-override — modelCatalog.notInCatalog');
+
+    fireEvent.click(screen.getByRole('button', { name: 'orch.launch' }));
+    await waitFor(() => expect(props.onLaunched).toHaveBeenCalled());
+    expect(mocks.catalog).toHaveBeenCalledTimes(1);
+    expect(mocks.createCampaign).not.toHaveBeenCalled();
+    expect(mocks.launch).toHaveBeenCalledWith('campaign-1', 'KT-323', expect.objectContaining({
+      worker: expect.objectContaining({ model: 'historical-override' }),
+    }));
+  });
+
+  it('does not offer agents outside a locked campaign policy', async () => {
+    mocks.detect.mockResolvedValue([
+      { name: 'Codex', agent_type: 'Codex', installed: true, enabled: true, runtime_available: false, auth_ready: true },
+      { name: 'OpenCode', agent_type: 'OpenCode', installed: true, enabled: true, runtime_available: false, auth_ready: true },
+    ]);
+    renderDialog({ campaign });
+    await waitFor(() => expect(mocks.detect).toHaveBeenCalled());
+    expect(screen.queryByRole('button', { name: 'orch.config.agent' })).not.toBeInTheDocument();
+    expect(screen.queryByText('OpenCode')).not.toBeInTheDocument();
+  });
+
   it('maps runtime failures to an actionable recovery instead of raw prose', () => {
     expect(orchestrationResolution('Fast-forward conflict')).toBe('resolve_git');
     expect(orchestrationResolution('Validation command failed')).toBe('fix_tests');

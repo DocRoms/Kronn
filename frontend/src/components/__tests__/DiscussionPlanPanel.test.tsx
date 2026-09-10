@@ -384,6 +384,31 @@ describe('DiscussionPlanPanel', () => {
     }, 'Réassignation demandée depuis le panneau d’orchestration'));
   });
 
+  it('keeps a reassignment model override when its target is not changed', async () => {
+    mocks.discussionCampaign.mockResolvedValue({ run: { allowed_agents: ['Codex'] }, candidates: [], principal_attention: {} });
+    mocks.discussionLinks.mockResolvedValue([{
+      execution_id: 'exec-1', orchestration_run_id: 'run-1', task_id: 'task-1', task_reference: 'KT-1',
+      task_title: 'Build the panel', parent_discussion_id: 'disc-1', sub_discussion_id: null, status: 'Working',
+    }]);
+    mocks.execution.mockResolvedValue({
+      lineage: { execution: { id: 'exec-1', status: 'Working', attempt_no: 1, worker_agent_type: 'Codex', worker_model: 'saved-override' }, task_reference: 'KT-1', task_title: 'Build the panel', parent_discussion_id: 'disc-1', sub_discussion_id: null, workspace_canonical_path: null },
+      target_branch: 'main', definition_of_done: [], attempts: [], validation_runs: [], recovery: null,
+      usage: { duration_ms: 0, in_app_tokens: 0, in_app_messages: 0, in_app_cost_usd: null, in_app_cost_is_partial: false, cli_traffic_tokens: null, cli_billable_tokens: null, cli_sessions: 0, cli_sessions_measured: 0, cli_sessions_unmeasured: 0 },
+    });
+    render(<DiscussionPlanPanel discussionId="disc-1" onClose={vi.fn()} toast={vi.fn()} />);
+
+    fireEvent.click((await screen.findAllByRole('button', { name: 'Build the panel' }))[0]);
+    fireEvent.click(await screen.findByTestId('orch-exec-reassign'));
+    const dialog = screen.getByRole('dialog', { name: 'orch.exec.reassign' });
+    expect(dialog.querySelector('label label')).toBeNull();
+    expect(within(dialog).getByRole('combobox', { name: 'wiz.model' })).toHaveValue('saved-override — modelCatalog.notInCatalog');
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'orch.exec.reassign' }));
+    await waitFor(() => expect(mocks.reassignExecution).toHaveBeenCalledWith('exec-1', {
+      target: { kind: 'agent', agent_type: 'Codex' }, model: 'saved-override', profile_id: null,
+    }, 'Réassignation demandée depuis le panneau d’orchestration'));
+  });
+
   it('moves a task between active and later without recreating it', async () => {
     render(
       <DiscussionPlanPanel

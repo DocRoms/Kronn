@@ -97,7 +97,8 @@ function TaskLaunchDialogContent({
     const previousFocus = document.activeElement as HTMLElement | null;
     dialogRef.current?.querySelector<HTMLElement>('select, input, button, textarea')?.focus();
     const close = (event: KeyboardEvent) => {
-      if (event.key === 'Escape' && !inFlight.current) onClose();
+      const targetIsAgentPicker = document.querySelector('.kr-agent-switch-popover')?.contains(event.target as Node);
+      if (event.key === 'Escape' && !event.defaultPrevented && !targetIsAgentPicker && !inFlight.current) onClose();
       if (event.key !== 'Tab' || !dialogRef.current) return;
       const focusable = Array.from(dialogRef.current.querySelectorAll<HTMLElement>(
         'button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled)',
@@ -210,8 +211,7 @@ function TaskLaunchDialogContent({
         {policyLocked && <p className="orch-policy-note">{t('orch.config.existingPolicy')}</p>}
 
         <div className="orch-launch-grid">
-          <label>
-            <span>{t('orch.config.agent')}</span>
+          <div className="orch-launch-catalogue-field">
             <AgentSwitchPicker
               currentAgent={agent}
               availableAgents={pickerAgents}
@@ -220,16 +220,15 @@ function TaskLaunchDialogContent({
               title={t('orch.config.agent')}
               ariaLabel={t('orch.config.agent')}
             />
-          </label>
-          <label>
-            <span>{t('orch.config.model')}</span>
+          </div>
+          <div className="orch-launch-catalogue-field">
             <ModelCatalogPicker
               agent={agent}
               value={model}
               onChange={setModel}
               disabled={busy}
             />
-          </label>
+          </div>
           <label>
             <span>{t('orch.config.profile')}</span>
             <select value={profileId} onChange={event => setProfileId(event.target.value)}>

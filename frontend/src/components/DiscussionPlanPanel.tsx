@@ -1100,8 +1100,7 @@ export function DiscussionPlanPanel({
             )}
             {reassignOpen && (
               <div className="orch-inline-action" role="dialog" aria-label={t('orch.exec.reassign')}>
-                <label>
-                  <span>{t('orch.config.agent')}</span>
+                <div className="orch-launch-catalogue-field">
                   <AgentSwitchPicker
                     currentAgent={reassignAgent}
                     availableAgents={reassignAgents}
@@ -1110,16 +1109,15 @@ export function DiscussionPlanPanel({
                     title={t('orch.config.agent')}
                     ariaLabel={t('orch.config.agent')}
                   />
-                </label>
-                <label>
-                  <span>{t('orch.config.model')}</span>
+                </div>
+                <div className="orch-launch-catalogue-field">
                   <ModelCatalogPicker
                     agent={reassignAgent}
                     value={reassignModel}
                     onChange={setReassignModel}
                     disabled={Boolean(actionBusy)}
                   />
-                </label>
+                </div>
                 <div>
                   <button type="button" onClick={() => setReassignOpen(false)} disabled={Boolean(actionBusy)}>{t('common.cancel')}</button>
                   <button type="button" className="btn btn-primary" disabled={Boolean(actionBusy)} onClick={reassignSelectedExecution}>
