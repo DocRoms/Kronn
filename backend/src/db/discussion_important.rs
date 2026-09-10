@@ -619,6 +619,69 @@ impl ImportantPublisher {
     }
 }
 
+/// Mint a steering card for an event Kronn itself produced.
+///
+/// **No grant and no proof, and that asymmetry is the point.** Those exist to
+/// answer "is this caller allowed to publish?" — a question with no caller
+/// here. The event is generated inside the backend from a transition that has
+/// already happened; there is nothing to authenticate and nobody to refuse.
+///
+/// Called in the SAME transaction as the message it attaches to, so the card
+/// exists if and only if the event was recorded. `dedup_key` is the identity of
+/// the FACT, so a replay after restart collapses onto the existing row instead
+/// of publishing twice.
+#[allow(clippy::too_many_arguments)]
+pub fn publish_steering_card(
+    conn: &Connection,
+    discussion_id: &str,
+    message_id: &str,
+    category: ImportantCategory,
+    dedup_key: &str,
+    title: &str,
+    highlight: &str,
+    impact: &str,
+    references: ImportantReferences,
+    created_at: &str,
+) -> Result<()> {
+    let spec = ImportantSpec {
+        version: IMPORTANT_SCHEMA_VERSION,
+        category,
+        dedup_key: dedup_key.to_string(),
+        title: title.to_string(),
+        highlight: highlight.to_string(),
+        context: None,
+        impact: impact.to_string(),
+        // A steering event states what happened; it asks nothing of anybody.
+        // An action nobody owes is `required: false`, not a vague sentence.
+        action_required: ImportantAction {
+            required: false,
+            action: None,
+            owner: None,
+            due: None,
+        },
+        references,
+    };
+    // A malformed spec here is a bug in the producer, not a caller's problem:
+    // refuse the card, keep the event. Losing a card is cheaper than aborting a
+    // terminal transition.
+    if !validate_spec(&spec) {
+        tracing::warn!("steering card {dedup_key} failed validation and was not published");
+        return Ok(());
+    }
+    publish(
+        conn,
+        &format!("important:{message_id}"),
+        discussion_id,
+        message_id,
+        &spec,
+        ImportantAuthorKind::Orchestrator,
+        "Orchestrateur",
+        Some(("orchestration", dedup_key)),
+        created_at,
+    )?;
+    Ok(())
+}
+
 /// What one message's fences produced. Counts are reported back so a refused
 /// publisher learns it was refused instead of assuming it succeeded.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]

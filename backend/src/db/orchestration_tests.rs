@@ -1862,6 +1862,29 @@ fn escalated_campaign_holds_the_principal_and_terminal_child_notifies_parent() {
         notices, 1,
         "terminal child event wakes the principal durably"
     );
+
+    // KT-619 — the same transition also mints a steering card, in the same
+    // transaction as the message. A cancelled execution is a blocking alert,
+    // not an accepted delivery.
+    let card = crate::db::discussion_important::list(&conn, DISC, None).unwrap();
+    assert_eq!(card.total, 1, "a terminal transition is steering");
+    assert_eq!(
+        card.items[0].category,
+        crate::db::discussion_important::ImportantCategory::BlockingAlert
+    );
+    assert_eq!(
+        card.items[0].author_kind,
+        crate::db::discussion_important::ImportantAuthorKind::Orchestrator,
+        "the server authored it; no caller was involved"
+    );
+    assert_eq!(
+        card.items[0].references.execution_id.as_deref(),
+        Some(launched.execution.id.as_str())
+    );
+    // The card is attached to the notification, not to some other message.
+    assert!(card.items[0]
+        .message_id
+        .starts_with("orch-principal-terminal:"));
 }
 
 #[test]

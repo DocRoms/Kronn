@@ -3399,6 +3399,46 @@ fn notify_principal_of_terminal(
         &[],
         None,
     )?;
+
+    // KT-619 — a terminal transition is steering, so it gets a card as well as
+    // a message. Same transaction: the card exists iff the event was recorded.
+    //
+    // An accepted delivery is NOT reclassified — the worker's `delivery_summary`
+    // stays what it is. This is a separate card ABOUT the transition, which is
+    // the distinction the contract asks for.
+    let (category, highlight, impact) = match terminal {
+        TaskExecutionStatus::Done => (
+            crate::db::discussion_important::ImportantCategory::AcceptedDelivery,
+            format!("{reference} — livraison acceptée et intégrée."),
+            "La tâche est close ; la campagne peut enchaîner.".to_string(),
+        ),
+        _ => (
+            crate::db::discussion_important::ImportantCategory::BlockingAlert,
+            format!(
+                "{reference} — exécution terminée en `{}`.",
+                terminal.as_str()
+            ),
+            "La tâche n'a pas abouti ; la suite de la campagne dépend d'une décision.".to_string(),
+        ),
+    };
+    crate::db::discussion_important::publish_steering_card(
+        conn,
+        &parent,
+        &message.id,
+        category,
+        // The identity of the FACT, not of the message: a replay after restart
+        // finds this key and does nothing.
+        &format!("orch.terminal.{exec_id}.{}", terminal.as_str()),
+        &format!("{reference} — {title}"),
+        &highlight,
+        &impact,
+        crate::db::discussion_important::ImportantReferences {
+            task_ref: Some(reference.clone()),
+            execution_id: Some(exec_id.to_string()),
+            ..Default::default()
+        },
+        &message.timestamp.to_rfc3339(),
+    )?;
     Ok(())
 }
 
