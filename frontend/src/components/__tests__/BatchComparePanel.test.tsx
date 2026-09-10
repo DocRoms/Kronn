@@ -573,6 +573,8 @@ describe('BatchComparePanel', () => {
 
     expect(screen.getByText('final-attested-model')).toBeInTheDocument();
     expect(screen.queryByText('older-recorded-model')).not.toBeInTheDocument();
+    expect(screen.queryByText('disc.compare.modelRecorded')).not.toBeInTheDocument();
+    expect(screen.queryByText('disc.compare.modelUnknown')).not.toBeInTheDocument();
   });
 
   it('falls back to an older recorded model when the final answer model is blank, never the live discussion override', () => {
@@ -606,6 +608,66 @@ describe('BatchComparePanel', () => {
 
     expect(screen.getByText('older-recorded-model')).toBeInTheDocument();
     expect(screen.queryByText('live-discussion-override')).not.toBeInTheDocument();
+    expect(screen.getByText('disc.compare.modelRecorded')).toBeInTheDocument();
+  });
+
+  it('never treats a model recorded after the compared answer as evidence of what produced it', () => {
+    const laterRecordAfterAnswer = discussion('disc-later-record', 'ClaudeCode', 'default', 'Final answer, blank model');
+    laterRecordAfterAnswer.messages[0].model = '   ';
+    laterRecordAfterAnswer.messages = [
+      ...laterRecordAfterAnswer.messages,
+      {
+        id: 'm-system-after', role: 'System', channel: 'main', content: 'Retrying on a different backend',
+        agent_type: 'ClaudeCode', timestamp: '2026-09-01T09:05:00Z', model: 'attempted-after-model',
+      },
+    ] as Discussion['messages'];
+
+    render(
+      <BatchComparePanel
+        runId="run-later-record"
+        label="A later record must not count as prior knowledge"
+        discussions={[laterRecordAfterAnswer]}
+        loading={false}
+        error={null}
+        availableAgents={['ClaudeCode']}
+        runningIds={new Set()}
+        onRefresh={vi.fn()}
+        onOpenDiscussion={vi.fn()}
+        onClose={vi.fn()}
+        t={(key) => key}
+      />,
+    );
+
+    expect(screen.queryByText('attempted-after-model')).not.toBeInTheDocument();
+    expect(screen.getByText('disc.defaultAgentModel')).toBeInTheDocument();
+    expect(screen.getByText('disc.compare.modelUnknown')).toBeInTheDocument();
+  });
+
+  it('surfaces a System-recorded model when there is no answer at all to protect from it', () => {
+    const systemOnly = discussion('disc-system-only', 'ClaudeCode', 'default', 'unused');
+    systemOnly.messages = [{
+      id: 'm-system-only', role: 'System', channel: 'main', content: 'Attempted before failing',
+      agent_type: 'ClaudeCode', timestamp: '2026-09-01T09:00:00Z', model: 'attempted-model-no-answer',
+    }] as Discussion['messages'];
+
+    render(
+      <BatchComparePanel
+        runId="run-system-only"
+        label="No answer, only a System record"
+        discussions={[systemOnly]}
+        loading={false}
+        error={null}
+        availableAgents={['ClaudeCode']}
+        runningIds={new Set()}
+        onRefresh={vi.fn()}
+        onOpenDiscussion={vi.fn()}
+        onClose={vi.fn()}
+        t={(key) => key}
+      />,
+    );
+
+    expect(screen.getByText('attempted-model-no-answer')).toBeInTheDocument();
+    expect(screen.getByText('disc.compare.modelRecorded')).toBeInTheDocument();
   });
 
   it('never labels the live discussion override as the model behind a run with no response at all', () => {
@@ -631,5 +693,6 @@ describe('BatchComparePanel', () => {
 
     expect(screen.queryByText('live-discussion-override')).not.toBeInTheDocument();
     expect(screen.getByText('disc.defaultAgentModel')).toBeInTheDocument();
+    expect(screen.getByText('disc.compare.modelUnknown')).toBeInTheDocument();
   });
 });

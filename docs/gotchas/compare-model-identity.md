@@ -9,8 +9,8 @@ configuration. A comparison run from weeks ago would then silently display
 whatever model is configured *today* for that agent/tier, as if it were the
 model that actually answered. The fallback now resolves to the plain generic
 label only, never a live config lookup.
-[src: file: frontend/src/components/BatchComparePanel.tsx:184-186]
-[src: file: frontend/src/components/BatchCompareDetailsPanel.tsx:446-448]
+[src: file: frontend/src/components/BatchComparePanel.tsx:195-197]
+[src: file: frontend/src/components/BatchCompareDetailsPanel.tsx:455-457]
 
 ## `discussion.model` is a forward override, never a record of what answered
 
@@ -24,25 +24,43 @@ only from `answer.model` (normalized, the response that actually produced the
 compared answer) or, failing that, the last message in history that recorded
 a concrete `model` — never from `discussion.model`.
 [src: file: frontend/src/types/generated.ts:1793-1798]
-[src: file: frontend/src/components/BatchComparePanel.tsx:184-186]
-[src: file: frontend/src/components/BatchCompareDetailsPanel.tsx:446-448]
+[src: file: frontend/src/components/BatchComparePanel.tsx:195-197]
+[src: file: frontend/src/components/BatchCompareDetailsPanel.tsx:455-457]
 
-`BatchCompareDetailsPanel`'s ranking card also badges the model to disclose
-its provenance instead of a single generic "inferred from tier" label (a
-holdover from the tier-inference removal above, which no longer applied once
-the badge started firing on ANY missing `answer.model`, not just a tier
-guess): `modelRecorded` when the shown model came from an earlier message
-rather than the final answer itself, `modelUnknown` when nothing was ever
-recorded and the generic default label is shown, and no badge at all when the
-final answer itself carries the model.
-[src: file: frontend/src/components/BatchCompareDetailsPanel.tsx:465-469]
+Both ranking card and main column now badge the model to disclose its
+provenance instead of a single generic "inferred from tier" label (a holdover
+from the tier-inference removal above, which no longer applied once the badge
+started firing on ANY missing `answer.model`, not just a tier guess):
+`modelRecorded` when the shown model came from an earlier message rather than
+the final answer itself, `modelUnknown` when nothing was ever recorded and the
+generic default label is shown, and no badge at all when the final answer
+itself carries the model.
+[src: file: frontend/src/components/BatchCompareDetailsPanel.tsx:477-478]
+[src: file: frontend/src/components/BatchComparePanel.tsx:233-237]
+
+### `lastRecordedModel` is bounded to strictly before the compared answer
+
+`lastRecordedModel` used to scan the ENTIRE message history backwards with no
+regard for the compared answer's own position. A System/recovered-partial
+record written AFTER that answer (e.g. a later retry attempt with a different
+backend) could therefore win and be shown with the `modelRecorded` badge —
+which claims "from an earlier message" — even though it was never known when
+the compared answer was produced. Both panels now pass the answer message
+itself as a `before` bound: the backward scan stops strictly before that
+message's index, so only genuinely earlier records can surface as
+`modelRecorded`. When there is no answer at all (`before` is `null`), the scan
+stays unbounded — there's no answer's provenance to protect at that point, so
+any recorded model (e.g. from a System message documenting an attempted model
+before failing) is legitimately shown.
+[src: file: frontend/src/components/BatchComparePanel.tsx:43-57]
+[src: file: frontend/src/components/BatchCompareDetailsPanel.tsx:47-61]
 
 Both panels also normalize model ids consistently: an empty or
 whitespace-only string is treated as absent (trimmed, `''` → `null`), the same
 as a `null`/`undefined` field, so stray whitespace from a legacy row cannot
 silently pass through as if it were a real recorded model.
-[src: file: frontend/src/components/BatchComparePanel.tsx:51-54]
-[src: file: frontend/src/components/BatchCompareDetailsPanel.tsx:55-58]
+[src: file: frontend/src/components/BatchComparePanel.tsx:59-62]
+[src: file: frontend/src/components/BatchCompareDetailsPanel.tsx:63-66]
 
 Connection identity resolution itself (`compareAgentLabel` /
 `externalConnectionForDiscussion`) was already correct: it matches by the
@@ -69,21 +87,27 @@ the same catalogue+identity resolution as every other `AgentSwitchPicker`
 caller.
 [src: file: frontend/src/pages/WorkflowsPage.tsx:3203-3232]
 [src: file: frontend/src/components/AgentSwitchPicker.tsx:124-143]
-[src: file: frontend/src/components/BatchCompareDetailsPanel.tsx:335-351]
+[src: file: frontend/src/components/BatchCompareDetailsPanel.tsx:343-354]
 
 Regressions: a config-drifted-after-the-run case (no answer, no historical
 model, current tier config now non-null), a no-response case, and a
 homonymous-connections case verifying each column keeps its own recorded
 model instead of blending, for both compare panels. Provenance regressions
 add, per panel: response-attested model taking precedence over an older
-recorded one, a missing/blank final-answer model falling back to that older
-recorded model rather than the live `discussion.model` override, and a
-no-response case with a `discussion.model` override still resolving to the
-honest generic/unknown label. The launch-target fix is covered by switching a
-named connection's compare target to a tier it never configured and
-asserting its own `default_model` surfaces instead of the generic label.
-[src: file: frontend/src/components/__tests__/BatchComparePanel.test.tsx:476-634]
-[src: file: frontend/src/components/__tests__/BatchCompareDetailsPanel.test.tsx:1-302]
+recorded one (unbadged), a missing/blank final-answer model falling back to
+that older recorded model rather than the live `discussion.model` override
+(badged `modelRecorded`), and a no-response case with a `discussion.model`
+override still resolving to the honest generic/unknown label (badged
+`modelUnknown`). Two further regressions per panel guard the `lastRecordedModel`
+bound: a missing-model final answer followed by a later System
+attempted-model record must resolve to unknown, never that later record; a
+no-answer discussion with only a System-recorded model must still surface it
+(badged `modelRecorded`), since there is no answer's provenance to protect.
+The launch-target fix is covered by switching a named connection's compare
+target to a tier it never configured and asserting its own `default_model`
+surfaces instead of the generic label.
+[src: file: frontend/src/components/__tests__/BatchComparePanel.test.tsx:476-698]
+[src: file: frontend/src/components/__tests__/BatchCompareDetailsPanel.test.tsx:1-370]
 [src: file: frontend/src/pages/__tests__/WorkflowsPage.qp-launch.test.tsx:591-643]
 
 These are component-level regressions against mocked APIs; no backend, worker,

@@ -267,6 +267,74 @@ describe('BatchCompareDetailsPanel — model identity in the ranking list', () =
     expect(screen.getByText('disc.compare.modelRecorded')).toBeInTheDocument();
   });
 
+  it('never treats a model recorded after the compared answer as evidence of what produced it', async () => {
+    compareApi.get.mockResolvedValue({
+      run_id: 'run-later-record',
+      prompt_compatibility: 'same',
+      improvement_availability: 'available',
+      latest_judge_run: null,
+      evaluations: [],
+    });
+    const laterRecordAfterAnswer = discussion('disc-later-record', 'ClaudeCode', 'default');
+    laterRecordAfterAnswer.messages = [
+      {
+        id: 'm-final', role: 'Agent', channel: 'main', content: 'Final answer, blank model',
+        agent_type: 'ClaudeCode', timestamp: '2026-09-01T10:00:00Z', tokens_used: 10, duration_ms: 100,
+        model: '   ',
+      },
+      {
+        id: 'm-system-after', role: 'System', channel: 'main', content: 'Retrying on a different backend',
+        timestamp: '2026-09-01T10:05:00Z', model: 'attempted-after-model',
+      },
+    ] as Discussion['messages'];
+
+    render(
+      <BatchCompareDetailsPanel
+        runId="run-later-record"
+        discussions={[laterRecordAfterAnswer]}
+        availableAgents={['ClaudeCode']}
+        onOpenDiscussion={vi.fn()}
+        onClose={vi.fn()}
+        t={t}
+      />,
+    );
+
+    await screen.findByLabelText('disc.compare.rankBy');
+    expect(screen.queryByText('attempted-after-model')).not.toBeInTheDocument();
+    expect(screen.getByText('disc.defaultAgentModel')).toBeInTheDocument();
+    expect(screen.getByText('disc.compare.modelUnknown')).toBeInTheDocument();
+  });
+
+  it('surfaces a System-recorded model when there is no answer at all to protect from it', async () => {
+    compareApi.get.mockResolvedValue({
+      run_id: 'run-system-only',
+      prompt_compatibility: 'same',
+      improvement_availability: 'available',
+      latest_judge_run: null,
+      evaluations: [],
+    });
+    const systemOnly = discussion('disc-system-only', 'ClaudeCode', 'default');
+    systemOnly.messages = [{
+      id: 'm-system-only', role: 'System', channel: 'main', content: 'Attempted before failing',
+      timestamp: '2026-09-01T10:00:00Z', model: 'attempted-model-no-answer',
+    }] as Discussion['messages'];
+
+    render(
+      <BatchCompareDetailsPanel
+        runId="run-system-only"
+        discussions={[systemOnly]}
+        availableAgents={['ClaudeCode']}
+        onOpenDiscussion={vi.fn()}
+        onClose={vi.fn()}
+        t={t}
+      />,
+    );
+
+    await screen.findByLabelText('disc.compare.rankBy');
+    expect(screen.getByText('attempted-model-no-answer')).toBeInTheDocument();
+    expect(screen.getByText('disc.compare.modelRecorded')).toBeInTheDocument();
+  });
+
   it('never labels the live discussion override as the model behind a run with no response at all', async () => {
     compareApi.get.mockResolvedValue({
       run_id: 'run-no-response-override',

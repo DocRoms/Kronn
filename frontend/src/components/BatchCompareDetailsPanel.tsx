@@ -44,9 +44,17 @@ function lastSystemCause(discussion: Discussion) {
   return null;
 }
 
-function lastRecordedModel(discussion: Discussion) {
-  for (let index = discussion.messages.length - 1; index >= 0; index -= 1) {
-    const model = discussion.messages[index].model?.trim();
+// Bounded to strictly before `before` (typically the compared answer) so a
+// later System/recovered-partial record can never masquerade as a model that
+// was already known when that answer was produced. Unbounded (`before` is
+// null, e.g. no answer at all) scans every message, since there is then no
+// answer to protect from future contamination.
+function lastRecordedModel(discussion: Discussion, before?: Discussion['messages'][number] | null) {
+  const messages = discussion.messages;
+  const boundIndex = before ? messages.indexOf(before) : messages.length;
+  const start = (boundIndex < 0 ? messages.length : boundIndex) - 1;
+  for (let index = start; index >= 0; index -= 1) {
+    const model = messages[index].model?.trim();
     if (model) return model;
   }
   return null;
@@ -438,13 +446,14 @@ export function BatchCompareDetailsPanel({
               const ai = evaluation?.ai;
               const agentLabel = compareAgentLabel(discussion, externalConnections);
               // Three distinct provenances, never conflated: the answer's own
-              // attested model, an earlier message's recorded model (kept for
-              // reference, but not proof of what produced THIS answer), and a
-              // genuine unknown. `discussion.model` is a forward override for
-              // the NEXT run — it can be edited at any time and must never be
-              // shown as if it were the model that produced a past answer.
+              // attested model, an earlier message's recorded model (bounded
+              // to strictly before the answer, kept for reference, but not
+              // proof of what produced THIS answer), and a genuine unknown.
+              // `discussion.model` is a forward override for the NEXT run —
+              // it can be edited at any time and must never be shown as if it
+              // were the model that produced a past answer.
               const attestedModel = normalizeModelId(answer?.model);
-              const recordedModel = attestedModel ?? lastRecordedModel(discussion);
+              const recordedModel = attestedModel ?? lastRecordedModel(discussion, answer);
               const concreteModel = recordedModel ?? t('disc.defaultAgentModel');
               const weighted = weightedQuality(evaluation, humanWeight);
               const failureCause = answer ? null : lastSystemCause(discussion);

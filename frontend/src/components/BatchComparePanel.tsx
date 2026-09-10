@@ -40,9 +40,17 @@ function lastSystemCause(discussion: Discussion) {
   return null;
 }
 
-function lastRecordedModel(discussion: Discussion) {
-  for (let index = discussion.messages.length - 1; index >= 0; index -= 1) {
-    const model = discussion.messages[index].model?.trim();
+// Bounded to strictly before `before` (typically the compared answer) so a
+// later System/recovered-partial record can never masquerade as a model that
+// was already known when that answer was produced. Unbounded (`before` is
+// null, e.g. no answer at all) scans every message, since there is then no
+// answer to protect from future contamination.
+function lastRecordedModel(discussion: Discussion, before?: Discussion['messages'][number] | null) {
+  const messages = discussion.messages;
+  const boundIndex = before ? messages.indexOf(before) : messages.length;
+  const start = (boundIndex < 0 ? messages.length : boundIndex) - 1;
+  for (let index = start; index >= 0; index -= 1) {
+    const model = messages[index].model?.trim();
     if (model) return model;
   }
   return null;
@@ -177,13 +185,16 @@ export function BatchComparePanel({
               && (runningIds.has(discussion.id) || discussion.awaiting_agent);
             const failureCause = !answer && !running ? terminalCause : null;
             const tier = discussion.tier ?? 'default';
-            // A missing historical record stays an honest unknown: neither the
-            // current tier configuration nor `discussion.model` (a forward
-            // override for the NEXT run, not a record of what already ran)
-            // may stand in for what actually answered.
-            const model = normalizeModelId(answer?.model)
-              ?? lastRecordedModel(discussion)
-              ?? t('disc.defaultAgentModel');
+            // Three distinct provenances, never conflated: the answer's own
+            // attested model, an earlier message's recorded model (kept for
+            // reference, bounded to strictly before the answer, but not proof
+            // of what produced THIS answer), and a genuine unknown.
+            // `discussion.model` is a forward override for the NEXT run — it
+            // can be edited at any time and must never be shown as if it were
+            // the model that produced a past answer.
+            const attestedModel = normalizeModelId(answer?.model);
+            const recordedModel = attestedModel ?? lastRecordedModel(discussion, answer);
+            const model = recordedModel ?? t('disc.defaultAgentModel');
             const agentLabel = compareAgentLabel(discussion, externalConnections);
             const duration = formatDuration(answer?.duration_ms);
             const tokens = answer?.tokens_used != null && answer.tokens_used > 0
@@ -219,7 +230,11 @@ export function BatchComparePanel({
                       <ArrowRight size={13} />
                     </button>
                   </div>
-                  <span className="disc-compare-model" title={model}>{model}</span>
+                  <span className="disc-compare-card-model">
+                    <span className="disc-compare-model" title={model}>{model}</span>
+                    {attestedModel == null && recordedModel != null && <small>{t('disc.compare.modelRecorded')}</small>}
+                    {recordedModel == null && <small>{t('disc.compare.modelUnknown')}</small>}
+                  </span>
                   <div className="disc-compare-metrics">
                     <span title={duration == null ? t('disc.compare.metricUnavailable') : undefined}>
                       <Clock3 size={12} />
