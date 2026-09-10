@@ -772,6 +772,29 @@ fn agent_start_failure_outcome(agent_type: &AgentType, error: &str) -> AgentExec
     }
 }
 
+fn persist_agent_start_error(
+    conn: &rusqlite::Connection,
+    discussion_id: &str,
+    message: &DiscussionMessage,
+    dispatch_id: Option<&str>,
+    tracked_dispatch: bool,
+) -> anyhow::Result<()> {
+    // Still clear the untracked obligation if inserting the diagnostic fails.
+    let inserted = crate::db::discussions::insert_message(conn, discussion_id, message);
+    let linked = match dispatch_id {
+        Some(job_id) => conn
+            .execute(
+                "UPDATE messages SET agent_dispatch_job_id = ?2 WHERE id = ?1",
+                rusqlite::params![message.id, job_id],
+            )
+            .map(|_| ())
+            .map_err(anyhow::Error::from),
+        None => Ok(()),
+    };
+    let cleared = clear_awaiting_after_terminal(conn, discussion_id, tracked_dispatch);
+    inserted.and(linked).and(cleared)
+}
+
 fn agent_http_status(error: &str) -> Option<u16> {
     error
         .split_once(" error ")
@@ -4178,30 +4201,18 @@ async fn make_agent_stream_inner(
                 };
 
                 let did = disc_id.clone();
-                let error_message_id = err_msg.id.clone();
                 let error_dispatch_id = dispatch_job_id.clone();
                 let err_msg_fed = err_msg.clone();
                 if let Err(db_err) = state
                     .db
                     .with_conn(move |conn| {
-                        // The agent was handled (it failed to start), so it's
-                        // no longer "owed a run": clear the marker so the boot
-                        // reconcile doesn't later flag this as interrupted. Both
-                        // ops run even if the insert fails — a `?` would leave the
-                        // marker stale exactly when the run never started.
-                        let inserted = crate::db::discussions::insert_message(conn, &did, &err_msg);
-                        let linked = match error_dispatch_id.as_deref() {
-                            Some(job_id) => conn
-                                .execute(
-                                    "UPDATE messages SET agent_dispatch_job_id = ?2 WHERE id = ?1",
-                                    rusqlite::params![error_message_id, job_id],
-                                )
-                                .map(|_| ())
-                                .map_err(anyhow::Error::from),
-                            None => Ok(()),
-                        };
-                        let cleared = clear_awaiting_after_terminal(conn, &did, tracked_dispatch);
-                        inserted.and(linked).and(cleared)
+                        persist_agent_start_error(
+                            conn,
+                            &did,
+                            &err_msg,
+                            error_dispatch_id.as_deref(),
+                            tracked_dispatch,
+                        )
                     })
                     .await
                 {
@@ -4944,6 +4955,100 @@ mod agent_lifecycle_tests {
                 reason: "Binary 'claude' not found".into()
             }
         );
+    }
+
+    #[test]
+    fn kt633_nul_failure_persists_a_visible_error_and_settles_the_dispatch() {
+        use crate::db::agent_dispatch::{self, DispatchStatus, NewAgentDispatchJob};
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO discussions (id, title, created_at, updated_at, awaiting_agent)
+            VALUES ('nul-room', 'NUL fixture', datetime('now'), datetime('now'), 1)",
+            [],
+        )
+        .unwrap();
+        let mut trigger = crate::api::orchestration::orchestrator_message(
+            "nul-trigger".into(),
+            "question".into(),
+        );
+        trigger.role = MessageRole::User;
+        crate::db::discussions::insert_message(&conn, "nul-room", &trigger).unwrap();
+        agent_dispatch::enqueue(
+            &conn,
+            NewAgentDispatchJob {
+                id: "nul-job",
+                discussion_id: "nul-room",
+                trigger_message_id: "nul-trigger",
+                trigger_sort_order: 0,
+                dedupe_key: "nul-once",
+                agent_override: Some(&AgentType::ClaudeCode),
+                chain_prompt_ids: &[],
+                batch_item: None,
+                group_id: None,
+                group_concurrency_limit: None,
+            },
+        )
+        .unwrap();
+        agent_dispatch::claim(&conn, "nul-job").unwrap().unwrap();
+        let error = "Spawn failed for npx: nul byte found in provided data";
+        let AgentExecutionOutcome::PreflightFailed { diagnostic } =
+            agent_start_failure_outcome(&AgentType::ClaudeCode, error)
+        else {
+            panic!("a deterministic NUL failure must not defer");
+        };
+        let content = agent_start_error_content(
+            &AgentType::ClaudeCode,
+            None,
+            crate::models::ModelTier::Default,
+            "en",
+            &diagnostic,
+            Some("nul-job"),
+        )
+        .unwrap_or_else(|| format!("Erreur: {diagnostic}"));
+        let mut message =
+            crate::api::orchestration::orchestrator_message("nul-error".into(), content);
+        message.role = MessageRole::System;
+        message.agent_type = Some(AgentType::ClaudeCode);
+        super::persist_agent_start_error(&conn, "nul-room", &message, Some("nul-job"), true)
+            .unwrap();
+        crate::api::discussions::runtime::persist_dispatch_settlement(
+            &conn,
+            "nul-job",
+            "nul-room",
+            None,
+            crate::db::workflows::BatchChildOutcome::Failed,
+            Some(&diagnostic),
+            None,
+        )
+        .unwrap();
+        let job = agent_dispatch::get(&conn, "nul-job").unwrap().unwrap();
+        assert_eq!(job.status, DispatchStatus::Failed);
+        assert_eq!(job.attempts, 1);
+        assert_eq!(job.last_error.as_deref(), Some(error));
+        assert!(agent_dispatch::list_runnable_ids(&conn, 10)
+            .unwrap()
+            .is_empty());
+        assert!(!agent_dispatch::defer_runtime_unavailable(&conn, "nul-job", 30, error).unwrap());
+        let (role, content, dispatch_id): (String, String, String) = conn
+            .query_row(
+                "SELECT role, content, agent_dispatch_job_id FROM messages WHERE id='nul-error'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(role, "System");
+        assert!(content.contains(error));
+        assert_eq!(dispatch_id, "nul-job");
+        let awaiting: bool = conn
+            .query_row(
+                "SELECT awaiting_agent FROM discussions WHERE id='nul-room'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!awaiting);
     }
 
     #[test]
