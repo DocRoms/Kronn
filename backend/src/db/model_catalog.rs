@@ -549,15 +549,22 @@ pub fn reconcile_live(
     for model in discovered {
         let id = canonical_id(runtime_target_id, &model.model_id);
         match existing.iter().find(|e| e.model_id == model.model_id) {
-            Some(_) => {
+            Some(existing_entry) => {
+                let promoted_alias = matches!(
+                    existing_entry.provenance,
+                    ModelProvenance::Manual | ModelProvenance::Migrated
+                )
+                .then(|| existing_entry.display_name.clone());
                 conn.execute(
-                    "UPDATE model_catalog_entries SET display_name = ?1, provenance = 'live', \
+                    "UPDATE model_catalog_entries SET display_name = ?1, \
+                     display_alias = COALESCE(display_alias, ?2), provenance = 'live', \
                      availability = 'available', unavailable_reason = NULL, \
-                     unavailable_detail = NULL, capabilities_json = ?2, \
-                     reasoning_modes_json = ?3, default_reasoning_mode = ?4, \
-                     last_seen_at = ?5, last_checked_at = ?5, updated_at = ?5 WHERE id = ?6",
+                     unavailable_detail = NULL, capabilities_json = ?3, \
+                     reasoning_modes_json = ?4, default_reasoning_mode = ?5, \
+                     last_seen_at = ?6, last_checked_at = ?6, updated_at = ?6 WHERE id = ?7",
                     params![
                         model.display_name,
+                        promoted_alias,
                         serde_json::to_string(&model.capabilities)?,
                         serde_json::to_string(&model.reasoning_modes)?,
                         model.default_reasoning_mode,
@@ -615,9 +622,9 @@ pub fn reconcile_live(
     set_refresh_log(conn, runtime_target_id, agent_type, true, None, None)
 }
 
-/// Record a failed discovery attempt without touching any model row: the
-/// last known catalogue (`Cached`/`Manual`/`Migrated`) remains exactly as it
-/// was, and the failure is only visible via the refresh log + preflight.
+/// Record a failed discovery without changing identities or availability.
+/// Previously live rows become cached; manual/migrated rows and last-seen
+/// timestamps are preserved. The refresh log supplies the failure diagnostic.
 pub fn record_refresh_failure(
     conn: &Connection,
     runtime_target_id: &str,
@@ -984,6 +991,7 @@ mod tests {
             "operator tier assignment must survive reconciliation"
         );
         assert_eq!(merged.display_name, "Provider Name");
+        assert_eq!(merged.display_alias.as_deref(), Some("Operator Alias"));
     }
 
     #[test]

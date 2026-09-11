@@ -331,7 +331,7 @@ export function OllamaCard({ t, modelCostSuffix, headerAccessory, title }: Ollam
         : t('ollama.notInstalled');
 
   const savedTarget = catalog.data?.targets.find(view => view.runtime_target_id === modelRuntimeTargetId('Ollama'));
-  const target = savedTarget && (catalog.error || catalog.loading || health?.status !== 'online')
+  const target = savedTarget && (!savedTarget.live_refresh_ok || catalog.error || catalog.loading || health?.status !== 'online')
     ? { ...savedTarget, stale: true, live_refresh_ok: false } : savedTarget;
 
   return (
