@@ -5238,6 +5238,61 @@ fn worker_brief_markdown(
     worker_scope: Option<&TaskWorkerScope>,
 ) -> String {
     let mediated_host_commit = can_run_shell && native_delivery_projection;
+    // A joined CLI retains the room tools exposed by the regular bridge. Spawned
+    // native workers and HTTP workers receive their narrower task/workspace
+    // surfaces, so their briefs must request a relay instead of naming a tool
+    // they cannot call.
+    let has_room_publication = can_run_shell && !native_delivery_projection;
+    let human_arbitration = if has_room_publication {
+        "## Arbitrages humains et jalons parent\n\
+         - Un choix normal d'implémentation, compatible avec l'objectif et la DoD, relève du worker. \
+           Une décision produit qui change le besoin, le périmètre ou un compromis utilisateur est \
+           réservée à l'humain.\n\
+         - Avant de solliciter une décision produit, appelle `disc_question_list` et réutilise une \
+           réponse humaine durable applicable ; ne redemande pas un arbitrage déjà tranché.\n\
+         - Sans réponse applicable, publie via `disc_append` une carte fermée `kronn-question` \
+           avec `\"version\":1` (nombre), une clé stable et la question bloquante. Relis ensuite \
+           cette clé avec `disc_question_list` pour vérifier l'enregistrement.\n\
+         - En attendant, pause ce seul périmètre et poursuis uniquement le travail indépendant. \
+           Ni le worker ni le principal ne décide jamais à la place de l'humain.\n\n"
+            .to_string()
+    } else {
+        "## Arbitrages humains et jalons parent\n\
+         - Un choix normal d'implémentation, compatible avec l'objectif et la DoD, relève du worker. \
+           Une décision produit qui change le besoin, le périmètre ou un compromis utilisateur est \
+           réservée à l'humain.\n\
+         - Cette surface ne déclare pas `disc_question_list` ni `disc_append`. Réutilise toute \
+           réponse humaine durable fournie dans le contexte ; sans réponse applicable, indique le \
+           blocker exact et demande au principal de relayer une carte `kronn-question` valide.\n\
+         - En attendant la réponse durable, pause ce seul périmètre. Ni le worker ni le principal \
+           ne décide jamais à la place de l'humain.\n\n"
+            .to_string()
+    };
+    // A joined CLI's disc_append/disc_question_list only ever reach the sub-discussion
+    // it was rebound into at acceptance (build_attach_notice: it "left" the origin room)
+    // — never the parent room directly. Stating "no declared publication tool" here would
+    // contradict the human_arbitration section above, which names those exact tools for
+    // this same transport. Native/HTTP workers declare no such tool at all.
+    let parent_milestones = if has_room_publication {
+        "## Jalons parent factuels\n\
+         Cette session a rejoint sa propre sous-discussion et n'est plus dans la room \
+         d'origine (parente) : `disc_append`/`disc_question_list` ne ciblent que cette \
+         sous-discussion, jamais la room parente directement. Les seuls jalons vus depuis \
+         la room parente restent ceux postés par l'orchestrateur : l'attachement enregistré \
+         à l'acceptation et, après un DeliveryManifest validé, la demande de revue qu'il crée. \
+         N'affirme jamais avoir publié dans la room parente ; pas de miroir automatique vers \
+         elle.\n\n"
+            .to_string()
+    } else {
+        "## Jalons parent factuels\n\
+         Cette surface ne déclare aucun outil de publication de message (ni `disc_append` \
+         ni `disc_question_list`). Les seuls jalons parent factuels sont l'attachement \
+         enregistré par l'orchestrateur et, après un DeliveryManifest validé, la demande de \
+         revue qu'il crée. Signale tes faits vérifiés uniquement dans le blocker ou la \
+         livraison, et demande au principal de relayer si une décision humaine doit atteindre \
+         la room parente ; pas de miroir automatique, ni d'outil de publication inventé.\n\n"
+            .to_string()
+    };
     let dod = if dod.is_empty() {
         "_(aucune)_".to_string()
     } else {
@@ -5293,6 +5348,8 @@ fn worker_brief_markdown(
                 "# {task_reference} — {task_title}\n\n\
                  ## Objectif\n{objective}\n\n\
                  ## Definition of Done\n{dod}\n\n\
+                 {human_arbitration}\
+                 {parent_milestones}\
                  ## Cible mécanique prélocalisée\n{target}\n\n\
                  ## Protocole borné\n\
                  1. Appelle l'unique `read_file` contraint.\n\
@@ -5441,6 +5498,8 @@ fn worker_brief_markdown(
         "# {reference} — {title}\n\n\
          ## Objectif\n{objective}\n\n\
          ## Definition of Done\n{dod}\n\n\
+         {human_arbitration}\
+         {parent_milestones}\
          ## Décisions & périmètre\n\
          Le périmètre exact de cette tâche EST la Definition of Done ci-dessus : \
          ne touche que ce qui la satisfait, ne déborde ni sur d'autres tâches ni \
@@ -5479,6 +5538,8 @@ fn worker_brief_markdown(
         tests = tests,
         method = method,
         mechanical_scope = mechanical_scope,
+        human_arbitration = human_arbitration,
+        parent_milestones = parent_milestones,
         delivery_format = delivery_format,
         commit_boundary = commit_boundary,
         first_action = first_action,
@@ -10241,6 +10302,127 @@ mod tests {
         assert!(brief.contains("N'utilise pas `git commit`"), "{brief}");
         assert!(!brief.contains("opaque-dod-id"), "{brief}");
         assert!(!brief.contains("`head_sha` : le HEAD exact"), "{brief}");
+    }
+
+    #[test]
+    fn worker_briefs_make_human_arbitration_and_parent_milestones_transport_aware() {
+        let joined_cli = worker_brief_markdown(
+            "KT-635",
+            "Arbitrages",
+            "Modifier un contrat",
+            &[],
+            "/wt/joined",
+            "kronn/task/KT-635",
+            "abc1234",
+            true,
+            false,
+            None,
+        );
+        for needle in [
+            "## Arbitrages humains et jalons parent",
+            "décision produit",
+            "disc_question_list",
+            "disc_append",
+            "`kronn-question`",
+            "`\"version\":1`",
+            "pause ce seul périmètre",
+            "Jalons parent factuels",
+            "pas de miroir automatique",
+        ] {
+            assert!(
+                joined_cli.contains(needle),
+                "joined CLI must mention `{needle}`\n{joined_cli}"
+            );
+        }
+        // The joined CLI's own human_arbitration section (just above) names
+        // `disc_append`/`disc_question_list` as real tools it holds. Its parent-milestones
+        // section must scope their reach (own sub-discussion only, never the parent room
+        // directly) rather than flatly deny any declared publication tool — that would
+        // contradict the section right above it in the same brief.
+        assert!(
+            joined_cli.contains("sous-discussion") && joined_cli.contains("jamais la room parente directement"),
+            "joined CLI parent-milestones must scope disc_append to its own sub-discussion, not deny it: {joined_cli}"
+        );
+        assert!(
+            !joined_cli.contains("ne déclare aucun outil de publication"),
+            "joined CLI has disc_append/disc_question_list — must not claim it declares no publication tool: {joined_cli}"
+        );
+
+        let native_cli = worker_brief_markdown(
+            "KT-635",
+            "Arbitrages",
+            "Modifier un contrat",
+            &[],
+            "/wt/native",
+            "kronn/task/KT-635",
+            "abc1234",
+            true,
+            true,
+            None,
+        );
+        let generic_http = worker_brief_markdown(
+            "KT-635",
+            "Arbitrages",
+            "Modifier un contrat",
+            &[],
+            "/wt/http",
+            "kronn/task/KT-635",
+            "abc1234",
+            false,
+            true,
+            None,
+        );
+        let scope = TaskWorkerScope::PrelocalizedEdit {
+            path: "backend/src/lib.rs".into(),
+            start_line: 40,
+            end_line: 44,
+        };
+        let prelocalized_http = worker_brief_markdown(
+            "KT-635",
+            "Arbitrages",
+            "Modifier un contrat",
+            &[],
+            "/wt/prelocalized",
+            "kronn/task/KT-635",
+            "abc1234",
+            false,
+            true,
+            Some(&scope),
+        );
+        for (name, brief) in [
+            ("native CLI", native_cli),
+            ("generic HTTP", generic_http),
+            ("prelocalized HTTP", prelocalized_http),
+        ] {
+            assert!(
+                brief.contains("demande au principal de relayer"),
+                "{name}: {brief}"
+            );
+            assert!(
+                brief.contains("ne décide jamais à la place de l'humain"),
+                "{name}: {brief}"
+            );
+            assert!(brief.contains("pause ce seul périmètre"), "{name}: {brief}");
+            assert!(
+                brief.contains("## Jalons parent factuels"),
+                "{name}: {brief}"
+            );
+            assert!(
+                !brief.contains("Avant de solliciter une décision produit, appelle"),
+                "{name}: {brief}"
+            );
+            // Native/HTTP hold no room-publication tool at all — unlike the joined CLI,
+            // their parent-milestones text must say so plainly, and must never claim the
+            // sub-discussion-scoped disc_append reach that only a joined CLI actually has.
+            assert!(
+                brief.contains("ne déclare aucun outil de publication"),
+                "{name}: {brief}"
+            );
+            assert!(
+                !brief.contains("jamais la room parente directement"),
+                "{name}: {brief}"
+            );
+        }
     }
 
     #[test]
