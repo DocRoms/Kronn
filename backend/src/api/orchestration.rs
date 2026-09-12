@@ -5268,20 +5268,29 @@ fn worker_brief_markdown(
            ne décide jamais à la place de l'humain.\n\n"
             .to_string()
     };
-    // A joined CLI's disc_append/disc_question_list only ever reach the sub-discussion
-    // it was rebound into at acceptance (build_attach_notice: it "left" the origin room)
-    // — never the parent room directly. Stating "no declared publication tool" here would
-    // contradict the human_arbitration section above, which names those exact tools for
-    // this same transport. Native/HTTP workers declare no such tool at all.
+    // `disc_append` defaults to this session's own bound sub-discussion but accepts an
+    // explicit `disc_id` (backend/scripts/disc-introspection-mcp.py:5063) — it is NOT
+    // restricted to the child room. `task_exec_status` exposes the real, authorized
+    // `parent_discussion_id` (TaskExecutionLineage), so a joined CLI CAN post an explicit
+    // factual milestone straight to the parent when one is warranted; it just never happens
+    // automatically. `disc_question_list` truly is bound-only — it always reads `_disc_id()`
+    // and ignores any id argument (backend/scripts/disc-introspection-mcp.py:4278-4289) — so
+    // it can never see the parent's pending questions. Native/HTTP workers declare neither
+    // tool at all.
     let parent_milestones = if has_room_publication {
         "## Jalons parent factuels\n\
-         Cette session a rejoint sa propre sous-discussion et n'est plus dans la room \
-         d'origine (parente) : `disc_append`/`disc_question_list` ne ciblent que cette \
-         sous-discussion, jamais la room parente directement. Les seuls jalons vus depuis \
-         la room parente restent ceux postés par l'orchestrateur : l'attachement enregistré \
-         à l'acceptation et, après un DeliveryManifest validé, la demande de revue qu'il crée. \
-         N'affirme jamais avoir publié dans la room parente ; pas de miroir automatique vers \
-         elle.\n\n"
+         `disc_append` cible par défaut la sous-discussion où cette session a été rebranchée \
+         à l'acceptation, mais accepte un `disc_id` explicite : appelle `task_exec_status` pour \
+         obtenir `parent_discussion_id`, l'identifiant réel et autorisé de la room parente, et \
+         publie-y directement un jalon factuel (avancement notable, blocker, résultat) quand \
+         c'en est un — pas de miroir automatique ni systématique. `disc_question_list` reste \
+         borné à cette seule sous-discussion quel que soit l'argument passé : il ne donne jamais \
+         accès aux questions en attente dans la room parente. Les jalons déjà visibles sans \
+         action de ta part restent l'attachement enregistré par l'orchestrateur à l'acceptation \
+         et, après un DeliveryManifest validé, la demande de revue qu'il crée ; ce ne sont pas \
+         les seuls jalons possibles. Si une décision humaine doit atteindre la room parente et \
+         que tu ne peux ou ne dois pas la publier toi-même, demande explicitement au principal \
+         de relayer.\n\n"
             .to_string()
     } else {
         "## Jalons parent factuels\n\
@@ -10336,16 +10345,32 @@ mod tests {
         }
         // The joined CLI's own human_arbitration section (just above) names
         // `disc_append`/`disc_question_list` as real tools it holds. Its parent-milestones
-        // section must scope their reach (own sub-discussion only, never the parent room
-        // directly) rather than flatly deny any declared publication tool — that would
-        // contradict the section right above it in the same brief.
-        assert!(
-            joined_cli.contains("sous-discussion") && joined_cli.contains("jamais la room parente directement"),
-            "joined CLI parent-milestones must scope disc_append to its own sub-discussion, not deny it: {joined_cli}"
-        );
+        // section must not invent a false "child room only" restriction: `disc_append`
+        // actually accepts an explicit `disc_id` (it can target the parent once known via
+        // `task_exec_status`), only `disc_question_list` is truly bound-only.
         assert!(
             !joined_cli.contains("ne déclare aucun outil de publication"),
             "joined CLI has disc_append/disc_question_list — must not claim it declares no publication tool: {joined_cli}"
+        );
+        assert!(
+            !joined_cli.contains("jamais la room parente directement"),
+            "joined CLI must not falsely restrict disc_append to the child room only — it accepts an explicit disc_id: {joined_cli}"
+        );
+        assert!(
+            joined_cli.contains("task_exec_status") && joined_cli.contains("parent_discussion_id"),
+            "joined CLI must name the real way to learn the authorized parent id: {joined_cli}"
+        );
+        assert!(
+            joined_cli.contains("disc_id` explicite"),
+            "joined CLI must state disc_append accepts an explicit disc_id, not child-only: {joined_cli}"
+        );
+        assert!(
+            joined_cli.contains("borné à cette seule sous-discussion"),
+            "joined CLI must state disc_question_list, not disc_append, is bound-only: {joined_cli}"
+        );
+        assert!(
+            joined_cli.contains("ce ne sont pas") && joined_cli.contains("les seuls jalons possibles"),
+            "joined CLI must state parent milestones are not limited to attach/review events: {joined_cli}"
         );
 
         let native_cli = worker_brief_markdown(
