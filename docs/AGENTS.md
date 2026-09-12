@@ -37,6 +37,21 @@ See
 [`operations/mcp-servers/kronn-internal.md`](operations/mcp-servers/kronn-internal.md#human-arbitration-cards).
 `[src: file: backend/src/db/discussion_questions.rs:1]`
 
+**Steering events in a Kronn room.** A decision, a scope change, a DoD waiver, a
+blocking alert, a human action required or an accepted delivery is published as
+a `kronn-important` fence, which mints a durable card — not a bold line, a
+colour or an emoji. It is NOT a delivery report: an accepted delivery stays a
+`delivery_summary`, and a fact inside it worth steering on becomes a SEPARATE
+card that `references` the delivery. `dedup_key` is the identity of the FACT, so
+a replay after a restart collapses instead of duplicating; only the first fence
+in a message publishes, and the `note` channel publishes none. Publication needs
+an enrolled credential and a single-use proof: an install with none publishes no
+card, the message still posts, and the response says which. A worker never
+publishes one while it is working, holding a valid grant or not — report through
+your delivery, and ask the human with `kronn-question`.
+`[src: file: backend/src/db/discussion_important.rs:1]`
+See [`architecture/important-messages.md`](architecture/important-messages.md).
+
 Use paths relative to the repo root.
 
 <!-- kronn:section name="anti-hallu" curated="ai" audit="2026-05-27" -->

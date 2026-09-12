@@ -221,6 +221,27 @@ async fn main() -> anyhow::Result<()> {
         config::config_dir().unwrap().display()
     );
 
+    // KT-619 — an operator who lost the admin secret asks for a new one by
+    // creating `recover-admin-secret` in the private directory; this honours it
+    // and consumes it. Runs BEFORE the bootstrap below so a recovery on an
+    // install that never bootstrapped delivers once, not twice.
+    //
+    // Never fatal, and never silent: a refused recovery leaves the request in
+    // place for the next boot.
+    match database
+        .with_conn(kronn::core::operator_secret::recover_if_requested)
+        .await
+    {
+        Ok(Some(path)) => tracing::warn!(
+            "Recovery request honoured: a NEW publication admin secret was written to {} — the previous one no longer authenticates",
+            path.display()
+        ),
+        Ok(None) => {}
+        Err(error) => tracing::error!(
+            "Publication admin secret recovery failed ({error}); the request file was left in place"
+        ),
+    }
+
     // KT-619 — mint the publication bootstrap on a fresh install, so the
     // operator finds it without being told to run anything. Idempotent: a
     // second boot sees the row and does nothing.

@@ -179,6 +179,16 @@ fn admin_secret_matches(conn: &Connection, secret: &Secret) -> Result<bool> {
     Ok(stored.is_some_and(|hash| hash == secret.hash()))
 }
 
+/// Does this secret authenticate as the ADMIN, and only the admin?
+///
+/// Deliberately not [`authorise_enrolment`], which also accepts a live `human`
+/// grant. Administering credentials and rotating the secret that governs them
+/// are different powers: a grant the operator enrolled must not be able to
+/// rotate the operator out of their own install.
+pub fn admin_secret_authenticates(conn: &Connection, presented: &Secret) -> Result<bool> {
+    admin_secret_matches(conn, presented)
+}
+
 /// Rotate the bootstrap secret. Every credential it enrolled keeps working;
 /// only the ability to enrol NEW ones moves to the new secret.
 pub fn rotate_admin_secret(conn: &Connection, delivered_to: &str) -> Result<Secret> {

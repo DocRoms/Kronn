@@ -166,6 +166,111 @@ pub fn ensure_bootstrap(conn: &rusqlite::Connection) -> Result<Option<PathBuf>> 
     Ok(Some(bootstrap(conn)?.path))
 }
 
+/// Rotate the bootstrap secret and deliver the new one.
+///
+/// Rotation and recovery are the SAME operation. Whether the operator still
+/// holds the old secret and wants a new one, or lost the file entirely, the only
+/// way forward is a fresh secret written to the one place they can read. Every
+/// credential already enrolled keeps working: only the power to enrol NEW ones
+/// moves.
+///
+/// Where `bootstrap` DELETES the file if the row cannot be committed, this puts
+/// the previous one back. There was nothing to lose before; here there is, and
+/// a failed rotation that takes the operator's only copy with it turns a
+/// recoverable install into a dead one.
+pub fn rotate(conn: &rusqlite::Connection) -> Result<Delivered> {
+    if !crate::db::human_credentials::admin_secret_exists(conn)? {
+        bail!("there is no admin secret to rotate; a boot with none mints one");
+    }
+    let path = secret_path()?;
+
+    // Keep the current bytes only if the file is genuinely ours and private.
+    // A secret already readable by others is already given away, and restoring
+    // it after a failed rotation would restore exactly what was being rotated
+    // away from. An absent file lands here too, which is the recovery case.
+    let previous = verify_private(&path)
+        .ok()
+        .and_then(|()| fs::read_to_string(&path).ok());
+
+    let transaction = conn.unchecked_transaction()?;
+    let secret = crate::db::human_credentials::rotate_admin_secret(
+        &transaction,
+        &path.to_string_lossy(),
+    )?;
+
+    write_private(&path, secret.expose())
+        .context("the rotated admin secret was not written; nothing was committed")?;
+
+    if let Err(error) = transaction.commit() {
+        match previous.as_deref().map(str::trim) {
+            Some(old) if !old.is_empty() => {
+                let _ = write_private(&path, old);
+            }
+            // Nothing usable to restore: leaving the new secret in place would
+            // look delivered while authenticating nothing.
+            _ => {
+                let _ = fs::remove_file(&path);
+            }
+        }
+        return Err(error).context("the admin secret rotation was rolled back");
+    }
+
+    verify_private(&path)?;
+    Ok(Delivered { path })
+}
+
+/// The file an operator creates to ask for a new admin secret.
+///
+/// Creating it proves write access to the private directory — the same access
+/// that already owns the database and the secret itself. That is the right
+/// proof for a recovery: it is available precisely to the person who can no
+/// longer authenticate, and to nobody who cannot already take everything.
+const RECOVERY_REQUEST_FILE: &str = "recover-admin-secret";
+
+pub fn recovery_request_path() -> Result<PathBuf> {
+    Ok(crate::core::config::config_dir()?.join(RECOVERY_REQUEST_FILE))
+}
+
+/// Honour a recovery request left in the private directory, and consume it.
+///
+/// This is the way back from a lost secret: the HTTP surface cannot help there
+/// by design — a route that re-delivers the admin secret to whoever asks is the
+/// hole this whole lot exists to close — so the way in is the filesystem.
+///
+/// The request is removed only once the new secret is committed and on disk. A
+/// failed attempt is therefore retried on the next boot rather than silently
+/// swallowed; the cost is that a crash between the commit and the removal
+/// rotates a second time, which delivers another usable secret rather than
+/// losing one.
+pub fn recover_if_requested(conn: &rusqlite::Connection) -> Result<Option<PathBuf>> {
+    let request = recovery_request_path()?;
+    let Ok(metadata) = fs::symlink_metadata(&request) else {
+        return Ok(None);
+    };
+    if !metadata.file_type().is_file() {
+        bail!(
+            "{} is not a regular file; refusing to read it as a recovery request",
+            request.display()
+        );
+    }
+
+    // An install that never bootstrapped has nothing to rotate, and recovery is
+    // then simply the bootstrap it never got.
+    let delivered = if crate::db::human_credentials::admin_secret_exists(conn)? {
+        rotate(conn)?
+    } else {
+        bootstrap(conn)?
+    };
+
+    fs::remove_file(&request).with_context(|| {
+        format!(
+            "the admin secret was rotated but {} could not be removed; the next boot will rotate again",
+            request.display()
+        )
+    })?;
+    Ok(Some(delivered.path))
+}
+
 /// Read the secret back, for an operator-side check that delivery worked.
 /// Refuses a file that is not private, rather than returning what it holds.
 pub fn read_delivered() -> Result<crate::db::human_credentials::Secret> {

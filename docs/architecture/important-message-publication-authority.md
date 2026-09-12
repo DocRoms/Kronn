@@ -54,6 +54,44 @@ sanctioned, so minting a second is refused; rotate instead.
 credential authorises nobody, including whoever asks first. A window the first
 caller wins is not an authorisation.
 
+## Rotating and recovering it
+
+Two doors, and they answer different questions.
+
+**Still holding it.** `POST /api/human-credentials/admin/rotate` takes the
+current admin secret and mints its replacement. The response carries a **path**,
+never a secret: the new plaintext goes to the operator's private file and over
+no wire at all. Settings offers the same thing as a button, and locks the screen
+back afterwards — the authority the operator just typed is dead, and leaving it
+on screen would say otherwise.
+
+Authenticated as the **admin and nothing else**. A `human` grant administers
+credentials — it enrols, lists and revokes — but rotating the bootstrap is a
+different power: allowing it would let a laptop the operator enrolled lock the
+operator out of their own install.
+
+**Lost it.** No route can help, and that is the point: an API that re-delivers
+the admin secret to whoever asks is the hole this whole contract closes. The way
+back is a file named `recover-admin-secret` in the private directory, honoured
+at the next boot. Creating it proves write access to the directory that already
+holds the database and the secret — available precisely to the person who can no
+longer authenticate, and to nobody who cannot already take everything.
+
+The request is consumed **after** the new secret is committed and on disk, so a
+failed attempt is retried on the next boot rather than swallowed. The cost of
+that ordering is a crash between the commit and the removal rotating a second
+time, which delivers another usable secret rather than losing one.
+
+Either way, **every credential already enrolled keeps working.** Rotation moves
+the power to enrol NEW ones; it is not a revocation sweep, and an operator
+rotating a secret they still hold must not discover they have logged out every
+device they enrolled.
+
+A rotation that cannot write its row returns before it touches the file, and one
+that cannot commit puts the previous file back — unless that file was readable
+by others, in which case it is already given away and restoring it would restore
+exactly what was being rotated away from.
+
 ## Grants
 
 | | |

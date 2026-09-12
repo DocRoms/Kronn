@@ -7,15 +7,16 @@ import type { HumanCredential } from '../../../types/generated';
 
 // `vi.mock` is hoisted above every declaration, so the mocks it closes over
 // have to be created in a hoisted block too.
-const { list, enrol, revoke, rotate } = vi.hoisted(() => ({
+const { list, enrol, revoke, rotate, rotateAdmin } = vi.hoisted(() => ({
   list: vi.fn(),
   enrol: vi.fn(),
   revoke: vi.fn(),
   rotate: vi.fn(),
+  rotateAdmin: vi.fn(),
 }));
 
 vi.mock('../../../lib/api', () => ({
-  publicationCredentials: { list, enrol, revoke, rotate },
+  publicationCredentials: { list, enrol, revoke, rotate, rotateAdmin },
 }));
 
 import { PublicationCredentialsSection } from '../PublicationCredentialsSection';
@@ -49,11 +50,14 @@ async function unlock(user: ReturnType<typeof userEvent.setup>) {
 }
 
 beforeEach(() => {
-  [list, enrol, revoke, rotate, toast].forEach((mock) => mock.mockReset());
+  [list, enrol, revoke, rotate, rotateAdmin, toast].forEach((mock) => mock.mockReset());
   list.mockResolvedValue([]);
 });
 
-afterEach(() => cleanup());
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+});
 
 describe('PublicationCredentialsSection', () => {
   it('shows nothing until an authority is presented', async () => {
@@ -238,5 +242,71 @@ describe('PublicationCredentialsSection', () => {
     // The fail-closed state is the one worth explaining: silence here would
     // read as a bug rather than as a deliberate refusal.
     expect(await screen.findByText('settings.credentials.empty')).toBeInTheDocument();
+  });
+
+  it('names the way back for the operator who cannot get past this form', async () => {
+    mount();
+    // The person locked out is exactly the one no button here can serve: the
+    // door is a file on the server, so the screen says which file.
+    expect(screen.getByText('settings.credentials.recoveryHint')).toBeInTheDocument();
+  });
+
+  it('asks before rotating the admin secret, and does nothing when refused', async () => {
+    const user = userEvent.setup();
+    list.mockResolvedValue([credential()]);
+    const confirm = vi.fn(() => false);
+    vi.stubGlobal('confirm', confirm);
+    mount();
+    await unlock(user);
+    await screen.findByRole('table');
+
+    await user.click(screen.getByRole('button', { name: /settings.credentials.rotateAdmin/ }));
+
+    expect(confirm).toHaveBeenCalled();
+    // A rotation nobody confirmed would invalidate the secret the operator is
+    // holding, from a single misplaced click.
+    expect(rotateAdmin).not.toHaveBeenCalled();
+  });
+
+  it('locks back to the form after rotating, and says where the new secret went', async () => {
+    const user = userEvent.setup();
+    list.mockResolvedValue([credential()]);
+    const confirm = vi.fn(() => true);
+    vi.stubGlobal('confirm', confirm);
+    rotateAdmin.mockResolvedValue({ path: '/data/kronn/human-admin-secret' });
+    mount();
+    await unlock(user);
+    await screen.findByRole('table');
+
+    await user.click(screen.getByRole('button', { name: /settings.credentials.rotateAdmin/ }));
+
+    // The authority just typed is dead; leaving the screen unlocked would show
+    // a session that no longer exists.
+    await screen.findByLabelText('settings.credentials.authorityLabel');
+    expect(screen.queryByRole('table')).toBeNull();
+    expect(rotateAdmin).toHaveBeenCalledWith(ADMIN);
+
+    // A path, and never a secret: the plaintext travels over no wire at all.
+    expect(screen.getByText('/data/kronn/human-admin-secret')).toBeInTheDocument();
+  });
+
+  it('leaves the operator where they were when the rotation is refused', async () => {
+    const user = userEvent.setup();
+    list.mockResolvedValue([credential()]);
+    const confirm = vi.fn(() => true);
+    vi.stubGlobal('confirm', confirm);
+    rotateAdmin.mockRejectedValue(new Error('forbidden'));
+    mount();
+    await unlock(user);
+    await screen.findByRole('table');
+
+    await user.click(screen.getByRole('button', { name: /settings.credentials.rotateAdmin/ }));
+
+    await waitFor(() =>
+      expect(toast).toHaveBeenCalledWith('settings.credentials.rotateAdminFailed', 'error'),
+    );
+    // Nothing changed on the server, so nothing changes on screen either —
+    // locking out after a failed rotation would read as a rotation that worked.
+    expect(screen.getByRole('table')).toBeInTheDocument();
   });
 });

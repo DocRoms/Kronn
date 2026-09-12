@@ -3373,4 +3373,8 @@ export const publicationCredentials = {
       authority,
       credential_id,
     }),
+  // Rotates the bootstrap itself. Returns where the new secret was written —
+  // never the secret: it goes to the operator's private file and over no wire.
+  rotateAdmin: (authority: string) =>
+    api<{ path: string }>('POST', '/human-credentials/admin/rotate', { authority }),
 };

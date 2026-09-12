@@ -5252,6 +5252,19 @@ export type ReviseNoteRequest = { content: string, };
 
 export type RevokeRequest = { authority: string, credential_id: string, reason: string, };
 
+export type RotateAdminRequest = {
+/**
+ * The CURRENT admin secret. Nothing else opens this door.
+ */
+authority: string, };
+
+/**
+ * A path, never a secret. The new plaintext goes to the operator's private
+ * file and travels over no wire — an API that could hand back the admin secret
+ * would be the hole this lot exists to close.
+ */
+export type RotateAdminResponse = { path: string, };
+
 export type RotateRequest = { authority: string, credential_id: string, };
 
 /**

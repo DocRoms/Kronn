@@ -31,6 +31,8 @@ export function PublicationCredentialsSection({ toast, t }: Props) {
   const [role, setRole] = useState<GrantRole>('human');
   const [minted, setMinted] = useState<Minted | null>(null);
   const [copied, setCopied] = useState(false);
+  /// Where the bootstrap secret landed after a rotation. A path, never a secret.
+  const [relocated, setRelocated] = useState<string | null>(null);
   // `busy` is React state, so it is not observable until the next render. Two
   // synchronous events — a double click, Enter on a focused button while the
   // click lands — both see `busy === false` and both fire. For a mutation that
@@ -124,6 +126,30 @@ export function PublicationCredentialsSection({ toast, t }: Props) {
     });
   };
 
+  /// Rotate the bootstrap secret itself — the way out when it may have leaked.
+  ///
+  /// The one who LOST it cannot come through here at all: proving you are the
+  /// operator when you can no longer authenticate is a filesystem question, so
+  /// that door is a `recover-admin-secret` file in the private directory,
+  /// honoured at the next boot.
+  const rotateAdmin = async () => {
+    if (!window.confirm(t('settings.credentials.rotateAdminConfirm'))) return;
+    await once(async () => {
+      try {
+        const { path } = await api.rotateAdmin(authority.trim());
+        // What the operator just typed no longer authenticates anything, so the
+        // screen goes back to the lock rather than leaving a dead authority in
+        // a field that looks live.
+        setRelocated(path);
+        setCredentials(null);
+        setAuthority('');
+        setMinted(null);
+      } catch {
+        toast(t('settings.credentials.rotateAdminFailed'), 'error');
+      }
+    });
+  };
+
   const copySecret = async () => {
     if (!minted) return;
     try {
@@ -144,6 +170,16 @@ export function PublicationCredentialsSection({ toast, t }: Props) {
       </h2>
       <p className="settings-hint">{t('settings.credentials.intro')}</p>
 
+      {relocated && (
+        <div className="settings-callout" role="status">
+          <p>
+            <strong>{t('settings.credentials.rotatedAdmin')}</strong>
+          </p>
+          <code>{relocated}</code>
+          <p className="settings-hint">{t('settings.credentials.rotatedAdminHint')}</p>
+        </div>
+      )}
+
       {credentials === null ? (
         <form onSubmit={unlock} className="settings-row">
           <label htmlFor="credentials-authority">
@@ -161,6 +197,10 @@ export function PublicationCredentialsSection({ toast, t }: Props) {
             {t('settings.credentials.unlock')}
           </button>
           <p className="settings-hint">{t('settings.credentials.authorityHint')}</p>
+          {/* The operator who cannot get past this form is exactly the one no
+              button here can help: the way back is a file in the private
+              directory, so the screen says so instead of leaving them stuck. */}
+          <p className="settings-hint">{t('settings.credentials.recoveryHint')}</p>
         </form>
       ) : (
         <>
@@ -252,6 +292,14 @@ export function PublicationCredentialsSection({ toast, t }: Props) {
               ))}
             </tbody>
           </table>
+
+          <div className="settings-row">
+            <button type="button" onClick={rotateAdmin} disabled={busy}>
+              <RotateCw size={14} aria-hidden="true" />{' '}
+              {t('settings.credentials.rotateAdmin')}
+            </button>
+            <p className="settings-hint">{t('settings.credentials.rotateAdminHint')}</p>
+          </div>
         </>
       )}
     </section>

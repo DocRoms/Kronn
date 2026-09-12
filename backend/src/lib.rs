@@ -1609,6 +1609,12 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             "/api/human-credentials/rotate",
             post(api::human_credentials::rotate),
         )
+        // Rotating the bootstrap itself, for an operator who still holds it.
+        // The one who lost it uses the `recover-admin-secret` file instead.
+        .route(
+            "/api/human-credentials/admin/rotate",
+            post(api::human_credentials::rotate_admin),
+        )
         .route(
             "/api/human-credentials/proof",
             post(api::human_credentials::issue_proof),

@@ -34,6 +34,10 @@ Two consequences worth carrying here:
 
 - **an install with no grant publishes no card.** That is every install today,
   and it is deliberate;
+- **the bootstrap is rotatable and recoverable.** An operator who still holds it
+  rotates through `POST /api/human-credentials/admin/rotate` (which answers with
+  a path, never a secret); one who lost it leaves a `recover-admin-secret` file
+  in the private directory and restarts;
 - **a worker never publishes**, even holding a valid grant and a valid proof —
   a principal delegated afterwards is refused while it is working, read from its
   exact active assignment rather than from the room it sits in.

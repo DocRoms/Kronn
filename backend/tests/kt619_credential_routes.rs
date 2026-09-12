@@ -103,6 +103,10 @@ async fn an_unauthenticated_local_caller_administers_nothing() {
             "/api/human-credentials/rotate",
             json!({"authority": "", "credential_id": "x"}),
         ),
+        (
+            "/api/human-credentials/admin/rotate",
+            json!({"authority": "kr-admin-guessed"}),
+        ),
     ] {
         let (status, envelope) = post(&fixture.app, path, body).await;
         assert_eq!(status, 403, "{path} must refuse an unauthenticated caller");
@@ -437,4 +441,85 @@ async fn the_admin_secret_publishes_nothing_by_itself() {
     )
     .await;
     assert_eq!(status, 403);
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn the_admin_secret_rotates_itself_and_the_replacement_never_travels() {
+    let fixture = fixture().await;
+    let admin = bootstrap(&fixture).await;
+
+    let (status, rotated) = post(
+        &fixture.app,
+        "/api/human-credentials/admin/rotate",
+        json!({"authority": &admin}),
+    )
+    .await;
+    assert_eq!(status, 200);
+
+    // What comes back is where to look, not what is there.
+    let path = rotated["data"]["path"].as_str().unwrap().to_string();
+    let replacement = kronn::core::operator_secret::read_delivered()
+        .unwrap()
+        .expose()
+        .to_string();
+    assert_eq!(path, kronn::core::operator_secret::secret_path().unwrap().to_string_lossy());
+    assert!(
+        !rotated.to_string().contains(&replacement),
+        "the new admin secret travelled over the wire"
+    );
+    assert_ne!(replacement, admin);
+
+    // The old one is done, the new one works: a rotation that leaves both alive
+    // has widened the door rather than moved it.
+    let (status, _envelope) = post(
+        &fixture.app,
+        "/api/human-credentials/list",
+        json!({"authority": &admin}),
+    )
+    .await;
+    assert_eq!(status, 403, "the rotated-away secret still administers");
+
+    let (status, _envelope) = post(
+        &fixture.app,
+        "/api/human-credentials/list",
+        json!({"authority": &replacement}),
+    )
+    .await;
+    assert_eq!(status, 200);
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn no_enrolled_grant_can_rotate_the_secret_that_governs_it() {
+    let fixture = fixture().await;
+    let admin = bootstrap(&fixture).await;
+
+    let (_s, human) = enrol(&fixture, &admin, "human", "Romu — laptop").await;
+    let (_s, orchestrator) = enrol(&fixture, &admin, "orchestrator", "principal").await;
+
+    // A `human` grant administers credentials — it enrols, lists and revokes.
+    // Rotating the BOOTSTRAP is a different power: allowing it would let a
+    // laptop the operator enrolled lock the operator out of their own install.
+    for grant in [
+        human["data"]["secret"].as_str().unwrap(),
+        orchestrator["data"]["secret"].as_str().unwrap(),
+    ] {
+        let (status, _envelope) = post(
+            &fixture.app,
+            "/api/human-credentials/admin/rotate",
+            json!({"authority": grant}),
+        )
+        .await;
+        assert_eq!(status, 403, "an enrolled grant must not rotate the bootstrap");
+    }
+
+    // And the admin secret is untouched by the attempts.
+    let (status, _envelope) = post(
+        &fixture.app,
+        "/api/human-credentials/list",
+        json!({"authority": &admin}),
+    )
+    .await;
+    assert_eq!(status, 200);
 }
