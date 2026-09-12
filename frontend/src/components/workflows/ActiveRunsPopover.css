@@ -7,11 +7,11 @@
  * style bundle ships with the component chunk. TD #248. */
 
 .wf-active-runs-popover {
-  position: absolute;
-  top: calc(100% + 6px);
-  left: 0;
-  z-index: 100;
-  min-width: 280px;
+  position: fixed;
+  z-index: calc(var(--kr-z-modal) + 1);
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
   max-width: 360px;
   background: var(--kr-bg-raised);
   border: 1px solid var(--kr-border-soft);
@@ -21,6 +21,7 @@
 }
 
 .wf-active-runs-header {
+  flex-shrink: 0;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -58,7 +59,15 @@
   text-align: center;
 }
 
+.wf-active-runs-error {
+  padding: 8px 12px;
+  border-top: 1px solid rgba(var(--kr-error-rgb), 0.3);
+  color: var(--kr-error);
+  font-size: var(--kr-fs-xs);
+}
+
 .wf-active-runs-list {
+  min-height: 0;
   list-style: none;
   margin: 0;
   padding: 0;
@@ -147,6 +156,7 @@
 }
 
 .wf-active-runs-footer {
+  flex-shrink: 0;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -164,4 +174,18 @@
 .wf-active-runs-footer:hover {
   background: var(--kr-bg-hover);
   color: var(--kr-text-primary);
+}
+
+@media (pointer: coarse) {
+  .wf-active-runs-close,
+  .wf-active-runs-stop-btn,
+  .wf-active-runs-item-body,
+  .wf-active-runs-footer {
+    min-width: 44px;
+    min-height: 44px;
+    align-items: center;
+  }
+  .wf-active-runs-close {
+    justify-content: center;
+  }
 }

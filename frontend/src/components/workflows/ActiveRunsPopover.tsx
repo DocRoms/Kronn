@@ -1,4 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type RefObject } from 'react';
+import { createPortal } from 'react-dom';
+import { useActivityPopover } from '../../hooks/useActivityPopover';
 import { Loader2, Square, X, ChevronRight } from 'lucide-react';
 import type { WorkflowSummary } from '../../types/generated';
 import { workflows as workflowsApi } from '../../lib/api';
@@ -11,6 +13,8 @@ export interface ActiveRunsPopoverProps {
   onNavigateToWorkflow: (workflowId: string) => void;
   onViewAllWorkflows: () => void;
   onAfterCancel?: () => void;
+  triggerRef?: RefObject<HTMLButtonElement | null>;
+  focusFallbackRef?: RefObject<HTMLButtonElement | null>;
 }
 
 function formatElapsed(ms: number, t: (k: string, ...a: (string | number)[]) => string): string {
@@ -28,12 +32,15 @@ export function ActiveRunsPopover({
   onNavigateToWorkflow,
   onViewAllWorkflows,
   onAfterCancel,
+  triggerRef,
+  focusFallbackRef,
 }: ActiveRunsPopoverProps) {
   const { t } = useT();
-  const rootRef = useRef<HTMLDivElement>(null);
+  const { rootRef, closeAndRestoreFocus } = useActivityPopover({ onClose, triggerRef, focusFallbackRef });
   const [cancellingIds, setCancellingIds] = useState<Set<string>>(new Set());
+  const cancellingRef = useRef(new Set<string>());
+  const [cancelError, setCancelError] = useState<string | null>(null);
   const [nowTick, setNowTick] = useState(() => Date.now());
-
   const activeRuns = useMemo(
     () => workflows.filter(w =>
       w.last_run && (w.last_run.status === 'Running' || w.last_run.status === 'Pending'),
@@ -46,25 +53,10 @@ export function ActiveRunsPopover({
     return () => clearInterval(id);
   }, []);
 
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
-    const onMouseDown = (e: MouseEvent) => {
-      if (rootRef.current && !rootRef.current.contains(e.target as Node)) onClose();
-    };
-    document.addEventListener('keydown', onKey);
-    // Defer the outside-click listener one tick so the click that opened
-    // the popover doesn't immediately close it.
-    const tid = window.setTimeout(() => {
-      document.addEventListener('mousedown', onMouseDown);
-    }, 0);
-    return () => {
-      document.removeEventListener('keydown', onKey);
-      document.removeEventListener('mousedown', onMouseDown);
-      window.clearTimeout(tid);
-    };
-  }, [onClose]);
-
   const handleCancel = async (workflowId: string, runId: string) => {
+    if (cancellingRef.current.has(runId)) return;
+    cancellingRef.current.add(runId);
+    setCancelError(null);
     setCancellingIds(prev => {
       const next = new Set(prev);
       next.add(runId);
@@ -73,25 +65,35 @@ export function ActiveRunsPopover({
     try {
       await workflowsApi.cancelRun(workflowId, runId);
     } catch {
-      // Parent refetch reconciles state; no toast system here.
+      setCancelError(t('wf.cancelRunError'));
+    } finally {
+      cancellingRef.current.delete(runId);
+      setCancellingIds(prev => {
+        const next = new Set(prev);
+        next.delete(runId);
+        return next;
+      });
+      onAfterCancel?.();
     }
-    onAfterCancel?.();
   };
 
-  return (
+  return createPortal(
     <div
       ref={rootRef}
       className="wf-active-runs-popover"
+      id="active-runs-popover"
       role="dialog"
+      aria-modal="false"
       aria-label={t('wf.activeRunsTitle')}
+      tabIndex={-1}
     >
       <div className="wf-active-runs-header">
         <span className="wf-active-runs-title">{t('wf.activeRunsTitle')}</span>
         <button
           type="button"
           className="wf-active-runs-close"
-          onClick={onClose}
-          aria-label="Close"
+          onClick={closeAndRestoreFocus}
+          aria-label={t('common.close')}
         >
           <X size={12} />
         </button>
@@ -149,6 +151,8 @@ export function ActiveRunsPopover({
         </ul>
       )}
 
+      {cancelError && <div className="wf-active-runs-error" role="alert">{cancelError}</div>}
+
       <button
         type="button"
         className="wf-active-runs-footer"
@@ -157,6 +161,7 @@ export function ActiveRunsPopover({
         <span>{t('wf.viewAllWorkflows')}</span>
         <ChevronRight size={12} />
       </button>
-    </div>
+    </div>,
+    document.body,
   );
 }
