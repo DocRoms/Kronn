@@ -9937,6 +9937,18 @@ async fn mcp_create_config_and_reveal() {
 
 const MCP_HOST_ISOLATION_CHILD: &str = "KRONN_TEST_MCP_HOST_ISOLATION_CHILD";
 const MCP_HOST_SENTINEL: &str = "KRONN_TEST_MCP_HOST_SENTINEL";
+const MCP_HOST_ISOLATION_MODE: &str = "KRONN_TEST_MCP_HOST_ISOLATION_MODE";
+
+fn test_state_without_fixture() -> AppState {
+    let db = Arc::new(kronn::db::Database::open_in_memory().expect("Failed to open in-memory DB"));
+    let mut cfg = kronn::core::config::default_config();
+    cfg.server.auth_token = None;
+    AppState::new_defaults(
+        Arc::new(RwLock::new(cfg)),
+        db,
+        DEFAULT_MAX_CONCURRENT_AGENTS,
+    )
+}
 
 /// Runs the real MCP creation endpoint in a fresh test process. The parent
 /// gives that process a synthetic host-home sentinel; `test_state` must replace
@@ -9945,39 +9957,56 @@ const MCP_HOST_SENTINEL: &str = "KRONN_TEST_MCP_HOST_SENTINEL";
 #[serial]
 async fn mcp_host_sync_router_confines_an_inherited_host_home() {
     if std::env::var_os(MCP_HOST_ISOLATION_CHILD).is_none() {
-        let sentinel_root = tempfile::tempdir().expect("create outside sentinel");
-        let sentinel_config = sentinel_root.path().join(".codex/config.toml");
-        std::fs::create_dir_all(sentinel_config.parent().unwrap()).unwrap();
-        std::fs::write(&sentinel_config, "sentinel = 'outside-fixture'\n").unwrap();
+        for mode in ["red", "green"] {
+            let sentinel_root = tempfile::tempdir().expect("create outside sentinel");
+            let sentinel_config = sentinel_root.path().join(".codex/config.toml");
+            let data_dir = sentinel_root.path().join("data");
+            std::fs::create_dir_all(sentinel_config.parent().unwrap()).unwrap();
+            std::fs::create_dir_all(&data_dir).unwrap();
+            std::fs::write(&sentinel_config, "sentinel = 'outside-fixture'\n").unwrap();
 
-        let status = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "mcp_host_sync_router_confines_an_inherited_host_home",
-                "--nocapture",
-            ])
-            .env(MCP_HOST_ISOLATION_CHILD, "1")
-            .env(MCP_HOST_SENTINEL, sentinel_root.path())
-            .env("KRONN_HOST_HOME", sentinel_root.path())
-            .status()
-            .expect("launch isolated API regression child");
-        assert!(status.success(), "API isolation child failed: {status}");
-        assert_eq!(
-            std::fs::read_to_string(sentinel_config).unwrap(),
-            "sentinel = 'outside-fixture'\n",
-            "the router child must not mutate the inherited outside sentinel"
-        );
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "mcp_host_sync_router_confines_an_inherited_host_home",
+                    "--nocapture",
+                ])
+                .env(MCP_HOST_ISOLATION_CHILD, "1")
+                .env(MCP_HOST_ISOLATION_MODE, mode)
+                .env(MCP_HOST_SENTINEL, sentinel_root.path())
+                .env("KRONN_DATA_DIR", data_dir)
+                .env("KRONN_HOST_HOME", sentinel_root.path())
+                .status()
+                .expect("launch isolated API regression child");
+            assert!(
+                status.success(),
+                "{mode} API isolation child failed: {status}"
+            );
+            let sentinel_contents = std::fs::read_to_string(sentinel_config).unwrap();
+            if mode == "red" {
+                assert_ne!(sentinel_contents, "sentinel = 'outside-fixture'\n");
+            } else {
+                assert_eq!(sentinel_contents, "sentinel = 'outside-fixture'\n");
+            }
+        }
         return;
     }
 
     let sentinel =
         std::path::PathBuf::from(std::env::var_os(MCP_HOST_SENTINEL).expect("child sentinel path"));
-    let state = test_state();
-    let host_fixture = integration_test_host_home();
-    assert_ne!(
-        host_fixture, sentinel,
-        "the harness must replace inherited host home"
-    );
+    let red = std::env::var(MCP_HOST_ISOLATION_MODE).as_deref() == Ok("red");
+    let state = if red {
+        test_state_without_fixture()
+    } else {
+        test_state()
+    };
+    let host_fixture = (!red).then(integration_test_host_home);
+    if let Some(host_fixture) = &host_fixture {
+        assert_ne!(
+            host_fixture, &sentinel,
+            "the harness must replace inherited host home"
+        );
+    }
 
     let (status, response) = post_json(
         build_router_with_auth(state, false),
@@ -9998,12 +10027,19 @@ async fn mcp_host_sync_router_confines_an_inherited_host_home() {
         response["success"], true,
         "create config response: {response}"
     );
-    assert!(host_fixture.join(".codex/config.toml").exists());
-    assert!(host_fixture.join(".copilot/mcp-config.json").exists());
-    assert_eq!(
-        std::fs::read_to_string(sentinel.join(".codex/config.toml")).unwrap(),
-        "sentinel = 'outside-fixture'\n"
-    );
+    if let Some(host_fixture) = host_fixture {
+        assert!(host_fixture.join(".codex/config.toml").exists());
+        assert!(host_fixture.join(".copilot/mcp-config.json").exists());
+        assert_eq!(
+            std::fs::read_to_string(sentinel.join(".codex/config.toml")).unwrap(),
+            "sentinel = 'outside-fixture'\n"
+        );
+    } else {
+        assert_ne!(
+            std::fs::read_to_string(sentinel.join(".codex/config.toml")).unwrap(),
+            "sentinel = 'outside-fixture'\n"
+        );
+    }
 }
 
 #[tokio::test]

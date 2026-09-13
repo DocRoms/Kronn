@@ -44,7 +44,8 @@ The MCP regression launches a fresh copy of the API test binary with a
 synthetic outside `KRONN_HOST_HOME` sentinel. The child runs the real
 `POST /api/mcps/configs` handler with `GlobalOnly`; it must replace the
 inherited value through the harness, write Codex and Copilot configuration only
-under the owned fixture, and leave the outside sentinel unchanged. The test is
-designed to fail if the harness no longer replaces the inherited host-home
-value; this delivery records the passing fixed-path execution only.
+under the owned fixture, and leave the outside sentinel unchanged. Its parent
+executes both synthetic controls: an unisolated child changes its disposable
+sentinel (RED), then the normal harness child leaves a different disposable
+sentinel unchanged (GREEN).
 [src: file: backend/tests/api_tests.rs:9938-10007]
