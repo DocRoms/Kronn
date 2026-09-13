@@ -4399,7 +4399,7 @@ pub fn reassign_execution_worker(
     actor: &OrchestrationActor,
 ) -> Result<TaskExecution> {
     in_savepoint(conn, |conn| {
-        let execution = get_task_execution(conn, exec_id)?
+        let mut execution = get_task_execution(conn, exec_id)?
             .ok_or_else(|| anyhow::anyhow!("unknown task execution"))?;
         if execution.status.is_terminal() {
             bail!("a terminal execution cannot be reassigned");
@@ -4435,13 +4435,43 @@ pub fn reassign_execution_worker(
             && matches!(
                 execution.interrupted_from_status,
                 Some(TaskExecutionStatus::Working | TaskExecutionStatus::ChangesRequested)
-            ));
+            ))
+            // KT-640: a live CLI control offer awaiting the exact target
+            // session's acceptance is the ONE `Blocked` hold a principal may
+            // redirect — the worker never started, so nothing but the offer
+            // itself needs unwinding. Every other `Blocked` reason (a session
+            // conflict needing a human pick, or an Applying-origin infra/dirty
+            // -main hold) stays refused by the fallthrough below.
+            || (execution.status == TaskExecutionStatus::Blocked
+                && execution.blocked_reason_code
+                    == Some(BlockedReasonCode::AwaitingWorkerAcceptance));
         if !resumable_worker_state {
             bail!(
                 "execution {} is {}, not a resumable worker state",
                 exec_id,
                 execution.status.as_str()
             );
+        }
+        // KT-640: clear the awaiting-acceptance hold back to its Provisioning
+        // origin (ADR §3 checkpoint guard — `Blocked` resumes ONLY to
+        // `blocked_from_status`) BEFORE this reassignment proceeds. This also
+        // clears `blocked_reason{,_code}`/`blocked_from_status` on the row, so
+        // even a caller that skipped the offer cancellation below could never
+        // read this execution as still awaiting the superseded worker. The
+        // caller (native dispatch or a fresh CLI offer) drives Provisioning to
+        // its next state exactly like the initial KT-328 handshake.
+        if execution.status == TaskExecutionStatus::Blocked {
+            if !transition_execution(
+                conn,
+                exec_id,
+                TaskExecutionStatus::Provisioning,
+                actor,
+                serde_json::json!({ "phase": "reassignment", "reason": reason }),
+            )? {
+                bail!("execution {exec_id} raced out of its awaiting-acceptance hold");
+            }
+            execution = get_task_execution(conn, exec_id)?
+                .ok_or_else(|| anyhow::anyhow!("execution vanished resuming its Blocked hold"))?;
         }
         // A lease marked settled proves its supervised Git operation already
         // returned. Reap it before deciding whether a live commit still bars

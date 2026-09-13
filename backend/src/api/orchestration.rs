@@ -7742,6 +7742,11 @@ pub(crate) async fn reassign_native_execution(
                 TaskExecutionStatus::Interrupted
                     | TaskExecutionStatus::ChangesRequested
                     | TaskExecutionStatus::Escalated
+                    // KT-640: a redirected awaiting-CLI-acceptance hold cleared
+                    // back to Provisioning (db::reassign_execution_worker); a
+                    // native worker dispatches immediately, exactly like the
+                    // initial KT-328 handshake's Provisioning -> Working.
+                    | TaskExecutionStatus::Provisioning
             ) {
                 crate::db::orchestration::transition_execution(
                     &transaction,
@@ -20454,6 +20459,301 @@ mod tests {
         assert_eq!(after.worker_model_tier, before.worker_model_tier);
         assert_eq!(after.worker_profile_id, before.worker_profile_id);
         assert_eq!(after.dispatch_job_id, before.dispatch_job_id);
+    }
+
+    /// KT-640: the native path through `reassign_native_execution` for the
+    /// `Blocked(awaiting_worker_acceptance)` origin — not just the DB-layer
+    /// primitive. The CLI never accepted its KT-328 control offer; the
+    /// principal redirects to a native worker in the SAME execution/checkout,
+    /// with exactly one replacement dispatch, and the stale CLI offer can
+    /// never be accepted late.
+    #[tokio::test]
+    async fn native_reassignment_resumes_a_blocked_awaiting_cli_acceptance_execution_through_dispatch(
+    ) {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let (_, _parent_id, child_id, offer_id) = parked_cli_worker(&db, repo.path()).await;
+        let exec_id = {
+            let offer_id = offer_id.clone();
+            db.with_conn(move |conn| {
+                conn.query_row(
+                    "SELECT task_execution_id FROM task_execution_worker_offers WHERE id = ?1",
+                    [&offer_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .map_err(anyhow::Error::from)
+            })
+            .await
+            .unwrap()
+        };
+        let before = exec_of(&db, &exec_id).await;
+        assert_eq!(before.status, TaskExecutionStatus::Blocked);
+        assert_eq!(
+            before.blocked_reason_code,
+            Some(crate::models::BlockedReasonCode::AwaitingWorkerAcceptance)
+        );
+
+        let state = AppState::new_defaults(
+            std::sync::Arc::new(tokio::sync::RwLock::new(
+                crate::core::config::default_config(),
+            )),
+            db.clone(),
+            crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+        );
+        reassign_native_execution(
+            &state,
+            &exec_id,
+            crate::models::CampaignWorkerSelection {
+                target: MessageTarget::discussion_agent(AgentType::Ollama),
+                model: Some("qwen3.6:35b-mlx".into()),
+                profile_id: Some("profile-local-worker".into()),
+            },
+            "native handoff after the CLI never accepted",
+        )
+        .await
+        .unwrap();
+
+        let after = exec_of(&db, &exec_id).await;
+        assert_eq!(after.status, TaskExecutionStatus::Working);
+        // Same execution/checkout/history/budget: sub-discussion and attempt
+        // carry over untouched; only the worker identity changed.
+        assert_eq!(after.sub_discussion_id.as_deref(), Some(child_id.as_str()));
+        assert_eq!(after.workspace_id, before.workspace_id);
+        assert_eq!(after.attempt_no, before.attempt_no);
+        assert_eq!(after.worker_agent_type.as_deref(), Some("Ollama"));
+        assert_eq!(after.worker_cli_session_id, None);
+
+        assert_eq!(
+            count(&db, "SELECT COUNT(*) FROM agent_dispatch_jobs").await,
+            1,
+            "exactly one replacement dispatch for the native worker"
+        );
+
+        let offer_status: String = {
+            let offer_id = offer_id.clone();
+            db.with_conn(move |conn| {
+                conn.query_row(
+                    "SELECT status FROM task_execution_worker_offers WHERE id = ?1",
+                    [&offer_id],
+                    |row| row.get(0),
+                )
+                .map_err(anyhow::Error::from)
+            })
+            .await
+            .unwrap()
+        };
+        assert_eq!(offer_status, "cancelled");
+        let late_accept = db
+            .with_conn(move |conn| {
+                crate::db::worker_offers::accept_worker_offer(
+                    conn,
+                    &offer_id,
+                    "ClaudeCode",
+                    "sess-a",
+                    "sess-a",
+                )
+                .map_err(anyhow::Error::from)
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            late_accept,
+            crate::db::worker_offers::AcceptOutcome::NotAcceptable {
+                status: crate::models::WorkerOfferStatus::Cancelled
+            }
+        ));
+    }
+
+    /// KT-640: the CLI path through `task_exec_reassign` for the same origin —
+    /// a fresh offer opens for the newly selected session with a correct
+    /// `Interrupted` checkpoint, and the OLD offer can never be accepted late.
+    #[tokio::test]
+    async fn cli_reassignment_resumes_a_blocked_awaiting_cli_acceptance_execution_with_a_fresh_offer(
+    ) {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let (_, parent_id, child_id, old_offer_id) = parked_cli_worker(&db, repo.path()).await;
+        seed_cli_session(&db, 102, &parent_id, "sess-b").await;
+        seed_cli_session(&db, 103, &parent_id, "principal").await;
+        // A selectable CLI must already carry its own durable origin binding —
+        // exactly what a real prior `disc_join` leaves behind.
+        {
+            let parent_id = parent_id.clone();
+            db.with_conn(move |conn| {
+                crate::db::disc_source::bind_to_source(conn, &parent_id, "ClaudeCode", "sess-b")
+            })
+            .await
+            .unwrap();
+        }
+        let exec_id = {
+            let old_offer_id = old_offer_id.clone();
+            db.with_conn(move |conn| {
+                conn.query_row(
+                    "SELECT task_execution_id FROM task_execution_worker_offers WHERE id = ?1",
+                    [&old_offer_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .map_err(anyhow::Error::from)
+            })
+            .await
+            .unwrap()
+        };
+
+        let state = AppState::new_defaults(
+            std::sync::Arc::new(tokio::sync::RwLock::new(
+                crate::core::config::default_config(),
+            )),
+            db.clone(),
+            crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+        );
+        let Json(reassigned) = task_exec_reassign(
+            State(state),
+            Path(exec_id.clone()),
+            Json(TaskExecReassignRequest {
+                source_agent: "ClaudeCode".into(),
+                source_session_id: "principal".into(),
+                worker: MessageTarget::cli(AgentType::ClaudeCode, 102),
+                reason: "redirect to a fresh CLI since the first never accepted".into(),
+            }),
+        )
+        .await;
+        assert!(reassigned.success, "{:?}", reassigned.error);
+
+        let after = exec_of(&db, &exec_id).await;
+        assert_eq!(after.status, TaskExecutionStatus::Interrupted);
+        assert_eq!(after.sub_discussion_id.as_deref(), Some(child_id.as_str()));
+        let attempt_no = after.attempt_no;
+
+        let new_offer = {
+            let id = exec_id.clone();
+            db.with_conn(move |conn| {
+                crate::db::worker_offers::get_active_offer_for_attempt(conn, &id, attempt_no)
+            })
+            .await
+            .unwrap()
+            .expect("a fresh offer targets the newly selected session")
+        };
+        assert_eq!(new_offer.target_cli_session_id, 102);
+        assert_ne!(
+            new_offer.id, old_offer_id,
+            "a distinct offer, not the stale one"
+        );
+
+        let late_accept = db
+            .with_conn(move |conn| {
+                crate::db::worker_offers::accept_worker_offer(
+                    conn,
+                    &old_offer_id,
+                    "ClaudeCode",
+                    "sess-a",
+                    "sess-a",
+                )
+                .map_err(anyhow::Error::from)
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            late_accept,
+            crate::db::worker_offers::AcceptOutcome::NotAcceptable {
+                status: crate::models::WorkerOfferStatus::Cancelled
+            }
+        ));
+
+        let accepted =
+            accept_worker_offer_and_attach(&db, &new_offer.id, "ClaudeCode", "sess-b", "sess-b")
+                .await
+                .unwrap();
+        assert!(matches!(accepted, AcceptAttachOutcome::Attached { .. }));
+        let final_exec = exec_of(&db, &exec_id).await;
+        assert_eq!(final_exec.status, TaskExecutionStatus::Working);
+        assert_eq!(final_exec.worker_cli_session_id, Some(102));
+    }
+
+    /// KT-640: a downstream refusal after the DB CAS already resumed the
+    /// `Blocked` hold back to `Provisioning` must roll back the WHOLE
+    /// transaction — the stale offer stays live and the hold stays exactly as
+    /// it was, not half-cleared.
+    #[tokio::test]
+    async fn native_reassignment_from_blocked_awaiting_acceptance_rolls_back_when_child_room_vanished(
+    ) {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let (_, _parent_id, _child_id, offer_id) = parked_cli_worker(&db, repo.path()).await;
+        let exec_id = {
+            let offer_id = offer_id.clone();
+            db.with_conn(move |conn| {
+                conn.query_row(
+                    "SELECT task_execution_id FROM task_execution_worker_offers WHERE id = ?1",
+                    [&offer_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .map_err(anyhow::Error::from)
+            })
+            .await
+            .unwrap()
+        };
+        {
+            let id = exec_id.clone();
+            db.with_conn(move |conn| {
+                conn.execute(
+                    "UPDATE task_executions SET sub_discussion_id = NULL WHERE id = ?1",
+                    [&id],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        }
+        let before = exec_of(&db, &exec_id).await;
+        assert_eq!(before.status, TaskExecutionStatus::Blocked);
+
+        let state = AppState::new_defaults(
+            std::sync::Arc::new(tokio::sync::RwLock::new(
+                crate::core::config::default_config(),
+            )),
+            db.clone(),
+            crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+        );
+        let error = reassign_native_execution(
+            &state,
+            &exec_id,
+            crate::models::CampaignWorkerSelection {
+                target: MessageTarget::discussion_agent(AgentType::Ollama),
+                model: Some("qwen3.8:27b-mlx".into()),
+                profile_id: Some("profile-local-worker".into()),
+            },
+            "must roll back",
+        )
+        .await
+        .err()
+        .expect("reassignment must fail when its child room vanished");
+        assert!(
+            error
+                .to_string()
+                .contains("execution has no child discussion"),
+            "{error:#}"
+        );
+
+        let after = exec_of(&db, &exec_id).await;
+        assert_eq!(after.status, TaskExecutionStatus::Blocked);
+        assert_eq!(after.blocked_from_status, before.blocked_from_status);
+        assert_eq!(after.blocked_reason_code, before.blocked_reason_code);
+
+        let offer_status: String = db
+            .with_conn(move |conn| {
+                conn.query_row(
+                    "SELECT status FROM task_execution_worker_offers WHERE id = ?1",
+                    [&offer_id],
+                    |row| row.get(0),
+                )
+                .map_err(anyhow::Error::from)
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            offer_status, "pending",
+            "the rolled-back transaction must not cancel the old offer"
+        );
     }
 
     #[tokio::test]
