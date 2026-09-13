@@ -505,6 +505,16 @@ export const TOUR_STEPS: TourStep[] = [
     groupKey: 'tour.group.discussions',
   },
   {
+    id: 'important-messages',
+    page: 'discussions',
+    selector: '.disc-important-publish',
+    titleKey: 'tour.importantMessages.title',
+    descKey: 'tour.importantMessages.desc',
+    agentNoteKey: 'tour.importantMessages.agentNote',
+    position: 'bottom',
+    groupKey: 'tour.group.discussions',
+  },
+  {
     id: 'copyable-ids',
     page: 'discussions',
     beforeStep: revealCopyableIds,

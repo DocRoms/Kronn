@@ -170,6 +170,18 @@ describe('DiscussionPlanPanel', () => {
     expect(screen.getAllByTitle('planning.copyTaskId:KT-1')).toHaveLength(2);
   });
 
+  it('opens the explicit linked task even when browser storage is unavailable', async () => {
+    const storage = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('storage unavailable'); });
+    try {
+      const { container } = render(<DiscussionPlanPanel discussionId="disc-1" initialTaskId="task-1" onClose={vi.fn()} toast={vi.fn()} />);
+      await waitFor(() => expect(mocks.get).toHaveBeenCalledWith('task-1'));
+      await waitFor(() => expect(container.querySelector('.plan-detail')).not.toBeNull());
+      expect(within(container.querySelector<HTMLElement>('.plan-detail')!).getByText('Build the panel')).toBeInTheDocument();
+      expect(mocks.create).not.toHaveBeenCalled();
+      expect(mocks.update).not.toHaveBeenCalled();
+    } finally { storage.mockRestore(); }
+  });
+
   it('jumps to a worker room straight from the task row', async () => {
     // The shortcut existed only inside the execution detail card, so seeing a
     // worker's discussion meant drilling in first. The row is where someone

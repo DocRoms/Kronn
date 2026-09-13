@@ -1459,6 +1459,33 @@ pub struct JoinViaTokenResult {
     pub resume_token: String,
 }
 
+/// Authenticate a caller by the resume credential it holds, and nothing else.
+///
+/// KT-619 — possession IS the identity here. The caller declares no session id,
+/// so there is nothing to spoof: `resume_token_hash` is uniquely indexed, which
+/// makes the match exact and ambiguity impossible by construction.
+///
+/// Returns the session row's `(id, disc_id)`, or `None` when the credential is
+/// absent, wrong, rotated away, or belongs to a session that has left. Never
+/// logs or returns the secret.
+pub fn authenticate_by_resume_credential(
+    conn: &Connection,
+    secret: &str,
+) -> Result<Option<(i64, String)>> {
+    if secret.is_empty() {
+        return Ok(None);
+    }
+    let hash = sha256_hex(secret);
+    Ok(conn
+        .query_row(
+            "SELECT id, disc_id FROM discussion_sessions \
+              WHERE resume_token_hash = ?1 AND status <> 'left'",
+            params![hash],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?)
+}
+
 fn new_resume_credential() -> (String, String) {
     let plain = format!("kr-resume-{}", Uuid::new_v4().simple());
     let hash = sha256_hex(&plain);
@@ -1780,7 +1807,9 @@ pub fn join_disc_session(
 /// algorithm is easy to swap (e.g. argon2 if we ever store
 /// long-lived tokens — but for 10-min TTLs SHA-256 + 122-bit UUID
 /// entropy is plenty).
-fn sha256_hex(input: &str) -> String {
+/// Crate-visible so a fixture can mint a session credential the same way the
+/// product does, instead of a test inventing a second hashing scheme.
+pub(crate) fn sha256_hex(input: &str) -> String {
     let mut h = Sha256::new();
     h.update(input.as_bytes());
     let digest = h.finalize();

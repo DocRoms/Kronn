@@ -37,14 +37,7 @@ test.describe('Workflow detail scrolling', () => {
     await dashboard.goto();
     await dashboard.navWorkflows.click();
     const automationKinds = page.locator('[data-tour-id="automation-kinds"]');
-    const activeRunsFooter = page.locator('.wf-active-runs-footer');
-    await Promise.race([
-      automationKinds.waitFor({ state: 'visible', timeout: 10_000 }),
-      activeRunsFooter.waitFor({ state: 'visible', timeout: 10_000 }),
-    ]);
-    if (await activeRunsFooter.isVisible()) {
-      await activeRunsFooter.click();
-    }
+    await automationKinds.waitFor({ state: 'visible', timeout: 10_000 });
     await expect(automationKinds).toBeVisible({ timeout: 10_000 });
     await page.locator('.wf-card').filter({ hasText: name }).click();
 

@@ -133,8 +133,10 @@ delivery manifest and diff, then choose one of:
 - **Approve** — record a result and non-empty evidence for every DoD item against
   the delivered attempt and exact HEAD. Kronn then builds and validates that
   candidate in an ephemeral integration worktree. The selected target branch
-  advances only by a guarded fast-forward after a clean-worktree check, a
-  target-SHA compare-and-swap and a backup ref.
+  advances only by a guarded fast-forward after checking the expected target
+  SHA and clean worktree, with a backup ref. These checks followed by
+  `git merge --ff-only` are not an atomic compare-and-swap transaction.
+  [src: file: backend/src/core/worktree.rs:1419-1447]
 - **Request changes** — enter concrete feedback. The same worker, discussion,
   branch and worktree resume for the next bounded review round.
 

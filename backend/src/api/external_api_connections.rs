@@ -14,7 +14,7 @@
 //! crosses the wire after an explicit authenticated reveal action.
 
 use crate::core::config;
-use crate::db::external_api_connections as store;
+use crate::db::{external_api_connections as store, model_catalog as catalog_store};
 use crate::models::*;
 use crate::AppState;
 use axum::{
@@ -686,48 +686,46 @@ pub async fn test(
         }));
     }
 
-    let stored_key = if req.api_key.is_none() {
-        match req.connection_id.as_deref() {
-            Some(connection_id) => {
-                let lookup_id = connection_id.to_string();
-                match state
-                    .db
-                    .with_read_conn(move |conn| store::get(conn, &lookup_id))
-                    .await
-                {
-                    Ok(Some(connection))
-                        if connection.endpoint.as_deref() == Some(endpoint.as_str())
-                            && req.origin_preset == Some(connection.origin_preset) =>
-                    {
-                        state
-                            .config
-                            .read()
-                            .await
-                            .tokens
-                            .active_key_for(&connection.credential_slug)
-                            .map(str::to_string)
-                    }
-                    Ok(Some(_)) => {
-                        return Json(ApiResponse::ok(TestConnectionResponse {
-                            ok: false,
-                            status: "credential_required".into(),
-                            models: vec![],
-                            catalog: vec![],
-                            hint: Some(
-                                "The endpoint or provider changed. Enter the API key again before testing."
-                                    .into(),
-                            ),
-                            ..Default::default()
-                        }));
-                    }
-                    _ => None,
-                }
+    let config_at_start = state.config.read().await;
+    let saved_connection = if req.api_key.is_none() {
+        if let Some(connection_id) = req.connection_id.as_ref() {
+            let lookup_id = connection_id.clone();
+            match state
+                .db
+                .with_read_conn(move |conn| store::get(conn, &lookup_id))
+                .await
+            {
+                Ok(connection) => connection,
+                Err(_) => return Json(ApiResponse::err("Could not read the saved connection")),
             }
-            None => None,
+        } else {
+            None
         }
     } else {
+        // An explicitly submitted key (including clearing it) belongs to the
+        // draft, not to the saved runtime target.
         None
     };
+    if saved_connection.as_ref().is_some_and(|connection| {
+        connection.endpoint.as_deref() != Some(endpoint.as_str())
+            || req.origin_preset != Some(connection.origin_preset)
+    }) {
+        return Json(ApiResponse::ok(TestConnectionResponse {
+            ok: false,
+            status: "credential_required".into(),
+            hint: Some(
+                "The endpoint or provider changed. Enter the API key again before testing.".into(),
+            ),
+            ..Default::default()
+        }));
+    }
+    let stored_key = saved_connection.as_ref().and_then(|connection| {
+        config_at_start
+            .tokens
+            .active_key_for(&connection.credential_slug)
+            .map(str::to_string)
+    });
+    drop(config_at_start);
     let key = req
         .api_key
         .as_deref()
@@ -748,16 +746,11 @@ pub async fn test(
     }
     let response = probe_models(&endpoint, key, req.origin_preset, &requested_models).await;
 
-    // A saved named connection is a durable catalog target. Persist the live
-    // snapshot under its immutable connection id; two connections exposing
-    // the same model id must never overwrite one another.
-    if let Some(connection_id) = req.connection_id.as_deref() {
-        let lookup_id = connection_id.to_string();
-        if let Ok(Some(connection)) = state
-            .db
-            .with_read_conn(move |conn| store::get(conn, &lookup_id))
-            .await
-        {
+    if let Some(connection) = saved_connection {
+        // Keep credentials stable through the compare-and-commit boundary;
+        // connection edits/deletion are checked inside the same transaction.
+        let config = state.config.read().await;
+        if config.tokens.active_key_for(&connection.credential_slug) == stored_key.as_deref() {
             let agent_type = match connection.origin_preset {
                 ExternalApiConnectionPreset::LiteLlm => AgentType::LiteLlm,
                 ExternalApiConnectionPreset::Nvidia => AgentType::Nvidia,
@@ -765,50 +758,69 @@ pub async fn test(
                     AgentType::Custom
                 }
             };
-            if response.ok {
-                let models = response
-                    .catalog
-                    .iter()
-                    .map(|model| crate::db::model_catalog::DiscoveredModel {
-                        model_id: model.id.clone(),
-                        display_name: model.display_name.clone(),
-                        capabilities: model.capabilities.clone(),
-                        reasoning_modes: Vec::new(),
-                        default_reasoning_mode: None,
-                    })
-                    .collect();
-                if let Err(error) = crate::core::model_catalog::reconcile_http_catalog(
-                    &state.db,
-                    connection_id,
-                    agent_type,
-                    models,
-                )
-                .await
-                {
-                    return Json(ApiResponse::err(format!(
-                        "Connection validated, but its model catalog could not be persisted: {error}"
-                    )));
+            let target = catalog_store::http_runtime_target_id(&connection.id);
+            let models: Vec<_> = response
+                .catalog
+                .iter()
+                .map(|model| catalog_store::DiscoveredModel {
+                    model_id: model.id.clone(),
+                    display_name: model.display_name.clone(),
+                    capabilities: model.capabilities.clone(),
+                    reasoning_modes: Vec::new(),
+                    default_reasoning_mode: None,
+                })
+                .collect();
+            let reason = match response.status.as_str() {
+                "auth_error" | "credential_required" => ModelUnavailableReason::AuthRequired,
+                "timeout" => ModelUnavailableReason::Timeout,
+                "invalid_catalogue" => ModelUnavailableReason::InvalidCatalog,
+                _ => ModelUnavailableReason::ProviderError,
+            };
+            let detail = response
+                .hint
+                .clone()
+                .unwrap_or_else(|| response.status.clone());
+            let success = response.ok;
+            let persisted = state
+                .db
+                .with_conn(move |conn| {
+                    let transaction = conn.unchecked_transaction()?;
+                    if store::get(&transaction, &connection.id)?.as_ref() != Some(&connection) {
+                        return Ok(false);
+                    }
+                    if success {
+                        catalog_store::reconcile_live(&transaction, &target, &agent_type, &models)?;
+                    } else {
+                        catalog_store::record_refresh_failure(
+                            &transaction,
+                            &target,
+                            &agent_type,
+                            reason,
+                            &detail,
+                        )?;
+                    }
+                    transaction.commit()?;
+                    Ok(true)
+                })
+                .await;
+            drop(config);
+            match persisted {
+                Ok(true) if success => {
+                    if crate::core::model_catalog::refresh_runtime_cache(&state.db)
+                        .await
+                        .is_err()
+                    {
+                        return Json(ApiResponse::err(
+                            "Could not reload the saved connection's model catalog",
+                        ));
+                    }
                 }
-            } else {
-                let reason = match response.status.as_str() {
-                    "auth_error" | "credential_required" => ModelUnavailableReason::AuthRequired,
-                    "timeout" => ModelUnavailableReason::Timeout,
-                    "invalid_catalogue" => ModelUnavailableReason::InvalidCatalog,
-                    _ => ModelUnavailableReason::ProviderError,
-                };
-                if let Err(error) = crate::core::model_catalog::record_http_refresh_failure(
-                    &state.db,
-                    connection_id,
-                    agent_type,
-                    reason,
-                    response
-                        .hint
-                        .clone()
-                        .unwrap_or_else(|| response.status.clone()),
-                )
-                .await
-                {
-                    tracing::warn!("failed to record HTTP model catalog refresh: {error}");
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::warn!("failed to persist HTTP model catalog probe: {error}");
+                    return Json(ApiResponse::err(
+                        "Could not persist the saved connection's model catalog",
+                    ));
                 }
             }
         }

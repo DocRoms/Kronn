@@ -112,6 +112,43 @@
   flex: 0;
 }
 
+.dash-nav-activity-group {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-2);
+  flex: 0 0 auto;
+}
+
+.dash-nav-activity-wrap {
+  display: inline-flex;
+  align-items: center;
+}
+
+.dash-nav-activity-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 30px;
+  min-height: 30px;
+  border: 1px solid var(--kr-border-soft);
+  border-radius: var(--kr-r-md);
+  background: var(--kr-bg-raised);
+  color: var(--kr-accent);
+  cursor: pointer;
+}
+
+.dash-nav-activity-btn:hover,
+.dash-nav-activity-btn:focus-visible {
+  background: var(--kr-bg-hover);
+}
+
+@media (pointer: coarse) {
+  .dash-nav-activity-btn {
+    min-width: 44px;
+    min-height: 44px;
+  }
+}
+
 /* ── Nav badge (unseen count / running workflows) ──────── */
 .dash-nav-badge {
   position: absolute;
@@ -163,6 +200,11 @@
 }
 :root[data-theme="euronews"] .dash-nav-badge {
   background: var(--kr-error);
+  color: #fff;
+}
+:root[data-theme="euronews"] .dash-nav-activity-btn {
+  background: rgba(255, 255, 255, 0.14);
+  border-color: rgba(255, 255, 255, 0.35);
   color: #fff;
 }
 :root[data-theme="euronews"] .dash-scan-btn {

@@ -10,6 +10,7 @@
 // Uses the shared apiMock so projects.cancelAudit is a vi.fn we can
 // assert on. No real backend, no real claude — pure DOM + behavior.
 
+import { useRef } from 'react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, fireEvent, screen, act } from '@testing-library/react';
 import { I18nProvider } from '../../lib/I18nContext';
@@ -49,7 +50,10 @@ const audit = (project_id: string, step = 2, total = 10): AuditProgress => ({
 
 const wrap = (ui: React.ReactElement) => render(<I18nProvider>{ui}</I18nProvider>);
 
-beforeEach(() => { vi.clearAllMocks(); });
+beforeEach(() => {
+  vi.clearAllMocks();
+  vi.mocked(projectsApi.cancelAudit).mockReset().mockResolvedValue('NoTemplate');
+});
 afterEach(() => { vi.useRealTimers(); });
 
 describe('ActiveAuditsPopover (0.8.3 #288)', () => {
@@ -64,13 +68,13 @@ describe('ActiveAuditsPopover (0.8.3 #288)', () => {
   });
 
   it('renders one row per active audit with project name + step + elapsed', () => {
-    const { container } = wrap(<ActiveAuditsPopover
+    const { baseElement } = wrap(<ActiveAuditsPopover
       audits={[audit('p1', 3, 10), audit('p2', 5, 10)]}
       projects={[proj('p1', 'kronn'), proj('p2', 'front_api')]}
       onClose={() => {}} onNavigateToProject={() => {}}
       onViewAllProjects={() => {}}
     />);
-    const items = container.querySelectorAll('.wf-active-runs-item');
+    const items = baseElement.querySelectorAll('.wf-active-runs-item');
     expect(items).toHaveLength(2);
     expect(screen.getByText('kronn')).toBeInTheDocument();
     expect(screen.getByText('front_api')).toBeInTheDocument();
@@ -93,13 +97,13 @@ describe('ActiveAuditsPopover (0.8.3 #288)', () => {
   it('Stop button calls cancelAudit and fires onAfterCancel', async () => {
     const onAfter = vi.fn();
     vi.mocked(projectsApi.cancelAudit).mockResolvedValue('NoTemplate');
-    const { container } = wrap(<ActiveAuditsPopover
+    const { baseElement } = wrap(<ActiveAuditsPopover
       audits={[audit('p1')]} projects={[proj('p1', 'kronn')]}
       onClose={() => {}} onNavigateToProject={() => {}}
       onViewAllProjects={() => {}}
       onAfterCancel={onAfter}
     />);
-    const stopBtn = container.querySelector('.wf-active-runs-stop-btn') as HTMLButtonElement;
+    const stopBtn = baseElement.querySelector('.wf-active-runs-stop-btn') as HTMLButtonElement;
     expect(stopBtn).not.toBeNull();
     await act(async () => { fireEvent.click(stopBtn); });
     expect(projectsApi.cancelAudit).toHaveBeenCalledWith('p1');
@@ -113,14 +117,46 @@ describe('ActiveAuditsPopover (0.8.3 #288)', () => {
     // from where they wanted to stay (Discussions, Workflows, etc.).
     const onNav = vi.fn();
     vi.mocked(projectsApi.cancelAudit).mockResolvedValue('NoTemplate');
-    const { container } = wrap(<ActiveAuditsPopover
+    const { baseElement } = wrap(<ActiveAuditsPopover
       audits={[audit('p1')]} projects={[proj('p1', 'kronn')]}
       onClose={() => {}} onNavigateToProject={onNav}
       onViewAllProjects={() => {}}
     />);
-    const stopBtn = container.querySelector('.wf-active-runs-stop-btn') as HTMLButtonElement;
+    const stopBtn = baseElement.querySelector('.wf-active-runs-stop-btn') as HTMLButtonElement;
     await act(async () => { fireEvent.click(stopBtn); });
     expect(onNav).not.toHaveBeenCalled();
+  });
+
+  it('guards synchronous Stop clicks, reports failure and permits a deliberate retry', async () => {
+    let rejectCancel!: (error: Error) => void;
+    vi.mocked(projectsApi.cancelAudit).mockImplementationOnce(() => new Promise((_, reject) => { rejectCancel = reject; }));
+    const onAfter = vi.fn();
+    const onNavigate = vi.fn();
+    wrap(<ActiveAuditsPopover audits={[audit('p1')]} projects={[proj('p1', 'kronn')]}
+      onClose={vi.fn()} onNavigateToProject={onNavigate} onViewAllProjects={vi.fn()} onAfterCancel={onAfter} />);
+    const stop = screen.getByRole('button', { name: 'Annuler' });
+    act(() => { stop.click(); stop.click(); });
+    expect(projectsApi.cancelAudit).toHaveBeenCalledExactlyOnceWith('p1');
+    expect(screen.getByRole('button', { name: 'Arrêt…' })).toBeDisabled();
+    await act(async () => { rejectCancel(new Error('offline')); });
+    expect(screen.getByRole('alert')).toHaveTextContent("Échec de l'arrêt");
+    expect(onAfter).toHaveBeenCalledTimes(1);
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Annuler' })); });
+    expect(projectsApi.cancelAudit).toHaveBeenCalledTimes(2);
+    expect(onAfter).toHaveBeenCalledTimes(2);
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(onNavigate).not.toHaveBeenCalled();
+  });
+
+  it('keeps keyboard focus in the dialog when the last focused audit row disappears', async () => {
+    const props = { projects: [], onClose: vi.fn(), onNavigateToProject: vi.fn(), onViewAllProjects: vi.fn() };
+    const view = wrap(<ActiveAuditsPopover {...props} audits={[audit('p1')]} />);
+    screen.getByRole('button', { name: 'Annuler' }).focus();
+    view.rerender(<I18nProvider><ActiveAuditsPopover {...props} audits={[]} /></I18nProvider>);
+    await act(async () => {});
+    expect(screen.getByRole('dialog')).toHaveFocus();
+    fireEvent.keyDown(document.activeElement ?? document, { key: 'Escape' });
+    expect(props.onClose).toHaveBeenCalledTimes(1);
   });
 
   it('Escape closes the popover', () => {
@@ -134,14 +170,32 @@ describe('ActiveAuditsPopover (0.8.3 #288)', () => {
     expect(onClose).toHaveBeenCalled();
   });
 
+  it('focuses the dialog and restores the disclosure trigger on Escape', async () => {
+    const onClose = vi.fn();
+    function Harness() {
+      const triggerRef = useRef<HTMLButtonElement>(null);
+      return <>
+        <button ref={triggerRef}>Activity</button>
+        <ActiveAuditsPopover audits={[audit('p1')]} projects={[proj('p1', 'kronn')]}
+          onClose={onClose} onNavigateToProject={() => {}}
+          onViewAllProjects={() => {}} triggerRef={triggerRef} />
+      </>;
+    }
+    wrap(<Harness />);
+    expect(screen.getByRole('dialog')).toHaveFocus();
+    fireEvent.keyDown(document, { key: 'Escape' });
+    await act(async () => { await new Promise(resolve => requestAnimationFrame(resolve)); });
+    expect(screen.getByRole('button', { name: 'Activity' })).toHaveFocus();
+  });
+
   it('footer click fires onViewAllProjects', () => {
     const onView = vi.fn();
-    const { container } = wrap(<ActiveAuditsPopover
+    const { baseElement } = wrap(<ActiveAuditsPopover
       audits={[]} projects={[]} onClose={() => {}}
       onNavigateToProject={() => {}}
       onViewAllProjects={onView}
     />);
-    const footer = container.querySelector('.wf-active-runs-footer') as HTMLButtonElement;
+    const footer = baseElement.querySelector('.wf-active-runs-footer') as HTMLButtonElement;
     fireEvent.click(footer);
     expect(onView).toHaveBeenCalled();
   });
@@ -151,12 +205,12 @@ describe('ActiveAuditsPopover (0.8.3 #288)', () => {
     // empty string) shouldn't render NaN. formatElapsed clamps to
     // 0 via Math.max — the chip reads "0s" rather than "NaNs".
     const broken: AuditProgress = { ...audit('p1'), started_at: 'not-a-date' };
-    const { container } = wrap(<ActiveAuditsPopover
+    const { baseElement } = wrap(<ActiveAuditsPopover
       audits={[broken]} projects={[proj('p1', 'kronn')]}
       onClose={() => {}} onNavigateToProject={() => {}}
       onViewAllProjects={() => {}}
     />);
-    const meta = container.querySelector('.wf-active-runs-item-meta')?.textContent ?? '';
+    const meta = baseElement.querySelector('.wf-active-runs-item-meta')?.textContent ?? '';
     expect(meta).not.toContain('NaN');
   });
 
@@ -165,12 +219,12 @@ describe('ActiveAuditsPopover (0.8.3 #288)', () => {
     // just created and isn't yet in `projects` (lag between the two
     // fetches). The row must still render — using the id as the
     // visible label — instead of crashing or showing "undefined".
-    const { container } = wrap(<ActiveAuditsPopover
+    const { baseElement } = wrap(<ActiveAuditsPopover
       audits={[audit('p-orphan')]}
       projects={[]}   // empty — the lookup falls through
       onClose={() => {}} onNavigateToProject={() => {}}
       onViewAllProjects={() => {}}
     />);
-    expect(container.textContent).toContain('p-orphan');
+    expect(baseElement.textContent).toContain('p-orphan');
   });
 });

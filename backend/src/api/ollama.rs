@@ -1,8 +1,6 @@
 //! Ollama local LLM endpoints (v0.4.0 — Phase 1).
 //!
-//! Health check and model listing via Ollama's HTTP API. The actual
-//! agent execution goes through the standard `agent_command()` path
-//! in `runner.rs` which spawns `ollama run <model>`.
+//! Health checks, model listing and agent execution use Ollama's HTTP API.
 //!
 //! Ollama runs on the HOST machine (not in the Docker container).
 //! In Docker, we reach it via `host.docker.internal:11434`.
@@ -146,34 +144,16 @@ pub async fn health(State(_state): State<AppState>) -> Json<ApiResponse<OllamaHe
 /// GET /api/ollama/models
 ///
 /// List locally installed Ollama models. Uses the HTTP API at
-/// `OLLAMA_HOST/api/tags`. Returns an empty list if Ollama is unreachable.
+/// `OLLAMA_HOST/api/tags`. Compatibility keeps an empty response on discovery
+/// failure, while the shared durable catalogue records the normalized error.
 pub async fn models(State(state): State<AppState>) -> Json<ApiResponse<OllamaModelsResponse>> {
-    let base = ollama_base_url();
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()
-        .unwrap_or_default();
-
-    match client.get(format!("{}/api/tags", base)).send().await {
-        Ok(resp) if resp.status().is_success() => {
-            let body: serde_json::Value = resp.json().await.unwrap_or_default();
-            // One tuple per model, in one pass: two separately-filtered vectors
-            // zipped back together is how a model missing `name` shifts every
-            // later entry's `modified_at` onto the wrong model (Codex review).
-            let listed: Vec<(String, u64, String)> = body["models"]
-                .as_array()
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|m| {
-                            Some((
-                                m["name"].as_str()?.to_string(),
-                                m["size"].as_u64().unwrap_or(0),
-                                m["modified_at"].as_str().unwrap_or("").to_string(),
-                            ))
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
+    let base = resolve_base_url_pub(state.ollama_base_url_override.as_deref());
+    match crate::core::model_catalog::refresh_ollama_catalog_at(&state.db, &base).await {
+        Ok((_, Ok(tags))) => {
+            let listed: Vec<(String, u64, String)> = tags
+                .into_iter()
+                .map(|tag| (tag.name, tag.size, tag.modified_at))
+                .collect();
             let env_cap = std::env::var("KRONN_OLLAMA_NUM_CTX_CAP").ok();
             let ram_ceiling = crate::agents::runner::ram_derived_ceiling(
                 crate::agents::runner::total_system_memory_bytes(),
@@ -227,7 +207,10 @@ pub async fn models(State(state): State<AppState>) -> Json<ApiResponse<OllamaMod
                 .collect();
             Json(ApiResponse::ok(OllamaModelsResponse { models }))
         }
-        _ => Json(ApiResponse::ok(OllamaModelsResponse { models: vec![] })),
+        Ok((_, Err(_))) => Json(ApiResponse::ok(OllamaModelsResponse { models: vec![] })),
+        Err(_) => Json(ApiResponse::err(
+            "Failed to update the saved Ollama catalogue",
+        )),
     }
 }
 

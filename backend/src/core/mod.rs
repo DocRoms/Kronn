@@ -37,6 +37,7 @@ pub mod model_catalog;
 pub mod native_files;
 pub mod net_expose;
 pub mod oauth2_cache;
+pub mod operator_secret;
 pub mod power_guard;
 pub mod pricing;
 pub mod profiles;

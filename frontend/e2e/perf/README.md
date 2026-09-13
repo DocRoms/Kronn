@@ -27,10 +27,17 @@ python3 frontend/e2e/perf/seed.py
 #    spec needs. Idempotent — re-run without conflicts.
 python3 frontend/e2e/perf/seed_introspection.py
 
-# 3. Boot the sandbox backend on :3142 (won't collide with the user's
-#    real backend on :3140).
-env KRONN_DATA_DIR=/tmp/kronn-perf-sandbox \
-    backend/target/debug/kronn &
+# 3. Boot the sandbox backend on :3142.
+#
+#    ⚠ `seed.py` writes the DB and NOT config.toml, and a backend with no
+#    config.toml writes one using the DEFAULT port — 3140, which is the
+#    user's real backend. Choose the port before booting, or this step aims
+#    at the instance it is supposed to protect.
+env KRONN_DATA_DIR=/tmp/kronn-perf-sandbox KRONN_HOST=127.0.0.2 \
+    target/debug/kronn & sleep 5; kill %1     # writes config.toml, cannot bind
+sed -i '' 's/^port = 3140$/port = 3142/' /tmp/kronn-perf-sandbox/config.toml
+env KRONN_DATA_DIR=/tmp/kronn-perf-sandbox KRONN_HOST=127.0.0.1 \
+    target/debug/kronn &
 
 # 4. Boot Vite pointed at the sandbox.
 env KRONN_BACKEND_URL=http://localhost:3142 \

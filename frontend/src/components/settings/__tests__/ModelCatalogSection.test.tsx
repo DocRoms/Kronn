@@ -1,18 +1,22 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { buildApiMock } from '../../../test/apiMock';
 
-const { listMock, createMock, deleteMock } = vi.hoisted(() => ({
+const { listMock, createMock, updateMock, deleteMock, refreshMock } = vi.hoisted(() => ({
   listMock: vi.fn(),
   createMock: vi.fn(),
+  updateMock: vi.fn(),
   deleteMock: vi.fn(),
+  refreshMock: vi.fn(),
 }));
 
 vi.mock('../../../lib/api', () => buildApiMock({
   modelCatalogApi: {
     list: listMock as never,
     createManual: createMock as never,
+    updateManual: updateMock as never,
     deleteManual: deleteMock as never,
+    refresh: refreshMock as never,
   },
 }));
 
@@ -89,9 +93,82 @@ describe('ModelCatalogSection', () => {
   beforeEach(() => {
     listMock.mockReset().mockResolvedValue(snapshot);
     createMock.mockReset().mockResolvedValue(snapshot.targets[1].models[0]);
+    updateMock.mockReset().mockResolvedValue(snapshot.targets[1].models[0]);
     deleteMock.mockReset().mockResolvedValue(undefined);
+    refreshMock.mockReset().mockResolvedValue(snapshot.targets[2]);
   });
   afterEach(cleanup);
+
+  it.each(['create', 'update', 'delete', 'refresh'] as const)('serializes synchronous %s clicks until reload finishes and permits retry', async (operation) => {
+    render(<ModelCatalogSection />);
+    await findSourceChip('Router one');
+    let button: HTMLElement;
+    const mutation = { create: createMock, update: updateMock, delete: deleteMock, refresh: refreshMock }[operation];
+    if (operation === 'create') {
+      fireEvent.click(screen.getByText('modelCatalog.add'));
+      fireEvent.change(screen.getByLabelText('modelCatalog.modelId'), { target: { value: 'new-model' } });
+      fireEvent.change(screen.getByLabelText('modelCatalog.displayName'), { target: { value: 'New model' } });
+      button = screen.getByText('common.save');
+    } else if (operation === 'update') {
+      fireEvent.click(screen.getByText('Shared two'));
+      button = screen.getByText('common.save');
+    } else if (operation === 'delete') {
+      button = within(screen.getByTestId('model-catalog-row-http:two:shared')).getByRole('button', { name: 'common.delete' });
+    } else {
+      button = screen.getByRole('button', { name: 'modelCatalog.recheck' });
+    }
+    let rejectReload!: (reason: Error) => void;
+    listMock.mockImplementationOnce(() => new Promise((_, reject) => { rejectReload = reject; }));
+    act(() => {
+      button.click();
+      button.click();
+    });
+    expect(mutation).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(listMock).toHaveBeenCalledTimes(2));
+    expect(button).toBeDisabled();
+    await act(async () => { rejectReload(new Error('Reload unavailable')); });
+    expect(await screen.findByText('Error: Reload unavailable')).toBeInTheDocument();
+    expect(button).toBeEnabled();
+    fireEvent.click(button);
+    await waitFor(() => expect(mutation).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.queryByText('Error: Reload unavailable')).not.toBeInTheDocument());
+  });
+
+  it.each([
+    { stale: true, live_refresh_ok: true },
+    { stale: false, live_refresh_ok: false },
+  ])('shows cached provenance rather than live for target state %j', async (state) => {
+    listMock.mockResolvedValue({ targets: [{ ...snapshot.targets[0], ...state }, snapshot.targets[1]] });
+    render(<ModelCatalogSection />);
+    const chip = await findSourceChip('Router one');
+    expect(chip).toHaveAttribute('title', 'modelCatalog.stale');
+    const row = screen.getByTestId('model-catalog-row-http:one:shared');
+    expect(row).toHaveTextContent('modelCatalog.provenance.cached');
+    expect(row).not.toHaveTextContent('modelCatalog.provenance.live');
+    expect(row).toHaveAttribute('data-availability', 'available');
+    expect(screen.getByTestId('model-catalog-row-http:two:shared')).toHaveTextContent('modelCatalog.provenance.manual');
+    expect(snapshot.targets[0].models[0].provenance).toBe('live');
+  });
+
+  it.each(['refresh', 'snapshot'])('marks the retained catalogue unverified on %s failure and recovers on recheck', async (failure) => {
+    render(<ModelCatalogSection />);
+    const chip = await findSourceChip('OpenCode');
+    const source = chip.closest('.set-model-catalog-source') as HTMLElement;
+    const button = within(source).getByRole('button', { name: 'modelCatalog.recheck' });
+    if (failure === 'refresh') refreshMock.mockRejectedValueOnce(new Error('Probe failed'));
+    else listMock.mockRejectedValueOnce(new Error('Snapshot failed'));
+    fireEvent.click(button);
+    await screen.findByText(failure === 'refresh' ? 'Error: Probe failed' : 'Error: Snapshot failed');
+    const row = screen.getByTestId('model-catalog-row-agent:opencode:zen');
+    expect(row).toHaveTextContent('modelCatalog.provenance.cached');
+    expect(row).toHaveTextContent('opencode/big-pickle');
+    expect(row).toHaveAttribute('data-availability', 'available');
+    expect(chip).toHaveAttribute('title', 'modelCatalog.stale');
+    fireEvent.click(button);
+    await waitFor(() => expect(row).toHaveTextContent('modelCatalog.provenance.live'));
+    expect(chip).toHaveAttribute('title', 'modelCatalog.current');
+    expect(screen.queryByText(/^Error: (Probe|Snapshot) failed$/)).not.toBeInTheDocument();
+  });
 
   it('keeps identical model ids separated by their named HTTP target', async () => {
     render(<ModelCatalogSection />);

@@ -3,13 +3,18 @@ import './DiscussionsPage.css';
 import { MessageBubble, MarkdownContent } from '../components/MessageBubble';
 import { DiscussionNote } from '../components/DiscussionNote';
 import { DiscussionQuestionBanner } from '../components/DiscussionQuestionBanner';
+import { ImportantMessagesBar } from '../components/ImportantMessageCard';
+import { ImportantMessageForm } from '../components/ImportantMessageForm';
+import { submitImportantMessage } from '../lib/submitImportantMessage';
+import { refreshImportantMessages } from '../lib/importantMessages';
+import { preparePublication } from '../lib/importantPublication';
 import { unseenBasis } from '../lib/discussionUiUtils';
 import { ToolCallsGroup } from '../components/ToolCallsGroup';
 import { MessageDateSeparator } from '../components/MessageDateSeparator';
 import { groupMessagesWithToolFold } from '../lib/discussionMessageGrouping';
 import { localCalendarDayKey } from '../lib/discussionDates';
 import { ChatInput } from '../components/ChatInput';
-import { discussions as discussionsApi, discussionActions as discussionActionsApi, projects as projectsApi, skills as skillsApi, profiles as profilesApi, directives as directivesApi, contacts as contactsApi, workflows as workflowsApi, quickPrompts as quickPromptsApi, planning as planningApi, orchestration as orchestrationApi, externalApi as externalApiConnections, runsApi } from '../lib/api';
+import { discussions as discussionsApi, discussionActions as discussionActionsApi, projects as projectsApi, skills as skillsApi, profiles as profilesApi, directives as directivesApi, contacts as contactsApi, workflows as workflowsApi, quickPrompts as quickPromptsApi, planning as planningApi, orchestration as orchestrationApi, externalApi as externalApiConnections, runsApi, publicationCredentials } from '../lib/api';
 import type { ExternalApiConnectionView } from '../lib/api';
 import { GitPanel } from '../components/GitPanel';
 import { TerminalPanel } from '../components/TerminalPanel';
@@ -36,7 +41,7 @@ import { sanitizeQpImproverPayload } from '../lib/qp-improver-sanitize';
 import type { Project, AgentDetection, Discussion, DiscussionDetail, DiscussionMessage, MessageChannel, AgentType, AgentsConfig, Skill, AgentProfile, Directive, McpConfigDisplay, McpIncompatibility, Contact, WsMessage, ContextFile, BatchRunSummary, DiscussionPlan, ProposalListResponse, ExecutionDiscussionLink, MessageSearchHit, MessageTarget, ParticipantView, DiscussionAction, SharedRun } from '../types/generated';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { useQpChain } from '../hooks/useQpChain';
-import { useMessageQueue, type QueuedMessage } from '../hooks/useMessageQueue';
+import { useMessageQueue, type QueuedMessage, type QueuedMessageControl } from '../hooks/useMessageQueue';
 import { useRafBatchedStream } from '../hooks/useRafBatchedStream';
 import { buildStreamingFlush } from '../lib/stream-flush';
 import { findLastAgentMessage } from '../lib/discussionHelpers';
@@ -456,6 +461,7 @@ export function DiscussionsPage({
   const [initialGitWorkspaceId, setInitialGitWorkspaceId] = useState<string | undefined>();
   const [gitPanelExpanded, setGitPanelExpanded] = useState(false);
   const [showPlanPanel, setShowPlanPanel] = useState(false);
+  const [planTaskTarget, setPlanTaskTarget] = useState<{ discussionId: string; taskId: string; sequence: number }>();
   const [showSettingsPanel, setShowSettingsPanel] = useState(false);
   const [showAssetsPanel, setShowAssetsPanel] = useState(false);
   // KT-580 — the sixth panel, and the one KT-581 existed to make room for.
@@ -463,6 +469,10 @@ export function DiscussionsPage({
   // Bumped when a note is written from the composer, so an open panel shows it
   // without waiting for a reopen.
   const [notesRefresh, setNotesRefresh] = useState(0);
+  // KT-619 — the credential that lets THIS person publish a steering card.
+  // Held for as long as the page is open and written nowhere: not
+  // localStorage, not a URL. Reloading asks again, which is the point.
+  const [publicationGrant, setPublicationGrant] = useState('');
   const [assetOpenRequest, setAssetOpenRequest] = useState<{ assetId: string; nonce: number } | null>(null);
   // KT-243 — carries the target run_id of the latest `shared_run_updated` WS
   // event so <DiscussionAttachedRuns> can relist only for a run_id it does
@@ -500,7 +510,8 @@ export function DiscussionsPage({
   // Loaded for the plan panel itself. Its completed/total pair used to be
   // shown in the header button too; the panel shows it, so the switcher does
   // not repeat it — one number, one place.
-  const [, setDiscussionPlan] = useState<DiscussionPlan | null>(null);
+  const [discussionPlan, setDiscussionPlan] = useState<DiscussionPlan | null>(null);
+  const [discussionPlanRoom, setDiscussionPlanRoom] = useState<string | null>(null);
   const [proposalInbox, setProposalInbox] = useState<ProposalListResponse | null>(null);
   const [proposalInboxDiscussionId, setProposalInboxDiscussionId] = useState<string | null>(null);
   // KT-587 — keyed by the discussion they were fetched for, so switching rooms
@@ -1299,6 +1310,7 @@ export function DiscussionsPage({
       .then(([plan, proposals]) => {
         if (!cancelled) {
           setDiscussionPlan(plan);
+          setDiscussionPlanRoom(activeDiscussionId);
           setProposalInbox(proposals);
           setProposalInboxDiscussionId(activeDiscussionId);
         }
@@ -1306,6 +1318,7 @@ export function DiscussionsPage({
       .catch(() => {
         if (!cancelled) {
           setDiscussionPlan(null);
+          setDiscussionPlanRoom(activeDiscussionId);
           setProposalInbox(null);
           setProposalInboxDiscussionId(activeDiscussionId);
         }
@@ -1332,20 +1345,41 @@ export function DiscussionsPage({
         planningApi.proposals(discussionId),
       ])
         .then(([plan, proposals]) => {
+          if (activeDiscussionIdRef.current !== discussionId) return;
           setDiscussionPlan(plan);
+          setDiscussionPlanRoom(discussionId);
           setProposalInbox(proposals);
           setProposalInboxDiscussionId(discussionId);
         })
         .catch(() => { /* panel will surface a fetch error when opened */ });
     };
     const openPlan = (event: Event) => {
-      const discussionId = (event as CustomEvent<{ discussionId?: string }>).detail?.discussionId;
-      if (discussionId !== activeDiscussionId) return;
-      setShowGitPanel(false);
-      setShowTerminalPanel(false);
-      setShowSettingsPanel(false);
-      setShowAssetsPanel(false);
-      setShowPlanPanel(true);
+      const detail = (event as CustomEvent<{ discussionId?: string; taskReference?: string }>).detail;
+      const discussionId = detail?.discussionId;
+      if (!discussionId || discussionId !== activeDiscussionId) return;
+      const show = () => {
+        setShowGitPanel(false);
+        setShowTerminalPanel(false);
+        setShowSettingsPanel(false);
+        setShowAssetsPanel(false);
+        setShowPlanPanel(true);
+      };
+      if (!detail?.taskReference) { show(); return; }
+      // A card may outlive its plan link. Resolve against a fresh room plan,
+      // never select an unrelated global task or reuse the previous room.
+      void planningApi.discussionPlan(discussionId).then(plan => {
+        if (activeDiscussionIdRef.current !== discussionId) return;
+        const task = plan.discussion_id === discussionId ? [
+          plan.primary_objective,
+          ...plan.active.map(relation => relation.task),
+          ...plan.later.map(relation => relation.task),
+        ].find(candidate => candidate?.reference === detail.taskReference) : undefined;
+        if (!task) { toast(t('disc.important.taskUnavailable'), 'error'); return; }
+        setPlanTaskTarget(previous => ({ discussionId, taskId: task.id, sequence: (previous?.sequence ?? 0) + 1 }));
+        show();
+      }).catch(() => {
+        if (activeDiscussionIdRef.current === discussionId) toast(t('disc.important.taskOpenFailed'), 'error');
+      });
     };
     window.addEventListener('kronn:plan-changed', refreshPlan);
     window.addEventListener('kronn:plan-proposals-changed', refreshPlan);
@@ -1355,7 +1389,7 @@ export function DiscussionsPage({
       window.removeEventListener('kronn:plan-proposals-changed', refreshPlan);
       window.removeEventListener('kronn:open-discussion-plan', openPlan);
     };
-  }, [activeDiscussionId]);
+  }, [activeDiscussionId, t, toast]);
   const batchReviewRows = useMemo(
     () => buildBatchTriageRows(batchReviewDiscs),
     [batchReviewDiscs],
@@ -1370,11 +1404,24 @@ export function DiscussionsPage({
     toast(t('disc.batchReviewDraftReady'), 'success');
   }, [toast, t]);
 
+  const [composerNativeMode, setComposerNativeMode] = useState<{
+    discussionId: string;
+    disabled: boolean | null;
+  } | null>(null);
+  const handleNativeAgentModeChange = useCallback((discussionId: string, disabled: boolean | null) => {
+    setComposerNativeMode({ discussionId, disabled });
+  }, []);
+
   const activeAgentDisabled = useMemo(() => {
     if (!activeDiscussion || agents.length === 0) return false;
+    // Human/CLI-only rooms do not require an installed native provider. Use
+    // the header's authoritative, room-scoped mode, never another room's
+    // previous value or a guessed mode while its request is pending.
+    if (composerNativeMode?.discussionId === activeDiscussion.id
+      && composerNativeMode.disabled === true) return false;
     const agentDet = agents.find(a => a.agent_type === activeDiscussion.agent);
     return !agentDet || !isUsable(agentDet);
-  }, [activeDiscussion, agents]);
+  }, [activeDiscussion, agents, composerNativeMode]);
 
   const activeDiscussionMessages = activeDiscussion?.messages;
   const loadedActiveDiscussionId = activeDiscussion?.id;
@@ -2672,6 +2719,31 @@ export function DiscussionsPage({
       cleanupStream(discId, false);
     };
     try {
+      // KT-619 — a `kronn-important` fence in the body is a request to publish a
+      // steering card. The rules, and the Stop that can land during the proof
+      // round-trip, live in `preparePublication` where they can be tested.
+      const prepared = await preparePublication({
+        grant: publicationGrant,
+        content: msg,
+        discussionId: discId,
+        signal: controller.signal,
+        issueProof: publicationCredentials.proof,
+        onRefused: () => toast(t('disc.important.proofRefused'), 'error'),
+      });
+      if (prepared.outcome === 'abandon') {
+        // The user asked for this, so it is reverted quietly: an error toast
+        // about their own Stop is noise.
+        optimisticMessageIdsRef.current.delete(clientMessageId);
+        revertOptimisticUserRow();
+        if (replyTargetId) {
+          saveReplyDraft(discId, replyTargetId);
+          setReplyToMessageId(current => current ?? replyTargetId);
+        }
+        publishSettlement('refused');
+        cleanupStream(discId, false);
+        return;
+      }
+      const publication = prepared.fields;
       await discussionsApi.sendMessageStream(
         discId,
         {
@@ -2684,6 +2756,7 @@ export function DiscussionsPage({
           target_agent: primaryTarget,
           client_message_id: clientMessageId,
           reply_to_message_id: replyTargetId,
+          ...publication,
         },
         (text) => appendRememberedStreamChunk(discId, text),
         () => {
@@ -2715,6 +2788,14 @@ export function DiscussionsPage({
           // headers, which can also precede an SSE error.
           reloadDiscussion(discId);
           loadContextFiles(discId);
+          // KT-619 — a card published by THIS send. The bar refreshes when a
+          // new durable message ARRIVES, which is an agent's message coming
+          // back from the server; the message we just wrote ourselves never
+          // arrives, so without this the first card in a discussion stayed
+          // invisible until the discussion was reopened. The receipt is
+          // emitted after the commit, and the card is written in the same
+          // transaction, so by here it exists or it never will.
+          if (publication.publication_proof) refreshImportantMessages(discId);
           // The optimistic update above bumped both counts by 1 (the freshly
           // queued User message); seed lastSeen with the matching non-System
           // basis so the badge resolves to 0 without waiting on the next tick.
@@ -2737,8 +2818,24 @@ export function DiscussionsPage({
   // currently rendered stream. `defer_dispatch` commits the User row and
   // Pending dispatch atomically; the backend scheduler starts it only after
   // the discussion's current runner releases its claim.
-  const persistQueuedMessage = useCallback((discId: string, queued: QueuedMessage) => (
-    new Promise<void>((resolve, reject) => {
+  const persistQueuedMessage = useCallback(async (
+    discId: string,
+    queued: QueuedMessage,
+    control: QueuedMessageControl,
+  ) => {
+    const prepared = await preparePublication({
+      grant: publicationGrant,
+      content: queued.content,
+      discussionId: discId,
+      signal: control.signal,
+      issueProof: publicationCredentials.proof,
+      onRefused: () => toast(t('disc.important.proofRefused'), 'error'),
+    });
+    if (prepared.outcome === 'abandon' || !control.beginPersist()) return;
+    // The proof exists only in this call, never in the durable queue. Every
+    // retry uses its stable message id but obtains a fresh proof.
+    const publication = prepared.fields;
+    await new Promise<void>((resolve, reject) => {
       let accepted = false;
       const refuseBeforeReceipt = (error: string) => {
         if (!accepted) reject(new Error(userError(error)));
@@ -2755,6 +2852,7 @@ export function DiscussionsPage({
           client_message_id: queued.id,
           defer_dispatch: true,
           reply_to_message_id: queued.replyToMessageId,
+          ...publication,
         },
         () => undefined,
         () => {
@@ -2770,10 +2868,11 @@ export function DiscussionsPage({
           refetchDiscussions();
           reloadDiscussion(discId);
           loadContextFiles(discId);
+          if (publication.publication_proof) refreshImportantMessages(discId);
         },
       ).catch(error => refuseBeforeReceipt(error instanceof Error ? error.message : String(error)));
-    })
-  ), [loadContextFiles, refetchDiscussions, reloadDiscussion]);
+    });
+  }, [loadContextFiles, publicationGrant, refetchDiscussions, reloadDiscussion, t, toast]);
 
   // Durable CLI-style outbox — entries are written locally before acceptance,
   // then reconciled against the backend with a stable client_message_id.
@@ -2783,9 +2882,11 @@ export function DiscussionsPage({
     removeQueued: removeQueuedMessage,
     retryQueued: retryQueuedMessage,
     clearQueue: clearMessageQueue,
+    cancelPreparing: cancelQueuedPreparation,
   } = useMessageQueue({
     discId: activeDiscussionId,
     onPersist: persistQueuedMessage,
+    prepareBeforePersist: true,
   });
 
   // Queued follow-ups now live inside the scrollable transcript. Keep the
@@ -2807,6 +2908,7 @@ export function DiscussionsPage({
   const handleStop = () => {
     if (!activeDiscussionId) return;
     const discId = activeDiscussionId;
+    cancelQueuedPreparation();
     // Backend cancellation FIRST — without this the agent keeps
     // running and burning tokens after the user clicked Stop.
     // Pre-fix the local abort just disconnected the SSE channel; the
@@ -2829,6 +2931,7 @@ export function DiscussionsPage({
   const handleStopDispatch = useCallback(async (dispatchId: string) => {
     if (!activeDiscussionId) return;
     const discId = activeDiscussionId;
+    if (visibleStreamingReplyId === dispatchId) cancelQueuedPreparation();
     setStoppingDispatchIds(current => new Set(current).add(dispatchId));
     try {
       const result = await discussionsApi.stopDispatch(discId, dispatchId);
@@ -2865,7 +2968,7 @@ export function DiscussionsPage({
         return next;
       });
     }
-  }, [abortControllers, activeDiscussionId, cleanupStream, refetchDiscussions, reloadDiscussion,
+  }, [abortControllers, activeDiscussionId, cancelQueuedPreparation, cleanupStream, refetchDiscussions, reloadDiscussion,
     setLoadedDiscussions, t, toast, visibleStreamingReplyId]);
 
   const handleTtsToggle = useCallback(() => {
@@ -3853,6 +3956,7 @@ export function DiscussionsPage({
               })}
               onToggleSidebar={() => setSidebarOpen(true)}
               onDiscussionUpdated={handleDiscussionUpdated}
+              onNativeAgentModeChange={handleNativeAgentModeChange}
               onAgentSwitch={handleAgentSwitch}
               toast={toast}
               t={t}
@@ -4046,6 +4150,15 @@ export function DiscussionsPage({
             <DiscussionQuestionBanner
               discussionId={activeDiscussion.id}
               messageRevision={activeDiscussion.messages.at(-1)?.id}
+            />
+
+            {/* KT-619 — find the steering cards without scrolling the whole
+                thread. Sits beside the question banner because both answer
+                "what do I need to know about this room", not "what was said". */}
+            <ImportantMessagesBar
+              discussionId={activeDiscussion.id}
+              messageRevision={activeDiscussion.messages.at(-1)?.id}
+              onNavigate={handleReplyNavigate}
             />
 
             {/* Messages */}
@@ -5082,6 +5195,33 @@ export function DiscussionsPage({
                 "même message dans toutes les discussions" bug on 2026-04-15.
                 Remount is cheap here and also gives us a clean reset of
                 mention popover / emoji popover / voice mode / draft hydration. */}
+            {/* KT-619 — the human's own publication authority, held for as
+                long as this page is open and stored nowhere. */}
+            <ImportantMessageForm
+              key={`important:${activeDiscussion.id}`}
+              discussionId={activeDiscussion.id}
+              grant={publicationGrant}
+              onGrantChange={value => {
+                cancelQueuedPreparation();
+                setPublicationGrant(value);
+              }}
+              onPublish={async submission => {
+                const outcome = await submitImportantMessage(submission);
+                if (outcome === 'confirmed' || outcome === 'text-only' || outcome === 'uncertain') {
+                  refreshImportantMessages(submission.discussionId);
+                  refetchDiscussions();
+                  reloadDiscussion(submission.discussionId);
+                }
+                return outcome;
+              }}
+              onOpenSettings={() => onNavigate('settings')}
+              tasks={[
+                ...(discussionPlanRoom === activeDiscussion.id && discussionPlan?.discussion_id === activeDiscussion.id && discussionPlan.primary_objective ? [discussionPlan.primary_objective] : []),
+                ...(discussionPlanRoom === activeDiscussion.id && discussionPlan?.discussion_id === activeDiscussion.id ? discussionPlan.active.map(relation => relation.task) : []),
+                ...(discussionPlanRoom === activeDiscussion.id && discussionPlan?.discussion_id === activeDiscussion.id ? discussionPlan.later.map(relation => relation.task) : []),
+              ].filter((task, index, all) => all.findIndex(candidate => candidate.reference === task.reference) === index)}
+              t={t}
+            />
             <ChatInput
               key={activeDiscussion.id}
               discussion={activeDiscussion}
@@ -5296,7 +5436,9 @@ export function DiscussionsPage({
 
             {showPlanPanel && (
               <DiscussionPlanPanel
+                key={`${activeDiscussion.id}:${planTaskTarget?.discussionId === activeDiscussion.id ? planTaskTarget.sequence : 0}`}
                 discussionId={activeDiscussion.id}
+                initialTaskId={planTaskTarget?.discussionId === activeDiscussion.id ? planTaskTarget.taskId : undefined}
                 onClose={() => setShowPlanPanel(false)}
                 onChanged={setDiscussionPlan}
                 onNavigateDiscussion={(targetDiscussionId) => {

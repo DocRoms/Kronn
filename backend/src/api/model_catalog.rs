@@ -10,7 +10,7 @@ use crate::models::{
 };
 use crate::AppState;
 
-fn cli_agents() -> [AgentType; 7] {
+fn snapshot_agents() -> [AgentType; 8] {
     [
         AgentType::ClaudeCode,
         AgentType::Codex,
@@ -19,6 +19,7 @@ fn cli_agents() -> [AgentType; 7] {
         AgentType::Kiro,
         AgentType::CopilotCli,
         AgentType::Vibe,
+        AgentType::Ollama,
     ]
 }
 
@@ -115,7 +116,7 @@ pub async fn list(State(state): State<AppState>) -> Json<ApiResponse<ModelCatalo
         }
     };
     let mut targets = Vec::new();
-    for agent_type in cli_agents() {
+    for agent_type in snapshot_agents() {
         let runtime_target_id = store::agent_runtime_target_id(&agent_type);
         let target_label = format!("{agent_type:?}");
         match model_catalog::build_view(&state.db, runtime_target_id, agent_type).await {
@@ -162,7 +163,16 @@ pub async fn refresh(
             "HTTP catalogs are refreshed by testing their named connection",
         ));
     }
-    match model_catalog::refresh_if_stale(&state.db, req.agent_type, req.force).await {
+    let refresh = if req.agent_type == AgentType::Ollama {
+        let base =
+            crate::api::ollama::resolve_base_url_pub(state.ollama_base_url_override.as_deref());
+        model_catalog::refresh_ollama_catalog_at(&state.db, &base)
+            .await
+            .map(|(view, _)| view)
+    } else {
+        model_catalog::refresh_if_stale(&state.db, req.agent_type, req.force).await
+    };
+    match refresh {
         Ok(view) => Json(ApiResponse::ok(view)),
         Err(error) => Json(ApiResponse::err(format!(
             "Failed to refresh model catalog: {error}"

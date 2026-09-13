@@ -448,7 +448,12 @@ fn configured_disk_thresholds() -> (u64, u64) {
 /// The refusal names the number and the setting, because the person reading it
 /// is by definition on a machine that is about to stop working and needs to know
 /// both what is wrong and which knob changes it.
-fn ensure_disk_headroom(path: &Path, warning_gib: u64, critical_gib: u64) -> Result<(), String> {
+fn ensure_disk_headroom_for(
+    path: &Path,
+    warning_gib: u64,
+    critical_gib: u64,
+    operation: &str,
+) -> Result<(), String> {
     match disk_headroom(path, warning_gib, critical_gib) {
         DiskHeadroom::Ok => Ok(()),
         DiskHeadroom::Low {
@@ -457,7 +462,7 @@ fn ensure_disk_headroom(path: &Path, warning_gib: u64, critical_gib: u64) -> Res
         } => {
             tracing::warn!(
                 "Low disk: {available_gib} GiB free at {} (warning below {warning_gib} GiB). \
-                 Worktree build artefacts are the usual cause; provisioning continues.",
+                 Worktree build artefacts are the usual cause; {operation} continues.",
                 path.display()
             );
             Ok(())
@@ -466,12 +471,82 @@ fn ensure_disk_headroom(path: &Path, warning_gib: u64, critical_gib: u64) -> Res
             available_gib,
             critical_gib,
         } => Err(format!(
-            "refusing to provision a worktree: only {available_gib} GiB free at {} \
+            "refusing to {operation}: only {available_gib} GiB free at {} \
              (critical below {critical_gib} GiB, server.disk_critical_gib). Free space — \
              worktree `target/` directories are the usual cause — or lower the threshold.",
             path.display()
         )),
     }
+}
+
+fn ensure_disk_headroom(path: &Path, warning_gib: u64, critical_gib: u64) -> Result<(), String> {
+    ensure_disk_headroom_for(path, warning_gib, critical_gib, "provision a worktree")
+}
+
+/// Gate a build or validation before it can create more compiler artefacts.
+///
+/// This uses the same configured thresholds as worktree provisioning. It only
+/// observes free space and never attempts cleanup: the interactive target and
+/// any unrecognised cache remain outside automatic deletion ownership.
+pub fn ensure_build_disk_headroom(path: &Path) -> Result<(), String> {
+    // Cargo creates a target on its first build. Inspect its existing real
+    // parent in that case instead of creating output during a guard; Cargo
+    // remains the sole writer of the exact target path.
+    let measured_path = match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(format!(
+                "refusing to run a build or validation: build target {} is a symlink",
+                path.display()
+            ));
+        }
+        Ok(_) => path.to_path_buf(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let parent = path.parent().ok_or_else(|| {
+                format!(
+                    "refusing to run a build or validation: build target {} has no parent directory",
+                    path.display()
+                )
+            })?;
+            let parent_metadata = std::fs::symlink_metadata(parent).map_err(|error| {
+                format!(
+                    "refusing to run a build or validation: build target parent {} cannot be inspected: {error}",
+                    parent.display()
+                )
+            })?;
+            if parent_metadata.file_type().is_symlink() || !parent_metadata.is_dir() {
+                return Err(format!(
+                    "refusing to run a build or validation: build target parent {} is not a real directory",
+                    parent.display()
+                ));
+            }
+            parent.to_path_buf()
+        }
+        Err(error) => {
+            return Err(format!(
+                "refusing to run a build or validation: build target {} cannot be inspected: {error}",
+                path.display()
+            ));
+        }
+    };
+    let target = measured_path.canonicalize().map_err(|error| {
+        format!(
+            "refusing to run a build or validation: build target {} cannot be resolved: {error}",
+            measured_path.display()
+        )
+    })?;
+    if !target.is_dir() {
+        return Err(format!(
+            "refusing to run a build or validation: build target {} is not a directory",
+            target.display()
+        ));
+    }
+    let (warning_gib, critical_gib) = configured_disk_thresholds();
+    ensure_disk_headroom_for(
+        &target,
+        warning_gib,
+        critical_gib,
+        "run a build or validation",
+    )
 }
 
 /// Fix worktree cross-references so they work from the host, not just inside Docker.
@@ -2766,6 +2841,75 @@ mod tests {
         // The message has to carry both the number and the knob.
         assert!(error.contains("refusing to provision"), "got: {error}");
         assert!(error.contains("disk_critical_gib"), "got: {error}");
+    }
+
+    #[test]
+    fn a_full_disk_refuses_a_build_with_the_same_configured_knob() {
+        let here = std::env::temp_dir();
+        let available_gib = fs2::available_space(&here).unwrap() / BYTES_PER_GIB;
+
+        let error = ensure_disk_headroom_for(
+            &here,
+            available_gib + 100,
+            available_gib + 50,
+            "run a build or validation",
+        )
+        .expect_err("a build must be refused below the critical threshold");
+
+        assert!(
+            error.contains("refusing to run a build or validation"),
+            "got: {error}"
+        );
+        assert!(error.contains("disk_critical_gib"), "got: {error}");
+    }
+
+    #[test]
+    fn build_headroom_measures_a_fresh_target_parent_without_creating_output() {
+        let root = tempfile::tempdir().unwrap();
+        let absent = root.path().join("target with spaces");
+        ensure_build_disk_headroom(&absent).unwrap();
+        assert!(
+            !absent.exists(),
+            "the guard must leave first-build target creation to Cargo"
+        );
+    }
+
+    #[test]
+    fn build_headroom_refuses_a_fresh_target_below_a_missing_parent() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("missing-parent").join("target");
+
+        let error = ensure_build_disk_headroom(&target).unwrap_err();
+        assert!(error.contains("parent"), "got: {error}");
+        assert!(
+            !target.exists(),
+            "the guard must not create arbitrary parents"
+        );
+    }
+
+    #[test]
+    fn build_headroom_refuses_a_target_symlink() {
+        let root = tempfile::tempdir().unwrap();
+        let real_target = root.path().join("real-target");
+        std::fs::create_dir(&real_target).unwrap();
+        let target = root.path().join("target-link");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&real_target, &target).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir(&real_target, &target).unwrap();
+
+        let error = ensure_build_disk_headroom(&target).unwrap_err();
+        assert!(error.contains("is a symlink"), "got: {error}");
+    }
+
+    #[test]
+    fn build_headroom_refuses_a_file_target() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("target-file");
+        std::fs::write(&target, "not a directory").unwrap();
+
+        let error = ensure_build_disk_headroom(&target).unwrap_err();
+        assert!(error.contains("not a directory"), "got: {error}");
     }
 
     #[test]

@@ -2,9 +2,7 @@
  * 0.8.3 (#288) — fleet-wide active-audits popover.
  *
  * Mirror of `workflows/ActiveRunsPopover` but for audit runs. Rendered
- * from `Dashboard.tsx` when the user clicks the Projets nav button
- * while at least one audit is in progress AND we're not already on
- * the projects page (otherwise normal navigation wins).
+ * from `Dashboard.tsx` through a distinct activity disclosure button.
  *
  * Lists every project currently auditing with:
  *   - project name + current step file
@@ -14,7 +12,9 @@
  *
  * Reuses the same CSS classes as ActiveRunsPopover for visual parity.
  */
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type RefObject } from 'react';
+import { createPortal } from 'react-dom';
+import { useActivityPopover } from '../hooks/useActivityPopover';
 import { Loader2, Square, X, ChevronRight } from 'lucide-react';
 import type { AuditProgress, Project } from '../types/generated';
 import { projects as projectsApi } from '../lib/api';
@@ -32,6 +32,8 @@ export interface ActiveAuditsPopoverProps {
   /** Called after a cancel succeeds so the parent can refetch the
    *  fleet-wide audit-status snapshot. */
   onAfterCancel?: () => void;
+  triggerRef?: RefObject<HTMLButtonElement | null>;
+  focusFallbackRef?: RefObject<HTMLButtonElement | null>;
 }
 
 function formatElapsed(ms: number, t: (k: string, ...a: (string | number)[]) => string): string {
@@ -54,12 +56,15 @@ export function ActiveAuditsPopover({
   onNavigateToProject,
   onViewAllProjects,
   onAfterCancel,
+  triggerRef,
+  focusFallbackRef,
 }: ActiveAuditsPopoverProps) {
   const { t } = useT();
-  const rootRef = useRef<HTMLDivElement>(null);
+  const { rootRef, closeAndRestoreFocus } = useActivityPopover({ onClose, triggerRef, focusFallbackRef });
   const [cancellingIds, setCancellingIds] = useState<Set<string>>(new Set());
+  const cancellingRef = useRef(new Set<string>());
+  const [cancelError, setCancelError] = useState<string | null>(null);
   const [nowTick, setNowTick] = useState(() => Date.now());
-
   // Build a project-id → project-name lookup so we don't iterate
   // `projects` per audit. Cheap; recomputes on every projects refetch.
   const projectName = useMemo(() => {
@@ -73,26 +78,10 @@ export function ActiveAuditsPopover({
     return () => clearInterval(id);
   }, []);
 
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
-    const onMouseDown = (e: MouseEvent) => {
-      if (rootRef.current && !rootRef.current.contains(e.target as Node)) onClose();
-    };
-    document.addEventListener('keydown', onKey);
-    // Defer the outside-click listener one tick so the click that opened
-    // the popover doesn't immediately close it — same race fix as
-    // ActiveRunsPopover.
-    const tid = window.setTimeout(() => {
-      document.addEventListener('mousedown', onMouseDown);
-    }, 0);
-    return () => {
-      document.removeEventListener('keydown', onKey);
-      document.removeEventListener('mousedown', onMouseDown);
-      window.clearTimeout(tid);
-    };
-  }, [onClose]);
-
   const handleCancel = async (projectId: string) => {
+    if (cancellingRef.current.has(projectId)) return;
+    cancellingRef.current.add(projectId);
+    setCancelError(null);
     setCancellingIds(prev => {
       const next = new Set(prev);
       next.add(projectId);
@@ -101,25 +90,35 @@ export function ActiveAuditsPopover({
     try {
       await projectsApi.cancelAudit(projectId);
     } catch {
-      // Parent's refetch reconciles state; no toast wiring here.
+      setCancelError(t('wf.cancelRunError'));
+    } finally {
+      cancellingRef.current.delete(projectId);
+      setCancellingIds(prev => {
+        const next = new Set(prev);
+        next.delete(projectId);
+        return next;
+      });
+      onAfterCancel?.();
     }
-    onAfterCancel?.();
   };
 
-  return (
+  return createPortal(
     <div
       ref={rootRef}
       className="wf-active-runs-popover"
+      id="active-audits-popover"
       role="dialog"
+      aria-modal="false"
       aria-label={t('audit.activeAuditsTitle')}
+      tabIndex={-1}
     >
       <div className="wf-active-runs-header">
         <span className="wf-active-runs-title">{t('audit.activeAuditsTitle')}</span>
         <button
           type="button"
           className="wf-active-runs-close"
-          onClick={onClose}
-          aria-label="Close"
+          onClick={closeAndRestoreFocus}
+          aria-label={t('common.close')}
         >
           <X size={12} />
         </button>
@@ -175,6 +174,8 @@ export function ActiveAuditsPopover({
         </ul>
       )}
 
+      {cancelError && <div className="wf-active-runs-error" role="alert">{cancelError}</div>}
+
       <button
         type="button"
         className="wf-active-runs-footer"
@@ -183,6 +184,7 @@ export function ActiveAuditsPopover({
         <span>{t('audit.viewAllProjects')}</span>
         <ChevronRight size={12} />
       </button>
-    </div>
+    </div>,
+    document.body,
   );
 }

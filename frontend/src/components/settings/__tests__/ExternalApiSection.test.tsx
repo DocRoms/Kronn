@@ -110,6 +110,65 @@ afterEach(() => {
 });
 
 describe('ExternalApiSection', () => {
+  it('keeps an absent saved text tier visible but unavailable after a successful test', async () => {
+    listMock.mockResolvedValue([conn({ endpoint: 'https://saved.example.test', default_model: 'retired/model' })]);
+    renderSection();
+    fireEvent.click(await screen.findByTestId('ext-api-edit-id'));
+    fireEvent.click(screen.getByTestId('ext-api-test'));
+    const input = screen.getByTestId('ext-api-tier-default');
+    await waitFor(() => expect(input).not.toBeDisabled());
+    expect(input).toHaveValue('retired/model');
+    fireEvent.focus(input);
+    const retired = screen.getByRole('option', { name: /retired\/model/ });
+    expect(retired).toHaveAttribute('aria-disabled', 'true');
+    expect(retired).toHaveTextContent('modelCatalog.unavailable');
+    fireEvent.click(retired);
+    fireEvent.keyDown(input, { key: 'Escape' });
+    expect(input).toHaveValue('retired/model');
+    fireEvent.click(screen.getByTestId('ext-api-save'));
+    await waitFor(() => expect(updateMock).toHaveBeenCalledWith('id', expect.objectContaining({ default_model: 'retired/model' })));
+  });
+
+  it.each([
+    { status: 'success', ok: true, expected: 'config.extApi.modelAbsent' },
+    { status: 'auth_error', ok: false, expected: 'config.extApi.modelUnverified' },
+  ])('keeps the saved identity and states its provenance when the probe returns $status without models', async ({ status, ok, expected }) => {
+    listMock.mockResolvedValue([conn({ endpoint: 'https://saved.example.test', default_model: 'saved/模型' })]);
+    testMock.mockResolvedValue({ ok, status, models: [], catalog: [], hint: null });
+    renderSection();
+    fireEvent.click(await screen.findByTestId('ext-api-edit-id'));
+    expect(screen.getByTestId('ext-api-tier-status-default')).toHaveTextContent('config.extApi.modelUnverified');
+    fireEvent.click(screen.getByTestId('ext-api-test'));
+    await waitFor(() => expect(screen.getByTestId('ext-api-test-result')).toHaveAttribute('data-status', status));
+    expect(screen.getByTestId('ext-api-tier-default')).toHaveValue('saved/模型');
+    expect(screen.getByTestId('ext-api-tier-default')).toBeDisabled();
+    expect(screen.getByTestId('ext-api-tier-status-default')).toHaveTextContent(expected);
+    fireEvent.click(screen.getByTestId('ext-api-save'));
+    await waitFor(() => expect(updateMock).toHaveBeenCalledWith('id', expect.objectContaining({ default_model: 'saved/模型' })));
+  });
+
+  it('re-enables a reappearing text model and invalidates its provenance when switching the endpoint', async () => {
+    listMock.mockResolvedValue([conn({ endpoint: 'https://saved.example.test', default_model: 'retired/model' })]);
+    renderSection();
+    fireEvent.click(await screen.findByTestId('ext-api-edit-id'));
+    fireEvent.click(screen.getByTestId('ext-api-test'));
+    await waitFor(() => expect(screen.getByTestId('ext-api-tier-status-default')).toHaveTextContent('config.extApi.modelAbsent'));
+    testMock.mockResolvedValue({ ok: true, status: 'success', models: ['retired/model'], hint: null });
+    fireEvent.click(screen.getByTestId('ext-api-test'));
+    await waitFor(() => expect(screen.getByTestId('ext-api-tier-status-default')).toHaveTextContent('config.extApi.testedCatalog'));
+    const input = screen.getByTestId('ext-api-tier-default');
+    fireEvent.focus(input);
+    expect(screen.getByRole('option', { name: 'retired/model' })).not.toHaveAttribute('aria-disabled');
+    fireEvent.keyDown(input, { key: 'ArrowDown' });
+    fireEvent.keyDown(input, { key: 'Enter' });
+    expect(input).toHaveValue('retired/model');
+    fireEvent.change(screen.getByTestId('ext-api-endpoint'), { target: { value: 'https://different.example.test' } });
+    expect(input).toBeDisabled();
+    expect(input).toHaveValue('retired/model');
+    expect(screen.getByTestId('ext-api-tier-status-default')).toHaveTextContent('config.extApi.modelUnverified');
+    expect(screen.queryByText('config.extApi.testedCatalog')).not.toBeInTheDocument();
+  });
+
   it('renders several connections at once, each with its own endpoint (DoD 2)', async () => {
     listMock.mockResolvedValue([
       conn({

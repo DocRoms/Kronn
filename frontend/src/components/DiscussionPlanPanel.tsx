@@ -58,6 +58,7 @@ import './DiscussionPlanPanel.css';
 
 interface Props {
   discussionId: string;
+  initialTaskId?: string;
   onClose: () => void;
   onChanged?: (plan: DiscussionPlan) => void;
   onNavigateDiscussion?: (discussionId: string) => void;
@@ -69,6 +70,7 @@ type PlanFilter = 'ready' | 'blocked' | 'done' | 'later';
 
 export function DiscussionPlanPanel({
   discussionId,
+  initialTaskId,
   onClose,
   onChanged,
   onNavigateDiscussion,
@@ -77,8 +79,10 @@ export function DiscussionPlanPanel({
 }: Props) {
   const { t } = useT();
   const initialPanelState = useMemo(
-    () => readPlanOrchestrationState(discussionId),
-    [discussionId],
+    () => initialTaskId
+      ? { selectedTaskId: initialTaskId, viewMode: 'focus' as const }
+      : readPlanOrchestrationState(discussionId),
+    [discussionId, initialTaskId],
   );
   const [plan, setPlan] = useState<DiscussionPlan | null>(null);
   const [proposalInbox, setProposalInbox] = useState<ProposalListResponse | null>(null);

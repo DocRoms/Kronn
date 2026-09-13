@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowDown, ArrowUp, Plus, RefreshCw, Search, Trash2, X } from 'lucide-react';
 import { modelCatalogApi } from '../../lib/api';
 import { useT } from '../../lib/I18nContext';
+import { catalogModelProvenance } from '../../lib/modelCatalogSelection';
 import { SearchableSelect, type SearchableSelectOption } from '../SearchableSelect';
 import type {
   AgentType,
@@ -17,6 +18,7 @@ type SortColumn = 'model' | 'target' | 'provenance' | 'availability' | 'cost';
 
 interface CatalogRow {
   model: CatalogModelEntry;
+  provenance: CatalogModelEntry['provenance'];
   targetId: string;
   targetLabel: string;
 }
@@ -54,6 +56,7 @@ export function ModelCatalogSection({ onCatalogChanged }: { onCatalogChanged?: (
   const [form, setForm] = useState<ManualForm | null>(null);
   const [editing, setEditing] = useState<CatalogModelEntry | null>(null);
   const [busy, setBusy] = useState(false);
+  const mutationPending = useRef(false);
   const [error, setError] = useState<string | null>(null);
   // KT-588 — 637 models across 10 targets were rendered as ten stacked lists.
   // Finding one meant scrolling past the other 636.
@@ -64,11 +67,23 @@ export function ModelCatalogSection({ onCatalogChanged }: { onCatalogChanged?: (
   );
   const [paging, setPaging] = useState({ key: '', count: PAGE_SIZE });
 
+  const invalidateSnapshot = (targetId?: string) => {
+    setSnapshot(previous => previous ? {
+      ...previous,
+      targets: previous.targets.map(target => !targetId || target.runtime_target_id === targetId
+        ? { ...target, stale: true, live_refresh_ok: false } : target),
+    } : null);
+  };
   const load = async () => {
-    const value = await modelCatalogApi.list();
-    setSnapshot(value);
-    onCatalogChanged?.();
-    return value;
+    try {
+      const value = await modelCatalogApi.list();
+      setSnapshot(value);
+      onCatalogChanged?.();
+      return value;
+    } catch (err) {
+      invalidateSnapshot();
+      throw err;
+    }
   };
   // KT-587 — awaited before anything is written, and dropped if the section
   // unmounted while the catalogue was in flight.
@@ -95,6 +110,7 @@ export function ModelCatalogSection({ onCatalogChanged }: { onCatalogChanged?: (
   const rows = useMemo<CatalogRow[]>(
     () => snapshot?.targets.flatMap(target => target.models.map(model => ({
       model,
+      provenance: catalogModelProvenance(model, target),
       targetId: target.runtime_target_id,
       targetLabel: target.target_label ?? target.runtime_target_id,
     }))) ?? [],
@@ -115,7 +131,7 @@ export function ModelCatalogSection({ onCatalogChanged }: { onCatalogChanged?: (
     const key = (row: CatalogRow) => {
       switch (sort.column) {
         case 'target': return row.targetLabel;
-        case 'provenance': return row.model.provenance;
+        case 'provenance': return row.provenance;
         case 'availability': return row.model.availability;
         case 'cost': return row.model.cost_hint ?? '';
         default: return row.model.display_alias ?? row.model.display_name;
@@ -180,7 +196,8 @@ export function ModelCatalogSection({ onCatalogChanged }: { onCatalogChanged?: (
     });
   }
   const save = async () => {
-    if (!form || !form.modelId.trim() || !form.displayName.trim()) return;
+    if (!form || !form.modelId.trim() || !form.displayName.trim() || mutationPending.current) return;
+    mutationPending.current = true;
     setBusy(true);
     setError(null);
     const request = {
@@ -204,10 +221,13 @@ export function ModelCatalogSection({ onCatalogChanged }: { onCatalogChanged?: (
     } catch (err) {
       setError(String(err));
     } finally {
+      mutationPending.current = false;
       setBusy(false);
     }
   };
   const remove = async (entry: CatalogModelEntry) => {
+    if (mutationPending.current) return;
+    mutationPending.current = true;
     setBusy(true);
     setError(null);
     try {
@@ -219,6 +239,7 @@ export function ModelCatalogSection({ onCatalogChanged }: { onCatalogChanged?: (
     } catch (err) {
       setError(String(err));
     } finally {
+      mutationPending.current = false;
       setBusy(false);
     }
   };
@@ -318,7 +339,7 @@ export function ModelCatalogSection({ onCatalogChanged }: { onCatalogChanged?: (
           <span
             key={target.runtime_target_id}
             className="set-model-catalog-source"
-            data-stale={target.stale}
+            data-stale={target.stale || !target.live_refresh_ok}
             data-selected={targetFilter === target.runtime_target_id}
           >
             <button
@@ -327,18 +348,21 @@ export function ModelCatalogSection({ onCatalogChanged }: { onCatalogChanged?: (
               onClick={() => setTargetFilter(
                 targetFilter === target.runtime_target_id ? '' : target.runtime_target_id,
               )}
-              title={target.stale ? t('modelCatalog.stale') : t('modelCatalog.current')}
+              title={target.stale || !target.live_refresh_ok ? t('modelCatalog.stale') : t('modelCatalog.current')}
             >
               {target.target_label ?? target.runtime_target_id}
               <em>{target.models.length}</em>
             </button>
             {!target.runtime_target_id.startsWith('http:') && (
               <button type="button" className="set-icon-btn" disabled={busy} aria-label={t('modelCatalog.recheck')} onClick={async () => {
+                if (mutationPending.current) return;
+                mutationPending.current = true;
                 setBusy(true);
+                setError(null);
                 try {
                   await modelCatalogApi.refresh({ runtime_target_id: target.runtime_target_id, agent_type: target.agent_type, force: true });
                   await load();
-                } catch (err) { setError(String(err)); } finally { setBusy(false); }
+                } catch (err) { invalidateSnapshot(target.runtime_target_id); setError(String(err)); } finally { mutationPending.current = false; setBusy(false); }
               }}><RefreshCw size={11} /></button>
             )}
           </span>
@@ -415,7 +439,7 @@ export function ModelCatalogSection({ onCatalogChanged }: { onCatalogChanged?: (
                   </td>
                   <td><span className="set-model-catalog-target-cell">{row.targetLabel}</span></td>
                   <td>
-                    {t(`modelCatalog.provenance.${row.model.provenance}`)}
+                    {t(`modelCatalog.provenance.${row.provenance}`)}
                     {row.model.availability === 'unavailable' && (
                       <em className="set-model-catalog-unavailable">{t('modelCatalog.unavailable')}</em>
                     )}
@@ -433,7 +457,7 @@ export function ModelCatalogSection({ onCatalogChanged }: { onCatalogChanged?: (
                   </td>
                   <td>
                     {(row.model.provenance === 'manual' || row.model.provenance === 'migrated') && (
-                      <button type="button" className="set-icon-btn" aria-label={t('common.delete')} onClick={() => void remove(row.model)}><Trash2 size={10} /></button>
+                      <button type="button" className="set-icon-btn" disabled={busy} aria-label={t('common.delete')} onClick={() => void remove(row.model)}><Trash2 size={10} /></button>
                     )}
                   </td>
                 </tr>

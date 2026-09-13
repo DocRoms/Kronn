@@ -1,4 +1,4 @@
-import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { I18nProvider } from '../../lib/I18nContext';
 import type { DiscussionListItem } from '../../types/generated';
@@ -25,42 +25,12 @@ vi.mock('../PlanningPage', () => ({ PlanningPage: () => <div data-testid="planni
 vi.mock('../SettingsPage', () => ({ SettingsPage: () => <div data-testid="settings-page" /> }));
 vi.mock('../PagesPage', () => ({ PagesPage: () => <div data-testid="pages-page" /> }));
 
-vi.mock('../../lib/api', () => ({
-  projects: {
-    list: vi.fn().mockResolvedValue([]),
-    auditStatusAll: vi.fn().mockResolvedValue([]),
-    auditHistory: vi.fn().mockResolvedValue([]),
-  },
-  mcps: {
-    registry: vi.fn().mockResolvedValue([]),
-    overview: vi.fn().mockResolvedValue({ servers: [], configs: [], customized_contexts: [] }),
-  },
-  agents: {
-    detect: vi.fn().mockResolvedValue([]),
-  },
-  discussions: {
-    list: vi.fn().mockResolvedValue([]),
-    runAgent: vi.fn(),
-    sendMessageStream: vi.fn(),
-  },
-  workflows: {
-    list: vi.fn().mockResolvedValue([]),
-  },
-  pages: { capability: vi.fn().mockResolvedValue({ activated: false, activated_at: null }) },
-  config: {
-    getLanguage: vi.fn().mockResolvedValue('fr'),
-    getUiLanguage: vi.fn().mockResolvedValue('fr'),
-    saveUiLanguage: vi.fn().mockResolvedValue(undefined),
-    getSttModel: vi.fn().mockResolvedValue(null),
-    getTtsVoices: vi.fn().mockResolvedValue({}),
-    getAgentAccess: vi.fn().mockResolvedValue(null),
-  },
-  skills: {
-    list: vi.fn().mockResolvedValue([]),
-  },
-}));
+vi.mock('../../lib/api', async () => {
+  const { buildApiMock } = await import('../../test/apiMock');
+  return buildApiMock();
+});
 
-import { discussions as discussionsApi, pages as pagesApi } from '../../lib/api';
+import { discussions as discussionsApi, pages as pagesApi, workflows as workflowsApi, projects as projectsApi } from '../../lib/api';
 import { Dashboard } from '../Dashboard';
 
 const makeDiscussion = (id: string): DiscussionListItem => ({
@@ -100,6 +70,9 @@ async function renderDashboard() {
 beforeEach(() => {
   sessionStorage.clear();
   vi.mocked(discussionsApi.list).mockResolvedValue([]);
+  vi.mocked(workflowsApi.list).mockResolvedValue([]);
+  vi.mocked(projectsApi.auditStatusAll).mockResolvedValue([]);
+  vi.mocked(pagesApi.capability).mockResolvedValue({ activated: false, activated_at: null });
 });
 
 afterEach(() => {
@@ -109,6 +82,48 @@ afterEach(() => {
 });
 
 describe('Dashboard reload/HMR navigation restoration', () => {
+  it('always navigates Projects and Automation while activity disclosures remain separate buttons', async () => {
+    vi.mocked(workflowsApi.list).mockResolvedValue([{
+      id: 'wf-live', name: 'Live workflow', project_id: null, project_name: null,
+      trigger_type: 'manual', step_count: 1, misconfigured_step_count: 0, enabled: true, pinned: false,
+      last_run: { id: 'run-live', status: 'Running', started_at: '2026-01-01T00:00:00Z', finished_at: null, tokens_used: 0 },
+      created_at: '2026-01-01T00:00:00Z',
+    }]);
+    vi.mocked(projectsApi.auditStatusAll).mockResolvedValue([{
+      project_id: 'project-live', phase: 'auditing', step_index: 1, total_steps: 2,
+      current_file: null, started_at: '2026-01-01T00:00:00Z', kind: 'full_audit',
+    }]);
+    await renderDashboard();
+    const projectsTab = document.querySelector<HTMLButtonElement>('[data-tour-id="nav-projects"]');
+    const workflowsTab = document.querySelector<HTMLButtonElement>('[data-tour-id="nav-workflows"]');
+    expect(projectsTab).not.toBeNull();
+    expect(workflowsTab).not.toBeNull();
+    expect(screen.getByTestId('active-audits-trigger')).toBeInTheDocument();
+    expect(screen.getByTestId('active-runs-trigger')).toBeInTheDocument();
+    expect(screen.getByTestId('active-audits-trigger')).toHaveAccessibleName('Voir et arrêter 1 audit en cours');
+    expect(screen.getByTestId('active-runs-trigger')).toHaveAccessibleName('Voir et arrêter 1 exécution en cours');
+    expect(screen.getByTestId('active-audits-trigger')).toHaveAttribute('aria-haspopup', 'dialog');
+    expect(screen.getByTestId('active-runs-trigger')).not.toHaveAttribute('aria-controls');
+    expect(projectsTab?.querySelector('button')).toBeNull();
+    expect(workflowsTab?.querySelector('button')).toBeNull();
+    await act(async () => { fireEvent.click(screen.getByTestId('active-audits-trigger')); });
+    expect(screen.getByRole('dialog', { name: 'Audits en cours' })).toBeInTheDocument();
+    expect(screen.getByTestId('active-audits-trigger')).toHaveAttribute('aria-controls', 'active-audits-popover');
+    await act(async () => { fireEvent.click(screen.getByTestId('active-runs-trigger')); });
+    expect(screen.queryByRole('dialog', { name: 'Audits en cours' })).not.toBeInTheDocument();
+    expect(screen.getByRole('dialog', { name: 'Runs en cours' })).toBeInTheDocument();
+    // A trigger pointerdown is not an outside click: its following click closes
+    // this disclosure rather than reopening it from a stale outside handler.
+    await act(async () => {
+      fireEvent.pointerDown(screen.getByTestId('active-runs-trigger'));
+      fireEvent.click(screen.getByTestId('active-runs-trigger'));
+    });
+    expect(screen.queryByRole('dialog', { name: 'Runs en cours' })).not.toBeInTheDocument();
+    await act(async () => { workflowsTab?.click(); });
+    expect(await screen.findByTestId('workflow-page')).toBeInTheDocument();
+    await act(async () => { projectsTab?.click(); });
+    expect(projectsTab).toHaveAttribute('aria-current', 'page');
+  });
   it('reveals Pages only after the first Page has activated the capability', async () => {
     await renderDashboard();
     expect(screen.queryByRole('button', { name: 'Pages' })).not.toBeInTheDocument();
