@@ -20552,7 +20552,6 @@ mod tests {
                     "sess-a",
                     "sess-a",
                 )
-                .map_err(anyhow::Error::from)
             })
             .await
             .unwrap();
@@ -20648,7 +20647,6 @@ mod tests {
                     "sess-a",
                     "sess-a",
                 )
-                .map_err(anyhow::Error::from)
             })
             .await
             .unwrap();
