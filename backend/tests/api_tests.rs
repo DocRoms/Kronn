@@ -9973,6 +9973,9 @@ fn test_state_without_fixture() -> AppState {
 #[serial]
 async fn mcp_host_sync_router_confines_an_inherited_host_home() {
     if std::env::var_os(MCP_HOST_ISOLATION_CHILD).is_none() {
+        // Ordinary non-serial router tests can initialize this OnceLock too.
+        // Snapshot only after its process-wide environment setup has settled.
+        isolate_config_dir();
         let parent_data_dir = std::env::var_os("KRONN_DATA_DIR");
         let parent_host_home = std::env::var_os("KRONN_HOST_HOME");
         for mode in ["red", "green", "blocked"] {

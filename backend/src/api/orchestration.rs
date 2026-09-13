@@ -20669,10 +20669,9 @@ mod tests {
         assert_eq!(final_exec.worker_cli_session_id, Some(102));
     }
 
-    /// KT-640: a downstream refusal after the DB CAS already resumed the
-    /// `Blocked` hold back to `Provisioning` must roll back the WHOLE
-    /// transaction — the stale offer stays live and the hold stays exactly as
-    /// it was, not half-cleared.
+    /// The missing CLI child binding fails inside the DB savepoint, after
+    /// Blocked→Provisioning but before stale-offer cancellation. The resumed
+    /// checkpoint must roll back and leave the pending offer untouched.
     #[tokio::test]
     async fn native_reassignment_from_blocked_awaiting_acceptance_rolls_back_when_child_room_vanished(
     ) {
@@ -20730,7 +20729,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("execution has no child discussion"),
+                .contains("CLI reassignment has no child discussion"),
             "{error:#}"
         );
 
@@ -20738,6 +20737,11 @@ mod tests {
         assert_eq!(after.status, TaskExecutionStatus::Blocked);
         assert_eq!(after.blocked_from_status, before.blocked_from_status);
         assert_eq!(after.blocked_reason_code, before.blocked_reason_code);
+        assert_eq!(
+            serde_json::to_value(&after).unwrap(),
+            serde_json::to_value(&before).unwrap(),
+            "the failed reassignment must leave every execution field unchanged"
+        );
 
         let offer_status: String = db
             .with_conn(move |conn| {

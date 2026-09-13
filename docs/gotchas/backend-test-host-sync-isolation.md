@@ -79,6 +79,13 @@ write failure leaves the outside sentinels unchanged. The parent uses the
 cross-platform command helper, has a deadline/kill path, and asserts that its
 own two overrides are unchanged after every child. [src: file: backend/tests/api_tests.rs:9933-10140]
 
+The parent initializes the ordinary `OnceLock` before taking those environment
+snapshots. Otherwise a parallel non-serial router test can perform the first
+initialization during a child run and make the parent falsely report an
+environment leak. Keep that initialization inside the parent branch: doing it
+in the child before its RED control would hide the confinement regression.
+[src: file: backend/tests/api_tests.rs:9974]
+
 The focused regression is not a replacement for the principal's combined-suite
 qualification; it is the source-level confinement audit and regression proof
 for the host-sync paths above.

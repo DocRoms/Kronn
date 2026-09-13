@@ -62,10 +62,11 @@ Regression coverage, and exactly what each layer proves:
   Provisioning→Working dispatch branch, asserting the execution reaches
   `Working` with its sub-discussion/workspace/attempt unchanged, exactly one
   replacement dispatch job, and the stale CLI offer refusing a late accept.
-  A second test forces a downstream refusal (missing child discussion) after
-  the DB CAS already resumed to `Provisioning`, and asserts the WHOLE
-  transaction rolled back — the row is still `Blocked`/`AwaitingWorkerAcceptance`
-  and the old offer is still `pending`, not half-cleared.
+  A second test removes the CLI child binding. Its guard fails inside the DB
+  savepoint after the CAS resumed to `Provisioning`, but before stale-offer
+  cancellation. Every execution field must equal the pre-call snapshot and
+  the old offer must remain `pending`. This proves checkpoint rollback at the
+  CLI-origin restoration boundary, not a later API failure after cancellation.
 - API-layer `task_exec_reassign` (CLI target): the same fixture redirected to
   a different joined CLI session opens a genuinely fresh offer (distinct id,
   correct target session) after the `Blocked`→`Provisioning`→`Interrupted`
