@@ -324,7 +324,7 @@ _ask_yn_fallback() {
 # warning: Docker is the correct path there (host binaries are Linux, run
 # directly in the container). Arg overridable for tests.
 is_macos_host() {
-    [[ "${1:-$(uname -s 2>/dev/null)}" == "Darwin" ]]
+    [[ "${1-$(uname -s 2>/dev/null)}" == "Darwin" ]]
 }
 
 # Pure: given whether each native-dev tool is present (1 = present, anything

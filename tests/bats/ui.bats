@@ -7,6 +7,24 @@ setup() {
     _load_lib "ui.sh"
 }
 
+@test "Bats assertions reject a failed command after UI helpers load" {
+    run false
+    run assert_success
+    [[ "$status" -ne 0 ]]
+}
+
+@test "Bats assertions reject an unexpected success after UI helpers load" {
+    run true
+    run assert_failure
+    [[ "$status" -ne 0 ]]
+}
+
+@test "Bats assertions reject mismatched output after UI helpers load" {
+    run printf 'actual'
+    run assert_output 'expected'
+    [[ "$status" -ne 0 ]]
+}
+
 # ─── info ────────────────────────────────────────────────────────────────────
 
 @test "info: outputs the message" {
@@ -53,13 +71,13 @@ setup() {
 # ─── fail ────────────────────────────────────────────────────────────────────
 
 @test "fail: outputs the error message" {
-    run fail "Something broke"
+    run bash -c 'source "$1"; fail "$2"' _ "$PROJECT_ROOT/lib/ui.sh" "Something broke"
     assert_success
     assert_output --partial "Something broke"
 }
 
 @test "fail: contains cross symbol" {
-    run fail "error"
+    run bash -c 'source "$1"; fail "$2"' _ "$PROJECT_ROOT/lib/ui.sh" "error"
     assert_success
     [[ "$output" == *"✗"* ]]
 }
@@ -87,7 +105,10 @@ setup() {
 }
 
 @test "banner: outputs version" {
-    run banner
+    local version_fixture="$BATS_TEST_TMPDIR/banner-version"
+    mkdir -p "$version_fixture"
+    printf '0.1.0\n' >"$version_fixture/VERSION"
+    run env KRONN_DIR="$version_fixture" bash -c 'source "$1"; banner' _ "$PROJECT_ROOT/lib/ui.sh"
     assert_success
     assert_output --partial "v0.1.0"
 }
@@ -136,7 +157,7 @@ setup() {
 }
 
 @test "fail: returns 0 (output only, not exit)" {
-    run fail "test"
+    run bash -c 'source "$1"; fail "$2"' _ "$PROJECT_ROOT/lib/ui.sh" "test"
     assert_success
 }
 
@@ -196,6 +217,11 @@ setup() {
 @test "is_macos_host: false for empty/unknown os" {
     run is_macos_host ""
     assert_failure
+}
+
+@test "is_macos_host: omitted argument detects the host" {
+    run bash -c 'source "$1"; uname() { printf "Darwin\n"; }; is_macos_host' _ "$PROJECT_ROOT/lib/ui.sh"
+    assert_success
 }
 
 # ─── dev_missing_tools (kronn start-dev preflight) ────────────────────────────
@@ -490,11 +516,13 @@ EOF
     local fake_backend="$BATS_TEST_TMPDIR/kronn-warm"
     local starts="$BATS_TEST_TMPDIR/backend-warm-starts"
     local cargo_done="$BATS_TEST_TMPDIR/cargo-done"
+    local cargo_release="$BATS_TEST_TMPDIR/cargo-release"
     mkdir -p "$fake_bin" "$fake_backend_dir"
+    mkfifo "$cargo_release"
 
     cat >"$fake_bin/cargo" <<'EOF'
 #!/usr/bin/env bash
-sleep 1
+IFS= read -r _ <"$KRONN_TEST_CARGO_RELEASE"
 touch "$KRONN_TEST_CARGO_DONE"
 EOF
     printf '#!/usr/bin/env bash\nexit 0\n' >"$fake_bin/curl"
@@ -518,23 +546,37 @@ EOF
         KRONN_DEV_BACKEND_HEALTH_URL="http://test.invalid/health" \
         KRONN_TEST_BACKEND_STARTS="$starts" \
         KRONN_TEST_CARGO_DONE="$cargo_done" \
+        KRONN_TEST_CARGO_RELEASE="$cargo_release" \
         bash -c '
             set -e
+            exec 4<>"$4"
             "$1" >/dev/null 2>&1 &
             supervisor=$!
+            cleanup_fixture() {
+                status=$?
+                trap - EXIT
+                # Release the owned fake Cargo even if an early assertion
+                # failed: the supervisor must not wait forever for its child.
+                printf "stop\n" >&4 || true
+                kill -TERM "$supervisor" 2>/dev/null || true
+                wait "$supervisor" 2>/dev/null || true
+                exit "$status"
+            }
+            trap cleanup_fixture EXIT
             for _ in $(seq 1 40); do
                 [[ -s "$2" ]] && break
                 sleep 0.025
             done
             [[ -s "$2" ]]
             [[ ! -e "$3" ]]
+            kill -0 "$supervisor"
+            printf "continue\n" >&4
             for _ in $(seq 1 80); do
                 [[ -e "$3" ]] && break
                 sleep 0.025
             done
-            kill -TERM "$supervisor" 2>/dev/null || true
-            wait "$supervisor" 2>/dev/null || true
-        ' _ "$PROJECT_ROOT/scripts/dev-backend-supervisor.sh" "$starts" "$cargo_done"
+            [[ -e "$3" ]]
+        ' _ "$PROJECT_ROOT/scripts/dev-backend-supervisor.sh" "$starts" "$cargo_done" "$cargo_release"
 
     assert_success
 }
@@ -581,6 +623,14 @@ EOF
             set -e
             "$1" >"$2" 2>&1 &
             supervisor=$!
+            cleanup_fixture() {
+                status=$?
+                trap - EXIT
+                kill -TERM "$supervisor" 2>/dev/null || true
+                wait "$supervisor" 2>/dev/null || true
+                exit "$status"
+            }
+            trap cleanup_fixture EXIT
             for _ in $(seq 1 80); do
                 grep -q "keeping the last successful backend online" "$2" 2>/dev/null && break
                 sleep 0.025
@@ -588,8 +638,7 @@ EOF
             grep -q "keeping the last successful backend online" "$2"
             [[ -s "$3" ]]
             [[ ! -e "$4" ]]
-            kill -TERM "$supervisor" 2>/dev/null || true
-            wait "$supervisor" 2>/dev/null || true
+            kill -0 "$supervisor"
         ' _ "$PROJECT_ROOT/scripts/dev-backend-supervisor.sh" "$BATS_TEST_TMPDIR/supervisor.log" "$starts" "$cargo_marker"
 
     assert_success

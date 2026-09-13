@@ -32,4 +32,9 @@ _load_lib() {
     MOVE_UP=${MOVE_UP:-$'\033[1A'}
 
     source "${PROJECT_ROOT}/lib/${script}"
+    # ui.sh defines a printing-only fail() which returns success. Bats uses
+    # its own fail() to propagate assertion errors: never let a loaded app
+    # helper replace that assertion boundary. Test the colliding UI function
+    # in a separate shell, where it retains its real production behavior.
+    source "${PROJECT_ROOT}/tests/bats/bats-support/src/error.bash"
 }

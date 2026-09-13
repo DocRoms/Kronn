@@ -44,6 +44,37 @@ done. KT-638 keeps prevention open: it does not lower disk thresholds, ignore
 tests, scan recursively on a failing request, or authorise deletion of active
 or unowned targets. [src: file: backend/src/core/worktree.rs:451-558]
 
+The retained maintenance record distinguishes each authorised batch. These are
+dated physical free-space observations, not quotas or reusable deletion grants:
+
+| Batch | Available space afterwards | Preserved boundary |
+| --- | ---: | --- |
+| Principal qualification incremental cache | 14,919,256 KiB | Main backend/watcher and worker targets untouched |
+| Remaining principal debug artifacts | 91,250,360 KiB | Sources, Git, independent logs and active workers retained |
+| Entire main `target/debug`, then backend-only offline rebuild | 517,517,132 KiB | Running executable backed up; original backend process stayed online |
+| Eligible KT-486 maintenance API target | 523,800,688 KiB | Other inventory entries refused/untouched |
+| Explicitly authorised 27 old targets | 1,449,400,604 KiB | Fixed inventory; live-use and unchanged Git state verified per target |
+
+The main-cache batch rebuilt only the backend with command-local
+`CARGO_INCREMENTAL=0` and `CARGO_PROFILE_DEV_DEBUG=0`, in 1 min 29 s; its rebuilt
+debug directory reported 1.85 GiB. The final 27-target batch freed about
+882.73 GiB, without rebuilding or restarting a service. Twenty targets were
+under the managed root (six escalated, fourteen without recorded ownership),
+and seven belonged to external worktrees. Human confirmation of inactivity
+authorised that manual exception; automatic eligibility was not widened.
+Sources, worktrees and non-integrated work were not removed. Such duplication
+can affect other Rust projects too, but Kronn's approved versioned profile
+change does not alter their Cargo settings.
+[src: user: 2026-09-13: kt638-old-targets-maintenance-013]
+[src: user: 2026-09-13: kt638-kronn-only-profile-approval-013]
+
+Continuous learning was disabled, so no proposal became an accepted automatic
+memory. KT-638, this document, and room
+`85513703-3169-451d-88e3-e03fbaac34b1` retain the incident record. KT-639 covers
+storage visibility and sorting/filtering separately and was explicitly deferred
+from 0.13.0. None of these records authorises another purge.
+[src: user: 2026-09-13: kt639-release-scope-013]
+
 ## Ownership
 
 | Path | Owner | Cleanable |

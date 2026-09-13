@@ -12658,7 +12658,11 @@ mod tests {
         )
         .unwrap();
         std::fs::write(backend.join("src/lib.rs"), "pub fn fixture() {}\n").unwrap();
-        let target = project.path().join("relative-target");
+        let target = project
+            .path()
+            .canonicalize()
+            .unwrap()
+            .join("relative-target");
         let spec = ValidationSpec {
             command: "cargo test --manifest-path backend/Cargo.toml --config build.target-dir=\"ignored\" --target-dir relative-target".into(),
             quick_exec_id: None,
@@ -12709,14 +12713,14 @@ mod tests {
         ] {
             let spec = ValidationSpec {
                 command: format!(
-                    "{prefix} test --manifest-path backend/Cargo.toml --config build.target-dir=ignored --target-dir {target_name}"
+                    "{prefix} test --manifest-path backend/Cargo.toml --config build.target-dir=\"ignored\" --target-dir {target_name}"
                 ),
                 quick_exec_id: None,
                 timeout_secs: Some(5),
             };
             assert_eq!(
                 validation_build_path(&spec, project.path()).await.unwrap(),
-                project.path().join(target_name),
+                project.path().canonicalize().unwrap().join(target_name),
                 "{prefix} must use Cargo's effective target"
             );
         }
@@ -12755,6 +12759,9 @@ mod tests {
             .kill_on_drop(true)
             .spawn()
             .unwrap();
+        // Child::wait closes any stdin handle it still owns. Hold the writer
+        // separately so the fixture cannot race to EOF before the deadline.
+        let _stdin_writer = child.stdin.take().unwrap();
         let result = wait_for_metadata_output(&mut child, std::time::Duration::ZERO).await;
 
         assert!(result.unwrap_err().contains("timed out"));
