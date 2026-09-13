@@ -195,7 +195,9 @@ proxy settings and launcher overrides are not inherited. Keychain access and
 periodic backups are disabled. Directory creation is exclusive (not `mkdir -p`)
 and private; an existing or concurrently created directory is never adopted.
 Before any enrolment or rotation, Playwright checks the configured backend URL,
-the launcher's `config.toml` and `backend.pid`, and the actual listening PID.
+the effective `config.toml`, the separate `sandbox-owner`/`backend.pid` launcher
+receipts, and the actual listening PID. Config comments are not ownership proof:
+normal product startup may remove them while saving its configuration.
 The publication run requires its own Vite (`--strictPort`, no server reuse).
 The shell suite also runs the preflight's dependency-free Node tests.
 

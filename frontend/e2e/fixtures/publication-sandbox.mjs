@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
 
 /** Validate destinations before any credential enrolment/rotation request. */
-export function validatePublicationSandbox({ backendUrl, devPort, config, pid, listeners }) {
+export function validatePublicationSandbox({ backendUrl, devPort, config, receipt, pid, listeners }) {
   const backend = new URL(backendUrl);
   const backendPort = Number(backend.port);
   const frontendPort = Number(devPort);
@@ -15,7 +15,9 @@ export function validatePublicationSandbox({ backendUrl, devPort, config, pid, l
     throw new Error('publication E2E requires distinct, non-developer loopback ports');
   }
   const server = config.match(/(?:^|\n)\[server\]\s*\n([\s\S]*?)(?=\n\[|$)/)?.[1] ?? '';
-  if (!config.startsWith('# Written by scripts/e2e-sandbox-backend.sh.')
+  // The product may reserialize config.toml and remove its comments. Keep the
+  // launcher receipt separate, while still checking the effective port/host.
+  if (receipt?.trim() !== 'kronn-e2e-sandbox-v1'
     || !/^host = "127\.0\.0\.1"$/m.test(server)
     || Number(server.match(/^port = (\d+)$/m)?.[1]) !== backendPort) {
     throw new Error('publication E2E backend URL does not match its owned configuration');
@@ -33,9 +35,10 @@ export function assertPublicationSandbox(environment = process.env) {
   const backendUrl = environment.KRONN_BACKEND_URL ?? '';
   const port = new URL(backendUrl).port;
   const config = readFileSync(join(directory, 'config.toml'), 'utf8');
+  const receipt = readFileSync(join(directory, 'sandbox-owner'), 'utf8');
   const pid = readFileSync(join(directory, 'backend.pid'), 'utf8');
   const listeners = execFileSync('lsof', ['-nP', `-iTCP:${port}`, '-sTCP:LISTEN', '-t'], {
     encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'pipe'],
   });
-  validatePublicationSandbox({ backendUrl, devPort: environment.VITE_DEV_PORT, config, pid, listeners });
+  validatePublicationSandbox({ backendUrl, devPort: environment.VITE_DEV_PORT, config, receipt, pid, listeners });
 }

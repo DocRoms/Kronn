@@ -68,6 +68,12 @@ with open(os.path.join(os.environ["KRONN_DATA_DIR"], "environment.json"), "w") a
 
 # The port is whatever the script wrote into the config it owns.
 config = open(os.path.join(os.environ["KRONN_DATA_DIR"], "config.toml")).read()
+with open(os.path.join(os.environ["KRONN_DATA_DIR"], "config-seen.toml"), "w") as fh:
+    fh.write(config)
+# Real Kronn saves its parsed configuration during startup, dropping comments.
+# The ownership receipt must survive independently of that normal rewrite.
+with open(os.path.join(os.environ["KRONN_DATA_DIR"], "config.toml"), "w") as fh:
+    fh.write("\\n".join(line for line in config.splitlines() if not line.startswith("#")))
 port = int(re.search(r"^port = (\\d+)\$", config, re.M).group(1))
 
 class Handler(BaseHTTPRequestHandler):
@@ -172,7 +178,7 @@ if PID="$(env OPENAI_API_KEY=synthetic-outside-key KRONN_AUTH_TOKEN=synthetic-ou
         || bad "writes the port it was given"
     # Written, not produced: the config exists without the product having run
     # to make it, so it cannot have served a default port on the way.
-    grep -q "Written by scripts/e2e-sandbox-backend.sh" "$DIR/config.toml" \
+    grep -q "Written by scripts/e2e-sandbox-backend.sh" "$DIR/config-seen.toml" \
         && ok "writes the config itself rather than booting to get one" \
         || bad "writes the config itself rather than booting to get one"
     # `KRONN_DATA_DIR` alone does not isolate the MCP host sync: the backend
@@ -214,7 +220,8 @@ PY
     [[ "$LISTENER" == "$PID" ]] \
         && ok "the pid it returns is the one holding the port" \
         || bad "the pid it returns is the one holding the port" "listener=$LISTENER pid=$PID"
-    [[ "$(cat "$DIR/backend.pid" 2>/dev/null)" == "$PID" ]] \
+    [[ "$(cat "$DIR/backend.pid" 2>/dev/null)" == "$PID" \
+        && "$(cat "$DIR/sandbox-owner" 2>/dev/null)" == "kronn-e2e-sandbox-v1" ]] \
         && ok "records the verified listener for destructive E2E preflight" \
         || bad "records the verified listener for destructive E2E preflight"
     kill "$PID" 2>/dev/null

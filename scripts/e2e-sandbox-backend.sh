@@ -178,5 +178,6 @@ listener="$(lsof -nP -iTCP:"$PORT" -sTCP:LISTEN -t 2>/dev/null | head -1)"
     || die "port $PORT is served by pid ${listener:-nobody}, not by the backend just started ($backend)"
 
 printf '%s\n' "$backend" > "$DATA_DIR/backend.pid"
+printf '%s\n' 'kronn-e2e-sandbox-v1' > "$DATA_DIR/sandbox-owner"
 trap - EXIT
 echo "$backend"
