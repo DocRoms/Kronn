@@ -1041,6 +1041,282 @@ fn reassignment_repairs_an_unadvanced_approved_attempt_after_validation_sendback
     );
 }
 
+/// KT-640: a principal may redirect the ONE `Blocked` hold that is a live CLI
+/// control offer awaiting the exact target session's acceptance — the worker
+/// never started, so the same execution/checkout/history/attempts/budget carry
+/// over untouched, and the stale offer can never be usurped by a late accept.
+#[test]
+fn reassignment_resumes_a_blocked_awaiting_cli_acceptance_execution_and_invalidates_the_stale_offer(
+) {
+    let conn = setup();
+    seed_task(&conn, "t-reassign-blocked-cli", 1108);
+    seed_session(&conn, 91, "Codex", "cli-91");
+    conn.execute(
+        "INSERT INTO discussions (id, title, created_at, updated_at) \
+         VALUES ('disc-blocked-child', 'child', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+        [],
+    )
+    .unwrap();
+    let mut input = LaunchSingleTaskInput::new("t-reassign-blocked-cli", DISC);
+    input.worker_target_kind = Some(MessageTargetKind::Cli);
+    input.worker_cli_session_id = Some(91);
+    input.worker_agent_type = Some("Codex".into());
+    let execution = launch_single_task(&conn, &input, &backend_actor())
+        .unwrap()
+        .execution;
+    set_execution_sub_discussion(&conn, &execution.id, "disc-blocked-child").unwrap();
+    transition_execution(
+        &conn,
+        &execution.id,
+        TaskExecutionStatus::Provisioning,
+        &backend_actor(),
+        serde_json::json!({}),
+    )
+    .unwrap();
+    let offer = match crate::db::worker_offers::open_worker_offer(
+        &conn,
+        &crate::db::worker_offers::NewWorkerOffer {
+            id: None,
+            task_execution_id: &execution.id,
+            attempt_no: 0,
+            target_cli_session_id: 91,
+            origin_discussion_id: DISC,
+            child_discussion_id: "disc-blocked-child",
+            expires_at: None,
+            offer_message_id: None,
+            reason: None,
+        },
+    )
+    .unwrap()
+    {
+        crate::db::worker_offers::OpenOutcome::Opened(offer) => offer,
+        other => panic!("expected the offer to open, got {other:?}"),
+    };
+    block_execution(
+        &conn,
+        &execution.id,
+        &backend_actor(),
+        "waiting for the exact CLI",
+        Some(BlockedReasonCode::AwaitingWorkerAcceptance),
+    )
+    .unwrap();
+
+    let reassigned = reassign_execution_worker(
+        &conn,
+        &execution.id,
+        &CampaignWorkerSelection {
+            target: MessageTarget::discussion_agent(AgentType::Ollama),
+            model: Some("qwen3.6:35b-mlx".into()),
+            profile_id: None,
+        },
+        "native handoff after the CLI never accepted",
+        &backend_actor(),
+    )
+    .unwrap();
+
+    // The awaiting-acceptance hold clears back to its Provisioning origin
+    // (ADR §3 checkpoint guard); a native worker drives Provisioning forward
+    // from there — not this db-layer primitive.
+    assert_eq!(reassigned.status, TaskExecutionStatus::Provisioning);
+    assert_eq!(reassigned.blocked_from_status, None);
+    assert_eq!(reassigned.blocked_reason, None);
+    assert_eq!(reassigned.blocked_reason_code, None);
+    assert_eq!(
+        reassigned.worker_target_kind,
+        Some(MessageTargetKind::DiscussionAgent)
+    );
+    assert_eq!(reassigned.worker_agent_type.as_deref(), Some("Ollama"));
+    assert_eq!(reassigned.worker_cli_session_id, None);
+    // Same execution/checkout: sub_discussion_id, attempt_no and the run
+    // identity carry over untouched.
+    assert_eq!(
+        reassigned.sub_discussion_id.as_deref(),
+        Some("disc-blocked-child")
+    );
+    assert_eq!(reassigned.attempt_no, 0);
+
+    let offer_status: String = conn
+        .query_row(
+            "SELECT status FROM task_execution_worker_offers WHERE id = ?1",
+            [&offer.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(offer_status, "cancelled");
+    // The superseded CLI still holds a live joined session, yet its stale
+    // offer can no longer be accepted — no usurped acceptance.
+    let late_accept = crate::db::worker_offers::accept_worker_offer(
+        &conn, &offer.id, "Codex", "cli-91", "cli-91",
+    )
+    .unwrap();
+    assert!(matches!(
+        late_accept,
+        crate::db::worker_offers::AcceptOutcome::NotAcceptable {
+            status: crate::models::WorkerOfferStatus::Cancelled
+        }
+    ));
+
+    let recovery = get_execution_recovery(&conn, &execution.id)
+        .unwrap()
+        .expect("the explicit reassignment arms exactly one new generation");
+    assert_eq!(recovery.assignment_generation, 1);
+    assert!(recovery.pending);
+
+    // Race: a second reassignment against the SAME once-Blocked row must not
+    // silently double-apply — the CAS already cleared it to `Provisioning`,
+    // which is not (by itself) a resumable worker state.
+    let raced = reassign_execution_worker(
+        &conn,
+        &execution.id,
+        &CampaignWorkerSelection {
+            target: MessageTarget::agent(AgentType::ClaudeCode),
+            model: None,
+            profile_id: None,
+        },
+        "a second, raced reassignment attempt",
+        &backend_actor(),
+    )
+    .expect_err("the hold already resumed once; it cannot resume a second time");
+    assert!(raced.to_string().contains("not a resumable worker state"));
+    assert_eq!(
+        get_execution_recovery(&conn, &execution.id)
+            .unwrap()
+            .expect("recovery row is untouched by the refused race")
+            .assignment_generation,
+        1
+    );
+}
+
+/// The OTHER `Blocked` reason (a live CLI session already committed elsewhere)
+/// still needs a human pick between a re-offer and a native worker — KT-640
+/// does not widen the resumable set beyond `awaiting_worker_acceptance`.
+#[test]
+fn reassignment_refuses_a_blocked_session_conflict_hold_without_mutation() {
+    let conn = setup();
+    seed_task(&conn, "t-reassign-blocked-conflict", 1109);
+    let execution = launch_single_task(
+        &conn,
+        &LaunchSingleTaskInput::new("t-reassign-blocked-conflict", DISC),
+        &backend_actor(),
+    )
+    .unwrap()
+    .execution;
+    transition_execution(
+        &conn,
+        &execution.id,
+        TaskExecutionStatus::Provisioning,
+        &backend_actor(),
+        serde_json::json!({}),
+    )
+    .unwrap();
+    block_execution(
+        &conn,
+        &execution.id,
+        &backend_actor(),
+        "worker session already committed to execution other-exec (attempt 0)",
+        Some(BlockedReasonCode::WorkerSessionCommittedElsewhere),
+    )
+    .unwrap();
+
+    let error = reassign_execution_worker(
+        &conn,
+        &execution.id,
+        &CampaignWorkerSelection {
+            target: MessageTarget::discussion_agent(AgentType::Ollama),
+            model: None,
+            profile_id: None,
+        },
+        "cannot self-serve a session conflict",
+        &backend_actor(),
+    )
+    .expect_err("a session-conflict hold still needs a human pick");
+    assert!(error.to_string().contains("not a resumable worker state"));
+
+    let unchanged = get_task_execution(&conn, &execution.id).unwrap().unwrap();
+    assert_eq!(unchanged.status, TaskExecutionStatus::Blocked);
+    assert_eq!(
+        unchanged.blocked_from_status,
+        Some(TaskExecutionStatus::Provisioning)
+    );
+    assert_eq!(
+        unchanged.blocked_reason_code,
+        Some(BlockedReasonCode::WorkerSessionCommittedElsewhere)
+    );
+    let assignment_events: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM task_execution_assignment_events \
+             WHERE task_execution_id = ?1",
+            [&execution.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(assignment_events, 0, "refusal cannot arm a watchdog retry");
+}
+
+/// An `Applying`-origin `Blocked` hold (infra/dirty-main) stays refused: KT-640
+/// only frees the CLI-acceptance handshake, never a resumable integration
+/// checkpoint.
+#[test]
+fn reassignment_refuses_an_applying_origin_blocked_hold_without_mutation() {
+    let conn = setup();
+    seed_task(&conn, "t-reassign-blocked-applying", 1110);
+    let execution = launch_single_task(
+        &conn,
+        &LaunchSingleTaskInput::new("t-reassign-blocked-applying", DISC),
+        &backend_actor(),
+    )
+    .unwrap()
+    .execution;
+    for status in [
+        TaskExecutionStatus::Provisioning,
+        TaskExecutionStatus::Working,
+        TaskExecutionStatus::AwaitingReview,
+        TaskExecutionStatus::Approved,
+        TaskExecutionStatus::Integrating,
+        TaskExecutionStatus::Validating,
+        TaskExecutionStatus::Applying,
+    ] {
+        transition_execution(
+            &conn,
+            &execution.id,
+            status,
+            &backend_actor(),
+            serde_json::json!({}),
+        )
+        .unwrap();
+    }
+    block_execution(
+        &conn,
+        &execution.id,
+        &backend_actor(),
+        "protected merge checkpoint refused",
+        None,
+    )
+    .unwrap();
+
+    let error = reassign_execution_worker(
+        &conn,
+        &execution.id,
+        &CampaignWorkerSelection {
+            target: MessageTarget::discussion_agent(AgentType::Ollama),
+            model: None,
+            profile_id: None,
+        },
+        "cannot self-serve an integration checkpoint",
+        &backend_actor(),
+    )
+    .expect_err("an Applying-origin hold is not a worker-acceptance handshake");
+    assert!(error.to_string().contains("not a resumable worker state"));
+
+    let unchanged = get_task_execution(&conn, &execution.id).unwrap().unwrap();
+    assert_eq!(unchanged.status, TaskExecutionStatus::Blocked);
+    assert_eq!(
+        unchanged.blocked_from_status,
+        Some(TaskExecutionStatus::Applying)
+    );
+    assert_eq!(unchanged.blocked_reason_code, None);
+}
+
 #[test]
 fn timeout_scan_reports_activity_total_review_and_human_wait_distinctly() {
     let conn = setup();

@@ -7519,6 +7519,11 @@ pub(crate) async fn reassign_native_execution(
                 TaskExecutionStatus::Interrupted
                     | TaskExecutionStatus::ChangesRequested
                     | TaskExecutionStatus::Escalated
+                    // KT-640: a redirected awaiting-CLI-acceptance hold cleared
+                    // back to Provisioning (db::reassign_execution_worker); a
+                    // native worker dispatches immediately, exactly like the
+                    // initial KT-328 handshake's Provisioning -> Working.
+                    | TaskExecutionStatus::Provisioning
             ) {
                 crate::db::orchestration::transition_execution(
                     &transaction,
