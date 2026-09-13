@@ -200,6 +200,9 @@ receipts, and the actual listening PID. Config comments are not ownership proof:
 normal product startup may remove them while saving its configuration.
 The publication run requires its own Vite (`--strictPort`, no server reuse).
 The shell suite also runs the preflight's dependency-free Node tests.
+The test server invokes the already installed Vite CLI directly; it never asks
+the package manager to repair or replace dependencies during a test run. Install
+dependencies separately in their owning checkout before running Playwright.
 
 Docs export is deliberately unavailable in this publication-only fixture. An
 owned executable occupies the sidecar override so resolution cannot fall back

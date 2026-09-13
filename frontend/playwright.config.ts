@@ -84,7 +84,10 @@ export default defineConfig({
   // another terminal — devs iterating on UI + specs at the same time keep
   // their hot-reload session.
   webServer: {
-    command: `pnpm exec vite --port ${devPort}${publicationSandbox ? ' --strictPort' : ''}`,
+    // Dependencies are a prerequisite, not something a test server may replace.
+    // Invoke the installed CLI directly: package-manager auto-install can try
+    // to remove a node_modules directory shared by a development worktree.
+    command: `node ./node_modules/vite/bin/vite.js --port ${devPort}${publicationSandbox ? ' --strictPort' : ''}`,
     url: devUrl,
     reuseExistingServer: !publicationSandbox && !process.env.CI,
     timeout: 30_000,
