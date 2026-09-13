@@ -114,7 +114,7 @@ export function ImportantMessageCard({ discussionId, sourceMessageId, serverEven
                     type="button"
                     className="disc-important-task-link"
                     onClick={() => window.dispatchEvent(new CustomEvent('kronn:open-discussion-plan', {
-                      detail: { discussionId },
+                      detail: { discussionId, taskReference: value },
                     }))}
                   >
                     {t(`disc.important.ref.${key}`)}: {value}

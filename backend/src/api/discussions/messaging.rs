@@ -3343,22 +3343,32 @@ mod tests {
     /// this endpoint refused every fence unconditionally.
     #[tokio::test]
     async fn send_message_publishes_a_card_for_a_human_grant_and_its_proof() {
-        assert_human_card_receipt(false, "valid").await;
+        assert_human_card_receipt(false, "valid", "decision").await;
     }
 
     #[tokio::test]
     async fn deferred_human_card_survives_a_lost_receipt_without_duplicate_publication() {
-        assert_human_card_receipt(true, "valid").await;
+        assert_human_card_receipt(true, "valid", "decision").await;
     }
 
     #[tokio::test]
     async fn deferred_human_card_refusals_preserve_text_and_never_upgrade_a_replayed_message() {
         for proof_case in ["missing", "revoked", "expired", "wrong_body"] {
-            assert_human_card_receipt(true, proof_case).await;
+            assert_human_card_receipt(true, proof_case, "decision").await;
         }
     }
 
-    async fn assert_human_card_receipt(defer_dispatch: bool, proof_case: &'static str) {
+    #[tokio::test]
+    async fn information_human_card_uses_the_same_authority_and_retry_contract() {
+        assert_human_card_receipt(true, "valid", "information").await;
+        assert_human_card_receipt(true, "missing", "information").await;
+    }
+
+    async fn assert_human_card_receipt(
+        defer_dispatch: bool,
+        proof_case: &'static str,
+        category: &'static str,
+    ) {
         let disc = "d-human-grant";
         let state = make_state_with_disc(disc).await;
         state
@@ -3374,7 +3384,7 @@ mod tests {
             "Décision prise.\n\n```kronn-important\n{}\n```\n",
             serde_json::json!({
                 "version": crate::db::discussion_important::IMPORTANT_SCHEMA_VERSION,
-                "category": "decision",
+                "category": category,
                 "dedup_key": "kt-619.human-grant",
                 "title": "Titre",
                 "highlight": "Le point essentiel.",
@@ -3503,6 +3513,7 @@ mod tests {
             .unwrap();
         if proof_case == "valid" {
             assert_eq!(list.total, 1, "a human grant and its proof must publish");
+            assert_eq!(list.items[0].category.as_str(), category);
             assert_eq!(
                 list.items[0].author_kind,
                 crate::db::discussion_important::ImportantAuthorKind::Human
@@ -3514,5 +3525,24 @@ mod tests {
                 "{proof_case}: refused card is never added on replay"
             );
         }
+        let (status, Json(filtered)) = crate::api::discussion_important::list(
+            State(state.clone()),
+            Path(disc.to_string()),
+            axum::extract::Query(crate::api::discussion_important::ImportantQuery {
+                category: Some(category.into()),
+            }),
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::OK);
+        assert_eq!(filtered.data.unwrap().total, list.total);
+        let (status, _) = crate::api::discussion_important::list(
+            State(state),
+            Path(disc.to_string()),
+            axum::extract::Query(crate::api::discussion_important::ImportantQuery {
+                category: Some("unknown".into()),
+            }),
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
     }
 }

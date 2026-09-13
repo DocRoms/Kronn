@@ -187,6 +187,13 @@ does not claim the message was delivered before an acceptance receipt arrives.
 
 ## Reading the code
 
+The dedicated **Important message** form uses this same authority protocol.
+Its key is requested contextually, not above every ordinary reply. Publication
+success requires the persisted card, not merely issuance of a proof or receipt
+of an ordinary message. See [the form lifecycle](important-messages.md#human-form-0130-kt-643)
+for draft isolation, cancellation and uncertain-write reconciliation.
+[src: file: frontend/src/lib/submitImportantMessage.ts:1]
+
 | | |
 |---|---|
 | grants, proofs, bootstrap | `backend/src/db/human_credentials.rs` |

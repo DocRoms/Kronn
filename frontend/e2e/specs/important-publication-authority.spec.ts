@@ -22,6 +22,7 @@ import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { expect, test } from '../fixtures/kronn-fixture';
 import { DashboardPage } from '../pages/DashboardPage';
+import { ImportantMessagePage } from '../pages/ImportantMessagePage';
 import { assertPublicationSandbox } from '../fixtures/publication-sandbox.mjs';
 
 const SANDBOX = process.env.KRONN_SANDBOX_DIR ?? '';
@@ -169,12 +170,11 @@ test.describe.serial('publication authority, end to end', () => {
     await dashboard.goto();
     await dashboard.openDiscussion(discId);
 
-    await page.getByText('Publier une carte importante en votre nom').click();
-    await page.getByLabel('Identifiant de publication').fill(grant);
-
-    const content = fence('e2e-published', 'La carte part avec un identifiant enrôlé.');
-    await page.locator('.disc-composer-textarea').fill(content);
-    await page.locator('.disc-send-btn').first().click();
+    const form = new ImportantMessagePage(page);
+    await expect(form.credential).toHaveCount(0);
+    await form.fill('La carte part avec un identifiant enrôlé.', grant, 'decision');
+    await form.publish.click();
+    await expect(form.content).toHaveCount(0);
 
     await expect(async () => {
       const listed = await request.get(`/api/discussions/${discId}/important`);
@@ -222,8 +222,8 @@ test.describe.serial('publication authority, end to end', () => {
     }, { room: discId, content, id: clientMessageId });
     await dashboard.openDiscussion(discId);
     await expect(page.locator('.disc-queued-line')).toHaveCount(1);
-    await page.getByText('Publier une carte importante en votre nom').click();
-    await page.getByLabel('Identifiant de publication').fill(grant);
+    const form = new ImportantMessagePage(page);
+    await form.authorize(grant);
     const proofRequest = page.waitForRequest(req => req.url().endsWith('/api/human-credentials/proof')
       && req.method() === 'POST' && req.postDataJSON()?.content === content);
     const sendRequest = page.waitForRequest(req => req.url().endsWith(`/api/discussions/${discId}/messages`)
@@ -243,7 +243,8 @@ test.describe.serial('publication authority, end to end', () => {
     expect(await page.evaluate(room => localStorage.getItem(`kronn:message-outbox:${room}`), discId)).toBeNull();
     await page.reload();
     await dashboard.openDiscussion(discId);
-    await expect(page.getByLabel('Identifiant de publication')).toHaveValue('');
+    await form.open();
+    await expect(form.credential).toHaveValue('');
     await expect(page.locator('.disc-queued-line')).toHaveCount(0);
     const listed = await request.get(`/api/discussions/${discId}/important`);
     expect((await listed.json())?.data?.total_all).toBe(2);
@@ -308,6 +309,54 @@ test.describe.serial('publication authority, end to end', () => {
       await request.delete(`/api/discussions/${other}`);
     }
   });
+
+  for (const width of [360, 1280]) {
+    test(`the simple form preserves the ordinary draft and links one real task at ${width}px`, async ({ page, request }) => {
+      const created = await request.post('/api/discussions', {
+        data: { title: `KT-643 formulaire ${width}`, agent: 'ClaudeCode', language: 'fr', initial_prompt: 'Ne lance aucun modèle.', no_agent: true },
+      });
+      expect(created.ok()).toBe(true);
+      const room = (await created.json()).data.id;
+      try {
+        const createdTask = await request.post('/api/planning/tasks', { data: { title: 'Vérifier le message important sans modifier cette tâche', discussion_id: room } });
+        expect(createdTask.ok()).toBe(true);
+        const task = (await createdTask.json()).data;
+        const taskBefore = (await (await request.get(`/api/planning/tasks/${task.id}`)).json()).data;
+        const dashboard = new DashboardPage(page);
+        await dashboard.goto();
+        await dashboard.openDiscussion(room);
+        await page.setViewportSize({ width, height: 1000 });
+        const form = new ImportantMessagePage(page);
+        await form.ordinaryComposer.fill('Ma réponse ordinaire reste intacte é🙂');
+        await form.fill('Une information utile é🙂', grant);
+        await form.task.selectOption(task.reference);
+        expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+        await form.publish.scrollIntoViewIfNeeded();
+        expect(await form.publish.evaluate(button => {
+          const box = button.getBoundingClientRect();
+          return button.contains(document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2));
+        })).toBe(true);
+        let sends = 0;
+        page.on('request', req => { if (req.method() === 'POST' && req.url().endsWith(`/api/discussions/${room}/messages`)) sends++; });
+        await form.publish.evaluate(button => { button.click(); button.click(); });
+        await expect(form.content).toHaveCount(0);
+        expect(sends).toBe(1);
+        await expect(form.ordinaryComposer).toHaveValue('Ma réponse ordinaire reste intacte é🙂');
+        const list = (await (await request.get(`/api/discussions/${room}/important?category=information`)).json()).data;
+        expect(list.total).toBe(1);
+        expect(list.items[0]).toMatchObject({ author_kind: 'human', category: 'information', references: { task_ref: task.reference } });
+        const card = page.locator('article.disc-important-card[data-category="information"]');
+        await expect(card).toBeVisible();
+        await card.getByRole('button', { name: `Tâche: ${task.reference}`, exact: true }).click();
+        await expect(page.locator('.plan-detail')).toContainText(task.title);
+        const taskAfter = (await (await request.get(`/api/planning/tasks/${task.id}`)).json()).data;
+        expect(taskAfter).toEqual(taskBefore);
+        expect(await page.evaluate(secret => [localStorage, sessionStorage].some(storage =>
+          Object.values(storage).some(value => typeof value === 'string' && value.includes(secret)),
+        ), grant)).toBe(false);
+      } finally { await request.delete(`/api/discussions/${room}`); }
+    });
+  }
 
   test('rotating the bootstrap locks the screen back and retires the old secret', async ({
     page,

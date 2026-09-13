@@ -1024,6 +1024,140 @@ mod tests {
     }
 
     #[test]
+    fn migration_175_preserves_populated_cards_and_closes_information_category() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let conn = Connection::open(file.path()).unwrap();
+        run_through(&conn, "174_human_publication_credentials").unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;")
+            .unwrap();
+        conn.execute(
+            "INSERT INTO discussions (id, title, agent, created_at, updated_at) VALUES ('d', 'D', 'Codex', 'now', 'now')",
+            [],
+        ).unwrap();
+        for (index, category) in [
+            "decision",
+            "scope_change",
+            "dod_waiver",
+            "blocking_alert",
+            "human_action_required",
+            "accepted_delivery",
+        ]
+        .iter()
+        .enumerate()
+        {
+            let id = format!("old-{index}");
+            conn.execute(
+                "INSERT INTO messages (id, discussion_id, role, content, timestamp, sort_order) VALUES (?1, 'd', 'User', 'body', 'now', ?2)",
+                rusqlite::params![&id, i64::try_from(index + 1).unwrap()],
+            ).unwrap();
+            conn.execute(
+                "INSERT INTO discussion_important_messages \
+                 (id, discussion_id, message_id, category, schema_version, dedup_key, payload_json, author_kind, author_label, source_kind, source_id, created_at) \
+                 VALUES (?1, 'd', ?1, ?2, 1, ?1, ?3, ?4, 'Ada é🙂', 'manual', ?1, 'now')",
+                rusqlite::params![id, category, "{\"author\":\"kept é🙂\"}", if index % 2 == 0 { "human" } else { "orchestrator" }],
+            ).unwrap();
+        }
+        let snapshot = |conn: &Connection| -> Vec<Vec<rusqlite::types::Value>> {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT * FROM discussion_important_messages WHERE id LIKE 'old-%' ORDER BY id",
+                )
+                .unwrap();
+            let columns = stmt.column_count();
+            stmt.query_map([], |row| {
+                (0..columns)
+                    .map(|column| row.get(column))
+                    .collect::<rusqlite::Result<Vec<_>>>()
+            })
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+        };
+        let before = snapshot(&conn);
+        assert_eq!(before.len(), 6);
+        run(&conn).unwrap();
+        assert_eq!(
+            snapshot(&conn),
+            before,
+            "every original column and row must survive"
+        );
+        let integrity: String = conn
+            .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(integrity, "ok");
+        assert!(!conn
+            .prepare("PRAGMA foreign_key_check")
+            .unwrap()
+            .exists([])
+            .unwrap());
+        let indexes: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'index' AND name IN ('idx_disc_important_message', 'idx_disc_important_discussion', 'idx_disc_important_source')",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(indexes, 3);
+        conn.execute(
+            "INSERT INTO messages (id, discussion_id, role, content, timestamp, sort_order) VALUES ('m-info', 'd', 'User', 'info', 'now', 7)",
+            [],
+        ).unwrap();
+        // Each rejected row is independent: a uniqueness violation must not
+        // masquerade as evidence that the category CHECK survived.
+        let insert = |id: &str, message: &str, category: &str, dedup: &str| {
+            conn.execute(
+            "INSERT INTO discussion_important_messages \
+             (id, discussion_id, message_id, category, schema_version, dedup_key, payload_json, author_kind, author_label, created_at) \
+             VALUES (?1, 'd', ?2, ?3, 1, ?4, '{}', 'human', 'Ada', 'now')",
+            rusqlite::params![id, message, category, dedup],
+        )
+        };
+        assert!(insert("bad", "m-info", "unknown", "bad")
+            .unwrap_err()
+            .to_string()
+            .contains("CHECK constraint failed"));
+        assert!(insert("orphan", "missing-message", "information", "orphan")
+            .unwrap_err()
+            .to_string()
+            .contains("FOREIGN KEY constraint failed"));
+        insert("info", "m-info", "information", "info").unwrap();
+        assert!(insert("duplicate", "m-info", "information", "other")
+            .unwrap_err()
+            .to_string()
+            .contains("UNIQUE constraint failed"));
+        conn.execute("INSERT INTO messages (id, discussion_id, role, content, timestamp, sort_order) VALUES ('m-dedup', 'd', 'User', 'body', 'now', 8)", []).unwrap();
+        assert!(insert("dedup", "m-dedup", "information", "info")
+            .unwrap_err()
+            .to_string()
+            .contains("UNIQUE constraint failed"));
+        drop(conn);
+        let conn = Connection::open(file.path()).unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        run(&conn).unwrap();
+        assert_eq!(
+            snapshot(&conn),
+            before,
+            "restart must preserve the upgraded rows"
+        );
+        let receipt_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM _migrations WHERE name = '175_important_message_information_category'",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(receipt_count, 1);
+        conn.execute("DELETE FROM messages WHERE id = 'm-info'", [])
+            .unwrap();
+        assert!(!conn
+            .prepare("SELECT 1 FROM discussion_important_messages WHERE id = 'info'")
+            .unwrap()
+            .exists([])
+            .unwrap());
+        conn.execute("DELETE FROM discussions WHERE id = 'd'", [])
+            .unwrap();
+        assert!(!conn
+            .prepare("SELECT 1 FROM discussion_important_messages")
+            .unwrap()
+            .exists([])
+            .unwrap());
+    }
+
+    #[test]
     fn model_catalog_upgrades_from_its_immediate_predecessor() {
         let conn = Connection::open_in_memory().unwrap();
         let model_catalog_index = MIGRATIONS

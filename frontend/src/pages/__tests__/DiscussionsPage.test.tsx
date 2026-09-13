@@ -211,6 +211,7 @@ import {
 } from '../../lib/api';
 import { DiscussionsPage } from '../DiscussionsPage';
 import { clearImportantMessages } from '../../lib/importantMessages';
+import { discardImportantDraft } from '../../lib/importantMessageDraft';
 import { findRenderedTextRanges } from '../../lib/discussionMessageSearch';
 import type { AgentDetection, AgentType, AgentsConfig, AiAuditStatus, ContextFile, Discussion, Project, SharedRun } from '../../types/generated';
 import type { ExternalApiConnectionView } from '../../lib/api';
@@ -220,6 +221,7 @@ const noop = () => {};
 const toastFn: ToastFn = vi.fn();
 
 beforeEach(() => {
+  for (const id of ['d-no-native-provider', 'd-important-queued', 'd-important-other']) discardImportantDraft(id);
   vi.mocked(discussionsApi.nativeAgentMode).mockReset();
   vi.mocked(discussionsApi.nativeAgentMode).mockResolvedValue({ disabled: false });
   vi.mocked(discussionsApi.get).mockReset();
@@ -339,7 +341,8 @@ describe('DiscussionsPage', () => {
     const textarea = document.querySelector('.disc-composer-textarea')!;
     await waitFor(() => expect(textarea).toBeEnabled());
     expect(document.querySelector('.disc-agent-disabled-banner')).toBeNull();
-    fireEvent.change(document.querySelector('#important-publish-grant')!, { target: { value: 'human-no-native-grant' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Message important' }));
+    fireEvent.change(screen.getByLabelText('Clé de publication'), { target: { value: 'human-no-native-grant' } });
     fireEvent.change(textarea, { target: { value: importantQueuedContent } });
     fireEvent.click(document.querySelector('.disc-send-btn')!);
     await waitFor(() => expect(discussionsApi.sendMessageStream).toHaveBeenCalledTimes(1));
@@ -407,11 +410,12 @@ describe('DiscussionsPage', () => {
       />
     );
     const view = await wrap(page());
-    const input = document.querySelector('#important-publish-grant') as HTMLInputElement;
+    const trigger = screen.getByRole('button', { name: 'Message important' });
+    if (trigger.getAttribute('aria-expanded') !== 'true') fireEvent.click(trigger);
+    const input = screen.getByLabelText('Clé de publication') as HTMLInputElement;
     if (!restore) {
-      fireEvent.click(input.closest('details')!.querySelector('summary')!);
       fireEvent.change(input, { target: { value: grant } });
-      fireEvent.change(document.querySelector('textarea')!, { target: { value: importantQueuedContent } });
+      fireEvent.change(document.querySelector('.disc-composer-textarea')!, { target: { value: importantQueuedContent } });
       fireEvent.click(screen.getByRole('button', { name: /Ajouter à la file/ }));
     }
     const navigate = () => {

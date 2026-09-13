@@ -119,7 +119,7 @@ describe('ImportantMessageCard', () => {
     render(<ImportantMessageCard discussionId={DISC} sourceMessageId="m-1" />);
     await user.click(await screen.findByRole('button', { name: 'disc.important.ref.task_ref: KT-643' }));
     expect(opened).toHaveBeenCalledOnce();
-    expect((opened.mock.calls[0][0] as CustomEvent).detail).toEqual({ discussionId: DISC });
+    expect((opened.mock.calls[0][0] as CustomEvent).detail).toEqual({ discussionId: DISC, taskReference: 'KT-643' });
     window.removeEventListener('kronn:open-discussion-plan', opened);
   });
 

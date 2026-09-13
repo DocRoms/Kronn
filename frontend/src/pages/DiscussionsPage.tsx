@@ -4,7 +4,8 @@ import { MessageBubble, MarkdownContent } from '../components/MessageBubble';
 import { DiscussionNote } from '../components/DiscussionNote';
 import { DiscussionQuestionBanner } from '../components/DiscussionQuestionBanner';
 import { ImportantMessagesBar } from '../components/ImportantMessageCard';
-import { ImportantPublicationStrip } from '../components/ImportantPublicationStrip';
+import { ImportantMessageForm } from '../components/ImportantMessageForm';
+import { submitImportantMessage } from '../lib/submitImportantMessage';
 import { refreshImportantMessages } from '../lib/importantMessages';
 import { preparePublication } from '../lib/importantPublication';
 import { unseenBasis } from '../lib/discussionUiUtils';
@@ -460,6 +461,7 @@ export function DiscussionsPage({
   const [initialGitWorkspaceId, setInitialGitWorkspaceId] = useState<string | undefined>();
   const [gitPanelExpanded, setGitPanelExpanded] = useState(false);
   const [showPlanPanel, setShowPlanPanel] = useState(false);
+  const [planTaskTarget, setPlanTaskTarget] = useState<{ discussionId: string; taskId: string; sequence: number }>();
   const [showSettingsPanel, setShowSettingsPanel] = useState(false);
   const [showAssetsPanel, setShowAssetsPanel] = useState(false);
   // KT-580 — the sixth panel, and the one KT-581 existed to make room for.
@@ -509,6 +511,7 @@ export function DiscussionsPage({
   // shown in the header button too; the panel shows it, so the switcher does
   // not repeat it — one number, one place.
   const [discussionPlan, setDiscussionPlan] = useState<DiscussionPlan | null>(null);
+  const [discussionPlanRoom, setDiscussionPlanRoom] = useState<string | null>(null);
   const [proposalInbox, setProposalInbox] = useState<ProposalListResponse | null>(null);
   const [proposalInboxDiscussionId, setProposalInboxDiscussionId] = useState<string | null>(null);
   // KT-587 — keyed by the discussion they were fetched for, so switching rooms
@@ -1307,6 +1310,7 @@ export function DiscussionsPage({
       .then(([plan, proposals]) => {
         if (!cancelled) {
           setDiscussionPlan(plan);
+          setDiscussionPlanRoom(activeDiscussionId);
           setProposalInbox(proposals);
           setProposalInboxDiscussionId(activeDiscussionId);
         }
@@ -1314,6 +1318,7 @@ export function DiscussionsPage({
       .catch(() => {
         if (!cancelled) {
           setDiscussionPlan(null);
+          setDiscussionPlanRoom(activeDiscussionId);
           setProposalInbox(null);
           setProposalInboxDiscussionId(activeDiscussionId);
         }
@@ -1340,20 +1345,41 @@ export function DiscussionsPage({
         planningApi.proposals(discussionId),
       ])
         .then(([plan, proposals]) => {
+          if (activeDiscussionIdRef.current !== discussionId) return;
           setDiscussionPlan(plan);
+          setDiscussionPlanRoom(discussionId);
           setProposalInbox(proposals);
           setProposalInboxDiscussionId(discussionId);
         })
         .catch(() => { /* panel will surface a fetch error when opened */ });
     };
     const openPlan = (event: Event) => {
-      const discussionId = (event as CustomEvent<{ discussionId?: string }>).detail?.discussionId;
-      if (discussionId !== activeDiscussionId) return;
-      setShowGitPanel(false);
-      setShowTerminalPanel(false);
-      setShowSettingsPanel(false);
-      setShowAssetsPanel(false);
-      setShowPlanPanel(true);
+      const detail = (event as CustomEvent<{ discussionId?: string; taskReference?: string }>).detail;
+      const discussionId = detail?.discussionId;
+      if (!discussionId || discussionId !== activeDiscussionId) return;
+      const show = () => {
+        setShowGitPanel(false);
+        setShowTerminalPanel(false);
+        setShowSettingsPanel(false);
+        setShowAssetsPanel(false);
+        setShowPlanPanel(true);
+      };
+      if (!detail?.taskReference) { show(); return; }
+      // A card may outlive its plan link. Resolve against a fresh room plan,
+      // never select an unrelated global task or reuse the previous room.
+      void planningApi.discussionPlan(discussionId).then(plan => {
+        if (activeDiscussionIdRef.current !== discussionId) return;
+        const task = plan.discussion_id === discussionId ? [
+          plan.primary_objective,
+          ...plan.active.map(relation => relation.task),
+          ...plan.later.map(relation => relation.task),
+        ].find(candidate => candidate?.reference === detail.taskReference) : undefined;
+        if (!task) { toast(t('disc.important.taskUnavailable'), 'error'); return; }
+        setPlanTaskTarget(previous => ({ discussionId, taskId: task.id, sequence: (previous?.sequence ?? 0) + 1 }));
+        show();
+      }).catch(() => {
+        if (activeDiscussionIdRef.current === discussionId) toast(t('disc.important.taskOpenFailed'), 'error');
+      });
     };
     window.addEventListener('kronn:plan-changed', refreshPlan);
     window.addEventListener('kronn:plan-proposals-changed', refreshPlan);
@@ -1363,7 +1389,7 @@ export function DiscussionsPage({
       window.removeEventListener('kronn:plan-proposals-changed', refreshPlan);
       window.removeEventListener('kronn:open-discussion-plan', openPlan);
     };
-  }, [activeDiscussionId]);
+  }, [activeDiscussionId, t, toast]);
   const batchReviewRows = useMemo(
     () => buildBatchTriageRows(batchReviewDiscs),
     [batchReviewDiscs],
@@ -5171,18 +5197,28 @@ export function DiscussionsPage({
                 mention popover / emoji popover / voice mode / draft hydration. */}
             {/* KT-619 — the human's own publication authority, held for as
                 long as this page is open and stored nowhere. */}
-            <ImportantPublicationStrip
+            <ImportantMessageForm
+              key={`important:${activeDiscussion.id}`}
+              discussionId={activeDiscussion.id}
               grant={publicationGrant}
               onGrantChange={value => {
                 cancelQueuedPreparation();
                 setPublicationGrant(value);
               }}
-              onPublish={handleSendMessage}
+              onPublish={async submission => {
+                const outcome = await submitImportantMessage(submission);
+                if (outcome === 'confirmed' || outcome === 'text-only' || outcome === 'uncertain') {
+                  refreshImportantMessages(submission.discussionId);
+                  refetchDiscussions();
+                  reloadDiscussion(submission.discussionId);
+                }
+                return outcome;
+              }}
               onOpenSettings={() => onNavigate('settings')}
               tasks={[
-                ...(discussionPlan?.primary_objective ? [discussionPlan.primary_objective] : []),
-                ...(discussionPlan?.active.map(relation => relation.task) ?? []),
-                ...(discussionPlan?.later.map(relation => relation.task) ?? []),
+                ...(discussionPlanRoom === activeDiscussion.id && discussionPlan?.discussion_id === activeDiscussion.id && discussionPlan.primary_objective ? [discussionPlan.primary_objective] : []),
+                ...(discussionPlanRoom === activeDiscussion.id && discussionPlan?.discussion_id === activeDiscussion.id ? discussionPlan.active.map(relation => relation.task) : []),
+                ...(discussionPlanRoom === activeDiscussion.id && discussionPlan?.discussion_id === activeDiscussion.id ? discussionPlan.later.map(relation => relation.task) : []),
               ].filter((task, index, all) => all.findIndex(candidate => candidate.reference === task.reference) === index)}
               t={t}
             />
@@ -5400,7 +5436,9 @@ export function DiscussionsPage({
 
             {showPlanPanel && (
               <DiscussionPlanPanel
+                key={`${activeDiscussion.id}:${planTaskTarget?.discussionId === activeDiscussion.id ? planTaskTarget.sequence : 0}`}
                 discussionId={activeDiscussion.id}
+                initialTaskId={planTaskTarget?.discussionId === activeDiscussion.id ? planTaskTarget.taskId : undefined}
                 onClose={() => setShowPlanPanel(false)}
                 onChanged={setDiscussionPlan}
                 onNavigateDiscussion={(targetDiscussionId) => {

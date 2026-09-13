@@ -89,7 +89,10 @@ fn spec_json(dedup_key: &str) -> String {
 
 #[test]
 fn information_is_a_closed_category() {
-    assert_eq!(ImportantCategory::parse("information"), Some(ImportantCategory::Information));
+    assert_eq!(
+        ImportantCategory::parse("information"),
+        Some(ImportantCategory::Information)
+    );
     assert_eq!(ImportantCategory::Information.as_str(), "information");
     assert_eq!(ImportantCategory::parse("unknown"), None);
 }

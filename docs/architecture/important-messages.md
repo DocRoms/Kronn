@@ -12,7 +12,7 @@ never becomes an important card retroactively.
 ## The template
 
 A publisher submits a bounded `ImportantSpec` (a `kronn-important` fence, the
-same mechanism as `kronn-question`): a closed `category` (`decision`,
+same mechanism as `kronn-question`): a closed `category` (`information`, `decision`,
 `scope_change`, `dod_waiver`, `blocking_alert`, `human_action_required`,
 `accepted_delivery`), a `dedup_key`, `title`, `highlight`, optional `context`,
 `impact`, `action_required` (`required` plus `action`/`owner`/`due`, or an
@@ -116,11 +116,59 @@ first GET while a new card lands.
 [src: file: frontend/src/components/ImportantMessageCard.tsx:156-162]
 [src: file: frontend/src/pages/DiscussionsPage.tsx:4052-4059]
 
+## Human form (0.13.0, KT-643)
+
+Use **Important message** above the ordinary composer to highlight information,
+a decision or a blocker. Enter plain text, choose the category, and optionally
+select an existing task from this discussion's plan. This does not create,
+complete or otherwise modify a task. The card's task link resolves a fresh plan
+and opens that exact task; a removed link or unavailable plan is explained
+instead of selecting an unrelated task.
+[src: file: frontend/src/components/ImportantMessageForm.tsx:1]
+[src: file: frontend/src/pages/DiscussionsPage.tsx:1340]
+[src: file: frontend/src/components/DiscussionPlanPanel.tsx:59]
+
+The publication-key field appears only inside the open form. It uses the
+existing enrolled credential and single-use proof; Settings remains the place
+to obtain that credential. No grant or proof enters browser storage, card text
+or the draft store. The normal composer keeps its own text and send lifecycle.
+[src: file: frontend/src/lib/submitImportantMessage.ts:1]
+[src: file: frontend/src/lib/importantMessageDraft.ts:1]
+
+Closing the form, switching discussion or visiting Settings preserves its text
+in memory, separately for each discussion. Reloading the browser discards this
+form draft; it is not the persistent ordinary-message outbox. Cancellation
+during permission preparation sends nothing. Once the HTTP write starts,
+the form keeps observing it, including after navigation. A receipt alone does
+not announce success: the persisted card must be found in that exact room.
+An uncertain outcome locks the submitted body and retries its stable UUID after
+reconciliation. A confirmed text-only outcome preserves the draft but an
+explicit new publication gets a new message UUID, because the ordinary row
+cannot be promoted retroactively. A successful publication starts a fresh draft.
+[src: file: frontend/src/lib/submitImportantMessage.ts:23]
+[src: file: frontend/src/components/ImportantMessageForm.tsx:1]
+
+The form bounds text by Unicode scalar values and does not split an emoji at
+the title/highlight limits. Migration 175 adds the closed `information`
+category without rewriting migrations 172/174, preserving the previous rows,
+identities, foreign keys, category checks and indexes.
+[src: file: frontend/src/lib/importantMessageDraft.ts:1]
+[src: file: backend/src/db/sql/175_important_message_information_category.sql:1]
+[src: file: backend/src/db/migrations.rs:1027]
+
 ## Tests
 
 - Backend model, dedup/replay/restart, categories: `backend/src/db/discussion_important/tests.rs`.
 - Authorization at the real handler (role/System bypass, bulk import, missing/invalid session, parent-room targeting): `backend/src/api/disc_source.rs` (`disc_append_*` tests) and `backend/src/api/discussions/messaging.rs` (`send_message_does_not_publish_an_unverified_human_card`).
 - Frontend behaviour (filter, counter, navigation, refetch-on-arrival): `frontend/src/components/__tests__/ImportantMessageCard.test.tsx`.
+- Human form, double-click, independent drafts, cancellation and reconciliation:
+  `frontend/src/components/__tests__/ImportantMessageForm.test.tsx`,
+  `frontend/src/lib/__tests__/submitImportantMessage.test.ts`, and
+  `frontend/src/pages/__tests__/DiscussionsPage.test.tsx`.
+- Populated migration 174 → 175 with persistent reopen, all old columns,
+  foreign-key/index/uniqueness checks: `backend/src/db/migrations.rs`.
+- Real form, ordinary-draft preservation and read-only task navigation at
+  360/1280 px: `frontend/e2e/specs/important-publication-authority.spec.ts`.
 - E2E layout (no horizontal overflow, click targets, keyboard focus ring) at phone and desktop widths: `frontend/e2e/specs/important-message-card-layout.spec.ts`.
 
 ## Known limitations
