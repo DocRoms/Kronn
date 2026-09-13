@@ -2481,10 +2481,23 @@ async fn run_one_validation(
     spec: &crate::models::ValidationSpec,
     cwd: &std::path::Path,
 ) -> (Option<i32>, i64, String) {
+    run_one_validation_checked(spec, cwd, worktree::ensure_build_disk_headroom).await
+}
+
+async fn run_one_validation_checked(
+    spec: &crate::models::ValidationSpec,
+    cwd: &std::path::Path,
+    check_headroom: impl FnOnce(&std::path::Path) -> Result<(), String>,
+) -> (Option<i32>, i64, String) {
     let mut parts = spec.command.split_whitespace();
     let Some(binary) = parts.next() else {
         return (None, 0, "empty validation command".into());
     };
+    if let Err(reason) = check_headroom(cwd) {
+        // A low-space refusal is recorded like every other validation failure,
+        // so recovery cannot advance the candidate as though the command ran.
+        return (None, 0, format!("refused: {reason}"));
+    }
     use crate::core::quick_exec;
     let requested_timeout = spec.timeout_secs.map(u64::from);
     let effective_timeout =
@@ -12360,11 +12373,35 @@ mod tests {
                     .expect("Quick Exec timeout cap fits u32"),
             ),
         };
-        let (exit_code, _duration_ms, output) = run_one_validation(&spec, cwd.path()).await;
+        let (exit_code, _duration_ms, output) =
+            run_one_validation_checked(&spec, cwd.path(), |_| Ok(())).await;
 
         assert_eq!(exit_code, Some(0));
         assert!(output.contains("legacy validation timeout 1801s clamped to 1800s"));
         assert!(!output.contains("refused:"));
+    }
+
+    #[tokio::test]
+    async fn validation_refuses_before_spawning_when_the_build_headroom_guard_fails() {
+        let cwd = tempfile::tempdir().unwrap();
+        let spec = ValidationSpec {
+            command: "true".into(),
+            quick_exec_id: None,
+            timeout_secs: Some(5),
+        };
+
+        let (exit_code, duration_ms, output) =
+            run_one_validation_checked(&spec, cwd.path(), |_| {
+                Err("only 4 GiB free (critical below 5 GiB, server.disk_critical_gib)".into())
+            })
+            .await;
+
+        assert_eq!(exit_code, None);
+        assert_eq!(duration_ms, 0);
+        assert!(
+            output.starts_with("refused: only 4 GiB free"),
+            "got: {output}"
+        );
     }
 
     #[tokio::test]

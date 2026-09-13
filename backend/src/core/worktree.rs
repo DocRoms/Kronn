@@ -448,7 +448,12 @@ fn configured_disk_thresholds() -> (u64, u64) {
 /// The refusal names the number and the setting, because the person reading it
 /// is by definition on a machine that is about to stop working and needs to know
 /// both what is wrong and which knob changes it.
-fn ensure_disk_headroom(path: &Path, warning_gib: u64, critical_gib: u64) -> Result<(), String> {
+fn ensure_disk_headroom_for(
+    path: &Path,
+    warning_gib: u64,
+    critical_gib: u64,
+    operation: &str,
+) -> Result<(), String> {
     match disk_headroom(path, warning_gib, critical_gib) {
         DiskHeadroom::Ok => Ok(()),
         DiskHeadroom::Low {
@@ -457,7 +462,7 @@ fn ensure_disk_headroom(path: &Path, warning_gib: u64, critical_gib: u64) -> Res
         } => {
             tracing::warn!(
                 "Low disk: {available_gib} GiB free at {} (warning below {warning_gib} GiB). \
-                 Worktree build artefacts are the usual cause; provisioning continues.",
+                 Worktree build artefacts are the usual cause; {operation} continues.",
                 path.display()
             );
             Ok(())
@@ -466,12 +471,26 @@ fn ensure_disk_headroom(path: &Path, warning_gib: u64, critical_gib: u64) -> Res
             available_gib,
             critical_gib,
         } => Err(format!(
-            "refusing to provision a worktree: only {available_gib} GiB free at {} \
+            "refusing to {operation}: only {available_gib} GiB free at {} \
              (critical below {critical_gib} GiB, server.disk_critical_gib). Free space — \
              worktree `target/` directories are the usual cause — or lower the threshold.",
             path.display()
         )),
     }
+}
+
+fn ensure_disk_headroom(path: &Path, warning_gib: u64, critical_gib: u64) -> Result<(), String> {
+    ensure_disk_headroom_for(path, warning_gib, critical_gib, "provision a worktree")
+}
+
+/// Gate a build or validation before it can create more compiler artefacts.
+///
+/// This uses the same configured thresholds as worktree provisioning. It only
+/// observes free space and never attempts cleanup: the interactive target and
+/// any unrecognised cache remain outside automatic deletion ownership.
+pub fn ensure_build_disk_headroom(path: &Path) -> Result<(), String> {
+    let (warning_gib, critical_gib) = configured_disk_thresholds();
+    ensure_disk_headroom_for(path, warning_gib, critical_gib, "run a build or validation")
 }
 
 /// Fix worktree cross-references so they work from the host, not just inside Docker.
@@ -2765,6 +2784,26 @@ mod tests {
         // Whoever reads this is on a machine that is about to stop working.
         // The message has to carry both the number and the knob.
         assert!(error.contains("refusing to provision"), "got: {error}");
+        assert!(error.contains("disk_critical_gib"), "got: {error}");
+    }
+
+    #[test]
+    fn a_full_disk_refuses_a_build_with_the_same_configured_knob() {
+        let here = std::env::temp_dir();
+        let available_gib = fs2::available_space(&here).unwrap() / BYTES_PER_GIB;
+
+        let error = ensure_disk_headroom_for(
+            &here,
+            available_gib + 100,
+            available_gib + 50,
+            "run a build or validation",
+        )
+        .expect_err("a build must be refused below the critical threshold");
+
+        assert!(
+            error.contains("refusing to run a build or validation"),
+            "got: {error}"
+        );
         assert!(error.contains("disk_critical_gib"), "got: {error}");
     }
 
