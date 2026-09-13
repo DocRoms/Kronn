@@ -2481,19 +2481,96 @@ async fn run_one_validation(
     spec: &crate::models::ValidationSpec,
     cwd: &std::path::Path,
 ) -> (Option<i32>, i64, String) {
-    run_one_validation_checked(spec, cwd, worktree::ensure_build_disk_headroom).await
+    let build_path = match validation_build_path(spec, cwd).await {
+        Ok(path) => path,
+        Err(reason) => return (None, 0, format!("refused: {reason}")),
+    };
+    run_one_validation_checked(spec, cwd, &build_path, worktree::ensure_build_disk_headroom).await
+}
+
+/// Resolve Cargo's own effective target directory before a validation build.
+///
+/// `cargo metadata` does not compile a crate, but it is the authority for
+/// workspace and configuration layering.  Checking `cwd` would be wrong when
+/// a project routes its target to another volume; checking an inferred
+/// `target/` would be wrong for an explicit `--target-dir`.  Non-Cargo
+/// validations do not create Cargo artefacts, so their declared working
+/// directory remains the measured filesystem.
+async fn validation_build_path(
+    spec: &crate::models::ValidationSpec,
+    cwd: &std::path::Path,
+) -> Result<std::path::PathBuf, String> {
+    let words: Vec<&str> = spec.command.split_whitespace().collect();
+    if words.first() != Some(&"cargo") {
+        return Ok(cwd.to_path_buf());
+    }
+
+    let mut metadata = crate::core::cmd::async_cmd("cargo");
+    metadata
+        .current_dir(cwd)
+        .args(["metadata", "--no-deps", "--format-version", "1"]);
+    // Preserve the validation's explicit target override, if any, so metadata
+    // reports precisely the filesystem that the eventual build will use.
+    let mut index = 1;
+    while index < words.len() {
+        if words[index] == "--target-dir" {
+            let value = words.get(index + 1).ok_or_else(|| {
+                "validation cargo command has --target-dir without a directory".to_string()
+            })?;
+            // `cargo metadata` has no `--target-dir` flag. Cargo does honour
+            // the equivalent environment override, whose relative values use
+            // the same current directory as this validation.
+            metadata.env("CARGO_TARGET_DIR", value);
+            break;
+        }
+        if let Some(value) = words[index].strip_prefix("--target-dir=") {
+            metadata.env("CARGO_TARGET_DIR", value);
+            break;
+        }
+        index += 1;
+    }
+    let output = metadata.output().await.map_err(|error| {
+        format!(
+            "cannot resolve Cargo target for validation in {}: {error}",
+            cwd.display()
+        )
+    })?;
+    if !output.status.success() {
+        return Err(format!(
+            "cannot resolve Cargo target for validation in {}: {}",
+            cwd.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let metadata: serde_json::Value = serde_json::from_slice(&output.stdout).map_err(|error| {
+        format!(
+            "Cargo returned invalid metadata for validation in {}: {error}",
+            cwd.display()
+        )
+    })?;
+    let target = metadata
+        .get("target_directory")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            format!(
+                "Cargo metadata has no target_directory for {}",
+                cwd.display()
+            )
+        })?;
+    Ok(std::path::PathBuf::from(target))
 }
 
 async fn run_one_validation_checked(
     spec: &crate::models::ValidationSpec,
     cwd: &std::path::Path,
+    build_path: &std::path::Path,
     check_headroom: impl FnOnce(&std::path::Path) -> Result<(), String>,
 ) -> (Option<i32>, i64, String) {
     let mut parts = spec.command.split_whitespace();
     let Some(binary) = parts.next() else {
         return (None, 0, "empty validation command".into());
     };
-    if let Err(reason) = check_headroom(cwd) {
+    if let Err(reason) = check_headroom(build_path) {
         // A low-space refusal is recorded like every other validation failure,
         // so recovery cannot advance the candidate as though the command ran.
         return (None, 0, format!("refused: {reason}"));
@@ -12374,7 +12451,7 @@ mod tests {
             ),
         };
         let (exit_code, _duration_ms, output) =
-            run_one_validation_checked(&spec, cwd.path(), |_| Ok(())).await;
+            run_one_validation_checked(&spec, cwd.path(), cwd.path(), |_| Ok(())).await;
 
         assert_eq!(exit_code, Some(0));
         assert!(output.contains("legacy validation timeout 1801s clamped to 1800s"));
@@ -12385,13 +12462,17 @@ mod tests {
     async fn validation_refuses_before_spawning_when_the_build_headroom_guard_fails() {
         let cwd = tempfile::tempdir().unwrap();
         let spec = ValidationSpec {
-            command: "true".into(),
+            // `sleep` is an execution sentinel: if the runner is ever reached,
+            // this test takes at least one second. A quick refusal proves the
+            // headroom guard runs before Quick Exec can spawn the validation.
+            command: "sleep 1".into(),
             quick_exec_id: None,
             timeout_secs: Some(5),
         };
 
+        let started = std::time::Instant::now();
         let (exit_code, duration_ms, output) =
-            run_one_validation_checked(&spec, cwd.path(), |_| {
+            run_one_validation_checked(&spec, cwd.path(), cwd.path(), |_| {
                 Err("only 4 GiB free (critical below 5 GiB, server.disk_critical_gib)".into())
             })
             .await;
@@ -12399,9 +12480,34 @@ mod tests {
         assert_eq!(exit_code, None);
         assert_eq!(duration_ms, 0);
         assert!(
+            started.elapsed() < std::time::Duration::from_millis(500),
+            "the execution sentinel ran before the headroom refusal: {output}"
+        );
+        assert!(
             output.starts_with("refused: only 4 GiB free"),
             "got: {output}"
         );
+    }
+
+    #[tokio::test]
+    async fn cargo_validation_measures_its_explicit_target_directory() {
+        let project = tempfile::tempdir().unwrap();
+        std::fs::write(
+            project.path().join("Cargo.toml"),
+            "[package]\nname = \"guard_fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::create_dir(project.path().join("src")).unwrap();
+        std::fs::write(project.path().join("src/lib.rs"), "pub fn fixture() {}\n").unwrap();
+        let target = project.path().join("target-dir");
+        let spec = ValidationSpec {
+            command: format!("cargo check --target-dir {}", target.display()),
+            quick_exec_id: None,
+            timeout_secs: Some(5),
+        };
+
+        let resolved = validation_build_path(&spec, project.path()).await.unwrap();
+        assert_eq!(resolved, target);
     }
 
     #[tokio::test]

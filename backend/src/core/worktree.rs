@@ -489,8 +489,28 @@ fn ensure_disk_headroom(path: &Path, warning_gib: u64, critical_gib: u64) -> Res
 /// observes free space and never attempts cleanup: the interactive target and
 /// any unrecognised cache remain outside automatic deletion ownership.
 pub fn ensure_build_disk_headroom(path: &Path) -> Result<(), String> {
+    // Unlike provisioning, a build has a concrete output directory which must
+    // exist now.  Treat a missing or unstatable target as a refusal rather than
+    // silently measuring a parent/cwd volume and pretending it is the target.
+    let target = path.canonicalize().map_err(|error| {
+        format!(
+            "refusing to run a build or validation: build target {} cannot be resolved: {error}",
+            path.display()
+        )
+    })?;
+    if !target.is_dir() {
+        return Err(format!(
+            "refusing to run a build or validation: build target {} is not a directory",
+            target.display()
+        ));
+    }
     let (warning_gib, critical_gib) = configured_disk_thresholds();
-    ensure_disk_headroom_for(path, warning_gib, critical_gib, "run a build or validation")
+    ensure_disk_headroom_for(
+        &target,
+        warning_gib,
+        critical_gib,
+        "run a build or validation",
+    )
 }
 
 /// Fix worktree cross-references so they work from the host, not just inside Docker.
@@ -2805,6 +2825,16 @@ mod tests {
             "got: {error}"
         );
         assert!(error.contains("disk_critical_gib"), "got: {error}");
+    }
+
+    #[test]
+    fn build_headroom_refuses_an_absent_target_instead_of_measuring_a_parent() {
+        let root = tempfile::tempdir().unwrap();
+        let absent = root.path().join("target with spaces");
+        let error = ensure_build_disk_headroom(&absent).unwrap_err();
+
+        assert!(error.contains("cannot be resolved"), "got: {error}");
+        assert!(error.contains("target with spaces"), "got: {error}");
     }
 
     #[test]

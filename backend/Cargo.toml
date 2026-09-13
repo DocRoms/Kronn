@@ -132,6 +132,14 @@ proptest = "1"          # Property tests for crypto (roundtrip + universal tampe
 # Compile deps with optimizations, keep local code in debug mode
 # Dramatically speeds up runtime AND reduces dep recompilation on code changes
 opt-level = 0
+# Keep source locations for actionable local failures without retaining full
+# debug information in every object file.  The explicit safety settings below
+# preserve Cargo's debug defaults while preventing incremental object graphs
+# from accumulating across short-lived qualification worktrees.
+debug = "line-tables-only"
+incremental = false
+debug-assertions = true
+overflow-checks = true
 
 [profile.dev.package."*"]
 opt-level = 1

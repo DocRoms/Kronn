@@ -85,6 +85,40 @@ in the error so the operator knows which knob to turn. A warning configured
 below the critical mark is raised to it: a contradictory config must not read
 as "merely warn" on a disk that is in fact below the refusal line.
 
+## Native development and qualification builds
+
+The native backend supervisor exports `CARGO_TARGET_DIR` as
+`<checkout>/target`; it does not inherit a target directory from another
+checkout. Before its initial and watched `cargo build`, it checks free space on
+that exact directory's filesystem and refuses without starting Cargo below the
+critical limit. The guard never removes files. Its default is 5 GiB; when a
+deployment has changed `server.disk_critical_gib`, the operator must supply the
+same approved value through `KRONN_DEV_BACKEND_DISK_CRITICAL_GIB` rather than
+reading a host configuration file from the shell. [src: file: scripts/dev-backend-supervisor.sh:16-23]
+[src: file: scripts/dev-backend-build-guard.sh:8-31]
+
+Kronn's versioned backend and desktop development profiles use line-table-only
+debug information, disable incremental compilation, and explicitly retain
+debug assertions and overflow checks. A developer needing full debug info may
+use Cargo's explicit command-line override, for example
+`cargo build --config 'profile.dev.debug=true'`; this is a local choice and is
+not a global Cargo setting. [src: file: backend/Cargo.toml:131-143]
+[src: file: desktop/src-tauri/Cargo.toml:44-51]
+
+Qualification validation resolves a Cargo validation's effective target through
+`cargo metadata` before Quick Exec is allowed to spawn its build; an explicit
+`--target-dir` is preserved in that lookup. Non-Cargo validations use their
+declared working directory. An unresolved or non-directory target is refused
+instead of measuring an unrelated parent filesystem; a critical-space refusal
+is stored as a refused validation rather than a pass. [src: file: backend/src/core/worktree.rs:491-518]
+[src: file: backend/src/api/orchestration.rs:2480-2552]
+
+There is intentionally no automatic lifecycle cleanup for the interactive
+target or unknown qualification caches. The only automatic reclamation remains
+the existing managed-worktree path: ownership, terminal execution state,
+attached sessions, and worker leases are all checked before deletion. [src: file: backend/src/core/worktree.rs:299-370]
+[src: file: backend/src/db/orchestration.rs:439-531]
+
 ## Maintenance command
 
 Two routes, delivered by KT-373, let an operator inspect and reclaim the

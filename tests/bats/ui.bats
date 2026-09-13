@@ -374,6 +374,34 @@ setup() {
     assert_output "101"
 }
 
+@test "dev backend watch command refuses low disk before Cargo executes" {
+    local fake_bin="$BATS_TEST_TMPDIR/guard-bin"
+    local target="$BATS_TEST_TMPDIR/target with spaces"
+    local cargo_marker="$BATS_TEST_TMPDIR/cargo-ran"
+    mkdir -p "$fake_bin"
+    cat >"$fake_bin/df" <<'EOF'
+#!/usr/bin/env bash
+printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\n'
+printf '/dev/test 100 99 4194304 99%% /tmp\n'
+EOF
+    cat >"$fake_bin/cargo" <<'EOF'
+#!/usr/bin/env bash
+touch "$KRONN_TEST_CARGO_MARKER"
+EOF
+    chmod +x "$fake_bin/df" "$fake_bin/cargo"
+
+    run env \
+        PATH="$fake_bin:$PATH" \
+        KRONN_DEV_BACKEND_TARGET_DIR="$target" \
+        KRONN_TEST_CARGO_MARKER="$cargo_marker" \
+        "$PROJECT_ROOT/scripts/dev-backend-watch-command.sh"
+
+    assert_failure 1
+    assert_output --partial "Refusing native backend build: only 4 GiB free"
+    run test -e "$cargo_marker"
+    assert_failure
+}
+
 @test "dev backend watch command keeps a healthy supervised backend on compile failure" {
     local fake_bin="$BATS_TEST_TMPDIR/fake-bin"
     local marker="$BATS_TEST_TMPDIR/backend-failed"
