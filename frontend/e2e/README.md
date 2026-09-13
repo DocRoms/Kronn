@@ -145,6 +145,45 @@ test.describe('Mon scénario', () => {
 });
 ```
 
+## Run isolé : droits et publication (KT-619)
+
+`important-publication-authority.spec.ts` **enrôle des identifiants** et
+**renouvelle le secret admin de publication**. Contre l'instance dans laquelle
+quelqu'un travaille, ce n'est pas un test : le secret admin de l'opérateur cesse
+de fonctionner et le fichier qu'il a sauvegardé devient périmé, sans rien qui le
+signale. La spec refuse donc de tourner sans `KRONN_SANDBOX_DIR`, et refuse
+`VITE_DEV_PORT=5173`.
+
+```bash
+# Depuis la racine du dépôt. Le script refuse 3140/5173, refuse un port déjà
+# servi, génère le config.toml sans jamais pouvoir binder le port de
+# l'utilisateur, et vérifie que le listener est BIEN le processus qu'il vient
+# de démarrer.
+cargo build --bin kronn
+PID=$(scripts/e2e-sandbox-backend.sh /tmp/kronn-kt619-sandbox 61140)
+
+cd frontend && env VITE_DEV_PORT=61372 \
+  KRONN_BACKEND_URL=http://127.0.0.1:61140 \
+  KRONN_SANDBOX_DIR=/tmp/kronn-kt619-sandbox \
+  pnpm exec playwright test important-publication-authority
+
+kill "$PID"   # par pid : le processus s'affiche `./target/debug/kronn`,
+              # un `pkill -f` sur le chemin du worktree ne matche rien.
+```
+
+Deux pièges rencontrés pour de vrai le 12/09, que le script ferme :
+
+- `KRONN_DATA_DIR=<tmp> kronn` **ne donne pas un port de sandbox**. Sans
+  `config.toml`, le backend en écrit un avec le port **par défaut — 3140**,
+  celui de l'instance de développement ;
+- **un health check à 200 ne prouve pas que c'est votre processus qui répond.**
+  Un sandbox précédent qui tient encore le port répond à tout, y compris après
+  que son répertoire de données a été supprimé sous lui — et le run suivant lit
+  alors un secret qui appartient à une base que plus personne ne sert.
+
+Vérifier avant et après avec `lsof -nP -iTCP:3140 -sTCP:LISTEN` que l'instance
+de l'utilisateur est celle qui tient encore son port.
+
 ## Debug
 
 ```bash
