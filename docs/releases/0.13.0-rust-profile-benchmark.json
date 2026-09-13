@@ -1,0 +1,29 @@
+{
+  "date": "2026-09-13",
+  "source_commit": "624df2894d57e83e491f5fd76c29e8e51fd55d5d",
+  "backend_tree": "a542a367b8a2015ff88da0de4b651305a86bc8f8",
+  "cargo": "cargo 1.98.0 (797e8a9bc 2026-08-05)",
+  "rustc": "rustc 1.98.0 (88d9e12ae 2026-08-18)",
+  "command": ["rtk", "proxy", "cargo", "build", "--manifest-path", "backend/Cargo.toml", "--offline", "--locked", "--bin", "kronn", "-j", "2"],
+  "jobs": 2,
+  "debug_assertions": true,
+  "overflow_checks": true,
+  "cold_definition": "Initially absent, separately owned Cargo target; OS and registry caches not purged",
+  "touch_definition": "Only backend/src/main.rs mtime advanced, original timestamps restored after the build",
+  "raw_evidence_directory": "/private/tmp/kt638-profile-benchmark.utIscv",
+  "scope": "Backend binary only, not desktop or full test-target footprint",
+  "limitations": [
+    "One local sample per phase, not a CI SLO or general performance guarantee",
+    "Independent qualification work could run in the background",
+    "New-profile linking warned: __eh_frame section too large (max 16MB) to encode dwarf unwind offsets in compact unwind table, performance of exception handling might be affected",
+    "No release approval, full-suite qualification or automatic cache cleanup inferred"
+  ],
+  "measurements": [
+    {"profile": "old", "debug": "2", "incremental": true, "phase": "cold", "elapsed_ms": 254182, "allocated_kib": 6097596, "exit_code": 0, "source_drift": false},
+    {"profile": "old", "debug": "2", "incremental": true, "phase": "warm", "elapsed_ms": 457, "allocated_kib": 6097596, "exit_code": 0, "source_drift": false},
+    {"profile": "old", "debug": "2", "incremental": true, "phase": "touch", "elapsed_ms": 1689, "allocated_kib": 6134920, "exit_code": 0, "source_drift": false},
+    {"profile": "new", "debug": "line-tables-only", "incremental": false, "phase": "cold", "elapsed_ms": 217998, "allocated_kib": 3434628, "exit_code": 0, "source_drift": false},
+    {"profile": "new", "debug": "line-tables-only", "incremental": false, "phase": "warm", "elapsed_ms": 447, "allocated_kib": 3434628, "exit_code": 0, "source_drift": false},
+    {"profile": "new", "debug": "line-tables-only", "incremental": false, "phase": "touch", "elapsed_ms": 2352, "allocated_kib": 3443268, "exit_code": 0, "source_drift": false}
+  ]
+}

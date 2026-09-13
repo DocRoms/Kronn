@@ -189,21 +189,56 @@ active, or leased targets. [src: file: backend/src/core/worktree.rs:451-558]
 
 ## KT-638 profile benchmark record
 
-The approved profile comparison has not been run in this checkout. Before
-adopting the profile beyond this committed, Kronn-only manifest change, compare
-the historical debug level 2 with incremental compilation enabled against the
-new line-table-only, non-incremental profile. Use the same source revision,
-commands and separate owned target directories; record elapsed wall time and
-`du -sh` after each cold, warm, and source-touch rebuild run:
+The principal ran both profiles on September 13, 2026, at the same clean
+commit `624df2894d57e83e491f5fd76c29e8e51fd55d5d` (backend tree
+`a542a367b8a2015ff88da0de4b651305a86bc8f8`). Both used Cargo 1.98.0 and
+rustc 1.98.0, two jobs, offline locked dependencies, and only the `kronn`
+backend binary. Debug assertions and overflow checks remained enabled in both.
+Each profile had its own initially absent target directory; no cache was
+deleted and no backend was started. [src: commit: 624df2894d57e83e491f5fd76c29e8e51fd55d5d]
+
+| Phase | Historical debug=2, incremental=true | New line-tables-only, incremental=false |
+| --- | ---: | ---: |
+| Cold: wall time / allocated target | 254.182 s / 6,097,596 KiB | 217.998 s / 3,434,628 KiB |
+| Warm, unchanged source | 0.457 s / 6,097,596 KiB | 0.447 s / 3,434,628 KiB |
+| Touch only `main.rs`, then rebuild | 1.689 s / 6,134,920 KiB | 2.352 s / 3,443,268 KiB |
+
+All six commands exited zero, with identical tracked source before and after;
+the touch phases restored the original source timestamps. In this scenario,
+the final target decreased from 5.851 GiB to 3.284 GiB (43.87% less), while the
+small source-touch rebuild was 0.663 s slower. These are single local
+observations, not CI SLO samples or a general performance guarantee. Cold means
+an empty Cargo target, not a purged OS/registry cache; independent qualification
+work could run in the background. Desktop builds and the complete test-target
+footprint were not part of this size comparison.
+[src: file: docs/releases/0.13.0-rust-profile-benchmark.json:1]
+
+The new binary also emitted a macOS linker warning that `__eh_frame` exceeded
+the compact-unwind table's 16 MiB encoding limit and exception-handling
+performance might be affected. It did not fail the build, but this record does
+not classify that warning as resolved or claim warning-free linking. Strict
+all-target Clippy on the candidate had separately passed; it is not a substitute
+for the linked-binary result.
+[src: file: docs/releases/0.13.0-rust-profile-benchmark.json:1]
+
+To reproduce the profile inputs with new owned targets:
 
 ```text
-CARGO_TARGET_DIR=<owned-old-target> cargo build --manifest-path backend/Cargo.toml --config profile.dev.debug=2 --config profile.dev.incremental=true
-CARGO_TARGET_DIR=<owned-new-target> cargo build --manifest-path backend/Cargo.toml
+CARGO_TARGET_DIR=<owned-old-target> CARGO_INCREMENTAL=1 CARGO_PROFILE_DEV_DEBUG=2 CARGO_PROFILE_DEV_INCREMENTAL=true CARGO_PROFILE_DEV_DEBUG_ASSERTIONS=true CARGO_PROFILE_DEV_OVERFLOW_CHECKS=true cargo build --manifest-path backend/Cargo.toml --offline --locked --bin kronn -j 2
+CARGO_TARGET_DIR=<owned-new-target> CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=line-tables-only CARGO_PROFILE_DEV_INCREMENTAL=false CARGO_PROFILE_DEV_DEBUG_ASSERTIONS=true CARGO_PROFILE_DEV_OVERFLOW_CHECKS=true cargo build --manifest-path backend/Cargo.toml --offline --locked --bin kronn -j 2
 ```
 
-Then run the unfiltered backend tests, strict Clippy, formatter, shell tests,
-and Python checks with a target owned by that benchmark checkout. No result is
-claimed here until those measurements are captured. [src: user: 2026-09-13: KT-638 durable profile arbitration and review]
+The local helper, six immutable JSON receipts, and separate raw stdout/stderr
+logs are retained in `/private/tmp/kt638-profile-benchmark.utIscv`. Relevant
+compiler/profile overrides were removed from the child environment before the
+listed values were installed; system home variables were never changed. The
+versioned receipt below preserves the compact results independently of that
+temporary evidence directory. [src: file: docs/releases/0.13.0-rust-profile-benchmark.json:1]
+
+This measurement completes the profile comparison, not release qualification.
+The combined unfiltered backend, frontend, Python, shell, desktop and browser
+gates remain separate requirements; host-sync test confinement must be proven
+before running the full backend suite. [src: file: docs/testing-quality.md:35-61]
 
 ## Maintenance command
 
