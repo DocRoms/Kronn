@@ -20103,7 +20103,11 @@ mod tests {
         let late_accept = db
             .with_conn(move |conn| {
                 crate::db::worker_offers::accept_worker_offer(
-                    conn, &offer_id, "ClaudeCode", "sess-a", "sess-a",
+                    conn,
+                    &offer_id,
+                    "ClaudeCode",
+                    "sess-a",
+                    "sess-a",
                 )
                 .map_err(anyhow::Error::from)
             })
@@ -20187,7 +20191,11 @@ mod tests {
             .expect("a fresh offer targets the newly selected session")
         };
         assert_eq!(new_offer.target_cli_session_id, 102);
-        assert_ne!(new_offer.id, old_offer_id, "a distinct offer, not the stale one");
+        assert_ne!(
+            new_offer.id,
+            old_offer_id,
+            "a distinct offer, not the stale one"
+        );
 
         let late_accept = db
             .with_conn(move |conn| {
@@ -20209,15 +20217,10 @@ mod tests {
             }
         ));
 
-        let accepted = accept_worker_offer_and_attach(
-            &db,
-            &new_offer.id,
-            "ClaudeCode",
-            "sess-b",
-            "sess-b",
-        )
-        .await
-        .unwrap();
+        let accepted =
+            accept_worker_offer_and_attach(&db, &new_offer.id, "ClaudeCode", "sess-b", "sess-b")
+                .await
+                .unwrap();
         assert!(matches!(accepted, AcceptAttachOutcome::Attached { .. }));
         let final_exec = exec_of(&db, &exec_id).await;
         assert_eq!(final_exec.status, TaskExecutionStatus::Working);
