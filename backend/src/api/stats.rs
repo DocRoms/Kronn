@@ -1,6 +1,5 @@
 use axum::{extract::State, Json};
 
-use crate::core::pricing;
 use crate::models::*;
 use crate::AppState;
 
@@ -12,6 +11,8 @@ type DiscRow = (
     u64,
     Option<f64>,
 );
+/// (discussion_id, title, agent_type, tokens, cost_db)
+type DiscAgentRow = (String, Option<String>, Option<String>, u64, Option<f64>);
 /// (agent_type, project_id, project_name, tokens, cost_db, message_count)
 type AgentRow = (
     String,
@@ -62,8 +63,8 @@ pub async fn token_usage(State(state): State<AppState>) -> Json<ApiResponse<Toke
                 )
                 .unwrap_or(0) as u64;
 
-            // ── 3. By provider (with cost estimation) ──
-            let mut provider_map: std::collections::HashMap<String, (u64, f64)> =
+            // ── 3. By provider (measured cost, justified estimate, or honest unknown) ──
+            let mut provider_map: std::collections::HashMap<String, (u64, CostAggregate)> =
                 std::collections::HashMap::new();
             for (agent_type, _, _, tokens, cost_db) in &disc_rows {
                 let provider = match agent_type.as_deref() {
@@ -75,13 +76,11 @@ pub async fn token_usage(State(state): State<AppState>) -> Json<ApiResponse<Toke
                     Some("CopilotCli") => "GitHub",
                     _ => "Other",
                 };
-                let entry = provider_map.entry(provider.into()).or_insert((0, 0.0));
+                let entry = provider_map
+                    .entry(provider.into())
+                    .or_insert_with(|| (0, CostAggregate::default()));
                 entry.0 += tokens;
-                let cost = cost_db.unwrap_or_else(|| {
-                    pricing::estimate_cost(agent_type.as_deref().unwrap_or(""), *tokens)
-                        .unwrap_or(0.0)
-                });
-                entry.1 += cost;
+                entry.1.add(*tokens, *cost_db, agent_type.as_deref());
             }
 
             let by_provider: Vec<ProviderUsage> = provider_map
@@ -90,24 +89,24 @@ pub async fn token_usage(State(state): State<AppState>) -> Json<ApiResponse<Toke
                     provider,
                     tokens_used: tokens,
                     tokens_limit: None,
-                    cost_usd: Some(cost),
+                    cost,
                 })
                 .collect();
 
-            // ── 4. By project (with cost) ──
-            let mut project_map: std::collections::HashMap<String, (String, u64, f64)> =
+            // ── 4. By project (measured cost, justified estimate, or honest unknown) ──
+            let mut project_map: std::collections::HashMap<String, (String, u64, CostAggregate)> =
                 std::collections::HashMap::new();
             for (agent_type, pid, pname, tokens, cost_db) in &disc_rows {
                 let key = pid.clone().unwrap_or_else(|| "global".into());
-                let entry = project_map
-                    .entry(key)
-                    .or_insert_with(|| (pname.clone().unwrap_or_else(|| "Global".into()), 0, 0.0));
-                entry.1 += tokens;
-                let cost = cost_db.unwrap_or_else(|| {
-                    pricing::estimate_cost(agent_type.as_deref().unwrap_or(""), *tokens)
-                        .unwrap_or(0.0)
+                let entry = project_map.entry(key).or_insert_with(|| {
+                    (
+                        pname.clone().unwrap_or_else(|| "Global".into()),
+                        0,
+                        CostAggregate::default(),
+                    )
                 });
-                entry.2 += cost;
+                entry.1 += tokens;
+                entry.2.add(*tokens, *cost_db, agent_type.as_deref());
             }
             let mut by_project: Vec<ProjectUsage> = project_map
                 .into_iter()
@@ -115,41 +114,62 @@ pub async fn token_usage(State(state): State<AppState>) -> Json<ApiResponse<Toke
                     project_id: id,
                     project_name: name,
                     tokens_used: tokens,
-                    cost_usd: cost,
+                    cost,
                 })
                 .collect();
             by_project.sort_by_key(|p| std::cmp::Reverse(p.tokens_used));
 
             // ── 5. Top discussions ──
+            // Grouped by (discussion, agent_type): a discussion may mix agents,
+            // and a group's real agent must drive its own cost — never the
+            // arbitrary "ClaudeCode" the old query assumed for every discussion.
             let mut top_disc_stmt = conn.prepare(
-                "SELECT d.id, d.title, SUM(m.tokens_used), SUM(m.cost_usd)
+                "SELECT d.id, d.title, m.agent_type, SUM(m.tokens_used), SUM(m.cost_usd)
              FROM messages m
              JOIN discussions d ON m.discussion_id = d.id
              WHERE m.tokens_used > 0
-             GROUP BY d.id
-             ORDER BY SUM(m.tokens_used) DESC
-             LIMIT 5",
+             GROUP BY d.id, m.agent_type",
             )?;
-            let top_discussions: Vec<UsageEntry> = top_disc_stmt
+            let disc_agent_rows: Vec<DiscAgentRow> = top_disc_stmt
                 .query_map([], |row| {
-                    let tokens = row.get::<_, i64>(2).unwrap_or(0) as u64;
-                    let cost_db: Option<f64> = row.get(3).unwrap_or(None);
-                    let cost = cost_db.unwrap_or_else(|| {
-                        pricing::estimate_cost("ClaudeCode", tokens).unwrap_or(0.0)
-                    });
-                    Ok(UsageEntry {
-                        id: row.get(0)?,
-                        name: row
-                            .get::<_, Option<String>>(1)?
-                            .unwrap_or_else(|| "Sans titre".into()),
-                        tokens_used: tokens,
-                        cost_usd: cost,
-                    })
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get::<_, i64>(3).unwrap_or(0) as u64,
+                        row.get::<_, Option<f64>>(4).unwrap_or(None),
+                    ))
                 })?
                 .filter_map(|r| r.ok())
                 .collect();
+            let mut disc_agg: std::collections::HashMap<String, (String, u64, CostAggregate)> =
+                std::collections::HashMap::new();
+            for (id, title, agent_type, tokens, cost_db) in &disc_agent_rows {
+                let entry = disc_agg.entry(id.clone()).or_insert_with(|| {
+                    (
+                        title.clone().unwrap_or_else(|| "Sans titre".into()),
+                        0,
+                        CostAggregate::default(),
+                    )
+                });
+                entry.1 += tokens;
+                entry.2.add(*tokens, *cost_db, agent_type.as_deref());
+            }
+            let mut top_discussions: Vec<UsageEntry> = disc_agg
+                .into_iter()
+                .map(|(id, (name, tokens_used, cost))| UsageEntry {
+                    id,
+                    name,
+                    tokens_used,
+                    cost,
+                })
+                .collect();
+            top_discussions.sort_by_key(|d| std::cmp::Reverse(d.tokens_used));
+            top_discussions.truncate(5);
 
             // ── 6. Top workflows ──
+            // workflow_runs carries no per-run agent attribution, so its cost
+            // is categorically unknown — never priced against Claude's table.
             let mut top_wf_stmt = conn.prepare(
                 "SELECT w.id, w.name, SUM(r.tokens_used)
              FROM workflow_runs r
@@ -162,11 +182,13 @@ pub async fn token_usage(State(state): State<AppState>) -> Json<ApiResponse<Toke
             let top_workflows: Vec<UsageEntry> = top_wf_stmt
                 .query_map([], |row| {
                     let tokens = row.get::<_, i64>(2).unwrap_or(0) as u64;
+                    let mut cost = CostAggregate::default();
+                    cost.add(tokens, None, None);
                     Ok(UsageEntry {
                         id: row.get(0)?,
                         name: row.get(1)?,
                         tokens_used: tokens,
-                        cost_usd: pricing::estimate_cost("ClaudeCode", tokens).unwrap_or(0.0),
+                        cost,
                     })
                 })?
                 .filter_map(|r| r.ok())
@@ -189,18 +211,14 @@ pub async fn token_usage(State(state): State<AppState>) -> Json<ApiResponse<Toke
                     let agent_type: Option<String> = row.get(1)?;
                     let tokens = row.get::<_, i64>(2).unwrap_or(0) as u64;
                     let cost_db: Option<f64> = row.get(3).unwrap_or(None);
-                    let cost = cost_db.unwrap_or_else(|| {
-                        pricing::estimate_cost(agent_type.as_deref().unwrap_or(""), tokens)
-                            .unwrap_or(0.0)
-                    });
-                    Ok((day, agent_type, tokens, cost))
+                    Ok((day, agent_type, tokens, cost_db))
                 })?
                 .filter_map(|r| r.ok())
-                .for_each(|(day, agent_type, tokens, cost)| {
+                .for_each(|(day, agent_type, tokens, cost_db)| {
                     let entry = daily_map.entry(day.clone()).or_insert_with(|| DailyUsage {
                         date: day,
                         tokens: 0,
-                        cost_usd: 0.0,
+                        cost: CostAggregate::default(),
                         anthropic: 0,
                         openai: 0,
                         google: 0,
@@ -209,7 +227,7 @@ pub async fn token_usage(State(state): State<AppState>) -> Json<ApiResponse<Toke
                         github: 0,
                     });
                     entry.tokens += tokens;
-                    entry.cost_usd += cost;
+                    entry.cost.add(tokens, cost_db, agent_type.as_deref());
                     match agent_type.as_deref() {
                         Some("ClaudeCode") => entry.anthropic += tokens,
                         Some("Codex") => entry.openai += tokens,
@@ -223,12 +241,20 @@ pub async fn token_usage(State(state): State<AppState>) -> Json<ApiResponse<Toke
             let daily_history: Vec<DailyUsage> = daily_map.into_values().collect();
 
             // ── 8. Total cost ──
-            let total_cost: f64 = by_provider.iter().filter_map(|p| p.cost_usd).sum();
+            // Merge every provider's known/estimated cost, then fold in
+            // workflow tokens as unknown: workflow_runs has no per-run agent
+            // attribution, so its share of the total is never "0", it's
+            // "not accounted for" — a non-zero unknown_cost_tokens means
+            // total_cost is partial relative to total_tokens.
+            let mut total_cost = by_provider
+                .iter()
+                .fold(CostAggregate::default(), |acc, p| acc.merge(&p.cost));
+            total_cost.unknown_cost_tokens += workflow_tokens;
             let total_tokens = discussion_tokens + workflow_tokens;
 
             Ok(TokenUsageSummary {
                 total_tokens,
-                total_cost_usd: total_cost,
+                total_cost,
                 discussion_tokens,
                 workflow_tokens,
                 by_provider,
