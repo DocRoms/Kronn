@@ -1,31 +1,39 @@
-# `messages.cost_usd` is not exclusively a real measurement
+# `messages.cost_usd` is never provably "measured", for any agent
 
 A non-null `messages.cost_usd` looks like a genuine, provider-reported cost,
-but only Claude Code's own CLI ever reports one: its `stream-json` `result`
-line carries a real `cost_usd` field, captured as `stream_json_cost`.
-[src: file: backend/src/agents/runner.rs:9444]
-[src: file: backend/src/agents/runner.rs:9535-9539]
-[src: file: backend/src/api/discussions/streaming.rs:3020-3030]
+but the ingest path falls back to a pricing-table estimate for **every**
+agent, including `ClaudeCode`, whenever a real cost isn't available:
+`stream_json_cost.or_else(|| estimate_cost(agent_type, tokens_used))`.
+[src: file: backend/src/api/discussions/streaming.rs:3464-3476]
 
-Every other agent type never emits that field (only the Claude Code launch
-path sets `OutputMode::StreamJson`), so when `stream_json_cost` is `None` the
-same ingest path falls back to `pricing::estimate_cost(agent_type,
-tokens_used)` and writes *that* estimate straight into `messages.cost_usd`.
-[src: file: backend/src/agents/runner.rs:8540-8548]
-[src: file: backend/src/api/discussions/streaming.rs:3463-3476]
+`stream_json_cost` is only ever populated from Claude Code's own `stream-json`
+`result` line, so only ClaudeCode messages can *possibly* carry a real
+measurement — but there is no column recording whether a given `ClaudeCode`
+row actually got one, or fell back to the same estimate as everyone else.
+[src: file: backend/src/api/discussions/streaming.rs:2757]
+[src: file: backend/src/api/discussions/streaming.rs:3028-3035]
 
-So a query that treats "`cost_usd` is non-null" as "this is a measured cost"
-is wrong for every agent except `ClaudeCode` — it silently upgrades a
-previously-computed estimate to look like an exact measurement. There is no
-column that distinguishes the two cases; the distinction has to be
-reconstructed from `agent_type` at read time.
+So a non-null `cost_usd`, for ANY agent_type, is data whose provenance is
+unguaranteed: it might be a real measurement, or it might be an old
+pricing-table estimate. `CostAggregate` (KT-637) never asserts either
+direction from `agent_type` alone. It folds a non-null `cost_usd` into
+`recorded_usd` / `has_recorded` — "known, provenance unguaranteed" — and only
+ever sets `estimated_usd` / `has_estimate` for tokens that have **no**
+persisted cost at all, freshly computed from the pricing table at read time.
+[src: file: backend/src/models/stats.rs:19-40]
+[src: file: backend/src/models/stats.rs:65-81]
 
-`CostAggregate::add` (KT-637) does this reconstruction: a non-null
-`cost_usd` only counts as "measured" (not flagged `has_estimate`) when
-`agent_type == "ClaudeCode"`; for every other agent a non-null `cost_usd` is
-folded into `known_usd` but still marked `has_estimate = true`.
-[src: file: backend/src/models/stats.rs:32-58]
+Because `SUM(cost_usd)` in SQL silently drops NULL rows, a `GROUP BY`
+aggregate cannot just read `SUM(tokens_used)` and `SUM(cost_usd)` for a group
+— that makes every token in the group look priced, even the ones whose row
+was NULL. Every query in `api/stats.rs` also computes
+`SUM(CASE WHEN cost_usd IS NOT NULL THEN tokens_used ELSE 0 END)` per group,
+so `CostAggregate::add` receives the exact token count that had no recorded
+cost and can price (or mark unknown) only that share.
+[src: file: backend/src/api/stats.rs:46-56]
 
-If a future agent adapter starts reporting its own real cost (a second
-`OutputMode::StreamJson`-like path), this reconstruction must be revisited —
-otherwise its genuine measurement will be mislabeled as an estimate.
+If a future agent adapter starts reporting a cost through a dedicated,
+distinguishable path (e.g. a `cost_source` column), this reconstruction can
+be relaxed for that path specifically — but as long as `messages` has no
+such column, no query may treat "`cost_usd` is non-null" as "this is a real
+measurement" for any agent, ClaudeCode included.

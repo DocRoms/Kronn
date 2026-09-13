@@ -2359,7 +2359,9 @@ async fn stats_tokens_empty_db() {
     // An empty DB has nothing to price, known or unknown — the aggregate
     // must report all-zero, not fall back to a fabricated total.
     let cost = &json["data"]["total_cost"];
-    assert_eq!(cost["known_usd"], 0.0);
+    assert_eq!(cost["recorded_usd"], 0.0);
+    assert_eq!(cost["has_recorded"], false);
+    assert_eq!(cost["estimated_usd"], 0.0);
     assert_eq!(cost["has_estimate"], false);
     assert_eq!(cost["unknown_cost_tokens"], 0);
 }
@@ -2376,7 +2378,7 @@ async fn stats_agent_usage_empty_db() {
 
 #[tokio::test]
 async fn stats_tokens_unknown_provider_reports_unknown_not_zero() {
-    // OpenCode and Custom have neither an ACP-measured cost nor a
+    // OpenCode and Custom have neither a recorded cost nor a
     // pricing-table entry (KT-637): their tokens must be reported as
     // unknown, never silently substituted with a fabricated zero.
     let state = test_state();
@@ -2409,20 +2411,23 @@ async fn stats_tokens_unknown_provider_reports_unknown_not_zero() {
         .find(|p| p["provider"] == "Other")
         .expect("OpenCode/Custom bucket into the 'Other' provider");
     assert_eq!(other["tokens_used"], 3000);
-    assert_eq!(other["cost"]["known_usd"], 0.0);
+    assert_eq!(other["cost"]["recorded_usd"], 0.0);
+    assert_eq!(other["cost"]["has_recorded"], false);
+    assert_eq!(other["cost"]["estimated_usd"], 0.0);
     assert_eq!(other["cost"]["has_estimate"], false);
     assert_eq!(other["cost"]["unknown_cost_tokens"], 3000);
 
     let total = &json["data"]["total_cost"];
-    assert_eq!(total["known_usd"], 0.0);
+    assert_eq!(total["recorded_usd"], 0.0);
+    assert_eq!(total["estimated_usd"], 0.0);
     assert_eq!(total["unknown_cost_tokens"], 3000);
 }
 
 #[tokio::test]
-async fn stats_tokens_preserves_explicit_measured_zero_cost() {
-    // A real ACP-reported cost of exactly 0.0 (e.g. a fully cached turn) is a
-    // measurement, not an absence of data. It must stay distinct from
-    // "unknown" and must not be bumped to a fabricated non-zero estimate.
+async fn stats_tokens_preserves_explicit_recorded_zero_cost() {
+    // A persisted cost of exactly 0.0 (e.g. a fully cached turn) is recorded
+    // data, not an absence of it. It must stay distinct from "unknown" and
+    // must not be bumped to a fabricated non-zero estimate.
     let state = test_state();
     let did = create_test_discussion(&state).await;
     state
@@ -2447,7 +2452,8 @@ async fn stats_tokens_preserves_explicit_measured_zero_cost() {
         .iter()
         .find(|p| p["provider"] == "Anthropic")
         .expect("ClaudeCode buckets into Anthropic");
-    assert_eq!(anthropic["cost"]["known_usd"], 0.0);
+    assert_eq!(anthropic["cost"]["recorded_usd"], 0.0);
+    assert_eq!(anthropic["cost"]["has_recorded"], true);
     assert_eq!(anthropic["cost"]["has_estimate"], false);
     assert_eq!(anthropic["cost"]["unknown_cost_tokens"], 0);
 }
@@ -2501,7 +2507,9 @@ async fn stats_tokens_mixed_known_and_unknown_totals_are_partial() {
 
     assert_eq!(json["data"]["total_tokens"], 3000);
     let total = &json["data"]["total_cost"];
-    assert_eq!(total["known_usd"], 5.0);
+    assert_eq!(total["recorded_usd"], 5.0);
+    assert_eq!(total["has_recorded"], true);
+    assert_eq!(total["estimated_usd"], 0.0);
     assert_eq!(total["has_estimate"], false);
     assert_eq!(total["unknown_cost_tokens"], 2000);
 
@@ -2511,7 +2519,7 @@ async fn stats_tokens_mixed_known_and_unknown_totals_are_partial() {
         .find(|p| p["project_id"] == "proj-mix")
         .expect("project bucket present");
     assert_eq!(proj["tokens_used"], 3000);
-    assert_eq!(proj["cost"]["known_usd"], 5.0);
+    assert_eq!(proj["cost"]["recorded_usd"], 5.0);
     assert_eq!(proj["cost"]["unknown_cost_tokens"], 2000);
 }
 
@@ -2545,18 +2553,22 @@ async fn stats_tokens_estimates_use_the_agents_own_pricing_not_claudes() {
         .find(|p| p["provider"] == "OpenAI")
         .expect("Codex buckets into OpenAI");
     assert_eq!(openai["cost"]["has_estimate"], true);
-    let known = openai["cost"]["known_usd"].as_f64().unwrap();
+    assert_eq!(openai["cost"]["has_recorded"], false);
+    let known = openai["cost"]["estimated_usd"].as_f64().unwrap();
     // Codex: 100K tokens -> (60K*2.0 + 40K*8.0)/1M = 0.44 — well under
     // Claude's 0.78 for the same token count, proving no cross-pricing.
     assert!((known - 0.44).abs() < 0.01, "expected ~0.44, got {known}");
 }
 
 #[tokio::test]
-async fn stats_tokens_persisted_non_claude_cost_is_flagged_as_an_estimate() {
-    // Only Claude Code's CLI reports a genuine cost measurement; a non-null
-    // cost_usd on any other agent's message was itself computed from the
-    // pricing table at ingest time and must stay labeled as an estimate,
-    // never silently upgraded to "measured" just because the DB row is non-null.
+async fn stats_tokens_persisted_non_claude_cost_is_recorded_not_auto_flagged_estimate() {
+    // A non-null cost_usd for a non-Claude agent went through the exact same
+    // ingest fallback as ClaudeCode's (see streaming.rs): the DB does not
+    // distinguish a real reported cost from a pricing-table fallback for
+    // ANY agent. So it must be reported as recorded (provenance
+    // unguaranteed), never branded "definitely an estimate" just because
+    // the agent isn't ClaudeCode — that would fabricate certainty the data
+    // doesn't support, in the opposite direction of the old bug.
     let state = test_state();
     let did = create_test_discussion(&state).await;
     state
@@ -2581,8 +2593,9 @@ async fn stats_tokens_persisted_non_claude_cost_is_flagged_as_an_estimate() {
         .iter()
         .find(|p| p["provider"] == "OpenAI")
         .expect("Codex buckets into OpenAI");
-    assert_eq!(openai["cost"]["known_usd"], 0.44);
-    assert_eq!(openai["cost"]["has_estimate"], true);
+    assert_eq!(openai["cost"]["recorded_usd"], 0.44);
+    assert_eq!(openai["cost"]["has_recorded"], true);
+    assert_eq!(openai["cost"]["has_estimate"], false);
 }
 
 #[tokio::test]
@@ -2639,12 +2652,12 @@ async fn stats_tokens_workflow_runs_have_no_agent_attribution_so_cost_is_unknown
         .find(|w| w["id"] == "wf-stats")
         .expect("workflow present in top_workflows");
     assert_eq!(wf["tokens_used"], 5000);
-    assert_eq!(wf["cost"]["known_usd"], 0.0);
+    assert_eq!(wf["cost"]["recorded_usd"], 0.0);
     assert_eq!(wf["cost"]["has_estimate"], false);
     assert_eq!(wf["cost"]["unknown_cost_tokens"], 5000);
 
     let total = &json["data"]["total_cost"];
-    assert_eq!(total["known_usd"], 3.0);
+    assert_eq!(total["recorded_usd"], 3.0);
     assert_eq!(total["unknown_cost_tokens"], 5000);
 }
 
@@ -2684,9 +2697,190 @@ async fn stats_tokens_top_discussion_cost_reflects_each_messages_real_agent() {
         .find(|d| d["id"] == disc_id)
         .expect("discussion present in top_discussions");
     assert_eq!(disc["tokens_used"], 5000);
-    assert_eq!(disc["cost"]["known_usd"], 2.5);
+    assert_eq!(disc["cost"]["recorded_usd"], 2.5);
     assert_eq!(disc["cost"]["has_estimate"], false);
     assert_eq!(disc["cost"]["unknown_cost_tokens"], 4000);
+}
+
+#[tokio::test]
+async fn stats_tokens_same_group_known_and_null_rows_keep_the_null_share_unknown() {
+    // KT-637 review (P1): SQL `SUM(cost_usd)` silently drops NULL rows, so a
+    // GROUP BY project+agent / discussion+agent / day+agent that only reads
+    // that sum treats every token in the group as priced — even the ones
+    // whose row had a NULL cost. Independent proof from the review:
+    // ('OpenCode', 100, 1.0), ('OpenCode', 200, NULL) must report
+    // recorded_usd=1.0 for 100 tokens and unknown_cost_tokens=200, not
+    // unknown=0. Same agent, same project, same discussion, same day, so
+    // every aggregation level (provider/project/discussion/daily/total)
+    // shares this one group and must all show the same honest split.
+    let state = test_state();
+    state
+        .db
+        .with_conn(|conn| {
+            let now = chrono::Utc::now().to_rfc3339();
+            conn.execute(
+                "INSERT INTO projects (id, name, path, created_at, updated_at)
+                 VALUES ('proj-split', 'Split', '/tmp/proj-split', ?1, ?1)",
+                rusqlite::params![now],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    let did = uuid::Uuid::new_v4().to_string();
+    let disc_id = did.clone();
+    state
+        .db
+        .with_conn(move |conn| {
+            conn.execute(
+                "INSERT INTO discussions (id, title, project_id, agent, language, participants_json, created_at, updated_at)
+                 VALUES (?1, 'Split', 'proj-split', 'OpenCode', 'en', '[]', datetime('now'), datetime('now'))",
+                rusqlite::params![did],
+            )?;
+            conn.execute(
+                "INSERT INTO messages (id, discussion_id, role, content, agent_type, timestamp, tokens_used, cost_usd)
+                 VALUES ('m-recorded', ?1, 'Agent', 'hi', 'OpenCode', datetime('now'), 100, 1.0)",
+                rusqlite::params![did],
+            )?;
+            conn.execute(
+                "INSERT INTO messages (id, discussion_id, role, content, agent_type, timestamp, tokens_used)
+                 VALUES ('m-no-cost', ?1, 'Agent', 'hi', 'OpenCode', datetime('now'), 200)",
+                rusqlite::params![did],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    let app = build_router_with_auth(state, false);
+    let (status, json) = get_json(app, "/api/stats/tokens").await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+
+    let assert_split = |cost: &Value, label: &str| {
+        assert_eq!(cost["recorded_usd"], 1.0, "{label}: recorded_usd");
+        assert_eq!(cost["has_recorded"], true, "{label}: has_recorded");
+        assert_eq!(cost["has_estimate"], false, "{label}: has_estimate");
+        assert_eq!(cost["unknown_cost_tokens"], 200, "{label}: unknown_cost_tokens");
+    };
+
+    let by_provider = json["data"]["by_provider"].as_array().unwrap();
+    let other = by_provider
+        .iter()
+        .find(|p| p["provider"] == "Other")
+        .expect("OpenCode buckets into Other");
+    assert_eq!(other["tokens_used"], 300);
+    assert_split(&other["cost"], "by_provider");
+
+    let by_project = json["data"]["by_project"].as_array().unwrap();
+    let proj = by_project
+        .iter()
+        .find(|p| p["project_id"] == "proj-split")
+        .expect("project bucket present");
+    assert_eq!(proj["tokens_used"], 300);
+    assert_split(&proj["cost"], "by_project");
+
+    let top_discussions = json["data"]["top_discussions"].as_array().unwrap();
+    let disc = top_discussions
+        .iter()
+        .find(|d| d["id"] == disc_id)
+        .expect("discussion present in top_discussions");
+    assert_eq!(disc["tokens_used"], 300);
+    assert_split(&disc["cost"], "top_discussions");
+
+    let daily_history = json["data"]["daily_history"].as_array().unwrap();
+    assert_eq!(daily_history.len(), 1, "single day of activity");
+    assert_split(&daily_history[0]["cost"], "daily_history");
+
+    assert_split(&json["data"]["total_cost"], "total_cost");
+}
+
+#[tokio::test]
+async fn stats_tokens_recorded_zero_cost_stays_distinct_from_a_sibling_null_row() {
+    // The "0/NULL" case: a recorded cost of exactly 0.0 and a NULL cost in
+    // the same group both contribute nothing to `SUM(cost_usd)`, so this is
+    // the case where the bug is hardest to notice numerically — recorded_usd
+    // stays 0.0 either way. Only the token-level split proves the 200 NULL
+    // tokens are unknown, not "recorded as free" alongside the other 100.
+    let state = test_state();
+    let did = create_test_discussion(&state).await;
+    state
+        .db
+        .with_conn(move |conn| {
+            conn.execute(
+                "INSERT INTO messages (id, discussion_id, role, content, agent_type, timestamp, tokens_used, cost_usd)
+                 VALUES ('m-zero', ?1, 'Agent', 'hi', 'OpenCode', datetime('now'), 100, 0.0)",
+                rusqlite::params![did],
+            )?;
+            conn.execute(
+                "INSERT INTO messages (id, discussion_id, role, content, agent_type, timestamp, tokens_used)
+                 VALUES ('m-null', ?1, 'Agent', 'hi', 'OpenCode', datetime('now'), 200)",
+                rusqlite::params![did],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    let app = build_router_with_auth(state, false);
+    let (status, json) = get_json(app, "/api/stats/tokens").await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+
+    let by_provider = json["data"]["by_provider"].as_array().unwrap();
+    let other = by_provider
+        .iter()
+        .find(|p| p["provider"] == "Other")
+        .expect("OpenCode buckets into Other");
+    assert_eq!(other["tokens_used"], 300);
+    assert_eq!(other["cost"]["recorded_usd"], 0.0);
+    assert_eq!(other["cost"]["has_recorded"], true);
+    assert_eq!(other["cost"]["unknown_cost_tokens"], 200);
+}
+
+#[tokio::test]
+async fn stats_tokens_estimable_agent_with_a_missing_sub_part_mixes_recorded_and_estimated() {
+    // An agent WITH pricing-table coverage (Codex) can still have some rows
+    // recorded and others missing entirely. The missing sub-part must be
+    // priced with Codex's own table (estimated_usd), never folded into the
+    // recorded sum and never treated as fully covered by the recorded rows.
+    let state = test_state();
+    let did = create_test_discussion(&state).await;
+    state
+        .db
+        .with_conn(move |conn| {
+            conn.execute(
+                "INSERT INTO messages (id, discussion_id, role, content, agent_type, timestamp, tokens_used, cost_usd)
+                 VALUES ('m-recorded', ?1, 'Agent', 'hi', 'Codex', datetime('now'), 1000, 0.05)",
+                rusqlite::params![did],
+            )?;
+            conn.execute(
+                "INSERT INTO messages (id, discussion_id, role, content, agent_type, timestamp, tokens_used)
+                 VALUES ('m-missing', ?1, 'Agent', 'hi', 'Codex', datetime('now'), 100000)",
+                rusqlite::params![did],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    let app = build_router_with_auth(state, false);
+    let (status, json) = get_json(app, "/api/stats/tokens").await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+
+    let by_provider = json["data"]["by_provider"].as_array().unwrap();
+    let openai = by_provider
+        .iter()
+        .find(|p| p["provider"] == "OpenAI")
+        .expect("Codex buckets into OpenAI");
+    assert_eq!(openai["tokens_used"], 101000);
+    assert_eq!(openai["cost"]["recorded_usd"], 0.05);
+    assert_eq!(openai["cost"]["has_recorded"], true);
+    assert_eq!(openai["cost"]["has_estimate"], true);
+    let estimated = openai["cost"]["estimated_usd"].as_f64().unwrap();
+    // Codex: 100K tokens -> (60K*2.0 + 40K*8.0)/1M = 0.44, computed only
+    // over the 100K missing tokens, not the 1K that were already recorded.
+    assert!((estimated - 0.44).abs() < 0.01, "expected ~0.44, got {estimated}");
+    assert_eq!(openai["cost"]["unknown_cost_tokens"], 0);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
