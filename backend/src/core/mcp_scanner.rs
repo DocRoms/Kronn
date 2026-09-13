@@ -4148,6 +4148,33 @@ mod host_sync_tests {
     use super::*;
     use serial_test::serial;
     use std::collections::{HashMap, HashSet};
+    use std::path::Path;
+
+    /// Restores the test process environment even if an assertion panics.
+    /// Callers are `#[serial]` because Rust process environments are global.
+    struct EnvRestore(Vec<(&'static str, Option<std::ffi::OsString>)>);
+
+    impl EnvRestore {
+        fn capture(names: &[&'static str]) -> Self {
+            Self(
+                names
+                    .iter()
+                    .map(|name| (*name, std::env::var_os(name)))
+                    .collect(),
+            )
+        }
+    }
+
+    impl Drop for EnvRestore {
+        fn drop(&mut self) {
+            for (name, value) in self.0.drain(..) {
+                match value {
+                    Some(value) => std::env::set_var(name, value),
+                    None => std::env::remove_var(name),
+                }
+            }
+        }
+    }
 
     fn kronn_entry(config_id: &str, command: &str) -> serde_json::Value {
         serde_json::json!({
@@ -5186,6 +5213,95 @@ Always send emails from contact@example.com
         assert!(
             is_default_mcp_context(bullet_only),
             "bare bullets inside Examples block are template structure"
+        );
+    }
+
+    fn project_sync_test_db(project_path: &Path) -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO projects (id, name, path, created_at, updated_at)
+             VALUES ('sync-project', 'Sync project', ?1, ?2, ?2)",
+            rusqlite::params![project_path.to_string_lossy(), now],
+        )
+        .unwrap();
+        conn
+    }
+
+    #[test]
+    #[serial]
+    fn host_sync_env_restore_returns_the_prior_override() {
+        let before = std::env::var_os("KRONN_HOST_HOME");
+        {
+            let _restore = EnvRestore::capture(&["KRONN_HOST_HOME"]);
+            std::env::set_var("KRONN_HOST_HOME", "/synthetic/host-sync-fixture");
+            assert_eq!(
+                std::env::var_os("KRONN_HOST_HOME"),
+                Some("/synthetic/host-sync-fixture".into())
+            );
+        }
+        assert_eq!(std::env::var_os("KRONN_HOST_HOME"), before);
+    }
+
+    #[test]
+    #[serial]
+    fn project_sync_receipt_distinguishes_written_unchanged_and_read_only() {
+        let _restore = EnvRestore::capture(&[
+            "KRONN_IN_DOCKER",
+            "KRONN_REPOS_DIR",
+            "KRONN_EXTRA_REPOS",
+            "KRONN_HOST_HOME",
+        ]);
+        let root = tempfile::tempdir().unwrap();
+        let writable_root = root.path().join("repos");
+        let writable_project = writable_root.join("project");
+        let host_home = root.path().join("host-home");
+        std::fs::create_dir_all(&writable_project).unwrap();
+        std::fs::create_dir_all(&host_home).unwrap();
+
+        std::env::set_var("KRONN_IN_DOCKER", "1");
+        std::env::set_var("KRONN_REPOS_DIR", &writable_root);
+        std::env::remove_var("KRONN_EXTRA_REPOS");
+        std::env::set_var("KRONN_HOST_HOME", &host_home);
+
+        let writable_db = project_sync_test_db(&writable_project);
+        sync_project_with_report(&writable_db, "sync-project", "test-secret");
+        let first = crate::db::projects::get_project(&writable_db, "sync-project")
+            .unwrap()
+            .unwrap()
+            .mcp_sync_report
+            .expect("first sync receipt");
+        assert_eq!(first.status, crate::models::ProjectMcpSyncStatus::Written);
+
+        sync_project_with_report(&writable_db, "sync-project", "test-secret");
+        let second = crate::db::projects::get_project(&writable_db, "sync-project")
+            .unwrap()
+            .unwrap()
+            .mcp_sync_report
+            .expect("second sync receipt");
+        assert_eq!(
+            second.status,
+            crate::models::ProjectMcpSyncStatus::Unchanged
+        );
+
+        let outside_project = root.path().join("outside/project");
+        std::fs::create_dir_all(&outside_project).unwrap();
+        let read_only_db = project_sync_test_db(&outside_project);
+        sync_project_with_report(&read_only_db, "sync-project", "test-secret");
+        let read_only = crate::db::projects::get_project(&read_only_db, "sync-project")
+            .unwrap()
+            .unwrap()
+            .mcp_sync_report
+            .expect("read-only sync receipt");
+        assert_eq!(
+            read_only.status,
+            crate::models::ProjectMcpSyncStatus::ReadOnly
+        );
+        assert!(!outside_project.join(".mcp.json").exists());
+        assert!(
+            !host_home.join(".codex/config.toml").exists(),
+            "project-only receipt sync must not reach the owned host fixture"
         );
     }
 }

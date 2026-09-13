@@ -1648,22 +1648,25 @@ async fn live_page_library_state_discussion_link_and_delete_round_trip() {
 /// platform dir when KRONN_DATA_DIR is unset). MCP handlers also synchronize
 /// host-agent configs, so both roots must be owned by this test process.
 fn isolate_config_dir() {
-    static FIXTURE_ROOT: OnceLock<tempfile::TempDir> = OnceLock::new();
-    let root = FIXTURE_ROOT
-        .get_or_init(|| tempfile::tempdir().expect("create integration-test fixture root"));
-    let data_dir = root.path().join("data");
-    let host_home = root.path().join("host-home");
-    std::fs::create_dir_all(&data_dir).expect("create integration-test data fixture");
-    std::fs::create_dir_all(&host_home).expect("create integration-test host fixture");
-    std::env::set_var("KRONN_DATA_DIR", data_dir);
-    std::env::set_var("KRONN_HOST_HOME", host_home);
+    static INIT: std::sync::Once = std::sync::Once::new();
+    INIT.call_once(|| {
+        let dir = std::env::temp_dir().join(format!("kronn-inttest-cfg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).ok();
+        std::env::set_var("KRONN_DATA_DIR", &dir);
+    });
 }
 
-fn integration_test_host_home() -> std::path::PathBuf {
-    isolate_config_dir();
-    std::env::var_os("KRONN_HOST_HOME")
-        .map(std::path::PathBuf::from)
-        .expect("integration-test host fixture")
+/// This is called only by the serial, fresh-process host-sync regression.
+/// Its TempDir is process-lived so a real router handler cannot fall back to a
+/// caller-provided host directory during the test.
+fn isolate_mcp_host_sync_dir() -> std::path::PathBuf {
+    static FIXTURE_ROOT: OnceLock<tempfile::TempDir> = OnceLock::new();
+    let root = FIXTURE_ROOT
+        .get_or_init(|| tempfile::tempdir().expect("create MCP host-sync fixture root"));
+    let host_home = root.path().join("host-home");
+    std::fs::create_dir_all(&host_home).expect("create MCP host-sync fixture");
+    std::env::set_var("KRONN_HOST_HOME", &host_home);
+    host_home
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -9939,6 +9942,27 @@ const MCP_HOST_ISOLATION_CHILD: &str = "KRONN_TEST_MCP_HOST_ISOLATION_CHILD";
 const MCP_HOST_SENTINEL: &str = "KRONN_TEST_MCP_HOST_SENTINEL";
 const MCP_HOST_ISOLATION_MODE: &str = "KRONN_TEST_MCP_HOST_ISOLATION_MODE";
 
+fn host_adapter_sentinels(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    [
+        ".claude.json",
+        ".gemini/settings.json",
+        ".gemini/kronn-mcp-state.json",
+        ".codex/config.toml",
+        ".copilot/mcp-config.json",
+    ]
+    .into_iter()
+    .map(|relative| root.join(relative))
+    .collect()
+}
+
+fn host_adapter_sentinel_contents(path: &std::path::Path) -> &'static str {
+    match path.extension().and_then(std::ffi::OsStr::to_str) {
+        Some("toml") => "model = 'outside-sentinel'\n",
+        Some("json") => "{\"outside_sentinel\":true,\"mcpServers\":{}}\n",
+        _ => unreachable!("host adapter sentinel must be TOML or JSON"),
+    }
+}
+
 fn test_state_without_fixture() -> AppState {
     let db = Arc::new(kronn::db::Database::open_in_memory().expect("Failed to open in-memory DB"));
     let mut cfg = kronn::core::config::default_config();
@@ -9957,15 +9981,21 @@ fn test_state_without_fixture() -> AppState {
 #[serial]
 async fn mcp_host_sync_router_confines_an_inherited_host_home() {
     if std::env::var_os(MCP_HOST_ISOLATION_CHILD).is_none() {
-        for mode in ["red", "green"] {
+        for mode in ["red", "green", "blocked"] {
             let sentinel_root = tempfile::tempdir().expect("create outside sentinel");
-            let sentinel_config = sentinel_root.path().join(".codex/config.toml");
             let data_dir = sentinel_root.path().join("data");
-            std::fs::create_dir_all(sentinel_config.parent().unwrap()).unwrap();
             std::fs::create_dir_all(&data_dir).unwrap();
-            std::fs::write(&sentinel_config, "sentinel = 'outside-fixture'\n").unwrap();
+            let sentinel_paths = host_adapter_sentinels(sentinel_root.path());
+            for path in &sentinel_paths {
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(path, host_adapter_sentinel_contents(path)).unwrap();
+            }
+            let before: Vec<_> = sentinel_paths
+                .iter()
+                .map(|path| std::fs::read(path).unwrap())
+                .collect();
 
-            let status = std::process::Command::new(std::env::current_exe().unwrap())
+            let mut child = kronn::core::cmd::async_cmd(std::env::current_exe().unwrap())
                 .args([
                     "--exact",
                     "mcp_host_sync_router_confines_an_inherited_host_home",
@@ -9976,17 +10006,42 @@ async fn mcp_host_sync_router_confines_an_inherited_host_home() {
                 .env(MCP_HOST_SENTINEL, sentinel_root.path())
                 .env("KRONN_DATA_DIR", data_dir)
                 .env("KRONN_HOST_HOME", sentinel_root.path())
-                .status()
+                .spawn()
                 .expect("launch isolated API regression child");
+            let status = match tokio::time::timeout(
+                std::time::Duration::from_secs(15),
+                child.wait(),
+            )
+            .await
+            {
+                Ok(Ok(status)) => status,
+                Ok(Err(error)) => panic!("{mode} API isolation child wait failed: {error}"),
+                Err(_) => {
+                    let _ = child.kill().await;
+                    panic!("{mode} API isolation child exceeded 15 seconds");
+                }
+            };
             assert!(
                 status.success(),
                 "{mode} API isolation child failed: {status}"
             );
-            let sentinel_contents = std::fs::read_to_string(sentinel_config).unwrap();
             if mode == "red" {
-                assert_ne!(sentinel_contents, "sentinel = 'outside-fixture'\n");
+                assert!(
+                    sentinel_paths
+                        .iter()
+                        .zip(&before)
+                        .any(|(path, contents)| std::fs::read(path).unwrap() != *contents),
+                    "the unisolated control must modify a disposable host-adapter sentinel"
+                );
             } else {
-                assert_eq!(sentinel_contents, "sentinel = 'outside-fixture'\n");
+                for (path, contents) in sentinel_paths.iter().zip(&before) {
+                    assert_eq!(
+                        std::fs::read(path).unwrap(),
+                        *contents,
+                        "outside sentinel changed: {}",
+                        path.display()
+                    );
+                }
             }
         }
         return;
@@ -9998,14 +10053,19 @@ async fn mcp_host_sync_router_confines_an_inherited_host_home() {
     let state = if red {
         test_state_without_fixture()
     } else {
+        isolate_config_dir();
         test_state()
     };
-    let host_fixture = (!red).then(integration_test_host_home);
+    let blocked = std::env::var(MCP_HOST_ISOLATION_MODE).as_deref() == Ok("blocked");
+    let host_fixture = (!red).then(isolate_mcp_host_sync_dir);
     if let Some(host_fixture) = &host_fixture {
         assert_ne!(
             host_fixture, &sentinel,
             "the harness must replace inherited host home"
         );
+        if blocked {
+            std::fs::write(host_fixture.join(".codex"), "fixture blocker").unwrap();
+        }
     }
 
     let (status, response) = post_json(
@@ -10028,17 +10088,20 @@ async fn mcp_host_sync_router_confines_an_inherited_host_home() {
         "create config response: {response}"
     );
     if let Some(host_fixture) = host_fixture {
-        assert!(host_fixture.join(".codex/config.toml").exists());
-        assert!(host_fixture.join(".copilot/mcp-config.json").exists());
-        assert_eq!(
-            std::fs::read_to_string(sentinel.join(".codex/config.toml")).unwrap(),
-            "sentinel = 'outside-fixture'\n"
-        );
+        if blocked {
+            assert!(
+                host_fixture.join(".codex").is_file(),
+                "blocked fixture must remain a file"
+            );
+        } else {
+            assert!(host_fixture.join(".codex/config.toml").exists());
+            assert!(host_fixture.join(".copilot/mcp-config.json").exists());
+        }
     } else {
-        assert_ne!(
-            std::fs::read_to_string(sentinel.join(".codex/config.toml")).unwrap(),
-            "sentinel = 'outside-fixture'\n"
-        );
+        assert!(host_adapter_sentinels(&sentinel)
+            .iter()
+            .any(|path| std::fs::read_to_string(path).unwrap()
+                != host_adapter_sentinel_contents(path)));
     }
 }
 
