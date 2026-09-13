@@ -20192,8 +20192,7 @@ mod tests {
         };
         assert_eq!(new_offer.target_cli_session_id, 102);
         assert_ne!(
-            new_offer.id,
-            old_offer_id,
+            new_offer.id, old_offer_id,
             "a distinct offer, not the stale one"
         );
 
@@ -20283,7 +20282,8 @@ mod tests {
             "must roll back",
         )
         .await
-        .expect_err("reassignment must fail when its child room vanished");
+        .err()
+        .expect("reassignment must fail when its child room vanished");
         assert!(
             error
                 .to_string()
