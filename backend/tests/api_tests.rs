@@ -2387,13 +2387,13 @@ async fn stats_tokens_unknown_provider_reports_unknown_not_zero() {
         .db
         .with_conn(move |conn| {
             conn.execute(
-                "INSERT INTO messages (id, discussion_id, role, content, agent_type, timestamp, tokens_used)
-                 VALUES ('m-opencode', ?1, 'Agent', 'hi', 'OpenCode', datetime('now'), 1000)",
+                "INSERT INTO messages (id, discussion_id, role, content, agent_type, timestamp, tokens_used, sort_order)
+                 VALUES ('m-opencode', ?1, 'Agent', 'hi', 'OpenCode', datetime('now'), 1000, 0)",
                 rusqlite::params![did],
             )?;
             conn.execute(
-                "INSERT INTO messages (id, discussion_id, role, content, agent_type, timestamp, tokens_used)
-                 VALUES ('m-custom', ?1, 'Agent', 'hi', 'Custom', datetime('now'), 2000)",
+                "INSERT INTO messages (id, discussion_id, role, content, agent_type, timestamp, tokens_used, sort_order)
+                 VALUES ('m-custom', ?1, 'Agent', 'hi', 'Custom', datetime('now'), 2000, 1)",
                 rusqlite::params![did],
             )?;
             Ok(())
@@ -2487,13 +2487,13 @@ async fn stats_tokens_mixed_known_and_unknown_totals_are_partial() {
                 rusqlite::params![did],
             )?;
             conn.execute(
-                "INSERT INTO messages (id, discussion_id, role, content, agent_type, timestamp, tokens_used, cost_usd)
-                 VALUES ('m-known', ?1, 'Agent', 'hi', 'ClaudeCode', datetime('now'), 1000, 5.0)",
+                "INSERT INTO messages (id, discussion_id, role, content, agent_type, timestamp, tokens_used, cost_usd, sort_order)
+                 VALUES ('m-known', ?1, 'Agent', 'hi', 'ClaudeCode', datetime('now'), 1000, 5.0, 0)",
                 rusqlite::params![did],
             )?;
             conn.execute(
-                "INSERT INTO messages (id, discussion_id, role, content, agent_type, timestamp, tokens_used)
-                 VALUES ('m-unknown', ?1, 'Agent', 'hi', 'OpenCode', datetime('now'), 2000)",
+                "INSERT INTO messages (id, discussion_id, role, content, agent_type, timestamp, tokens_used, sort_order)
+                 VALUES ('m-unknown', ?1, 'Agent', 'hi', 'OpenCode', datetime('now'), 2000, 1)",
                 rusqlite::params![did],
             )?;
             Ok(())
@@ -2673,13 +2673,13 @@ async fn stats_tokens_top_discussion_cost_reflects_each_messages_real_agent() {
         .db
         .with_conn(move |conn| {
             conn.execute(
-                "INSERT INTO messages (id, discussion_id, role, content, agent_type, timestamp, tokens_used, cost_usd)
-                 VALUES ('m-claude', ?1, 'Agent', 'hi', 'ClaudeCode', datetime('now'), 1000, 2.5)",
+                "INSERT INTO messages (id, discussion_id, role, content, agent_type, timestamp, tokens_used, cost_usd, sort_order)
+                 VALUES ('m-claude', ?1, 'Agent', 'hi', 'ClaudeCode', datetime('now'), 1000, 2.5, 0)",
                 rusqlite::params![did],
             )?;
             conn.execute(
-                "INSERT INTO messages (id, discussion_id, role, content, agent_type, timestamp, tokens_used)
-                 VALUES ('m-opencode', ?1, 'Agent', 'hi', 'OpenCode', datetime('now'), 4000)",
+                "INSERT INTO messages (id, discussion_id, role, content, agent_type, timestamp, tokens_used, sort_order)
+                 VALUES ('m-opencode', ?1, 'Agent', 'hi', 'OpenCode', datetime('now'), 4000, 1)",
                 rusqlite::params![did],
             )?;
             Ok(())
@@ -2739,13 +2739,13 @@ async fn stats_tokens_same_group_known_and_null_rows_keep_the_null_share_unknown
                 rusqlite::params![did],
             )?;
             conn.execute(
-                "INSERT INTO messages (id, discussion_id, role, content, agent_type, timestamp, tokens_used, cost_usd)
-                 VALUES ('m-recorded', ?1, 'Agent', 'hi', 'OpenCode', datetime('now'), 100, 1.0)",
+                "INSERT INTO messages (id, discussion_id, role, content, agent_type, timestamp, tokens_used, cost_usd, sort_order)
+                 VALUES ('m-recorded', ?1, 'Agent', 'hi', 'OpenCode', datetime('now'), 100, 1.0, 0)",
                 rusqlite::params![did],
             )?;
             conn.execute(
-                "INSERT INTO messages (id, discussion_id, role, content, agent_type, timestamp, tokens_used)
-                 VALUES ('m-no-cost', ?1, 'Agent', 'hi', 'OpenCode', datetime('now'), 200)",
+                "INSERT INTO messages (id, discussion_id, role, content, agent_type, timestamp, tokens_used, sort_order)
+                 VALUES ('m-no-cost', ?1, 'Agent', 'hi', 'OpenCode', datetime('now'), 200, 1)",
                 rusqlite::params![did],
             )?;
             Ok(())
@@ -2811,13 +2811,13 @@ async fn stats_tokens_recorded_zero_cost_stays_distinct_from_a_sibling_null_row(
         .db
         .with_conn(move |conn| {
             conn.execute(
-                "INSERT INTO messages (id, discussion_id, role, content, agent_type, timestamp, tokens_used, cost_usd)
-                 VALUES ('m-zero', ?1, 'Agent', 'hi', 'OpenCode', datetime('now'), 100, 0.0)",
+                "INSERT INTO messages (id, discussion_id, role, content, agent_type, timestamp, tokens_used, cost_usd, sort_order)
+                 VALUES ('m-zero', ?1, 'Agent', 'hi', 'OpenCode', datetime('now'), 100, 0.0, 0)",
                 rusqlite::params![did],
             )?;
             conn.execute(
-                "INSERT INTO messages (id, discussion_id, role, content, agent_type, timestamp, tokens_used)
-                 VALUES ('m-null', ?1, 'Agent', 'hi', 'OpenCode', datetime('now'), 200)",
+                "INSERT INTO messages (id, discussion_id, role, content, agent_type, timestamp, tokens_used, sort_order)
+                 VALUES ('m-null', ?1, 'Agent', 'hi', 'OpenCode', datetime('now'), 200, 1)",
                 rusqlite::params![did],
             )?;
             Ok(())
@@ -2852,13 +2852,13 @@ async fn stats_tokens_estimable_agent_with_a_missing_sub_part_mixes_recorded_and
         .db
         .with_conn(move |conn| {
             conn.execute(
-                "INSERT INTO messages (id, discussion_id, role, content, agent_type, timestamp, tokens_used, cost_usd)
-                 VALUES ('m-recorded', ?1, 'Agent', 'hi', 'Codex', datetime('now'), 1000, 0.05)",
+                "INSERT INTO messages (id, discussion_id, role, content, agent_type, timestamp, tokens_used, cost_usd, sort_order)
+                 VALUES ('m-recorded', ?1, 'Agent', 'hi', 'Codex', datetime('now'), 1000, 0.05, 0)",
                 rusqlite::params![did],
             )?;
             conn.execute(
-                "INSERT INTO messages (id, discussion_id, role, content, agent_type, timestamp, tokens_used)
-                 VALUES ('m-missing', ?1, 'Agent', 'hi', 'Codex', datetime('now'), 100000)",
+                "INSERT INTO messages (id, discussion_id, role, content, agent_type, timestamp, tokens_used, sort_order)
+                 VALUES ('m-missing', ?1, 'Agent', 'hi', 'Codex', datetime('now'), 100000, 1)",
                 rusqlite::params![did],
             )?;
             Ok(())
