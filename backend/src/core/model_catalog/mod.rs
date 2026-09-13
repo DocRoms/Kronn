@@ -15,6 +15,7 @@
 
 pub mod acp_discovery;
 pub mod codex_discovery;
+pub mod ollama_discovery;
 
 use std::time::Duration;
 use std::{collections::HashMap, sync::LazyLock};
@@ -356,6 +357,59 @@ pub async fn refresh_agent_catalog(
     build_view(db, runtime_target_id, agent_type).await
 }
 
+/// Discover and reconcile the configured Ollama HTTP catalogue.
+pub async fn refresh_ollama_catalog_at(
+    database: &Database,
+    base_url: &str,
+) -> anyhow::Result<(
+    ModelCatalogView,
+    Result<Vec<ollama_discovery::OllamaTag>, DiscoveryOutcome>,
+)> {
+    let outcome = ollama_discovery::discover(base_url).await;
+    let target = db::agent_runtime_target_id(&AgentType::Ollama);
+    match &outcome {
+        Ok(tags) => {
+            let models = ollama_discovery::discovered_models(tags);
+            let reconcile_target = target.clone();
+            database
+                .with_conn(move |conn| {
+                    let transaction = conn.unchecked_transaction()?;
+                    db::reconcile_live(
+                        &transaction,
+                        &reconcile_target,
+                        &AgentType::Ollama,
+                        &models,
+                    )?;
+                    transaction.commit()?;
+                    Ok(())
+                })
+                .await?;
+            refresh_runtime_cache(database).await?;
+        }
+        Err(error) => {
+            if let Some((reason, detail)) = reason_for(error) {
+                let failure_target = target.clone();
+                database
+                    .with_conn(move |conn| {
+                        let transaction = conn.unchecked_transaction()?;
+                        db::record_refresh_failure(
+                            &transaction,
+                            &failure_target,
+                            &AgentType::Ollama,
+                            reason,
+                            &detail,
+                        )?;
+                        transaction.commit()?;
+                        Ok(())
+                    })
+                    .await?;
+            }
+        }
+    }
+    let view = build_view(database, target, AgentType::Ollama).await?;
+    Ok((view, outcome))
+}
+
 /// Persist a successful provider catalogue for one named HTTP connection.
 pub async fn reconcile_http_catalog(
     database: &Database,
@@ -432,16 +486,21 @@ pub async fn build_view(
 }
 
 /// Serve the current snapshot, refreshing first when it is stale (or when
-/// `force` requests an explicit recheck). Non-managed runtimes (Ollama,
-/// LiteLLM, NVIDIA, Custom) skip discovery entirely — their catalogue comes
-/// from `external_api_connections` — and just return whatever (empty) rows
-/// happen to exist for them.
+/// `force` requests an explicit recheck). Ollama only probes its HTTP endpoint
+/// on a forced recheck; ordinary reads/preflight use its durable rows. Named
+/// HTTP connections are refreshed by their connection-test boundary instead.
 pub async fn refresh_if_stale(
     db: &Database,
     agent_type: AgentType,
     force: bool,
 ) -> anyhow::Result<ModelCatalogView> {
     let runtime_target_id = db::agent_runtime_target_id(&agent_type);
+    if agent_type == AgentType::Ollama && force {
+        let base = crate::api::ollama::resolve_base_url_pub(None);
+        return refresh_ollama_catalog_at(db, &base)
+            .await
+            .map(|(view, _)| view);
+    }
     if !is_catalog_managed(&agent_type) {
         return build_view(db, runtime_target_id, agent_type).await;
     }

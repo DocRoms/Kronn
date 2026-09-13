@@ -99,6 +99,10 @@ export function Dashboard({ onReset }: DashboardProps) {
   const [openWorkflowId, setOpenWorkflowId] = useState<string | null>(null);
   const [openWorkflowRunId, setOpenWorkflowRunId] = useState<string | null>(null);
   const [activeRunsPopoverOpen, setActiveRunsPopoverOpen] = useState(false);
+  const projectsTabRef = useRef<HTMLButtonElement>(null);
+  const workflowsTabRef = useRef<HTMLButtonElement>(null);
+  const auditsTriggerRef = useRef<HTMLButtonElement>(null);
+  const runsTriggerRef = useRef<HTMLButtonElement>(null);
   // Reverse direction: when a "📋 View N discussions" chip on a workflow run
   // is clicked, we hand the batch run id to DiscussionsPage so the sidebar
   // expands the matching batch group + scrolls to it.
@@ -746,7 +750,7 @@ export function Dashboard({ onReset }: DashboardProps) {
         ] as [string, typeof Folder, string][]).map(([id, Icon, label]) => {
           const btn = (
             <button
-              key={id === 'workflows' ? undefined : id}
+              key={id}
               className="dash-nav-btn"
               data-active={page === id}
               data-mobile={isMobile}
@@ -758,43 +762,15 @@ export function Dashboard({ onReset }: DashboardProps) {
               // hook for sighted users.
               aria-current={page === id ? 'page' : undefined}
               aria-label={isMobile ? label : undefined}
-              // Stop the mousedown so the popover's outside-click handler
-              // doesn't fire when the user re-clicks the nav button to toggle
-              // it closed — without this the outside-close + onClick-toggle
-              // race leaves the popover stuck open.
-              onMouseDown={
-                id === 'workflows' || id === 'projects'
-                  ? (e) => e.stopPropagation()
-                  : undefined
-              }
+              ref={id === 'projects' ? projectsTabRef : id === 'workflows' ? workflowsTabRef : undefined}
               onClick={() => {
-                // When workflows are running, hijack the nav click to open the
-                // active-runs popover instead of navigating — single-click
-                // access to Stop from any page. Normal nav still works when
-                // nothing is running, or when we're already on the page.
-                if (id === 'workflows' && runningWorkflows > 0 && page !== 'workflows') {
-                  setActiveRunsPopoverOpen(o => !o);
-                  return;
-                }
-                // 0.8.3 (#288) — mirror the same hijack pattern for audits.
-                // The Projets nav opens the audits popover when an audit
-                // is in progress and we're not already on the page.
-                if (id === 'projects' && activeAudits.length > 0 && page !== 'projects') {
-                  setActiveAuditsPopoverOpen(o => !o);
-                  return;
-                }
                 setPage(id as Page);
                 if (id !== 'mcps') setMcpSelectedConfigId(null);
                 setPlanningSelectedTaskId(null);
               }}
               title={label}
             >
-              {id === 'workflows' && runningWorkflows > 0
-                ? <Loader2 size={isMobile ? 16 : 14} style={{ animation: 'spin 1s linear infinite' }} className="text-accent" />
-                : id === 'projects' && activeAudits.length > 0
-                ? <Loader2 size={isMobile ? 16 : 14} style={{ animation: 'spin 1s linear infinite' }} className="text-accent" />
-                : <Icon size={isMobile ? 16 : 14} />
-              }
+              <Icon size={isMobile ? 16 : 14} />
               {!isMobile && <>{' '}{label}</>}
               {id === 'discussions' && totalUnseen > 0 && (
                 /* Tooltip + aria-label pin the meaning so the badge isn't
@@ -830,81 +806,95 @@ export function Dashboard({ onReset }: DashboardProps) {
               )}
             </button>
           );
-          if (id === 'projects') {
-            return (
-              <div
-                key={id}
-                className="dash-nav-projects-wrap"
-                style={{ position: 'relative', display: 'inline-flex' }}
-              >
-                {btn}
-                {activeAuditsPopoverOpen && (
-                  <ActiveAuditsPopover
-                    audits={activeAudits}
-                    projects={projects}
-                    onClose={() => setActiveAuditsPopoverOpen(false)}
-                    onNavigateToProject={(projectId) => {
-                      // 0.8.3 (#288) — same pattern as workflow nav:
-                      // navigate to the page and let the ProjectCard
-                      // resume effect surface the live progress bar
-                      // (poll auditStatus inside the card kicks in).
-                      setExpandedId(projectId);
-                      setPage('projects');
-                      setActiveAuditsPopoverOpen(false);
-                    }}
-                    onViewAllProjects={() => {
-                      setPage('projects');
-                      setActiveAuditsPopoverOpen(false);
-                    }}
-                    onAfterCancel={async () => {
-                      // Refetch the fleet-wide audit list so the
-                      // popover updates instantly when a cancel
-                      // succeeds; if 0 audits remain, the popover
-                      // auto-hides via the empty-state branch.
-                      try {
-                        const list = await projectsApi.auditStatusAll();
-                        setActiveAudits(list);
-                      } catch { /* ignore */ }
-                      // Refetch the project list so card statuses
-                      // (Audited / Validated / TemplateInstalled)
-                      // catch up to the cancellation.
-                      refetch();
-                    }}
-                  />
-                )}
-              </div>
-            );
-          }
-          if (id === 'workflows') {
-            return (
-              <div
-                key={id}
-                className="dash-nav-workflows-wrap"
-                style={{ position: 'relative', display: 'inline-flex' }}
-              >
-                {btn}
-                {activeRunsPopoverOpen && (
-                  <ActiveRunsPopover
-                    workflows={workflowList ?? []}
-                    onClose={() => setActiveRunsPopoverOpen(false)}
-                    onNavigateToWorkflow={(wfId) => {
-                      setOpenWorkflowId(wfId);
-                      setOpenWorkflowRunId(null);
-                      setPage('workflows');
-                      setActiveRunsPopoverOpen(false);
-                    }}
-                    onViewAllWorkflows={() => {
-                      setPage('workflows');
-                      setActiveRunsPopoverOpen(false);
-                    }}
-                    onAfterCancel={() => { refetchWorkflows(); }}
-                  />
-                )}
-              </div>
-            );
-          }
           return btn;
         })}
+        </div>
+        <div className="dash-nav-activity-group" data-mobile={isMobile}>
+          {(activeAudits.length > 0 || activeAuditsPopoverOpen) && (
+            <div className="dash-nav-activity-wrap">
+              <button
+                ref={auditsTriggerRef}
+                type="button"
+                className="dash-nav-activity-btn"
+                data-testid="active-audits-trigger"
+                aria-label={t('audit.activeAuditsDisclosure', activeAudits.length, activeAudits.length === 1 ? '' : 's')}
+                aria-haspopup="dialog"
+                aria-expanded={activeAuditsPopoverOpen}
+                aria-controls={activeAuditsPopoverOpen ? 'active-audits-popover' : undefined}
+                onClick={() => {
+                  setActiveRunsPopoverOpen(false);
+                  setActiveAuditsPopoverOpen(open => !open);
+                }}
+              >
+                <Loader2 size={14} className="spin" aria-hidden="true" />
+              </button>
+              {activeAuditsPopoverOpen && (
+                <ActiveAuditsPopover
+                  audits={activeAudits}
+                  projects={projects}
+                  triggerRef={auditsTriggerRef}
+                  focusFallbackRef={projectsTabRef}
+                  onClose={() => setActiveAuditsPopoverOpen(false)}
+                  onNavigateToProject={(projectId) => {
+                    setExpandedId(projectId);
+                    setPage('projects');
+                    setActiveAuditsPopoverOpen(false);
+                    requestAnimationFrame(() => projectsTabRef.current?.focus());
+                  }}
+                  onViewAllProjects={() => {
+                    setPage('projects');
+                    setActiveAuditsPopoverOpen(false);
+                    requestAnimationFrame(() => projectsTabRef.current?.focus());
+                  }}
+                  onAfterCancel={async () => {
+                    try { setActiveAudits(await projectsApi.auditStatusAll()); } catch { /* ignore */ }
+                    refetch();
+                  }}
+                />
+              )}
+            </div>
+          )}
+          {(runningWorkflows > 0 || activeRunsPopoverOpen) && (
+            <div className="dash-nav-activity-wrap">
+              <button
+                ref={runsTriggerRef}
+                type="button"
+                className="dash-nav-activity-btn"
+                data-testid="active-runs-trigger"
+                aria-label={t('wf.activeRunsDisclosure', runningWorkflows, runningWorkflows === 1 ? '' : 's')}
+                aria-haspopup="dialog"
+                aria-expanded={activeRunsPopoverOpen}
+                aria-controls={activeRunsPopoverOpen ? 'active-runs-popover' : undefined}
+                onClick={() => {
+                  setActiveAuditsPopoverOpen(false);
+                  setActiveRunsPopoverOpen(open => !open);
+                }}
+              >
+                <Loader2 size={14} className="spin" aria-hidden="true" />
+              </button>
+              {activeRunsPopoverOpen && (
+                <ActiveRunsPopover
+                  workflows={workflowList ?? []}
+                  triggerRef={runsTriggerRef}
+                  focusFallbackRef={workflowsTabRef}
+                  onClose={() => setActiveRunsPopoverOpen(false)}
+                  onNavigateToWorkflow={(wfId) => {
+                    setOpenWorkflowId(wfId);
+                    setOpenWorkflowRunId(null);
+                    setPage('workflows');
+                    setActiveRunsPopoverOpen(false);
+                    requestAnimationFrame(() => workflowsTabRef.current?.focus());
+                  }}
+                  onViewAllWorkflows={() => {
+                    setPage('workflows');
+                    setActiveRunsPopoverOpen(false);
+                    requestAnimationFrame(() => workflowsTabRef.current?.focus());
+                  }}
+                  onAfterCancel={() => { refetchWorkflows(); }}
+                />
+              )}
+            </div>
+          )}
         </div>
         <div className="dash-nav-spacer" data-mobile={isMobile} />
         {runningDiscIds.length > 0 && (

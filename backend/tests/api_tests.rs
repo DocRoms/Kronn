@@ -3,7 +3,10 @@
 //! These tests exercise the full HTTP layer (router + handlers + DB)
 //! using `tower::ServiceExt::oneshot` with an in-memory SQLite database.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    sync::{Arc, OnceLock},
+};
 
 use axum::{
     body::Body,
@@ -12,6 +15,7 @@ use axum::{
 };
 use http_body_util::BodyExt;
 use serde_json::Value;
+use serial_test::serial;
 use tokio::sync::RwLock;
 use tower::ServiceExt;
 
@@ -1641,14 +1645,19 @@ async fn live_page_library_state_discussion_link_and_delete_round_trip() {
 /// Create a test AppState with an in-memory database and default config.
 /// Every config::save reached through a handler under test would otherwise
 /// write the DEVELOPER'S REAL config.toml (config_dir() falls back to the
-/// platform dir when KRONN_DATA_DIR is unset) — a full `cargo test` used to
-/// wipe pseudo/avatar/model-tiers on the host (2026-07-13 incident).
+/// platform dir when KRONN_DATA_DIR is unset). MCP handlers also synchronize
+/// host-agent configs, so both roots must be owned by this test process.
 fn isolate_config_dir() {
-    static INIT: std::sync::Once = std::sync::Once::new();
-    INIT.call_once(|| {
-        let dir = std::env::temp_dir().join(format!("kronn-inttest-cfg-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).ok();
-        std::env::set_var("KRONN_DATA_DIR", &dir);
+    static FIXTURE_ROOT: OnceLock<tempfile::TempDir> = OnceLock::new();
+    FIXTURE_ROOT.get_or_init(|| {
+        let root = tempfile::tempdir().expect("create API test fixture root");
+        let data_dir = root.path().join("data");
+        let host_home = root.path().join("host-home");
+        std::fs::create_dir_all(&data_dir).expect("create API data fixture");
+        std::fs::create_dir_all(&host_home).expect("create API host fixture");
+        std::env::set_var("KRONN_DATA_DIR", data_dir);
+        std::env::set_var("KRONN_HOST_HOME", host_home);
+        root
     });
 }
 
@@ -2356,6 +2365,14 @@ async fn stats_tokens_empty_db() {
     assert_eq!(json["data"]["total_tokens"], 0);
     assert!(json["data"]["by_provider"].as_array().unwrap().is_empty());
     assert!(json["data"]["by_project"].as_array().unwrap().is_empty());
+    // An empty DB has nothing to price, known or unknown — the aggregate
+    // must report all-zero, not fall back to a fabricated total.
+    let cost = &json["data"]["total_cost"];
+    assert_eq!(cost["recorded_usd"], 0.0);
+    assert_eq!(cost["has_recorded"], false);
+    assert_eq!(cost["estimated_usd"], 0.0);
+    assert_eq!(cost["has_estimate"], false);
+    assert_eq!(cost["unknown_cost_tokens"], 0);
 }
 
 #[tokio::test]
@@ -2366,6 +2383,519 @@ async fn stats_agent_usage_empty_db() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(json["success"], true);
     assert!(json["data"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn stats_tokens_unknown_provider_reports_unknown_not_zero() {
+    // OpenCode and Custom have neither a recorded cost nor a
+    // pricing-table entry (KT-637): their tokens must be reported as
+    // unknown, never silently substituted with a fabricated zero.
+    let state = test_state();
+    let did = create_test_discussion(&state).await;
+    state
+        .db
+        .with_conn(move |conn| {
+            conn.execute(
+                "INSERT INTO messages (id, discussion_id, role, content, agent_type, timestamp, tokens_used, sort_order)
+                 VALUES ('m-opencode', ?1, 'Agent', 'hi', 'OpenCode', datetime('now'), 1000, 0)",
+                rusqlite::params![did],
+            )?;
+            conn.execute(
+                "INSERT INTO messages (id, discussion_id, role, content, agent_type, timestamp, tokens_used, sort_order)
+                 VALUES ('m-custom', ?1, 'Agent', 'hi', 'Custom', datetime('now'), 2000, 1)",
+                rusqlite::params![did],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    let app = build_router_with_auth(state, false);
+    let (status, json) = get_json(app, "/api/stats/tokens").await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+
+    let by_provider = json["data"]["by_provider"].as_array().unwrap();
+    let other = by_provider
+        .iter()
+        .find(|p| p["provider"] == "Other")
+        .expect("OpenCode/Custom bucket into the 'Other' provider");
+    assert_eq!(other["tokens_used"], 3000);
+    assert_eq!(other["cost"]["recorded_usd"], 0.0);
+    assert_eq!(other["cost"]["has_recorded"], false);
+    assert_eq!(other["cost"]["estimated_usd"], 0.0);
+    assert_eq!(other["cost"]["has_estimate"], false);
+    assert_eq!(other["cost"]["unknown_cost_tokens"], 3000);
+
+    let total = &json["data"]["total_cost"];
+    assert_eq!(total["recorded_usd"], 0.0);
+    assert_eq!(total["estimated_usd"], 0.0);
+    assert_eq!(total["unknown_cost_tokens"], 3000);
+}
+
+#[tokio::test]
+async fn stats_tokens_preserves_explicit_recorded_zero_cost() {
+    // A persisted cost of exactly 0.0 (e.g. a fully cached turn) is recorded
+    // data, not an absence of it. It must stay distinct from "unknown" and
+    // must not be bumped to a fabricated non-zero estimate.
+    let state = test_state();
+    let did = create_test_discussion(&state).await;
+    state
+        .db
+        .with_conn(move |conn| {
+            conn.execute(
+                "INSERT INTO messages (id, discussion_id, role, content, agent_type, timestamp, tokens_used, cost_usd)
+                 VALUES ('m-zero', ?1, 'Agent', 'hi', 'ClaudeCode', datetime('now'), 500, 0.0)",
+                rusqlite::params![did],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    let app = build_router_with_auth(state, false);
+    let (status, json) = get_json(app, "/api/stats/tokens").await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+
+    let by_provider = json["data"]["by_provider"].as_array().unwrap();
+    let anthropic = by_provider
+        .iter()
+        .find(|p| p["provider"] == "Anthropic")
+        .expect("ClaudeCode buckets into Anthropic");
+    assert_eq!(anthropic["cost"]["recorded_usd"], 0.0);
+    assert_eq!(anthropic["cost"]["has_recorded"], true);
+    assert_eq!(anthropic["cost"]["has_estimate"], false);
+    assert_eq!(anthropic["cost"]["unknown_cost_tokens"], 0);
+}
+
+#[tokio::test]
+async fn stats_tokens_mixed_known_and_unknown_totals_are_partial() {
+    // A total that blends a real measured cost with unpriced tokens must
+    // expose the unknown share instead of quietly presenting itself as complete.
+    let state = test_state();
+    state
+        .db
+        .with_conn(|conn| {
+            let now = chrono::Utc::now().to_rfc3339();
+            conn.execute(
+                "INSERT INTO projects (id, name, path, created_at, updated_at)
+                 VALUES ('proj-mix', 'Mix', '/tmp/proj-mix', ?1, ?1)",
+                rusqlite::params![now],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    let did = uuid::Uuid::new_v4().to_string();
+    state
+        .db
+        .with_conn(move |conn| {
+            conn.execute(
+                "INSERT INTO discussions (id, title, project_id, agent, language, participants_json, created_at, updated_at)
+                 VALUES (?1, 'Mixed', 'proj-mix', 'ClaudeCode', 'en', '[]', datetime('now'), datetime('now'))",
+                rusqlite::params![did],
+            )?;
+            conn.execute(
+                "INSERT INTO messages (id, discussion_id, role, content, agent_type, timestamp, tokens_used, cost_usd, sort_order)
+                 VALUES ('m-known', ?1, 'Agent', 'hi', 'ClaudeCode', datetime('now'), 1000, 5.0, 0)",
+                rusqlite::params![did],
+            )?;
+            conn.execute(
+                "INSERT INTO messages (id, discussion_id, role, content, agent_type, timestamp, tokens_used, sort_order)
+                 VALUES ('m-unknown', ?1, 'Agent', 'hi', 'OpenCode', datetime('now'), 2000, 1)",
+                rusqlite::params![did],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    let app = build_router_with_auth(state, false);
+    let (status, json) = get_json(app, "/api/stats/tokens").await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+
+    assert_eq!(json["data"]["total_tokens"], 3000);
+    let total = &json["data"]["total_cost"];
+    assert_eq!(total["recorded_usd"], 5.0);
+    assert_eq!(total["has_recorded"], true);
+    assert_eq!(total["estimated_usd"], 0.0);
+    assert_eq!(total["has_estimate"], false);
+    assert_eq!(total["unknown_cost_tokens"], 2000);
+
+    let by_project = json["data"]["by_project"].as_array().unwrap();
+    let proj = by_project
+        .iter()
+        .find(|p| p["project_id"] == "proj-mix")
+        .expect("project bucket present");
+    assert_eq!(proj["tokens_used"], 3000);
+    assert_eq!(proj["cost"]["recorded_usd"], 5.0);
+    assert_eq!(proj["cost"]["unknown_cost_tokens"], 2000);
+}
+
+#[tokio::test]
+async fn stats_tokens_estimates_use_the_agents_own_pricing_not_claudes() {
+    // A justified pricing-table estimate for a non-Claude agent must use
+    // that agent's own price, never Claude's — and must be flagged as an
+    // estimate, not presented as an exact measurement.
+    let state = test_state();
+    let did = create_test_discussion(&state).await;
+    state
+        .db
+        .with_conn(move |conn| {
+            conn.execute(
+                "INSERT INTO messages (id, discussion_id, role, content, agent_type, timestamp, tokens_used)
+                 VALUES ('m-codex', ?1, 'Agent', 'hi', 'Codex', datetime('now'), 100000)",
+                rusqlite::params![did],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    let app = build_router_with_auth(state, false);
+    let (status, json) = get_json(app, "/api/stats/tokens").await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+
+    let by_provider = json["data"]["by_provider"].as_array().unwrap();
+    let openai = by_provider
+        .iter()
+        .find(|p| p["provider"] == "OpenAI")
+        .expect("Codex buckets into OpenAI");
+    assert_eq!(openai["cost"]["has_estimate"], true);
+    assert_eq!(openai["cost"]["has_recorded"], false);
+    let known = openai["cost"]["estimated_usd"].as_f64().unwrap();
+    // Codex: 100K tokens -> (60K*2.0 + 40K*8.0)/1M = 0.44 — well under
+    // Claude's 0.78 for the same token count, proving no cross-pricing.
+    assert!((known - 0.44).abs() < 0.01, "expected ~0.44, got {known}");
+}
+
+#[tokio::test]
+async fn stats_tokens_persisted_non_claude_cost_is_recorded_not_auto_flagged_estimate() {
+    // A non-null cost_usd for a non-Claude agent went through the exact same
+    // ingest fallback as ClaudeCode's (see streaming.rs): the DB does not
+    // distinguish a real reported cost from a pricing-table fallback for
+    // ANY agent. So it must be reported as recorded (provenance
+    // unguaranteed), never branded "definitely an estimate" just because
+    // the agent isn't ClaudeCode — that would fabricate certainty the data
+    // doesn't support, in the opposite direction of the old bug.
+    let state = test_state();
+    let did = create_test_discussion(&state).await;
+    state
+        .db
+        .with_conn(move |conn| {
+            conn.execute(
+                "INSERT INTO messages (id, discussion_id, role, content, agent_type, timestamp, tokens_used, cost_usd)
+                 VALUES ('m-codex-priced', ?1, 'Agent', 'hi', 'Codex', datetime('now'), 100000, 0.44)",
+                rusqlite::params![did],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    let app = build_router_with_auth(state, false);
+    let (status, json) = get_json(app, "/api/stats/tokens").await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+
+    let by_provider = json["data"]["by_provider"].as_array().unwrap();
+    let openai = by_provider
+        .iter()
+        .find(|p| p["provider"] == "OpenAI")
+        .expect("Codex buckets into OpenAI");
+    assert_eq!(openai["cost"]["recorded_usd"], 0.44);
+    assert_eq!(openai["cost"]["has_recorded"], true);
+    assert_eq!(openai["cost"]["has_estimate"], false);
+}
+
+#[tokio::test]
+async fn stats_tokens_workflow_runs_have_no_agent_attribution_so_cost_is_unknown() {
+    // workflow_runs carries no per-run agent, so its cost can never be
+    // known or estimated — it must always be unknown, never fabricated
+    // as if every workflow ran on Claude.
+    let state = test_state();
+    let did = create_test_discussion(&state).await;
+    state
+        .db
+        .with_conn(move |conn| {
+            conn.execute(
+                "INSERT INTO messages (id, discussion_id, role, content, agent_type, timestamp, tokens_used, cost_usd)
+                 VALUES ('m-known', ?1, 'Agent', 'hi', 'ClaudeCode', datetime('now'), 1000, 3.0)",
+                rusqlite::params![did],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    state
+        .db
+        .with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO workflows (id, name, project_id, trigger_json, steps_json, actions_json,
+                 safety_json, workspace_config_json, concurrency_limit, enabled, created_at, updated_at)
+                 VALUES ('wf-stats', 'Stats WF', NULL, '\"Manual\"', '[]', '[]', '{}', NULL, NULL, 1,
+                 datetime('now'), datetime('now'))",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO workflow_runs (id, workflow_id, status, step_results_json, tokens_used,
+                 started_at, run_type, batch_total, batch_completed, batch_failed)
+                 VALUES ('run-stats', 'wf-stats', 'Success', '[]', 5000, datetime('now'),
+                 'linear', 0, 0, 0)",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    let app = build_router_with_auth(state, false);
+    let (status, json) = get_json(app, "/api/stats/tokens").await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+
+    assert_eq!(json["data"]["workflow_tokens"], 5000);
+    assert_eq!(json["data"]["total_tokens"], 6000);
+
+    let top_workflows = json["data"]["top_workflows"].as_array().unwrap();
+    let wf = top_workflows
+        .iter()
+        .find(|w| w["id"] == "wf-stats")
+        .expect("workflow present in top_workflows");
+    assert_eq!(wf["tokens_used"], 5000);
+    assert_eq!(wf["cost"]["recorded_usd"], 0.0);
+    assert_eq!(wf["cost"]["has_estimate"], false);
+    assert_eq!(wf["cost"]["unknown_cost_tokens"], 5000);
+
+    let total = &json["data"]["total_cost"];
+    assert_eq!(total["recorded_usd"], 3.0);
+    assert_eq!(total["unknown_cost_tokens"], 5000);
+}
+
+#[tokio::test]
+async fn stats_tokens_top_discussion_cost_reflects_each_messages_real_agent() {
+    // A discussion mixing a measured ClaudeCode message with an unpriced
+    // OpenCode one must not be priced as if the whole discussion were
+    // Claude — the old query hardcoded "ClaudeCode" for every top discussion.
+    let state = test_state();
+    let disc_id = create_test_discussion(&state).await;
+    let did = disc_id.clone();
+    state
+        .db
+        .with_conn(move |conn| {
+            conn.execute(
+                "INSERT INTO messages (id, discussion_id, role, content, agent_type, timestamp, tokens_used, cost_usd, sort_order)
+                 VALUES ('m-claude', ?1, 'Agent', 'hi', 'ClaudeCode', datetime('now'), 1000, 2.5, 0)",
+                rusqlite::params![did],
+            )?;
+            conn.execute(
+                "INSERT INTO messages (id, discussion_id, role, content, agent_type, timestamp, tokens_used, sort_order)
+                 VALUES ('m-opencode', ?1, 'Agent', 'hi', 'OpenCode', datetime('now'), 4000, 1)",
+                rusqlite::params![did],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    let app = build_router_with_auth(state, false);
+    let (status, json) = get_json(app, "/api/stats/tokens").await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+
+    let top_discussions = json["data"]["top_discussions"].as_array().unwrap();
+    let disc = top_discussions
+        .iter()
+        .find(|d| d["id"] == disc_id)
+        .expect("discussion present in top_discussions");
+    assert_eq!(disc["tokens_used"], 5000);
+    assert_eq!(disc["cost"]["recorded_usd"], 2.5);
+    assert_eq!(disc["cost"]["has_estimate"], false);
+    assert_eq!(disc["cost"]["unknown_cost_tokens"], 4000);
+}
+
+#[tokio::test]
+async fn stats_tokens_same_group_known_and_null_rows_keep_the_null_share_unknown() {
+    // KT-637 review (P1): SQL `SUM(cost_usd)` silently drops NULL rows, so a
+    // GROUP BY project+agent / discussion+agent / day+agent that only reads
+    // that sum treats every token in the group as priced — even the ones
+    // whose row had a NULL cost. Independent proof from the review:
+    // ('OpenCode', 100, 1.0), ('OpenCode', 200, NULL) must report
+    // recorded_usd=1.0 for 100 tokens and unknown_cost_tokens=200, not
+    // unknown=0. Same agent, same project, same discussion, same day, so
+    // every aggregation level (provider/project/discussion/daily/total)
+    // shares this one group and must all show the same honest split.
+    let state = test_state();
+    state
+        .db
+        .with_conn(|conn| {
+            let now = chrono::Utc::now().to_rfc3339();
+            conn.execute(
+                "INSERT INTO projects (id, name, path, created_at, updated_at)
+                 VALUES ('proj-split', 'Split', '/tmp/proj-split', ?1, ?1)",
+                rusqlite::params![now],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    let did = uuid::Uuid::new_v4().to_string();
+    let disc_id = did.clone();
+    state
+        .db
+        .with_conn(move |conn| {
+            conn.execute(
+                "INSERT INTO discussions (id, title, project_id, agent, language, participants_json, created_at, updated_at)
+                 VALUES (?1, 'Split', 'proj-split', 'OpenCode', 'en', '[]', datetime('now'), datetime('now'))",
+                rusqlite::params![did],
+            )?;
+            conn.execute(
+                "INSERT INTO messages (id, discussion_id, role, content, agent_type, timestamp, tokens_used, cost_usd, sort_order)
+                 VALUES ('m-recorded', ?1, 'Agent', 'hi', 'OpenCode', datetime('now'), 100, 1.0, 0)",
+                rusqlite::params![did],
+            )?;
+            conn.execute(
+                "INSERT INTO messages (id, discussion_id, role, content, agent_type, timestamp, tokens_used, sort_order)
+                 VALUES ('m-no-cost', ?1, 'Agent', 'hi', 'OpenCode', datetime('now'), 200, 1)",
+                rusqlite::params![did],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    let app = build_router_with_auth(state, false);
+    let (status, json) = get_json(app, "/api/stats/tokens").await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+
+    let assert_split = |cost: &Value, label: &str| {
+        assert_eq!(cost["recorded_usd"], 1.0, "{label}: recorded_usd");
+        assert_eq!(cost["has_recorded"], true, "{label}: has_recorded");
+        assert_eq!(cost["has_estimate"], false, "{label}: has_estimate");
+        assert_eq!(
+            cost["unknown_cost_tokens"], 200,
+            "{label}: unknown_cost_tokens"
+        );
+    };
+
+    let by_provider = json["data"]["by_provider"].as_array().unwrap();
+    let other = by_provider
+        .iter()
+        .find(|p| p["provider"] == "Other")
+        .expect("OpenCode buckets into Other");
+    assert_eq!(other["tokens_used"], 300);
+    assert_split(&other["cost"], "by_provider");
+
+    let by_project = json["data"]["by_project"].as_array().unwrap();
+    let proj = by_project
+        .iter()
+        .find(|p| p["project_id"] == "proj-split")
+        .expect("project bucket present");
+    assert_eq!(proj["tokens_used"], 300);
+    assert_split(&proj["cost"], "by_project");
+
+    let top_discussions = json["data"]["top_discussions"].as_array().unwrap();
+    let disc = top_discussions
+        .iter()
+        .find(|d| d["id"] == disc_id)
+        .expect("discussion present in top_discussions");
+    assert_eq!(disc["tokens_used"], 300);
+    assert_split(&disc["cost"], "top_discussions");
+
+    let daily_history = json["data"]["daily_history"].as_array().unwrap();
+    assert_eq!(daily_history.len(), 1, "single day of activity");
+    assert_split(&daily_history[0]["cost"], "daily_history");
+
+    assert_split(&json["data"]["total_cost"], "total_cost");
+}
+
+#[tokio::test]
+async fn stats_tokens_recorded_zero_cost_stays_distinct_from_a_sibling_null_row() {
+    // The "0/NULL" case: a recorded cost of exactly 0.0 and a NULL cost in
+    // the same group both contribute nothing to `SUM(cost_usd)`, so this is
+    // the case where the bug is hardest to notice numerically — recorded_usd
+    // stays 0.0 either way. Only the token-level split proves the 200 NULL
+    // tokens are unknown, not "recorded as free" alongside the other 100.
+    let state = test_state();
+    let did = create_test_discussion(&state).await;
+    state
+        .db
+        .with_conn(move |conn| {
+            conn.execute(
+                "INSERT INTO messages (id, discussion_id, role, content, agent_type, timestamp, tokens_used, cost_usd, sort_order)
+                 VALUES ('m-zero', ?1, 'Agent', 'hi', 'OpenCode', datetime('now'), 100, 0.0, 0)",
+                rusqlite::params![did],
+            )?;
+            conn.execute(
+                "INSERT INTO messages (id, discussion_id, role, content, agent_type, timestamp, tokens_used, sort_order)
+                 VALUES ('m-null', ?1, 'Agent', 'hi', 'OpenCode', datetime('now'), 200, 1)",
+                rusqlite::params![did],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    let app = build_router_with_auth(state, false);
+    let (status, json) = get_json(app, "/api/stats/tokens").await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+
+    let by_provider = json["data"]["by_provider"].as_array().unwrap();
+    let other = by_provider
+        .iter()
+        .find(|p| p["provider"] == "Other")
+        .expect("OpenCode buckets into Other");
+    assert_eq!(other["tokens_used"], 300);
+    assert_eq!(other["cost"]["recorded_usd"], 0.0);
+    assert_eq!(other["cost"]["has_recorded"], true);
+    assert_eq!(other["cost"]["unknown_cost_tokens"], 200);
+}
+
+#[tokio::test]
+async fn stats_tokens_estimable_agent_with_a_missing_sub_part_mixes_recorded_and_estimated() {
+    // An agent WITH pricing-table coverage (Codex) can still have some rows
+    // recorded and others missing entirely. The missing sub-part must be
+    // priced with Codex's own table (estimated_usd), never folded into the
+    // recorded sum and never treated as fully covered by the recorded rows.
+    let state = test_state();
+    let did = create_test_discussion(&state).await;
+    state
+        .db
+        .with_conn(move |conn| {
+            conn.execute(
+                "INSERT INTO messages (id, discussion_id, role, content, agent_type, timestamp, tokens_used, cost_usd, sort_order)
+                 VALUES ('m-recorded', ?1, 'Agent', 'hi', 'Codex', datetime('now'), 1000, 0.05, 0)",
+                rusqlite::params![did],
+            )?;
+            conn.execute(
+                "INSERT INTO messages (id, discussion_id, role, content, agent_type, timestamp, tokens_used, sort_order)
+                 VALUES ('m-missing', ?1, 'Agent', 'hi', 'Codex', datetime('now'), 100000, 1)",
+                rusqlite::params![did],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    let app = build_router_with_auth(state, false);
+    let (status, json) = get_json(app, "/api/stats/tokens").await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+
+    let by_provider = json["data"]["by_provider"].as_array().unwrap();
+    let openai = by_provider
+        .iter()
+        .find(|p| p["provider"] == "OpenAI")
+        .expect("Codex buckets into OpenAI");
+    assert_eq!(openai["tokens_used"], 101000);
+    assert_eq!(openai["cost"]["recorded_usd"], 0.05);
+    assert_eq!(openai["cost"]["has_recorded"], true);
+    assert_eq!(openai["cost"]["has_estimate"], true);
+    let estimated = openai["cost"]["estimated_usd"].as_f64().unwrap();
+    // Codex: 100K tokens -> (60K*2.0 + 40K*8.0)/1M = 0.44, computed only
+    // over the 100K missing tokens, not the 1K that were already recorded.
+    assert!(
+        (estimated - 0.44).abs() < 0.01,
+        "expected ~0.44, got {estimated}"
+    );
+    assert_eq!(openai["cost"]["unknown_cost_tokens"], 0);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -9919,6 +10449,221 @@ async fn mcp_create_config_and_reveal() {
         entries[0]["masked_value"], "ghp_test_alpha_token_123",
         "Revealed value should match original plaintext"
     );
+}
+
+const MCP_HOST_ISOLATION_CHILD: &str = "KRONN_TEST_MCP_HOST_ISOLATION_CHILD";
+const MCP_HOST_SENTINEL: &str = "KRONN_TEST_MCP_HOST_SENTINEL";
+const MCP_HOST_ISOLATION_MODE: &str = "KRONN_TEST_MCP_HOST_ISOLATION_MODE";
+
+fn host_adapter_sentinels(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    [
+        ".claude.json",
+        ".gemini/settings.json",
+        ".gemini/kronn-mcp-state.json",
+        ".codex/config.toml",
+        ".copilot/mcp-config.json",
+    ]
+    .into_iter()
+    .map(|relative| root.join(relative))
+    .collect()
+}
+
+fn host_adapter_sentinel_contents(path: &std::path::Path) -> &'static str {
+    match path.extension().and_then(std::ffi::OsStr::to_str) {
+        Some("toml") => "model = 'outside-sentinel'\n",
+        Some("json") => "{\"outside_sentinel\":true,\"mcpServers\":{}}\n",
+        _ => unreachable!("host adapter sentinel must be TOML or JSON"),
+    }
+}
+
+fn test_state_without_fixture() -> AppState {
+    let db = Arc::new(kronn::db::Database::open_in_memory().expect("Failed to open in-memory DB"));
+    let mut cfg = kronn::core::config::default_config();
+    cfg.server.auth_token = None;
+    AppState::new_defaults(
+        Arc::new(RwLock::new(cfg)),
+        db,
+        DEFAULT_MAX_CONCURRENT_AGENTS,
+    )
+}
+
+/// Runs the real MCP creation endpoint in a fresh test process. The parent
+/// gives that process a synthetic host-home sentinel; `test_state` must replace
+/// it with its owned fixture before the endpoint reaches the host-sync adapters.
+#[tokio::test]
+#[serial]
+async fn mcp_host_sync_router_confines_an_inherited_host_home() {
+    if std::env::var_os(MCP_HOST_ISOLATION_CHILD).is_none() {
+        // Ordinary non-serial router tests can initialize this OnceLock too.
+        // Snapshot only after its process-wide environment setup has settled.
+        isolate_config_dir();
+        let parent_data_dir = std::env::var_os("KRONN_DATA_DIR");
+        let parent_host_home = std::env::var_os("KRONN_HOST_HOME");
+        for mode in ["red", "green", "blocked"] {
+            let sentinel_root = tempfile::tempdir().expect("create outside sentinel");
+            let data_dir = sentinel_root.path().join("data");
+            std::fs::create_dir_all(&data_dir).unwrap();
+            let sentinel_paths = host_adapter_sentinels(sentinel_root.path());
+            for path in &sentinel_paths {
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(path, host_adapter_sentinel_contents(path)).unwrap();
+            }
+            let before: Vec<_> = sentinel_paths
+                .iter()
+                .map(|path| std::fs::read(path).unwrap())
+                .collect();
+
+            let mut child = kronn::core::cmd::async_cmd(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "mcp_host_sync_router_confines_an_inherited_host_home",
+                    "--nocapture",
+                ])
+                .env(MCP_HOST_ISOLATION_CHILD, "1")
+                .env(MCP_HOST_ISOLATION_MODE, mode)
+                .env(MCP_HOST_SENTINEL, sentinel_root.path())
+                .env("KRONN_DATA_DIR", data_dir)
+                .env("KRONN_HOST_HOME", sentinel_root.path())
+                .spawn()
+                .expect("launch isolated API regression child");
+            let status = match tokio::time::timeout(
+                std::time::Duration::from_secs(15),
+                child.wait(),
+            )
+            .await
+            {
+                Ok(Ok(status)) => status,
+                Ok(Err(error)) => panic!("{mode} API isolation child wait failed: {error}"),
+                Err(_) => {
+                    let _ = child.kill().await;
+                    panic!("{mode} API isolation child exceeded 15 seconds");
+                }
+            };
+            assert!(
+                status.success(),
+                "{mode} API isolation child failed: {status}"
+            );
+            if mode == "red" {
+                assert!(
+                    sentinel_paths
+                        .iter()
+                        .zip(&before)
+                        .any(|(path, contents)| std::fs::read(path).unwrap() != *contents),
+                    "the unisolated control must modify a disposable host-adapter sentinel"
+                );
+            } else {
+                for (path, contents) in sentinel_paths.iter().zip(&before) {
+                    assert_eq!(
+                        std::fs::read(path).unwrap(),
+                        *contents,
+                        "outside sentinel changed: {}",
+                        path.display()
+                    );
+                }
+            }
+            assert_eq!(std::env::var_os("KRONN_DATA_DIR"), parent_data_dir);
+            assert_eq!(std::env::var_os("KRONN_HOST_HOME"), parent_host_home);
+        }
+        return;
+    }
+
+    let sentinel =
+        std::path::PathBuf::from(std::env::var_os(MCP_HOST_SENTINEL).expect("child sentinel path"));
+    let red = std::env::var(MCP_HOST_ISOLATION_MODE).as_deref() == Ok("red");
+    let state = if red {
+        test_state_without_fixture()
+    } else {
+        test_state()
+    };
+    let blocked = std::env::var(MCP_HOST_ISOLATION_MODE).as_deref() == Ok("blocked");
+    let host_fixture = (!red).then(|| {
+        std::path::PathBuf::from(
+            std::env::var_os("KRONN_HOST_HOME").expect("normal test harness host fixture"),
+        )
+    });
+    if let Some(host_fixture) = &host_fixture {
+        assert_ne!(
+            host_fixture, &sentinel,
+            "the harness must replace inherited host home"
+        );
+        if blocked {
+            std::fs::write(host_fixture.join(".codex"), "fixture blocker").unwrap();
+        }
+    }
+
+    let app = build_router_with_auth(state, false);
+    let create_body = serde_json::json!({
+        "server_id": "mcp-github",
+        "label": "Fixture-only host sync",
+        "env": { "GITHUB_PERSONAL_ACCESS_TOKEN": "synthetic-fixture-secret" },
+        "args_override": null,
+        "is_global": true,
+        "project_ids": [],
+        "host_sync": "GlobalOnly"
+    });
+    let (status, response) = post_json(app.clone(), "/api/mcps/configs", create_body.clone()).await;
+    assert_eq!(status, StatusCode::OK, "create config response: {response}");
+    assert_eq!(
+        response["success"], true,
+        "create config response: {response}"
+    );
+    if !red && !blocked {
+        let concurrent_body = serde_json::json!({
+            "server_id": "mcp-github",
+            "label": "Fixture-only concurrent host sync",
+            "env": { "GITHUB_PERSONAL_ACCESS_TOKEN": "synthetic-fixture-secret-two" },
+            "args_override": null,
+            "is_global": true,
+            "project_ids": [],
+            "host_sync": "GlobalOnly"
+        });
+        let (first, second) = tokio::join!(
+            post_json(app.clone(), "/api/mcps/configs", create_body),
+            post_json(app, "/api/mcps/configs", concurrent_body),
+        );
+        assert_eq!(
+            first.0,
+            StatusCode::OK,
+            "first concurrent response: {}",
+            first.1
+        );
+        assert_eq!(
+            second.0,
+            StatusCode::OK,
+            "second concurrent response: {}",
+            second.1
+        );
+        assert_eq!(
+            first.1["success"], true,
+            "first concurrent response: {}",
+            first.1
+        );
+        assert_eq!(
+            second.1["success"], true,
+            "second concurrent response: {}",
+            second.1
+        );
+    }
+    if let Some(host_fixture) = host_fixture {
+        if blocked {
+            assert!(
+                host_fixture.join(".codex").is_file(),
+                "blocked fixture must remain a file"
+            );
+            assert!(
+                host_fixture.join(".copilot/mcp-config.json").exists(),
+                "the remaining adapter syncs must continue inside the owned fixture"
+            );
+        } else {
+            assert!(host_fixture.join(".codex/config.toml").exists());
+            assert!(host_fixture.join(".copilot/mcp-config.json").exists());
+        }
+    } else {
+        assert!(host_adapter_sentinels(&sentinel)
+            .iter()
+            .any(|path| std::fs::read_to_string(path).unwrap()
+                != host_adapter_sentinel_contents(path)));
+    }
 }
 
 #[tokio::test]

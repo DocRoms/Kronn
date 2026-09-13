@@ -240,6 +240,9 @@ pub struct AppState {
     /// call time and return a 503 if the bundled/runtime sidecar could
     /// not be started.
     pub docs_sidecar: Arc<crate::core::docs_sidecar::DocsSidecar>,
+    /// Invocation-local discovery endpoint for isolated routers. Production
+    /// leaves it unset and retains OLLAMA_HOST/Docker resolution.
+    pub ollama_base_url_override: Option<Arc<str>>,
     /// Production-only data-directory lock. Spawned Git commits inherit a
     /// duplicate of this handle so a replacement backend waits for Git/hooks.
     pub data_dir_lock: Option<Arc<std::fs::File>>,
@@ -278,12 +281,18 @@ impl AppState {
             git_language_cache: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             agent_dispatch_notify: Arc::new(tokio::sync::Notify::new()),
             docs_sidecar: Arc::new(crate::core::docs_sidecar::DocsSidecar::new()),
+            ollama_base_url_override: None,
             data_dir_lock: None,
         }
     }
 
     pub fn with_data_dir_lock(mut self, data_dir_lock: std::fs::File) -> Self {
         self.data_dir_lock = Some(Arc::new(data_dir_lock));
+        self
+    }
+
+    pub fn with_ollama_base_url(mut self, base_url: impl Into<Arc<str>>) -> Self {
+        self.ollama_base_url_override = Some(base_url.into());
         self
     }
 }
@@ -1587,6 +1596,38 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route("/api/quick-execs/{id}/run", post(api::quick_execs::run))
         .route("/api/runs", get(api::shared_runs::list))
         .route("/api/runs/{id}", get(api::shared_runs::get))
+        .route(
+            "/api/discussions/{id}/important",
+            get(api::discussion_important::list),
+        )
+        // KT-619 — administering publication credentials. Every one of these
+        // authenticates in the same transaction as the mutation it performs.
+        .route(
+            "/api/human-credentials/list",
+            post(api::human_credentials::list),
+        )
+        .route(
+            "/api/human-credentials/enrol",
+            post(api::human_credentials::enrol),
+        )
+        .route(
+            "/api/human-credentials/revoke",
+            post(api::human_credentials::revoke),
+        )
+        .route(
+            "/api/human-credentials/rotate",
+            post(api::human_credentials::rotate),
+        )
+        // Rotating the bootstrap itself, for an operator who still holds it.
+        // The one who lost it uses the `recover-admin-secret` file instead.
+        .route(
+            "/api/human-credentials/admin/rotate",
+            post(api::human_credentials::rotate_admin),
+        )
+        .route(
+            "/api/human-credentials/proof",
+            post(api::human_credentials::issue_proof),
+        )
         .route(
             "/api/discussions/{id}/questions",
             get(api::discussion_questions::list),

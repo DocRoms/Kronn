@@ -2127,7 +2127,10 @@ mod tests {
         let outside = tempfile::TempDir::new().unwrap();
         touch(&outside.path().join("secret.rs"));
         touch(&tmp.path().join("site/en.html"));
+        #[cfg(unix)]
         std::os::unix::fs::symlink(outside.path(), tmp.path().join("escape")).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir(outside.path(), tmp.path().join("escape")).unwrap();
 
         // The name passes every rule: no `..`, no leading slash, not a skipped
         // folder. Only the link itself gives it away.

@@ -363,6 +363,9 @@ mod tests {
     /// `--output-format`, `--session-id <uuid>`, …) is simply ignored, the
     /// way a real shell script would.
     const FIXTURE_BODY: &str = r#"
+        # Match the CLI's stdin contract before emitting a completed response.
+        # Exiting early races the adapter's write, especially under coverage.
+        cat >/dev/null
         case "$*" in
           *--resume*)
             printf '%s\n' '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"resumed"}}}'
@@ -412,9 +415,13 @@ mod tests {
         assert_eq!(target.agent, AcpAgent::ClaudeCode);
         assert!(!target.session_id.trim().is_empty());
 
+        // Exceed pipe capacity so a fixture that exits without reading stdin
+        // fails reliably instead of occasionally racing a short prompt write.
+        let prompt = "large prompt with unicode: é🙂\n".repeat(32_768);
+
         // First turn: no prior run, so `--session-id` is used, not `--resume`.
         let (tx, rx) = mpsc::channel(16);
-        host.prompt(&target, "hello", tx)
+        host.prompt(&target, &prompt, tx)
             .await
             .unwrap_or_else(|error| panic!("first prompt failed: {error}"));
         let events = drain(rx).await;
@@ -423,7 +430,7 @@ mod tests {
 
         // Second turn: has_run_before is now true, so `--resume` is used.
         let (tx, rx) = mpsc::channel(16);
-        host.prompt(&target, "hello again", tx)
+        host.prompt(&target, &prompt, tx)
             .await
             .unwrap_or_else(|error| panic!("second prompt failed: {error}"));
         let events = drain(rx).await;

@@ -216,6 +216,10 @@ import type {
   SourceDirectoryListing,
   DiscussionQuestion,
   DiscussionQuestionList,
+  GrantRole,
+  HumanCredential,
+  ImportantCategory,
+  ImportantMessageList,
   AnswerDiscussionQuestionRequest,
   ProviderQuotaState,
 } from '../types/generated';
@@ -1799,6 +1803,16 @@ export const discussions = {
     { content },
   ),
 
+  /** KT-619 — the important steering cards of a discussion, in transcript
+   *  order. `category` narrows the list; the counter reads `total_all`, which
+   *  stays the discussion-wide count so the chip does not drop while a filter
+   *  is active. */
+  importantMessages: (id: string, category?: ImportantCategory) => api<ImportantMessageList>(
+    'GET',
+    `/discussions/${encodeURIComponent(id)}/important`
+      + (category ? `?category=${encodeURIComponent(category)}` : ''),
+  ),
+
   /** KT-595 — the arbitration questions of a discussion, pending and past.
    *  Polled, so the backend checks the room exists without loading its
    *  transcript. */
@@ -3332,4 +3346,40 @@ export const learnings = {
   reject: (id: string) => api<void>('POST', `/learnings/${encodeURIComponent(id)}/reject`),
   forDiscussion: (discId: string) =>
     api<Learning[]>('GET', `/discussions/${encodeURIComponent(discId)}/learnings`),
+};
+
+/** KT-619 — publication credentials. Not discussion-scoped: a credential
+ *  belongs to the install, not to a room. */
+export const publicationCredentials = {
+  list: (authority: string) => api<HumanCredential[]>(
+    'POST',
+    '/human-credentials/list',
+    { authority },
+  ),
+  enrol: (authority: string, role: GrantRole, label: string) =>
+    api<{ credential: HumanCredential; secret: string }>(
+      'POST',
+      '/human-credentials/enrol',
+      { authority, role, label },
+    ),
+  revoke: (authority: string, credential_id: string, reason: string) =>
+    api<boolean>('POST', '/human-credentials/revoke', {
+      authority,
+      credential_id,
+      reason,
+    }),
+  rotate: (authority: string, credential_id: string) =>
+    api<string>('POST', '/human-credentials/rotate', {
+      authority,
+      credential_id,
+    }),
+  // Rotates the bootstrap itself. Returns where the new secret was written —
+  // never the secret: it goes to the operator's private file and over no wire.
+  rotateAdmin: (authority: string) =>
+    api<{ path: string }>('POST', '/human-credentials/admin/rotate', { authority }),
+  /** A single-use proof for THIS body in THIS room, spent by the send that
+   *  follows. Issued separately so a captured send cannot be replayed and a
+   *  captured proof cannot be aimed at another discussion or another card. */
+  proof: (grant: string, discussion_id: string, content: string) =>
+    api<string>('POST', '/human-credentials/proof', { grant, discussion_id, content }),
 };

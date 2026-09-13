@@ -1,4 +1,8 @@
 import { defineConfig, devices } from '@playwright/test';
+import { assertPublicationSandbox } from './e2e/fixtures/publication-sandbox.mjs';
+
+const publicationSandbox = Boolean(process.env.KRONN_SANDBOX_DIR);
+if (publicationSandbox) assertPublicationSandbox();
 
 const devPort = Number(process.env.VITE_DEV_PORT ?? 5173);
 const devUrl = `http://localhost:${devPort}`;
@@ -80,9 +84,12 @@ export default defineConfig({
   // another terminal — devs iterating on UI + specs at the same time keep
   // their hot-reload session.
   webServer: {
-    command: `pnpm exec vite --port ${devPort}`,
+    // Dependencies are a prerequisite, not something a test server may replace.
+    // Invoke the installed CLI directly: package-manager auto-install can try
+    // to remove a node_modules directory shared by a development worktree.
+    command: `node ./node_modules/vite/bin/vite.js --port ${devPort}${publicationSandbox ? ' --strictPort' : ''}`,
     url: devUrl,
-    reuseExistingServer: !process.env.CI,
+    reuseExistingServer: !publicationSandbox && !process.env.CI,
     timeout: 30_000,
     stdout: 'pipe',
     stderr: 'pipe',

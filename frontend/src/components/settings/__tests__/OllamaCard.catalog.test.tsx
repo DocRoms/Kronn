@@ -49,7 +49,7 @@ beforeEach(() => {
   health.mockReset().mockResolvedValue({ status: 'online', version: null, endpoint: 'fixture', models_count: 2, hint: null });
   models.mockReset().mockResolvedValue({ models: ['current', 'next'].map(name => ({
     name, size: '1 GB', modified: checkedAt, advertised_context: 8192,
-    context_ceiling: 8192, context_override: null, context_origin: 'model_limit',
+    context_ceiling: 8192, context_override: null, context_origin: 'model_window',
   })) });
   list.mockReset().mockResolvedValue(snapshot(target([model('current'), model('next')])));
   refresh.mockReset().mockResolvedValue(target([]));
@@ -155,6 +155,17 @@ describe('OllamaCard shared catalogue and safe persistence (KT-531)', () => {
     expect(health).toHaveBeenCalledTimes(healthCalls);
     expect(models).toHaveBeenCalledTimes(inventoryCalls);
     expect(refresh).not.toHaveBeenCalled();
+  });
+
+  it('shows a failed provider recheck even while the previous success is inside its TTL', async () => {
+    list.mockResolvedValue(snapshot(target([model('current', { provenance: 'cached' })], {
+      stale: false, live_refresh_ok: false, last_error_reason: 'provider_error',
+    })));
+    const input = await show();
+    expect(screen.getByText(/modelCatalog.stale.*provider_error/)).toBeInTheDocument();
+    fireEvent.focus(input);
+    expect(await screen.findByRole('option', { name: 'current' })).toHaveTextContent('modelCatalog.provenance.cached');
+    expect(setTiers).not.toHaveBeenCalled();
   });
 
   it('clears only the explicit override and shows the assigned catalogue default', async () => {

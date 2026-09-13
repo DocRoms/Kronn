@@ -357,9 +357,10 @@ function ConnectionForm({
                       ? { ...prev, default_model: next }
                       : { ...prev, reasoning_model: next },
                 );
+              const available = catalogModels('chat');
               const models = [...new Set([
                 value,
-                ...catalogModels('chat').map(model => model.id),
+                ...available.map(model => model.id),
               ].filter(Boolean))];
               return (
                 <div className="set-ext-api-tier" key={tier} data-tier={tier}>
@@ -372,7 +373,11 @@ function ConnectionForm({
                     options={models.map(model => ({
                       value: model,
                       label: model,
-                      keywords: model.replaceAll('/', ' '),
+                      keywords: `${model.replaceAll('/', ' ')} ${available.find(entry => entry.id === model)?.display_name ?? ''}`,
+                      description: available.some(entry => entry.id === model)
+                        ? t('config.extApi.testedCatalog')
+                        : t('modelCatalog.unavailable'),
+                      disabled: !available.some(entry => entry.id === model),
                     }))}
                     onChange={setValue}
                     label={t(`disc.tier.${tier}`)}
@@ -382,6 +387,15 @@ function ConnectionForm({
                     disabled={!modelsUnlocked}
                     testId={`ext-api-tier-${tier}`}
                   />
+                  {value ? (
+                    <small className="set-hint" data-testid={`ext-api-tier-status-${tier}`}>
+                      {testResult?.ok !== true
+                        ? t('config.extApi.modelUnverified')
+                        : available.some(model => model.id === value)
+                          ? t('config.extApi.testedCatalog')
+                          : t('config.extApi.modelAbsent')}
+                    </small>
+                  ) : null}
                   {value && modelCostSuffix ? (
                     <span className="text-2xs text-muted">{modelCostSuffix(value)}</span>
                   ) : null}

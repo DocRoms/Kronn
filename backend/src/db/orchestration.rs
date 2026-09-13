@@ -2860,6 +2860,54 @@ pub fn commit_review_checkpoint(
                         .unwrap_or(&[]),
                     None,
                 )?;
+
+            // KT-619 — `request_changes` is a steering event, not merely a
+            // message: the delivery did not pass, and the room needs that
+            // findable without re-reading the thread. Same transaction as the
+            // message it attaches to, so the card exists iff the verdict was
+            // recorded. The worker's own delivery report is NOT reclassified.
+            let reference: Option<i64> = tx
+                .query_row(
+                    "SELECT t.task_number \
+                     FROM task_executions e \
+                     JOIN planning_tasks t ON t.id = e.task_id \
+                     WHERE e.id = ?1",
+                    [input.exec_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let reference = reference.map(|n| format!("KT-{n}")).unwrap_or_default();
+            crate::db::discussion_important::publish_steering_card(
+                &tx,
+                findings.child_discussion_id,
+                &findings.message.id,
+                crate::db::discussion_important::SteeringCard {
+                    category: crate::db::discussion_important::ImportantCategory::BlockingAlert,
+                    dedup_key: &format!(
+                        "orch.review.changes.{}.{}",
+                        input.exec_id, input.attempt_no
+                    ),
+                    title: &format!(
+                        "{reference} — changements demandés (tour {})",
+                        input.attempt_no
+                    ),
+                    highlight: "La revue a renvoyé le tour livré : il ne passe pas en l'état.",
+                    impact: "La livraison n'est pas intégrée ; le worktree et la sous-discussion \
+                             restent ouverts pour la correction.",
+                    // Somebody owes something here, and it is not a human.
+                    action_required: crate::db::discussion_important::ImportantAction::owed(
+                        "Corriger les points de revue dans ce worktree, puis re-livrer via \
+                         `task_exec_deliver`",
+                        "Worker",
+                    ),
+                    references: crate::db::discussion_important::ImportantReferences {
+                        task_ref: (!reference.is_empty()).then(|| reference.clone()),
+                        execution_id: Some(input.exec_id.to_string()),
+                        ..Default::default()
+                    },
+                },
+                &findings.message.timestamp.to_rfc3339(),
+            )?;
             // (2d) AwaitingReview → ChangesRequested (guarded CAS + journal).
             let moved = transition_execution(
                 &tx,
@@ -3324,6 +3372,14 @@ fn sync_campaign_human_gate(
             Some("an execution escalated beyond the automatic review policy"),
             actor,
         )?;
+        // KT-619 — a campaign parked on a human is the steering event that most
+        // needs to be findable: nothing advances until somebody decides, and a
+        // control-state flip alone leaves no trace anyone reads.
+        //
+        // This is NOT the terminal card. A terminal says what happened; this one
+        // says who now owes what, so it carries a real `action_required` rather
+        // than the "nothing is owed" every other steering card carries.
+        publish_campaign_gate_card(conn, exec_id, &run_id, CampaignGate::AwaitingHuman)?;
     } else {
         let remaining: i64 = conn.query_row(
             "SELECT COUNT(*) FROM task_executions \
@@ -3339,8 +3395,130 @@ fn sync_campaign_human_gate(
                 None,
                 actor,
             )?;
+            // The wait is over. Without this the room keeps a card saying a
+            // human still owes a decision long after they made it — which is
+            // worse than no card, because it is read as current.
+            publish_campaign_gate_card(conn, exec_id, &run_id, CampaignGate::Resumed)?;
         }
     }
+    Ok(())
+}
+
+/// Which side of the human gate a campaign just crossed.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CampaignGate {
+    AwaitingHuman,
+    Resumed,
+}
+
+/// Post the campaign's human-gate event in the PARENT room, message and card in
+/// the same transaction.
+///
+/// Deterministic per `(run, execution, side)`: a replay after a restart finds
+/// the same ids and publishes nothing, while a genuinely new escalation on
+/// another execution gets its own card.
+fn publish_campaign_gate_card(
+    conn: &Connection,
+    exec_id: &str,
+    run_id: &str,
+    gate: CampaignGate,
+) -> Result<()> {
+    let context: Option<(String, i64, String)> = conn
+        .query_row(
+            "SELECT e.parent_discussion_id, t.task_number, t.title \
+             FROM task_executions e \
+             JOIN planning_tasks t ON t.id = e.task_id \
+             WHERE e.id = ?1",
+            [exec_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    let Some((parent, task_number, title)) = context else {
+        return Ok(());
+    };
+    let Some(principal) = crate::db::discussions::get_discussion(conn, &parent)? else {
+        return Ok(());
+    };
+    let reference = format!("KT-{task_number}");
+
+    let (side, content, category, highlight, impact, action) = match gate {
+        CampaignGate::AwaitingHuman => (
+            "awaiting",
+            format!(
+                "**Campagne en attente d'une décision humaine — {reference}**\n\n                 L'exécution `{exec_id}` (**{title}**) a été escaladée : le budget de revue                  automatique est épuisé. La campagne est en pause et n'enchaînera pas seule."
+            ),
+            crate::db::discussion_important::ImportantCategory::HumanActionRequired,
+            format!("{reference} — la campagne attend une décision humaine."),
+            "Aucune tâche de cette campagne n'avance tant que l'escalade n'est pas tranchée."
+                .to_string(),
+            crate::db::discussion_important::ImportantAction::owed(
+                "Trancher l'escalade, puis relancer la campagne",
+                "Humain",
+            ),
+        ),
+        CampaignGate::Resumed => (
+            "resumed",
+            format!(
+                "**Campagne relancée — {reference}**\n\n                 Plus aucune exécution escaladée : la campagne repasse en `Running` et                  poursuit avec la prochaine tâche prête."
+            ),
+            crate::db::discussion_important::ImportantCategory::Decision,
+            format!("{reference} — la campagne repart, l'escalade est levée."),
+            "Les tâches prêtes de la campagne peuvent de nouveau être lancées.".to_string(),
+            crate::db::discussion_important::ImportantAction::none(),
+        ),
+    };
+
+    let message = DiscussionMessage {
+        id: format!("orch-campaign-gate:{run_id}:{exec_id}:{side}"),
+        role: MessageRole::User,
+        channel: MessageChannel::Main,
+        content,
+        agent_type: None,
+        timestamp: Utc::now(),
+        tokens_used: 0,
+        session_tokens_at_message: None,
+        recovered_partial: false,
+        auth_mode: None,
+        model_tier: None,
+        model: None,
+        cost_usd: None,
+        author_pseudo: Some("Orchestrateur".to_string()),
+        author_avatar_email: None,
+        source_msg_id: None,
+        duration_ms: None,
+        lint_report: None,
+        target_agent: None,
+        reply_to_message_id: None,
+        author_cli_ordinal: None,
+    };
+    let targets = [MessageTarget::discussion_agent(principal.agent)];
+    crate::db::discussions::insert_message_with_targets_and_dispatches_within_tx(
+        conn,
+        &parent,
+        &message,
+        &targets,
+        &[],
+        None,
+    )?;
+    crate::db::discussion_important::publish_steering_card(
+        conn,
+        &parent,
+        &message.id,
+        crate::db::discussion_important::SteeringCard {
+            category,
+            dedup_key: &format!("orch.campaign.gate.{run_id}.{exec_id}.{side}"),
+            title: &format!("{reference} — {title}"),
+            highlight: &highlight,
+            impact: &impact,
+            action_required: action,
+            references: crate::db::discussion_important::ImportantReferences {
+                task_ref: Some(reference.clone()),
+                execution_id: Some(exec_id.to_string()),
+                ..Default::default()
+            },
+        },
+        &message.timestamp.to_rfc3339(),
+    )?;
     Ok(())
 }
 
@@ -3411,6 +3589,40 @@ fn notify_principal_of_terminal(
         &targets,
         &[],
         None,
+    )?;
+
+    // Routine accepted deliveries stay ordinary notifications. A human or
+    // orchestrator may explicitly publish a separate accepted_delivery card
+    // when the fact merits it; Done alone is not that editorial decision.
+    if terminal == TaskExecutionStatus::Done {
+        return Ok(());
+    }
+    // Failed/cancelled execution is a blocking steering event. Its card and
+    // source notification remain in the same transaction.
+    let highlight = format!(
+        "{reference} — exécution terminée en `{}`.",
+        terminal.as_str()
+    );
+    crate::db::discussion_important::publish_steering_card(
+        conn,
+        &parent,
+        &message.id,
+        crate::db::discussion_important::SteeringCard {
+            category: crate::db::discussion_important::ImportantCategory::BlockingAlert,
+            dedup_key: &format!("orch.terminal.{exec_id}.{}", terminal.as_str()),
+            title: &format!("{reference} — {title}"),
+            highlight: &highlight,
+            impact: "La tâche n'a pas abouti ; la suite de la campagne dépend d'une décision.",
+            // A terminal transition is a fact, not an obligation. What follows
+            // it may be one, and that card is minted by whatever produces it.
+            action_required: crate::db::discussion_important::ImportantAction::none(),
+            references: crate::db::discussion_important::ImportantReferences {
+                task_ref: Some(reference.clone()),
+                execution_id: Some(exec_id.to_string()),
+                ..Default::default()
+            },
+        },
+        &message.timestamp.to_rfc3339(),
     )?;
     Ok(())
 }
@@ -4399,7 +4611,7 @@ pub fn reassign_execution_worker(
     actor: &OrchestrationActor,
 ) -> Result<TaskExecution> {
     in_savepoint(conn, |conn| {
-        let execution = get_task_execution(conn, exec_id)?
+        let mut execution = get_task_execution(conn, exec_id)?
             .ok_or_else(|| anyhow::anyhow!("unknown task execution"))?;
         if execution.status.is_terminal() {
             bail!("a terminal execution cannot be reassigned");
@@ -4435,13 +4647,43 @@ pub fn reassign_execution_worker(
             && matches!(
                 execution.interrupted_from_status,
                 Some(TaskExecutionStatus::Working | TaskExecutionStatus::ChangesRequested)
-            ));
+            ))
+            // KT-640: a live CLI control offer awaiting the exact target
+            // session's acceptance is the ONE `Blocked` hold a principal may
+            // redirect — the worker never started, so nothing but the offer
+            // itself needs unwinding. Every other `Blocked` reason (a session
+            // conflict needing a human pick, or an Applying-origin infra/dirty
+            // -main hold) stays refused by the fallthrough below.
+            || (execution.status == TaskExecutionStatus::Blocked
+                && execution.blocked_reason_code
+                    == Some(BlockedReasonCode::AwaitingWorkerAcceptance));
         if !resumable_worker_state {
             bail!(
                 "execution {} is {}, not a resumable worker state",
                 exec_id,
                 execution.status.as_str()
             );
+        }
+        // KT-640: clear the awaiting-acceptance hold back to its Provisioning
+        // origin (ADR §3 checkpoint guard — `Blocked` resumes ONLY to
+        // `blocked_from_status`) BEFORE this reassignment proceeds. This also
+        // clears `blocked_reason{,_code}`/`blocked_from_status` on the row, so
+        // even a caller that skipped the offer cancellation below could never
+        // read this execution as still awaiting the superseded worker. The
+        // caller (native dispatch or a fresh CLI offer) drives Provisioning to
+        // its next state exactly like the initial KT-328 handshake.
+        if execution.status == TaskExecutionStatus::Blocked {
+            if !transition_execution(
+                conn,
+                exec_id,
+                TaskExecutionStatus::Provisioning,
+                actor,
+                serde_json::json!({ "phase": "reassignment", "reason": reason }),
+            )? {
+                bail!("execution {exec_id} raced out of its awaiting-acceptance hold");
+            }
+            execution = get_task_execution(conn, exec_id)?
+                .ok_or_else(|| anyhow::anyhow!("execution vanished resuming its Blocked hold"))?;
         }
         // A lease marked settled proves its supervised Git operation already
         // returned. Reap it before deciding whether a live commit still bars

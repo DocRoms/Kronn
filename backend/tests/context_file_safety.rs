@@ -14,7 +14,12 @@ fn data_dir() -> &'static tempfile::TempDir {
     static DIRECTORY: OnceLock<tempfile::TempDir> = OnceLock::new();
     DIRECTORY.get_or_init(|| {
         let directory = tempfile::tempdir().unwrap();
-        std::env::set_var("KRONN_DATA_DIR", directory.path());
+        let data_dir = directory.path().join("data");
+        let host_home = directory.path().join("host-home");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        std::fs::create_dir_all(&host_home).unwrap();
+        std::env::set_var("KRONN_DATA_DIR", data_dir);
+        std::env::set_var("KRONN_HOST_HOME", host_home);
         directory
     })
 }

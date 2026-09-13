@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, renderHook, waitFor } from '@testing-library/react';
-import { useMessageQueue, type QueuedMessage } from '../useMessageQueue';
+import { useMessageQueue, type QueuedMessage, type QueuedMessageControl } from '../useMessageQueue';
 import type { AgentType, MessageTarget } from '../../types/generated';
 
 const punctual = (agent_type: AgentType): MessageTarget => ({
@@ -91,6 +91,7 @@ describe('useMessageQueue — durable outbox', () => {
     await waitFor(() => expect(onPersist).toHaveBeenCalledWith(
       'd1',
       expect.objectContaining({ id: stableId, status: 'sending', attempts: 2 }),
+      expect.objectContaining({ signal: expect.any(AbortSignal), beginPersist: expect.any(Function) }),
     ));
     await waitFor(() => expect(result.current.queue).toEqual([]));
     expect(onPersist).toHaveBeenCalledTimes(1);
@@ -139,6 +140,43 @@ describe('useMessageQueue — durable outbox', () => {
     act(() => result.current.removeQueued(id));
     expect(result.current.queue).toHaveLength(1);
     await act(async () => { resolvePersist(); });
+    await waitFor(() => expect(result.current.queue).toEqual([]));
+  });
+
+  it('releases cancelled preparation without waiting for an unresponsive proof service', async () => {
+    const controls: QueuedMessageControl[] = [];
+    const onPersist = vi.fn(async (_disc: string, _message: QueuedMessage, control: QueuedMessageControl) => {
+      controls.push(control);
+      if (controls.length === 1) await new Promise<void>(() => undefined);
+      else expect(control.beginPersist()).toBe(true);
+    });
+    const { result } = renderHook(() => useMessageQueue({ discId: 'd1', onPersist, prepareBeforePersist: true }));
+    act(() => { result.current.enqueue('first'); });
+    await waitFor(() => expect(onPersist).toHaveBeenCalledTimes(1));
+    const firstId = result.current.queue[0].id;
+    expect(result.current.queue[0].status).toBe('preparing');
+    act(() => { result.current.removeQueued(firstId); result.current.enqueue('second'); });
+    await waitFor(() => expect(onPersist).toHaveBeenCalledTimes(2));
+    expect(controls[0].signal.aborted).toBe(true);
+    expect(controls[0].beginPersist()).toBe(false);
+    await waitFor(() => expect(result.current.queue).toEqual([]));
+  });
+
+  it('protects an already claimed write while clearing other unsent entries', async () => {
+    let finish!: () => void;
+    let control!: QueuedMessageControl;
+    const onPersist = vi.fn(async (_disc: string, _message: QueuedMessage, current: QueuedMessageControl) => {
+      control = current;
+      expect(control.beginPersist()).toBe(true);
+      await new Promise<void>(resolve => { finish = resolve; });
+    });
+    const { result } = renderHook(() => useMessageQueue({ discId: 'd1', onPersist, prepareBeforePersist: true }));
+    act(() => { result.current.enqueue('claimed'); });
+    await waitFor(() => expect(result.current.queue[0]?.status).toBe('sending'));
+    act(() => { result.current.enqueue('unsent'); result.current.clearQueue(); result.current.cancelPreparing(); });
+    expect(result.current.queue.map(message => message.content)).toEqual(['claimed']);
+    expect(control.signal.aborted).toBe(false);
+    await act(async () => { finish(); });
     await waitFor(() => expect(result.current.queue).toEqual([]));
   });
 });

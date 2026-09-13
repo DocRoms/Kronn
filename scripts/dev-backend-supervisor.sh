@@ -14,7 +14,11 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 BACKEND_DIR="${KRONN_DEV_BACKEND_DIR:-$PROJECT_ROOT/backend}"
-BACKEND_BINARY="${KRONN_DEV_BACKEND_BINARY:-$PROJECT_ROOT/target/debug/kronn}"
+# Do not inherit a target directory from another checkout.  Cargo's checked-in
+# configuration resolves this path at the repository root; exporting it here
+# makes that ownership explicit for both the initial and watched builds.
+export CARGO_TARGET_DIR="${KRONN_DEV_BACKEND_TARGET_DIR:-$PROJECT_ROOT/target}"
+BACKEND_BINARY="${KRONN_DEV_BACKEND_BINARY:-$CARGO_TARGET_DIR/debug/kronn}"
 HEALTH_URL="${KRONN_DEV_BACKEND_HEALTH_URL:-http://localhost:3140/api/health}"
 
 failure_file="${KRONN_DEV_BACKEND_FAILURE_FILE:-}"
@@ -90,7 +94,13 @@ if [[ -x "$BACKEND_BINARY" ]]; then
 fi
 
 echo "  Building initial backend..."
-if ! (cd "$BACKEND_DIR" && cargo build); then
+if ! "$SCRIPT_DIR/dev-backend-build-guard.sh"; then
+    record_failure 102
+    if (( bootstrap_started == 0 )) || ! kill -0 "$backend_pid" 2>/dev/null; then
+        exit 102
+    fi
+    echo "  Initial backend build refused for low disk — keeping the last successful backend online." >&2
+elif ! (cd "$BACKEND_DIR" && cargo build); then
     if (( bootstrap_started == 0 )) || ! kill -0 "$backend_pid" 2>/dev/null; then
         record_failure 101
         exit 101

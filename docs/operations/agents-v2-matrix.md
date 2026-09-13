@@ -66,7 +66,7 @@ assert that every installed version is the newest available.
 | Streaming | assumed at initialize | yes | yes |
 | Cancellation | assumed at initialize | yes | yes |
 | MCP injection | assumed at initialize | yes, via CLI config | no |
-| Session resume | **host capability negotiated**; production currently starts fresh (see below) | yes, via `--resume` | n/a |
+| Session resume | **negotiated**, then bounded by a proven production checkpoint and unseen-message delta (see below) | negotiated ACP resume with the same checkpoint safeguards; direct CLI uses its own resume route | n/a |
 | Live permissions | **negotiated** — only if it advertises `permissionCapabilities` | no, computed once per session | n/a |
 | Model list | **negotiated** — read from the `session/new` response | from the CLI's own catalogue | from the connection's slots |
 
@@ -128,6 +128,15 @@ the same job.
   [ACP v1 UsageUpdate, checked 2026-09-08](https://agentclientprotocol.com/protocol/v1/schema#usageupdate)
   [src: file: backend/src/acp.rs:352-365]
   [src: file: backend/src/acp.rs:790-813]
+- **Statistics distinguish missing cost from a recorded zero.** Token-usage
+  aggregates retain recorded amounts, fresh pricing estimates and unpriced
+  tokens separately. A mixed total is partial; an existing recorded amount is
+  not retroactively claimed to be a measured provider charge. This bounded
+  correction does not add cumulative/multicurrency ACP accounting or OpenCode
+  collection to the separate global spend report. See
+  [cost provenance](../gotchas/stats-cost-usd-not-always-measured.md).
+  [src: file: backend/src/models/stats.rs:19-95]
+  [src: file: backend/src/api/stats.rs:46-56]
 - **MCP servers holding a credential are dropped**, whole. A project mixing
   safe and credentialed entries loses the credentialed ones — silently from the
   agent's point of view, since it simply never sees them.
@@ -178,8 +187,10 @@ the write succeeds. See [the preservation regression](../gotchas/agent-tier-cata
 The shared picker prioritizes explicit identities, isolates named HTTP targets,
 disables known unavailable models and retains a failed reload as cached with
 an error. `modelForAgentTier` no longer invents embedded fallback model names.
-KT-531 remains open for the other custom selector/display paths and the legacy
-HTTP runner fallback; this checkpoint does not qualify every selector.
+The later [consumer and migration inventory](../gotchas/model-catalogue-consumer-inventory.md)
+covers the remaining custom selector/display paths and removal of the legacy
+HTTP runtime fallback. That source/contract inventory does not claim a live
+provider run for every selector.
 [src: file: frontend/src/lib/constants.ts:60-75]
 [src: file: frontend/src/components/AgentSwitchPicker.tsx:113-142]
 

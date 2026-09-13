@@ -41,6 +41,14 @@ tauri-build = { version = "2", features = [] }
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
 
+[profile.dev]
+# The desktop package has its own Cargo invocation, so keep its development
+# artefacts aligned with the backend's bounded Kronn-only profile.
+debug = "line-tables-only"
+incremental = false
+debug-assertions = true
+overflow-checks = true
+
 [profile.release]
 lto = "thin"
 codegen-units = 1

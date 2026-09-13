@@ -1,7 +1,14 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { MessageTarget } from '../types/generated';
 
-export type QueuedMessageStatus = 'queued' | 'sending' | 'failed';
+export type QueuedMessageStatus = 'queued' | 'preparing' | 'sending' | 'failed';
+
+/** Ephemeral preparation controls; never part of the durable outbox entry. */
+export interface QueuedMessageControl {
+  signal: AbortSignal;
+  /** Claim the write synchronously, only after preparation is still valid. */
+  beginPersist: () => boolean;
+}
 
 /** A durable outbox entry created while another reply is already running. */
 export interface QueuedMessage {
@@ -99,9 +106,11 @@ function saveQueue(discId: string, queue: QueuedMessage[]): boolean {
 export function useMessageQueue({
   discId,
   onPersist,
+  prepareBeforePersist = false,
 }: {
   discId: string | null;
-  onPersist: (discId: string, message: QueuedMessage) => Promise<void>;
+  onPersist: (discId: string, message: QueuedMessage, control: QueuedMessageControl) => Promise<void>;
+  prepareBeforePersist?: boolean;
 }) {
   const [queueState, setQueueState] = useState(() => ({
     discId,
@@ -112,7 +121,11 @@ export function useMessageQueue({
   const queue = queueState.discId === discId ? queueState.messages : restoredQueue;
   const queueRef = useRef(queue);
   const activeDiscRef = useRef(discId);
-  const processingDiscsRef = useRef(new Set<string>());
+  const processingDiscsRef = useRef(new Map<string, {
+    id: string;
+    controller: AbortController;
+    preparing: boolean;
+  }>());
   const onPersistRef = useRef(onPersist);
 
   useLayoutEffect(() => {
@@ -132,6 +145,19 @@ export function useMessageQueue({
     activeDiscRef.current = discId;
     queueRef.current = queue;
   }, [discId, queue]);
+
+  // A proof is scoped to the open room, unlike a write already sent to the
+  // backend. Preserve unsent text on navigation/reload, but never finish an old
+  // preparation after leaving. Reopening obtains fresh authority and proof.
+  useLayoutEffect(() => () => {
+    if (!discId) return;
+    const pending = processingDiscsRef.current.get(discId);
+    if (!pending?.preparing) return;
+    pending.controller.abort();
+    saveQueue(discId, loadQueue(discId).map(message => message.id === pending.id
+      ? { ...message, status: 'queued', retryAt: undefined, error: undefined }
+      : message));
+  }, [discId]);
 
   // Wake the pump when the earliest failed entry becomes retryable. The
   // stable UUID makes repeated network attempts safe even when the previous
@@ -157,14 +183,19 @@ export function useMessageQueue({
     const now = Date.now();
     const candidate = queue.find(message => (
       message.status === 'queued'
-      || (message.status === 'failed' && (message.retryAt ?? 0) <= now)
+      || (message.status === 'failed' && message.retryAt != null && message.retryAt <= now)
     ));
     if (!candidate) return;
 
-    processingDiscsRef.current.add(discId);
+    const pending = {
+      id: candidate.id,
+      controller: new AbortController(),
+      preparing: prepareBeforePersist,
+    };
+    processingDiscsRef.current.set(discId, pending);
     const sending = queue.map(message => message.id === candidate.id ? {
       ...message,
-      status: 'sending' as const,
+      status: prepareBeforePersist ? 'preparing' as const : 'sending' as const,
       attempts: message.attempts + 1,
       retryAt: undefined,
       error: undefined,
@@ -179,10 +210,35 @@ export function useMessageQueue({
       return;
     }
 
-    void onPersistRef.current(discId, submitted).then(() => {
+    const control: QueuedMessageControl = {
+      signal: pending.controller.signal,
+      beginPersist: () => {
+        if (pending.controller.signal.aborted) return false;
+        if (!pending.preparing) return true;
+        const current = loadQueue(discId);
+        if (!current.some(message => message.id === submitted.id)) return false;
+        if (!publishActiveQueue(discId, current.map(message => message.id === submitted.id
+          ? { ...message, status: 'sending' }
+          : message))) throw new Error('Unable to persist the outbox write state');
+        pending.preparing = false;
+        return true;
+      },
+    };
+    let releaseAbortListener = () => {};
+    const cancelled = new Promise<void>(resolve => {
+      const onAbort = () => resolve();
+      control.signal.addEventListener('abort', onAbort, { once: true });
+      releaseAbortListener = () => control.signal.removeEventListener('abort', onAbort);
+    });
+    void Promise.race([
+      Promise.resolve().then(() => onPersistRef.current(discId, submitted, control)),
+      cancelled,
+    ]).then(() => {
+      if (control.signal.aborted) return;
       const current = loadQueue(discId);
       publishActiveQueue(discId, current.filter(message => message.id !== submitted.id));
     }).catch((error: unknown) => {
+      if (control.signal.aborted) return;
       const current = loadQueue(discId);
       const delay = Math.min(
         RETRY_MAX_MS,
@@ -195,10 +251,11 @@ export function useMessageQueue({
         error: error instanceof Error ? error.message : String(error),
       } : message));
     }).finally(() => {
+      releaseAbortListener();
       processingDiscsRef.current.delete(discId);
       setRetryTick(current => current + 1);
     });
-  }, [discId, publishActiveQueue, queue, retryTick]);
+  }, [discId, prepareBeforePersist, publishActiveQueue, queue, retryTick]);
 
   const enqueue = useCallback((
     content: string,
@@ -224,6 +281,8 @@ export function useMessageQueue({
 
   const removeQueued = useCallback((id: string) => {
     if (!discId) return;
+    const pending = processingDiscsRef.current.get(discId);
+    if (pending?.id === id && pending.preparing) pending.controller.abort();
     publishActiveQueue(
       discId,
       queueRef.current.filter(message => message.id !== id || message.status === 'sending'),
@@ -242,11 +301,24 @@ export function useMessageQueue({
 
   const clearQueue = useCallback(() => {
     if (!discId) return;
+    const pending = processingDiscsRef.current.get(discId);
+    if (pending?.preparing) pending.controller.abort();
     publishActiveQueue(
       discId,
       queueRef.current.filter(message => message.status === 'sending'),
     );
   }, [discId, publishActiveQueue]);
 
-  return { queue, enqueue, removeQueued, retryQueued, clearQueue };
+  const cancelPreparing = useCallback(() => {
+    if (!discId) return;
+    const pending = processingDiscsRef.current.get(discId);
+    if (pending?.preparing) pending.controller.abort();
+    // Pause, don't discard, unsent text. A deliberate Stop/authority change
+    // requires a manual retry instead of silently publishing on a timer.
+    publishActiveQueue(discId, queueRef.current.map(message => message.status === 'sending'
+      ? message
+      : { ...message, status: 'failed', retryAt: undefined, error: undefined }));
+  }, [discId, publishActiveQueue]);
+
+  return { queue, enqueue, removeQueued, retryQueued, clearQueue, cancelPreparing };
 }

@@ -41,8 +41,9 @@ mod tests {
     }
 
     fn setup_tmp(name: &str) -> std::path::PathBuf {
-        // Ensure resolve_host_path passes through unchanged
-        std::env::remove_var("KRONN_HOST_HOME");
+        // This generic file fixture must not mutate process-wide host resolution.
+        // Host-sync callers establish and restore KRONN_HOST_HOME in their own
+        // #[serial] test bodies.
         let tmp = std::env::temp_dir().join(format!("kronn-test-mcp-{}", name));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();

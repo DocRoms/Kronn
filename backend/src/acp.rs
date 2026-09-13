@@ -31,6 +31,7 @@ pub use permission_broker::{
 #[cfg(test)]
 pub(crate) mod test_support {
     use std::fs;
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
 
@@ -39,14 +40,19 @@ pub(crate) mod test_support {
     /// `--output-format`, `--session-id`, `--resume`, …); a fixture script
     /// ignores whatever it does not recognize and reacts only to the
     /// substrings it cares about, exactly like a real shell script would.
+    /// The fixture executes on POSIX hosts; its helper must also compile for
+    /// Windows, where the portability gate builds the complete test library.
     pub(crate) fn write_fixture_script(dir: &Path, body: &str) -> PathBuf {
         let path = dir.join("fixture-cli");
         fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("write fixture script");
-        let mut perms = fs::metadata(&path)
-            .expect("stat fixture script")
-            .permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&path, perms).expect("chmod fixture script");
+        #[cfg(unix)]
+        {
+            let mut perms = fs::metadata(&path)
+                .expect("stat fixture script")
+                .permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&path, perms).expect("chmod fixture script");
+        }
         path
     }
 }

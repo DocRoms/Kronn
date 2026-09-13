@@ -740,6 +740,202 @@ fn table_exists(conn: &Connection, name: &str) -> bool {
         > 0
 }
 
+/// The 0.12.0 tag ends at migration 153. Exercise the real file-open path,
+/// including a committed WAL write and the operator's pre-upgrade backups.
+#[tokio::test]
+async fn persistent_0_12_upgrade_preserves_data_configuration_and_rollback_snapshot() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("kronn.db");
+    let config_path = dir.path().join("config.toml");
+    let config = "[server]\nport = 4178\nauth_token = 'fixture-only-not-a-real-secret'\n\n[agents.model_tiers.ollama]\ndefault = 'operator/local:v2'\n";
+    std::fs::write(&config_path, config).unwrap();
+
+    let legacy = Connection::open(&db_path).unwrap();
+    legacy
+        .execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")
+        .unwrap();
+    migrations::run_through(&legacy, "153_quick_prompt_external_connection").unwrap();
+    legacy.execute_batch(
+        "INSERT INTO projects (id, name, path, created_at, updated_at)
+         VALUES ('release-p', 'Projet conservé', '/fixture/project', datetime('now'), datetime('now'));
+         INSERT INTO external_api_connections
+             (id, display_name, mention_alias, endpoint, credential_slug, origin_preset,
+              economy_model, default_model, reasoning_model)
+         VALUES ('release-api', 'Private endpoint', 'release-api', 'https://example.invalid/v1',
+                 'fixture-credential-reference', 'other', 'operator/small', 'operator/default', 'operator/large');
+         INSERT INTO discussions (id, project_id, title, created_at, updated_at)
+         VALUES ('release-d', 'release-p', 'Discussion conservée', datetime('now'), datetime('now'));
+         INSERT INTO planning_tasks
+             (id, task_number, title, description, status, priority, created_at, updated_at)
+         VALUES ('release-t', 1300, 'Tâche conservée', 'Do not discard existing work',
+                 'in_progress', 'high', datetime('now'), datetime('now'));
+         INSERT INTO planning_task_events
+             (id, task_id, action, actor_kind, actor_id, changes_json, created_at)
+         VALUES ('release-event', 'release-t', 'created', 'agent', 'Codex', '{}', datetime('now'));
+         INSERT INTO orchestration_runs
+             (id, discussion_id, project_id, target_branch, created_at, updated_at)
+         VALUES ('release-run', 'release-d', 'release-p', 'operator/work', datetime('now'), datetime('now'));
+         INSERT INTO task_executions
+             (id, orchestration_run_id, task_id, parent_discussion_id, status,
+              child_branch, created_at, updated_at)
+         VALUES ('release-execution', 'release-run', 'release-t', 'release-d',
+                 'Working', 'kronn/preserved-work', datetime('now'), datetime('now'));
+         INSERT INTO quick_prompts
+             (id, name, prompt_template, connection_id, created_at, updated_at)
+         VALUES ('release-qp', 'Prompt conservé', 'Translate {{text}}', 'release-api', datetime('now'), datetime('now'));",
+    ).unwrap();
+    let text = "Texte conservé — 中文\n```kronn-important\nnot a publication\n```\0fin";
+    legacy
+        .execute(
+            "INSERT INTO messages (id, discussion_id, role, content, timestamp, sort_order)
+         VALUES ('release-message', 'release-d', 'User', ?1, datetime('now'), 0)",
+            [text],
+        )
+        .unwrap();
+    assert!(!table_exists(&legacy, "discussion_important_messages"));
+    assert!(!table_exists(&legacy, "acp_runtime_sessions"));
+    let tables = [
+        "projects",
+        "external_api_connections",
+        "discussions",
+        "messages",
+        "planning_tasks",
+        "planning_task_events",
+        "orchestration_runs",
+        "task_executions",
+        "quick_prompts",
+        "_migrations",
+    ];
+    let before = legacy_upgrade_snapshot(&legacy, &tables);
+
+    // Keep the old connection open: the backup must include committed WAL
+    // content, not rely on the last connection closing to flush it.
+    let upgraded = super::Database::open_path(&db_path).unwrap();
+    let expected = before.clone();
+    upgraded
+        .with_read_conn(move |conn| {
+            assert_legacy_upgrade_snapshot(conn, &expected, false);
+            for table in [
+                "discussion_important_messages",
+                "human_credentials",
+                "acp_runtime_sessions",
+                "model_catalog_entries",
+            ] {
+                assert!(table_exists(conn, table), "missing new table {table}");
+            }
+            let important: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM discussion_important_messages",
+                [],
+                |row| row.get(0),
+            )?;
+            assert_eq!(
+                important, 0,
+                "historical text is not retroactively published"
+            );
+            let integrity: String =
+                conn.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
+            assert_eq!(integrity, "ok");
+            assert!(conn
+                .prepare("PRAGMA foreign_key_check")?
+                .query([])?
+                .next()?
+                .is_none());
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert_eq!(std::fs::read(&config_path).unwrap(), config.as_bytes());
+    assert_eq!(
+        std::fs::read(dir.path().join("config.toml.backup")).unwrap(),
+        config.as_bytes()
+    );
+
+    let backup_path = db_path.with_extension("db.backup");
+    let backup = Connection::open(&backup_path).unwrap();
+    assert_legacy_upgrade_snapshot(&backup, &before, true);
+    assert!(!table_exists(&backup, "discussion_important_messages"));
+    assert!(!table_exists(&backup, "acp_runtime_sessions"));
+    drop(backup);
+    let backup_bytes = std::fs::read(&backup_path).unwrap();
+    drop(legacy);
+    drop(upgraded);
+
+    let reopened = super::Database::open_path(&db_path).unwrap();
+    reopened.with_read_conn(move |conn| {
+        assert_legacy_upgrade_snapshot(conn, &before, false);
+        let duplicates: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM (SELECT name FROM _migrations GROUP BY name HAVING COUNT(*) != 1)",
+            [], |row| row.get(0),
+        )?;
+        assert_eq!(duplicates, 0);
+        Ok(())
+    }).await.unwrap();
+    assert_eq!(
+        std::fs::read(&backup_path).unwrap(),
+        backup_bytes,
+        "a second boot must not overwrite the rollback snapshot"
+    );
+    assert_eq!(std::fs::read(config_path).unwrap(), config.as_bytes());
+}
+
+type LegacyUpgradeSnapshot = Vec<(String, Vec<String>, Vec<Vec<rusqlite::types::Value>>)>;
+
+fn legacy_upgrade_snapshot(conn: &Connection, tables: &[&str]) -> LegacyUpgradeSnapshot {
+    tables
+        .iter()
+        .map(|table| {
+            let mut statement = conn
+                .prepare(&format!("SELECT * FROM {table} ORDER BY id"))
+                .unwrap();
+            let columns = statement
+                .column_names()
+                .iter()
+                .map(|name| name.to_string())
+                .collect::<Vec<_>>();
+            let rows = statement
+                .query_map([], |row| {
+                    (0..columns.len())
+                        .map(|index| row.get(index))
+                        .collect::<rusqlite::Result<Vec<_>>>()
+                })
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap();
+            (table.to_string(), columns, rows)
+        })
+        .collect()
+}
+
+fn assert_legacy_upgrade_snapshot(
+    conn: &Connection,
+    expected: &LegacyUpgradeSnapshot,
+    backup: bool,
+) {
+    for (table, columns, rows) in expected {
+        let filter = if table == "_migrations" && !backup {
+            " WHERE name <= '153_quick_prompt_external_connection'"
+        } else {
+            ""
+        };
+        let mut statement = conn
+            .prepare(&format!(
+                "SELECT {} FROM {table}{filter} ORDER BY id",
+                columns.join(",")
+            ))
+            .unwrap();
+        let actual = statement
+            .query_map([], |row| {
+                (0..columns.len())
+                    .map(|index| row.get::<_, rusqlite::types::Value>(index))
+                    .collect::<rusqlite::Result<Vec<_>>>()
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(&actual, rows, "legacy {table} changed during upgrade");
+    }
+}
+
 fn column_exists(conn: &Connection, table: &str, col: &str) -> bool {
     let mut stmt = conn
         .prepare(&format!("PRAGMA table_info({table})"))

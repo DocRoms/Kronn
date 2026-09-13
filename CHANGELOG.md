@@ -13,6 +13,26 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Added
 
+- Important messages are objects, not formatting. An agent publishes a
+  `kronn-important` block — a decision, a scope change, a DoD waiver, a blocking
+  alert, an action needed from a human, an accepted delivery — and Kronn keeps a
+  card the discussion can filter, count and step through, instead of a bold line
+  that scrolls away. A worker's delivery report stays a delivery report: when a
+  fact inside one matters, a separate card points at it. A replay after a
+  restart collapses onto the fact it already recorded rather than doubling it.
+- Publishing a card asks who you are. It takes a credential enrolled in
+  Settings and a single-use proof bound to the room and to the exact text, so a
+  captured request cannot be replayed or aimed somewhere else. A worker
+  publishes none while it is working, holding a valid credential or not — it
+  reports through its delivery. **An install publishes no cards until an
+  operator enrols one**, which is deliberate: the message still posts, and the
+  response says what was refused.
+- The publication bootstrap can be rotated, and recovered when it is lost.
+  Rotating it from Settings writes the replacement to the operator's private
+  file and answers with the path — the secret travels over no wire, and the
+  screen locks back because the authority just used is gone. An operator who
+  lost it leaves a `recover-admin-secret` file in the Kronn data directory and
+  restarts. Credentials already enrolled keep working through both.
 - An agent can put a decision to the human and stop, without the question
   scrolling away. A `kronn-question` block becomes a card that stays pinned
   while it waits: the question, what it blocks, the options with their
@@ -565,6 +585,16 @@ Release notes for 0.9.3 and earlier are available in the
   warning, search and free-text entry preserved), or unsupported (the
   connection proves it has no compatible model). A saved selection is never
   cleared by a refresh or a re-test, whatever the state.
+
+- A task execution parked on a CLI worker's control offer — waiting for the
+  exact target session to accept — can now be redirected to another worker.
+  It used to refuse outright with "not a resumable worker state", stranding
+  real work behind a CLI that never showed up. The same execution, checkout,
+  history, attempts and review budget carry over untouched; the stale offer
+  is cancelled in the same move, so the original CLI can no longer accept it
+  late. Every other blocked reason — a session already committed elsewhere,
+  or a protected-merge checkpoint — still refuses reassignment and requires
+  a human decision, unchanged.
 
 ## [0.12.0] - 2026-08-30
 
