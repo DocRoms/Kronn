@@ -1317,6 +1317,82 @@ fn reassignment_refuses_an_applying_origin_blocked_hold_without_mutation() {
     assert_eq!(unchanged.blocked_reason_code, None);
 }
 
+/// A malformed `Blocked` row — `awaiting_worker_acceptance` attached to a hold
+/// whose checkpoint is NOT `Provisioning` — must still be refused. KT-640 only
+/// widens the resumable set for the code, not for every origin it might (by a
+/// bug elsewhere) end up paired with; the checkpoint guard in
+/// `transition_execution` is the real backstop here, not the reason code.
+#[test]
+fn reassignment_refuses_a_blocked_awaiting_acceptance_hold_with_a_non_provisioning_checkpoint() {
+    let conn = setup();
+    seed_task(&conn, "t-reassign-blocked-malformed", 1111);
+    let execution = launch_single_task(
+        &conn,
+        &LaunchSingleTaskInput::new("t-reassign-blocked-malformed", DISC),
+        &backend_actor(),
+    )
+    .unwrap()
+    .execution;
+    for status in [
+        TaskExecutionStatus::Provisioning,
+        TaskExecutionStatus::Working,
+        TaskExecutionStatus::AwaitingReview,
+        TaskExecutionStatus::Approved,
+        TaskExecutionStatus::Integrating,
+        TaskExecutionStatus::Validating,
+        TaskExecutionStatus::Applying,
+    ] {
+        transition_execution(
+            &conn,
+            &execution.id,
+            status,
+            &backend_actor(),
+            serde_json::json!({}),
+        )
+        .unwrap();
+    }
+    // An Applying-origin block that (wrongly) carries the CLI-acceptance code —
+    // this combination never arises from the real KT-328/KT-319 handshakes,
+    // which only ever block from Provisioning; it is constructed here to prove
+    // the guard does not trust the code alone.
+    block_execution(
+        &conn,
+        &execution.id,
+        &backend_actor(),
+        "malformed: acceptance code on a non-Provisioning checkpoint",
+        Some(BlockedReasonCode::AwaitingWorkerAcceptance),
+    )
+    .unwrap();
+
+    let error = reassign_execution_worker(
+        &conn,
+        &execution.id,
+        &CampaignWorkerSelection {
+            target: MessageTarget::discussion_agent(AgentType::Ollama),
+            model: None,
+            profile_id: None,
+        },
+        "cannot self-serve a malformed checkpoint",
+        &backend_actor(),
+    )
+    .expect_err("a non-Provisioning checkpoint must refuse even with the acceptance code");
+    assert!(
+        error.to_string().contains("illegal Blocked resume"),
+        "{error}"
+    );
+
+    let unchanged = get_task_execution(&conn, &execution.id).unwrap().unwrap();
+    assert_eq!(unchanged.status, TaskExecutionStatus::Blocked);
+    assert_eq!(
+        unchanged.blocked_from_status,
+        Some(TaskExecutionStatus::Applying)
+    );
+    assert_eq!(
+        unchanged.blocked_reason_code,
+        Some(BlockedReasonCode::AwaitingWorkerAcceptance)
+    );
+}
+
 #[test]
 fn timeout_scan_reports_activity_total_review_and_human_wait_distinctly() {
     let conn = setup();
