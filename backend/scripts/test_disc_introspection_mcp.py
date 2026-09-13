@@ -415,6 +415,9 @@ class DiscAppendPublicationGrantTests(unittest.TestCase):
     FENCE = "```kronn-important\n{}\n```"
 
     def setUp(self):
+        # Run after the fixture's own cleanups: none may unwind the module's
+        # fail-closed transport guard for tests that follow this one.
+        self.addCleanup(lambda: self.assertIs(urllib.request.urlopen, _AMBIENT_URLOPEN))
         self.mod = _load_module()
         self.dir = tempfile.TemporaryDirectory(prefix="kronn-grant-")
         self.addCleanup(self.dir.cleanup)
@@ -425,12 +428,13 @@ class DiscAppendPublicationGrantTests(unittest.TestCase):
         patcher = mock.patch.object(self.mod, "_http", self.fake_http)
         patcher.start()
         self.addCleanup(patcher.stop)
-        mock.patch.object(
+        binding_patcher = mock.patch.object(
             self.mod,
             "_read_binding",
             return_value={"disc_id": "disc-1", "resume_token": "kr-resume-x"},
-        ).start()
-        self.addCleanup(mock.patch.stopall)
+        )
+        binding_patcher.start()
+        self.addCleanup(binding_patcher.stop)
 
     def _respond(self, method, path, *args, **kwargs):
         if path == "/api/human-credentials/proof":
