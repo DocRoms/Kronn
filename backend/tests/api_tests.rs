@@ -2761,7 +2761,10 @@ async fn stats_tokens_same_group_known_and_null_rows_keep_the_null_share_unknown
         assert_eq!(cost["recorded_usd"], 1.0, "{label}: recorded_usd");
         assert_eq!(cost["has_recorded"], true, "{label}: has_recorded");
         assert_eq!(cost["has_estimate"], false, "{label}: has_estimate");
-        assert_eq!(cost["unknown_cost_tokens"], 200, "{label}: unknown_cost_tokens");
+        assert_eq!(
+            cost["unknown_cost_tokens"], 200,
+            "{label}: unknown_cost_tokens"
+        );
     };
 
     let by_provider = json["data"]["by_provider"].as_array().unwrap();
@@ -2879,7 +2882,10 @@ async fn stats_tokens_estimable_agent_with_a_missing_sub_part_mixes_recorded_and
     let estimated = openai["cost"]["estimated_usd"].as_f64().unwrap();
     // Codex: 100K tokens -> (60K*2.0 + 40K*8.0)/1M = 0.44, computed only
     // over the 100K missing tokens, not the 1K that were already recorded.
-    assert!((estimated - 0.44).abs() < 0.01, "expected ~0.44, got {estimated}");
+    assert!(
+        (estimated - 0.44).abs() < 0.01,
+        "expected ~0.44, got {estimated}"
+    );
     assert_eq!(openai["cost"]["unknown_cost_tokens"], 0);
 }
 

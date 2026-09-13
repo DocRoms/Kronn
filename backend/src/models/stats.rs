@@ -276,7 +276,10 @@ mod cost_aggregate_tests {
         let total = recorded.merge(&estimated).merge(&unknown);
         assert_eq!(total.recorded_usd, recorded.recorded_usd);
         assert_eq!(total.estimated_usd, estimated.estimated_usd);
-        assert_eq!(total.known_usd(), recorded.known_usd() + estimated.known_usd());
+        assert_eq!(
+            total.known_usd(),
+            recorded.known_usd() + estimated.known_usd()
+        );
         assert!(total.has_recorded);
         assert!(total.has_estimate);
         assert_eq!(total.unknown_cost_tokens, 3000);

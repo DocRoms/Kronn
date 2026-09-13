@@ -1265,6 +1265,50 @@ extracted_from_asset_id?: string | null, created_at: string, };
  */
 export type ContextFileAiGeneration = { model: string, prompt: string, };
 
+/**
+ * Cost aggregated across one or more token-cost observations. Never
+ * fabricates a price and never collapses distinct provenances into one
+ * number: a persisted DB amount, a freshly-computed pricing estimate, and a
+ * true absence of data are three different things and stay in three
+ * different fields.
+ *
+ * See KT-637: substituting 0.0 for a missing cost, pricing an agent with
+ * another provider's table, or asserting a persisted `cost_usd` is a real
+ * measurement (it is not, for ANY agent — see `add`) are all fabrications
+ * and must never happen again.
+ */
+export type CostAggregate = {
+/**
+ * Sum of `messages.cost_usd` (or `workflow_runs`/equivalent) values
+ * already persisted for tokens in this group. Provenance is NOT
+ * guaranteed to be a real measurement — see `add`. 0.0 with
+ * `has_recorded == true` means "recorded as free", which is different
+ * from `has_recorded == false` ("nothing recorded at all").
+ */
+recorded_usd: number,
+/**
+ * True once at least one token in this group had a persisted, non-null
+ * cost folded into `recorded_usd`.
+ */
+has_recorded: boolean,
+/**
+ * Sum of pricing-table estimates computed here (never persisted), for
+ * tokens that had no recorded cost at all. Always a genuine,
+ * freshly-computed estimate — never a relabeled recorded amount.
+ */
+estimated_usd: number,
+/**
+ * True once at least one token's cost came from `estimated_usd`.
+ */
+has_estimate: boolean,
+/**
+ * Token count with neither a recorded cost nor a pricing-table entry
+ * (e.g. OpenCode, Nvidia, Custom, LiteLLM, or a run with no agent
+ * attribution at all). Non-zero means `recorded_usd + estimated_usd`
+ * is a partial total, not a complete one.
+ */
+unknown_cost_tokens: number, };
+
 export type CreateAdHocCompareRequest = { discussion_ids: Array<string>, };
 
 export type CreateAdHocCompareResponse = { run_id: string, };
@@ -1409,7 +1453,7 @@ fields?: Array<CustomApiField>,
  */
 endpoints?: Array<ApiEndpoint>, };
 
-export type DailyUsage = { date: string, tokens: number, cost_usd: number, anthropic: number, openai: number, google: number, mistral: number, amazon: number, github: number, };
+export type DailyUsage = { date: string, tokens: number, cost: CostAggregate, anthropic: number, openai: number, google: number, mistral: number, amazon: number, github: number, };
 
 /**
  * Result of a `POST /api/db/backup` call. The frontend surfaces the
@@ -4527,7 +4571,7 @@ export type ProjectMcpSyncReport = { status: ProjectMcpSyncStatus, detail?: stri
 
 export type ProjectMcpSyncStatus = "Written" | "Unchanged" | "ReadOnly" | "MissingSecrets" | "Failed";
 
-export type ProjectUsage = { project_id: string, project_name: string, tokens_used: number, cost_usd: number, };
+export type ProjectUsage = { project_id: string, project_name: string, tokens_used: number, cost: CostAggregate, };
 
 export type ProjectWriteAccess = { status: ProjectWriteAccessStatus, reason?: string | null, writable_roots?: Array<string>, };
 
@@ -4658,7 +4702,7 @@ export type ProposeResult = { accepted: boolean, reason: string | null, warnings
  */
 export type ProviderQuotaState = { provider: AgentType, blocked: boolean, };
 
-export type ProviderUsage = { provider: string, tokens_used: number, tokens_limit: number | null, cost_usd: number | null, };
+export type ProviderUsage = { provider: string, tokens_used: number, tokens_limit: number | null, cost: CostAggregate, };
 
 export type PublishLivePageRequest = { workflow_id?: string | null, workflow_run_id?: string | null, writes: Array<LivePageWrite>, };
 
@@ -6307,7 +6351,7 @@ anthropic?: string | null, openai?: string | null, google?: string | null,
  */
 keys: Array<ApiKey>, disabled_overrides: Array<string>, };
 
-export type TokenUsageSummary = { total_tokens: number, total_cost_usd: number, discussion_tokens: number, workflow_tokens: number, by_provider: Array<ProviderUsage>, by_project: Array<ProjectUsage>, top_discussions: Array<UsageEntry>, top_workflows: Array<UsageEntry>, daily_history: Array<DailyUsage>, };
+export type TokenUsageSummary = { total_tokens: number, total_cost: CostAggregate, discussion_tokens: number, workflow_tokens: number, by_provider: Array<ProviderUsage>, by_project: Array<ProjectUsage>, top_discussions: Array<UsageEntry>, top_workflows: Array<UsageEntry>, daily_history: Array<DailyUsage>, };
 
 export type TourDemoDiscussionResponse = { discussion_id: string, created: boolean,
 /**
@@ -6528,7 +6572,7 @@ cost_hint?: ModelCostHint | null, privacy_note?: string | null, };
 /**
  * A ranked usage entry (for top N lists)
  */
-export type UsageEntry = { id: string, name: string, tokens_used: number, cost_usd: number, };
+export type UsageEntry = { id: string, name: string, tokens_used: number, cost: CostAggregate, };
 
 /**
  * Per-model cost within a row — lets the frontend roll up by agent
