@@ -23,14 +23,16 @@ static ENV_LOCK: Mutex<()> = Mutex::const_new(());
 /// write the developer's REAL config.toml (2026-07-13 incident).
 fn isolate_config_dir() {
     static FIXTURE_ROOT: OnceLock<tempfile::TempDir> = OnceLock::new();
-    let root = FIXTURE_ROOT
-        .get_or_init(|| tempfile::tempdir().expect("create learnings test fixture root"));
-    let data_dir = root.path().join("data");
-    let host_home = root.path().join("host-home");
-    std::fs::create_dir_all(&data_dir).expect("create learnings data fixture");
-    std::fs::create_dir_all(&host_home).expect("create learnings host fixture");
-    std::env::set_var("KRONN_DATA_DIR", data_dir);
-    std::env::set_var("KRONN_HOST_HOME", host_home);
+    FIXTURE_ROOT.get_or_init(|| {
+        let root = tempfile::tempdir().expect("create learnings test fixture root");
+        let data_dir = root.path().join("data");
+        let host_home = root.path().join("host-home");
+        std::fs::create_dir_all(&data_dir).expect("create learnings data fixture");
+        std::fs::create_dir_all(&host_home).expect("create learnings host fixture");
+        std::env::set_var("KRONN_DATA_DIR", data_dir);
+        std::env::set_var("KRONN_HOST_HOME", host_home);
+        root
+    });
 }
 
 fn app_with(enabled: bool) -> Router {

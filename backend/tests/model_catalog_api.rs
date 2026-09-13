@@ -23,14 +23,16 @@ use kronn::{build_router_with_auth, AppState, DEFAULT_MAX_CONCURRENT_AGENTS};
 /// write the developer's REAL config.toml (2026-07-13 incident).
 fn isolate_config_dir() {
     static FIXTURE_ROOT: OnceLock<tempfile::TempDir> = OnceLock::new();
-    let root = FIXTURE_ROOT
-        .get_or_init(|| tempfile::tempdir().expect("create model-catalog test fixture root"));
-    let data_dir = root.path().join("data");
-    let host_home = root.path().join("host-home");
-    std::fs::create_dir_all(&data_dir).expect("create model-catalog data fixture");
-    std::fs::create_dir_all(&host_home).expect("create model-catalog host fixture");
-    std::env::set_var("KRONN_DATA_DIR", data_dir);
-    std::env::set_var("KRONN_HOST_HOME", host_home);
+    FIXTURE_ROOT.get_or_init(|| {
+        let root = tempfile::tempdir().expect("create model-catalog test fixture root");
+        let data_dir = root.path().join("data");
+        let host_home = root.path().join("host-home");
+        std::fs::create_dir_all(&data_dir).expect("create model-catalog data fixture");
+        std::fs::create_dir_all(&host_home).expect("create model-catalog host fixture");
+        std::env::set_var("KRONN_DATA_DIR", data_dir);
+        std::env::set_var("KRONN_HOST_HOME", host_home);
+        root
+    });
 }
 
 fn test_app() -> Router {

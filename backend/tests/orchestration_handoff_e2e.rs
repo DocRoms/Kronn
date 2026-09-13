@@ -26,14 +26,16 @@ const PROVIDER: &str = "ClaudeCode";
 
 fn isolate_config_dir() {
     static FIXTURE_ROOT: OnceLock<tempfile::TempDir> = OnceLock::new();
-    let root =
-        FIXTURE_ROOT.get_or_init(|| tempfile::tempdir().expect("create handoff test fixture root"));
-    let data_dir = root.path().join("data");
-    let host_home = root.path().join("host-home");
-    std::fs::create_dir_all(&data_dir).expect("create handoff data fixture");
-    std::fs::create_dir_all(&host_home).expect("create handoff host fixture");
-    std::env::set_var("KRONN_DATA_DIR", data_dir);
-    std::env::set_var("KRONN_HOST_HOME", host_home);
+    FIXTURE_ROOT.get_or_init(|| {
+        let root = tempfile::tempdir().expect("create handoff test fixture root");
+        let data_dir = root.path().join("data");
+        let host_home = root.path().join("host-home");
+        std::fs::create_dir_all(&data_dir).expect("create handoff data fixture");
+        std::fs::create_dir_all(&host_home).expect("create handoff host fixture");
+        std::env::set_var("KRONN_DATA_DIR", data_dir);
+        std::env::set_var("KRONN_HOST_HOME", host_home);
+        root
+    });
 }
 
 /// The router plus the database behind it: sessions are seeded directly, the

@@ -1648,25 +1648,17 @@ async fn live_page_library_state_discussion_link_and_delete_round_trip() {
 /// platform dir when KRONN_DATA_DIR is unset). MCP handlers also synchronize
 /// host-agent configs, so both roots must be owned by this test process.
 fn isolate_config_dir() {
-    static INIT: std::sync::Once = std::sync::Once::new();
-    INIT.call_once(|| {
-        let dir = std::env::temp_dir().join(format!("kronn-inttest-cfg-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).ok();
-        std::env::set_var("KRONN_DATA_DIR", &dir);
-    });
-}
-
-/// This is called only by the serial, fresh-process host-sync regression.
-/// Its TempDir is process-lived so a real router handler cannot fall back to a
-/// caller-provided host directory during the test.
-fn isolate_mcp_host_sync_dir() -> std::path::PathBuf {
     static FIXTURE_ROOT: OnceLock<tempfile::TempDir> = OnceLock::new();
-    let root = FIXTURE_ROOT
-        .get_or_init(|| tempfile::tempdir().expect("create MCP host-sync fixture root"));
-    let host_home = root.path().join("host-home");
-    std::fs::create_dir_all(&host_home).expect("create MCP host-sync fixture");
-    std::env::set_var("KRONN_HOST_HOME", &host_home);
-    host_home
+    FIXTURE_ROOT.get_or_init(|| {
+        let root = tempfile::tempdir().expect("create API test fixture root");
+        let data_dir = root.path().join("data");
+        let host_home = root.path().join("host-home");
+        std::fs::create_dir_all(&data_dir).expect("create API data fixture");
+        std::fs::create_dir_all(&host_home).expect("create API host fixture");
+        std::env::set_var("KRONN_DATA_DIR", data_dir);
+        std::env::set_var("KRONN_HOST_HOME", host_home);
+        root
+    });
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -9981,6 +9973,8 @@ fn test_state_without_fixture() -> AppState {
 #[serial]
 async fn mcp_host_sync_router_confines_an_inherited_host_home() {
     if std::env::var_os(MCP_HOST_ISOLATION_CHILD).is_none() {
+        let parent_data_dir = std::env::var_os("KRONN_DATA_DIR");
+        let parent_host_home = std::env::var_os("KRONN_HOST_HOME");
         for mode in ["red", "green", "blocked"] {
             let sentinel_root = tempfile::tempdir().expect("create outside sentinel");
             let data_dir = sentinel_root.path().join("data");
@@ -10043,6 +10037,8 @@ async fn mcp_host_sync_router_confines_an_inherited_host_home() {
                     );
                 }
             }
+            assert_eq!(std::env::var_os("KRONN_DATA_DIR"), parent_data_dir);
+            assert_eq!(std::env::var_os("KRONN_HOST_HOME"), parent_host_home);
         }
         return;
     }
@@ -10053,11 +10049,14 @@ async fn mcp_host_sync_router_confines_an_inherited_host_home() {
     let state = if red {
         test_state_without_fixture()
     } else {
-        isolate_config_dir();
         test_state()
     };
     let blocked = std::env::var(MCP_HOST_ISOLATION_MODE).as_deref() == Ok("blocked");
-    let host_fixture = (!red).then(isolate_mcp_host_sync_dir);
+    let host_fixture = (!red).then(|| {
+        std::path::PathBuf::from(
+            std::env::var_os("KRONN_HOST_HOME").expect("normal test harness host fixture"),
+        )
+    });
     if let Some(host_fixture) = &host_fixture {
         assert_ne!(
             host_fixture, &sentinel,
@@ -10068,30 +10067,68 @@ async fn mcp_host_sync_router_confines_an_inherited_host_home() {
         }
     }
 
-    let (status, response) = post_json(
-        build_router_with_auth(state, false),
-        "/api/mcps/configs",
-        serde_json::json!({
-            "server_id": "mcp-github",
-            "label": "Fixture-only host sync",
-            "env": { "GITHUB_PERSONAL_ACCESS_TOKEN": "synthetic-fixture-secret" },
-            "args_override": null,
-            "is_global": true,
-            "project_ids": [],
-            "host_sync": "GlobalOnly"
-        }),
-    )
-    .await;
+    let app = build_router_with_auth(state, false);
+    let create_body = serde_json::json!({
+        "server_id": "mcp-github",
+        "label": "Fixture-only host sync",
+        "env": { "GITHUB_PERSONAL_ACCESS_TOKEN": "synthetic-fixture-secret" },
+        "args_override": null,
+        "is_global": true,
+        "project_ids": [],
+        "host_sync": "GlobalOnly"
+    });
+    let (status, response) = post_json(app.clone(), "/api/mcps/configs", create_body.clone()).await;
     assert_eq!(status, StatusCode::OK, "create config response: {response}");
     assert_eq!(
         response["success"], true,
         "create config response: {response}"
     );
+    if !red && !blocked {
+        let concurrent_body = serde_json::json!({
+            "server_id": "mcp-github",
+            "label": "Fixture-only concurrent host sync",
+            "env": { "GITHUB_PERSONAL_ACCESS_TOKEN": "synthetic-fixture-secret-two" },
+            "args_override": null,
+            "is_global": true,
+            "project_ids": [],
+            "host_sync": "GlobalOnly"
+        });
+        let (first, second) = tokio::join!(
+            post_json(app.clone(), "/api/mcps/configs", create_body),
+            post_json(app, "/api/mcps/configs", concurrent_body),
+        );
+        assert_eq!(
+            first.0,
+            StatusCode::OK,
+            "first concurrent response: {}",
+            first.1
+        );
+        assert_eq!(
+            second.0,
+            StatusCode::OK,
+            "second concurrent response: {}",
+            second.1
+        );
+        assert_eq!(
+            first.1["success"], true,
+            "first concurrent response: {}",
+            first.1
+        );
+        assert_eq!(
+            second.1["success"], true,
+            "second concurrent response: {}",
+            second.1
+        );
+    }
     if let Some(host_fixture) = host_fixture {
         if blocked {
             assert!(
                 host_fixture.join(".codex").is_file(),
                 "blocked fixture must remain a file"
+            );
+            assert!(
+                host_fixture.join(".copilot/mcp-config.json").exists(),
+                "the remaining adapter syncs must continue inside the owned fixture"
             );
         } else {
             assert!(host_fixture.join(".codex/config.toml").exists());
