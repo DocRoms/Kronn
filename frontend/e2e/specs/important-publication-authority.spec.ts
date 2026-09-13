@@ -274,7 +274,7 @@ test.describe.serial('publication authority, end to end', () => {
 
   test('switching rooms restores the selected card without borrowing another room position', async ({ page, request }) => {
     const created = await request.post('/api/discussions', {
-      data: { title: 'KT-619 autre salle navigation', agent: 'ClaudeCode', language: 'fr', no_agent: true },
+      data: { title: 'KT-619 autre salle navigation', agent: 'ClaudeCode', language: 'fr', initial_prompt: 'Ne lance aucun modèle.', no_agent: true },
     });
     expect(created.ok()).toBe(true);
     const other = (await created.json())?.data?.id;
