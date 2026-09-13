@@ -8,8 +8,8 @@
  * underneath said it had been refused — the two halves of the same screen
  * disagreeing about the same row.
  */
-import { describe, it, expect, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { beforeEach, describe, it, expect, vi } from 'vitest';
+import { render, screen, fireEvent } from '@testing-library/react';
 import { I18nProvider } from '../../lib/I18nContext';
 import type { DiscussionMessage, ImportantMessage } from '../../types/generated';
 
@@ -48,12 +48,15 @@ const card: ImportantMessage = {
   sort_order: 2,
 } as ImportantMessage;
 
+let recordedCards: ImportantMessage[] = [card];
+beforeEach(() => { recordedCards = [card]; });
+
 vi.mock('../../lib/importantMessages', async () => {
   const real = await vi.importActual<object>('../../lib/importantMessages');
   return {
     ...real,
     refreshImportantMessages: vi.fn(),
-    useImportantMessages: () => ({ items: [card], totalAll: 1, loaded: true }),
+    useImportantMessages: () => ({ items: recordedCards, totalAll: recordedCards.length, loaded: true }),
   };
 });
 
@@ -114,6 +117,28 @@ const noopProps = {
 };
 
 describe('MessageBubble — an important card on its own message', () => {
+  it.each(['decision', 'blocking_alert', 'human_action_required'] as const)(
+    'renders a durable server %s card without a Markdown fence or opening the report', category => {
+      recordedCards = [{ ...card, category, source_kind: 'orchestration', author_kind: 'orchestrator' }];
+      const msg = { ...fenceMessage('User'), author_pseudo: 'Orchestrateur', content: 'Événement de pilotage enregistré.' };
+      render(<I18nProvider><MessageBubble {...noopProps} msg={msg} /></I18nProvider>);
+      expect(screen.getByText(card.highlight)).toBeVisible();
+      expect(document.querySelectorAll('.disc-important-card')).toHaveLength(1);
+      fireEvent.click(screen.getByRole('button', { name: 'disc.orchestratorShowDetails' }));
+      expect(screen.getByText(card.highlight)).toBeVisible();
+      expect(document.querySelectorAll('.disc-important-card')).toHaveLength(1);
+    },
+  );
+
+  it.each(['missing', 'another message', 'caller publication'] as const)('does not invent a server card when the durable row is %s', kind => {
+    recordedCards = kind === 'missing' ? [] : kind === 'another message'
+      ? [{ ...card, message_id: 'another-message', source_kind: 'orchestration' }]
+      : [card];
+    const msg = { ...fenceMessage('User'), author_pseudo: 'Orchestrateur', content: 'Livraison acceptée.' };
+    render(<I18nProvider><MessageBubble {...noopProps} msg={msg} /></I18nProvider>);
+    expect(document.querySelectorAll('.disc-important-card')).toHaveLength(0);
+  });
+
   for (const role of ['User', 'Agent'] as const) {
     it(`renders the recorded card on a ${role} message`, () => {
       render(

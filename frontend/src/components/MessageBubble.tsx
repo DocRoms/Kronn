@@ -1003,6 +1003,11 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
             if (isOrchestrator) {
               return (
                 <div className="disc-msg-orchestrator-content">
+                  <ImportantMessageCard
+                    discussionId={discussionId}
+                    sourceMessageId={msg.id}
+                    serverEventOnly
+                  />
                   {!orchestratorDetailsOpen && (
                     <p className="disc-msg-orchestrator-preview">{orchestratorPreview}</p>
                   )}

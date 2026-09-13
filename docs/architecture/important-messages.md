@@ -34,7 +34,7 @@ Two consequences worth carrying here:
 
 - **an install with no grant publishes no card IN ANYBODY'S NAME.** That is
   every install today, and it is deliberate. It does not mean a silent product:
-  Kronn's own orchestration events — a terminal transition, a review that
+  Kronn's own orchestration events — a failed/cancelled execution, a review that
   requests changes, a campaign parked on a human — publish with no credential at
   all, because there is no caller to authenticate. The gate is on publication in
   one's own name, never on the backend reporting what it just did;
@@ -57,6 +57,10 @@ SEPARATE important card that references the delivery (via `references`)
 instead of mutating the delivery message's type. The note channel
 (`channel: "note"`) is excluded from important-card ingestion entirely — a
 note is a private aside, not a steering event.
+
+An ordinary `Done` transition keeps its durable notification without minting
+an `accepted_delivery` card automatically. That category is an explicit
+publication decision, not an automatic promotion of every accepted report.
 
 ## Deduplication and replay
 
@@ -88,6 +92,12 @@ disabled and the counter is the only way left to reach it.
 `ImportantMessageCard` renders the DURABLE row for a `kronn-important` fence
 in the transcript, never the fence text itself; a fence that produced no row
 (refused or malformed) says so instead of rendering raw JSON.
+
+Server-authored orchestration events carry no Markdown fence. Their durable
+card is rendered beside the folded report, visible without opening its details.
+Only a matching row with `source_kind: orchestration` enables that path; an
+orchestrator display label or ordinary notification alone renders no card and
+no false refusal notice.
 [src: file: frontend/src/components/ImportantMessageCard.tsx:1-114]
 [src: file: frontend/src/lib/importantMessages.ts:1-98]
 

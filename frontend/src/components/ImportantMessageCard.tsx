@@ -23,6 +23,8 @@ function formatDate(value: string): string {
 export interface ImportantMessageCardProps {
   discussionId?: string;
   sourceMessageId?: string;
+  /** Server events have no transport fence; absence is ordinary, not refusal. */
+  serverEventOnly?: boolean;
 }
 
 /**
@@ -31,13 +33,17 @@ export interface ImportantMessageCardProps {
  * A fence with no row means it was refused or malformed. Saying so beats
  * rendering raw JSON at the reader, and beats rendering nothing at all.
  */
-export function ImportantMessageCard({ discussionId, sourceMessageId }: ImportantMessageCardProps) {
+export function ImportantMessageCard({ discussionId, sourceMessageId, serverEventOnly = false }: ImportantMessageCardProps) {
   const { t } = useT();
   const { items, loaded } = useImportantMessages(discussionId);
   const card = useMemo(
     () => items.find((item) => item.message_id === sourceMessageId),
     [items, sourceMessageId],
   );
+
+  // A display label or ordinary delivery notification is not proof that a
+  // steering card exists. Only the durable row and its source kind decide.
+  if (serverEventOnly && card?.source_kind !== 'orchestration') return null;
 
   if (!card) {
     if (!loaded) return <div className="disc-important-card" aria-busy="true" />;

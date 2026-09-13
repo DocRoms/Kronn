@@ -4329,6 +4329,42 @@ fn launch_and_finish(conn: &Connection, task_id: &str, number: i64) -> String {
     execution
 }
 
+#[test]
+fn a_finished_delivery_is_not_automatically_an_important_card() {
+    let conn = setup();
+    let execution = launch_and_finish(&conn, "task-ordinary-delivery", 9919);
+    let message_id = format!("orch-principal-terminal:{execution}:Done");
+    let messages = crate::db::discussions::list_messages(&conn, DISC).unwrap();
+    assert!(
+        messages.iter().any(|message| message.id == message_id),
+        "ordinary acceptance still leaves its durable principal notification"
+    );
+    assert_eq!(
+        crate::db::discussion_important::list(&conn, DISC, None)
+            .unwrap()
+            .total_all,
+        0,
+        "only an explicit publication may select an accepted delivery as important"
+    );
+    let replay_error = transition_execution(
+        &conn,
+        &execution,
+        TaskExecutionStatus::Done,
+        &backend_actor(),
+        serde_json::json!({}),
+    )
+    .unwrap_err();
+    assert!(replay_error
+        .to_string()
+        .contains("illegal task-execution transition Done -> Done"));
+    assert_eq!(
+        crate::db::discussion_important::list(&conn, DISC, None)
+            .unwrap()
+            .total_all,
+        0
+    );
+}
+
 // ── KT-373 — durable authorisation for reclaiming build artefacts ────────────
 //
 // Terminal is necessary and NOT sufficient. Each test below is a way a
