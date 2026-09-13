@@ -1641,14 +1641,18 @@ async fn live_page_library_state_discussion_link_and_delete_round_trip() {
 /// Create a test AppState with an in-memory database and default config.
 /// Every config::save reached through a handler under test would otherwise
 /// write the DEVELOPER'S REAL config.toml (config_dir() falls back to the
-/// platform dir when KRONN_DATA_DIR is unset) — a full `cargo test` used to
-/// wipe pseudo/avatar/model-tiers on the host (2026-07-13 incident).
+/// platform dir when KRONN_DATA_DIR is unset). MCP handlers also synchronize
+/// host-agent configs, so both roots must be owned by this test process.
 fn isolate_config_dir() {
     static INIT: std::sync::Once = std::sync::Once::new();
     INIT.call_once(|| {
-        let dir = std::env::temp_dir().join(format!("kronn-inttest-cfg-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).ok();
-        std::env::set_var("KRONN_DATA_DIR", &dir);
+        let root = std::env::temp_dir().join(format!("kronn-inttest-{}", std::process::id()));
+        let data_dir = root.join("data");
+        let host_home = root.join("host-home");
+        std::fs::create_dir_all(&data_dir).expect("create integration-test data fixture");
+        std::fs::create_dir_all(&host_home).expect("create integration-test host fixture");
+        std::env::set_var("KRONN_DATA_DIR", data_dir);
+        std::env::set_var("KRONN_HOST_HOME", host_home);
     });
 }
 
