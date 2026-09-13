@@ -2481,10 +2481,234 @@ async fn run_one_validation(
     spec: &crate::models::ValidationSpec,
     cwd: &std::path::Path,
 ) -> (Option<i32>, i64, String) {
+    let build_path = match validation_build_path(spec, cwd).await {
+        Ok(path) => path,
+        Err(reason) => return (None, 0, format!("refused: {reason}")),
+    };
+    run_one_validation_checked(spec, cwd, &build_path, worktree::ensure_build_disk_headroom).await
+}
+
+/// Resolve Cargo's own effective target directory before a validation build.
+///
+/// `cargo metadata` does not compile a crate, but it is the authority for
+/// workspace and configuration layering.  Checking `cwd` would be wrong when
+/// a project routes its target to another volume; checking an inferred
+/// `target/` would be wrong for an explicit `--target-dir`.  Non-Cargo
+/// validations do not create Cargo artefacts, so their declared working
+/// directory remains the measured filesystem.
+async fn validation_build_path(
+    spec: &crate::models::ValidationSpec,
+    cwd: &std::path::Path,
+) -> Result<std::path::PathBuf, String> {
+    const METADATA_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+    let Some(words) = validation_cargo_argv(&spec.command)? else {
+        return Ok(cwd.to_path_buf());
+    };
+
+    let mut metadata = crate::core::cmd::async_cmd("cargo");
+    metadata
+        .current_dir(cwd)
+        // Resolution must neither fetch dependencies nor wait forever before a
+        // validation can be refused. `metadata` only needs the local manifest
+        // graph to return Cargo's effective target directory.
+        .args([
+            "metadata",
+            "--no-deps",
+            "--format-version",
+            "1",
+            "--offline",
+        ]);
+    // Preserve the validation's manifest and configuration options. Validations
+    // are normally launched from the repository root, including commands such
+    // as `cargo test --manifest-path backend/Cargo.toml`; resolving metadata in
+    // cwd alone would reject that normal form before Quick Exec can run it.
+    // `cargo metadata` has no `--target-dir`, so its equivalent environment
+    // override retains the effective output directory for that one invocation.
+    // Cargo's validation subcommand is ignored; only its global resolution
+    // options are forwarded to metadata, wherever the literal argv placed them.
+    let mut index = 0;
+    while index < words.len() {
+        let word = words[index];
+        if word == "--target-dir" {
+            let value = words.get(index + 1).ok_or_else(|| {
+                "validation cargo command has --target-dir without a directory".to_string()
+            })?;
+            metadata.env("CARGO_TARGET_DIR", value);
+            index += 2;
+            continue;
+        } else if let Some(value) = word.strip_prefix("--target-dir=") {
+            metadata.env("CARGO_TARGET_DIR", value);
+        } else if word == "--manifest-path" || word == "--config" {
+            let value = words
+                .get(index + 1)
+                .ok_or_else(|| format!("validation cargo command has {word} without a value"))?;
+            metadata.arg(word).arg(value);
+            index += 2;
+            continue;
+        } else if let Some(value) = word.strip_prefix("--manifest-path=") {
+            metadata.arg("--manifest-path").arg(value);
+        } else if let Some(value) = word.strip_prefix("--config=") {
+            metadata.arg("--config").arg(value);
+        }
+        index += 1;
+    }
+    metadata
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        // `wait_for_metadata_output` owns timeout cleanup and reaps the child.
+        .kill_on_drop(true);
+    let mut child = metadata.spawn().map_err(|error| {
+        format!(
+            "cannot resolve Cargo target for validation in {}: {error}",
+            cwd.display()
+        )
+    })?;
+    let output = wait_for_metadata_output(&mut child, METADATA_TIMEOUT)
+        .await
+        .map_err(|reason| {
+            format!(
+                "cannot resolve Cargo target for validation in {}: {reason}",
+                cwd.display(),
+            )
+        })?;
+    if !output.status.success() {
+        return Err(format!(
+            "cannot resolve Cargo target for validation in {}: {}",
+            cwd.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let metadata: serde_json::Value = serde_json::from_slice(&output.stdout).map_err(|error| {
+        format!(
+            "Cargo returned invalid metadata for validation in {}: {error}",
+            cwd.display()
+        )
+    })?;
+    let target = metadata
+        .get("target_directory")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            format!(
+                "Cargo metadata has no target_directory for {}",
+                cwd.display()
+            )
+        })?;
+    Ok(std::path::PathBuf::from(target))
+}
+
+/// Return Cargo's literal argv for the forms Quick Exec already launches.
+///
+/// `ValidationSpec::command` is deliberately split exactly as the runner splits
+/// it below; this is not a shell parser and it does not make shell syntax valid.
+fn validation_cargo_argv(command: &str) -> Result<Option<Vec<&str>>, String> {
+    let words: Vec<&str> = command.split_whitespace().collect();
+    let cargo = match words.as_slice() {
+        ["cargo", rest @ ..] => rest,
+        ["rtk", "cargo", rest @ ..] => rest,
+        ["rtk", "proxy", "cargo", rest @ ..] => rest,
+        _ => return Ok(None),
+    };
+    if cargo.is_empty() {
+        return Err("validation cargo command has no Cargo arguments".into());
+    }
+    Ok(Some(cargo.to_vec()))
+}
+
+async fn wait_for_metadata_output(
+    child: &mut tokio::process::Child,
+    timeout: std::time::Duration,
+) -> Result<std::process::Output, String> {
+    use tokio::io::AsyncReadExt;
+
+    let mut stdout = child.stdout.take();
+    let mut stderr = child.stderr.take();
+    let captured = {
+        let output = async {
+            let read_stdout = async {
+                let mut bytes = Vec::new();
+                if let Some(pipe) = stdout.as_mut() {
+                    pipe.read_to_end(&mut bytes).await?;
+                }
+                Ok::<_, std::io::Error>(bytes)
+            };
+            let read_stderr = async {
+                let mut bytes = Vec::new();
+                if let Some(pipe) = stderr.as_mut() {
+                    pipe.read_to_end(&mut bytes).await?;
+                }
+                Ok::<_, std::io::Error>(bytes)
+            };
+            let (status, stdout, stderr) =
+                tokio::try_join!(child.wait(), read_stdout, read_stderr)?;
+            Ok::<_, std::io::Error>(std::process::Output {
+                status,
+                stdout,
+                stderr,
+            })
+        };
+        tokio::time::timeout(timeout, output).await
+    };
+    match captured {
+        Ok(Ok(output)) => Ok(output),
+        Ok(Err(error)) => {
+            let _ = child.kill().await;
+            Err(error.to_string())
+        }
+        Err(_) => {
+            // `kill` waits for collection, so a timed-out metadata process
+            // cannot survive and contend with the following validation.
+            let _ = child.kill().await;
+            Err(format!(
+                "Cargo target resolution timed out after {} seconds",
+                timeout.as_secs()
+            ))
+        }
+    }
+}
+
+async fn run_one_validation_checked(
+    spec: &crate::models::ValidationSpec,
+    cwd: &std::path::Path,
+    build_path: &std::path::Path,
+    check_headroom: impl FnOnce(&std::path::Path) -> Result<(), String>,
+) -> (Option<i32>, i64, String) {
+    run_one_validation_checked_with_runner(
+        spec,
+        cwd,
+        build_path,
+        check_headroom,
+        |validated| async move {
+            let cancel = tokio_util::sync::CancellationToken::new();
+            crate::core::quick_exec::run(&validated, None, &cancel).await
+        },
+    )
+    .await
+}
+
+/// The runner seam is deliberately narrower than the validation contract: it
+/// receives only an already-validated literal argv. Production always calls
+/// Quick Exec above; tests use this seam to prove a headroom refusal cannot
+/// reach the spawn operation without depending on timing or a real full disk.
+async fn run_one_validation_checked_with_runner<F, Fut>(
+    spec: &crate::models::ValidationSpec,
+    cwd: &std::path::Path,
+    build_path: &std::path::Path,
+    check_headroom: impl FnOnce(&std::path::Path) -> Result<(), String>,
+    run: F,
+) -> (Option<i32>, i64, String)
+where
+    F: FnOnce(crate::core::quick_exec::ValidatedSpec) -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<crate::core::quick_exec::QuickExecResult>>,
+{
     let mut parts = spec.command.split_whitespace();
     let Some(binary) = parts.next() else {
         return (None, 0, "empty validation command".into());
     };
+    if let Err(reason) = check_headroom(build_path) {
+        // A low-space refusal is recorded like every other validation failure,
+        // so recovery cannot advance the candidate as though the command ran.
+        return (None, 0, format!("refused: {reason}"));
+    }
     use crate::core::quick_exec;
     let requested_timeout = spec.timeout_secs.map(u64::from);
     let effective_timeout =
@@ -2518,8 +2742,7 @@ async fn run_one_validation(
         // A refused command is a failed validation, never a silent skip.
         Err(rejection) => return (None, 0, format!("refused: {rejection}")),
     };
-    let cancel = tokio_util::sync::CancellationToken::new();
-    let (code, duration, summary) = match quick_exec::run(&validated, None, &cancel).await {
+    let (code, duration, summary) = match run(validated).await {
         Ok(result) => (result.exit_code, result.duration_ms as i64, result.summary),
         Err(e) => (None, 0, format!("validation could not run: {e}")),
     };
@@ -5238,6 +5461,66 @@ fn worker_brief_markdown(
     worker_scope: Option<&TaskWorkerScope>,
 ) -> String {
     let mediated_host_commit = can_run_shell && native_delivery_projection;
+    // A joined CLI retains the room tools exposed by the regular bridge. Spawned
+    // native workers and HTTP workers receive their narrower task/workspace
+    // surfaces, so their briefs must request a relay instead of naming a tool
+    // they cannot call.
+    let has_room_publication = can_run_shell && !native_delivery_projection;
+    let human_arbitration = if has_room_publication {
+        "## Arbitrages humains et jalons parent\n\
+         - Un choix normal d'implémentation, compatible avec l'objectif et la DoD, relève du worker. \
+           Une décision produit qui change le besoin, le périmètre ou un compromis utilisateur est \
+           réservée à l'humain.\n\
+         - Avant de solliciter une décision produit, appelle `disc_question_list` et réutilise une \
+           réponse humaine durable applicable ; ne redemande pas un arbitrage déjà tranché.\n\
+         - Sans réponse applicable, publie via `disc_append` une carte fermée `kronn-question` \
+           avec `\"version\":1` (nombre), une clé stable et la question bloquante. Relis ensuite \
+           cette clé avec `disc_question_list` pour vérifier l'enregistrement.\n\
+         - En attendant, pause ce seul périmètre et poursuis uniquement le travail indépendant. \
+           Ni le worker ni le principal ne décide jamais à la place de l'humain.\n\n"
+            .to_string()
+    } else {
+        "## Arbitrages humains et jalons parent\n\
+         - Un choix normal d'implémentation, compatible avec l'objectif et la DoD, relève du worker. \
+           Une décision produit qui change le besoin, le périmètre ou un compromis utilisateur est \
+           réservée à l'humain.\n\
+         - Cette surface ne déclare pas `disc_question_list` ni `disc_append`. Réutilise toute \
+           réponse humaine durable fournie dans le contexte ; sans réponse applicable, indique le \
+           blocker exact et demande au principal de relayer une carte `kronn-question` valide.\n\
+         - En attendant la réponse durable, pause ce seul périmètre. Ni le worker ni le principal \
+           ne décide jamais à la place de l'humain.\n\n"
+            .to_string()
+    };
+    // `disc_append` accepts an explicit `disc_id` (backend/scripts/disc-introspection-mcp.py:5063),
+    // so a joined CLI can target the real parent via `task_exec_status`'s `parent_discussion_id`.
+    // `disc_question_list` truly is bound-only (backend/scripts/disc-introspection-mcp.py:4278-4289).
+    // Native/HTTP workers declare neither tool.
+    let parent_milestones = if has_room_publication {
+        "## Jalons parent factuels\n\
+         `disc_append` cible par défaut la sous-discussion où cette session a été rebranchée \
+         à l'acceptation, mais accepte un `disc_id` explicite : appelle `task_exec_status` pour \
+         obtenir `parent_discussion_id`, l'identifiant réel et autorisé de la room parente, et \
+         publie-y directement un jalon factuel (avancement notable, blocker, résultat) quand \
+         c'en est un — pas de miroir automatique ni systématique. `disc_question_list` reste \
+         borné à cette seule sous-discussion quel que soit l'argument passé : il ne donne jamais \
+         accès aux questions en attente dans la room parente. Les jalons déjà visibles sans \
+         action de ta part restent l'attachement enregistré par l'orchestrateur à l'acceptation \
+         et, après un DeliveryManifest validé, la demande de revue qu'il crée ; ce ne sont pas \
+         les seuls jalons possibles. Si une décision humaine doit atteindre la room parente et \
+         que tu ne peux ou ne dois pas la publier toi-même, demande explicitement au principal \
+         de relayer.\n\n"
+            .to_string()
+    } else {
+        "## Jalons parent factuels\n\
+         Cette surface ne déclare aucun outil de publication de message (ni `disc_append` \
+         ni `disc_question_list`). Les seuls jalons parent automatiques sont l'attachement \
+         enregistré par l'orchestrateur et, après un DeliveryManifest validé, la demande de \
+         revue. Pour tout autre fait vérifié notable (avancement, blocker, résultat), \
+         signale-le dans ta sortie disponible et demande au principal de le relayer vers la \
+         room parente, pas seulement pour une décision humaine ; ni visibilité automatique \
+         ni livraison garantie, pas de miroir automatique, ni d'outil inventé.\n\n"
+            .to_string()
+    };
     let dod = if dod.is_empty() {
         "_(aucune)_".to_string()
     } else {
@@ -5293,6 +5576,8 @@ fn worker_brief_markdown(
                 "# {task_reference} — {task_title}\n\n\
                  ## Objectif\n{objective}\n\n\
                  ## Definition of Done\n{dod}\n\n\
+                 {human_arbitration}\
+                 {parent_milestones}\
                  ## Cible mécanique prélocalisée\n{target}\n\n\
                  ## Protocole borné\n\
                  1. Appelle l'unique `read_file` contraint.\n\
@@ -5441,6 +5726,8 @@ fn worker_brief_markdown(
         "# {reference} — {title}\n\n\
          ## Objectif\n{objective}\n\n\
          ## Definition of Done\n{dod}\n\n\
+         {human_arbitration}\
+         {parent_milestones}\
          ## Décisions & périmètre\n\
          Le périmètre exact de cette tâche EST la Definition of Done ci-dessus : \
          ne touche que ce qui la satisfait, ne déborde ni sur d'autres tâches ni \
@@ -5479,6 +5766,8 @@ fn worker_brief_markdown(
         tests = tests,
         method = method,
         mechanical_scope = mechanical_scope,
+        human_arbitration = human_arbitration,
+        parent_milestones = parent_milestones,
         delivery_format = delivery_format,
         commit_boundary = commit_boundary,
         first_action = first_action,
@@ -7453,6 +7742,11 @@ pub(crate) async fn reassign_native_execution(
                 TaskExecutionStatus::Interrupted
                     | TaskExecutionStatus::ChangesRequested
                     | TaskExecutionStatus::Escalated
+                    // KT-640: a redirected awaiting-CLI-acceptance hold cleared
+                    // back to Provisioning (db::reassign_execution_worker); a
+                    // native worker dispatches immediately, exactly like the
+                    // initial KT-328 handshake's Provisioning -> Working.
+                    | TaskExecutionStatus::Provisioning
             ) {
                 crate::db::orchestration::transition_execution(
                     &transaction,
@@ -10244,6 +10538,158 @@ mod tests {
     }
 
     #[test]
+    fn worker_briefs_make_human_arbitration_and_parent_milestones_transport_aware() {
+        let joined_cli = worker_brief_markdown(
+            "KT-635",
+            "Arbitrages",
+            "Modifier un contrat",
+            &[],
+            "/wt/joined",
+            "kronn/task/KT-635",
+            "abc1234",
+            true,
+            false,
+            None,
+        );
+        for needle in [
+            "## Arbitrages humains et jalons parent",
+            "décision produit",
+            "disc_question_list",
+            "disc_append",
+            "`kronn-question`",
+            "`\"version\":1`",
+            "pause ce seul périmètre",
+            "Jalons parent factuels",
+            "pas de miroir automatique",
+        ] {
+            assert!(
+                joined_cli.contains(needle),
+                "joined CLI must mention `{needle}`\n{joined_cli}"
+            );
+        }
+        // The joined CLI's own human_arbitration section (just above) names
+        // `disc_append`/`disc_question_list` as real tools it holds. Its parent-milestones
+        // section must not invent a false "child room only" restriction: `disc_append`
+        // actually accepts an explicit `disc_id` (it can target the parent once known via
+        // `task_exec_status`), only `disc_question_list` is truly bound-only.
+        assert!(
+            !joined_cli.contains("ne déclare aucun outil de publication"),
+            "joined CLI has disc_append/disc_question_list — must not claim it declares no publication tool: {joined_cli}"
+        );
+        assert!(
+            !joined_cli.contains("jamais la room parente directement"),
+            "joined CLI must not falsely restrict disc_append to the child room only — it accepts an explicit disc_id: {joined_cli}"
+        );
+        assert!(
+            joined_cli.contains("task_exec_status") && joined_cli.contains("parent_discussion_id"),
+            "joined CLI must name the real way to learn the authorized parent id: {joined_cli}"
+        );
+        assert!(
+            joined_cli.contains("disc_id` explicite"),
+            "joined CLI must state disc_append accepts an explicit disc_id, not child-only: {joined_cli}"
+        );
+        assert!(
+            joined_cli.contains("borné à cette seule sous-discussion"),
+            "joined CLI must state disc_question_list, not disc_append, is bound-only: {joined_cli}"
+        );
+        assert!(
+            joined_cli.contains("ce ne sont pas") && joined_cli.contains("les seuls jalons possibles"),
+            "joined CLI must state parent milestones are not limited to attach/review events: {joined_cli}"
+        );
+
+        let native_cli = worker_brief_markdown(
+            "KT-635",
+            "Arbitrages",
+            "Modifier un contrat",
+            &[],
+            "/wt/native",
+            "kronn/task/KT-635",
+            "abc1234",
+            true,
+            true,
+            None,
+        );
+        let generic_http = worker_brief_markdown(
+            "KT-635",
+            "Arbitrages",
+            "Modifier un contrat",
+            &[],
+            "/wt/http",
+            "kronn/task/KT-635",
+            "abc1234",
+            false,
+            true,
+            None,
+        );
+        let scope = TaskWorkerScope::PrelocalizedEdit {
+            path: "backend/src/lib.rs".into(),
+            start_line: 40,
+            end_line: 44,
+        };
+        let prelocalized_http = worker_brief_markdown(
+            "KT-635",
+            "Arbitrages",
+            "Modifier un contrat",
+            &[],
+            "/wt/prelocalized",
+            "kronn/task/KT-635",
+            "abc1234",
+            false,
+            true,
+            Some(&scope),
+        );
+        for (name, brief) in [
+            ("native CLI", native_cli),
+            ("generic HTTP", generic_http),
+            ("prelocalized HTTP", prelocalized_http),
+        ] {
+            assert!(
+                brief.contains("demande au principal de relayer"),
+                "{name}: {brief}"
+            );
+            assert!(
+                brief.contains("ne décide jamais à la place de l'humain"),
+                "{name}: {brief}"
+            );
+            assert!(brief.contains("pause ce seul périmètre"), "{name}: {brief}");
+            assert!(
+                brief.contains("## Jalons parent factuels"),
+                "{name}: {brief}"
+            );
+            assert!(
+                !brief.contains("Avant de solliciter une décision produit, appelle"),
+                "{name}: {brief}"
+            );
+            // Native/HTTP hold no room-publication tool at all — unlike the joined CLI,
+            // their parent-milestones text must say so plainly, and must never claim the
+            // sub-discussion-scoped disc_append reach that only a joined CLI actually has.
+            assert!(
+                brief.contains("ne déclare aucun outil de publication"),
+                "{name}: {brief}"
+            );
+            assert!(
+                !brief.contains("jamais la room parente directement"),
+                "{name}: {brief}"
+            );
+            // The old text tied principal relay to human decisions only ("si une décision
+            // humaine doit atteindre la room parente"), falsely implying notable non-decision
+            // milestones (progress/blocker/result) have no relay path at all.
+            assert!(
+                !brief.contains("si une décision humaine doit atteindre la room parente"),
+                "{name}: relay must not be restricted to human decisions only: {brief}"
+            );
+            assert!(
+                brief.contains("pas seulement pour une décision humaine"),
+                "{name}: must ask for relay of notable facts, not just human decisions: {brief}"
+            );
+            assert!(
+                brief.contains("avancement") && brief.contains("résultat"),
+                "{name}: must name progress/result as relayable notable facts: {brief}"
+            );
+        }
+    }
+
+    #[test]
     fn prelocalized_http_worker_brief_forbids_exploration_and_names_exact_target() {
         let scope = TaskWorkerScope::PrelocalizedEdit {
             path: "backend/src/lib.rs".into(),
@@ -12360,11 +12806,231 @@ mod tests {
                     .expect("Quick Exec timeout cap fits u32"),
             ),
         };
-        let (exit_code, _duration_ms, output) = run_one_validation(&spec, cwd.path()).await;
+        let (exit_code, _duration_ms, output) =
+            run_one_validation_checked(&spec, cwd.path(), cwd.path(), |_| Ok(())).await;
 
         assert_eq!(exit_code, Some(0));
         assert!(output.contains("legacy validation timeout 1801s clamped to 1800s"));
         assert!(!output.contains("refused:"));
+    }
+
+    #[tokio::test]
+    async fn validation_refuses_before_spawning_when_the_build_headroom_guard_fails() {
+        let cwd = tempfile::tempdir().unwrap();
+        let sentinel = cwd.path().join("validation-command-ran");
+        let spec = ValidationSpec {
+            command: "true".into(),
+            quick_exec_id: None,
+            timeout_secs: Some(5),
+        };
+
+        let sentinel_for_spawn = sentinel.clone();
+        let (exit_code, duration_ms, output) = run_one_validation_checked_with_runner(
+            &spec,
+            cwd.path(),
+            cwd.path(),
+            |_| {
+                Err("only 4 GiB free (critical below 5 GiB, server.disk_critical_gib); command not spawned".into())
+            },
+            move |_| async move {
+                std::fs::write(&sentinel_for_spawn, "spawned")?;
+                unreachable!("the headroom refusal must not reach the spawn seam")
+            },
+        )
+        .await;
+
+        assert_eq!(exit_code, None);
+        assert_eq!(duration_ms, 0);
+        assert!(!sentinel.exists(), "the validation command was spawned");
+        assert!(
+            output.starts_with("refused: only 4 GiB free"),
+            "got: {output}"
+        );
+    }
+
+    #[tokio::test]
+    async fn cargo_validation_measures_its_explicit_target_directory() {
+        let project = tempfile::tempdir().unwrap();
+        std::fs::write(
+            project.path().join("Cargo.toml"),
+            "[package]\nname = \"guard_fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::create_dir(project.path().join("src")).unwrap();
+        std::fs::write(project.path().join("src/lib.rs"), "pub fn fixture() {}\n").unwrap();
+        let target = project.path().join("target-dir");
+        let spec = ValidationSpec {
+            command: format!("cargo check --target-dir {}", target.display()),
+            quick_exec_id: None,
+            timeout_secs: Some(5),
+        };
+
+        let resolved = validation_build_path(&spec, project.path()).await.unwrap();
+        assert_eq!(resolved, target);
+    }
+
+    #[tokio::test]
+    async fn cargo_validation_from_root_preserves_manifest_config_and_relative_target() {
+        let project = tempfile::tempdir().unwrap();
+        let backend = project.path().join("backend");
+        std::fs::create_dir(&backend).unwrap();
+        std::fs::create_dir(backend.join("src")).unwrap();
+        std::fs::write(
+            backend.join("Cargo.toml"),
+            "[package]\nname = \"root_manifest_fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::write(backend.join("src/lib.rs"), "pub fn fixture() {}\n").unwrap();
+        let target = project
+            .path()
+            .canonicalize()
+            .unwrap()
+            .join("relative-target");
+        let spec = ValidationSpec {
+            command: "cargo test --manifest-path backend/Cargo.toml --config build.target-dir=\"ignored\" --target-dir relative-target".into(),
+            quick_exec_id: None,
+            timeout_secs: Some(5),
+        };
+
+        let resolved = validation_build_path(&spec, project.path()).await.unwrap();
+        assert_eq!(resolved, target);
+    }
+
+    #[test]
+    fn validation_cargo_argv_recognises_only_quick_exec_cargo_forms() {
+        assert_eq!(
+            validation_cargo_argv("cargo test --manifest-path backend/Cargo.toml").unwrap(),
+            Some(vec!["test", "--manifest-path", "backend/Cargo.toml"])
+        );
+        assert_eq!(
+            validation_cargo_argv("rtk cargo clippy --target-dir target").unwrap(),
+            Some(vec!["clippy", "--target-dir", "target"])
+        );
+        assert_eq!(
+            validation_cargo_argv("rtk proxy cargo fmt --config build.target-dir=elsewhere")
+                .unwrap(),
+            Some(vec!["fmt", "--config", "build.target-dir=elsewhere"])
+        );
+        assert_eq!(validation_cargo_argv("rtk git status").unwrap(), None);
+        assert!(validation_cargo_argv("rtk cargo").is_err());
+        assert!(validation_cargo_argv("rtk proxy cargo --target-dir").is_ok());
+    }
+
+    #[tokio::test]
+    async fn cargo_validation_wrappers_preserve_root_manifest_config_and_target() {
+        let project = tempfile::tempdir().unwrap();
+        let backend = project.path().join("backend");
+        std::fs::create_dir(&backend).unwrap();
+        std::fs::create_dir(backend.join("src")).unwrap();
+        std::fs::write(
+            backend.join("Cargo.toml"),
+            "[package]\nname = \"wrapper_manifest_fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::write(backend.join("src/lib.rs"), "pub fn fixture() {}\n").unwrap();
+
+        for (prefix, target_name) in [
+            ("cargo", "plain-target"),
+            ("rtk cargo", "rtk-target"),
+            ("rtk proxy cargo", "proxy-target"),
+        ] {
+            let spec = ValidationSpec {
+                command: format!(
+                    "{prefix} test --manifest-path backend/Cargo.toml --config build.target-dir=\"ignored\" --target-dir {target_name}"
+                ),
+                quick_exec_id: None,
+                timeout_secs: Some(5),
+            };
+            assert_eq!(
+                validation_build_path(&spec, project.path()).await.unwrap(),
+                project.path().canonicalize().unwrap().join(target_name),
+                "{prefix} must use Cargo's effective target"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn cargo_validation_refuses_missing_target_or_manifest_values() {
+        let cwd = tempfile::tempdir().unwrap();
+        for command in [
+            "cargo test --target-dir",
+            "rtk cargo test --manifest-path",
+            "rtk proxy cargo test --config",
+        ] {
+            let spec = ValidationSpec {
+                command: command.into(),
+                quick_exec_id: None,
+                timeout_secs: Some(5),
+            };
+            assert!(
+                validation_build_path(&spec, cwd.path()).await.is_err(),
+                "{command} must be refused before metadata runs"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn metadata_timeout_kills_and_reaps_the_owned_child() {
+        use std::process::Stdio;
+
+        let mut child = crate::core::cmd::async_cmd("sh")
+            .args(["-c", "read _"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        // Child::wait closes any stdin handle it still owns. Hold the writer
+        // separately so the fixture cannot race to EOF before the deadline.
+        let _stdin_writer = child.stdin.take().unwrap();
+        let result = wait_for_metadata_output(&mut child, std::time::Duration::ZERO).await;
+
+        assert!(result.unwrap_err().contains("timed out"));
+        assert!(
+            child.try_wait().unwrap().is_some(),
+            "the timeout must collect its owned metadata child"
+        );
+    }
+
+    #[tokio::test]
+    async fn validation_with_headroom_executes_the_validated_command_path() {
+        let cwd = tempfile::tempdir().unwrap();
+        let sentinel = cwd.path().join("validation-command-ran");
+        let spec = ValidationSpec {
+            command: "true".into(),
+            quick_exec_id: None,
+            timeout_secs: Some(5),
+        };
+        let sentinel_for_spawn = sentinel.clone();
+        let (exit_code, _duration_ms, _output) = run_one_validation_checked_with_runner(
+            &spec,
+            cwd.path(),
+            cwd.path(),
+            |_| Ok(()),
+            move |_| async move {
+                std::fs::write(&sentinel_for_spawn, "spawned")?;
+                Ok(crate::core::quick_exec::QuickExecResult {
+                    status: crate::core::quick_exec::QuickExecStatus::Passed,
+                    exit_code: Some(0),
+                    summary: "sentinel ran".into(),
+                    failed_tests: vec![],
+                    diagnostics: vec![],
+                    artifact: None,
+                    duration_ms: 0,
+                    stdout_bytes: 0,
+                    stderr_bytes: 0,
+                    findings_complete: true,
+                })
+            },
+        )
+        .await;
+        assert_eq!(exit_code, Some(0));
+        assert!(
+            sentinel.exists(),
+            "the permitted validation did not reach spawn"
+        );
     }
 
     #[tokio::test]
@@ -19793,6 +20459,303 @@ mod tests {
         assert_eq!(after.worker_model_tier, before.worker_model_tier);
         assert_eq!(after.worker_profile_id, before.worker_profile_id);
         assert_eq!(after.dispatch_job_id, before.dispatch_job_id);
+    }
+
+    /// KT-640: the native path through `reassign_native_execution` for the
+    /// `Blocked(awaiting_worker_acceptance)` origin — not just the DB-layer
+    /// primitive. The CLI never accepted its KT-328 control offer; the
+    /// principal redirects to a native worker in the SAME execution/checkout,
+    /// with exactly one replacement dispatch, and the stale CLI offer can
+    /// never be accepted late.
+    #[tokio::test]
+    async fn native_reassignment_resumes_a_blocked_awaiting_cli_acceptance_execution_through_dispatch(
+    ) {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let (_, _parent_id, child_id, offer_id) = parked_cli_worker(&db, repo.path()).await;
+        let exec_id = {
+            let offer_id = offer_id.clone();
+            db.with_conn(move |conn| {
+                conn.query_row(
+                    "SELECT task_execution_id FROM task_execution_worker_offers WHERE id = ?1",
+                    [&offer_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .map_err(anyhow::Error::from)
+            })
+            .await
+            .unwrap()
+        };
+        let before = exec_of(&db, &exec_id).await;
+        assert_eq!(before.status, TaskExecutionStatus::Blocked);
+        assert_eq!(
+            before.blocked_reason_code,
+            Some(crate::models::BlockedReasonCode::AwaitingWorkerAcceptance)
+        );
+
+        let state = AppState::new_defaults(
+            std::sync::Arc::new(tokio::sync::RwLock::new(
+                crate::core::config::default_config(),
+            )),
+            db.clone(),
+            crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+        );
+        reassign_native_execution(
+            &state,
+            &exec_id,
+            crate::models::CampaignWorkerSelection {
+                target: MessageTarget::discussion_agent(AgentType::Ollama),
+                model: Some("qwen3.6:35b-mlx".into()),
+                profile_id: Some("profile-local-worker".into()),
+            },
+            "native handoff after the CLI never accepted",
+        )
+        .await
+        .unwrap();
+
+        let after = exec_of(&db, &exec_id).await;
+        assert_eq!(after.status, TaskExecutionStatus::Working);
+        // Same execution/checkout/history/budget: sub-discussion and attempt
+        // carry over untouched; only the worker identity changed.
+        assert_eq!(after.sub_discussion_id.as_deref(), Some(child_id.as_str()));
+        assert_eq!(after.workspace_id, before.workspace_id);
+        assert_eq!(after.attempt_no, before.attempt_no);
+        assert_eq!(after.worker_agent_type.as_deref(), Some("Ollama"));
+        assert_eq!(after.worker_cli_session_id, None);
+
+        assert_eq!(
+            count(&db, "SELECT COUNT(*) FROM agent_dispatch_jobs").await,
+            1,
+            "exactly one replacement dispatch for the native worker"
+        );
+
+        let offer_status: String = {
+            let offer_id = offer_id.clone();
+            db.with_conn(move |conn| {
+                conn.query_row(
+                    "SELECT status FROM task_execution_worker_offers WHERE id = ?1",
+                    [&offer_id],
+                    |row| row.get(0),
+                )
+                .map_err(anyhow::Error::from)
+            })
+            .await
+            .unwrap()
+        };
+        assert_eq!(offer_status, "cancelled");
+        let late_accept = db
+            .with_conn(move |conn| {
+                crate::db::worker_offers::accept_worker_offer(
+                    conn,
+                    &offer_id,
+                    "ClaudeCode",
+                    "sess-a",
+                    "sess-a",
+                )
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            late_accept,
+            crate::db::worker_offers::AcceptOutcome::NotAcceptable {
+                status: crate::models::WorkerOfferStatus::Cancelled
+            }
+        ));
+    }
+
+    /// KT-640: the CLI path through `task_exec_reassign` for the same origin —
+    /// a fresh offer opens for the newly selected session with a correct
+    /// `Interrupted` checkpoint, and the OLD offer can never be accepted late.
+    #[tokio::test]
+    async fn cli_reassignment_resumes_a_blocked_awaiting_cli_acceptance_execution_with_a_fresh_offer(
+    ) {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let (_, parent_id, child_id, old_offer_id) = parked_cli_worker(&db, repo.path()).await;
+        seed_cli_session(&db, 102, &parent_id, "sess-b").await;
+        seed_cli_session(&db, 103, &parent_id, "principal").await;
+        // A selectable CLI must already carry its own durable origin binding —
+        // exactly what a real prior `disc_join` leaves behind.
+        {
+            let parent_id = parent_id.clone();
+            db.with_conn(move |conn| {
+                crate::db::disc_source::bind_to_source(conn, &parent_id, "ClaudeCode", "sess-b")
+            })
+            .await
+            .unwrap();
+        }
+        let exec_id = {
+            let old_offer_id = old_offer_id.clone();
+            db.with_conn(move |conn| {
+                conn.query_row(
+                    "SELECT task_execution_id FROM task_execution_worker_offers WHERE id = ?1",
+                    [&old_offer_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .map_err(anyhow::Error::from)
+            })
+            .await
+            .unwrap()
+        };
+
+        let state = AppState::new_defaults(
+            std::sync::Arc::new(tokio::sync::RwLock::new(
+                crate::core::config::default_config(),
+            )),
+            db.clone(),
+            crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+        );
+        let Json(reassigned) = task_exec_reassign(
+            State(state),
+            Path(exec_id.clone()),
+            Json(TaskExecReassignRequest {
+                source_agent: "ClaudeCode".into(),
+                source_session_id: "principal".into(),
+                worker: MessageTarget::cli(AgentType::ClaudeCode, 102),
+                reason: "redirect to a fresh CLI since the first never accepted".into(),
+            }),
+        )
+        .await;
+        assert!(reassigned.success, "{:?}", reassigned.error);
+
+        let after = exec_of(&db, &exec_id).await;
+        assert_eq!(after.status, TaskExecutionStatus::Interrupted);
+        assert_eq!(after.sub_discussion_id.as_deref(), Some(child_id.as_str()));
+        let attempt_no = after.attempt_no;
+
+        let new_offer = {
+            let id = exec_id.clone();
+            db.with_conn(move |conn| {
+                crate::db::worker_offers::get_active_offer_for_attempt(conn, &id, attempt_no)
+            })
+            .await
+            .unwrap()
+            .expect("a fresh offer targets the newly selected session")
+        };
+        assert_eq!(new_offer.target_cli_session_id, 102);
+        assert_ne!(
+            new_offer.id, old_offer_id,
+            "a distinct offer, not the stale one"
+        );
+
+        let late_accept = db
+            .with_conn(move |conn| {
+                crate::db::worker_offers::accept_worker_offer(
+                    conn,
+                    &old_offer_id,
+                    "ClaudeCode",
+                    "sess-a",
+                    "sess-a",
+                )
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            late_accept,
+            crate::db::worker_offers::AcceptOutcome::NotAcceptable {
+                status: crate::models::WorkerOfferStatus::Cancelled
+            }
+        ));
+
+        let accepted =
+            accept_worker_offer_and_attach(&db, &new_offer.id, "ClaudeCode", "sess-b", "sess-b")
+                .await
+                .unwrap();
+        assert!(matches!(accepted, AcceptAttachOutcome::Attached { .. }));
+        let final_exec = exec_of(&db, &exec_id).await;
+        assert_eq!(final_exec.status, TaskExecutionStatus::Working);
+        assert_eq!(final_exec.worker_cli_session_id, Some(102));
+    }
+
+    /// The missing CLI child binding fails inside the DB savepoint, after
+    /// Blocked→Provisioning but before stale-offer cancellation. The resumed
+    /// checkpoint must roll back and leave the pending offer untouched.
+    #[tokio::test]
+    async fn native_reassignment_from_blocked_awaiting_acceptance_rolls_back_when_child_room_vanished(
+    ) {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let (_, _parent_id, _child_id, offer_id) = parked_cli_worker(&db, repo.path()).await;
+        let exec_id = {
+            let offer_id = offer_id.clone();
+            db.with_conn(move |conn| {
+                conn.query_row(
+                    "SELECT task_execution_id FROM task_execution_worker_offers WHERE id = ?1",
+                    [&offer_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .map_err(anyhow::Error::from)
+            })
+            .await
+            .unwrap()
+        };
+        {
+            let id = exec_id.clone();
+            db.with_conn(move |conn| {
+                conn.execute(
+                    "UPDATE task_executions SET sub_discussion_id = NULL WHERE id = ?1",
+                    [&id],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        }
+        let before = exec_of(&db, &exec_id).await;
+        assert_eq!(before.status, TaskExecutionStatus::Blocked);
+
+        let state = AppState::new_defaults(
+            std::sync::Arc::new(tokio::sync::RwLock::new(
+                crate::core::config::default_config(),
+            )),
+            db.clone(),
+            crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+        );
+        let error = reassign_native_execution(
+            &state,
+            &exec_id,
+            crate::models::CampaignWorkerSelection {
+                target: MessageTarget::discussion_agent(AgentType::Ollama),
+                model: Some("qwen3.8:27b-mlx".into()),
+                profile_id: Some("profile-local-worker".into()),
+            },
+            "must roll back",
+        )
+        .await
+        .err()
+        .expect("reassignment must fail when its child room vanished");
+        assert!(
+            error
+                .to_string()
+                .contains("CLI reassignment has no child discussion"),
+            "{error:#}"
+        );
+
+        let after = exec_of(&db, &exec_id).await;
+        assert_eq!(after.status, TaskExecutionStatus::Blocked);
+        assert_eq!(after.blocked_from_status, before.blocked_from_status);
+        assert_eq!(after.blocked_reason_code, before.blocked_reason_code);
+        assert_eq!(
+            serde_json::to_value(&after).unwrap(),
+            serde_json::to_value(&before).unwrap(),
+            "the failed reassignment must leave every execution field unchanged"
+        );
+
+        let offer_status: String = db
+            .with_conn(move |conn| {
+                conn.query_row(
+                    "SELECT status FROM task_execution_worker_offers WHERE id = ?1",
+                    [&offer_id],
+                    |row| row.get(0),
+                )
+                .map_err(anyhow::Error::from)
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            offer_status, "pending",
+            "the rolled-back transaction must not cancel the old offer"
+        );
     }
 
     #[tokio::test]

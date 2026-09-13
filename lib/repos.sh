@@ -55,13 +55,18 @@ detect_ai_context() {
     if [[ -f "$repo_dir/.mcp.json" ]]; then
         mcp_count=$(grep -c '"command"' "$repo_dir/.mcp.json" 2>/dev/null || echo 0)
         (( mcp_count > 0 )) && parts+=("${mcp_count} MCPs")
+    elif [[ -f "$repo_dir/.mcp.json.example" ]]; then
+        parts+=("MCP template")
     fi
 
     if [[ ${#parts[@]} -eq 0 ]]; then
         echo "not configured"
     else
-        local IFS=" · "
-        echo "${parts[*]}"
+        local joined="${parts[0]}" part
+        for part in "${parts[@]:1}"; do
+            joined+=" · $part"
+        done
+        printf '%s\n' "$joined"
     fi
 }
 

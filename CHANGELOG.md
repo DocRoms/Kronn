@@ -566,6 +566,16 @@ Release notes for 0.9.3 and earlier are available in the
   connection proves it has no compatible model). A saved selection is never
   cleared by a refresh or a re-test, whatever the state.
 
+- A task execution parked on a CLI worker's control offer — waiting for the
+  exact target session to accept — can now be redirected to another worker.
+  It used to refuse outright with "not a resumable worker state", stranding
+  real work behind a CLI that never showed up. The same execution, checkout,
+  history, attempts and review budget carry over untouched; the stale offer
+  is cancelled in the same move, so the original CLI can no longer accept it
+  late. Every other blocked reason — a session already committed elsewhere,
+  or a protected-merge checkpoint — still refuses reassignment and requires
+  a human decision, unchanged.
+
 ## [0.12.0] - 2026-08-30
 
 ### Added

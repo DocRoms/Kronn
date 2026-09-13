@@ -180,29 +180,25 @@ TOML
 }
 JSON
 
-    # Set known env vars that should NOT be substituted
-    export HOME="/home/testuser"
-    export PATH="/usr/bin:/bin"
+    # Test the literal placeholders without repurposing the process HOME or
+    # hiding an installed envsubst by replacing PATH.
+    command -v envsubst >/dev/null 2>&1 || skip "envsubst not available"
 
     run sync_mcp_for_repo "$TEST_TMPDIR/repo"
+    assert_success
 
-    if [[ "$status" -ne 0 ]]; then
-        # envsubst not installed — skip
-        skip "envsubst not available"
-    fi
-
-    local output="$TEST_TMPDIR/repo/.mcp.json"
-    [ -f "$output" ]
+    local mcp_path="$TEST_TMPDIR/repo/.mcp.json"
+    [ -f "$mcp_path" ]
 
     # Kronn secret should be substituted
-    run grep "ghp_test123" "$output"
+    run grep "ghp_test123" "$mcp_path"
     assert_success
 
     # System vars should NOT be substituted — should remain as literals
-    run grep '$HOME' "$output"
+    run grep '$HOME' "$mcp_path"
     assert_success
 
-    run grep '$PATH' "$output"
+    run grep '$PATH' "$mcp_path"
     assert_success
 }
 
@@ -239,26 +235,25 @@ TOML
 }
 JSON
 
+    command -v envsubst >/dev/null 2>&1 || skip "envsubst not available"
     run sync_mcp_for_repo "$TEST_TMPDIR/repo"
-    if [[ "$status" -ne 0 ]]; then
-        skip "envsubst not available"
-    fi
-
-    local output="$TEST_TMPDIR/repo/.mcp.json"
-
-    run grep "https://myco.atlassian.net" "$output"
     assert_success
 
-    run grep "user@example.com" "$output"
+    local mcp_path="$TEST_TMPDIR/repo/.mcp.json"
+
+    run grep "https://myco.atlassian.net" "$mcp_path"
     assert_success
 
-    run grep "ghp_mysecret" "$output"
+    run grep "user@example.com" "$mcp_path"
     assert_success
 
-    run grep "AKIA123" "$output"
+    run grep "ghp_mysecret" "$mcp_path"
     assert_success
 
-    run grep "eu-west-1" "$output"
+    run grep "AKIA123" "$mcp_path"
+    assert_success
+
+    run grep "eu-west-1" "$mcp_path"
     assert_success
 }
 

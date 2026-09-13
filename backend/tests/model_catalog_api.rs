@@ -5,7 +5,7 @@
 //! its Zen-routed models must carry an honest, catalog-driven cost/privacy
 //! overlay instead of a hardcoded model list.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use axum::{
     body::Body,
@@ -22,11 +22,16 @@ use kronn::{build_router_with_auth, AppState, DEFAULT_MAX_CONCURRENT_AGENTS};
 /// See api_tests.rs — without this, handler-level config saves during tests
 /// write the developer's REAL config.toml (2026-07-13 incident).
 fn isolate_config_dir() {
-    static INIT: std::sync::Once = std::sync::Once::new();
-    INIT.call_once(|| {
-        let dir = std::env::temp_dir().join(format!("kronn-inttest-mccfg-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).ok();
-        std::env::set_var("KRONN_DATA_DIR", &dir);
+    static FIXTURE_ROOT: OnceLock<tempfile::TempDir> = OnceLock::new();
+    FIXTURE_ROOT.get_or_init(|| {
+        let root = tempfile::tempdir().expect("create model-catalog test fixture root");
+        let data_dir = root.path().join("data");
+        let host_home = root.path().join("host-home");
+        std::fs::create_dir_all(&data_dir).expect("create model-catalog data fixture");
+        std::fs::create_dir_all(&host_home).expect("create model-catalog host fixture");
+        std::env::set_var("KRONN_DATA_DIR", data_dir);
+        std::env::set_var("KRONN_HOST_HOME", host_home);
+        root
     });
 }
 
