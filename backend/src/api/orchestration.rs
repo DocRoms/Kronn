@@ -15854,6 +15854,9 @@ mod tests {
             Json(crate::api::disc_source::DiscAppendRequest {
                 disc_id: child.clone(),
                 session_id: Some("sess-a".into()),
+                session_credential: None,
+                publication_grant: None,
+                publication_proof: None,
                 since_sort_order: None,
                 messages: vec![crate::api::disc_source::DiscAppendMessage {
                     source_msg_id: "kt624-worker-status".into(),

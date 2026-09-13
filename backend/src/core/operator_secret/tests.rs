@@ -2,10 +2,43 @@ use super::*;
 use serial_test::serial;
 
 /// Point `config_dir()` at a scratch directory for the duration of one test.
-fn scratch() -> tempfile::TempDir {
+struct Scratch {
+    dir: tempfile::TempDir,
+    previous: Option<std::ffi::OsString>,
+}
+
+impl Scratch {
+    fn path(&self) -> &std::path::Path {
+        self.dir.path()
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        match &self.previous {
+            Some(value) => std::env::set_var("KRONN_DATA_DIR", value),
+            None => std::env::remove_var("KRONN_DATA_DIR"),
+        }
+    }
+}
+
+fn scratch() -> Scratch {
     let dir = tempfile::tempdir().unwrap();
+    let previous = std::env::var_os("KRONN_DATA_DIR");
     std::env::set_var("KRONN_DATA_DIR", dir.path());
-    dir
+    Scratch { dir, previous }
+}
+
+#[test]
+#[serial]
+fn scratch_restores_the_environment_even_after_a_test_changes_its_path() {
+    let before = std::env::var_os("KRONN_DATA_DIR");
+    {
+        let dir = scratch();
+        assert_eq!(std::env::var_os("KRONN_DATA_DIR").unwrap(), dir.path());
+        std::env::set_var("KRONN_DATA_DIR", dir.path().join("blocked"));
+    }
+    assert_eq!(std::env::var_os("KRONN_DATA_DIR"), before);
 }
 
 fn database() -> rusqlite::Connection {

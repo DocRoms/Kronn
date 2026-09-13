@@ -13,6 +13,9 @@ use serde_json::{json, Value};
 use tokio::sync::RwLock;
 use tower::ServiceExt;
 
+#[path = "support/publication_fixture.rs"]
+mod fixture_env;
+
 async fn post(app: &Router, path: &str, body: Value) -> (u16, Value) {
     let mut request = Request::builder()
         .method("POST")
@@ -33,12 +36,11 @@ async fn post(app: &Router, path: &str, body: Value) -> (u16, Value) {
 struct Fixture {
     app: Router,
     db: Arc<kronn::db::Database>,
-    _dir: tempfile::TempDir,
+    _dir: fixture_env::PublicationFixture,
 }
 
 async fn fixture() -> Fixture {
-    let dir = tempfile::tempdir().unwrap();
-    std::env::set_var("KRONN_DATA_DIR", dir.path());
+    let dir = fixture_env::PublicationFixture::new();
     let db = Arc::new(kronn::db::Database::open_in_memory().unwrap());
     let mut config = kronn::core::config::default_config();
     config.server.auth_enabled = true;

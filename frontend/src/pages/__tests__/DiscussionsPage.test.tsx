@@ -74,11 +74,12 @@ vi.mock('../../lib/api', () => ({
     worktreeLock: vi.fn().mockResolvedValue('ok'),
     dismissPartial: vi.fn().mockResolvedValue({ recovered: false }),
     listContextFiles: vi.fn().mockResolvedValue([]),
-    contextFileBlob: vi.fn(),
+    contextFileBlob: vi.fn().mockResolvedValue(new Blob()),
     // 0.9.2 — the composer lists joined CLI sessions to offer their `-cli` aliases.
     participants: vi.fn().mockResolvedValue([]),
     // KT-595 — the arbitration banner reads the room's questions on mount.
     questions: vi.fn().mockResolvedValue({ questions: [], pending_count: 0 }),
+    importantMessages: vi.fn().mockResolvedValue({ items: [], total: 0, total_all: 0 }),
     answerQuestion: vi.fn(),
   },
   projects: {
@@ -204,10 +205,12 @@ import {
   externalApi as externalApiConnections,
   media,
   planning as planningApi,
+  publicationCredentials,
   projects as projectsApi,
   runsApi,
 } from '../../lib/api';
 import { DiscussionsPage } from '../DiscussionsPage';
+import { clearImportantMessages } from '../../lib/importantMessages';
 import { findRenderedTextRanges } from '../../lib/discussionMessageSearch';
 import type { AgentDetection, AgentType, AgentsConfig, AiAuditStatus, ContextFile, Discussion, Project, SharedRun } from '../../types/generated';
 import type { ExternalApiConnectionView } from '../../lib/api';
@@ -299,6 +302,190 @@ const openPanel = async (name: RegExp) => {
 };
 
 describe('DiscussionsPage', () => {
+  const importantQueuedContent = 'Texte conservé é🙂\n\n' + '\x60\x60\x60kronn-important\n' + JSON.stringify({
+    version: 1,
+    category: 'decision',
+    dedup_key: 'queued-proof',
+    title: 'Décision',
+    highlight: 'Vérifier la publication différée',
+    impact: 'Une seule carte',
+    action_required: { required: false },
+    references: {},
+  }) + '\n\x60\x60\x60';
+
+  async function renderQueuedImportant(grant = 'synthetic-human-grant', restore = false) {
+    const discussion = { ...makeListDiscussion('d-important-queued', 0), awaiting_agent: true };
+    vi.mocked(discussionsApi.get).mockResolvedValue(discussion);
+    vi.mocked(discussionsApi.sendMessageStream).mockReset();
+    vi.mocked(discussionsApi.sendMessageStream).mockResolvedValue(undefined);
+    vi.mocked(discussionsApi.stop).mockResolvedValue({ cancelled: true });
+    clearImportantMessages(discussion.id);
+    vi.mocked(discussionsApi.importantMessages).mockClear();
+    if (!restore) localStorage.removeItem('kronn:message-outbox:d-important-queued');
+    const lifted = liftedProps();
+    lifted.sendingMap = { 'd-important-queued': true };
+    const page = (openDiscussionId?: string) => (
+      <DiscussionsPage
+        projects={[]} agents={[]} allDiscussions={[discussion]}
+        configLanguage="fr" agentAccess={null}
+        refetchDiscussions={noop} refetchProjects={noop} onNavigate={noop}
+        toast={toastFn} initialActiveDiscussionId={discussion.id} {...lifted}
+        openDiscussionId={openDiscussionId}
+      />
+    );
+    const view = await wrap(page());
+    const input = document.querySelector('#important-publish-grant') as HTMLInputElement;
+    if (!restore) {
+      fireEvent.click(input.closest('details')!.querySelector('summary')!);
+      fireEvent.change(input, { target: { value: grant } });
+      fireEvent.change(document.querySelector('textarea')!, { target: { value: importantQueuedContent } });
+      fireEvent.click(screen.getByRole('button', { name: /Ajouter à la file/ }));
+    }
+    const navigate = () => {
+      vi.mocked(discussionsApi.get).mockResolvedValue(makeListDiscussion('d-important-other', 0));
+      view.rerender(<I18nProvider>{page('d-important-other')}</I18nProvider>);
+    };
+    return { view, input, lifted, discussion, navigate };
+  }
+
+  it('binds queued Important publication to its exact body without storing authority', async () => {
+    vi.mocked(publicationCredentials.proof).mockReset();
+    vi.mocked(publicationCredentials.proof).mockResolvedValue('synthetic-single-use-proof');
+    await renderQueuedImportant();
+    await waitFor(() => expect(discussionsApi.sendMessageStream).toHaveBeenCalledTimes(1));
+    expect(publicationCredentials.proof).toHaveBeenCalledExactlyOnceWith(
+      'synthetic-human-grant', 'd-important-queued', importantQueuedContent,
+    );
+    expect(vi.mocked(discussionsApi.sendMessageStream).mock.calls[0][1]).toEqual(expect.objectContaining({
+      content: importantQueuedContent,
+      defer_dispatch: true,
+      publication_grant: 'synthetic-human-grant',
+      publication_proof: 'synthetic-single-use-proof',
+    }));
+    const persisted = localStorage.getItem('kronn:message-outbox:d-important-queued');
+    expect(persisted).toContain('queued-proof');
+    expect(persisted).not.toContain('synthetic-human-grant');
+    expect(persisted).not.toContain('synthetic-single-use-proof');
+    expect(persisted).not.toContain('publication_grant');
+    expect(persisted).not.toContain('publication_proof');
+    const fetchesBeforeReceipt = vi.mocked(discussionsApi.importantMessages).mock.calls.length;
+    const call = vi.mocked(discussionsApi.sendMessageStream).mock.calls[0];
+    await act(async () => {
+      call[8]?.({ message_id: call[1].client_message_id!, sort_order: 1, duplicate: false });
+    });
+    await waitFor(() => expect(localStorage.getItem('kronn:message-outbox:d-important-queued')).toBeNull());
+    expect(vi.mocked(discussionsApi.importantMessages).mock.calls.length).toBeGreaterThan(fetchesBeforeReceipt);
+  });
+
+  it.each(['revoked', 'expired', 'invalid credential'])(
+    'preserves queued Important text when proof is refused: %s',
+    async reason => {
+      vi.mocked(publicationCredentials.proof).mockReset();
+      vi.mocked(publicationCredentials.proof).mockRejectedValue(new Error(reason));
+      await renderQueuedImportant();
+      await waitFor(() => expect(discussionsApi.sendMessageStream).toHaveBeenCalledTimes(1));
+      const payload = vi.mocked(discussionsApi.sendMessageStream).mock.calls[0][1];
+      expect(payload.content).toBe(importantQueuedContent);
+      expect(payload.defer_dispatch).toBe(true);
+      expect(payload.publication_grant).toBeUndefined();
+      expect(payload.publication_proof).toBeUndefined();
+      expect(publicationCredentials.proof).toHaveBeenCalledTimes(1);
+      expect(toastFn).toHaveBeenCalledWith(
+        'La carte a été refusée. Le texte du message est conservé, sans carte.', 'error',
+      );
+    },
+  );
+
+  it.each(['remove', 'stop', 'change credential', 'unmount', 'navigate'])(
+    'abandons queued Important preparation after %s, even if the proof arrives late',
+    async action => {
+      let resolveProof!: (proof: string) => void;
+      vi.mocked(publicationCredentials.proof).mockReset();
+      vi.mocked(publicationCredentials.proof).mockImplementation(() => new Promise(resolve => { resolveProof = resolve; }));
+      const { view, input, navigate } = await renderQueuedImportant();
+      await waitFor(() => expect(publicationCredentials.proof).toHaveBeenCalledTimes(1));
+      expect(discussionsApi.sendMessageStream).not.toHaveBeenCalled();
+      if (action === 'remove') {
+        fireEvent.click(screen.getByRole('button', { name: 'Retirer ce message de la file' }));
+      } else if (action === 'stop') {
+        fireEvent.click(screen.getByRole('button', { name: 'Arrêter la réflexion' }));
+      } else if (action === 'change credential') {
+        fireEvent.change(input, { target: { value: 'replacement-human-grant' } });
+      } else if (action === 'navigate') {
+        navigate();
+      } else {
+        view.unmount();
+      }
+      await act(async () => { resolveProof('late-proof-must-not-publish'); });
+      expect(discussionsApi.sendMessageStream).not.toHaveBeenCalled();
+      const stored = localStorage.getItem('kronn:message-outbox:d-important-queued');
+      if (action === 'remove') expect(stored).toBeNull();
+      else {
+        expect(stored).toContain('queued-proof');
+        expect(stored).not.toContain('synthetic-human-grant');
+        expect(stored).not.toContain('late-proof-must-not-publish');
+        if (action !== 'unmount' && action !== 'navigate') {
+          expect(JSON.parse(stored!)[0]).toEqual(expect.objectContaining({ status: 'failed' }));
+          expect(JSON.parse(stored!)[0].retryAt).toBeUndefined();
+        }
+      }
+    },
+  );
+
+  it('retries queued Important publication with fresh proof and the same receipt identity', async () => {
+    vi.mocked(publicationCredentials.proof).mockReset();
+    vi.mocked(publicationCredentials.proof)
+      .mockResolvedValueOnce('first-proof')
+      .mockResolvedValueOnce('retry-proof');
+    await renderQueuedImportant();
+    await waitFor(() => expect(discussionsApi.sendMessageStream).toHaveBeenCalledTimes(1));
+    const first = vi.mocked(discussionsApi.sendMessageStream).mock.calls[0];
+    await act(async () => { first[4]?.('receipt lost'); });
+    await waitFor(() => expect(document.querySelector('.disc-queued-retry')).toBeInTheDocument());
+    fireEvent.click(document.querySelector('.disc-queued-retry')!);
+    await waitFor(() => expect(discussionsApi.sendMessageStream).toHaveBeenCalledTimes(2));
+    const second = vi.mocked(discussionsApi.sendMessageStream).mock.calls[1];
+    expect(second[1].client_message_id).toBe(first[1].client_message_id);
+    expect(second[1].publication_proof).toBe('retry-proof');
+    expect(first[1].publication_proof).toBe('first-proof');
+    expect(publicationCredentials.proof).toHaveBeenCalledTimes(2);
+    for (const args of vi.mocked(publicationCredentials.proof).mock.calls) {
+      expect(args).toEqual(['synthetic-human-grant', 'd-important-queued', importantQueuedContent]);
+    }
+    await act(async () => {
+      second[8]?.({ message_id: second[1].client_message_id!, sort_order: 1, duplicate: true });
+      second[3]?.();
+    });
+    await waitFor(() => expect(localStorage.getItem('kronn:message-outbox:d-important-queued')).toBeNull());
+  });
+
+  it('restores queued Important text after reload without restoring the old publication authority', async () => {
+    let resolveOldProof!: (proof: string) => void;
+    vi.mocked(publicationCredentials.proof).mockReset();
+    vi.mocked(publicationCredentials.proof).mockImplementation(() => new Promise(resolve => { resolveOldProof = resolve; }));
+    const first = await renderQueuedImportant();
+    await waitFor(() => expect(publicationCredentials.proof).toHaveBeenCalledTimes(1));
+    const stableId = JSON.parse(localStorage.getItem('kronn:message-outbox:d-important-queued')!)[0].id;
+    first.view.unmount();
+    vi.mocked(publicationCredentials.proof).mockClear();
+    const restored = await renderQueuedImportant('', true);
+    await waitFor(() => expect(discussionsApi.sendMessageStream).toHaveBeenCalledTimes(1));
+    expect(restored.input.value).toBe('');
+    expect(publicationCredentials.proof).not.toHaveBeenCalled();
+    const call = vi.mocked(discussionsApi.sendMessageStream).mock.calls[0];
+    expect(call[1]).toEqual(expect.objectContaining({
+      content: importantQueuedContent, client_message_id: stableId, defer_dispatch: true,
+    }));
+    expect(call[1].publication_grant).toBeUndefined();
+    expect(call[1].publication_proof).toBeUndefined();
+    await act(async () => { resolveOldProof('stale-proof'); });
+    expect(discussionsApi.sendMessageStream).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      call[8]?.({ message_id: stableId, sort_order: 1, duplicate: true });
+    });
+    await waitFor(() => expect(localStorage.getItem('kronn:message-outbox:d-important-queued')).toBeNull());
+  });
+
   it('confirms and tombstones the selected message before refreshing the discussion', async () => {
     const message: DiscussionMessage = {
       id: 'message-delete-me',

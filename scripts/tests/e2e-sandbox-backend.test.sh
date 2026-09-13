@@ -14,6 +14,7 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SCRIPT="$ROOT/scripts/e2e-sandbox-backend.sh"
 WORK="$(mktemp -d)"
+PYTHON="$(command -v python3)"
 PASS=0
 FAIL=0
 
@@ -46,8 +47,8 @@ make_fake() {
     # $1: path, $2: one of healthy | silent | exits
     local path="$1" mode="$2"
     cat > "$path" <<PY
-#!/usr/bin/env python3
-import os, re, sys
+#!$PYTHON
+import json, os, re, sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 MODE = "$mode"
@@ -59,6 +60,11 @@ if MODE == "exits":
 # config writes is asserted rather than described in a comment.
 with open(os.path.join(os.environ["KRONN_DATA_DIR"], "env-seen.txt"), "w") as fh:
     fh.write(os.environ.get("KRONN_HOST_HOME", "<unset>"))
+keys = ["OPENAI_API_KEY", "KRONN_AUTH_TOKEN", "KRONN_KEK", "KRONN_BACKUP_DIR",
+        "KRONN_BACKUP_INTERVAL_HOURS", "KRONN_BACKEND_URL", "KRONN_USE_KEYCHAIN",
+        "KRONN_DOCS_SIDECAR", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "TMPDIR", "PATH"]
+with open(os.path.join(os.environ["KRONN_DATA_DIR"], "environment.json"), "w") as fh:
+    json.dump({key: os.environ.get(key) for key in keys}, fh)
 
 # The port is whatever the script wrote into the config it owns.
 config = open(os.path.join(os.environ["KRONN_DATA_DIR"], "config.toml")).read()
@@ -114,6 +120,18 @@ refuses "developer instance" "refuses the developer backend port" \
     "$SCRIPT" "$WORK/d4" 3140
 refuses "developer instance" "refuses the developer Vite port" \
     "$SCRIPT" "$WORK/d5" 5173
+refuses "developer instance" "normalizes a zero-prefixed reserved port" \
+    "$SCRIPT" "$WORK/d5-leading-zero" 03140
+
+ln -s "$WORK/absent" "$WORK/dangling"
+refuses "already exists" "refuses a dangling symlink before starting" \
+    "$SCRIPT" "$WORK/dangling" "$(free_port)"
+KRONN_E2E_HEALTH_TRIES=invalid \
+    refuses "health tries" "validates the health budget before creating data" \
+        "$SCRIPT" "$WORK/invalid-health" "$(free_port)"
+[[ ! -e "$WORK/invalid-health" ]] \
+    && ok "an invalid health budget creates nothing" \
+    || bad "an invalid health budget creates nothing"
 
 mkdir -p "$WORK/already-there"
 refuses "already exists" "refuses a data directory it does not own" \
@@ -140,7 +158,11 @@ refuses "already served" "refuses a port somebody else is already serving" \
 
 PORT="$(free_port)"
 DIR="$WORK/live"
-if PID="$("$SCRIPT" "$DIR" "$PORT" 2>"$WORK/live.err")"; then
+if PID="$(env OPENAI_API_KEY=synthetic-outside-key KRONN_AUTH_TOKEN=synthetic-outside-auth \
+    KRONN_KEK=synthetic-outside-kek KRONN_BACKUP_DIR="$WORK/outside-backup" \
+    KRONN_BACKUP_INTERVAL_HOURS=1 KRONN_BACKEND_URL=http://127.0.0.1:3140 \
+    KRONN_USE_KEYCHAIN=1 KRONN_DOCS_SIDECAR="$WORK/outside-sidecar" \
+    "$SCRIPT" "$DIR" "$PORT" 2>"$WORK/live.err")"; then
     echo "$PID" > "$WORK/live.pid"
     [[ "$PID" =~ ^[0-9]+$ ]] \
         && ok "prints the pid and nothing else" \
@@ -166,13 +188,63 @@ if PID="$("$SCRIPT" "$DIR" "$PORT" 2>"$WORK/live.err")"; then
         && ok "creates the host-home it points at" \
         || bad "creates the host-home it points at"
 
+    if "$PYTHON" - "$DIR" "$PORT" <<'PY'
+import json, os, stat, sys
+root, port = sys.argv[1:]
+seen = json.load(open(os.path.join(root, "environment.json")))
+for key in ["OPENAI_API_KEY", "KRONN_AUTH_TOKEN", "KRONN_KEK"]:
+    assert seen[key] is None, f"ambient {key} reached the child"
+assert seen["KRONN_BACKEND_URL"] == f"http://127.0.0.1:{port}"
+assert seen["KRONN_USE_KEYCHAIN"] == "0"
+assert seen["KRONN_BACKUP_INTERVAL_HOURS"] == "0"
+for key in ["KRONN_BACKUP_DIR", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "TMPDIR"]:
+    assert seen[key] and os.path.commonpath([root, seen[key]]) == root, key
+sidecar = seen["KRONN_DOCS_SIDECAR"]
+assert sidecar and os.path.commonpath([root, sidecar]) == root
+assert os.path.isfile(sidecar) and os.access(sidecar, os.X_OK)
+assert seen["PATH"] == "/usr/bin:/bin:/usr/sbin:/sbin"
+assert stat.S_IMODE(os.stat(root).st_mode) == 0o700
+assert stat.S_IMODE(os.stat(os.path.join(root, "config.toml")).st_mode) == 0o600
+PY
+    then ok "child environment and private artifacts are confined"
+    else bad "child environment and private artifacts are confined"
+    fi
+
     LISTENER="$(lsof -nP -iTCP:"$PORT" -sTCP:LISTEN -t 2>/dev/null | head -1)"
     [[ "$LISTENER" == "$PID" ]] \
         && ok "the pid it returns is the one holding the port" \
         || bad "the pid it returns is the one holding the port" "listener=$LISTENER pid=$PID"
+    [[ "$(cat "$DIR/backend.pid" 2>/dev/null)" == "$PID" ]] \
+        && ok "records the verified listener for destructive E2E preflight" \
+        || bad "records the verified listener for destructive E2E preflight"
     kill "$PID" 2>/dev/null
 else
     bad "starts a healthy fake backend" "$(cat "$WORK/live.err")"
+fi
+
+# Deterministic concurrent creator: insert a foreign directory at the mkdir
+# boundary, after the precheck. A second mkdir must fail, never adopt it.
+mkdir "$WORK/race-bin"
+REAL_MKDIR="$(command -v mkdir)"
+RACE_DIR="$WORK/race-data"
+cat > "$WORK/race-bin/mkdir" <<SH
+#!/usr/bin/env bash
+for arg in "\$@"; do
+    if [[ "\$arg" == "$RACE_DIR" && ! -e "$RACE_DIR" ]]; then
+        "$REAL_MKDIR" "$RACE_DIR"
+        printf '%s' concurrent-owner > "$RACE_DIR/owner"
+    fi
+done
+exec "$REAL_MKDIR" "\$@"
+SH
+chmod +x "$WORK/race-bin/mkdir"
+if RACE_PID="$(PATH="$WORK/race-bin:$PATH" "$SCRIPT" "$RACE_DIR" "$(free_port)" 2>"$WORK/race.err")"; then
+    [[ "$RACE_PID" =~ ^[0-9]+$ ]] && kill "$RACE_PID" 2>/dev/null
+    bad "refuses a directory created concurrently"
+else
+    [[ -f "$RACE_DIR/owner" && ! -e "$RACE_DIR/config.toml" ]] \
+        && ok "refuses a directory created concurrently" \
+        || bad "refuses a directory created concurrently" "$(cat "$WORK/race.err")"
 fi
 
 # ── Failures after the spawn must not leave a process behind ────────────────

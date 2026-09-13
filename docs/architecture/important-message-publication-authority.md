@@ -155,6 +155,30 @@ the remedy. An ordinary message asks for nothing at all.
 important card publishes until an operator bootstraps. That is deliberate and it
 is a real behaviour change, not a silent tightening.
 
+## Queued messages and interrupted publication
+
+The UI obtains a fresh proof immediately before each queued send, including a
+retry after a lost receipt. The grant, proof and abort controller stay in memory;
+the durable outbox stores only the message, its targets and its stable UUID.
+The server returns the existing receipt for that UUID rather than creating a
+second message/card, even when the retry supplies a new proof. A previously
+refused card is not added retroactively on replay.
+
+Preparation and an HTTP write already started are different states. Removing
+an entry, clearing the queue, leaving the room or unmounting the page cancels
+pending preparation; a late proof cannot send the abandoned message. Navigation
+preserves unsent text. Stop and changing the credential pause unsent entries
+until an explicit retry. A write already started stays tracked until its receipt
+or a retryable error: cancellation cannot undo a server commit.
+
+Reload restores text and the same UUID, not publication authority. Without a
+newly entered grant the restored message is ordinary text. The refusal notice
+does not claim the message was delivered before an acceptance receipt arrives.
+[src: file: frontend/src/hooks/useMessageQueue.ts:1]
+[src: file: frontend/src/lib/importantPublication.ts:1]
+[src: file: frontend/src/pages/DiscussionsPage.tsx:1]
+[src: file: backend/src/api/discussions/messaging.rs:3345]
+
 ## Reading the code
 
 | | |

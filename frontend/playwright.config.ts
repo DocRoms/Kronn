@@ -1,4 +1,8 @@
 import { defineConfig, devices } from '@playwright/test';
+import { assertPublicationSandbox } from './e2e/fixtures/publication-sandbox.mjs';
+
+const publicationSandbox = Boolean(process.env.KRONN_SANDBOX_DIR);
+if (publicationSandbox) assertPublicationSandbox();
 
 const devPort = Number(process.env.VITE_DEV_PORT ?? 5173);
 const devUrl = `http://localhost:${devPort}`;
@@ -80,9 +84,9 @@ export default defineConfig({
   // another terminal — devs iterating on UI + specs at the same time keep
   // their hot-reload session.
   webServer: {
-    command: `pnpm exec vite --port ${devPort}`,
+    command: `pnpm exec vite --port ${devPort}${publicationSandbox ? ' --strictPort' : ''}`,
     url: devUrl,
-    reuseExistingServer: !process.env.CI,
+    reuseExistingServer: !publicationSandbox && !process.env.CI,
     timeout: 30_000,
     stdout: 'pipe',
     stderr: 'pipe',

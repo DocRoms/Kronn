@@ -18,12 +18,13 @@
  */
 
 import { readFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { expect, test } from '../fixtures/kronn-fixture';
 import { DashboardPage } from '../pages/DashboardPage';
+import { assertPublicationSandbox } from '../fixtures/publication-sandbox.mjs';
 
 const SANDBOX = process.env.KRONN_SANDBOX_DIR ?? '';
-const DEV_PORT = process.env.VITE_DEV_PORT ?? '5173';
 
 /** The bootstrap, read where the backend delivered it rather than injected. */
 function adminSecret(): string {
@@ -67,12 +68,7 @@ test.describe.serial('publication authority, end to end', () => {
   test.skip(!SANDBOX, 'needs an isolated backend — see e2e/README.md (KRONN_SANDBOX_DIR)');
 
   test.beforeAll(() => {
-    // 5173 and 3140 belong to whoever is actually working right now.
-    if (DEV_PORT === '5173') {
-      throw new Error(
-        'refusing to run against the developer instance: set VITE_DEV_PORT to a sandbox port',
-      );
-    }
+    assertPublicationSandbox();
   });
 
   test.afterAll(async ({ request }) => {
@@ -212,6 +208,47 @@ test.describe.serial('publication authority, end to end', () => {
     await expect(bar.locator('.disc-important-position')).toHaveText('Aucun dans cette catégorie');
   });
 
+  test('a restored outbox obtains fresh authority and preserves its message identity', async ({ page, request }) => {
+    const dashboard = new DashboardPage(page);
+    await dashboard.goto();
+    const content = fence('e2e-queued', 'La reprise de la file conserve é🙂 et son identité.');
+    const clientMessageId = randomUUID();
+    // Persist the same shape a tab leaves after an interrupted send. No grant
+    // or proof is seeded, and the real hook/HTTP writer perform the retry.
+    await page.evaluate(({ room, content, id }) => {
+      localStorage.setItem(`kronn:message-outbox:${room}`, JSON.stringify([{
+        id, content, status: 'failed', attempts: 1, createdAt: new Date().toISOString(),
+      }]));
+    }, { room: discId, content, id: clientMessageId });
+    await dashboard.openDiscussion(discId);
+    await expect(page.locator('.disc-queued-line')).toHaveCount(1);
+    await page.getByText('Publier une carte importante en votre nom').click();
+    await page.getByLabel('Identifiant de publication').fill(grant);
+    const proofRequest = page.waitForRequest(req => req.url().endsWith('/api/human-credentials/proof')
+      && req.method() === 'POST' && req.postDataJSON()?.content === content);
+    const sendRequest = page.waitForRequest(req => req.url().endsWith(`/api/discussions/${discId}/messages`)
+      && req.method() === 'POST' && req.postDataJSON()?.client_message_id === clientMessageId);
+    await page.locator('.disc-queued-line').getByRole('button', { name: 'Réessayer' }).click();
+    const proofBody = (await proofRequest).postDataJSON();
+    expect(proofBody.discussion_id).toBe(discId);
+    const sent = (await sendRequest).postDataJSON();
+    expect(sent.defer_dispatch).toBe(true);
+    expect(sent.content).toBe(content);
+    expect(sent.publication_proof).toBeTruthy();
+    await expect(page.locator('.disc-queued-line')).toHaveCount(0);
+    await expect(async () => {
+      const response = await request.get(`/api/discussions/${discId}/important`);
+      expect((await response.json())?.data?.total_all).toBe(2);
+    }).toPass({ timeout: 15_000 });
+    expect(await page.evaluate(room => localStorage.getItem(`kronn:message-outbox:${room}`), discId)).toBeNull();
+    await page.reload();
+    await dashboard.openDiscussion(discId);
+    await expect(page.getByLabel('Identifiant de publication')).toHaveValue('');
+    await expect(page.locator('.disc-queued-line')).toHaveCount(0);
+    const listed = await request.get(`/api/discussions/${discId}/important`);
+    expect((await listed.json())?.data?.total_all).toBe(2);
+  });
+
   test('a proof is spent once, whatever presents it again', async ({ request }) => {
     // The composer mints a fresh proof per send, so replay is not something a
     // person can do through the UI — which is exactly why it is checked here.
@@ -232,7 +269,7 @@ test.describe.serial('publication authority, end to end', () => {
     // Two sends, one card: the second proof was already spent. The MESSAGE
     // posted both times — a refused publication never costs the text.
     const listed = await request.get(`/api/discussions/${discId}/important`);
-    expect((await listed.json())?.data?.total_all).toBe(2);
+    expect((await listed.json())?.data?.total_all).toBe(3);
   });
 
   test('rotating the bootstrap locks the screen back and retires the old secret', async ({

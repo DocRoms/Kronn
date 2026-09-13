@@ -10,6 +10,9 @@ use sha2::{Digest, Sha256};
 use tokio::sync::RwLock;
 use tower::ServiceExt;
 
+#[path = "support/publication_fixture.rs"]
+mod fixture_env;
+
 async fn post(app: &Router, path: &str, body: Value) -> Value {
     let mut request = Request::builder()
         .method("POST")
@@ -33,8 +36,7 @@ async fn post(app: &Router, path: &str, body: Value) -> Value {
 }
 
 async fn exercise(session_credential: Option<&str>) {
-    let directory = tempfile::tempdir().unwrap();
-    std::env::set_var("KRONN_DATA_DIR", directory.path());
+    let _directory = fixture_env::PublicationFixture::new();
     let db = Arc::new(kronn::db::Database::open_in_memory().unwrap());
     let mut config = kronn::core::config::default_config();
     config.server.auth_enabled = true;

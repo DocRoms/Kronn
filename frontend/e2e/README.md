@@ -189,11 +189,21 @@ Trois pièges rencontrés pour de vrai le 12-13/09, que le script ferme :
 Le script a ses propres tests, à faux binaire — aucune instance réelle, aucun
 port fixe : `scripts/tests/e2e-sandbox-backend.test.sh`.
 
-Ce que le script **ne** promet pas : le backend lit la machine sur laquelle il
-tourne (détection d'agents, import de clés d'API trouvées dans les fichiers de
-configuration des agents). Ces lectures ne sont pas isolées et leurs résultats
-atterrissent dans la base du sandbox — traitez le répertoire comme contenant
-des secrets et supprimez-le après le run.
+The launcher uses an empty child environment with explicit owned data, host,
+cache and temporary roots. Ambient API keys, bearer tokens, backup destinations,
+proxy settings and launcher overrides are not inherited. Keychain access and
+periodic backups are disabled. Directory creation is exclusive (not `mkdir -p`)
+and private; an existing or concurrently created directory is never adopted.
+Before any enrolment or rotation, Playwright checks the configured backend URL,
+the launcher's `config.toml` and `backend.pid`, and the actual listening PID.
+The publication run requires its own Vite (`--strictPort`, no server reuse).
+The shell suite also runs the preflight's dependency-free Node tests.
+
+Docs export is deliberately unavailable in this publication-only fixture. An
+owned executable occupies the sidecar override so resolution cannot fall back
+to the operator's Python venv or desktop bundle. A nonexistent override would
+still fall back. This launcher is not an OS/network security boundary: do not
+dispatch real providers or qualify docs export/agent installation with it.
 
 Vérifier avant et après avec `lsof -nP -iTCP:3140 -sTCP:LISTEN` que l'instance
 de l'utilisateur est celle qui tient encore son port.

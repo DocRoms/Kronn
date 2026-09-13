@@ -40,7 +40,7 @@ import { sanitizeQpImproverPayload } from '../lib/qp-improver-sanitize';
 import type { Project, AgentDetection, Discussion, DiscussionDetail, DiscussionMessage, MessageChannel, AgentType, AgentsConfig, Skill, AgentProfile, Directive, McpConfigDisplay, McpIncompatibility, Contact, WsMessage, ContextFile, BatchRunSummary, DiscussionPlan, ProposalListResponse, ExecutionDiscussionLink, MessageSearchHit, MessageTarget, ParticipantView, DiscussionAction, SharedRun } from '../types/generated';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { useQpChain } from '../hooks/useQpChain';
-import { useMessageQueue, type QueuedMessage } from '../hooks/useMessageQueue';
+import { useMessageQueue, type QueuedMessage, type QueuedMessageControl } from '../hooks/useMessageQueue';
 import { useRafBatchedStream } from '../hooks/useRafBatchedStream';
 import { buildStreamingFlush } from '../lib/stream-flush';
 import { findLastAgentMessage } from '../lib/discussionHelpers';
@@ -2779,8 +2779,24 @@ export function DiscussionsPage({
   // currently rendered stream. `defer_dispatch` commits the User row and
   // Pending dispatch atomically; the backend scheduler starts it only after
   // the discussion's current runner releases its claim.
-  const persistQueuedMessage = useCallback((discId: string, queued: QueuedMessage) => (
-    new Promise<void>((resolve, reject) => {
+  const persistQueuedMessage = useCallback(async (
+    discId: string,
+    queued: QueuedMessage,
+    control: QueuedMessageControl,
+  ) => {
+    const prepared = await preparePublication({
+      grant: publicationGrant,
+      content: queued.content,
+      discussionId: discId,
+      signal: control.signal,
+      issueProof: publicationCredentials.proof,
+      onRefused: () => toast(t('disc.important.proofRefused'), 'error'),
+    });
+    if (prepared.outcome === 'abandon' || !control.beginPersist()) return;
+    // The proof exists only in this call, never in the durable queue. Every
+    // retry uses its stable message id but obtains a fresh proof.
+    const publication = prepared.fields;
+    await new Promise<void>((resolve, reject) => {
       let accepted = false;
       const refuseBeforeReceipt = (error: string) => {
         if (!accepted) reject(new Error(userError(error)));
@@ -2797,6 +2813,7 @@ export function DiscussionsPage({
           client_message_id: queued.id,
           defer_dispatch: true,
           reply_to_message_id: queued.replyToMessageId,
+          ...publication,
         },
         () => undefined,
         () => {
@@ -2812,10 +2829,11 @@ export function DiscussionsPage({
           refetchDiscussions();
           reloadDiscussion(discId);
           loadContextFiles(discId);
+          if (publication.publication_proof) refreshImportantMessages(discId);
         },
       ).catch(error => refuseBeforeReceipt(error instanceof Error ? error.message : String(error)));
-    })
-  ), [loadContextFiles, refetchDiscussions, reloadDiscussion]);
+    });
+  }, [loadContextFiles, publicationGrant, refetchDiscussions, reloadDiscussion, t, toast]);
 
   // Durable CLI-style outbox — entries are written locally before acceptance,
   // then reconciled against the backend with a stable client_message_id.
@@ -2825,9 +2843,11 @@ export function DiscussionsPage({
     removeQueued: removeQueuedMessage,
     retryQueued: retryQueuedMessage,
     clearQueue: clearMessageQueue,
+    cancelPreparing: cancelQueuedPreparation,
   } = useMessageQueue({
     discId: activeDiscussionId,
     onPersist: persistQueuedMessage,
+    prepareBeforePersist: true,
   });
 
   // Queued follow-ups now live inside the scrollable transcript. Keep the
@@ -2849,6 +2869,7 @@ export function DiscussionsPage({
   const handleStop = () => {
     if (!activeDiscussionId) return;
     const discId = activeDiscussionId;
+    cancelQueuedPreparation();
     // Backend cancellation FIRST — without this the agent keeps
     // running and burning tokens after the user clicked Stop.
     // Pre-fix the local abort just disconnected the SSE channel; the
@@ -2871,6 +2892,7 @@ export function DiscussionsPage({
   const handleStopDispatch = useCallback(async (dispatchId: string) => {
     if (!activeDiscussionId) return;
     const discId = activeDiscussionId;
+    if (visibleStreamingReplyId === dispatchId) cancelQueuedPreparation();
     setStoppingDispatchIds(current => new Set(current).add(dispatchId));
     try {
       const result = await discussionsApi.stopDispatch(discId, dispatchId);
@@ -2907,7 +2929,7 @@ export function DiscussionsPage({
         return next;
       });
     }
-  }, [abortControllers, activeDiscussionId, cleanupStream, refetchDiscussions, reloadDiscussion,
+  }, [abortControllers, activeDiscussionId, cancelQueuedPreparation, cleanupStream, refetchDiscussions, reloadDiscussion,
     setLoadedDiscussions, t, toast, visibleStreamingReplyId]);
 
   const handleTtsToggle = useCallback(() => {
@@ -5137,7 +5159,10 @@ export function DiscussionsPage({
                 long as this page is open and stored nowhere. */}
             <ImportantPublicationStrip
               grant={publicationGrant}
-              onGrantChange={setPublicationGrant}
+              onGrantChange={value => {
+                cancelQueuedPreparation();
+                setPublicationGrant(value);
+              }}
               t={t}
             />
             <ChatInput

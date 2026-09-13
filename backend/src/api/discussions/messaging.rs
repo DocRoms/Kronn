@@ -3343,6 +3343,22 @@ mod tests {
     /// this endpoint refused every fence unconditionally.
     #[tokio::test]
     async fn send_message_publishes_a_card_for_a_human_grant_and_its_proof() {
+        assert_human_card_receipt(false, "valid").await;
+    }
+
+    #[tokio::test]
+    async fn deferred_human_card_survives_a_lost_receipt_without_duplicate_publication() {
+        assert_human_card_receipt(true, "valid").await;
+    }
+
+    #[tokio::test]
+    async fn deferred_human_card_refusals_preserve_text_and_never_upgrade_a_replayed_message() {
+        for proof_case in ["missing", "revoked", "expired", "wrong_body"] {
+            assert_human_card_receipt(true, proof_case).await;
+        }
+    }
+
+    async fn assert_human_card_receipt(defer_dispatch: bool, proof_case: &'static str) {
         let disc = "d-human-grant";
         let state = make_state_with_disc(disc).await;
         state
@@ -3372,49 +3388,112 @@ mod tests {
         let (grant, proof) = state
             .db
             .with_conn(move |conn| {
-                crate::core::operator_secret::bootstrap(conn)?;
-                let admin = crate::core::operator_secret::read_delivered()?;
+                // This handler test needs database authority, not delivery to
+                // a host file. Bootstrap file semantics have dedicated tests.
+                let admin = crate::db::human_credentials::create_admin_secret(
+                    conn,
+                    "/synthetic/operator/private/credential",
+                )?;
                 let authority = crate::db::human_credentials::authorise_enrolment(conn, &admin)?
                     .expect("the admin secret authorises");
-                let (_row, grant) = crate::db::human_credentials::enrol(
+                let (row, grant) = crate::db::human_credentials::enrol(
                     conn,
                     &authority,
                     crate::db::human_credentials::GrantRole::Human,
                     "Romu",
                 )?;
+                let issued_body = if proof_case == "wrong_body" {
+                    format!("{body_for_proof}different")
+                } else {
+                    body_for_proof
+                };
+                let issued_at = if proof_case == "expired" {
+                    chrono::Utc::now() - chrono::Duration::days(1)
+                } else {
+                    chrono::Utc::now()
+                };
                 let proof = crate::db::human_credentials::issue_proof(
                     conn,
                     &grant,
                     &disc_for_proof,
-                    &body_for_proof,
-                    chrono::Utc::now(),
+                    &issued_body,
+                    issued_at,
                 )
                 .expect("a live human grant is issued a proof");
+                if proof_case == "revoked" {
+                    assert!(crate::db::human_credentials::revoke(
+                        conn,
+                        &row.id,
+                        "test revoke"
+                    )?);
+                }
                 Ok((grant.expose().to_string(), proof))
             })
             .await
             .unwrap();
 
+        let request = |grant, proof| SendMessageRequest {
+            content: fence.clone(),
+            channel: MessageChannel::Main,
+            targets: vec![],
+            target_all: false,
+            target_agents: vec![],
+            target_agent: None,
+            client_message_id: Some("9c1f0d2e-77aa-4f3b-9d51-4b2e6a8c1f70".into()),
+            defer_dispatch,
+            reply_to_message_id: None,
+            publication_grant: grant,
+            publication_proof: proof,
+        };
         let response = send_message(
             State(state.clone()),
             Path(disc.to_string()),
-            Json(SendMessageRequest {
-                content: fence,
-                channel: MessageChannel::Main,
-                targets: vec![],
-                target_all: false,
-                target_agents: vec![],
-                target_agent: None,
-                client_message_id: Some("9c1f0d2e-77aa-4f3b-9d51-4b2e6a8c1f70".into()),
-                defer_dispatch: false,
-                reply_to_message_id: None,
-                publication_grant: Some(grant),
-                publication_proof: Some(proof),
-            }),
+            Json(request(
+                (proof_case != "missing").then(|| grant.clone()),
+                Some(proof),
+            )),
         )
         .await;
         let body = sse_body_to_string(response).await;
         assert!(body.contains("event: accepted"), "message accepted: {body}");
+
+        // A retry has a fresh proof (or none if the grant was revoked), but
+        // the same message UUID. It must not create a second message/card or
+        // retroactively promote text whose original card was refused.
+        let retry_grant = grant.clone();
+        let retry_body = fence.clone();
+        let fresh_proof = state
+            .db
+            .with_conn(move |conn| {
+                Ok(crate::db::human_credentials::issue_proof(
+                    conn,
+                    &crate::db::human_credentials::Secret::new(retry_grant),
+                    disc,
+                    &retry_body,
+                    chrono::Utc::now(),
+                )
+                .ok())
+            })
+            .await
+            .unwrap();
+        let retry = send_message(
+            State(state.clone()),
+            Path(disc.to_string()),
+            Json(request(Some(grant), fresh_proof)),
+        )
+        .await;
+        let retry_body = sse_body_to_string(retry).await;
+        assert!(
+            retry_body.contains(r#""duplicate":true"#),
+            "duplicate receipt: {retry_body}"
+        );
+        let messages = state
+            .db
+            .with_conn(move |conn| crate::db::discussions::list_messages(conn, disc))
+            .await
+            .unwrap();
+        assert_eq!(messages.len(), 1, "{proof_case}: stable message identity");
+        assert_eq!(messages[0].content, fence, "{proof_case}: text survives");
 
         let disc_owned = disc.to_string();
         let list = state
@@ -3422,11 +3501,18 @@ mod tests {
             .with_conn(move |conn| crate::db::discussion_important::list(conn, &disc_owned, None))
             .await
             .unwrap();
-        assert_eq!(list.total, 1, "a human grant and its proof must publish");
-        assert_eq!(
-            list.items[0].author_kind,
-            crate::db::discussion_important::ImportantAuthorKind::Human
-        );
-        assert_eq!(list.items[0].author_label, "Human");
+        if proof_case == "valid" {
+            assert_eq!(list.total, 1, "a human grant and its proof must publish");
+            assert_eq!(
+                list.items[0].author_kind,
+                crate::db::discussion_important::ImportantAuthorKind::Human
+            );
+            assert_eq!(list.items[0].author_label, "Human");
+        } else {
+            assert_eq!(
+                list.total, 0,
+                "{proof_case}: refused card is never added on replay"
+            );
+        }
     }
 }

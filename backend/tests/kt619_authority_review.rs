@@ -15,6 +15,9 @@ use serde_json::{json, Value};
 use tokio::sync::RwLock;
 use tower::ServiceExt;
 
+#[path = "support/publication_fixture.rs"]
+mod fixture_env;
+
 async fn post(app: &Router, path: &str, body: Value) -> Value {
     let mut request = Request::builder()
         .method("POST")
@@ -65,8 +68,7 @@ async fn exercise_anonymous_issuance_chain(include_declared_session: bool) {
 /// Walk the chain and hand back what happened, so each test asserts the one
 /// property it is named for.
 async fn exercise_issuance_chain(include_declared_session: bool) -> (Value, u32) {
-    let data_dir = tempfile::tempdir().unwrap();
-    std::env::set_var("KRONN_DATA_DIR", data_dir.path());
+    let _directory = fixture_env::PublicationFixture::new();
     let db = Arc::new(kronn::db::Database::open_in_memory().unwrap());
     let mut config = kronn::core::config::default_config();
     config.server.auth_enabled = true;

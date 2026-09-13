@@ -56,12 +56,10 @@ export async function preparePublication(
   options: PreparePublicationOptions,
 ): Promise<PreparedPublication> {
   const grant = options.grant.trim();
+  if (options.signal.aborted) return { outcome: 'abandon' };
   if (!grant || !options.content.includes(IMPORTANT_FENCE)) {
     return { outcome: 'send', fields: {} };
   }
-  // Already stopped: asking for a proof we will not spend only burns one.
-  if (options.signal.aborted) return { outcome: 'abandon' };
-
   let fields: PublicationFields = {};
   try {
     fields = {
@@ -69,7 +67,7 @@ export async function preparePublication(
       publication_proof: await options.issueProof(grant, options.discussionId, options.content),
     };
   } catch {
-    options.onRefused();
+    if (!options.signal.aborted) options.onRefused();
   }
   if (options.signal.aborted) return { outcome: 'abandon' };
   return { outcome: 'send', fields };

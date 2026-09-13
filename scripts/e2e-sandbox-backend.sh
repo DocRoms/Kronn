@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Start a Kronn backend that cannot reach the instance you are working in.
+# Start a dedicated Kronn backend with isolated startup data and credentials.
 #
 # E2E specs that enrol credentials, rotate the publication bootstrap or seed
 # hundreds of rows need a backend of their own. Pointing one at the developer's
@@ -37,12 +37,16 @@
 #     configuration. That happened, on 2026-09-13. `KRONN_HOST_HOME` is the
 #     product's own override and points here instead.
 #
-# What it does NOT claim
+#   * no ambient credentials, proxy settings, host paths or launcher overrides
+#     reach the child. Host configs, cache, temp files and backups have owned
+#     roots; keychain access and periodic backups are disabled;
+#   * docs export is intentionally unavailable in this publication-only fixture.
+#     An owned executable prevents fallback to a user's Python venv or desktop
+#     bundle. A nonexistent override would NOT prevent that fallback.
 #
-#   The backend reads the machine it runs on: it detects installed agents and
-#   imports API keys it finds in the user's agent config files. Those reads are
-#   not isolated, and their results land in the sandbox database — so treat the
-#   data directory as containing secrets and delete it after the run.
+# This is not an OS security boundary or a general network sandbox. Only run
+# deterministic fixtures with no real provider dispatch; docs export and live
+# agent installation/authentication need their own qualification environment.
 
 set -euo pipefail
 
@@ -61,6 +65,8 @@ BINARY="${KRONN_E2E_BINARY:-$ROOT/target/debug/kronn}"
 # ── Refusals, before anything is created or started ──────────────────────────
 
 [[ "$PORT" =~ ^[0-9]+$ ]] || die "port must be a number, got: $PORT"
+(( ${#PORT} <= 5 )) || die "port out of range (1024-65535): $PORT"
+PORT=$((10#$PORT))
 (( PORT >= 1024 && PORT <= 65535 )) || die "port out of range (1024-65535): $PORT"
 for reserved in "${DEVELOPER_PORTS[@]}"; do
     [[ "$PORT" == "$reserved" ]] && die "refusing port $PORT: that is the developer instance"
@@ -68,13 +74,31 @@ done
 if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
     die "port $PORT is already served — stop that process first, by pid"
 fi
-[[ -e "$DATA_DIR" ]] && die "$DATA_DIR already exists; this script owns the directory it creates"
+[[ "$DATA_DIR" == /* ]] || die "data directory must be absolute"
+[[ -e "$DATA_DIR" || -L "$DATA_DIR" ]] && die "$DATA_DIR already exists; this script owns the directory it creates"
 [[ -x "$BINARY" ]] || die "no backend binary at $BINARY (cargo build --bin kronn)"
+[[ "$BINARY" == /* ]] || die "backend binary path must be absolute"
+readonly HEALTH_TRIES="${KRONN_E2E_HEALTH_TRIES:-90}"
+[[ "$HEALTH_TRIES" =~ ^[1-9][0-9]{0,2}$ ]] && (( HEALTH_TRIES <= 300 )) \
+    || die "health tries must be an integer from 1 to 300"
 
-mkdir -p "$DATA_DIR"
+# Atomic ownership: another creator winning after the precheck is a refusal,
+# never permission to adopt its files. The parent must already exist.
+umask 077
+mkdir "$DATA_DIR" || die "data directory could not be exclusively created: $DATA_DIR"
 # Where the product will look for the user's CLI host configs. Inside the
 # sandbox, so a sync writes here and the developer's own files are untouched.
-mkdir -p "$DATA_DIR/host-home"
+mkdir "$DATA_DIR/host-home" "$DATA_DIR/cache" "$DATA_DIR/xdg-config" \
+    "$DATA_DIR/tmp" "$DATA_DIR/backups"
+
+# resolve_sidecar_program accepts an existing override before host fallbacks.
+# This fixture does not exercise export, and must not start host Python.
+cat > "$DATA_DIR/docs-sidecar-disabled" <<'SH'
+#!/bin/sh
+echo 'Docs export is disabled in this publication test fixture.' >&2
+exit 78
+SH
+chmod 700 "$DATA_DIR/docs-sidecar-disabled"
 
 # ── The config, written rather than produced ────────────────────────────────
 #
@@ -105,17 +129,35 @@ TOML
 
 # ── Start, and prove it is ours ─────────────────────────────────────────────
 
-KRONN_DATA_DIR="$DATA_DIR" KRONN_HOST=127.0.0.1 KRONN_HOST_HOME="$DATA_DIR/host-home" \
-    "$BINARY" >"$DATA_DIR/backend.log" 2>&1 &
+(
+    cd "$DATA_DIR"
+    exec env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin \
+        KRONN_DATA_DIR="$DATA_DIR" KRONN_HOST=127.0.0.1 \
+        KRONN_HOST_HOME="$DATA_DIR/host-home" \
+        KRONN_BACKEND_URL="http://127.0.0.1:$PORT" KRONN_USE_KEYCHAIN=0 \
+        KRONN_BACKUP_DIR="$DATA_DIR/backups" KRONN_BACKUP_INTERVAL_HOURS=0 \
+        KRONN_DOCS_SIDECAR="$DATA_DIR/docs-sidecar-disabled" \
+        XDG_CONFIG_HOME="$DATA_DIR/xdg-config" XDG_CACHE_HOME="$DATA_DIR/cache" \
+        TMPDIR="$DATA_DIR/tmp" "$BINARY"
+) < /dev/null >"$DATA_DIR/backend.log" 2>&1 &
 backend=$!
 
 # From here on, any exit that is not a success takes the backend with it.
-cleanup_on_failure() { kill "$backend" 2>/dev/null || true; }
+cleanup_on_failure() {
+    kill "$backend" 2>/dev/null || true
+    for _ in $(seq 1 50); do
+        kill -0 "$backend" 2>/dev/null || break
+        sleep 0.1
+    done
+    kill -KILL "$backend" 2>/dev/null || true
+    wait "$backend" 2>/dev/null || true
+}
 trap cleanup_on_failure EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # Attempts, not a duration. Overridable so the tests can prove the refusal
 # path without spending ninety seconds on it.
-readonly HEALTH_TRIES="${KRONN_E2E_HEALTH_TRIES:-90}"
 healthy=""
 for _ in $(seq 1 "$HEALTH_TRIES"); do
     if ! kill -0 "$backend" 2>/dev/null; then
@@ -123,7 +165,7 @@ for _ in $(seq 1 "$HEALTH_TRIES"); do
     fi
     # A 200 AND the body it is supposed to carry. A reverse proxy, a stale
     # sandbox or a captive portal can all return 200 with something else.
-    if curl -fsS --max-time 5 "http://127.0.0.1:$PORT/api/health" 2>/dev/null | grep -q '"ok":true'; then
+    if curl -q -fsS --noproxy '*' --max-time 5 "http://127.0.0.1:$PORT/api/health" 2>/dev/null | grep -q '"ok":true'; then
         healthy=yes
         break
     fi
@@ -135,5 +177,6 @@ listener="$(lsof -nP -iTCP:"$PORT" -sTCP:LISTEN -t 2>/dev/null | head -1)"
 [[ "$listener" == "$backend" ]] \
     || die "port $PORT is served by pid ${listener:-nobody}, not by the backend just started ($backend)"
 
+printf '%s\n' "$backend" > "$DATA_DIR/backend.pid"
 trap - EXIT
 echo "$backend"
