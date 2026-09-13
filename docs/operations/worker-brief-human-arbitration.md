@@ -21,8 +21,11 @@ orchestrator's attach notice at acceptance and, after a validated
 DeliveryManifest, its review request are not the only parent milestones — a
 joined CLI may add real ones itself. Native and HTTP workers declare neither
 tool at all, so their brief still says so plainly, with no explicit-id nuance to
-add; both variants ask for a principal relay when a human decision must reach
-the parent and the worker cannot or should not publish it itself.
+add. Their relay request is not limited to human decisions: the brief also asks
+them to report any other verified notable fact (progress, a blocker, a result)
+through their actually available output and to explicitly ask the principal to
+relay it toward the parent room — without promising automatic visibility,
+guaranteed delivery, or a publication tool the surface does not declare.
 [src: file: backend/src/api/orchestration.rs:5271-5300]
 [src: file: backend/src/api/orchestration.rs:5136-5157]
 [src: file: backend/src/api/orchestration.rs:5163-5189]

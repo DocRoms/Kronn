@@ -5268,15 +5268,10 @@ fn worker_brief_markdown(
            ne décide jamais à la place de l'humain.\n\n"
             .to_string()
     };
-    // `disc_append` defaults to this session's own bound sub-discussion but accepts an
-    // explicit `disc_id` (backend/scripts/disc-introspection-mcp.py:5063) — it is NOT
-    // restricted to the child room. `task_exec_status` exposes the real, authorized
-    // `parent_discussion_id` (TaskExecutionLineage), so a joined CLI CAN post an explicit
-    // factual milestone straight to the parent when one is warranted; it just never happens
-    // automatically. `disc_question_list` truly is bound-only — it always reads `_disc_id()`
-    // and ignores any id argument (backend/scripts/disc-introspection-mcp.py:4278-4289) — so
-    // it can never see the parent's pending questions. Native/HTTP workers declare neither
-    // tool at all.
+    // `disc_append` accepts an explicit `disc_id` (backend/scripts/disc-introspection-mcp.py:5063),
+    // so a joined CLI can target the real parent via `task_exec_status`'s `parent_discussion_id`.
+    // `disc_question_list` truly is bound-only (backend/scripts/disc-introspection-mcp.py:4278-4289).
+    // Native/HTTP workers declare neither tool.
     let parent_milestones = if has_room_publication {
         "## Jalons parent factuels\n\
          `disc_append` cible par défaut la sous-discussion où cette session a été rebranchée \
@@ -5295,11 +5290,12 @@ fn worker_brief_markdown(
     } else {
         "## Jalons parent factuels\n\
          Cette surface ne déclare aucun outil de publication de message (ni `disc_append` \
-         ni `disc_question_list`). Les seuls jalons parent factuels sont l'attachement \
+         ni `disc_question_list`). Les seuls jalons parent automatiques sont l'attachement \
          enregistré par l'orchestrateur et, après un DeliveryManifest validé, la demande de \
-         revue qu'il crée. Signale tes faits vérifiés uniquement dans le blocker ou la \
-         livraison, et demande au principal de relayer si une décision humaine doit atteindre \
-         la room parente ; pas de miroir automatique, ni d'outil de publication inventé.\n\n"
+         revue. Pour tout autre fait vérifié notable (avancement, blocker, résultat), \
+         signale-le dans ta sortie disponible et demande au principal de le relayer vers la \
+         room parente, pas seulement pour une décision humaine ; ni visibilité automatique \
+         ni livraison garantie, pas de miroir automatique, ni d'outil inventé.\n\n"
             .to_string()
     };
     let dod = if dod.is_empty() {
@@ -10446,6 +10442,21 @@ mod tests {
             assert!(
                 !brief.contains("jamais la room parente directement"),
                 "{name}: {brief}"
+            );
+            // The old text tied principal relay to human decisions only ("si une décision
+            // humaine doit atteindre la room parente"), falsely implying notable non-decision
+            // milestones (progress/blocker/result) have no relay path at all.
+            assert!(
+                !brief.contains("si une décision humaine doit atteindre la room parente"),
+                "{name}: relay must not be restricted to human decisions only: {brief}"
+            );
+            assert!(
+                brief.contains("pas seulement pour une décision humaine"),
+                "{name}: must ask for relay of notable facts, not just human decisions: {brief}"
+            );
+            assert!(
+                brief.contains("avancement") && brief.contains("résultat"),
+                "{name}: must name progress/result as relayable notable facts: {brief}"
             );
         }
     }
