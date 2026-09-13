@@ -2994,7 +2994,7 @@ export type ImportantAuthorKind = "orchestrator" | "human";
  * The closed set. A category is part of the contract, so a new one is a
  * deliberate migration, never a free-text label.
  */
-export type ImportantCategory = "decision" | "scope_change" | "dod_waiver" | "blocking_alert" | "human_action_required" | "accepted_delivery";
+export type ImportantCategory = "information" | "decision" | "scope_change" | "dod_waiver" | "blocking_alert" | "human_action_required" | "accepted_delivery";
 
 /**
  * What one message's fences produced. Counts are reported back so a refused

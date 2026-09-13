@@ -9,6 +9,7 @@ import { discussions as discussionsApi } from './api';
 import type { ImportantCategory, ImportantMessage } from '../types/generated';
 
 export const IMPORTANT_CATEGORIES: ImportantCategory[] = [
+  'information',
   'decision',
   'scope_change',
   'dod_waiver',

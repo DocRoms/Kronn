@@ -508,7 +508,7 @@ export function DiscussionsPage({
   // Loaded for the plan panel itself. Its completed/total pair used to be
   // shown in the header button too; the panel shows it, so the switcher does
   // not repeat it — one number, one place.
-  const [, setDiscussionPlan] = useState<DiscussionPlan | null>(null);
+  const [discussionPlan, setDiscussionPlan] = useState<DiscussionPlan | null>(null);
   const [proposalInbox, setProposalInbox] = useState<ProposalListResponse | null>(null);
   const [proposalInboxDiscussionId, setProposalInboxDiscussionId] = useState<string | null>(null);
   // KT-587 — keyed by the discussion they were fetched for, so switching rooms
@@ -5177,6 +5177,13 @@ export function DiscussionsPage({
                 cancelQueuedPreparation();
                 setPublicationGrant(value);
               }}
+              onPublish={handleSendMessage}
+              onOpenSettings={() => onNavigate('settings')}
+              tasks={[
+                ...(discussionPlan?.primary_objective ? [discussionPlan.primary_objective] : []),
+                ...(discussionPlan?.active.map(relation => relation.task) ?? []),
+                ...(discussionPlan?.later.map(relation => relation.task) ?? []),
+              ].filter((task, index, all) => all.findIndex(candidate => candidate.reference === task.reference) === index)}
               t={t}
             />
             <ChatInput

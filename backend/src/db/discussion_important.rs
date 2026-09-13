@@ -33,6 +33,7 @@ const MAX_SPEC_BYTES: usize = 24_000;
 #[serde(rename_all = "snake_case")]
 #[ts(export)]
 pub enum ImportantCategory {
+    Information,
     Decision,
     ScopeChange,
     DodWaiver,
@@ -44,6 +45,7 @@ pub enum ImportantCategory {
 impl ImportantCategory {
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Information => "information",
             Self::Decision => "decision",
             Self::ScopeChange => "scope_change",
             Self::DodWaiver => "dod_waiver",
@@ -58,6 +60,7 @@ impl ImportantCategory {
     /// `Err` — an unrecognised value is simply not a category).
     pub fn parse(value: &str) -> Option<Self> {
         Some(match value {
+            "information" => Self::Information,
             "decision" => Self::Decision,
             "scope_change" => Self::ScopeChange,
             "dod_waiver" => Self::DodWaiver,
