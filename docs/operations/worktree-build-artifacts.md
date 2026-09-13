@@ -22,6 +22,28 @@ destructive.
 1 689 865 stale files; deleting them one by one took over 44 minutes of APFS
 I/O. Any check that runs on a failing path must not be the thing that walks it.
 
+### Recurrence on 2026-09-13 — KT-638
+
+During 0.13.0 qualification, the protected KT-635 candidate was not applied:
+its complete library run recorded 5,946 passes and 131 failures, each a
+worktree-provisioning refusal below the 5 GiB critical threshold. The saved
+failure log therefore identified disk pressure rather than independent product
+regressions; the threshold was not lowered. [src: user: 2026-09-13: KT-638 incident record]
+
+The authorised recovery paused owned build activity and reclaimed only named,
+regenerable targets after ownership, live-use, path and Git-state checks. It
+preserved sources, worktrees, Git state, databases, host settings and the
+running backend; the later maintenance inventory rechecked eligibility before
+reclaiming its one named managed target. The final recorded free-space reading
+was 1,449,400,604 KiB. This recovery is evidence of a manual exception, not
+authority for automatic deletion of interactive or unknown targets. [src: user: 2026-09-13: kt638-old-targets-maintenance-013]
+
+The recurrence also exposed that non-terminal old executions and unregistered
+manual worktrees do not become reclaimable merely because a planning task is
+done. KT-638 keeps prevention open: it does not lower disk thresholds, ignore
+tests, scan recursively on a failing request, or authorise deletion of active
+or unowned targets. [src: file: backend/src/core/worktree.rs:451-558]
+
 ## Ownership
 
 | Path | Owner | Cleanable |
@@ -136,16 +158,15 @@ active, or leased targets. [src: file: backend/src/core/worktree.rs:451-558]
 
 ## KT-638 profile benchmark record
 
-The approved profile comparison has not been run in this checkout. The current
-disk-capacity incident leaves less than the configured build critical headroom,
-so a cold build would contradict the guard being introduced. Before adopting
-the profile beyond this committed, Kronn-only manifest change, run the following
-commands against the same source revision and separate, owned target directories;
-record elapsed wall time and `du -sh` after each cold, warm, and source-touch
-rebuild run:
+The approved profile comparison has not been run in this checkout. Before
+adopting the profile beyond this committed, Kronn-only manifest change, compare
+the historical debug level 2 with incremental compilation enabled against the
+new line-table-only, non-incremental profile. Use the same source revision,
+commands and separate owned target directories; record elapsed wall time and
+`du -sh` after each cold, warm, and source-touch rebuild run:
 
 ```text
-CARGO_TARGET_DIR=<owned-old-target> cargo build --manifest-path backend/Cargo.toml --config profile.dev.debug=true
+CARGO_TARGET_DIR=<owned-old-target> cargo build --manifest-path backend/Cargo.toml --config profile.dev.debug=2 --config profile.dev.incremental=true
 CARGO_TARGET_DIR=<owned-new-target> cargo build --manifest-path backend/Cargo.toml
 ```
 

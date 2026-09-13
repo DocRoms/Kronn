@@ -2501,10 +2501,9 @@ async fn validation_build_path(
     cwd: &std::path::Path,
 ) -> Result<std::path::PathBuf, String> {
     const METADATA_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
-    let words: Vec<&str> = spec.command.split_whitespace().collect();
-    if words.first() != Some(&"cargo") {
+    let Some(words) = validation_cargo_argv(&spec.command)? else {
         return Ok(cwd.to_path_buf());
-    }
+    };
 
     let mut metadata = crate::core::cmd::async_cmd("cargo");
     metadata
@@ -2525,7 +2524,9 @@ async fn validation_build_path(
     // cwd alone would reject that normal form before Quick Exec can run it.
     // `cargo metadata` has no `--target-dir`, so its equivalent environment
     // override retains the effective output directory for that one invocation.
-    let mut index = 1;
+    // Cargo's validation subcommand is ignored; only its global resolution
+    // options are forwarded to metadata, wherever the literal argv placed them.
+    let mut index = 0;
     while index < words.len() {
         let word = words[index];
         if word == "--target-dir" {
@@ -2551,19 +2552,23 @@ async fn validation_build_path(
         }
         index += 1;
     }
-    let output = tokio::time::timeout(METADATA_TIMEOUT, metadata.output())
+    metadata
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        // `wait_for_metadata_output` owns timeout cleanup and reaps the child.
+        .kill_on_drop(true);
+    let mut child = metadata.spawn().map_err(|error| {
+        format!(
+            "cannot resolve Cargo target for validation in {}: {error}",
+            cwd.display()
+        )
+    })?;
+    let output = wait_for_metadata_output(&mut child, METADATA_TIMEOUT)
         .await
-        .map_err(|_| {
+        .map_err(|reason| {
             format!(
-                "Cargo target resolution timed out after {} seconds for validation in {}",
-                METADATA_TIMEOUT.as_secs(),
-                cwd.display()
-            )
-        })?
-        .map_err(|error| {
-            format!(
-                "cannot resolve Cargo target for validation in {}: {error}",
-                cwd.display()
+                "cannot resolve Cargo target for validation in {}: {reason}",
+                cwd.display(),
             )
         })?;
     if !output.status.success() {
@@ -2589,6 +2594,76 @@ async fn validation_build_path(
             )
         })?;
     Ok(std::path::PathBuf::from(target))
+}
+
+/// Return Cargo's literal argv for the forms Quick Exec already launches.
+///
+/// `ValidationSpec::command` is deliberately split exactly as the runner splits
+/// it below; this is not a shell parser and it does not make shell syntax valid.
+fn validation_cargo_argv(command: &str) -> Result<Option<Vec<&str>>, String> {
+    let words: Vec<&str> = command.split_whitespace().collect();
+    let cargo = match words.as_slice() {
+        ["cargo", rest @ ..] => rest,
+        ["rtk", "cargo", rest @ ..] => rest,
+        ["rtk", "proxy", "cargo", rest @ ..] => rest,
+        _ => return Ok(None),
+    };
+    if cargo.is_empty() {
+        return Err("validation cargo command has no Cargo arguments".into());
+    }
+    Ok(Some(cargo.to_vec()))
+}
+
+async fn wait_for_metadata_output(
+    child: &mut tokio::process::Child,
+    timeout: std::time::Duration,
+) -> Result<std::process::Output, String> {
+    use tokio::io::AsyncReadExt;
+
+    let mut stdout = child.stdout.take();
+    let mut stderr = child.stderr.take();
+    let captured = {
+        let output = async {
+            let read_stdout = async {
+                let mut bytes = Vec::new();
+                if let Some(pipe) = stdout.as_mut() {
+                    pipe.read_to_end(&mut bytes).await?;
+                }
+                Ok::<_, std::io::Error>(bytes)
+            };
+            let read_stderr = async {
+                let mut bytes = Vec::new();
+                if let Some(pipe) = stderr.as_mut() {
+                    pipe.read_to_end(&mut bytes).await?;
+                }
+                Ok::<_, std::io::Error>(bytes)
+            };
+            let (status, stdout, stderr) =
+                tokio::try_join!(child.wait(), read_stdout, read_stderr)?;
+            Ok::<_, std::io::Error>(std::process::Output {
+                status,
+                stdout,
+                stderr,
+            })
+        };
+        tokio::time::timeout(timeout, output).await
+    };
+    match captured {
+        Ok(Ok(output)) => Ok(output),
+        Ok(Err(error)) => {
+            let _ = child.kill().await;
+            Err(error.to_string())
+        }
+        Err(_) => {
+            // `kill` waits for collection, so a timed-out metadata process
+            // cannot survive and contend with the following validation.
+            let _ = child.kill().await;
+            Err(format!(
+                "Cargo target resolution timed out after {} seconds",
+                timeout.as_secs()
+            ))
+        }
+    }
 }
 
 async fn run_one_validation_checked(
@@ -12592,6 +12667,101 @@ mod tests {
 
         let resolved = validation_build_path(&spec, project.path()).await.unwrap();
         assert_eq!(resolved, target);
+    }
+
+    #[test]
+    fn validation_cargo_argv_recognises_only_quick_exec_cargo_forms() {
+        assert_eq!(
+            validation_cargo_argv("cargo test --manifest-path backend/Cargo.toml").unwrap(),
+            Some(vec!["test", "--manifest-path", "backend/Cargo.toml"])
+        );
+        assert_eq!(
+            validation_cargo_argv("rtk cargo clippy --target-dir target").unwrap(),
+            Some(vec!["clippy", "--target-dir", "target"])
+        );
+        assert_eq!(
+            validation_cargo_argv("rtk proxy cargo fmt --config build.target-dir=elsewhere")
+                .unwrap(),
+            Some(vec!["fmt", "--config", "build.target-dir=elsewhere"])
+        );
+        assert_eq!(validation_cargo_argv("rtk git status").unwrap(), None);
+        assert!(validation_cargo_argv("rtk cargo").is_err());
+        assert!(validation_cargo_argv("rtk proxy cargo --target-dir").is_ok());
+    }
+
+    #[tokio::test]
+    async fn cargo_validation_wrappers_preserve_root_manifest_config_and_target() {
+        let project = tempfile::tempdir().unwrap();
+        let backend = project.path().join("backend");
+        std::fs::create_dir(&backend).unwrap();
+        std::fs::create_dir(backend.join("src")).unwrap();
+        std::fs::write(
+            backend.join("Cargo.toml"),
+            "[package]\nname = \"wrapper_manifest_fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::write(backend.join("src/lib.rs"), "pub fn fixture() {}\n").unwrap();
+
+        for (prefix, target_name) in [
+            ("cargo", "plain-target"),
+            ("rtk cargo", "rtk-target"),
+            ("rtk proxy cargo", "proxy-target"),
+        ] {
+            let spec = ValidationSpec {
+                command: format!(
+                    "{prefix} test --manifest-path backend/Cargo.toml --config build.target-dir=ignored --target-dir {target_name}"
+                ),
+                quick_exec_id: None,
+                timeout_secs: Some(5),
+            };
+            assert_eq!(
+                validation_build_path(&spec, project.path()).await.unwrap(),
+                project.path().join(target_name),
+                "{prefix} must use Cargo's effective target"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn cargo_validation_refuses_missing_target_or_manifest_values() {
+        let cwd = tempfile::tempdir().unwrap();
+        for command in [
+            "cargo test --target-dir",
+            "rtk cargo test --manifest-path",
+            "rtk proxy cargo test --config",
+        ] {
+            let spec = ValidationSpec {
+                command: command.into(),
+                quick_exec_id: None,
+                timeout_secs: Some(5),
+            };
+            assert!(
+                validation_build_path(&spec, cwd.path()).await.is_err(),
+                "{command} must be refused before metadata runs"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn metadata_timeout_kills_and_reaps_the_owned_child() {
+        use std::process::Stdio;
+
+        let mut child = crate::core::cmd::async_cmd("sh")
+            .args(["-c", "read _"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let result = wait_for_metadata_output(&mut child, std::time::Duration::ZERO).await;
+
+        assert!(result.unwrap_err().contains("timed out"));
+        assert!(
+            child.try_wait().unwrap().is_some(),
+            "the timeout must collect its owned metadata child"
+        );
     }
 
     #[tokio::test]

@@ -519,6 +519,7 @@ EOF
         KRONN_TEST_BACKEND_STARTS="$starts" \
         KRONN_TEST_CARGO_DONE="$cargo_done" \
         bash -c '
+            set -e
             "$1" >/dev/null 2>&1 &
             supervisor=$!
             for _ in $(seq 1 40); do
@@ -577,6 +578,7 @@ EOF
         KRONN_TEST_BACKEND_STARTS="$starts" \
         KRONN_TEST_CARGO_MARKER="$cargo_marker" \
         bash -c '
+            set -e
             "$1" >"$2" 2>&1 &
             supervisor=$!
             for _ in $(seq 1 80); do

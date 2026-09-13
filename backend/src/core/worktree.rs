@@ -489,20 +489,17 @@ fn ensure_disk_headroom(path: &Path, warning_gib: u64, critical_gib: u64) -> Res
 /// observes free space and never attempts cleanup: the interactive target and
 /// any unrecognised cache remain outside automatic deletion ownership.
 pub fn ensure_build_disk_headroom(path: &Path) -> Result<(), String> {
-    // Cargo creates a fresh target directory on a checkout's first build. Do
-    // the same only when its immediate parent already exists and is a real
-    // directory. This permits the normal fresh checkout while refusing to
-    // recursively create an arbitrary output path. An existing symlink is
-    // refused: following it would make a qualification check inspect a target
-    // whose ownership is not represented by this path.
-    match std::fs::symlink_metadata(path) {
+    // Cargo creates a target on its first build. Inspect its existing real
+    // parent in that case instead of creating output during a guard; Cargo
+    // remains the sole writer of the exact target path.
+    let measured_path = match std::fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_symlink() => {
             return Err(format!(
                 "refusing to run a build or validation: build target {} is a symlink",
                 path.display()
             ));
         }
-        Ok(_) => {}
+        Ok(_) => path.to_path_buf(),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             let parent = path.parent().ok_or_else(|| {
                 format!(
@@ -522,12 +519,7 @@ pub fn ensure_build_disk_headroom(path: &Path) -> Result<(), String> {
                     parent.display()
                 ));
             }
-            std::fs::create_dir(path).map_err(|error| {
-                format!(
-                    "refusing to run a build or validation: build target {} cannot be prepared: {error}",
-                    path.display()
-                )
-            })?;
+            parent.to_path_buf()
         }
         Err(error) => {
             return Err(format!(
@@ -535,11 +527,11 @@ pub fn ensure_build_disk_headroom(path: &Path) -> Result<(), String> {
                 path.display()
             ));
         }
-    }
-    let target = path.canonicalize().map_err(|error| {
+    };
+    let target = measured_path.canonicalize().map_err(|error| {
         format!(
             "refusing to run a build or validation: build target {} cannot be resolved: {error}",
-            path.display()
+            measured_path.display()
         )
     })?;
     if !target.is_dir() {
@@ -2872,11 +2864,14 @@ mod tests {
     }
 
     #[test]
-    fn build_headroom_prepares_a_fresh_target_before_measuring_it() {
+    fn build_headroom_measures_a_fresh_target_parent_without_creating_output() {
         let root = tempfile::tempdir().unwrap();
         let absent = root.path().join("target with spaces");
         ensure_build_disk_headroom(&absent).unwrap();
-        assert!(absent.is_dir());
+        assert!(
+            !absent.exists(),
+            "the guard must leave first-build target creation to Cargo"
+        );
     }
 
     #[test]
