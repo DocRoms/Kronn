@@ -1378,11 +1378,24 @@ export function DiscussionsPage({
     toast(t('disc.batchReviewDraftReady'), 'success');
   }, [toast, t]);
 
+  const [composerNativeMode, setComposerNativeMode] = useState<{
+    discussionId: string;
+    disabled: boolean | null;
+  } | null>(null);
+  const handleNativeAgentModeChange = useCallback((discussionId: string, disabled: boolean | null) => {
+    setComposerNativeMode({ discussionId, disabled });
+  }, []);
+
   const activeAgentDisabled = useMemo(() => {
     if (!activeDiscussion || agents.length === 0) return false;
+    // Human/CLI-only rooms do not require an installed native provider. Use
+    // the header's authoritative, room-scoped mode, never another room's
+    // previous value or a guessed mode while its request is pending.
+    if (composerNativeMode?.discussionId === activeDiscussion.id
+      && composerNativeMode.disabled === true) return false;
     const agentDet = agents.find(a => a.agent_type === activeDiscussion.agent);
     return !agentDet || !isUsable(agentDet);
-  }, [activeDiscussion, agents]);
+  }, [activeDiscussion, agents, composerNativeMode]);
 
   const activeDiscussionMessages = activeDiscussion?.messages;
   const loadedActiveDiscussionId = activeDiscussion?.id;
@@ -3917,6 +3930,7 @@ export function DiscussionsPage({
               })}
               onToggleSidebar={() => setSidebarOpen(true)}
               onDiscussionUpdated={handleDiscussionUpdated}
+              onNativeAgentModeChange={handleNativeAgentModeChange}
               onAgentSwitch={handleAgentSwitch}
               toast={toast}
               t={t}

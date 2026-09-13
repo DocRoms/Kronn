@@ -58,6 +58,8 @@ export interface ChatHeaderProps {
   /** Any panel currently open — the control reads as expanded then. */
   onToggleSidebar: () => void;
   onDiscussionUpdated: () => void;
+  /** Share the authoritative room mode with the composer, scoped by identity. */
+  onNativeAgentModeChange?: (discussionId: string, disabled: boolean | null) => void;
   onAgentSwitch: (newAgent: AgentType) => void;
   toast: ToastFn;
   t: (key: string, ...args: (string | number)[]) => string;
@@ -75,6 +77,7 @@ export function ChatHeader({
   onToggleSettingsPanel,
   onToggleSidebar,
   onDiscussionUpdated,
+  onNativeAgentModeChange,
   onAgentSwitch,
   toast,
   t,
@@ -194,6 +197,10 @@ export function ChatHeader({
   const nativeAgentDisabled = nativeAgentMode?.discussionId === discussion.id
     ? nativeAgentMode.disabled
     : null;
+
+  useEffect(() => {
+    onNativeAgentModeChange?.(discussion.id, nativeAgentDisabled);
+  }, [discussion.id, nativeAgentDisabled, onNativeAgentModeChange]);
 
   const toggleDetails = () => {
     setDetailsOpen(open => {

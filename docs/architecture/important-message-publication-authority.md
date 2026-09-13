@@ -155,6 +155,12 @@ the remedy. An ordinary message asks for nothing at all.
 important card publishes until an operator bootstraps. That is deliberate and it
 is a real behaviour change, not a silent tightening.
 
+A room explicitly running without its native agent still accepts human text
+and publication from the composer, even if that provider is not installed.
+The header's authoritative room mode controls the missing-provider guard;
+switching rooms cannot reuse another room's mode, and re-enabling an unavailable
+native restores that guard. Publication credentials never enable a provider.
+
 ## Queued messages and interrupted publication
 
 The UI obtains a fresh proof immediately before each queued send, including a

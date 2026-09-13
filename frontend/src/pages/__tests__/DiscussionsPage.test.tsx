@@ -220,6 +220,8 @@ const noop = () => {};
 const toastFn: ToastFn = vi.fn();
 
 beforeEach(() => {
+  vi.mocked(discussionsApi.nativeAgentMode).mockReset();
+  vi.mocked(discussionsApi.nativeAgentMode).mockResolvedValue({ disabled: false });
   vi.mocked(discussionsApi.get).mockReset();
   vi.mocked(discussionsApi.searchMessages).mockReset();
   vi.mocked(discussionsApi.searchMessages).mockResolvedValue([]);
@@ -302,6 +304,77 @@ const openPanel = async (name: RegExp) => {
 };
 
 describe('DiscussionsPage', () => {
+  const unavailableNative: AgentDetection = {
+    agent_type: 'ClaudeCode', name: 'Claude Code', installed: false, enabled: false,
+    path: null, version: null, latest_version: null, origin: 'npm',
+    install_command: null, host_managed: false, host_label: null,
+    runtime_available: false, rtk_available: false, rtk_hook_configured: false,
+  };
+
+  async function renderWithoutNativeProvider() {
+    const discussion = makeListDiscussion('d-no-native-provider', 0);
+    const other = makeListDiscussion('d-native-required', 0);
+    vi.mocked(discussionsApi.get).mockImplementation(async id => id === discussion.id ? discussion : other);
+    const lifted = liftedProps();
+    const page = (openDiscussionId?: string) => (
+      <DiscussionsPage
+        projects={[]} agents={[unavailableNative]} allDiscussions={[discussion, other]}
+        configLanguage="fr" agentAccess={null}
+        refetchDiscussions={noop} refetchProjects={noop} onNavigate={noop}
+        toast={toastFn} initialActiveDiscussionId={discussion.id} {...lifted}
+        openDiscussionId={openDiscussionId}
+      />
+    );
+    const view = await wrap(page());
+    return { view, page, discussion, other };
+  }
+
+  it('allows human publication in a no_agent room without an installed native provider', async () => {
+    vi.mocked(discussionsApi.nativeAgentMode).mockResolvedValue({ disabled: true });
+    vi.mocked(discussionsApi.sendMessageStream).mockReset();
+    vi.mocked(discussionsApi.sendMessageStream).mockResolvedValue(undefined);
+    vi.mocked(publicationCredentials.proof).mockReset();
+    vi.mocked(publicationCredentials.proof).mockResolvedValue('human-no-native-proof');
+    await renderWithoutNativeProvider();
+    const textarea = document.querySelector('.disc-composer-textarea')!;
+    await waitFor(() => expect(textarea).toBeEnabled());
+    expect(document.querySelector('.disc-agent-disabled-banner')).toBeNull();
+    fireEvent.change(document.querySelector('#important-publish-grant')!, { target: { value: 'human-no-native-grant' } });
+    fireEvent.change(textarea, { target: { value: importantQueuedContent } });
+    fireEvent.click(document.querySelector('.disc-send-btn')!);
+    await waitFor(() => expect(discussionsApi.sendMessageStream).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(discussionsApi.sendMessageStream).mock.calls[0].slice(0, 2)).toEqual([
+      'd-no-native-provider',
+      expect.objectContaining({ content: importantQueuedContent, publication_proof: 'human-no-native-proof' }),
+    ]);
+    // Re-enabling the missing native must restore the ordinary runtime guard
+    // immediately after the server accepts the operator's mode change.
+    vi.mocked(discussionsApi.update).mockResolvedValue(undefined);
+    fireEvent.click(screen.getByTestId('disc-native-agent-disabled'));
+    await waitFor(() => expect(textarea).toBeDisabled());
+    expect(document.querySelector('.disc-agent-disabled-banner')).not.toBeNull();
+  });
+
+  it.each(['required', 'unknown'] as const)('keeps an unavailable native blocked when its mode is %s', async mode => {
+    if (mode === 'unknown') vi.mocked(discussionsApi.nativeAgentMode).mockImplementation(() => new Promise(() => {}));
+    await renderWithoutNativeProvider();
+    expect(document.querySelector('.disc-composer-textarea')).toBeDisabled();
+  });
+
+  it('does not carry no_agent permission into another room before its mode has loaded', async () => {
+    let resolveMode!: (mode: { disabled: boolean }) => void;
+    const pending = new Promise<{ disabled: boolean }>(resolve => { resolveMode = resolve; });
+    vi.mocked(discussionsApi.nativeAgentMode).mockImplementation(id => id === 'd-no-native-provider'
+      ? Promise.resolve({ disabled: true }) : pending);
+    const { view, page, other } = await renderWithoutNativeProvider();
+    await waitFor(() => expect(document.querySelector('.disc-composer-textarea')).toBeEnabled());
+    view.rerender(<I18nProvider>{page(other.id)}</I18nProvider>);
+    await waitFor(() => expect(discussionsApi.nativeAgentMode).toHaveBeenCalledWith(other.id));
+    expect(document.querySelector('.disc-composer-textarea')).toBeDisabled();
+    await act(async () => resolveMode({ disabled: false }));
+    expect(document.querySelector('.disc-composer-textarea')).toBeDisabled();
+  });
+
   const importantQueuedContent = 'Texte conservé é🙂\n\n' + '\x60\x60\x60kronn-important\n' + JSON.stringify({
     version: 1,
     category: 'decision',
