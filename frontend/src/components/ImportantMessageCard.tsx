@@ -4,7 +4,7 @@
 // fence is what the orchestrator typed, the row is what Kronn recorded and
 // what the counter, the filter and the navigation all agree on.
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AlertTriangle, ChevronDown, ChevronUp } from 'lucide-react';
 import { useT } from '../lib/I18nContext';
 import {
@@ -145,36 +145,50 @@ export function ImportantMessagesBar({
 }: ImportantMessagesBarProps) {
   const { t } = useT();
   const { items, totalAll, loaded } = useImportantMessages(discussionId);
-  const [category, setCategory] = useState<ImportantCategory | ''>('');
-  const [cursor, setCursor] = useState(0);
+  const [selections, setSelections] = useState<Record<string, {
+    category: ImportantCategory | '';
+    messageId?: string;
+  }>>({});
+  const room = discussionId ?? '';
+  const selection = selections[room];
+  const category = selection?.category ?? '';
+  const previousRefresh = useRef<{ discussionId?: string; messageRevision?: string }>({});
 
   const visible = useMemo(
     () => (category ? items.filter((item) => item.category === category) : items),
     [items, category],
   );
+  // Row identities survive re-fetching, insertion and room changes; numeric
+  // positions do not. A removed selection falls back within the current list
+  // without causing an unsolicited transcript jump.
+  const cursor = Math.max(0, visible.findIndex(item => item.message_id === selection?.messageId));
 
   // A filter change makes the old index meaningless, so the reset happens in
   // the event that caused it — not in an effect watching for it afterwards.
   const changeCategory = (next: ImportantCategory | '') => {
-    setCategory(next);
-    setCursor(0);
+    setSelections(current => ({ ...current, [room]: { category: next } }));
   };
 
   // A new durable message is the only moment a card can have appeared. Without
   // this the store stayed on its first GET, so an arriving card showed as
   // "not recorded" and the counter stayed behind until a reload.
   useEffect(() => {
-    if (discussionId && messageRevision) refreshImportantMessages(discussionId);
+    const newArrival = previousRefresh.current.discussionId === discussionId
+      && previousRefresh.current.messageRevision !== messageRevision;
+    previousRefresh.current = { discussionId, messageRevision };
+    // Initial/new-room reads coalesce with the hook's mount request. A later
+    // arrival in this room must invalidate even an already pending snapshot.
+    if (discussionId && messageRevision) refreshImportantMessages(discussionId, newArrival);
   }, [discussionId, messageRevision]);
 
   const goTo = useCallback(
     (index: number) => {
       const target = visible[index];
       if (!target) return;
-      setCursor(index);
+      setSelections(current => ({ ...current, [room]: { category, messageId: target.message_id } }));
       onNavigate?.(target.message_id);
     },
-    [visible, onNavigate],
+    [visible, onNavigate, room, category],
   );
 
   // Separate from `goTo` so the current card stays reachable when there is only

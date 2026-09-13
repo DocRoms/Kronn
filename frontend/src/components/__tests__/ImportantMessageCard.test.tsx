@@ -1,7 +1,8 @@
 // KT-619 — what the reader actually sees, and what the bar promises them.
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, waitFor, cleanup } from '@testing-library/react';
+import { StrictMode } from 'react';
+import { act, render, screen, waitFor, cleanup } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { ImportantMessage } from '../../types/generated';
 
@@ -24,7 +25,7 @@ vi.mock('../../lib/I18nContext', () => ({
 }));
 
 import { ImportantMessageCard, ImportantMessagesBar } from '../ImportantMessageCard';
-import { clearImportantMessages } from '../../lib/importantMessages';
+import { clearImportantMessages, refreshImportantMessages } from '../../lib/importantMessages';
 
 const DISC = 'd-1';
 
@@ -233,6 +234,90 @@ describe('ImportantMessagesBar', () => {
     expect(importantMessages).toHaveBeenCalledTimes(1);
   });
 
+  it('keeps each room on its own current card when switching away and back', async () => {
+    const other = 'd-navigation-other';
+    clearImportantMessages(other);
+    importantMessages.mockImplementation(async (id: string) => {
+      const items = id === DISC ? three : [card({ discussion_id: other, message_id: 'other-message' })];
+      return { items, total: items.length, total_all: items.length };
+    });
+    const onNavigate = vi.fn();
+    const { rerender } = render(<ImportantMessagesBar discussionId={DISC} onNavigate={onNavigate} />);
+    await screen.findByText('disc.important.position|1|3');
+    await userEvent.click(screen.getByLabelText('disc.important.next'));
+    await userEvent.click(screen.getByLabelText('disc.important.next'));
+    expect(screen.getByText('disc.important.position|3|3')).toBeVisible();
+    rerender(<ImportantMessagesBar discussionId={other} onNavigate={onNavigate} />);
+    await screen.findByText('disc.important.position|1|1');
+    expect(screen.getByLabelText('disc.important.previous')).toBeDisabled();
+    rerender(<ImportantMessagesBar discussionId={DISC} onNavigate={onNavigate} />);
+    await screen.findByText('disc.important.position|3|3');
+    await userEvent.click(screen.getByLabelText('disc.important.goToCurrent'));
+    expect(onNavigate).toHaveBeenLastCalledWith('m-3');
+  });
+
+  it('restores a room filter without applying it to another room', async () => {
+    const other = 'd-filter-other';
+    clearImportantMessages(other);
+    importantMessages.mockImplementation(async (id: string) => {
+      const items = id === DISC ? three : [card({ discussion_id: other, message_id: 'other-message' })];
+      return { items, total: items.length, total_all: items.length };
+    });
+    const { rerender } = render(<ImportantMessagesBar discussionId={DISC} />);
+    await screen.findByText('disc.important.position|1|3');
+    await userEvent.selectOptions(screen.getByLabelText('disc.important.filterLabel'), 'blocking_alert');
+    rerender(<ImportantMessagesBar discussionId={other} />);
+    await screen.findByText('disc.important.position|1|1');
+    expect(screen.getByLabelText('disc.important.filterLabel')).toHaveValue('');
+    rerender(<ImportantMessagesBar discussionId={DISC} />);
+    expect(screen.getByLabelText('disc.important.filterLabel')).toHaveValue('blocking_alert');
+    expect(screen.getByText('disc.important.position|1|1')).toBeVisible();
+  });
+
+  it('bounds the cursor after a refresh removes its selected card without moving the transcript', async () => {
+    serve(three);
+    const onNavigate = vi.fn();
+    render(<ImportantMessagesBar discussionId={DISC} onNavigate={onNavigate} />);
+    await screen.findByText('disc.important.position|1|3');
+    await userEvent.click(screen.getByLabelText('disc.important.next'));
+    await userEvent.click(screen.getByLabelText('disc.important.next'));
+    serve([three[0]]);
+    act(() => refreshImportantMessages(DISC));
+    await screen.findByText('disc.important.position|1|1');
+    expect(screen.getByLabelText('disc.important.previous')).toBeDisabled();
+    expect(screen.getByLabelText('disc.important.next')).toBeDisabled();
+    expect(onNavigate).toHaveBeenCalledTimes(2);
+  });
+
+  it('tracks the selected message rather than its old array index after a refresh', async () => {
+    serve(three);
+    const onNavigate = vi.fn();
+    render(<ImportantMessagesBar discussionId={DISC} onNavigate={onNavigate} />);
+    await screen.findByText('disc.important.position|1|3');
+    await userEvent.click(screen.getByLabelText('disc.important.next'));
+    serve([card({ id: 'i-older', message_id: 'm-older' }), ...three]);
+    act(() => refreshImportantMessages(DISC));
+    await screen.findByText('disc.important.position|3|4');
+    await userEvent.click(screen.getByLabelText('disc.important.goToCurrent'));
+    expect(onNavigate).toHaveBeenLastCalledWith('m-2');
+  });
+
+  it('does not lose a publication invalidation while the first snapshot is in flight', async () => {
+    let resolveFirst!: (value: unknown) => void;
+    importantMessages.mockImplementationOnce(() => new Promise(resolve => { resolveFirst = resolve; }));
+    serve(three);
+    const { rerender } = render(<ImportantMessagesBar discussionId={DISC} messageRevision="before" />);
+    await waitFor(() => expect(importantMessages).toHaveBeenCalledTimes(1));
+    rerender(<ImportantMessagesBar discussionId={DISC} messageRevision="after" />);
+    act(() => {
+      refreshImportantMessages(DISC);
+      refreshImportantMessages(DISC);
+    });
+    await act(async () => resolveFirst({ items: [], total: 0, total_all: 0 }));
+    await screen.findByText('disc.important.count|3');
+    expect(importantMessages).toHaveBeenCalledTimes(2);
+  });
+
   it('cannot walk past either end', async () => {
     serve(three);
     render(<ImportantMessagesBar discussionId={DISC} />);
@@ -351,6 +436,13 @@ describe('ImportantMessagesBar', () => {
         <ImportantMessageCard discussionId={DISC} sourceMessageId="m-2" />
       </>,
     );
+    await screen.findByText('disc.important.count|3');
+    expect(importantMessages).toHaveBeenCalledTimes(1);
+  });
+
+  it('coalesces the initial read when StrictMode replays mount effects', async () => {
+    serve(three);
+    render(<StrictMode><ImportantMessagesBar discussionId={DISC} messageRevision="m-3" /></StrictMode>);
     await screen.findByText('disc.important.count|3');
     expect(importantMessages).toHaveBeenCalledTimes(1);
   });

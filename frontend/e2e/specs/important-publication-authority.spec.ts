@@ -272,6 +272,43 @@ test.describe.serial('publication authority, end to end', () => {
     expect((await listed.json())?.data?.total_all).toBe(3);
   });
 
+  test('switching rooms restores the selected card without borrowing another room position', async ({ page, request }) => {
+    const created = await request.post('/api/discussions', {
+      data: { title: 'KT-619 autre salle navigation', agent: 'ClaudeCode', language: 'fr', no_agent: true },
+    });
+    expect(created.ok()).toBe(true);
+    const other = (await created.json())?.data?.id;
+    expect(other).toBeTruthy();
+    try {
+      const content = fence('e2e-other-room', 'La sélection appartient à cette salle.');
+      const proof = await request.post('/api/human-credentials/proof', {
+        data: { grant, discussion_id: other, content },
+      });
+      expect(proof.ok()).toBe(true);
+      const posted = await request.post(`/api/discussions/${other}/messages`, {
+        data: { content, publication_grant: grant, publication_proof: (await proof.json())?.data },
+      });
+      expect(posted.ok()).toBe(true);
+      const dashboard = new DashboardPage(page);
+      await dashboard.goto();
+      await dashboard.openDiscussion(discId);
+      const bar = page.locator('.disc-important-bar');
+      await expect(bar.locator('.disc-important-position')).toHaveText('1 sur 3');
+      await bar.getByRole('button', { name: 'Message important suivant' }).click();
+      await bar.getByRole('button', { name: 'Message important suivant' }).click();
+      await expect(bar.locator('.disc-important-position')).toHaveText('3 sur 3');
+      await dashboard.openDiscussion(other);
+      await expect(bar.locator('.disc-important-position')).toHaveText('1 sur 1');
+      await expect(bar.getByRole('button', { name: 'Message important précédent' })).toBeDisabled();
+      await dashboard.openDiscussion(discId);
+      await expect(bar.locator('.disc-important-position')).toHaveText('3 sur 3');
+      await bar.getByRole('button', { name: 'Aller au message important courant' }).click();
+      await expect(page.locator('article.disc-important-card').filter({ hasText: 'Une preuve ne se dépense qu’une fois.' })).toBeVisible();
+    } finally {
+      await request.delete(`/api/discussions/${other}`);
+    }
+  });
+
   test('rotating the bootstrap locks the screen back and retires the old secret', async ({
     page,
   }) => {

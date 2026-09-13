@@ -30,6 +30,7 @@ const EMPTY: Snapshot = { items: [], totalAll: 0, loaded: false };
 const stores = new Map<string, Snapshot>();
 const listeners = new Map<string, Set<() => void>>();
 const inFlight = new Map<string, Promise<void>>();
+const refreshAgain = new Set<string>();
 
 function emit(discussionId: string) {
   listeners.get(discussionId)?.forEach((listener) => listener());
@@ -51,17 +52,20 @@ async function load(discussionId: string): Promise<void> {
   const task = (async () => {
     try {
       const list = await discussionsApi.importantMessages(discussionId);
-      stores.set(discussionId, {
-        items: list.items,
-        totalAll: list.total_all,
-        loaded: true,
-      });
+      if (!refreshAgain.has(discussionId)) {
+        stores.set(discussionId, {
+          items: list.items,
+          totalAll: list.total_all,
+          loaded: true,
+        });
+      }
     } catch {
       // A failed load leaves the transcript readable and the bar hidden; the
       // cards are an overlay on the thread, never a precondition for it.
-      stores.set(discussionId, { ...EMPTY, loaded: true });
+      if (!refreshAgain.has(discussionId)) stores.set(discussionId, { ...EMPTY, loaded: true });
     } finally {
       inFlight.delete(discussionId);
+      if (refreshAgain.delete(discussionId)) void load(discussionId);
       emit(discussionId);
     }
   })();
@@ -76,8 +80,11 @@ export function clearImportantMessages(discussionId: string) {
 }
 
 /** Invalidate and reload, after an append that may have published a card. */
-export function refreshImportantMessages(discussionId: string) {
-  clearImportantMessages(discussionId);
+export function refreshImportantMessages(discussionId: string, afterPending = true) {
+  // A mutation after a GET began cannot be represented by that old snapshot.
+  // Coalesce such invalidations into one subsequent read, keeping durable rows
+  // visible meanwhile. Mount-time consumers may simply join the current read.
+  if (afterPending && inFlight.has(discussionId)) refreshAgain.add(discussionId);
   void load(discussionId);
 }
 
@@ -95,4 +102,3 @@ export function useImportantMessages(discussionId: string | undefined): Snapshot
   }, [discussionId]);
   return snapshot;
 }
-

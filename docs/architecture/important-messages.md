@@ -87,6 +87,14 @@ highlights the target the way every other jump in the page does, instead of
 reimplementing scroll/focus against a raw `querySelector`. The counter is
 itself a button: with one card, or a filter narrowed to one, both arrows are
 disabled and the counter is the only way left to reach it.
+
+Filter and selected message identity are remembered separately for each room
+while the discussion page remains mounted. Switching back restores that room's
+selection, not another room's array index. Refreshing cannot produce a position
+past the list's end; if a selected card disappears, the first remaining match
+is selected without moving the transcript. A page reload starts navigation
+fresh. Publication invalidations during a pending GET coalesce into a fresh
+follow-up read rather than accepting the old snapshot as the final state.
 [src: file: frontend/src/components/ImportantMessageCard.tsx:116-236]
 
 `ImportantMessageCard` renders the DURABLE row for a `kronn-important` fence
