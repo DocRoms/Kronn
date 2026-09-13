@@ -489,9 +489,53 @@ fn ensure_disk_headroom(path: &Path, warning_gib: u64, critical_gib: u64) -> Res
 /// observes free space and never attempts cleanup: the interactive target and
 /// any unrecognised cache remain outside automatic deletion ownership.
 pub fn ensure_build_disk_headroom(path: &Path) -> Result<(), String> {
-    // Unlike provisioning, a build has a concrete output directory which must
-    // exist now.  Treat a missing or unstatable target as a refusal rather than
-    // silently measuring a parent/cwd volume and pretending it is the target.
+    // Cargo creates a fresh target directory on a checkout's first build. Do
+    // the same only when its immediate parent already exists and is a real
+    // directory. This permits the normal fresh checkout while refusing to
+    // recursively create an arbitrary output path. An existing symlink is
+    // refused: following it would make a qualification check inspect a target
+    // whose ownership is not represented by this path.
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(format!(
+                "refusing to run a build or validation: build target {} is a symlink",
+                path.display()
+            ));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let parent = path.parent().ok_or_else(|| {
+                format!(
+                    "refusing to run a build or validation: build target {} has no parent directory",
+                    path.display()
+                )
+            })?;
+            let parent_metadata = std::fs::symlink_metadata(parent).map_err(|error| {
+                format!(
+                    "refusing to run a build or validation: build target parent {} cannot be inspected: {error}",
+                    parent.display()
+                )
+            })?;
+            if parent_metadata.file_type().is_symlink() || !parent_metadata.is_dir() {
+                return Err(format!(
+                    "refusing to run a build or validation: build target parent {} is not a real directory",
+                    parent.display()
+                ));
+            }
+            std::fs::create_dir(path).map_err(|error| {
+                format!(
+                    "refusing to run a build or validation: build target {} cannot be prepared: {error}",
+                    path.display()
+                )
+            })?;
+        }
+        Err(error) => {
+            return Err(format!(
+                "refusing to run a build or validation: build target {} cannot be inspected: {error}",
+                path.display()
+            ));
+        }
+    }
     let target = path.canonicalize().map_err(|error| {
         format!(
             "refusing to run a build or validation: build target {} cannot be resolved: {error}",
@@ -2828,13 +2872,49 @@ mod tests {
     }
 
     #[test]
-    fn build_headroom_refuses_an_absent_target_instead_of_measuring_a_parent() {
+    fn build_headroom_prepares_a_fresh_target_before_measuring_it() {
         let root = tempfile::tempdir().unwrap();
         let absent = root.path().join("target with spaces");
-        let error = ensure_build_disk_headroom(&absent).unwrap_err();
+        ensure_build_disk_headroom(&absent).unwrap();
+        assert!(absent.is_dir());
+    }
 
-        assert!(error.contains("cannot be resolved"), "got: {error}");
-        assert!(error.contains("target with spaces"), "got: {error}");
+    #[test]
+    fn build_headroom_refuses_a_fresh_target_below_a_missing_parent() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("missing-parent").join("target");
+
+        let error = ensure_build_disk_headroom(&target).unwrap_err();
+        assert!(error.contains("parent"), "got: {error}");
+        assert!(
+            !target.exists(),
+            "the guard must not create arbitrary parents"
+        );
+    }
+
+    #[test]
+    fn build_headroom_refuses_a_target_symlink() {
+        let root = tempfile::tempdir().unwrap();
+        let real_target = root.path().join("real-target");
+        std::fs::create_dir(&real_target).unwrap();
+        let target = root.path().join("target-link");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&real_target, &target).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir(&real_target, &target).unwrap();
+
+        let error = ensure_build_disk_headroom(&target).unwrap_err();
+        assert!(error.contains("is a symlink"), "got: {error}");
+    }
+
+    #[test]
+    fn build_headroom_refuses_a_file_target() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("target-file");
+        std::fs::write(&target, "not a directory").unwrap();
+
+        let error = ensure_build_disk_headroom(&target).unwrap_err();
+        assert!(error.contains("not a directory"), "got: {error}");
     }
 
     #[test]

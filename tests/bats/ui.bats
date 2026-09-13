@@ -538,6 +538,93 @@ EOF
     assert_success
 }
 
+@test "dev backend supervisor keeps the last successful binary online when the disk guard refuses" {
+    local fake_bin="$BATS_TEST_TMPDIR/supervisor-low-disk-bin"
+    local fake_backend_dir="$BATS_TEST_TMPDIR/backend-low-disk"
+    local fake_backend="$BATS_TEST_TMPDIR/kronn-low-disk"
+    local starts="$BATS_TEST_TMPDIR/backend-low-disk-starts"
+    local cargo_marker="$BATS_TEST_TMPDIR/cargo-ran"
+    mkdir -p "$fake_bin" "$fake_backend_dir"
+
+    cat >"$fake_bin/df" <<'EOF'
+#!/usr/bin/env bash
+printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\n'
+printf '/dev/test 100 99 4194304 99%% /tmp\n'
+EOF
+    cat >"$fake_bin/cargo" <<'EOF'
+#!/usr/bin/env bash
+touch "$KRONN_TEST_CARGO_MARKER"
+EOF
+    printf '#!/usr/bin/env bash\nexit 0\n' >"$fake_bin/curl"
+    cat >"$fake_backend" <<'EOF'
+#!/usr/bin/env bash
+printf 'start\n' >>"$KRONN_TEST_BACKEND_STARTS"
+trap 'exit 0' TERM INT
+while true; do sleep 1; done
+EOF
+    cat >"$fake_bin/watchexec" <<'EOF'
+#!/usr/bin/env bash
+trap 'exit 0' TERM INT
+while true; do sleep 1; done
+EOF
+    chmod +x "$fake_bin/df" "$fake_bin/cargo" "$fake_bin/curl" "$fake_bin/watchexec" "$fake_backend"
+
+    run env \
+        PATH="$fake_bin:$PATH" \
+        KRONN_DEV_BACKEND_DIR="$fake_backend_dir" \
+        KRONN_DEV_BACKEND_BINARY="$fake_backend" \
+        KRONN_DEV_BACKEND_TARGET_DIR="$BATS_TEST_TMPDIR/target with spaces" \
+        KRONN_TEST_BACKEND_STARTS="$starts" \
+        KRONN_TEST_CARGO_MARKER="$cargo_marker" \
+        bash -c '
+            "$1" >"$2" 2>&1 &
+            supervisor=$!
+            for _ in $(seq 1 80); do
+                grep -q "keeping the last successful backend online" "$2" 2>/dev/null && break
+                sleep 0.025
+            done
+            grep -q "keeping the last successful backend online" "$2"
+            [[ -s "$3" ]]
+            [[ ! -e "$4" ]]
+            kill -TERM "$supervisor" 2>/dev/null || true
+            wait "$supervisor" 2>/dev/null || true
+        ' _ "$PROJECT_ROOT/scripts/dev-backend-supervisor.sh" "$BATS_TEST_TMPDIR/supervisor.log" "$starts" "$cargo_marker"
+
+    assert_success
+}
+
+@test "dev backend supervisor refuses before Cargo when no prior backend is available" {
+    local fake_bin="$BATS_TEST_TMPDIR/supervisor-initial-low-disk-bin"
+    local fake_backend_dir="$BATS_TEST_TMPDIR/backend-initial-low-disk"
+    local cargo_marker="$BATS_TEST_TMPDIR/initial-cargo-ran"
+    local failure_file="$BATS_TEST_TMPDIR/initial-failure"
+    mkdir -p "$fake_bin" "$fake_backend_dir"
+
+    cat >"$fake_bin/df" <<'EOF'
+#!/usr/bin/env bash
+printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\n'
+printf '/dev/test 100 99 4194304 99%% /tmp\n'
+EOF
+    cat >"$fake_bin/cargo" <<'EOF'
+#!/usr/bin/env bash
+touch "$KRONN_TEST_CARGO_MARKER"
+EOF
+    chmod +x "$fake_bin/df" "$fake_bin/cargo"
+
+    run env \
+        PATH="$fake_bin:$PATH" \
+        KRONN_DEV_BACKEND_DIR="$fake_backend_dir" \
+        KRONN_DEV_BACKEND_BINARY="$BATS_TEST_TMPDIR/no-prior-backend" \
+        KRONN_DEV_BACKEND_TARGET_DIR="$BATS_TEST_TMPDIR/initial target" \
+        KRONN_DEV_BACKEND_FAILURE_FILE="$failure_file" \
+        KRONN_TEST_CARGO_MARKER="$cargo_marker" \
+        "$PROJECT_ROOT/scripts/dev-backend-supervisor.sh"
+
+    assert_failure 102
+    [[ ! -e "$cargo_marker" ]]
+    [[ "$(<"$failure_file")" == "102" ]]
+}
+
 # ─── ask_yn EOF safety (must not loop forever on closed stdin) ─────────────────
 
 @test "ask_yn: returns 1 (no) on EOF instead of looping forever" {

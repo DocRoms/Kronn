@@ -92,10 +92,11 @@ The native backend supervisor exports `CARGO_TARGET_DIR` as
 checkout. Before its initial and watched `cargo build`, it checks free space on
 that exact directory's filesystem and refuses without starting Cargo below the
 critical limit. The guard never removes files. Its default is 5 GiB; when a
-deployment has changed `server.disk_critical_gib`, the operator must supply the
-same approved value through `KRONN_DEV_BACKEND_DISK_CRITICAL_GIB` rather than
-reading a host configuration file from the shell. [src: file: scripts/dev-backend-supervisor.sh:16-23]
-[src: file: scripts/dev-backend-build-guard.sh:8-31]
+deployment has changed either server disk threshold, the operator must supply
+the same approved values through `KRONN_DEV_BACKEND_DISK_WARNING_GIB` and
+`KRONN_DEV_BACKEND_DISK_CRITICAL_GIB` rather than reading a host configuration
+file from the shell. [src: file: scripts/dev-backend-supervisor.sh:16-23]
+[src: file: scripts/dev-backend-build-guard.sh:8-49]
 
 Kronn's versioned backend and desktop development profiles use line-table-only
 debug information, disable incremental compilation, and explicitly retain
@@ -106,18 +107,51 @@ not a global Cargo setting. [src: file: backend/Cargo.toml:131-143]
 [src: file: desktop/src-tauri/Cargo.toml:44-51]
 
 Qualification validation resolves a Cargo validation's effective target through
-`cargo metadata` before Quick Exec is allowed to spawn its build; an explicit
-`--target-dir` is preserved in that lookup. Non-Cargo validations use their
-declared working directory. An unresolved or non-directory target is refused
-instead of measuring an unrelated parent filesystem; a critical-space refusal
-is stored as a refused validation rather than a pass. [src: file: backend/src/core/worktree.rs:491-518]
-[src: file: backend/src/api/orchestration.rs:2480-2552]
+`cargo metadata` before Quick Exec is allowed to spawn its build. The metadata
+call retains the validation's `--manifest-path`, `--config`, and
+`--target-dir` inputs, runs offline with a bounded deadline, so root-launched
+backend gates measure the same target filesystem as Cargo. A new target is
+created only at Cargo's exact target path when its immediate parent is already a
+real directory; an existing symlink, non-directory, or inspection failure is
+refused. Non-Cargo
+validations use their declared working directory. A critical-space refusal is
+stored as a refused validation rather than a pass. [src: file: backend/src/core/worktree.rs:491-558]
+[src: file: backend/src/api/orchestration.rs:2480-2585]
 
 There is intentionally no automatic lifecycle cleanup for the interactive
 target or unknown qualification caches. The only automatic reclamation remains
 the existing managed-worktree path: ownership, terminal execution state,
 attached sessions, and worker leases are all checked before deletion. [src: file: backend/src/core/worktree.rs:299-370]
 [src: file: backend/src/db/orchestration.rs:439-531]
+
+For an interactive or qualification cache outside that managed ownership path,
+the bounded policy is refusal and escalation: the build guard names its exact
+target and configured critical threshold, while the maintenance inventory lists
+managed candidates and their refusal reason. An operator may request a manual,
+path-specific reclaim only after the inventory's ownership and terminal-state
+checks; this document does not authorise a broad purge or deletion of unknown,
+active, or leased targets. [src: file: backend/src/core/worktree.rs:451-558]
+[src: file: backend/src/api/orchestration.rs:2588-2680]
+[src: file: backend/src/db/orchestration.rs:439-531]
+
+## KT-638 profile benchmark record
+
+The approved profile comparison has not been run in this checkout. The current
+disk-capacity incident leaves less than the configured build critical headroom,
+so a cold build would contradict the guard being introduced. Before adopting
+the profile beyond this committed, Kronn-only manifest change, run the following
+commands against the same source revision and separate, owned target directories;
+record elapsed wall time and `du -sh` after each cold, warm, and source-touch
+rebuild run:
+
+```text
+CARGO_TARGET_DIR=<owned-old-target> cargo build --manifest-path backend/Cargo.toml --config profile.dev.debug=true
+CARGO_TARGET_DIR=<owned-new-target> cargo build --manifest-path backend/Cargo.toml
+```
+
+Then run the unfiltered backend tests, strict Clippy, formatter, shell tests,
+and Python checks with a target owned by that benchmark checkout. No result is
+claimed here until those measurements are captured. [src: user: 2026-09-13: KT-638 durable profile arbitration and review]
 
 ## Maintenance command
 

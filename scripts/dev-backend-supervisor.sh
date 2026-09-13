@@ -96,7 +96,10 @@ fi
 echo "  Building initial backend..."
 if ! "$SCRIPT_DIR/dev-backend-build-guard.sh"; then
     record_failure 102
-    exit 102
+    if (( bootstrap_started == 0 )) || ! kill -0 "$backend_pid" 2>/dev/null; then
+        exit 102
+    fi
+    echo "  Initial backend build refused for low disk — keeping the last successful backend online." >&2
 elif ! (cd "$BACKEND_DIR" && cargo build); then
     if (( bootstrap_started == 0 )) || ! kill -0 "$backend_pid" 2>/dev/null; then
         record_failure 101

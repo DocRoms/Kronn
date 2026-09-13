@@ -2500,6 +2500,7 @@ async fn validation_build_path(
     spec: &crate::models::ValidationSpec,
     cwd: &std::path::Path,
 ) -> Result<std::path::PathBuf, String> {
+    const METADATA_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
     let words: Vec<&str> = spec.command.split_whitespace().collect();
     if words.first() != Some(&"cargo") {
         return Ok(cwd.to_path_buf());
@@ -2508,33 +2509,63 @@ async fn validation_build_path(
     let mut metadata = crate::core::cmd::async_cmd("cargo");
     metadata
         .current_dir(cwd)
-        .args(["metadata", "--no-deps", "--format-version", "1"]);
-    // Preserve the validation's explicit target override, if any, so metadata
-    // reports precisely the filesystem that the eventual build will use.
+        // Resolution must neither fetch dependencies nor wait forever before a
+        // validation can be refused. `metadata` only needs the local manifest
+        // graph to return Cargo's effective target directory.
+        .args([
+            "metadata",
+            "--no-deps",
+            "--format-version",
+            "1",
+            "--offline",
+        ]);
+    // Preserve the validation's manifest and configuration options. Validations
+    // are normally launched from the repository root, including commands such
+    // as `cargo test --manifest-path backend/Cargo.toml`; resolving metadata in
+    // cwd alone would reject that normal form before Quick Exec can run it.
+    // `cargo metadata` has no `--target-dir`, so its equivalent environment
+    // override retains the effective output directory for that one invocation.
     let mut index = 1;
     while index < words.len() {
-        if words[index] == "--target-dir" {
+        let word = words[index];
+        if word == "--target-dir" {
             let value = words.get(index + 1).ok_or_else(|| {
                 "validation cargo command has --target-dir without a directory".to_string()
             })?;
-            // `cargo metadata` has no `--target-dir` flag. Cargo does honour
-            // the equivalent environment override, whose relative values use
-            // the same current directory as this validation.
             metadata.env("CARGO_TARGET_DIR", value);
-            break;
-        }
-        if let Some(value) = words[index].strip_prefix("--target-dir=") {
+            index += 2;
+            continue;
+        } else if let Some(value) = word.strip_prefix("--target-dir=") {
             metadata.env("CARGO_TARGET_DIR", value);
-            break;
+        } else if word == "--manifest-path" || word == "--config" {
+            let value = words
+                .get(index + 1)
+                .ok_or_else(|| format!("validation cargo command has {word} without a value"))?;
+            metadata.arg(word).arg(value);
+            index += 2;
+            continue;
+        } else if let Some(value) = word.strip_prefix("--manifest-path=") {
+            metadata.arg("--manifest-path").arg(value);
+        } else if let Some(value) = word.strip_prefix("--config=") {
+            metadata.arg("--config").arg(value);
         }
         index += 1;
     }
-    let output = metadata.output().await.map_err(|error| {
-        format!(
-            "cannot resolve Cargo target for validation in {}: {error}",
-            cwd.display()
-        )
-    })?;
+    let output = tokio::time::timeout(METADATA_TIMEOUT, metadata.output())
+        .await
+        .map_err(|_| {
+            format!(
+                "Cargo target resolution timed out after {} seconds for validation in {}",
+                METADATA_TIMEOUT.as_secs(),
+                cwd.display()
+            )
+        })?
+        .map_err(|error| {
+            format!(
+                "cannot resolve Cargo target for validation in {}: {error}",
+                cwd.display()
+            )
+        })?;
     if !output.status.success() {
         return Err(format!(
             "cannot resolve Cargo target for validation in {}: {}",
@@ -2566,6 +2597,34 @@ async fn run_one_validation_checked(
     build_path: &std::path::Path,
     check_headroom: impl FnOnce(&std::path::Path) -> Result<(), String>,
 ) -> (Option<i32>, i64, String) {
+    run_one_validation_checked_with_runner(
+        spec,
+        cwd,
+        build_path,
+        check_headroom,
+        |validated| async move {
+            let cancel = tokio_util::sync::CancellationToken::new();
+            crate::core::quick_exec::run(&validated, None, &cancel).await
+        },
+    )
+    .await
+}
+
+/// The runner seam is deliberately narrower than the validation contract: it
+/// receives only an already-validated literal argv. Production always calls
+/// Quick Exec above; tests use this seam to prove a headroom refusal cannot
+/// reach the spawn operation without depending on timing or a real full disk.
+async fn run_one_validation_checked_with_runner<F, Fut>(
+    spec: &crate::models::ValidationSpec,
+    cwd: &std::path::Path,
+    build_path: &std::path::Path,
+    check_headroom: impl FnOnce(&std::path::Path) -> Result<(), String>,
+    run: F,
+) -> (Option<i32>, i64, String)
+where
+    F: FnOnce(crate::core::quick_exec::ValidatedSpec) -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<crate::core::quick_exec::QuickExecResult>>,
+{
     let mut parts = spec.command.split_whitespace();
     let Some(binary) = parts.next() else {
         return (None, 0, "empty validation command".into());
@@ -2608,8 +2667,7 @@ async fn run_one_validation_checked(
         // A refused command is a failed validation, never a silent skip.
         Err(rejection) => return (None, 0, format!("refused: {rejection}")),
     };
-    let cancel = tokio_util::sync::CancellationToken::new();
-    let (code, duration, summary) = match quick_exec::run(&validated, None, &cancel).await {
+    let (code, duration, summary) = match run(validated).await {
         Ok(result) => (result.exit_code, result.duration_ms as i64, result.summary),
         Err(e) => (None, 0, format!("validation could not run: {e}")),
     };
@@ -12461,28 +12519,31 @@ mod tests {
     #[tokio::test]
     async fn validation_refuses_before_spawning_when_the_build_headroom_guard_fails() {
         let cwd = tempfile::tempdir().unwrap();
+        let sentinel = cwd.path().join("validation-command-ran");
         let spec = ValidationSpec {
-            // `sleep` is an execution sentinel: if the runner is ever reached,
-            // this test takes at least one second. A quick refusal proves the
-            // headroom guard runs before Quick Exec can spawn the validation.
-            command: "sleep 1".into(),
+            command: "true".into(),
             quick_exec_id: None,
             timeout_secs: Some(5),
         };
 
-        let started = std::time::Instant::now();
-        let (exit_code, duration_ms, output) =
-            run_one_validation_checked(&spec, cwd.path(), cwd.path(), |_| {
-                Err("only 4 GiB free (critical below 5 GiB, server.disk_critical_gib)".into())
-            })
-            .await;
+        let sentinel_for_spawn = sentinel.clone();
+        let (exit_code, duration_ms, output) = run_one_validation_checked_with_runner(
+            &spec,
+            cwd.path(),
+            cwd.path(),
+            |_| {
+                Err("only 4 GiB free (critical below 5 GiB, server.disk_critical_gib); command not spawned".into())
+            },
+            move |_| async move {
+                std::fs::write(&sentinel_for_spawn, "spawned")?;
+                unreachable!("the headroom refusal must not reach the spawn seam")
+            },
+        )
+        .await;
 
         assert_eq!(exit_code, None);
         assert_eq!(duration_ms, 0);
-        assert!(
-            started.elapsed() < std::time::Duration::from_millis(500),
-            "the execution sentinel ran before the headroom refusal: {output}"
-        );
+        assert!(!sentinel.exists(), "the validation command was spawned");
         assert!(
             output.starts_with("refused: only 4 GiB free"),
             "got: {output}"
@@ -12508,6 +12569,68 @@ mod tests {
 
         let resolved = validation_build_path(&spec, project.path()).await.unwrap();
         assert_eq!(resolved, target);
+    }
+
+    #[tokio::test]
+    async fn cargo_validation_from_root_preserves_manifest_config_and_relative_target() {
+        let project = tempfile::tempdir().unwrap();
+        let backend = project.path().join("backend");
+        std::fs::create_dir(&backend).unwrap();
+        std::fs::create_dir(backend.join("src")).unwrap();
+        std::fs::write(
+            backend.join("Cargo.toml"),
+            "[package]\nname = \"root_manifest_fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::write(backend.join("src/lib.rs"), "pub fn fixture() {}\n").unwrap();
+        let target = project.path().join("relative-target");
+        let spec = ValidationSpec {
+            command: "cargo test --manifest-path backend/Cargo.toml --config build.target-dir=\"ignored\" --target-dir relative-target".into(),
+            quick_exec_id: None,
+            timeout_secs: Some(5),
+        };
+
+        let resolved = validation_build_path(&spec, project.path()).await.unwrap();
+        assert_eq!(resolved, target);
+    }
+
+    #[tokio::test]
+    async fn validation_with_headroom_executes_the_validated_command_path() {
+        let cwd = tempfile::tempdir().unwrap();
+        let sentinel = cwd.path().join("validation-command-ran");
+        let spec = ValidationSpec {
+            command: "true".into(),
+            quick_exec_id: None,
+            timeout_secs: Some(5),
+        };
+        let sentinel_for_spawn = sentinel.clone();
+        let (exit_code, _duration_ms, _output) = run_one_validation_checked_with_runner(
+            &spec,
+            cwd.path(),
+            cwd.path(),
+            |_| Ok(()),
+            move |_| async move {
+                std::fs::write(&sentinel_for_spawn, "spawned")?;
+                Ok(crate::core::quick_exec::QuickExecResult {
+                    status: crate::core::quick_exec::QuickExecStatus::Passed,
+                    exit_code: Some(0),
+                    summary: "sentinel ran".into(),
+                    failed_tests: vec![],
+                    diagnostics: vec![],
+                    artifact: None,
+                    duration_ms: 0,
+                    stdout_bytes: 0,
+                    stderr_bytes: 0,
+                    findings_complete: true,
+                })
+            },
+        )
+        .await;
+        assert_eq!(exit_code, Some(0));
+        assert!(
+            sentinel.exists(),
+            "the permitted validation did not reach spawn"
+        );
     }
 
     #[tokio::test]
