@@ -8,7 +8,7 @@
 //! parsing cannot see that: the substitution happens across the whole routing
 //! path, so the proof has to travel it.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use axum::{
     body::Body,
@@ -25,12 +25,15 @@ use kronn::{build_router_with_auth, AppState, DEFAULT_MAX_CONCURRENT_AGENTS};
 const PROVIDER: &str = "ClaudeCode";
 
 fn isolate_config_dir() {
-    static INIT: std::sync::Once = std::sync::Once::new();
-    INIT.call_once(|| {
-        let dir = std::env::temp_dir().join(format!("kronn-handoff-cfg-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).ok();
-        std::env::set_var("KRONN_DATA_DIR", &dir);
-    });
+    static FIXTURE_ROOT: OnceLock<tempfile::TempDir> = OnceLock::new();
+    let root =
+        FIXTURE_ROOT.get_or_init(|| tempfile::tempdir().expect("create handoff test fixture root"));
+    let data_dir = root.path().join("data");
+    let host_home = root.path().join("host-home");
+    std::fs::create_dir_all(&data_dir).expect("create handoff data fixture");
+    std::fs::create_dir_all(&host_home).expect("create handoff host fixture");
+    std::env::set_var("KRONN_DATA_DIR", data_dir);
+    std::env::set_var("KRONN_HOST_HOME", host_home);
 }
 
 /// The router plus the database behind it: sessions are seeded directly, the

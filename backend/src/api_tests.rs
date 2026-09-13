@@ -9,7 +9,7 @@ mod tests {
     use axum::http::{Request, StatusCode};
     use http_body_util::BodyExt;
     use serde_json::Value;
-    use std::sync::Arc;
+    use std::sync::{Arc, OnceLock};
     use tokio::sync::RwLock;
     use tower::ServiceExt; // for `oneshot`
 
@@ -25,19 +25,19 @@ mod tests {
     /// writes the developer's REAL config.toml (2026-07-13 incident; the
     /// persist_atomic guard now panics instead).
     fn isolate_config_dir() {
-        // Called ONLY by the #[serial] tests whose handlers SAVE config —
-        // a global call from test_state() would mutate KRONN_DATA_DIR from
-        // 80 non-serial tests and race the serialized env family. Re-set on
-        // EVERY call (same stable path, so repeats are idempotent): the
-        // config.rs #[serial] env tests legitimately remove_var at their
-        // end, and a Once guard left later callers with no dir at all —
-        // the write-guard panic fired on whichever test ran after them.
-        let dir = std::env::temp_dir().join(format!("kronn-libtest-cfg-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).ok();
-        std::env::set_var("KRONN_DATA_DIR", &dir);
+        static FIXTURE_ROOT: OnceLock<tempfile::TempDir> = OnceLock::new();
+        let root = FIXTURE_ROOT
+            .get_or_init(|| tempfile::tempdir().expect("create API unit-test fixture root"));
+        let data_dir = root.path().join("data");
+        let host_home = root.path().join("host-home");
+        std::fs::create_dir_all(&data_dir).expect("create API unit-test data fixture");
+        std::fs::create_dir_all(&host_home).expect("create API unit-test host fixture");
+        std::env::set_var("KRONN_DATA_DIR", data_dir);
+        std::env::set_var("KRONN_HOST_HOME", host_home);
     }
 
     fn test_state() -> AppState {
+        isolate_config_dir();
         let db = Arc::new(Database::open_in_memory().expect("in-memory DB"));
         let config_arc = Arc::new(RwLock::new(default_config()));
         AppState::new_defaults(config_arc, db, DEFAULT_MAX_CONCURRENT_AGENTS)
@@ -45,6 +45,7 @@ mod tests {
 
     /// Build a test AppState with a specific auth token configured.
     fn test_state_with_token(token: &str) -> AppState {
+        isolate_config_dir();
         let db = Arc::new(Database::open_in_memory().expect("in-memory DB"));
         let mut config = default_config();
         config.server.auth_token = Some(token.to_string());

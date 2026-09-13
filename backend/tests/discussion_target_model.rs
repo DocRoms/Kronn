@@ -13,12 +13,15 @@ async fn fixture(
     agent: AgentType,
     connection_id: Option<&str>,
 ) -> (Router, Arc<kronn::db::Database>) {
-    static DIRECTORY: OnceLock<tempfile::TempDir> = OnceLock::new();
-    DIRECTORY.get_or_init(|| {
-        let directory = tempfile::tempdir().unwrap();
-        std::env::set_var("KRONN_DATA_DIR", directory.path());
-        directory
-    });
+    static FIXTURE_ROOT: OnceLock<tempfile::TempDir> = OnceLock::new();
+    let root = FIXTURE_ROOT
+        .get_or_init(|| tempfile::tempdir().expect("create discussion-target fixture root"));
+    let data_dir = root.path().join("data");
+    let host_home = root.path().join("host-home");
+    std::fs::create_dir_all(&data_dir).expect("create discussion-target data fixture");
+    std::fs::create_dir_all(&host_home).expect("create discussion-target host fixture");
+    std::env::set_var("KRONN_DATA_DIR", data_dir);
+    std::env::set_var("KRONN_HOST_HOME", host_home);
     let db = Arc::new(kronn::db::Database::open_in_memory().unwrap());
     let now = chrono::Utc::now();
     let disc: Discussion = serde_json::from_value(json!({

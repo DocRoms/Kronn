@@ -41,8 +41,12 @@ mod tests {
     }
 
     fn setup_tmp(name: &str) -> std::path::PathBuf {
-        // Ensure resolve_host_path passes through unchanged
-        std::env::remove_var("KRONN_HOST_HOME");
+        // Keep host-sync fallback inside a process-owned fixture. Existing
+        // local paths still pass through resolve_host_path unchanged.
+        static HOST_FIXTURE: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+        let host_fixture = HOST_FIXTURE
+            .get_or_init(|| tempfile::tempdir().expect("create MCP scanner host fixture"));
+        std::env::set_var("KRONN_HOST_HOME", host_fixture.path());
         let tmp = std::env::temp_dir().join(format!("kronn-test-mcp-{}", name));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();

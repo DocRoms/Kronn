@@ -1,7 +1,7 @@
 //! Integration tests for the 0.10.0 Continual Learning API — the validation
 //! pipeline (spec §6) end-to-end through the real router + handlers + in-memory DB.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use axum::{
     body::Body,
@@ -22,12 +22,15 @@ static ENV_LOCK: Mutex<()> = Mutex::const_new(());
 /// See api_tests.rs — without this, handler-level config saves during tests
 /// write the developer's REAL config.toml (2026-07-13 incident).
 fn isolate_config_dir() {
-    static INIT: std::sync::Once = std::sync::Once::new();
-    INIT.call_once(|| {
-        let dir = std::env::temp_dir().join(format!("kronn-inttest-cfg-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).ok();
-        std::env::set_var("KRONN_DATA_DIR", &dir);
-    });
+    static FIXTURE_ROOT: OnceLock<tempfile::TempDir> = OnceLock::new();
+    let root = FIXTURE_ROOT
+        .get_or_init(|| tempfile::tempdir().expect("create learnings test fixture root"));
+    let data_dir = root.path().join("data");
+    let host_home = root.path().join("host-home");
+    std::fs::create_dir_all(&data_dir).expect("create learnings data fixture");
+    std::fs::create_dir_all(&host_home).expect("create learnings host fixture");
+    std::env::set_var("KRONN_DATA_DIR", data_dir);
+    std::env::set_var("KRONN_HOST_HOME", host_home);
 }
 
 fn app_with(enabled: bool) -> Router {
