@@ -60,6 +60,40 @@ Discussion list items expose `pending_question_count`, including pagination.
 `[src: file: backend/src/api/discussion_questions.rs:1]`
 `[src: file: backend/src/db/sql/168_discussion_questions.sql:1]`
 
+## Steering cards (`kronn-important`)
+
+A decision, a scope change, a DoD waiver, a blocking alert, an action needed
+from a human or an accepted delivery is published as a `kronn-important` fence,
+which mints a DURABLE card — not a bold line, a colour or an emoji. The
+discussion can then filter, count and step through them.
+
+It is **not** a delivery report. An accepted delivery stays a
+`delivery_summary`; a fact inside one worth steering on becomes a SEPARATE card
+that `references` the delivery. Nothing is ever reclassified.
+
+`dedup_key` is the identity of the FACT, so a replay after a restart collapses
+onto the row it already wrote instead of doubling it. Only the FIRST fence in a
+message publishes, and the `note` channel publishes none.
+
+**Who may publish**, and the distinction matters:
+
+- publishing **in your own name** — an agent's fence, or a human's from the
+  composer — needs a credential enrolled in Settings plus a single-use proof
+  bound to that room and that exact body. An install with no credential
+  publishes none of these: the message still posts, no card is recorded, and
+  the response says which;
+- **Kronn's own orchestration events** — a terminal transition, a review that
+  requests changes, a campaign parked on a human — publish with no credential
+  at all. There is no caller to authenticate: the backend produces them from a
+  transition that already happened.
+
+A **worker never publishes**, holding a valid credential or not. Report through
+your delivery, and put a decision to the human with `kronn-question`.
+
+Full contract: [`../../architecture/important-messages.md`](../../architecture/important-messages.md)
+and [`../../architecture/important-message-publication-authority.md`](../../architecture/important-message-publication-authority.md).
+`[src: file: backend/src/db/discussion_important.rs:1]`
+
 ## What it does
 
 Bidirectional gateway between a CLI agent (Claude Code, Codex, Gemini, Kiro, Vibe in host-launched mode, …) and the Kronn backend. Three tool families :

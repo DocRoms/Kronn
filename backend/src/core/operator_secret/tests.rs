@@ -382,6 +382,9 @@ fn a_request_that_is_not_a_regular_file_is_refused_and_left_in_place() {
 
     // A directory where a request should be is a surprise, not an instruction.
     assert!(recover_if_requested(&conn).is_err());
-    assert!(request.is_dir(), "the surprise is left for the operator to see");
+    assert!(
+        request.is_dir(),
+        "the surprise is left for the operator to see"
+    );
     assert_eq!(read_delivered().unwrap().expose(), before.expose());
 }

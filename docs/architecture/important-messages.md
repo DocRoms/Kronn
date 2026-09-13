@@ -32,8 +32,12 @@ transferring or rebinding.
 
 Two consequences worth carrying here:
 
-- **an install with no grant publishes no card.** That is every install today,
-  and it is deliberate;
+- **an install with no grant publishes no card IN ANYBODY'S NAME.** That is
+  every install today, and it is deliberate. It does not mean a silent product:
+  Kronn's own orchestration events — a terminal transition, a review that
+  requests changes, a campaign parked on a human — publish with no credential at
+  all, because there is no caller to authenticate. The gate is on publication in
+  one's own name, never on the backend reporting what it just did;
 - **the bootstrap is rotatable and recoverable.** An operator who still holds it
   rotates through `POST /api/human-credentials/admin/rotate` (which answers with
   a path, never a secret); one who lost it leaves a `recover-admin-secret` file
@@ -108,9 +112,11 @@ first GET while a new card lands.
   (`kt619-human-credential-bootstrap` → `dedicated-human-credential`) excluded
   OS-level secret theft and direct database writes from scope, so an operator
   whose grant file is readable has given it away and nothing here notices.
-- **Every existing install publishes nothing until it is bootstrapped.** No
-  grant exists anywhere, and there is no trust-on-first-use to fall back on.
-  Deliberate, and a real behaviour change rather than a silent tightening.
+- **Every existing install publishes nothing IN A CALLER'S NAME until it is
+  bootstrapped.** No grant exists anywhere, and there is no trust-on-first-use
+  to fall back on. Deliberate, and a real behaviour change rather than a silent
+  tightening. Server-authored steering cards are unaffected and need no
+  bootstrap.
 - A bulk `disc_append` (several messages in one call) reports only the LAST
   message's `ImportantIngest` in the response; earlier messages' outcomes are
   not summed into it. The database is still authoritative — nothing is lost —

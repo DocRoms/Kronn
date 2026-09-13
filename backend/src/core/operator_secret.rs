@@ -193,10 +193,8 @@ pub fn rotate(conn: &rusqlite::Connection) -> Result<Delivered> {
         .and_then(|()| fs::read_to_string(&path).ok());
 
     let transaction = conn.unchecked_transaction()?;
-    let secret = crate::db::human_credentials::rotate_admin_secret(
-        &transaction,
-        &path.to_string_lossy(),
-    )?;
+    let secret =
+        crate::db::human_credentials::rotate_admin_secret(&transaction, &path.to_string_lossy())?;
 
     write_private(&path, secret.expose())
         .context("the rotated admin secret was not written; nothing was committed")?;

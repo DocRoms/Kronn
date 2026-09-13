@@ -463,7 +463,12 @@ async fn the_admin_secret_rotates_itself_and_the_replacement_never_travels() {
         .unwrap()
         .expose()
         .to_string();
-    assert_eq!(path, kronn::core::operator_secret::secret_path().unwrap().to_string_lossy());
+    assert_eq!(
+        path,
+        kronn::core::operator_secret::secret_path()
+            .unwrap()
+            .to_string_lossy()
+    );
     assert!(
         !rotated.to_string().contains(&replacement),
         "the new admin secret travelled over the wire"
@@ -511,7 +516,10 @@ async fn no_enrolled_grant_can_rotate_the_secret_that_governs_it() {
             json!({"authority": grant}),
         )
         .await;
-        assert_eq!(status, 403, "an enrolled grant must not rotate the bootstrap");
+        assert_eq!(
+            status, 403,
+            "an enrolled grant must not rotate the bootstrap"
+        );
     }
 
     // And the admin secret is untouched by the attempts.

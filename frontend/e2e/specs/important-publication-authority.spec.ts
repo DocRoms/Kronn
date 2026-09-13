@@ -168,40 +168,29 @@ test.describe.serial('publication authority, end to end', () => {
     expect(grant).toMatch(/^kr-human-/);
     expect((await section.getByRole('table').textContent()) ?? '').not.toContain(grant);
 
-    // Publication is two steps on purpose: a proof over the exact body, then
-    // the send. A captured send cannot be replayed, and a captured proof
-    // cannot be aimed at another room or another card.
-    const content = fence('e2e-published', 'La carte part avec un identifiant enrôlé.');
-    const proof = await request.post('/api/human-credentials/proof', {
-      data: { grant, discussion_id: discId, content },
-    });
-    expect(proof.ok()).toBe(true);
-    const proofId = (await proof.json())?.data;
-    expect(proofId).toBeTruthy();
-
-    const posted = await request.post(`/api/discussions/${discId}/messages`, {
-      data: { content, publication_grant: grant, publication_proof: proofId },
-    });
-    expect(posted.ok()).toBe(true);
-
-    const listed = await request.get(`/api/discussions/${discId}/important`);
-    const list = (await listed.json())?.data;
-    expect(list?.total_all).toBe(1);
-    expect(list?.items?.[0]?.author_kind).toBe('human');
-
-    // The same proof a second time buys nothing: single use is the whole
-    // point of issuing one.
-    const replayed = await request.post(`/api/discussions/${discId}/messages`, {
-      data: { content, publication_grant: grant, publication_proof: proofId },
-    });
-    expect(replayed.ok()).toBe(true);
-    expect((await (await request.get(`/api/discussions/${discId}/important`)).json())?.data
-      ?.total_all).toBe(1);
-
-    // Navigation: the bar exists now, counts what the database holds, and its
-    // counter reaches the card even with both arrows disabled at one item.
+    // Publish from the COMPOSER, which is the whole point: enrolling a grant
+    // in Settings and then reaching for curl is not a path a person has.
     await dashboard.goto();
     await dashboard.openDiscussion(discId);
+
+    await page.getByText('Publier une carte importante en votre nom').click();
+    await page.getByLabel('Identifiant de publication').fill(grant);
+
+    const content = fence('e2e-published', 'La carte part avec un identifiant enrôlé.');
+    await page.locator('.disc-composer-textarea').fill(content);
+    await page.locator('.disc-send-btn').first().click();
+
+    await expect(async () => {
+      const listed = await request.get(`/api/discussions/${discId}/important`);
+      const list = (await listed.json())?.data;
+      expect(list?.total_all).toBe(1);
+      // Signed as a human, not as the orchestrator: the roles exist to be
+      // distinguishable and a card saying "human" must mean one.
+      expect(list?.items?.[0]?.author_kind).toBe('human');
+    }).toPass({ timeout: 15_000 });
+
+    // Navigation: the bar counts what the database holds, and its counter
+    // reaches the card even with both arrows disabled at one item.
     const bar = page.locator('.disc-important-bar');
     await expect(bar).toBeVisible();
     await expect(bar.getByRole('button', { name: 'Aller au message important courant' })).toHaveText(
@@ -221,6 +210,29 @@ test.describe.serial('publication authority, end to end', () => {
       /1/,
     );
     await expect(bar.locator('.disc-important-position')).toHaveText('Aucun dans cette catégorie');
+  });
+
+  test('a proof is spent once, whatever presents it again', async ({ request }) => {
+    // The composer mints a fresh proof per send, so replay is not something a
+    // person can do through the UI — which is exactly why it is checked here.
+    const content = fence('e2e-replay', 'Une preuve ne se dépense qu’une fois.');
+    const proof = await request.post('/api/human-credentials/proof', {
+      data: { grant, discussion_id: discId, content },
+    });
+    expect(proof.ok()).toBe(true);
+    const proofId = (await proof.json())?.data;
+
+    for (const attempt of [1, 2]) {
+      const posted = await request.post(`/api/discussions/${discId}/messages`, {
+        data: { content, publication_grant: grant, publication_proof: proofId },
+      });
+      expect(posted.ok(), `send ${attempt} must still post the message`).toBe(true);
+    }
+
+    // Two sends, one card: the second proof was already spent. The MESSAGE
+    // posted both times — a refused publication never costs the text.
+    const listed = await request.get(`/api/discussions/${discId}/important`);
+    expect((await listed.json())?.data?.total_all).toBe(2);
   });
 
   test('rotating the bootstrap locks the screen back and retires the old secret', async ({

@@ -630,42 +630,75 @@ impl ImportantPublisher {
 /// exists if and only if the event was recorded. `dedup_key` is the identity of
 /// the FACT, so a replay after restart collapses onto the existing row instead
 /// of publishing twice.
-#[allow(clippy::too_many_arguments)]
-pub fn publish_steering_card(
-    conn: &Connection,
-    discussion_id: &str,
-    message_id: &str,
-    category: ImportantCategory,
-    dedup_key: &str,
-    title: &str,
-    highlight: &str,
-    impact: &str,
-    references: ImportantReferences,
-    created_at: &str,
-) -> Result<()> {
-    let spec = ImportantSpec {
-        version: IMPORTANT_SCHEMA_VERSION,
-        category,
-        dedup_key: dedup_key.to_string(),
-        title: title.to_string(),
-        highlight: highlight.to_string(),
-        context: None,
-        impact: impact.to_string(),
-        // A steering event states what happened; it asks nothing of anybody.
-        // An action nobody owes is `required: false`, not a vague sentence.
-        action_required: ImportantAction {
+/// What a steering card says.
+///
+/// Grouped rather than passed as ten positional arguments, because five of them
+/// are strings and transposing two of those is a mistake nothing catches.
+pub struct SteeringCard<'a> {
+    pub category: ImportantCategory,
+    /// The identity of the FACT, not of the message: a replay after a restart
+    /// finds this key and does nothing.
+    pub dedup_key: &'a str,
+    pub title: &'a str,
+    pub highlight: &'a str,
+    pub impact: &'a str,
+    /// Most steering events state what happened and ask nothing of anybody.
+    /// Not all: a campaign parked on a human IS waiting for somebody in
+    /// particular, and printing "no action required" on that card would be
+    /// false in the one place a reader most needs it to be true.
+    pub action_required: ImportantAction,
+    pub references: ImportantReferences,
+}
+
+impl ImportantAction {
+    /// Nothing is owed. The explicit "none" the contract asks for, so an
+    /// omitted action and a deliberate absence cannot be confused.
+    pub fn none() -> Self {
+        Self {
             required: false,
             action: None,
             owner: None,
             due: None,
-        },
-        references,
+        }
+    }
+
+    /// Somebody owes something.
+    pub fn owed(action: &str, owner: &str) -> Self {
+        Self {
+            required: true,
+            action: Some(action.to_string()),
+            owner: Some(owner.to_string()),
+            due: None,
+        }
+    }
+}
+
+pub fn publish_steering_card(
+    conn: &Connection,
+    discussion_id: &str,
+    message_id: &str,
+    card: SteeringCard<'_>,
+    created_at: &str,
+) -> Result<()> {
+    let spec = ImportantSpec {
+        version: IMPORTANT_SCHEMA_VERSION,
+        category: card.category,
+        dedup_key: card.dedup_key.to_string(),
+        title: card.title.to_string(),
+        highlight: card.highlight.to_string(),
+        context: None,
+        impact: card.impact.to_string(),
+        action_required: card.action_required,
+        references: card.references,
     };
     // A malformed spec here is a bug in the producer, not a caller's problem:
     // refuse the card, keep the event. Losing a card is cheaper than aborting a
     // terminal transition.
     if !validate_spec(&spec) {
-        tracing::warn!("steering card {dedup_key} failed validation and was not published");
+        tracing::warn!(
+            "steering card {} failed validation and was not published",
+            card.dedup_key
+        );
         return Ok(());
     }
     publish(
@@ -676,7 +709,7 @@ pub fn publish_steering_card(
         &spec,
         ImportantAuthorKind::Orchestrator,
         "Orchestrateur",
-        Some(("orchestration", dedup_key)),
+        Some(("orchestration", card.dedup_key)),
         created_at,
     )?;
     Ok(())

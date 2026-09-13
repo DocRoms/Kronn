@@ -3377,4 +3377,9 @@ export const publicationCredentials = {
   // never the secret: it goes to the operator's private file and over no wire.
   rotateAdmin: (authority: string) =>
     api<{ path: string }>('POST', '/human-credentials/admin/rotate', { authority }),
+  /** A single-use proof for THIS body in THIS room, spent by the send that
+   *  follows. Issued separately so a captured send cannot be replayed and a
+   *  captured proof cannot be aimed at another discussion or another card. */
+  proof: (grant: string, discussion_id: string, content: string) =>
+    api<string>('POST', '/human-credentials/proof', { grant, discussion_id, content }),
 };

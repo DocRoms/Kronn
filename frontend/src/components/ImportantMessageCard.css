@@ -199,3 +199,56 @@
     justify-content: space-between;
   }
 }
+
+/* ── Publishing from the composer ───────────────────────────────────────── */
+
+/* Collapsed by default: most messages are not steering events, and a field
+   asking for a secret should not sit open above every reply. */
+.disc-important-publish {
+  margin: 0 0 var(--kr-sp-2);
+  border: 1px solid var(--kr-border-subtle);
+  border-radius: var(--kr-r-md);
+  background: var(--kr-bg-subtle);
+  font-size: var(--kr-fs-sm);
+}
+
+.disc-important-publish > summary {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-2);
+  padding: var(--kr-sp-2) var(--kr-sp-3);
+  color: var(--kr-text-secondary);
+  cursor: pointer;
+}
+
+.disc-important-publish > summary:focus-visible {
+  outline: 2px solid var(--kr-accent);
+  outline-offset: 2px;
+}
+
+.disc-important-publish-body {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--kr-sp-2);
+  padding: 0 var(--kr-sp-3) var(--kr-sp-3);
+}
+
+.disc-important-publish-body input {
+  flex: 1 1 16rem;
+  min-width: 0;
+  min-height: 32px;
+  padding: 0 var(--kr-sp-2);
+  border: 1px solid var(--kr-border);
+  border-radius: var(--kr-r-sm);
+  background: var(--kr-bg-input);
+  color: var(--kr-text-primary);
+  font-family: var(--kr-font-mono);
+}
+
+.disc-important-publish-body .settings-hint {
+  flex: 1 1 100%;
+  margin: 0;
+  color: var(--kr-text-muted);
+  font-size: var(--kr-fs-xs);
+}
