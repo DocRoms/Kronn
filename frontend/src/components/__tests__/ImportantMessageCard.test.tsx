@@ -111,6 +111,18 @@ describe('ImportantMessageCard', () => {
     expect(container.querySelector('[data-category="blocking_alert"]')).not.toBeNull();
   });
 
+  it('opens this discussion plan from a task reference', async () => {
+    serve([card({ references: { task_ref: 'KT-643' } })]);
+    const opened = vi.fn();
+    window.addEventListener('kronn:open-discussion-plan', opened);
+    const user = userEvent.setup();
+    render(<ImportantMessageCard discussionId={DISC} sourceMessageId="m-1" />);
+    await user.click(await screen.findByRole('button', { name: 'disc.important.ref.task_ref: KT-643' }));
+    expect(opened).toHaveBeenCalledOnce();
+    expect((opened.mock.calls[0][0] as CustomEvent).detail).toEqual({ discussionId: DISC });
+    window.removeEventListener('kronn:open-discussion-plan', opened);
+  });
+
   it('lists only the references that are set', async () => {
     serve([card({ references: { task_ref: 'KT-619', dod_id: null, agent: 'Codex' } })]);
     render(<ImportantMessageCard discussionId={DISC} sourceMessageId="m-1" />);

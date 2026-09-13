@@ -21,6 +21,7 @@
    local variable wearing its prefix reads as a token that somebody could look
    up and fail to find. */
 .disc-important-card[data-category='decision'] { --card-accent: var(--kr-accent); }
+.disc-important-card[data-category='information'] { --card-accent: var(--kr-cyan); }
 .disc-important-card[data-category='scope_change'] { --card-accent: var(--kr-purple); }
 .disc-important-card[data-category='dod_waiver'] { --card-accent: var(--kr-warning); }
 .disc-important-card[data-category='blocking_alert'] { --card-accent: var(--kr-error); }
@@ -128,6 +129,16 @@
   font-size: var(--kr-fs-2xs);
 }
 
+.disc-important-task-link {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
 /* ── Filter bar ─────────────────────────────────────────────────────────── */
 
 .disc-important-bar {
@@ -212,6 +223,28 @@
   font-size: var(--kr-fs-sm);
 }
 
+.disc-important-trigger {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-2);
+  width: 100%;
+  padding: var(--kr-sp-2) var(--kr-sp-3);
+  border: 0;
+  background: transparent;
+  color: var(--kr-text-secondary);
+  cursor: pointer;
+  text-align: left;
+}
+
+.disc-important-trigger:focus-visible,
+.disc-important-publish button:focus-visible,
+.disc-important-publish input:focus-visible,
+.disc-important-publish textarea:focus-visible,
+.disc-important-publish select:focus-visible {
+  outline: 2px solid var(--kr-accent);
+  outline-offset: 2px;
+}
+
 .disc-important-publish > summary {
   display: flex;
   align-items: center;
@@ -232,6 +265,49 @@
   align-items: center;
   gap: var(--kr-sp-2);
   padding: 0 var(--kr-sp-3) var(--kr-sp-3);
+}
+
+.disc-important-publish-body > label {
+  flex: 1 1 100%;
+  font-weight: 600;
+}
+
+.disc-important-publish-body textarea,
+.disc-important-publish-body select {
+  flex: 1 1 100%;
+  min-width: 0;
+  min-height: 36px;
+  padding: var(--kr-sp-2);
+  border: 1px solid var(--kr-border);
+  border-radius: var(--kr-r-sm);
+  background: var(--kr-bg-input);
+  color: var(--kr-text-primary);
+}
+
+.disc-important-publish-body textarea { min-height: 7rem; resize: vertical; }
+
+.disc-important-credential,
+.disc-important-form-actions {
+  display: flex;
+  flex: 1 1 100%;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--kr-sp-2);
+}
+
+.disc-important-credential > label { flex: 1 1 100%; }
+
+.disc-important-form-actions { justify-content: flex-end; }
+
+.disc-important-form-actions button,
+.disc-important-credential button {
+  min-height: 34px;
+  padding: 0 var(--kr-sp-3);
+  border: 1px solid var(--kr-border);
+  border-radius: var(--kr-r-sm);
+  background: var(--kr-bg-input);
+  color: var(--kr-text-primary);
+  cursor: pointer;
 }
 
 .disc-important-publish-body input {

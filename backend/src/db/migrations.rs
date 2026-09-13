@@ -667,6 +667,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "174_human_publication_credentials",
         include_str!("sql/174_human_publication_credentials.sql"),
     ),
+    (
+        "175_important_message_information_category",
+        include_str!("sql/175_important_message_information_category.sql"),
+    ),
 ];
 
 /// Apply one migration inside the caller-owned transaction.

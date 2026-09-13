@@ -109,7 +109,17 @@ export function ImportantMessageCard({ discussionId, sourceMessageId, serverEven
           <ul className="disc-important-refs">
             {references.map(([key, value]) => (
               <li key={key}>
-                {t(`disc.important.ref.${key}`)}: {value}
+                {key === 'task_ref' ? (
+                  <button
+                    type="button"
+                    className="disc-important-task-link"
+                    onClick={() => window.dispatchEvent(new CustomEvent('kronn:open-discussion-plan', {
+                      detail: { discussionId },
+                    }))}
+                  >
+                    {t(`disc.important.ref.${key}`)}: {value}
+                  </button>
+                ) : `${t(`disc.important.ref.${key}`)}: ${value}`}
               </li>
             ))}
           </ul>
