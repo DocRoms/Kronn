@@ -3,13 +3,17 @@ import './DiscussionsPage.css';
 import { MessageBubble, MarkdownContent } from '../components/MessageBubble';
 import { DiscussionNote } from '../components/DiscussionNote';
 import { DiscussionQuestionBanner } from '../components/DiscussionQuestionBanner';
+import { ImportantMessagesBar } from '../components/ImportantMessageCard';
+import { ImportantPublicationStrip } from '../components/ImportantPublicationStrip';
+import { refreshImportantMessages } from '../lib/importantMessages';
+import { preparePublication } from '../lib/importantPublication';
 import { unseenBasis } from '../lib/discussionUiUtils';
 import { ToolCallsGroup } from '../components/ToolCallsGroup';
 import { MessageDateSeparator } from '../components/MessageDateSeparator';
 import { groupMessagesWithToolFold } from '../lib/discussionMessageGrouping';
 import { localCalendarDayKey } from '../lib/discussionDates';
 import { ChatInput } from '../components/ChatInput';
-import { discussions as discussionsApi, discussionActions as discussionActionsApi, projects as projectsApi, skills as skillsApi, profiles as profilesApi, directives as directivesApi, contacts as contactsApi, workflows as workflowsApi, quickPrompts as quickPromptsApi, planning as planningApi, orchestration as orchestrationApi, externalApi as externalApiConnections, runsApi } from '../lib/api';
+import { discussions as discussionsApi, discussionActions as discussionActionsApi, projects as projectsApi, skills as skillsApi, profiles as profilesApi, directives as directivesApi, contacts as contactsApi, workflows as workflowsApi, quickPrompts as quickPromptsApi, planning as planningApi, orchestration as orchestrationApi, externalApi as externalApiConnections, runsApi, publicationCredentials } from '../lib/api';
 import type { ExternalApiConnectionView } from '../lib/api';
 import { GitPanel } from '../components/GitPanel';
 import { TerminalPanel } from '../components/TerminalPanel';
@@ -463,6 +467,10 @@ export function DiscussionsPage({
   // Bumped when a note is written from the composer, so an open panel shows it
   // without waiting for a reopen.
   const [notesRefresh, setNotesRefresh] = useState(0);
+  // KT-619 — the credential that lets THIS person publish a steering card.
+  // Held for as long as the page is open and written nowhere: not
+  // localStorage, not a URL. Reloading asks again, which is the point.
+  const [publicationGrant, setPublicationGrant] = useState('');
   const [assetOpenRequest, setAssetOpenRequest] = useState<{ assetId: string; nonce: number } | null>(null);
   // KT-243 — carries the target run_id of the latest `shared_run_updated` WS
   // event so <DiscussionAttachedRuns> can relist only for a run_id it does
@@ -2672,6 +2680,31 @@ export function DiscussionsPage({
       cleanupStream(discId, false);
     };
     try {
+      // KT-619 — a `kronn-important` fence in the body is a request to publish a
+      // steering card. The rules, and the Stop that can land during the proof
+      // round-trip, live in `preparePublication` where they can be tested.
+      const prepared = await preparePublication({
+        grant: publicationGrant,
+        content: msg,
+        discussionId: discId,
+        signal: controller.signal,
+        issueProof: publicationCredentials.proof,
+        onRefused: () => toast(t('disc.important.proofRefused'), 'error'),
+      });
+      if (prepared.outcome === 'abandon') {
+        // The user asked for this, so it is reverted quietly: an error toast
+        // about their own Stop is noise.
+        optimisticMessageIdsRef.current.delete(clientMessageId);
+        revertOptimisticUserRow();
+        if (replyTargetId) {
+          saveReplyDraft(discId, replyTargetId);
+          setReplyToMessageId(current => current ?? replyTargetId);
+        }
+        publishSettlement('refused');
+        cleanupStream(discId, false);
+        return;
+      }
+      const publication = prepared.fields;
       await discussionsApi.sendMessageStream(
         discId,
         {
@@ -2684,6 +2717,7 @@ export function DiscussionsPage({
           target_agent: primaryTarget,
           client_message_id: clientMessageId,
           reply_to_message_id: replyTargetId,
+          ...publication,
         },
         (text) => appendRememberedStreamChunk(discId, text),
         () => {
@@ -2715,6 +2749,14 @@ export function DiscussionsPage({
           // headers, which can also precede an SSE error.
           reloadDiscussion(discId);
           loadContextFiles(discId);
+          // KT-619 — a card published by THIS send. The bar refreshes when a
+          // new durable message ARRIVES, which is an agent's message coming
+          // back from the server; the message we just wrote ourselves never
+          // arrives, so without this the first card in a discussion stayed
+          // invisible until the discussion was reopened. The receipt is
+          // emitted after the commit, and the card is written in the same
+          // transaction, so by here it exists or it never will.
+          if (publication.publication_proof) refreshImportantMessages(discId);
           // The optimistic update above bumped both counts by 1 (the freshly
           // queued User message); seed lastSeen with the matching non-System
           // basis so the badge resolves to 0 without waiting on the next tick.
@@ -4048,6 +4090,15 @@ export function DiscussionsPage({
               messageRevision={activeDiscussion.messages.at(-1)?.id}
             />
 
+            {/* KT-619 — find the steering cards without scrolling the whole
+                thread. Sits beside the question banner because both answer
+                "what do I need to know about this room", not "what was said". */}
+            <ImportantMessagesBar
+              discussionId={activeDiscussion.id}
+              messageRevision={activeDiscussion.messages.at(-1)?.id}
+              onNavigate={handleReplyNavigate}
+            />
+
             {/* Messages */}
             <div
               className="disc-messages"
@@ -5082,6 +5133,13 @@ export function DiscussionsPage({
                 "même message dans toutes les discussions" bug on 2026-04-15.
                 Remount is cheap here and also gives us a clean reset of
                 mention popover / emoji popover / voice mode / draft hydration. */}
+            {/* KT-619 — the human's own publication authority, held for as
+                long as this page is open and stored nowhere. */}
+            <ImportantPublicationStrip
+              grant={publicationGrant}
+              onGrantChange={setPublicationGrant}
+              t={t}
+            />
             <ChatInput
               key={activeDiscussion.id}
               discussion={activeDiscussion}

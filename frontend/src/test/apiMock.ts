@@ -67,6 +67,7 @@ export const API_NAMESPACES = [
   'apiCallLogs',
   'orchestration',
   'learnings',
+  'publicationCredentials',
   'health',
   // KT-190 — joined-CLI token telemetry coverage.
   'telemetry',
@@ -129,6 +130,7 @@ interface DefaultMock {
   apiCallLogs: Record<string, AnyFn>;
   orchestration: Record<string, AnyFn>;
   learnings: Record<string, AnyFn>;
+  publicationCredentials: Record<string, AnyFn>;
   telemetry: Record<string, AnyFn>;
   runsApi: Record<string, AnyFn>;
   modelCatalogApi: Record<string, AnyFn>;
@@ -722,6 +724,15 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       }),
     },
 
+    // KT-619 — publication credentials. Empty list by default so a settings
+    // screen mounts clean and locked: no credential means nothing publishes,
+    // which is also the real state of a fresh install.
+    publicationCredentials: {
+      list: vi.fn().mockResolvedValue([]),
+      enrol: vi.fn().mockResolvedValue({ credential: null, secret: '' }),
+      revoke: vi.fn().mockResolvedValue(true),
+      rotate: vi.fn().mockResolvedValue(''),
+    },
     learnings: {
       // 0.10.0 — Continual Learning. Neutral defaults so components mount clean:
       // pending → 0 (badge hidden), list/forDiscussion → empty.

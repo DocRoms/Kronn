@@ -320,6 +320,208 @@ class ResolveIdTests(unittest.TestCase):
         http.assert_not_called()
 
 
+class DiscAppendCredentialInjectionTests(unittest.TestCase):
+    """KT-619 — the credential the bridge injects, and never shows.
+
+    Publication authority is decided from the resume token this bridge HOLDS.
+    Two properties matter, and neither is provable by reading the code once:
+    it must actually reach the append body, and it must not reach anything the
+    model or a log can see.
+    """
+
+    SECRET = "kr-resume-must-never-appear"
+
+    def setUp(self):
+        self.mod = _load_module()
+        self.fake_http = mock.MagicMock(return_value={
+            "success": True,
+            "data": {"appended": 1, "last_message_id": "m-1"},
+        })
+        self.http_patch = mock.patch.object(self.mod, "_http", self.fake_http)
+        self.http_patch.start()
+        self.addCleanup(self.http_patch.stop)
+        self.binding_patch = mock.patch.object(
+            self.mod,
+            "_read_binding",
+            return_value={"disc_id": "disc-1", "resume_token": self.SECRET},
+        )
+        self.binding_patch.start()
+        self.addCleanup(self.binding_patch.stop)
+
+    def _append(self, **extra):
+        args = {"disc_id": "disc-1", "content": "hello", **extra}
+        return self.mod.call_disc_append(args)
+
+    def _body(self):
+        """The append body specifically: `call_disc_append` makes other HTTP
+        calls, so the LAST one is not reliably the one under test."""
+        for call in self.fake_http.call_args_list:
+            args = call.args
+            if len(args) >= 3 and args[0] == "POST" and args[1] == "/api/disc/append":
+                return args[2]
+        self.fail(f"no POST /api/disc/append among {self.fake_http.call_args_list}")
+
+    def test_the_held_credential_reaches_the_append_body(self):
+        self._append()
+        self.assertEqual(self._body().get("session_credential"), self.SECRET)
+
+    def test_no_binding_means_no_credential_rather_than_an_empty_one(self):
+        """An absent binding must omit the field, not send `""` or `None`:
+        the backend refuses either way, but only omission is honest about
+        having nothing."""
+        with mock.patch.object(self.mod, "_read_binding", return_value=None):
+            self._append()
+        self.assertNotIn("session_credential", self._body())
+
+    def test_a_binding_without_a_token_sends_nothing(self):
+        with mock.patch.object(
+            self.mod, "_read_binding", return_value={"disc_id": "disc-1"}
+        ):
+            self._append()
+        self.assertNotIn("session_credential", self._body())
+
+    def test_the_credential_is_absent_from_the_tool_schemas(self):
+        """A model cannot set what it is never offered. If this ever fails,
+        the field became a parameter and the whole contract is void."""
+        schemas = json.dumps(self.mod.tool_definitions()
+                             if hasattr(self.mod, "tool_definitions")
+                             else self.mod.TOOLS)
+        self.assertNotIn("session_credential", schemas)
+
+    def test_the_credential_is_absent_from_the_tool_result(self):
+        result = self._append()
+        # `repr` rather than a JSON dump: it is what a log line or a traceback
+        # would print, and it does not choke on a non-serialisable value.
+        self.assertNotIn(self.SECRET, repr(result))
+
+    def test_the_credential_is_absent_from_anything_logged(self):
+        """The bridge logs to stderr. A secret printed there lands in the
+        supervisor's capture, which is exactly where it must not be."""
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            self._append()
+        self.assertNotIn(self.SECRET, stderr.getvalue())
+
+
+class DiscAppendPublicationGrantTests(unittest.TestCase):
+    """KT-619 — the grant the bridge reads, and never shows.
+
+    A grant is what turns a message into a steering card. It comes from a file
+    the operator placed, not from anything the model can reach, and a message
+    without one still gets posted.
+    """
+
+    GRANT = "kr-human-grant-must-never-appear"
+    FENCE = "```kronn-important\n{}\n```"
+
+    def setUp(self):
+        self.mod = _load_module()
+        self.dir = tempfile.TemporaryDirectory(prefix="kronn-grant-")
+        self.addCleanup(self.dir.cleanup)
+        self.mod._BINDING_DIR = self.dir.name
+        self.grant_path = os.path.join(self.dir.name, self.mod._GRANT_FILE)
+
+        self.fake_http = mock.MagicMock(side_effect=self._respond)
+        patcher = mock.patch.object(self.mod, "_http", self.fake_http)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        mock.patch.object(
+            self.mod,
+            "_read_binding",
+            return_value={"disc_id": "disc-1", "resume_token": "kr-resume-x"},
+        ).start()
+        self.addCleanup(mock.patch.stopall)
+
+    def _respond(self, method, path, *args, **kwargs):
+        if path == "/api/human-credentials/proof":
+            return {"success": True, "data": "proof-issued"}
+        return {"success": True, "data": {"appended": 1, "last_message_id": "m-1"}}
+
+    def _write_grant(self, mode=0o600):
+        with open(self.grant_path, "w", encoding="utf-8") as handle:
+            handle.write(self.GRANT + "\n")
+        os.chmod(self.grant_path, mode)
+
+    def _append(self, content):
+        return self.mod.call_disc_append({"disc_id": "disc-1", "content": content})
+
+    def _append_body(self):
+        for call in self.fake_http.call_args_list:
+            if len(call.args) >= 3 and call.args[1] == "/api/disc/append":
+                return call.args[2]
+        self.fail("no append was sent")
+
+    def test_a_card_carries_the_grant_and_a_proof(self):
+        self._write_grant()
+        self._append(self.FENCE)
+        body = self._append_body()
+        self.assertEqual(body.get("publication_grant"), self.GRANT)
+        self.assertEqual(body.get("publication_proof"), "proof-issued")
+
+    def test_the_proof_is_asked_over_the_body_actually_posted(self):
+        """If the proof were issued over different content than the append
+        carries, it would never match its own card — silently, and only at
+        publication time."""
+        self._write_grant()
+        self._append(self.FENCE)
+        proof_call = next(
+            call
+            for call in self.fake_http.call_args_list
+            if call.args[1] == "/api/human-credentials/proof"
+        )
+        posted = "".join(m["content"] for m in self._append_body()["messages"])
+        self.assertEqual(proof_call.args[2]["content"], posted)
+
+    def test_an_ordinary_message_asks_for_nothing(self):
+        self._write_grant()
+        self._append("just talking")
+        body = self._append_body()
+        self.assertNotIn("publication_grant", body)
+        self.assertNotIn("publication_proof", body)
+        self.assertFalse(
+            any(
+                call.args[1] == "/api/human-credentials/proof"
+                for call in self.fake_http.call_args_list
+            )
+        )
+
+    def test_no_grant_file_loses_the_card_and_keeps_the_message(self):
+        self._append(self.FENCE)
+        body = self._append_body()
+        self.assertNotIn("publication_grant", body)
+        self.assertEqual(body["disc_id"], "disc-1")
+
+    def test_a_grant_readable_by_others_is_ignored(self):
+        """It has already been given away; using it anyway would pretend
+        otherwise."""
+        self._write_grant(mode=0o644)
+        self._append(self.FENCE)
+        self.assertNotIn("publication_grant", self._append_body())
+
+    def test_a_refused_proof_loses_the_card_and_keeps_the_message(self):
+        self._write_grant()
+        self.fake_http.side_effect = lambda method, path, *a, **k: (
+            {"success": False, "error": "forbidden"}
+            if path == "/api/human-credentials/proof"
+            else {"success": True, "data": {"appended": 1}}
+        )
+        self._append(self.FENCE)
+        body = self._append_body()
+        self.assertNotIn("publication_proof", body)
+        self.assertEqual(body["disc_id"], "disc-1")
+
+    def test_the_grant_appears_in_no_tool_schema(self):
+        self.assertNotIn("publication_grant", json.dumps(self.mod.TOOLS))
+
+    def test_the_grant_reaches_neither_the_result_nor_stderr(self):
+        self._write_grant()
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            result = self._append(self.FENCE)
+        self.assertNotIn(self.GRANT, repr(result))
+        self.assertNotIn(self.GRANT, stderr.getvalue())
+
+
 class CallDiscCreateAutoInheritTests(unittest.TestCase):
     """The auto-fill contract on `call_disc_create`.
 

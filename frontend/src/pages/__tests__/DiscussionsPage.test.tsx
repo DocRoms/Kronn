@@ -37,6 +37,17 @@ vi.mock('../../lib/api', () => ({
     propose: vi.fn().mockResolvedValue({ accepted: true, warnings: [], evidence_checks: [], learning: null }),
     forDiscussion: vi.fn().mockResolvedValue([]),
   },
+  // KT-619 — the composer asks for a publication proof before every send that
+  // carries a card. Absent from this mock, the property access alone throws and
+  // every send in this file dies before `sendMessageStream`.
+  publicationCredentials: {
+    proof: vi.fn().mockResolvedValue('proof-test'),
+    list: vi.fn().mockResolvedValue([]),
+    enrol: vi.fn(),
+    revoke: vi.fn(),
+    rotate: vi.fn(),
+    rotateAdmin: vi.fn(),
+  },
   discussions: {
     list: vi.fn().mockResolvedValue([]),
     get: vi.fn().mockResolvedValue(null),

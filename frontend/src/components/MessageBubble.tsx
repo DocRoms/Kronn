@@ -19,6 +19,7 @@ import { DocPreview } from './DocPreview';
 import { DocDataExport } from './DocDataExport';
 import { PlanningActionCard } from './PlanningActionCard';
 import { DiscussionQuestionCard } from './DiscussionQuestionCard';
+import { ImportantMessageCard } from './ImportantMessageCard';
 import { SourceCitationChip } from './SourceCitationChip';
 import { hasSourceCitation, splitSourceCitations } from '../lib/sourceCitations';
 import { DiscussionActionCard } from './DiscussionActionCard';
@@ -1050,7 +1051,16 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
                         <MentionAwareMessageBody
                           content={cleaned}
                           discussionId={discussionId}
-                          sourceMessageId={msg.role === 'Agent' ? msg.id : undefined}
+                          // The durable id of THIS message, whoever wrote it.
+                          // It used to be handed over only for `Agent`, which
+                          // was true while an agent was the only thing that
+                          // could publish a durable fence. Since KT-619 a human
+                          // publishes an important card from the composer — on
+                          // a `User` message — and with `undefined` here the
+                          // card could never find its own row: the bar counted
+                          // it while the bubble right underneath said it had
+                          // been refused.
+                          sourceMessageId={msg.id}
                           sources={lint?.sources}
                         />
                       </MentionDiscussionAgentContext.Provider>
@@ -1766,6 +1776,15 @@ function MarkdownPre({ children, node }: {
           source={source.trim()}
           sourceMessageId={sourceMessageId}
           fenceIndex={fenceIndex !== undefined && fenceIndex >= 0 ? fenceIndex : undefined}
+        />
+      );
+    }
+    if (className.includes('language-kronn-important')) {
+      return (
+        <ImportantMessageCard
+          key={JSON.stringify([discussionId, sourceMessageId])}
+          discussionId={discussionId}
+          sourceMessageId={sourceMessageId}
         />
       );
     }

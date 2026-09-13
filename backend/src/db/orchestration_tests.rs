@@ -2214,6 +2214,51 @@ fn escalated_campaign_holds_the_principal_and_terminal_child_notifies_parent() {
         notices, 1,
         "terminal child event wakes the principal durably"
     );
+
+    // KT-619 — every steering event on this path mints a card, each in the same
+    // transaction as the message it attaches to. Three happened above, in this
+    // order: the campaign parked on a human, the campaign resumed, and the
+    // execution ended.
+    let cards = crate::db::discussion_important::list(&conn, DISC, None).unwrap();
+    let kinds: Vec<_> = cards.items.iter().map(|item| item.category).collect();
+    assert_eq!(
+        kinds,
+        vec![
+            crate::db::discussion_important::ImportantCategory::HumanActionRequired,
+            crate::db::discussion_important::ImportantCategory::Decision,
+            crate::db::discussion_important::ImportantCategory::BlockingAlert,
+        ],
+        "the human gate, its release, and the terminal are three distinct events"
+    );
+
+    // The gate card is the ONE that owes something. Printing "no action
+    // required" on a campaign that is waiting for a person would be false in
+    // the single place a reader most needs it to be true.
+    let gate = &cards.items[0];
+    assert!(gate.action_required.required);
+    assert_eq!(gate.action_required.owner.as_deref(), Some("Humain"));
+    assert!(gate.message_id.starts_with("orch-campaign-gate:"));
+
+    // The release closes it. A gate card left standing after the decision is
+    // worse than none, because it reads as current.
+    assert!(!cards.items[1].action_required.required);
+
+    let terminal = &cards.items[2];
+    assert_eq!(
+        terminal.author_kind,
+        crate::db::discussion_important::ImportantAuthorKind::Orchestrator,
+        "the server authored it; no caller was involved"
+    );
+    assert_eq!(
+        terminal.references.execution_id.as_deref(),
+        Some(launched.execution.id.as_str())
+    );
+    // The card is attached to the notification, not to some other message.
+    assert!(terminal.message_id.starts_with("orch-principal-terminal:"));
+    assert!(
+        !terminal.action_required.required,
+        "a terminal states what happened; it asks nothing"
+    );
 }
 
 #[test]
@@ -4623,5 +4668,170 @@ fn an_unowned_path_is_not_forced_into_someone_elses_audit_trail() {
     assert_eq!(
         count, 0,
         "nothing is attributed to an execution that owns nothing"
+    );
+}
+
+/// KT-619 — `request_changes` is a steering event in the CHILD room, and the
+/// card is minted in the same transaction as the findings message.
+///
+/// DoD-2 asks that the EXISTING steering events produce the required cards.
+/// This is the second of them; the terminal and the campaign human gate are
+/// covered by `failed_child_stops_campaign_until_a_human_decides`.
+#[test]
+fn requested_changes_publish_a_steering_card_beside_the_findings() {
+    const CHILD: &str = "disc-review-child";
+    let conn = setup();
+    seed_task(&conn, "t-review-card", 1310);
+    conn.execute(
+        "INSERT INTO discussions (id, title, created_at, updated_at) \
+         VALUES (?1, 'child', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+        params![CHILD],
+    )
+    .unwrap();
+    let execution = launch_single_task(
+        &conn,
+        &LaunchSingleTaskInput::new("t-review-card", DISC),
+        &backend_actor(),
+    )
+    .unwrap()
+    .execution;
+    conn.execute(
+        "UPDATE task_executions SET sub_discussion_id = ?2 WHERE id = ?1",
+        params![&execution.id, CHILD],
+    )
+    .unwrap();
+    for status in [
+        TaskExecutionStatus::Provisioning,
+        TaskExecutionStatus::Working,
+        TaskExecutionStatus::AwaitingReview,
+    ] {
+        transition_execution(
+            &conn,
+            &execution.id,
+            status,
+            &backend_actor(),
+            serde_json::json!({}),
+        )
+        .unwrap();
+    }
+
+    let findings_message = DiscussionMessage {
+        id: format!("orch-review-findings:{}:0", execution.id),
+        role: MessageRole::User,
+        channel: MessageChannel::Main,
+        content: "**Changements demandés**\n\n- corriger ceci".to_string(),
+        agent_type: None,
+        timestamp: Utc::now(),
+        tokens_used: 0,
+        session_tokens_at_message: None,
+        recovered_partial: false,
+        auth_mode: None,
+        model_tier: None,
+        model: None,
+        cost_usd: None,
+        author_pseudo: Some("Orchestrateur".to_string()),
+        author_avatar_email: None,
+        source_msg_id: None,
+        duration_ms: None,
+        lint_report: None,
+        target_agent: None,
+        reply_to_message_id: None,
+        author_cli_ordinal: None,
+    };
+    let worker_target = MessageTarget::discussion_agent(AgentType::ClaudeCode);
+    let outcome = commit_review_checkpoint(
+        &conn,
+        &ReviewCheckpoint {
+            exec_id: &execution.id,
+            attempt_no: 0,
+            verdict: ReviewVerdict::RequestChanges,
+            decision_json: r#"{"version":"1","decision":"request_changes"}"#,
+            findings: Some(ReviewFindingsDelivery {
+                child_discussion_id: CHILD,
+                message: &findings_message,
+                worker_target: &worker_target,
+            }),
+            escalation: None,
+            reactivation: None,
+            native_dispatch: None,
+            actor: &backend_actor(),
+        },
+    )
+    .unwrap();
+    assert!(matches!(
+        outcome,
+        ReviewCheckpointOutcome::ChangesRequested | ReviewCheckpointOutcome::Escalated
+    ));
+
+    let cards = crate::db::discussion_important::list(&conn, CHILD, None).unwrap();
+    assert_eq!(cards.total, 1, "a returned delivery is a steering event");
+    let card = &cards.items[0];
+    assert_eq!(
+        card.category,
+        crate::db::discussion_important::ImportantCategory::BlockingAlert
+    );
+    assert_eq!(card.message_id, findings_message.id);
+    assert_eq!(
+        card.author_kind,
+        crate::db::discussion_important::ImportantAuthorKind::Orchestrator,
+        "the server authored it — no worker can mint one, here or anywhere"
+    );
+    // The worker owes the fix, and the card says so rather than printing a
+    // polite "no action required" on the one event that is entirely an action.
+    assert!(card.action_required.required);
+    assert_eq!(card.action_required.owner.as_deref(), Some("Worker"));
+    assert_eq!(
+        card.references.execution_id.as_deref(),
+        Some(execution.id.as_str())
+    );
+    assert_eq!(card.references.task_ref.as_deref(), Some("KT-1310"));
+
+    // One event, one message, one card. The card did not mint a SECOND message
+    // beside the findings, and no other message in the room acquired one — the
+    // card is an object pointing at the event, never a reclassification.
+    let messages: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM messages WHERE discussion_id = ?1",
+            [CHILD],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        messages, 1,
+        "the card rode the findings message, not a new one"
+    );
+
+    // Replay: the same checkpoint committed again finds the same dedup key and
+    // publishes nothing. A resume after a restart must not double the card.
+    let replayed = commit_review_checkpoint(
+        &conn,
+        &ReviewCheckpoint {
+            exec_id: &execution.id,
+            attempt_no: 0,
+            verdict: ReviewVerdict::RequestChanges,
+            decision_json: r#"{"version":"1","decision":"request_changes"}"#,
+            findings: Some(ReviewFindingsDelivery {
+                child_discussion_id: CHILD,
+                message: &findings_message,
+                worker_target: &worker_target,
+            }),
+            escalation: None,
+            reactivation: None,
+            native_dispatch: None,
+            actor: &backend_actor(),
+        },
+    );
+    // The second commit is refused by the execution's own state machine, which
+    // is the point: the card cannot double because the event cannot re-happen.
+    assert!(matches!(
+        replayed,
+        Ok(ReviewCheckpointOutcome::NotReviewable { .. })
+            | Ok(ReviewCheckpointOutcome::ExecutionRaced)
+    ));
+    assert_eq!(
+        crate::db::discussion_important::list(&conn, CHILD, None)
+            .unwrap()
+            .total,
+        1
     );
 }

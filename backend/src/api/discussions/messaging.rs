@@ -603,6 +603,9 @@ pub async fn send_message(
         .map(|agent| (Uuid::new_v4().to_string(), agent))
         .collect::<Vec<_>>();
     let defer_dispatch = req.defer_dispatch;
+    // KT-619 — cloned before the `move` closure, like `defer_dispatch` above.
+    let publication_grant = req.publication_grant.clone();
+    let publication_proof = req.publication_proof.clone();
 
     let insert_outcome = match state
         .db
@@ -666,6 +669,52 @@ pub async fn send_message(
                                 &participants,
                             )?;
                         }
+                    }
+                }
+                // KT-619 — a `kronn-important` fence here publishes only when
+                // the sender presents a grant AND the proof issued for this
+                // exact body.
+                //
+                // This handler has no caller identity of its own, and
+                // `auth_middleware` waives authentication for every local
+                // request, so nothing about the REQUEST distinguishes the
+                // browser from a worker. The grant is what does: it is enrolled
+                // by an authority the operator established, it is held rather
+                // than named, and a worker has no path to one.
+                if msg.content.contains("kronn-important") {
+                    let publisher =
+                        match (publication_grant.as_deref(), publication_proof.as_deref()) {
+                            (Some(grant), Some(proof)) => {
+                                crate::db::discussion_important::publisher_for_human_grant(
+                                    conn,
+                                    grant,
+                                    proof,
+                                    &disc_id,
+                                    &msg.content,
+                                    msg.timestamp,
+                                )?
+                            }
+                            // No grant, or a grant without its proof: no card. The
+                            // message itself is already written and stays.
+                            _ => crate::db::discussion_important::ImportantPublisher::Unverified,
+                        };
+                    let label = msg
+                        .author_pseudo
+                        .clone()
+                        .unwrap_or_else(|| "Human".to_string());
+                    let ingest = crate::db::discussion_important::ingest_message_important(
+                        conn,
+                        &disc_id,
+                        &msg.id,
+                        &msg.content,
+                        &publisher.with_label(label),
+                        &msg.timestamp.to_rfc3339(),
+                    )?;
+                    if !ingest.is_empty() && ingest.published == 0 {
+                        tracing::info!(
+                            "important fence in message {} not published: no verified grant",
+                            msg.id
+                        );
                     }
                 }
             }
@@ -1922,6 +1971,8 @@ mod tests {
                 client_message_id: Some("5fa2fc3c-4b92-4472-9729-faba80bf0525".into()),
                 defer_dispatch: false,
                 reply_to_message_id: None,
+                publication_grant: None,
+                publication_proof: None,
             }),
         )
         .await;
@@ -1993,6 +2044,8 @@ mod tests {
                 client_message_id: Some(client_message_id.into()),
                 defer_dispatch: false,
                 reply_to_message_id: None,
+                publication_grant: None,
+                publication_proof: None,
             }),
         )
         .await;
@@ -2013,6 +2066,8 @@ mod tests {
                 client_message_id: Some(client_message_id.into()),
                 defer_dispatch: false,
                 reply_to_message_id: None,
+                publication_grant: None,
+                publication_proof: None,
             }),
         )
         .await;
@@ -2052,6 +2107,8 @@ mod tests {
                 client_message_id: Some(client_message_id.into()),
                 defer_dispatch: true,
                 reply_to_message_id: None,
+                publication_grant: None,
+                publication_proof: None,
             }),
         )
         .await;
@@ -2087,6 +2144,8 @@ mod tests {
                 client_message_id: Some(client_message_id.into()),
                 defer_dispatch: true,
                 reply_to_message_id: None,
+                publication_grant: None,
+                publication_proof: None,
             }),
         )
         .await;
@@ -2250,6 +2309,8 @@ mod tests {
                 client_message_id: Some("6661b620-162d-4a8a-9552-33f0896c6835".into()),
                 defer_dispatch: false,
                 reply_to_message_id: None,
+                publication_grant: None,
+                publication_proof: None,
             }),
         )
         .await;
@@ -2362,6 +2423,8 @@ mod tests {
                 client_message_id: Some("c4a768c8-48b5-4d64-9fe4-121ebf9c36ac".into()),
                 defer_dispatch: false,
                 reply_to_message_id: None,
+                publication_grant: None,
+                publication_proof: None,
             }),
         )
         .await;
@@ -2420,6 +2483,8 @@ mod tests {
                 client_message_id: Some("not-a-uuid".into()),
                 defer_dispatch: false,
                 reply_to_message_id: None,
+                publication_grant: None,
+                publication_proof: None,
             }),
         )
         .await;
@@ -2475,6 +2540,8 @@ mod tests {
                 client_message_id: Some("22222222-2222-4222-8222-222222222222".into()),
                 defer_dispatch: false,
                 reply_to_message_id: Some(source_id.into()),
+                publication_grant: None,
+                publication_proof: None,
             }),
         )
         .await;
@@ -2508,6 +2575,8 @@ mod tests {
                 client_message_id: Some("33333333-3333-4333-8333-333333333333".into()),
                 defer_dispatch: false,
                 reply_to_message_id: Some("44444444-4444-4444-8444-444444444444".into()),
+                publication_grant: None,
+                publication_proof: None,
             }),
         )
         .await;
@@ -3204,5 +3273,160 @@ mod tests {
                 .any(|m| m.role == MessageRole::System && m.content.starts_with("Erreur:")),
             "the preflight error must be persisted in the thread (fire-and-forget child)"
         );
+    }
+
+    /// KT-619 — this endpoint cannot tell a human from a worker (no caller
+    /// identity, and loopback waives auth), so it publishes no card at all
+    /// until a verified publication authority exists.
+    #[tokio::test]
+    async fn send_message_does_not_publish_an_unverified_human_card() {
+        let disc = "d-human-important";
+        let state = make_state_with_disc(disc).await;
+        state
+            .db
+            .with_conn(move |conn| {
+                conn.execute("UPDATE discussions SET no_agent = 1 WHERE id = ?1", [disc])?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let fence = format!(
+            "Décision prise.\n\n```kronn-important\n{}\n```\n",
+            serde_json::json!({
+                "version": crate::db::discussion_important::IMPORTANT_SCHEMA_VERSION,
+                "category": "decision",
+                "dedup_key": "kt-619.human-card",
+                "title": "Titre",
+                "highlight": "Le point essentiel.",
+                "impact": "Conséquence concrète.",
+                "action_required": { "required": false },
+            })
+        );
+
+        let response = send_message(
+            State(state.clone()),
+            Path(disc.to_string()),
+            Json(SendMessageRequest {
+                content: fence,
+                channel: MessageChannel::Main,
+                targets: vec![],
+                target_all: false,
+                target_agents: vec![],
+                target_agent: None,
+                client_message_id: Some("f2f1a6a0-9e2b-4c9a-9b1d-9f7e9a9c5d21".into()),
+                defer_dispatch: false,
+                reply_to_message_id: None,
+                publication_grant: None,
+                publication_proof: None,
+            }),
+        )
+        .await;
+        let body = sse_body_to_string(response).await;
+        assert!(body.contains("event: accepted"), "message accepted: {body}");
+
+        let disc_owned = disc.to_string();
+        let list = state
+            .db
+            .with_conn(move |conn| crate::db::discussion_important::list(conn, &disc_owned, None))
+            .await
+            .unwrap();
+        assert_eq!(
+            list.total, 0,
+            "an unverified caller must not publish, however it labels itself"
+        );
+    }
+
+    /// KT-619 — the human path, which exists again now that there is something
+    /// to verify. A grant plus its proof publishes; the review found that a
+    /// human could enrol a credential and still not publish anything, because
+    /// this endpoint refused every fence unconditionally.
+    #[tokio::test]
+    async fn send_message_publishes_a_card_for_a_human_grant_and_its_proof() {
+        let disc = "d-human-grant";
+        let state = make_state_with_disc(disc).await;
+        state
+            .db
+            .with_conn(move |conn| {
+                conn.execute("UPDATE discussions SET no_agent = 1 WHERE id = ?1", [disc])?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let fence = format!(
+            "Décision prise.\n\n```kronn-important\n{}\n```\n",
+            serde_json::json!({
+                "version": crate::db::discussion_important::IMPORTANT_SCHEMA_VERSION,
+                "category": "decision",
+                "dedup_key": "kt-619.human-grant",
+                "title": "Titre",
+                "highlight": "Le point essentiel.",
+                "impact": "Conséquence concrète.",
+                "action_required": { "required": false },
+            })
+        );
+
+        let body_for_proof = fence.clone();
+        let disc_for_proof = disc.to_string();
+        let (grant, proof) = state
+            .db
+            .with_conn(move |conn| {
+                crate::core::operator_secret::bootstrap(conn)?;
+                let admin = crate::core::operator_secret::read_delivered()?;
+                let authority = crate::db::human_credentials::authorise_enrolment(conn, &admin)?
+                    .expect("the admin secret authorises");
+                let (_row, grant) = crate::db::human_credentials::enrol(
+                    conn,
+                    &authority,
+                    crate::db::human_credentials::GrantRole::Human,
+                    "Romu",
+                )?;
+                let proof = crate::db::human_credentials::issue_proof(
+                    conn,
+                    &grant,
+                    &disc_for_proof,
+                    &body_for_proof,
+                    chrono::Utc::now(),
+                )
+                .expect("a live human grant is issued a proof");
+                Ok((grant.expose().to_string(), proof))
+            })
+            .await
+            .unwrap();
+
+        let response = send_message(
+            State(state.clone()),
+            Path(disc.to_string()),
+            Json(SendMessageRequest {
+                content: fence,
+                channel: MessageChannel::Main,
+                targets: vec![],
+                target_all: false,
+                target_agents: vec![],
+                target_agent: None,
+                client_message_id: Some("9c1f0d2e-77aa-4f3b-9d51-4b2e6a8c1f70".into()),
+                defer_dispatch: false,
+                reply_to_message_id: None,
+                publication_grant: Some(grant),
+                publication_proof: Some(proof),
+            }),
+        )
+        .await;
+        let body = sse_body_to_string(response).await;
+        assert!(body.contains("event: accepted"), "message accepted: {body}");
+
+        let disc_owned = disc.to_string();
+        let list = state
+            .db
+            .with_conn(move |conn| crate::db::discussion_important::list(conn, &disc_owned, None))
+            .await
+            .unwrap();
+        assert_eq!(list.total, 1, "a human grant and its proof must publish");
+        assert_eq!(
+            list.items[0].author_kind,
+            crate::db::discussion_important::ImportantAuthorKind::Human
+        );
+        assert_eq!(list.items[0].author_label, "Human");
     }
 }

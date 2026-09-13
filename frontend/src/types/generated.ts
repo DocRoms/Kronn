@@ -1610,7 +1610,32 @@ session_id?: string | null,
  * Used only to report whether peer traffic arrived while it was working;
  * it never advances the durable read cursor.
  */
-since_sort_order?: number | null, };
+since_sort_order?: number | null,
+/**
+ * KT-619 — the resume credential the bridge already holds, injected by the
+ * transport rather than offered as a tool parameter.
+ *
+ * Keeping it out of the MCP schema **reduces the surface a model reaches
+ * for**; it proves nothing on its own, because any direct HTTP caller can
+ * still set this field. What makes it an identity is the server-side hash
+ * comparison, not its absence from a catalogue.
+ *
+ * `session_id` above stays what it always was: a declared hint for
+ * provenance and heartbeats, never an authority.
+ */
+session_credential?: SessionCredential | null,
+/**
+ * KT-619 — the publication grant the caller holds, read by the bridge from
+ * its own private file and injected here. Attached to no session, so no
+ * amount of inviting, joining or transferring produces one.
+ */
+publication_grant?: SessionCredential | null,
+/**
+ * KT-619 — the single-use proof issued for THIS card, in this room, over
+ * this body. An id rather than a secret, so it is the one publication
+ * field that is not sensitive; it is still useless without the grant.
+ */
+publication_proof?: string | null, };
 
 export type DiscAppendResponse = { appended: number, skipped_as_duplicates: number,
 /**
@@ -1623,6 +1648,12 @@ diverged: boolean,
  * Present only for a live single Agent append whose lint had a signal.
  */
 lint?: AppendLintSummary,
+/**
+ * KT-619 — what a `kronn-important` fence produced, present only when the
+ * append carried one. A refusal is reported rather than dropped: a worker
+ * that cannot publish must learn it did not, instead of assuming it did.
+ */
+important?: ImportantIngest,
 /**
  * `sort_order` of the LAST appended message (stab-1). This is a write
  * receipt, not a read cursor: another message may have landed between
@@ -2580,6 +2611,28 @@ http_status: number, failures: number,
 successes: number, last_seen: string, };
 
 /**
+ * Who authorised an enrolment. There is deliberately no anonymous variant.
+ */
+export type EnrolledBy = "admin" | "human";
+
+/**
+ * The presented secret never appears in a URL or a query string — a path is
+ * logged by every proxy in the world, and a body is not.
+ */
+export type EnrolRequest = {
+/**
+ * The admin secret, or a live credential whose role is `human`.
+ */
+authority: string, role: GrantRole, label: string, };
+
+/**
+ * Carries the plaintext exactly once, in the response to the request that
+ * created it. No route returns it a second time, and it is stored only as a
+ * hash.
+ */
+export type EnrolResponse = { credential: HumanCredential, secret: string, };
+
+/**
  * One piece of evidence backing a claim. `kind` mirrors the citable source
  * types; `reference` is the resolvable ref (file:line / url / disc-id / cmd /
  * user:date); `quote` is the supporting excerpt (the NL premise the Gate-2
@@ -2891,6 +2944,11 @@ export type GitSwitchBranchRequest = { branch: string, };
 export type GitWorkspaceProvenance = { workspace_id: string | null, ownership: string, state: string, path: string | null, branch: string, base_sha: string | null, head_sha: string | null, integrated_sha: string | null, task_execution_id: string | null, task_reference: string | null, };
 
 /**
+ * What a grant may do. Fixed at enrolment, never derived afterwards.
+ */
+export type GrantRole = "human" | "orchestrator";
+
+/**
  * Which guard tripped — surfaced verbatim in the SSE `GuardTriggered`
  * event so the frontend can render the right badge / toast / explainer.
  */
@@ -2908,6 +2966,107 @@ export type HostScope = { "kind": "ClaudeUser" } | { "kind": "ClaudeLocal", "val
  * whether Kronn writes the entry into `~/.claude.json` & friends.
  */
 export type HostSyncMode = "None" | "GlobalOnly" | "MirrorAll";
+
+/**
+ * A credential as the UI may see it. No hash, no plaintext — a list of these
+ * is safe to return.
+ */
+export type HumanCredential = { id: string, label: string, role: GrantRole, enrolled_by: EnrolledBy, created_at: string, revoked_at: string | null, revoked_reason: string | null, };
+
+/**
+ * `required: false` is the explicit "none" the contract asks for, so an
+ * omitted action and a deliberate absence of action cannot be confused.
+ * Validation refuses a half-filled action in either direction.
+ */
+export type ImportantAction = { required: boolean, action?: string | null, owner?: string | null, due?: string | null, };
+
+/**
+ * Who may publish. There is deliberately no worker variant: a worker cannot
+ * name itself here, so the refusal does not depend on the API layer being
+ * asked politely.
+ *
+ * `Human` is never resolved from a CLI session — see
+ * [`ImportantPublisher::Human`] and its one call site.
+ */
+export type ImportantAuthorKind = "orchestrator" | "human";
+
+/**
+ * The closed set. A category is part of the contract, so a new one is a
+ * deliberate migration, never a free-text label.
+ */
+export type ImportantCategory = "decision" | "scope_change" | "dod_waiver" | "blocking_alert" | "human_action_required" | "accepted_delivery";
+
+/**
+ * What one message's fences produced. Counts are reported back so a refused
+ * publisher learns it was refused instead of assuming it succeeded.
+ */
+export type ImportantIngest = { published: number, deduplicated: number, refused_worker: number,
+/**
+ * The caller proved nothing: no credential, or one that no longer
+ * authenticates. Counted apart from a known worker so an out-of-date
+ * bridge can be told to reload instead of being called an impostor.
+ */
+refused_unverified: number, invalid: number,
+/**
+ * Fences past the first in one message. One card is one message, so the
+ * extras are refused rather than silently collapsed by the unique index.
+ */
+refused_extra: number,
+/**
+ * What the caller should DO about a refusal. Present only when there is
+ * something actionable — an out-of-date bridge is the common cause of an
+ * unverified refusal, and "reload the MCP" is more useful than silence.
+ */
+hint?: string, };
+
+/**
+ * A persisted card, as read back.
+ */
+export type ImportantMessage = { id: string, discussion_id: string, message_id: string, category: ImportantCategory, schema_version: number, dedup_key: string, title: string, highlight: string, context: string | null, impact: string, action_required: ImportantAction, references: ImportantReferences, author_kind: ImportantAuthorKind, author_label: string, source_kind: string | null, source_id: string | null, created_at: string,
+/**
+ * Transcript position, so the filter and previous/next agree with the list.
+ */
+sort_order: number, };
+
+export type ImportantMessageList = { items: Array<ImportantMessage>,
+/**
+ * How many `items` came back — the filtered count.
+ */
+total: number,
+/**
+ * Every card in the discussion, filter or no filter. The counter chip
+ * reads this one, so it does not drop while a category is selected.
+ */
+total_all: number, };
+
+export type ImportantQuery = {
+/**
+ * One closed category, or absent for every card.
+ */
+category?: string | null, };
+
+/**
+ * Objects the card points at. Every field is optional because a card may
+ * legitimately predate the object it will later concern.
+ */
+export type ImportantReferences = { task_ref?: string | null, dod_id?: string | null, execution_id?: string | null, agent?: string | null, commit?: string | null, artifact?: string | null, };
+
+/**
+ * The bounded template a publisher submits.
+ *
+ * `deny_unknown_fields` is what keeps `author`, `created_at` and
+ * `schema_version` server-owned: a payload that tries to carry them fails to
+ * parse instead of being silently trusted.
+ */
+export type ImportantSpec = { version: number, category: ImportantCategory,
+/**
+ * Stable identity of the reported fact. Replays collapse onto it.
+ */
+dedup_key: string, title: string,
+/**
+ * The one line that must survive being read at a glance.
+ */
+highlight: string, context?: string | null, impact: string, action_required: ImportantAction, references: ImportantReferences, };
 
 export type ImportDiscussionReport = { discussion_id: string, source_discussion_id: string, already_imported: boolean, imported_messages: number, imported_attachments: number, imported_revision_events: number, imported_tasks: number, imported_task_events: number, warnings: Array<string>, conflicts: Array<string>, };
 
@@ -3007,6 +3166,13 @@ export type InviteTokenIssued = { token: string, disc_id: string, expires_at: st
  * (who joined via which invite). Never carries plaintext.
  */
 export type InviteTokenRecord = { id: number, disc_id: string, created_at: string, expires_at: string, used_at: string | null, used_by_session_id: number | null, };
+
+export type IssueProofRequest = { grant: string, discussion_id: string,
+/**
+ * The exact message body about to be posted. Hashed here, so the proof
+ * cannot be issued for one card and spent on another.
+ */
+content: string, };
 
 /**
  * Result of an atomic invite-token consumption + session creation.
@@ -3176,6 +3342,8 @@ export type LintReport = { unsourced_count: number, flagged_spans: Array<Flagged
  * a soft amber pill, NOT a red "fabricated" one.
  */
 unverified_count: number, };
+
+export type ListRequest = { authority: string, };
 
 export type LiteLlmHealthResponse = {
 /**
@@ -5126,6 +5294,23 @@ target_agents?: Array<AgentType>, };
  */
 export type ReviseNoteRequest = { content: string, };
 
+export type RevokeRequest = { authority: string, credential_id: string, reason: string, };
+
+export type RotateAdminRequest = {
+/**
+ * The CURRENT admin secret. Nothing else opens this door.
+ */
+authority: string, };
+
+/**
+ * A path, never a secret. The new plaintext goes to the operator's private
+ * file and travels over no wire — an API that could hand back the admin secret
+ * would be the hole this lot exists to close.
+ */
+export type RotateAdminResponse = { path: string, };
+
+export type RotateRequest = { authority: string, credential_id: string, };
+
 /**
  * Rotation metrics — KT-193 DoD 6.
  *
@@ -5347,6 +5532,17 @@ target_all?: boolean,
  * `target_agent` below remains accepted for older clients.
  */
 target_agents?: Array<AgentType>, target_agent?: AgentType | null, client_message_id?: string | null,
+/**
+ * KT-619 — the human's publication grant, when this message carries a
+ * `kronn-important` fence. Absent for every ordinary message, and absent
+ * is simply "no card": this endpoint has no caller identity of its own, so
+ * the grant is the only thing that can authorise one.
+ */
+publication_grant?: string | null,
+/**
+ * The single-use proof issued for this exact body, in this room.
+ */
+publication_proof?: string | null,
 /**
  * Persist the User turn and its dispatch obligations without claiming a
  * runner for this HTTP/SSE request. Used by the durable composer outbox:
@@ -5611,6 +5807,16 @@ max_turns: number,
  * prepare a handover instead of being cut off mid-task.
  */
 soft_ratio: number, };
+
+/**
+ * A bridge-held secret, carried without ever being printed.
+ *
+ * KT-619 — `DiscAppendRequest` derives `Debug`, and a tracing line or a test
+ * failure that dumps the request would put the credential in a log. The
+ * redacting `Debug` makes that impossible rather than unlikely; there is no
+ * `Serialize`, so it cannot travel back out either.
+ */
+export type SessionCredential = string;
 
 export type SetAgentAccessRequest = { agent: AgentType, full_access: boolean, };
 

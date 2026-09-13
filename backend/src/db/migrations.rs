@@ -655,10 +655,17 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "171_cli_worker_bindings",
         include_str!("sql/171_cli_worker_bindings.sql"),
     ),
-    // 172 belongs to the independently developed important-message contract.
+    (
+        "172_discussion_important_messages",
+        include_str!("sql/172_discussion_important_messages.sql"),
+    ),
     (
         "173_acp_completed_turn_checkpoint",
         include_str!("sql/173_acp_completed_turn_checkpoint.sql"),
+    ),
+    (
+        "174_human_publication_credentials",
+        include_str!("sql/174_human_publication_credentials.sql"),
     ),
 ];
 
