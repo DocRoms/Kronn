@@ -472,21 +472,31 @@ impl DispatcherOwner {
     /// Wait for the drain to finish, bounded. On timeout, abort and then WAIT
     /// for the cancellation to land: `abort` only requests it, so returning
     /// here without the join would claim a stop that has not happened.
+    ///
+    /// The handle STAYS in `self.0` across every await. Taking it into a local
+    /// first — which this did — defeats the whole guard precisely where it is
+    /// needed: a `finish` cancelled mid-await would drop that local, and
+    /// dropping a `JoinHandle` detaches, while `Drop` here would find `None`
+    /// and do nothing. Held in place, any cancellation leaves `Some(..)` for
+    /// `Drop` to abort.
     async fn finish(mut self) -> Result<(), String> {
-        let Some(mut handle) = self.0.take() else {
+        let Some(handle) = self.0.as_mut() else {
             return Ok(());
         };
-        match timeout(DISPATCHER_JOIN_TIMEOUT, &mut handle).await {
+        let outcome = match timeout(DISPATCHER_JOIN_TIMEOUT, &mut *handle).await {
             Ok(Ok(())) => Ok(()),
             Ok(Err(error)) => Err(format!("join ACP dispatcher: {error}")),
             Err(_) => {
                 handle.abort();
                 // The cancellation is what we wait for; its `JoinError` is the
                 // expected outcome, not a failure to report.
-                let _ = handle.await;
+                let _ = (&mut *handle).await;
                 Ok(())
             }
-        }
+        };
+        // Observed finished: release it so `Drop` has nothing left to abort.
+        self.0.take();
+        outcome
     }
 }
 
@@ -2246,18 +2256,30 @@ done"#]);
         DispatcherOwner(None).finish().await.unwrap();
     }
 
-    /// A `shutdown` future cancelled mid-await must still stop the drain.
-    /// `finish` takes the owner BY VALUE, so dropping the future drops the
-    /// owner — this pins that the cancellation path really reaches `Drop`.
+    /// A `shutdown` future cancelled MID-AWAIT must still stop the drain.
+    ///
+    /// The future is polled once before being dropped, on purpose: an unpolled
+    /// `async fn` has not run its body at all, so dropping it would exercise
+    /// nothing and pass for the wrong reason. Polling first puts it inside the
+    /// join, which is the exact window where taking the handle into a local
+    /// would detach it.
     #[tokio::test]
     async fn cancelling_a_shutdown_in_flight_still_cancels_the_drain() {
+        use std::future::Future;
+        use std::task::Poll;
+
         let (sender, receiver) = tokio::sync::oneshot::channel::<()>();
         let owner = DispatcherOwner::new(tokio::spawn(async move {
             let _sender = sender;
             std::future::pending::<()>().await;
         }));
 
-        let in_flight = owner.finish();
+        let mut in_flight = Box::pin(owner.finish());
+        let entered = std::future::poll_fn(|cx| Poll::Ready(in_flight.as_mut().poll(cx))).await;
+        assert!(
+            entered.is_pending(),
+            "the drain never ends on its own, so finish must be waiting"
+        );
         drop(in_flight);
 
         receiver
