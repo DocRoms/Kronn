@@ -191,6 +191,11 @@ async fn historical_bootstrap_does_not_compete_with_an_existing_manual_tier() {
     model_catalog::migrate_hardcoded_catalog_once(&database, &default_config())
         .await
         .unwrap();
+    assert_eq!(
+        model_catalog::reasoning_modes_for_agent_model(&AgentType::ClaudeCode, "operator/known"),
+        Some(vec!["high".into()]),
+        "bootstrap must populate effort modes before the first run"
+    );
     let rows = database
         .with_read_conn(|conn| store::list_for_target(conn, "agent:claude-code"))
         .await

@@ -110,6 +110,9 @@ documented per-run
 and Claude Code via its installed `--effort <level>` CLI flag. Direct CLI and
 the optional Claude/Codex ACP adapters carry the same resolved value; other
 ACP and HTTP routes receive no guessed parameter.
+Free-text API/workflow overrides are trimmed, then must match an advertised
+mode exactly, including case (`high` is not `High`). Use the catalog value;
+Kronn does not guess a spelling or substitute another effort level.
 The direct Codex runner still starts a fresh execution on each turn; its ACP
 adapter supports thread resume. Claude supports resume on both routes. Effort
 is transmitted on every supported fresh/resumed invocation; this feature does
@@ -118,6 +121,17 @@ isolated direct-CLI route even when adapters are enabled.
 [src: file: backend/src/agents/runner.rs:2746-2850]
 [src: file: backend/src/acp/claude_adapter.rs:200-225]
 [src: file: backend/src/acp/codex_adapter.rs:358-374]
+
+Both standalone and embedded-desktop startup await catalog bootstrap before
+starting workflows or serving requests. Even after the one-time migration is
+already recorded, bootstrap reloads models and their effort modes from the
+durable catalog. Bootstrap failures are logged; an unavailable projection
+does not silently authorize an effort. Discussion preflight may refresh the
+catalog afterward, but the first scheduled workflow does not depend on opening
+Settings first.
+[src: file: backend/src/main.rs:287]
+[src: file: desktop/src-tauri/src/main.rs:591]
+[src: file: backend/src/core/model_catalog/mod.rs:103]
 
 A Quick Prompt's explicit `agent_settings.reasoning_effort` is copied onto a
 hydrated workflow step the same way its `agent_settings.model` already is
