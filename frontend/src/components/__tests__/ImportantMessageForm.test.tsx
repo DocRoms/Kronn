@@ -136,6 +136,21 @@ describe('ImportantMessageForm', () => {
     expect(second.dedupKey).toBe(first.dedupKey);
   });
 
+  it('can reconcile an uncertain send even when its linked task has left the plan', async () => {
+    const input = props();
+    input.tasks = [{ reference: 'KT-643', title: 'Existing task' }];
+    input.onPublish.mockResolvedValueOnce('uncertain');
+    const view = render(<ImportantMessageForm {...input} />);
+    const user = await open();
+    await user.selectOptions(screen.getByLabelText('disc.important.taskLabel'), 'KT-643');
+    await user.click(publishButton());
+    view.rerender(<ImportantMessageForm {...input} tasks={[]} />);
+    expect(publishButton()).toBeEnabled();
+    await user.click(publishButton());
+    const [first, second] = input.onPublish.mock.calls.map(call => call[0]);
+    expect(second).toMatchObject({ reconcileFirst: true, clientMessageId: first.clientMessageId, content: first.content });
+  });
+
   it('keeps room drafts separate across navigation and cancels only the abandoned preparation', async () => {
     const input = props(), waiting = deferred();
     input.onPublish.mockReturnValue(waiting.promise);

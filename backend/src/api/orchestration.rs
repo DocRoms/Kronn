@@ -15830,7 +15830,13 @@ mod tests {
     async fn cli_worker_room_append_never_falls_back_to_a_native_worker() {
         let repo = init_repo();
         let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
-        let (_, _, child, exec_id) = attached_cli_worker(&db, repo.path()).await;
+        let (_, parent, child, exec_id) = attached_cli_worker(&db, repo.path()).await;
+        let parent_before = {
+            let parent = parent.clone();
+            db.with_conn(move |conn| crate::db::discussions::list_messages(conn, &parent))
+                .await
+                .unwrap()
+        };
         db.with_conn(|conn| {
             // Reproduce the legacy child whose UI flag never disabled the
             // native default, after its joined worker became unavailable.
@@ -15876,6 +15882,24 @@ mod tests {
             "the worker's message must remain publishable"
         );
         assert_eq!(response.data.unwrap().appended, 1);
+        let parent_after = db
+            .with_conn(move |conn| crate::db::discussions::list_messages(conn, &parent))
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(parent_after).unwrap(),
+            serde_json::to_value(parent_before).unwrap(),
+            "a worker status append must not copy technical chatter into the parent"
+        );
+        let child_messages = {
+            let child = child.clone();
+            db.with_conn(move |conn| crate::db::discussions::list_messages(conn, &child))
+                .await
+                .unwrap()
+        };
+        assert!(child_messages
+            .iter()
+            .any(|message| { message.content == "Work remains in progress; no delivery yet." }));
         let jobs = db
             .with_conn(move |conn| {
                 crate::db::agent_dispatch::list_active_for_discussion(
@@ -18405,6 +18429,23 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
         let (parent, _child, exec_id, _head, _path) =
             delivered_awaiting_review(&db, repo.path()).await;
+
+        let reports_before_review = {
+            let parent = parent.clone();
+            db.with_conn(move |conn| {
+                Ok(conn.query_row(
+                    "SELECT COUNT(*) FROM messages WHERE discussion_id = ?1 AND content LIKE '## ✅ Delivery accepted%'",
+                    [parent],
+                    |row| row.get::<_, i64>(0),
+                )?)
+            })
+            .await
+            .unwrap()
+        };
+        assert_eq!(
+            reports_before_review, 0,
+            "a delivered but unreviewed result must not appear as an accepted report"
+        );
 
         let approve = review_approve(&db, &exec_id).await;
         let outcome = decide_review(&db, &exec_id, &approve, "ClaudeCode", "sess-b")
