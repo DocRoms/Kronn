@@ -218,15 +218,16 @@ pub(crate) async fn canonical_targets(
     // Naming the joined sessions is what `no_agent` already promises: "joined
     // peers remain participants and continue receiving turns".
     if !target_all && requested.is_empty() && no_agent && !sessions.is_empty() {
-        return Ok(sessions
+        return sessions
             .iter()
             .map(|session| {
-                MessageTarget::cli(
-                    crate::db::discussions::parse_agent_type(&session.agent_type),
+                Ok(MessageTarget::cli(
+                    crate::db::discussions::parse_agent_type(&session.agent_type)?,
                     session.id,
-                )
+                ))
             })
-            .collect());
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|error| error.to_string());
     }
 
     let mut candidates = if target_all {
@@ -244,12 +245,18 @@ pub(crate) async fn canonical_targets(
                 .cloned()
                 .map(|agent| MessageTarget::agent(agent).with_tier(ModelTier::Default)),
         );
-        all.extend(sessions.iter().map(|session| {
-            MessageTarget::cli(
-                crate::db::discussions::parse_agent_type(&session.agent_type),
-                session.id,
-            )
-        }));
+        all.extend(
+            sessions
+                .iter()
+                .map(|session| {
+                    Ok(MessageTarget::cli(
+                        crate::db::discussions::parse_agent_type(&session.agent_type)?,
+                        session.id,
+                    ))
+                })
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(|error| error.to_string())?,
+        );
         all
     } else {
         Vec::new()
@@ -298,7 +305,8 @@ pub(crate) async fn canonical_targets(
                         "CLI target {session_id} is not part of this discussion"
                     ));
                 };
-                let session_agent = crate::db::discussions::parse_agent_type(&session.agent_type);
+                let session_agent = crate::db::discussions::parse_agent_type(&session.agent_type)
+                    .map_err(|error| error.to_string())?;
                 if session_agent != target.agent_type {
                     return Err(format!(
                         "CLI target {session_id} does not match the requested agent"

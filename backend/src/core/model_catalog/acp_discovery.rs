@@ -62,19 +62,32 @@ async fn discover_with_transport(
         })
         .await
     {
-        return classify_acp_error(error);
+        return discovery_failure(&host, error).await;
     }
     let session = match host.create_session().await {
         Ok(session) => session,
-        Err(error) => return classify_acp_error(error),
+        Err(error) => return discovery_failure(&host, error).await,
     };
     let options = host.config_options().await;
-    let _ = host.shutdown().await;
+    if let Err(error) = host.shutdown().await {
+        return classify_acp_error(error);
+    }
     let _ = session; // discovery never prompts; the session exists only to fetch config options
 
     match models_from_config_options(&options) {
         Some(models) if !models.is_empty() => DiscoveryOutcome::Live(models),
         _ => DiscoveryOutcome::Unsupported,
+    }
+}
+
+/// Preserve the discovery failure and expose cleanup failures instead of
+/// returning while a native ACP transport still owns its subprocess.
+async fn discovery_failure(host: &AcpHost, failure: AcpError) -> DiscoveryOutcome {
+    match host.shutdown().await {
+        Ok(()) => classify_acp_error(failure),
+        Err(shutdown) => {
+            DiscoveryOutcome::ProviderError(format!("{failure}; ACP shutdown failed: {shutdown}"))
+        }
     }
 }
 
@@ -239,5 +252,170 @@ mod tests {
     async fn claude_adapter_without_catalog_options_is_unsupported_not_live_empty() {
         let outcome = discover_claude_adapter().await;
         assert!(matches!(outcome, DiscoveryOutcome::Unsupported));
+    }
+
+    /// A scriptable transport that COUNTS its shutdowns. Discovery owns a
+    /// subprocess on the native route, so "did it clean up on this path?" is a
+    /// behaviour to assert, not a line to read.
+    struct ScriptedTransport {
+        /// `AcpError` is not `Clone`, so the scripts carry the message and the
+        /// error is built on demand.
+        initialize: Option<String>,
+        create_session: Option<String>,
+        shutdown: Option<String>,
+        options: Vec<AcpConfigOption>,
+        shutdowns: std::sync::atomic::AtomicUsize,
+    }
+
+    impl ScriptedTransport {
+        fn succeeding() -> Self {
+            Self {
+                initialize: None,
+                create_session: None,
+                shutdown: None,
+                options: vec![AcpConfigOption {
+                    id: "model".into(),
+                    current: None,
+                    available: vec![value("sonnet", "Sonnet")],
+                }],
+                shutdowns: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+
+        fn shutdowns(&self) -> usize {
+            self.shutdowns.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl AcpTransport for ScriptedTransport {
+        async fn initialize(
+            &self,
+            _: AcpInitialize,
+        ) -> Result<crate::acp::AcpNegotiatedCapabilities, AcpError> {
+            if let Some(message) = &self.initialize {
+                return Err(AcpError::Transport(message.clone()));
+            }
+            Ok(crate::acp::AcpNegotiatedCapabilities {
+                protocol_version: 1,
+                capabilities: [crate::acp::AcpCapability::Sessions].into_iter().collect(),
+            })
+        }
+        async fn create_session(&self) -> Result<crate::acp::AcpSessionTarget, AcpError> {
+            if let Some(message) = &self.create_session {
+                return Err(AcpError::Transport(message.clone()));
+            }
+            crate::acp::AcpSessionTarget::new(crate::acp::AcpAgent::OpenCode, "discovery")
+        }
+        async fn config_options(&self) -> Vec<AcpConfigOption> {
+            self.options.clone()
+        }
+        async fn set_config_option(
+            &self,
+            _: &crate::acp::AcpSessionTarget,
+            _: &str,
+            _: &str,
+        ) -> Result<(), AcpError> {
+            Ok(())
+        }
+        async fn resume_session(&self, _: &crate::acp::AcpSessionTarget) -> Result<(), AcpError> {
+            Ok(())
+        }
+        async fn prompt(
+            &self,
+            _: &crate::acp::AcpSessionTarget,
+            _: &str,
+            _: tokio::sync::mpsc::Sender<crate::acp::AcpSessionEvent>,
+        ) -> Result<(), AcpError> {
+            unreachable!("discovery never prompts")
+        }
+        async fn cancel(&self, _: &crate::acp::AcpSessionTarget) -> Result<(), AcpError> {
+            Ok(())
+        }
+        async fn shutdown(&self) -> Result<(), AcpError> {
+            self.shutdowns
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            match &self.shutdown {
+                Some(message) => Err(AcpError::Transport(message.clone())),
+                None => Ok(()),
+            }
+        }
+    }
+
+    async fn discover_scripted(transport: Arc<ScriptedTransport>) -> (DiscoveryOutcome, usize) {
+        let outcome =
+            discover_with_transport(transport.clone() as Arc<dyn AcpTransport>, "/tmp".into())
+                .await;
+        (outcome, transport.shutdowns())
+    }
+
+    #[tokio::test]
+    async fn discovery_shuts_the_transport_down_when_initialize_fails() {
+        let transport = Arc::new(ScriptedTransport {
+            initialize: Some("boom".into()),
+            ..ScriptedTransport::succeeding()
+        });
+
+        let (outcome, shutdowns) = discover_scripted(transport).await;
+
+        assert_eq!(shutdowns, 1, "a failed negotiation still owns a subprocess");
+        assert!(matches!(outcome, DiscoveryOutcome::ProviderError(_)));
+    }
+
+    #[tokio::test]
+    async fn discovery_shuts_the_transport_down_when_session_creation_fails() {
+        let transport = Arc::new(ScriptedTransport {
+            create_session: Some("no session".into()),
+            ..ScriptedTransport::succeeding()
+        });
+
+        let (outcome, shutdowns) = discover_scripted(transport).await;
+
+        assert_eq!(shutdowns, 1, "a failed session/new still owns a subprocess");
+        assert!(matches!(outcome, DiscoveryOutcome::ProviderError(_)));
+    }
+
+    #[tokio::test]
+    async fn discovery_shuts_the_transport_down_on_the_happy_path() {
+        let transport = Arc::new(ScriptedTransport::succeeding());
+
+        let (outcome, shutdowns) = discover_scripted(transport).await;
+
+        assert_eq!(
+            shutdowns, 1,
+            "a successful discovery must not leak its process"
+        );
+        match outcome {
+            DiscoveryOutcome::Live(models) => assert_eq!(models.len(), 1),
+            other => panic!("expected a live catalogue, got {other:?}"),
+        }
+    }
+
+    /// The failure that brought us here is what the operator has to act on; a
+    /// cleanup that also failed is extra information, never a replacement.
+    #[tokio::test]
+    async fn a_failing_cleanup_never_hides_the_failure_that_caused_it() {
+        let transport = Arc::new(ScriptedTransport {
+            initialize: Some("the real cause".into()),
+            shutdown: Some("cleanup also failed".into()),
+            ..ScriptedTransport::succeeding()
+        });
+
+        let (outcome, shutdowns) = discover_scripted(transport).await;
+
+        assert_eq!(shutdowns, 1);
+        match outcome {
+            DiscoveryOutcome::ProviderError(message) => {
+                assert!(
+                    message.contains("the real cause"),
+                    "the original failure must survive: {message}"
+                );
+                assert!(
+                    message.contains("cleanup also failed"),
+                    "the cleanup failure must be surfaced too: {message}"
+                );
+            }
+            other => panic!("expected a provider error, got {other:?}"),
+        }
     }
 }

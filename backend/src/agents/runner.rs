@@ -3744,25 +3744,51 @@ async fn run_acp_session(
 
     let mut host = AcpHost::new(1, transport);
     let mcp_servers = acp_project_mcp_servers(project_path);
-    host.negotiate(AcpInitialize {
-        protocol_version: 1,
-        cwd: work_dir.to_string_lossy().into_owned(),
-        mcp_servers: mcp_servers.clone(),
-    })
-    .await
-    .map_err(|error| format!("{agent_type:?} ACP initialize failed: {error}"))?;
+    if let Err(error) = host
+        .negotiate(AcpInitialize {
+            protocol_version: 1,
+            cwd: work_dir.to_string_lossy().into_owned(),
+            mcp_servers: mcp_servers.clone(),
+        })
+        .await
+    {
+        return Err(acp_start_failure(
+            &host,
+            format!("{agent_type:?} ACP initialize failed: {error}"),
+        )
+        .await);
+    }
     if !mcp_servers.is_empty() {
-        host.require_capability(AcpCapability::McpInjection)
-            .map_err(|error| {
-                format!("{agent_type:?} ACP cannot start with the project MCP registry: {error}")
-            })?;
+        if let Err(error) = host.require_capability(AcpCapability::McpInjection) {
+            return Err(acp_start_failure(
+                &host,
+                format!("{agent_type:?} ACP cannot start with the project MCP registry: {error}"),
+            )
+            .await);
+        }
     }
     let (resumed, resume_failed) = match resume_id {
         Some(conversation_id) => {
-            let agent = acp_agent(agent_type)
-                .ok_or_else(|| format!("{agent_type:?} has no ACP session identity"))?;
-            let target = AcpSessionTarget::new(agent, conversation_id.to_owned())
-                .map_err(|error| format!("{agent_type:?} ACP resume target is invalid: {error}"))?;
+            let agent = match acp_agent(agent_type) {
+                Some(agent) => agent,
+                None => {
+                    return Err(acp_start_failure(
+                        &host,
+                        format!("{agent_type:?} has no ACP session identity"),
+                    )
+                    .await)
+                }
+            };
+            let target = match AcpSessionTarget::new(agent, conversation_id.to_owned()) {
+                Ok(target) => target,
+                Err(error) => {
+                    return Err(acp_start_failure(
+                        &host,
+                        format!("{agent_type:?} ACP resume target is invalid: {error}"),
+                    )
+                    .await)
+                }
+            };
             match host.resume_session(&target).await {
                 Ok(()) => (Some(target), false),
                 // Capability absence and a positively identified missing
@@ -3774,7 +3800,11 @@ async fn run_acp_session(
                 }) => (None, true),
                 Err(crate::acp::AcpError::SessionNotFound) => (None, true),
                 Err(error) => {
-                    return Err(format!("{agent_type:?} ACP session resume failed: {error}"));
+                    return Err(acp_start_failure(
+                        &host,
+                        format!("{agent_type:?} ACP session resume failed: {error}"),
+                    )
+                    .await);
                 }
             }
         }
@@ -3782,16 +3812,25 @@ async fn run_acp_session(
     };
     let session = match resumed {
         Some(target) => target,
-        None => host
-            .create_session()
-            .await
-            .map_err(|error| format!("{agent_type:?} ACP session creation failed: {error}"))?,
+        None => match host.create_session().await {
+            Ok(session) => session,
+            Err(error) => {
+                return Err(acp_start_failure(
+                    &host,
+                    format!("{agent_type:?} ACP session creation failed: {error}"),
+                )
+                .await)
+            }
+        },
     };
     if let Some(store) = session_store.as_ref() {
         if AcpSessionStore::tracks(agent_type) {
-            store
+            if let Err(error) = store
                 .persist(agent_type, work_dir, &session.session_id)
-                .await?;
+                .await
+            {
+                return Err(acp_start_failure(&host, error).await);
+            }
         }
     }
     // Apply the resolved tier/model against the options the session actually
@@ -3808,9 +3847,11 @@ async fn run_acp_session(
                 "ACP session exposes no matching model option; keeping its default"
             ),
             Err(error) => {
-                return Err(format!(
-                    "{agent_type:?} ACP model selection failed: {error}"
-                ))
+                return Err(acp_start_failure(
+                    &host,
+                    format!("{agent_type:?} ACP model selection failed: {error}"),
+                )
+                .await)
             }
         }
     }
@@ -3841,13 +3882,22 @@ async fn run_acp_session(
 
     // Match the async agent task to the AgentProcess lifecycle without treating
     // the ACP child itself as a line-producing text process.
-    let mut lifeline = async_cmd("sh")
+    let mut lifeline = match async_cmd("sh")
         .args(["-c", r#"read -r s; exit "${s:-1}""#])
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .map_err(|error| format!("OpenCode ACP lifeline spawn failed: {error}"))?;
+    {
+        Ok(lifeline) => lifeline,
+        Err(error) => {
+            return Err(acp_start_failure(
+                &host,
+                format!("OpenCode ACP lifeline spawn failed: {error}"),
+            )
+            .await)
+        }
+    };
     let lifeline_stdin = lifeline.stdin.take();
 
     tokio::spawn(async move {
@@ -3964,6 +4014,16 @@ fn acp_failure_diagnostic(operation: &str, error: &str) -> String {
         excerpt.push('…');
     }
     format!("ACP {operation} failed: {excerpt}")
+}
+
+/// Preserve the startup failure while surfacing a lifecycle failure as well.
+/// Native transports own a subprocess, so every return before the turn task is
+/// spawned must explicitly finish that transport.
+async fn acp_start_failure(host: &crate::acp::AcpHost, failure: String) -> String {
+    match host.shutdown().await {
+        Ok(()) => failure,
+        Err(error) => format!("{failure}; ACP shutdown failed: {error}"),
+    }
 }
 
 /// ACP receives only command-only MCP declarations from Kronn's canonical
