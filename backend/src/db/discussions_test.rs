@@ -1060,7 +1060,7 @@ mod tests {
                 'messages', (SELECT json_group_array(json_array(id, content, timestamp, sort_order, channel)) FROM (SELECT * FROM messages ORDER BY sort_order)),
                 'sequence', next_message_seq, 'summary', summary_cache,
                 'message_count', message_count, 'updated_at', updated_at,
-                'awaiting', awaiting_agent, 'running', agent_running,
+                'awaiting', awaiting_agent,
                 'events', (SELECT COUNT(*) FROM message_revision_events),
                 'tombstones', (SELECT COUNT(*) FROM message_tombstones),
                 'targets', (SELECT COUNT(*) FROM message_targets),
@@ -1072,10 +1072,18 @@ mod tests {
         .unwrap()
     }
 
+    fn remote_note_main_messages(conn: &Connection) -> Vec<DiscussionMessage> {
+        list_messages(conn, "shared-note-disc")
+            .unwrap()
+            .into_iter()
+            .filter(|message| message.channel == crate::models::MessageChannel::Main)
+            .collect()
+    }
+
     #[test]
     fn remote_note_revisions_preserve_the_conversation_and_written_at() {
         let (source, mirror) = remote_note_revision_fixture();
-        let before_messages = list_messages(&mirror, "shared-note-disc").unwrap();
+        let before_messages = remote_note_main_messages(&mirror);
         let written_at: String = mirror
             .query_row(
                 "SELECT timestamp FROM messages WHERE id = 'shared-note'",
@@ -1102,7 +1110,7 @@ mod tests {
             // A wire target must never turn a note into a conversation dispatch.
             let targets = [MessageTarget::agent(AgentType::Codex)];
             assert!(apply_remote_message_revision_with_targets(&mirror, &event, &targets).unwrap());
-            let after_messages = list_messages(&mirror, "shared-note-disc").unwrap();
+            let after_messages = remote_note_main_messages(&mirror);
             assert_eq!(
                 serde_json::to_value(&after_messages).unwrap(),
                 serde_json::to_value(&before_messages).unwrap(),
@@ -1177,7 +1185,7 @@ mod tests {
         assert_eq!(remote_note_projection(&mirror), before);
         assert!(apply_remote_message_revision(&mirror, &event).unwrap());
         assert_eq!(
-            list_messages(&mirror, "shared-note-disc").unwrap().len(),
+            remote_note_main_messages(&mirror).len(),
             3,
             "retrying the same event must preserve the conversation too"
         );

@@ -60,7 +60,7 @@ reads a snapshot once; typing filters locally, without provider discovery.
 `ModelCatalogPicker` additionally preserves an unrecognized saved reasoning
 mode and labels explicitly typed model IDs as outside the catalogue. An empty
 override means the configured/durable default, not an invented model.
-[src: file: frontend/src/components/ModelCatalogPicker.tsx:23-72]
+[src: file: frontend/src/components/ModelCatalogPicker.tsx:23-71]
 
 The management table's create/update/delete/refresh actions share a synchronous
 guard through snapshot reload; failure releases it for an explicit retry.
