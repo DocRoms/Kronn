@@ -460,7 +460,8 @@ fn answer_inner(
             )
             .map_err(anyhow::Error::from)?;
         if let Some(agent) = agent {
-            let agent = super::discussions::parse_agent_type(&agent)?;
+            let agent =
+                super::discussions::parse_agent_type(&agent).map_err(anyhow::Error::from)?;
             let connection_id: Option<String> = conn
                 .query_row(
                     "SELECT COALESCE(j.connection_id, q.requester_connection_id)

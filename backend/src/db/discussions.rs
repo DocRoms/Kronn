@@ -3772,7 +3772,7 @@ pub(crate) fn parse_agent_type(s: &str) -> rusqlite::Result<AgentType> {
             return Err(rusqlite::Error::FromSqlConversionFailure(
                 0,
                 rusqlite::types::Type::Text,
-                Box::new(anyhow::anyhow!("unknown persisted agent type")),
+                "unknown persisted agent type".into(),
             ));
         }
     })

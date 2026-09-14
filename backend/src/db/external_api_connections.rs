@@ -75,9 +75,7 @@ fn parse_preset(value: &str) -> rusqlite::Result<ExternalApiConnectionPreset> {
             return Err(rusqlite::Error::FromSqlConversionFailure(
                 0,
                 rusqlite::types::Type::Text,
-                Box::new(anyhow::anyhow!(
-                    "unknown persisted external connection preset"
-                )),
+                "unknown persisted external connection preset".into(),
             ));
         }
     })
