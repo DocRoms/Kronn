@@ -69,8 +69,9 @@ under an unrelated agent.
 
 - **Preflight remains caller-owned.** Each launch surface must pass the actual
   runtime target to `model_catalog::preflight_check`. Orchestration and
-  Workflow Agent steps resolve their named connection before checking, then
-  reuse that connection's endpoint and effective model for dispatch. A future
+  Workflow Agent steps fail closed when their named connection cannot be
+  resolved. Orchestration resolves and checks a fresh connection/model snapshot
+  immediately before each launch. A future
   centralized guard can make this invariant structural once the agent runner
   is available for that refactor. [src: file:
   backend/src/api/discussions/orchestration.rs:235-385] [src: file:

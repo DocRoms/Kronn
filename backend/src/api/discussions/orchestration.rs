@@ -63,6 +63,54 @@ fn primary_connection_id(
     })
 }
 
+async fn checked_launch_connection(
+    state: &AppState,
+    agent: &AgentType,
+    connection_id: Option<&str>,
+    tier: ModelTier,
+    model_tiers: &crate::models::setup::ModelTiersConfig,
+) -> Result<(Option<ExternalApiConnection>, Option<String>), String> {
+    crate::http_transport::validate_connection_target(state, agent, connection_id).await?;
+    let connection = match connection_id {
+        Some(id) => {
+            let lookup = id.to_string();
+            Some(
+                state
+                    .db
+                    .with_read_conn(move |conn| {
+                        crate::db::external_api_connections::get(conn, &lookup)
+                    })
+                    .await
+                    .map_err(|error| error.to_string())?
+                    .ok_or_else(|| format!("External API connection {id} was not found"))?,
+            )
+        }
+        None => None,
+    };
+    let runtime_target_id = connection
+        .as_ref()
+        .map(|connection| crate::db::model_catalog::http_runtime_target_id(&connection.id));
+    let model = connection
+        .as_ref()
+        .and_then(|connection| crate::http_transport::connection_tier_model(connection, tier));
+    if let Some(failure) = crate::core::model_catalog::preflight_check(
+        &state.db,
+        runtime_target_id.as_deref(),
+        agent.clone(),
+        tier,
+        model.as_deref(),
+        Some(model_tiers),
+    )
+    .await
+    {
+        return Err(format!(
+            "model_catalog_preflight_failed:{}",
+            serde_json::to_string(&failure).unwrap_or_default()
+        ));
+    }
+    Ok((connection, model))
+}
+
 fn tier_label(tier: ModelTier) -> &'static str {
     match tier {
         ModelTier::Economy => "economy",
@@ -297,7 +345,6 @@ pub async fn orchestrate(
     // discussion path performs this catalog gate in `make_agent_stream`; this
     // direct multi-agent path must do the same so a known non-chat or
     // unavailable HTTP model never reaches an endpoint.
-    let mut primary_connection = None;
     for participant in &participants {
         let participant_tier = target_tier(
             &participant.agent_type,
@@ -369,18 +416,7 @@ pub async fn orchestrate(
             }));
             return Sse::new(stream);
         }
-        if participant.agent_type == primary_agent_type
-            && participant.connection_id == primary_connection_id
-        {
-            primary_connection = connection;
-        }
     }
-    let primary_external_http = primary_connection
-        .as_ref()
-        .and_then(|connection| crate::http_transport::external_http_runtime(connection, &tokens));
-    let primary_model_override = primary_connection.as_ref().and_then(|connection| {
-        crate::http_transport::connection_tier_model(connection, primary_tier)
-    });
 
     // Validate that every agent in the final list (including the
     // re-injected primary) is actually runnable. The frontend already
@@ -601,6 +637,28 @@ pub async fn orchestrate(
                 SpawnToolPolicy::ToolFreeSummary,
                 &primary_agent_type
             ));
+            let (summary_connection, summary_model_override) = match checked_launch_connection(
+                &state,
+                &primary_agent_type,
+                primary_connection_id.as_deref(),
+                primary_tier,
+                &model_tiers_config,
+            )
+            .await
+            {
+                Ok(snapshot) => snapshot,
+                Err(error) => {
+                    emit!(AgentStreamEvent::AgentError {
+                        data: serde_json::json!({
+                            "agent": primary_agent_type, "round": "summary", "error": error,
+                        })
+                    });
+                    return;
+                }
+            };
+            let summary_external_http = summary_connection.as_ref().and_then(|connection| {
+                crate::http_transport::external_http_runtime(connection, &tokens)
+            });
             match runner::start_agent_with_config(runner::AgentStartConfig {
                 work_dir: orch_workspace_path.as_deref(),
                 full_access: fa,
@@ -610,8 +668,8 @@ pub async fn orchestrate(
                 ollama_context_overrides: Some(&ollama_context_overrides),
                 http_request_timeout: Some(timeout_for_agent(&primary_agent_type)),
                 http_endpoints: Some(&http_endpoints),
-                external_http: primary_external_http.as_ref(),
-                model_override: primary_model_override.as_deref(),
+                external_http: summary_external_http.as_ref(),
+                model_override: summary_model_override.as_deref(),
                 // This pass only compresses already-loaded transcript text.
                 // Giving it room tools would permit mutation and recursive
                 // summarisation with no relevance to its bounded job.
@@ -682,26 +740,29 @@ pub async fn orchestrate(
                 // discussion dispatch resolves it (KT-545 DoD #4), so a
                 // debate participant on a Custom connection gets the exact
                 // same endpoint/credential/model as every other surface.
-                let connection = match connection_id {
-                    Some(cid) => {
-                        let lookup = cid.to_string();
-                        state
-                            .db
-                            .with_read_conn(move |conn| {
-                                crate::db::external_api_connections::get(conn, &lookup)
+                let (connection, round_model_override) = match checked_launch_connection(
+                    &state,
+                    agent_type,
+                    connection_id,
+                    agent_tier,
+                    &model_tiers_config,
+                )
+                .await
+                {
+                    Ok(snapshot) => snapshot,
+                    Err(error) => {
+                        emit!(AgentStreamEvent::AgentError {
+                            data: serde_json::json!({
+                                "agent": agent_name, "agent_type": agent_type,
+                                "round": round, "error": error,
                             })
-                            .await
-                            .ok()
-                            .flatten()
+                        });
+                        return;
                     }
-                    None => None,
                 };
                 let external_http = connection
                     .as_ref()
                     .and_then(|c| crate::http_transport::external_http_runtime(c, &tokens));
-                let round_model_override = connection
-                    .as_ref()
-                    .and_then(|c| crate::http_transport::connection_tier_model(c, agent_tier));
 
                 emit!(AgentStreamEvent::AgentStart {
                     data: serde_json::json!({ "agent": agent_name, "agent_type": agent_type, "round": round })
@@ -912,6 +973,28 @@ pub async fn orchestrate(
             let synth_fa = *agent_access
                 .get(&format!("{:?}", primary_agent_type))
                 .unwrap_or(&false);
+            let (synthesis_connection, synthesis_model_override) = match checked_launch_connection(
+                &state,
+                &primary_agent_type,
+                primary_connection_id.as_deref(),
+                primary_tier,
+                &model_tiers_config,
+            )
+            .await
+            {
+                Ok(snapshot) => snapshot,
+                Err(error) => {
+                    emit!(AgentStreamEvent::AgentError {
+                        data: serde_json::json!({
+                            "agent": primary_agent_type, "round": "synthesis", "error": error,
+                        })
+                    });
+                    return;
+                }
+            };
+            let synthesis_external_http = synthesis_connection.as_ref().and_then(|connection| {
+                crate::http_transport::external_http_runtime(connection, &tokens)
+            });
             match runner::start_agent_with_config(runner::AgentStartConfig {
                 work_dir: orch_workspace_path.as_deref(),
                 full_access: synth_fa,
@@ -924,8 +1007,8 @@ pub async fn orchestrate(
                 ollama_context_overrides: Some(&ollama_context_overrides),
                 http_request_timeout: Some(timeout_for_agent(&primary_agent_type)),
                 http_endpoints: Some(&http_endpoints),
-                external_http: primary_external_http.as_ref(),
-                model_override: primary_model_override.as_deref(),
+                external_http: synthesis_external_http.as_ref(),
+                model_override: synthesis_model_override.as_deref(),
                 context_files_prompt: &companion_context,
                 discussion_id: Some(&id),
                 acp_session_store: Some(runner::AcpSessionStore::new(state.db.clone(), id.clone())),
@@ -978,7 +1061,7 @@ pub async fn orchestrate(
                     {
                         // KT-37 — stamp the concrete model the synthesis ran on.
                         let synthesis_model = runner::effective_model_flag(
-                            primary_model_override.as_deref(),
+                            synthesis_model_override.as_deref(),
                             &primary_agent_type,
                             primary_tier,
                             Some(&model_tiers_config),
@@ -1657,8 +1740,89 @@ mod orchestrate_validation_tests {
     // pure function so we can unit-test the discriminant-based comparison
     // without spinning up `detect_all` (which hits the filesystem and
     // depends on the host having `claude` / `codex` binaries).
-    use super::{primary_connection_id, target_tier};
-    use crate::models::{AgentType, MessageTarget, ModelTier, OrchestrationParticipant};
+    use super::{checked_launch_connection, primary_connection_id, target_tier};
+    use crate::models::{
+        AgentType, ExternalApiConnection, ExternalApiConnectionPreset, MessageTarget, ModelTier,
+        OrchestrationParticipant,
+    };
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+
+    fn connection(id: &str, model: &str) -> ExternalApiConnection {
+        let now = chrono::Utc::now();
+        ExternalApiConnection {
+            id: id.into(),
+            display_name: id.into(),
+            mention_alias: id.into(),
+            endpoint: Some(format!("http://{id}.test")),
+            credential_slug: format!("credential-{id}"),
+            origin_preset: ExternalApiConnectionPreset::Other,
+            economy_model: None,
+            default_model: Some(model.into()),
+            reasoning_model: None,
+            created_at: now,
+            updated_at: now,
+            image_model: None,
+            video_model: None,
+            media_endpoint: None,
+        }
+    }
+
+    async fn state_with_connections(connections: Vec<ExternalApiConnection>) -> crate::AppState {
+        let db = Arc::new(crate::db::Database::open_in_memory().unwrap());
+        for connection in connections {
+            db.with_conn(move |conn| {
+                crate::db::external_api_connections::insert(conn, &connection)
+            })
+            .await
+            .unwrap();
+        }
+        crate::AppState::new_defaults(
+            Arc::new(RwLock::new(crate::core::config::default_config())),
+            db,
+            crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+        )
+    }
+
+    #[tokio::test]
+    async fn launch_snapshot_selects_named_b_not_same_agent_a() {
+        let state = state_with_connections(vec![
+            connection("connection-a", "model-a"),
+            connection("connection-b", "model-b"),
+        ])
+        .await;
+        let tiers = state.config.read().await.agents.model_tiers.clone();
+
+        let (selected, model) = checked_launch_connection(
+            &state,
+            &AgentType::Custom,
+            Some("connection-b"),
+            ModelTier::Default,
+            &tiers,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(selected.unwrap().id, "connection-b");
+        assert_eq!(model.as_deref(), Some("model-b"));
+    }
+
+    #[tokio::test]
+    async fn launch_snapshot_refuses_deleted_named_connection() {
+        let state = state_with_connections(vec![]).await;
+        let tiers = state.config.read().await.agents.model_tiers.clone();
+        let error = checked_launch_connection(
+            &state,
+            &AgentType::Custom,
+            Some("deleted-connection"),
+            ModelTier::Default,
+            &tiers,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.contains("deleted-connection"), "{error}");
+    }
 
     fn missing_agents(requested: &[AgentType], usable: &[AgentType]) -> Vec<AgentType> {
         requested

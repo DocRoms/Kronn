@@ -116,10 +116,11 @@ capability gate on one side, tier/connection resolution shared across launch
 surfaces on the other. Nothing in this module talks to a provider directly or
 owns persistence beyond the `discussions.connection_id` column.
 
-Orchestration and Workflow Agent steps resolve a named connection before their
-catalog preflight. They pass the resulting `http:<connection-id>` runtime
-target and effective connection model to the guard, then reuse the same
-connection/model for dispatch. The guard remains caller-owned; centralizing it
+Orchestration resolves and checks the named connection snapshot immediately
+before each summary, participant-round, and synthesis launch. Workflow Agent
+steps fail closed when their named connection cannot be resolved; their initial
+and immediate pre-dispatch checks use its `http:<connection-id>` target and
+effective model. The guard remains caller-owned; centralizing it
 at the runner boundary is a possible follow-up once overlapping runner work is
 integrated. [src: file: backend/src/api/discussions/orchestration.rs:235-385]
 [src: file: backend/src/workflows/steps.rs:241-310]

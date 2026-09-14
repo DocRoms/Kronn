@@ -821,7 +821,19 @@ async fn execute_run_with_notify_policy(
                     .as_ref()
                     .and_then(|settings| settings.tier)
                     .unwrap_or_default();
-                let connection = resolve_step_connection(step, Some(&state.db)).await;
+                let connection = match resolve_step_connection(step, Some(&state.db)).await {
+                    Ok(connection) => connection,
+                    Err(error) => {
+                        catalog_failures.push((
+                            step.name.clone(),
+                            serde_json::json!({
+                                "error": "connection_resolution_failed",
+                                "detail": error.to_string(),
+                            }),
+                        ));
+                        continue;
+                    }
+                };
                 let runtime_target_id = connection.as_ref().map(|connection| {
                     crate::db::model_catalog::http_runtime_target_id(&connection.id)
                 });
@@ -836,7 +848,10 @@ async fn execute_run_with_notify_policy(
                 )
                 .await
                 {
-                    catalog_failures.push((step.name.clone(), failure));
+                    catalog_failures.push((
+                        step.name.clone(),
+                        serde_json::to_value(failure).unwrap_or_default(),
+                    ));
                 }
             }
             if !catalog_failures.is_empty() {

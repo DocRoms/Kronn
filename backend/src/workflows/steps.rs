@@ -241,7 +241,32 @@ pub async fn execute_step(
     let max_attempts = step.retry.as_ref().map(|r| r.max_retries + 1).unwrap_or(1);
     let mut last_error = String::new();
 
-    let resolved_connection = resolve_step_connection(step, catalog_db).await;
+    let resolved_connection = match resolve_step_connection(step, catalog_db).await {
+        Ok(connection) => connection,
+        Err(error) => {
+            return StepOutcome {
+                result: StepResult {
+                    step_name: step.name.clone(),
+                    status: RunStatus::Failed,
+                    output: format!("preflight_failed:{error}"),
+                    tokens_used: 0,
+                    duration_ms: start.elapsed().as_millis() as u64,
+                    started_at: None,
+                    condition_result: None,
+                    envelope_detected: None,
+                    step_kind: Some("preflight_failed".into()),
+                    step_agent: Some(step.agent.clone()),
+                    step_model: None,
+                    step_api_plugin_slug: None,
+                    step_api_endpoint_path: None,
+                    is_rollback: false,
+                    child_run_id: None,
+                    native_tool_calls: Box::default(),
+                },
+                condition_action: None,
+            };
+        }
+    };
     let runtime_target_id = resolved_connection
         .as_ref()
         .map(|connection| crate::db::model_catalog::http_runtime_target_id(&connection.id));
@@ -335,6 +360,7 @@ pub async fn execute_step(
             native_tools.clone(),
             progress_tx.as_ref(),
             external_http.as_ref(),
+            model_override.as_deref(),
         )
         .await
         {
@@ -408,6 +434,7 @@ pub async fn execute_step(
                             native_tools.clone(),
                             None,
                             external_http.as_ref(),
+                            model_override.as_deref(),
                         )
                         .await;
                         if let Err(ref e) = repair_res {
@@ -472,6 +499,7 @@ pub async fn execute_step(
                                 "local schema validation failed after repair — escalating to Claude"
                             );
                             let escalated = escalation_step(step);
+                            let escalated_model = step_model_override(&escalated, None);
                             let esc_res = run_agent_with_timeout(
                                 &escalated,
                                 project_path,
@@ -484,7 +512,8 @@ pub async fn execute_step(
                                 ollama_context_overrides,
                                 native_tools.clone(),
                                 None,
-                                external_http.as_ref(),
+                                None,
+                                escalated_model.as_deref(),
                             )
                             .await;
                             if let Err(ref e) = esc_res {
@@ -580,6 +609,8 @@ pub async fn execute_step(
                         native_tools.clone(),
                         progress_tx.as_ref(),
                         external_http.as_ref(),
+                        model_override.as_deref(),
+                        resolved_connection.as_ref(),
                     ).await {
                         Ok((converged, debate_tokens, debate_tool_calls)) => {
                             total_tokens += debate_tokens;
@@ -839,11 +870,9 @@ fn escalation_step(step: &WorkflowStep) -> WorkflowStep {
 
 /// Resolve the named external HTTP connection a step points at.
 ///
-/// Returns `None` when the step names none — every non-HTTP agent — and also
-/// when the id no longer resolves or now belongs to a different agent type.
-/// Refusing here rather than substituting another connection is deliberate: a
-/// step silently answered by the wrong provider is worse than one that fails
-/// with the runner's own diagnostic.
+/// Returns `Ok(None)` only when the step names no connection. A requested id
+/// that cannot be read, no longer exists, or belongs to another agent is an
+/// error so dispatch cannot fall through to a provider default.
 /// Whether the step's named connection is the reviewer's endpoint too.
 ///
 /// A connection belongs to an agent, not to a role. When the reviewer runs on
@@ -859,31 +888,35 @@ fn reviewer_shares_step_connection(step: &WorkflowStep, reviewer_agent: &AgentTy
 pub(crate) async fn resolve_step_connection(
     step: &WorkflowStep,
     catalog_db: Option<&crate::db::Database>,
-) -> Option<ExternalApiConnection> {
+) -> Result<Option<ExternalApiConnection>> {
     let connection_id = step
         .agent_settings
         .as_ref()
-        .and_then(|settings| settings.connection_id.clone())?;
-    let db = catalog_db?;
+        .and_then(|settings| settings.connection_id.clone());
+    let Some(connection_id) = connection_id else {
+        return Ok(None);
+    };
+    let db = catalog_db.ok_or_else(|| {
+        anyhow::anyhow!(
+            "named connection {connection_id} cannot be resolved without the workflow database"
+        )
+    })?;
     let lookup_id = connection_id.clone();
     let connection = db
         .with_read_conn(move |conn| crate::db::external_api_connections::get(conn, &lookup_id))
-        .await
-        .ok()
-        .flatten()?;
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("External API connection {connection_id} was not found"))?;
 
     if crate::db::external_api_connections::target_for_connection(&connection).agent_type
         != step.agent
     {
-        tracing::warn!(
-            step = %step.name,
-            "Step connection {} no longer matches its agent type — running without it",
-            connection_id
+        anyhow::bail!(
+            "External API connection {connection_id} no longer matches agent {:?}",
+            step.agent
         );
-        return None;
     }
 
-    Some(connection)
+    Ok(Some(connection))
 }
 
 /// Run an agent with optional stall timeout.
@@ -905,6 +938,7 @@ async fn run_agent_with_timeout(
     native_tools: Option<Arc<dyn crate::agents::tools::ToolExecutor>>,
     progress_tx: Option<&ProgressSender>,
     external_http: Option<&runner::ExternalHttpRuntime>,
+    effective_model: Option<&str>,
 ) -> Result<AgentOutput> {
     // 30 min default — generous safety net rather than aggressive ceiling.
     // With tool-call streaming (cf. format_tool_input_suffix), an active
@@ -943,7 +977,7 @@ async fn run_agent_with_timeout(
         ollama_format: ollama_format.as_ref(),
         // Explicit per-step model (from the wizard's model picker) — now
         // actually consumed at run time, not just stamped for display.
-        model_override: model_override.as_deref(),
+        model_override: effective_model,
         // KT-646 — explicit per-step reasoning effort, from the wizard's
         // effort picker. Wins over the tier's configured preset; `None`
         // falls back to that preset, then to the CLI default (see
@@ -1252,6 +1286,8 @@ async fn run_multi_agent_debate(
     // The step's own connection. It applies to the AUTHOR, which runs on the
     // step's agent — never to the reviewer, which runs on its own.
     external_http: Option<&runner::ExternalHttpRuntime>,
+    author_model: Option<&str>,
+    author_connection: Option<&ExternalApiConnection>,
 ) -> Result<(String, u64, Vec<NativeToolCallLog>)> {
     let max_rounds = cfg.max_rounds.unwrap_or(3).clamp(1, 5);
     let approved = |t: &str| {
@@ -1304,6 +1340,9 @@ async fn run_multi_agent_debate(
         s.on_result = vec![];
         s
     };
+    let reviewer_model = reviewer_shares_the_step_connection
+        .then(|| step_model_override(&reviewer_step, author_connection))
+        .flatten();
 
     for round in 0..max_rounds {
         // ---- reviewer challenges ----
@@ -1330,6 +1369,7 @@ async fn run_multi_agent_debate(
             reviewer_shares_the_step_connection
                 .then_some(external_http)
                 .flatten(),
+            reviewer_model.as_deref(),
         )
         .await?;
         tokens += rev.tokens_used;
@@ -1380,6 +1420,7 @@ async fn run_multi_agent_debate(
             native_tools.clone(),
             progress_tx,
             external_http,
+            author_model,
         )
         .await?;
         tokens += auth.tokens_used;
