@@ -870,7 +870,17 @@ pub fn get_disc_no_agent(conn: &Connection, disc_id: &str) -> Result<Option<bool
 /// discussion existed.
 pub fn set_disc_no_agent(conn: &Connection, disc_id: &str, no_agent: bool) -> Result<bool> {
     let transaction = conn.unchecked_transaction()?;
-    if !no_agent && super::orchestration::discussion_has_cli_worker(&transaction, disc_id)? {
+    let changed = set_disc_no_agent_within_tx(&transaction, disc_id, no_agent)?;
+    transaction.commit()?;
+    Ok(changed)
+}
+
+pub(crate) fn set_disc_no_agent_within_tx(
+    transaction: &rusqlite::Transaction<'_>,
+    disc_id: &str,
+    no_agent: bool,
+) -> Result<bool> {
+    if !no_agent && super::orchestration::discussion_has_cli_worker(transaction, disc_id)? {
         anyhow::bail!("this room is owned by a CLI worker; reassign the execution before enabling a native agent");
     }
     let affected = transaction.execute(
@@ -878,12 +888,11 @@ pub fn set_disc_no_agent(conn: &Connection, disc_id: &str, no_agent: bool) -> Re
         params![disc_id, no_agent as i32, Utc::now().to_rfc3339()],
     )?;
     if affected > 0 && no_agent {
-        super::agent_dispatch::cancel_pending_for_discussion(&transaction, disc_id)?;
-        if !super::agent_dispatch::has_active_for_discussion(&transaction, disc_id)? {
-            set_awaiting_agent(&transaction, disc_id, false)?;
+        super::agent_dispatch::cancel_pending_for_discussion(transaction, disc_id)?;
+        if !super::agent_dispatch::has_active_for_discussion(transaction, disc_id)? {
+            set_awaiting_agent(transaction, disc_id, false)?;
         }
     }
-    transaction.commit()?;
     Ok(affected > 0)
 }
 

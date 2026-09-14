@@ -492,7 +492,7 @@ pub async fn create(
             }
             // F9 — mark the disc human-only so the runner never spawns.
             if want_no_agent {
-                crate::db::discussions::set_disc_no_agent(conn, &disc.id, true)?;
+                crate::db::discussions::set_disc_no_agent_within_tx(&tx, &disc.id, true)?;
             }
             tx.commit()?;
             Ok(disc)
