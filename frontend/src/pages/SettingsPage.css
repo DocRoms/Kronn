@@ -3482,6 +3482,12 @@
   color: color-mix(in srgb, var(--agent-color) 78%, var(--kr-text-primary));
 }
 
+.set-agent-row .set-agent-release-error {
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
 .set-agent-runtime-state {
   min-width: 0;
 }

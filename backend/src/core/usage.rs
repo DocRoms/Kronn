@@ -416,6 +416,14 @@ fn resolve_ccusage_program() -> Result<PathBuf, String> {
     Err("ccusage not available. Install it globally, or run `npx ccusage@latest --version`, `pnpm dlx ccusage --version`, or `bunx ccusage --version` once so Kronn can use the local package-runner cache.".to_string())
 }
 
+/// Probe the same ccusage executable resolution path used for usage reports.
+/// This only asks for its installed version; it never downloads or updates a
+/// package-runner cache.
+pub async fn installed_ccusage_version() -> Option<String> {
+    let program = resolve_ccusage_program().ok()?;
+    crate::core::versions::installed_version(&program).await
+}
+
 fn usage_home_for_command(explicit: Option<OsString>, in_docker: bool) -> Option<OsString> {
     explicit
         .filter(|value| !value.is_empty())

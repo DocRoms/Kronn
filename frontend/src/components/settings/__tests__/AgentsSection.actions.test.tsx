@@ -27,6 +27,7 @@ const {
   uninstallMock,
   toggleMock,
   detectMock,
+  versionCheckMock,
   setAgentAccessMock,
   setAgentMentionColorMock,
   setAgentConcurrencyMock,
@@ -41,6 +42,7 @@ const {
   uninstallMock: vi.fn(),
   toggleMock: vi.fn(),
   detectMock: vi.fn(),
+  versionCheckMock: vi.fn(),
   setAgentAccessMock: vi.fn(),
   setAgentMentionColorMock: vi.fn(),
   setAgentConcurrencyMock: vi.fn(),
@@ -65,6 +67,7 @@ vi.mock('../../../lib/api', () => buildApiMock({
     uninstall: uninstallMock as never,
     toggle: toggleMock as never,
     detect: detectMock as never,
+    versionCheck: versionCheckMock as never,
     quotaStates: quotaStatesMock as never,
     rearmQuota: rearmQuotaMock as never,
   },
@@ -140,6 +143,7 @@ beforeEach(() => {
   toggleMock.mockResolvedValue(undefined);
   detectMock.mockReset();
   detectMock.mockResolvedValue([]);
+  versionCheckMock.mockReset().mockResolvedValue([]);
   setAgentConcurrencyMock.mockReset();
   setAgentConcurrencyMock.mockResolvedValue(undefined);
   setAgentAccessMock.mockReset();
@@ -195,6 +199,25 @@ afterEach(() => {
   vi.unstubAllGlobals();
   cleanup();
   sessionStorage.removeItem('kronn:model-config-target');
+});
+
+describe('AgentsSection — release checks', () => {
+  it('guards synchronous clicks and reports a request failure without refreshing away the snapshot', async () => {
+    let rejectCheck!: (error: Error) => void;
+    versionCheckMock.mockReturnValue(new Promise((_, reject) => { rejectCheck = reject; }));
+    const { refetchAgents, toastFn } = renderSection({ agents: [makeAgent({ name: 'Claude Code', agent_type: 'ClaudeCode', installed: true })] });
+    const buttons = await screen.findAllByRole('button', { name: 'config.recheckVersions' });
+    const button = buttons.at(-1)!;
+    act(() => { fireEvent.click(button); fireEvent.click(button); });
+    expect(versionCheckMock).toHaveBeenCalledTimes(1);
+    await act(async () => { rejectCheck(new Error('request unavailable')); });
+    expect(toastFn).toHaveBeenCalledWith('config.releaseCheckRequestFailed', 'error');
+    expect(refetchAgents).not.toHaveBeenCalled();
+    expect(button).not.toBeDisabled();
+    versionCheckMock.mockResolvedValue([]);
+    fireEvent.click(button);
+    await waitFor(() => expect(refetchAgents).toHaveBeenCalledTimes(1));
+  });
 });
 
 describe('AgentsSection — model-error deep link', () => {

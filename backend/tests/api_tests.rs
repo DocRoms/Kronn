@@ -24,6 +24,74 @@ use kronn::models::WsMessage;
 use kronn::{build_router_with_auth, AppState, DEFAULT_MAX_CONCURRENT_AGENTS};
 
 #[tokio::test]
+async fn cli_release_recheck_returns_agent_metadata_and_distinct_rtk_ccusage_versions() {
+    let app = test_app();
+    let (status, result) = post_json(
+        app.clone(),
+        "/api/agents/version-check",
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(result["success"], true, "{result}");
+    let agents = result["data"].as_array().expect("agent snapshot");
+    assert!(!agents.is_empty());
+    let claude = agents
+        .iter()
+        .find(|agent| agent["agent_type"] == "ClaudeCode")
+        .unwrap();
+    assert_eq!(
+        claude["version_source_url"],
+        "https://registry.npmjs.org/@anthropic-ai/claude-code/latest"
+    );
+    assert!(claude["version_checked_at"].is_string());
+    // No public source is invented for an unsupported runtime.
+    let kiro = agents
+        .iter()
+        .find(|agent| agent["agent_type"] == "Kiro")
+        .unwrap();
+    assert!(kiro["latest_version"].is_null());
+    assert!(kiro["version_source_url"].is_null());
+    assert!(kiro["version_check_error"].is_string());
+
+    let (status, result) = get_json(app, "/api/rtk/version").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(result["success"], true, "{result}");
+    let versions: kronn::api::rtk::RtkVersionInfo =
+        serde_json::from_value(result["data"].clone()).unwrap();
+    assert!(versions.checked_at.is_some());
+    assert!(versions.ccusage.checked_at.is_some());
+    assert_eq!(
+        versions.update_available,
+        versions
+            .installed
+            .as_deref()
+            .zip(versions.latest_known.as_deref())
+            .is_some_and(
+                |(installed, latest)| kronn::core::versions::update_available(installed, latest)
+            )
+    );
+    assert_eq!(
+        versions.ccusage.update_available,
+        versions
+            .ccusage
+            .installed
+            .as_deref()
+            .zip(versions.ccusage.latest.as_deref())
+            .is_some_and(
+                |(installed, latest)| kronn::core::versions::update_available(installed, latest)
+            )
+    );
+    // An unavailable network yields an explicit failure, never a made-up version.
+    if versions.latest_known.is_none() {
+        assert!(versions.check_error.is_some());
+    }
+    if versions.ccusage.latest.is_none() {
+        assert!(versions.ccusage.check_error.is_some());
+    }
+}
+
+#[tokio::test]
 async fn orchestration_recovery_routes_return_structured_missing_execution_errors() {
     let app = test_app();
     let missing = "00000000-0000-0000-0000-000000000000";
