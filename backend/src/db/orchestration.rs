@@ -3495,12 +3495,15 @@ fn publish_campaign_gate_card(
     };
     let message_id = format!("orch-campaign-gate:{run_id}:{exec_id}:{side}:{occurrence}");
 
-    // A card must never be able to abort a state transition. The principle is
-    // stated three functions up, in `publish_steering_card`: losing a card is
-    // cheaper than aborting a terminal transition. This insert used to violate
-    // it. Whatever the occurrence key turns out to be worth, this is the
-    // guarantee — and it is the same shape the resume path already uses for its
-    // own deterministic id (`api/orchestration.rs`, `orch-resume-worker`).
+    // Skip the publication rather than raise on a duplicate id. Every query
+    // here still returns a `Result`, so this does not make the gate incapable
+    // of aborting a transition — it removes the ONE abort this code was
+    // creating: a repeated deterministic id hitting `messages.id`. That matters
+    // because the principle three functions up, in `publish_steering_card`,
+    // says losing a card is cheaper than aborting a terminal transition, and
+    // this insert was buying the opposite. Same shape the resume path already
+    // uses for its own deterministic id (`api/orchestration.rs`,
+    // `orch-resume-worker`).
     let already_posted: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM messages WHERE id = ?1)",
         [&message_id],

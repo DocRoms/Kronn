@@ -105,11 +105,10 @@ Release notes for 0.9.3 and earlier are available in the
   used by (they fail on their next run), or that nothing else is touched. A
   count that cannot be read says so, instead of reading as nothing.
 - A clip's last frame can be kept as an asset of its own, with a link back to
-  the clip it came from. It is decoded in the BROWSER, by the player already
-  showing the clip, and only from a click in that viewer: these clips come back
-  as H.264 profile 100, which the pure-Rust decoder reads for 9 frames out of
-  97, and ffmpeg is on neither the machine nor the repo. So there is no
-  headless path — not from Docker, not from an agent through MCP.
+  the clip it came from. It is decoded in the browser, by the player already
+  showing the clip, and runs only from a click in that viewer — there is no
+  headless path, so it is not available from Docker or from an agent through
+  MCP.
 - Image and video generation on HTTP connections (LiteLLM, NVIDIA, OpenRouter).
   Media models are configured as their own slots on a connection — modalities,
   not quality tiers — so a text step can never select "tier Image". A
