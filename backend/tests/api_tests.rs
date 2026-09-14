@@ -2370,7 +2370,7 @@ async fn orchestrator_return_resume_route_authenticates_and_replays_exact_rotati
             idempotency_key: None,
             description: String::new(),
             status: kronn::models::PlanningTaskStatus::Todo,
-            priority: kronn::models::PlanningTaskPriority::Medium,
+            priority: kronn::models::PlanningTaskPriority::Normal,
             parent_id: None,
             project_ids: vec!["return-http-project".into()],
             tags: vec![],
