@@ -1729,6 +1729,8 @@ mod orchestrate_validation_tests {
         ExternalApiConnectionPreset, MessageChannel, MessageRole, MessageTarget, ModelTier,
         OrchestrationParticipant, SummaryStrategy, TokensConfig,
     };
+    use axum::response::IntoResponse;
+    use http_body_util::BodyExt;
     use std::sync::Arc;
     use tokio::sync::RwLock;
     use wiremock::matchers::{body_string_contains, method, path};
@@ -1913,6 +1915,58 @@ mod orchestrate_validation_tests {
         assert_eq!(result.0, "summary B");
         assert!(provider_a.received_requests().await.unwrap().is_empty());
         assert_eq!(provider_b.received_requests().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn orchestrate_surfaces_initial_catalog_refusal_without_provider_requests() {
+        let provider_a = MockServer::start().await;
+        let provider_b = MockServer::start().await;
+        let mut secondary = connection("connection-a", "model-a");
+        secondary.endpoint = Some(provider_a.uri());
+        secondary.origin_preset = ExternalApiConnectionPreset::Nvidia;
+        let mut primary = connection("connection-b", "model-b");
+        primary.endpoint = Some(provider_b.uri());
+        let state = state_with_connections(vec![secondary, primary]).await;
+        set_catalog(&state, "connection-a", "model-a", &["chat"]).await;
+        set_catalog(&state, "connection-b", "model-b", &["video"]).await;
+        let disc = discussion("connection-b");
+        let disc_id = disc.id.clone();
+        state
+            .db
+            .with_conn(move |conn| crate::db::discussions::insert_discussion(conn, &disc))
+            .await
+            .unwrap();
+
+        let response = super::orchestrate(
+            axum::extract::State(state),
+            axum::extract::Path(disc_id),
+            axum::Json(crate::models::OrchestrationRequest {
+                agents: vec![
+                    OrchestrationParticipant {
+                        agent_type: AgentType::Custom,
+                        connection_id: Some("connection-b".into()),
+                    },
+                    OrchestrationParticipant {
+                        agent_type: AgentType::Nvidia,
+                        connection_id: Some("connection-a".into()),
+                    },
+                ],
+                max_rounds: Some(2),
+                skill_ids: vec![],
+                profile_ids: vec![],
+                directive_ids: vec![],
+            }),
+        )
+        .await
+        .into_response();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let body = String::from_utf8_lossy(&body);
+
+        assert!(body.contains("event: error"), "{body}");
+        assert!(body.contains("model_catalog_preflight_failed"), "{body}");
+        assert!(body.contains("unsupported"), "{body}");
+        assert!(provider_a.received_requests().await.unwrap().is_empty());
+        assert!(provider_b.received_requests().await.unwrap().is_empty());
     }
 
     #[tokio::test]
