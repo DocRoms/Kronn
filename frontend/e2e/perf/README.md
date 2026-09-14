@@ -21,29 +21,41 @@ make build-backend  # or `cd backend && cargo build`
 
 # 2. Seed the sandbox DB. The script wipes any existing /tmp/kronn-perf-
 #    sandbox/* and writes 250 projects + 500 discussions + ~7500 messages.
+# 2. Create and migrate the sandbox, through the launcher that owns it.
+#    It writes config.toml itself, refuses 3140/5173, refuses a port already
+#    served, refuses a directory it did not create, verifies the listener is
+#    the process it started — and points KRONN_HOST_HOME INSIDE the sandbox.
+#    That last one is not cosmetic: at boot the backend syncs ~/.claude.json,
+#    ~/.gemini/settings.json and ~/.codex/config.toml, dropping every
+#    Kronn-managed entry before re-inserting from the database it was given.
+#    An empty sandbox database therefore STRIPS your own MCP configuration.
+#    That happened on 2026-09-13.
+PID=$(scripts/e2e-sandbox-backend.sh /tmp/kronn-perf-sandbox 3142)
+
+# 3. Stop it BEFORE seeding. `seed.py` writes rows straight into kronn.db and
+#    creates no schema of its own, so it needs the migrated database step 2
+#    just produced — and it must not race a live backend holding that file.
+kill "$PID"
+
 python3 frontend/e2e/perf/seed.py
 
-# 2-bis. (Optional) Add the 20-msg discussion the introspection regression
+# 3-bis. (Optional) Add the 20-msg discussion the introspection regression
 #    spec needs. Idempotent — re-run without conflicts.
 python3 frontend/e2e/perf/seed_introspection.py
 
-# 3. Boot the sandbox backend on :3142.
-#
-#    ⚠ `seed.py` writes the DB and NOT config.toml, and a backend with no
-#    config.toml writes one using the DEFAULT port — 3140, which is the
-#    user's real backend. Choose the port before booting, or this step aims
-#    at the instance it is supposed to protect.
-env KRONN_DATA_DIR=/tmp/kronn-perf-sandbox KRONN_HOST=127.0.0.2 \
-    target/debug/kronn & sleep 5; kill %1     # writes config.toml, cannot bind
-sed -i '' 's/^port = 3140$/port = 3142/' /tmp/kronn-perf-sandbox/config.toml
-env KRONN_DATA_DIR=/tmp/kronn-perf-sandbox KRONN_HOST=127.0.0.1 \
+# 4. Restart on the seeded database. The launcher owns only directories it
+#    creates and refuses this one now, so the isolation is repeated by hand —
+#    KRONN_HOST_HOME included. Dropping it is what rewrites your host configs.
+env KRONN_DATA_DIR=/tmp/kronn-perf-sandbox \
+    KRONN_HOST=127.0.0.1 \
+    KRONN_HOST_HOME=/tmp/kronn-perf-sandbox/host-home \
     target/debug/kronn &
 
-# 4. Boot Vite pointed at the sandbox.
+# 5. Boot Vite pointed at the sandbox.
 env KRONN_BACKEND_URL=http://localhost:3142 \
     pnpm --filter kronn-frontend dev &
 
-# 5. Run the perf specs.
+# 6. Run the perf specs.
 cd frontend && pnpm exec playwright test --config=playwright.perf.config.ts
 ```
 

@@ -3414,9 +3414,20 @@ enum CampaignGate {
 /// Post the campaign's human-gate event in the PARENT room, message and card in
 /// the same transaction.
 ///
-/// Deterministic per `(run, execution, side)`: a replay after a restart finds
-/// the same ids and publishes nothing, while a genuinely new escalation on
-/// another execution gets its own card.
+/// Keyed on the OCCURRENCE, not on the execution. The first version keyed on
+/// `(run, execution, side)` and claimed, in this very comment, a replay safety
+/// it did not implement: a second escalation of the same execution re-inserted
+/// the same `messages.id`, the UNIQUE constraint fired inside the caller's
+/// savepoint, and the whole transition rolled back — so an execution that had
+/// been parked on a human once could never be parked again.
+///
+/// The occurrence is counted from the journal rather than from a status
+/// counter. `attempt_no` only advances when the current attempt already carries
+/// a review, and `assignment_generation` only advances on a reassignment, while
+/// `Escalated -> Approved -> ... -> Working -> Escalated` is a legal loop that
+/// touches neither. Transitions INTO `Escalated` are the thing being counted,
+/// and `can_transition_to` refuses `Escalated -> Escalated`, so each one is a
+/// distinct gate.
 fn publish_campaign_gate_card(
     conn: &Connection,
     exec_id: &str,
@@ -3468,8 +3479,39 @@ fn publish_campaign_gate_card(
         ),
     };
 
+    // Counted BEFORE `record_execution_event` writes this transition — see the
+    // call order in `transition_execution` — so for an opening gate the count
+    // is this gate's own index, and for a closing one the escalation it closes
+    // is already journalled.
+    let escalations: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM task_execution_events \
+         WHERE task_execution_id = ?1 AND to_status = 'Escalated'",
+        [exec_id],
+        |row| row.get(0),
+    )?;
+    let occurrence = match gate {
+        CampaignGate::AwaitingHuman => escalations,
+        CampaignGate::Resumed => escalations.saturating_sub(1),
+    };
+    let message_id = format!("orch-campaign-gate:{run_id}:{exec_id}:{side}:{occurrence}");
+
+    // A card must never be able to abort a state transition. The principle is
+    // stated three functions up, in `publish_steering_card`: losing a card is
+    // cheaper than aborting a terminal transition. This insert used to violate
+    // it. Whatever the occurrence key turns out to be worth, this is the
+    // guarantee — and it is the same shape the resume path already uses for its
+    // own deterministic id (`api/orchestration.rs`, `orch-resume-worker`).
+    let already_posted: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM messages WHERE id = ?1)",
+        [&message_id],
+        |row| row.get(0),
+    )?;
+    if already_posted {
+        return Ok(());
+    }
+
     let message = DiscussionMessage {
-        id: format!("orch-campaign-gate:{run_id}:{exec_id}:{side}"),
+        id: message_id,
         role: MessageRole::User,
         channel: MessageChannel::Main,
         content,
@@ -3506,7 +3548,7 @@ fn publish_campaign_gate_card(
         &message.id,
         crate::db::discussion_important::SteeringCard {
             category,
-            dedup_key: &format!("orch.campaign.gate.{run_id}.{exec_id}.{side}"),
+            dedup_key: &format!("orch.campaign.gate.{run_id}.{exec_id}.{side}.{occurrence}"),
             title: &format!("{reference} — {title}"),
             highlight: &highlight,
             impact: &impact,
