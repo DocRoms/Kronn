@@ -1299,6 +1299,10 @@ impl AcpHost {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Only the unix liveness fixtures read from a pipe; gate it so a non-unix
+    /// build does not carry an unused import.
+    #[cfg(unix)]
+    use tokio::io::AsyncReadExt;
 
     struct FakeTransport;
 
@@ -2240,5 +2244,159 @@ done"#]);
     #[tokio::test]
     async fn finishing_an_owner_twice_is_not_possible_and_an_empty_one_succeeds() {
         DispatcherOwner(None).finish().await.unwrap();
+    }
+
+    /// A `shutdown` future cancelled mid-await must still stop the drain.
+    /// `finish` takes the owner BY VALUE, so dropping the future drops the
+    /// owner — this pins that the cancellation path really reaches `Drop`.
+    #[tokio::test]
+    async fn cancelling_a_shutdown_in_flight_still_cancels_the_drain() {
+        let (sender, receiver) = tokio::sync::oneshot::channel::<()>();
+        let owner = DispatcherOwner::new(tokio::spawn(async move {
+            let _sender = sender;
+            std::future::pending::<()>().await;
+        }));
+
+        let in_flight = owner.finish();
+        drop(in_flight);
+
+        receiver
+            .await
+            .expect_err("a cancelled shutdown must not leave the drain detached");
+    }
+
+    /// A liveness rendezvous the TEST owns, with no PID anywhere.
+    ///
+    /// The fixture holds a FIFO open for writing; the test holds the read end.
+    /// While the process lives the pipe stays open, and when it dies the kernel
+    /// closes its end — the test observes EOF. That EOF is an event, so nothing
+    /// is polled and nothing is slept on. On a failure path the test simply
+    /// drops its end: the fixture, blocked on a stdin that the transport owns,
+    /// is terminated by `kill_on_drop`, and no signal is ever sent to a number
+    /// that may have been recycled.
+    #[cfg(unix)]
+    struct FixtureLiveness {
+        _dir: tempfile::TempDir,
+        path: std::path::PathBuf,
+    }
+
+    #[cfg(unix)]
+    impl FixtureLiveness {
+        fn new() -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("alive");
+            let status = std::process::Command::new("mkfifo")
+                .arg(&path)
+                .status()
+                .expect("mkfifo must be available on a unix test host");
+            assert!(status.success(), "mkfifo failed for {path:?}");
+            Self { _dir: dir, path }
+        }
+
+        /// Opens the read end and waits for the fixture's READY byte, proving
+        /// the process reached its blocking state before the test acts.
+        async fn wait_ready(&self) -> tokio::fs::File {
+            let mut reader = timeout(FIXTURE_GUARD, tokio::fs::File::open(&self.path))
+                .await
+                .expect("opening the liveness pipe must not hang")
+                .expect("the fixture must open its liveness pipe");
+            let mut ready = [0u8; 5];
+            timeout(FIXTURE_GUARD, reader.read_exact(&mut ready))
+                .await
+                .expect("the fixture must announce itself")
+                .expect("the fixture must announce itself");
+            assert_eq!(&ready, b"READY");
+            reader
+        }
+    }
+
+    /// Anti-hang bound only: every wait below resolves on an event, and this
+    /// exists so a broken build fails instead of blocking the suite forever.
+    #[cfg(unix)]
+    const FIXTURE_GUARD: Duration = Duration::from_secs(30);
+
+    /// EOF on the liveness pipe means every writer is gone — the fixture and
+    /// anything that inherited its descriptors. An IO error is NOT treated as
+    /// success: it would prove nothing about the process.
+    #[cfg(unix)]
+    async fn fixture_is_gone(reader: &mut tokio::fs::File) -> bool {
+        let mut rest = Vec::new();
+        matches!(
+            timeout(FIXTURE_GUARD, reader.read_to_end(&mut rest)).await,
+            Ok(Ok(_))
+        )
+    }
+
+    #[cfg(unix)]
+    fn fixture_command(liveness: &FixtureLiveness, script: &str) -> tokio::process::Command {
+        let mut command = crate::core::cmd::async_cmd("sh");
+        command.env("ALIVE", &liveness.path).args(["-c", script]);
+        command
+    }
+
+    /// DoD — abandonment: a transport dropped after a REJECTED negotiation must
+    /// not leave its process behind. Observed through the pipe closing, never
+    /// through a PID.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_rejected_negotiation_dropped_terminates_the_owned_fixture() {
+        let liveness = FixtureLiveness::new();
+        let command = fixture_command(
+            &liveness,
+            r#"exec 3>"$ALIVE"
+printf 'READY' >&3
+while IFS= read -r line; do
+    case "$line" in
+        *'"method":"initialize"'*) printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":2}}' ;;
+    esac
+done"#,
+        );
+        let transport = Arc::new(
+            AcpJsonRpcTransport::spawn(AcpAgent::OpenCode, command, false)
+                .await
+                .unwrap(),
+        );
+        let mut alive = liveness.wait_ready().await;
+        let mut host = AcpHost::new(1, transport.clone());
+
+        assert_eq!(
+            host.negotiate(request()).await.unwrap_err(),
+            AcpError::UnsupportedProtocolVersion {
+                actual: 2,
+                maximum: 1,
+            }
+        );
+        drop(host);
+        drop(transport);
+
+        assert!(
+            fixture_is_gone(&mut alive).await,
+            "dropping the rejected transport must terminate its owned fixture"
+        );
+    }
+
+    /// DoD — idempotent reap: two shutdowns succeed, and the process is gone.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shutdown_is_idempotent_and_reaps_the_owned_fixture() {
+        let liveness = FixtureLiveness::new();
+        let command = fixture_command(
+            &liveness,
+            r#"exec 3>"$ALIVE"
+printf 'READY' >&3
+while IFS= read -r _; do :; done"#,
+        );
+        let transport = AcpJsonRpcTransport::spawn(AcpAgent::OpenCode, command, false)
+            .await
+            .unwrap();
+        let mut alive = liveness.wait_ready().await;
+
+        transport.shutdown().await.unwrap();
+        transport.shutdown().await.unwrap();
+
+        assert!(
+            fixture_is_gone(&mut alive).await,
+            "shutdown must wait until the owned fixture is reaped"
+        );
     }
 }
