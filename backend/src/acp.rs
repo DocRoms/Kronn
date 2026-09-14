@@ -1202,6 +1202,8 @@ impl AcpHost {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use tokio::io::AsyncReadExt;
 
     struct FakeTransport;
 
@@ -2078,5 +2080,160 @@ done"#]);
             }
             transport.shutdown().await.unwrap();
         }
+    }
+
+    /// A liveness rendezvous the TEST owns, over a real async socket.
+    ///
+    /// A FIFO read through `tokio::fs` is delegated to `spawn_blocking`, where
+    /// a future timeout does not cancel the blocking call — a RED could pin a
+    /// blocking-pool thread for the rest of the suite. A `UnixStream` is polled
+    /// by the reactor instead: every wait here is cancellable.
+    ///
+    /// The fixture exits on its OWN when the test drops the connection, so
+    /// cleanup works against the broken implementation too. It deliberately
+    /// SURVIVES stdin EOF, the way a real agent does — otherwise dropping the
+    /// transport would end it for a reason that has nothing to do with process
+    /// ownership, and the RED would pass without the fix.
+    #[cfg(unix)]
+    struct FixtureLink {
+        _dir: tempfile::TempDir,
+        path: std::path::PathBuf,
+        listener: tokio::net::UnixListener,
+    }
+
+    /// Anti-hang bound only: every wait below resolves on a socket event, and
+    /// this exists so a broken build fails instead of blocking the suite.
+    #[cfg(unix)]
+    const FIXTURE_GUARD: Duration = Duration::from_secs(30);
+
+    #[cfg(unix)]
+    impl FixtureLink {
+        fn new() -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("acp-fixture.sock");
+            let listener = tokio::net::UnixListener::bind(&path).unwrap();
+            Self {
+                _dir: dir,
+                path,
+                listener,
+            }
+        }
+
+        /// python3 is already a project dependency (`core::mcp_scanner`,
+        /// `core::quick_exec`). Only the stdlib is used here.
+        fn command(&self, initialize_reply: Option<&str>) -> tokio::process::Command {
+            let mut command = crate::core::cmd::async_cmd("python3");
+            command.env("ACP_SOCK", &self.path);
+            if let Some(reply) = initialize_reply {
+                command.env("ACP_REPLY", reply);
+            }
+            command.args([
+                "-c",
+                r#"
+import os, select, socket, sys
+
+sock = socket.socket(socket.AF_UNIX)
+sock.connect(os.environ["ACP_SOCK"])
+sock.sendall(b"READY")
+
+reply = os.environ.get("ACP_REPLY", "")
+stdin = sys.stdin.buffer
+watch = [sock, stdin]
+while True:
+    ready, _, _ = select.select(watch, [], [])
+    if sock in ready:
+        if not sock.recv(1):
+            break                 # the test released us: exit on our own
+    if stdin in ready:
+        line = stdin.readline()
+        if not line:
+            watch = [sock]        # a real agent survives stdin EOF
+        elif reply and '"method":"initialize"' in line.decode("utf-8", "replace"):
+            sys.stdout.write(reply + "\n")
+            sys.stdout.flush()
+"#,
+            ]);
+            command
+        }
+
+        /// Accept the fixture and read its READY, proving it reached its
+        /// blocking state before the test acts on the transport.
+        async fn accept_ready(&self) -> tokio::net::UnixStream {
+            let (mut stream, _) = timeout(FIXTURE_GUARD, self.listener.accept())
+                .await
+                .expect("the fixture must connect")
+                .expect("the fixture must connect");
+            let mut ready = [0u8; 5];
+            timeout(FIXTURE_GUARD, stream.read_exact(&mut ready))
+                .await
+                .expect("the fixture must announce itself")
+                .expect("the fixture must announce itself");
+            assert_eq!(&ready, b"READY");
+            stream
+        }
+    }
+
+    /// EOF on the socket means the fixture is gone. An IO error is NOT counted
+    /// as success: it would prove nothing about the process.
+    #[cfg(unix)]
+    async fn fixture_is_gone(stream: &mut tokio::net::UnixStream) -> bool {
+        let mut rest = Vec::new();
+        matches!(
+            timeout(FIXTURE_GUARD, stream.read_to_end(&mut rest)).await,
+            Ok(Ok(_))
+        )
+    }
+
+    /// DoD — abandonment: a transport dropped after a REJECTED negotiation must
+    /// not leave its process behind. The fixture ignores stdin EOF, so only
+    /// real process ownership can end it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_rejected_negotiation_dropped_terminates_the_owned_fixture() {
+        let link = FixtureLink::new();
+        let command = link.command(Some(
+            r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":2}}"#,
+        ));
+        let transport = Arc::new(
+            AcpJsonRpcTransport::spawn(AcpAgent::OpenCode, command, false)
+                .await
+                .unwrap(),
+        );
+        let mut alive = link.accept_ready().await;
+        let mut host = AcpHost::new(1, transport.clone());
+
+        assert_eq!(
+            host.negotiate(request()).await.unwrap_err(),
+            AcpError::UnsupportedProtocolVersion {
+                actual: 2,
+                maximum: 1,
+            }
+        );
+        drop(host);
+        drop(transport);
+
+        assert!(
+            fixture_is_gone(&mut alive).await,
+            "dropping the rejected transport must terminate its owned fixture"
+        );
+    }
+
+    /// DoD — idempotent reap: two shutdowns succeed, and the process is gone.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shutdown_is_idempotent_and_reaps_the_owned_fixture() {
+        let link = FixtureLink::new();
+        let transport = AcpJsonRpcTransport::spawn(AcpAgent::OpenCode, link.command(None), false)
+            .await
+            .unwrap();
+        let mut alive = link.accept_ready().await;
+
+        transport.shutdown().await.unwrap();
+        transport.shutdown().await.unwrap();
+
+        assert!(
+            fixture_is_gone(&mut alive).await,
+            "shutdown must wait until the owned fixture is reaped"
+        );
     }
 }
