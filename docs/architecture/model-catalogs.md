@@ -83,6 +83,51 @@ reasoning modes.
 [src: file: frontend/src/components/AgentSwitchPicker.tsx:1-300]
 [src: file: frontend/src/components/settings/ModelCatalogSection.tsx:1-236]
 
+## Reasoning-effort presets and transmission (KT-646)
+
+`ModelTierConfig` (per-agent Economy/Default/Reasoning model tiers, stored in
+`config.toml` under `[agents.model_tiers]`) carries an optional effort string
+alongside each tier's model (`economy_effort`/`default_effort`/
+`reasoning_effort`), additive and backward compatible: an untouched config
+deserializes every new field to `None`, so no flag is ever sent and existing
+behaviour is unchanged. A `None` effort always means "no flag — the runtime's
+own CLI default applies", never a silently assigned `high`/`max`.
+[src: file: backend/src/models/setup.rs (ModelTierConfig)]
+
+Resolution is a single precedence, mirrored on `effective_model_flag`:
+`runner::effective_reasoning_effort` — explicit per-step/per-QP
+`AgentSettings.reasoning_effort` (the execution override) wins outright; else
+the tier's configured preset applies only when the final model equals that
+tier's resolved model; else `None`. This retains a preset when an internal
+caller pre-resolves the same model, but never carries it onto a different
+model pin. The candidate is sent only when that exact available catalog entry
+advertises it in `reasoning_modes`. `runner::agent_supports_reasoning_effort`
+gates the whole precedence to agents with a proven contract: Codex via its
+documented per-run
+`-c model_reasoning_effort=<value>` TOML override
+([config reference](https://learn.chatgpt.com/docs/config-file/config-reference),
+[developer commands](https://learn.chatgpt.com/docs/developer-commands?surface=cli)),
+and Claude Code via its installed `--effort <level>` CLI flag. Direct CLI and
+the optional Claude/Codex ACP adapters carry the same resolved value; other
+ACP and HTTP routes receive no guessed parameter.
+[src: file: backend/src/agents/runner.rs:2746-2850]
+[src: file: backend/src/acp/claude_adapter.rs:200-225]
+[src: file: backend/src/acp/codex_adapter.rs:358-374]
+
+A Quick Prompt's explicit `agent_settings.reasoning_effort` is copied onto a
+hydrated workflow step the same way its `agent_settings.model` already is
+(step wins if it sets its own), so a QP-driven step carries the effort its
+author picked.
+[src: file: backend/src/workflows/quick_prompt_hydrate.rs (hydrate_step_from_quick_prompt)]
+
+Settings → Agents exposes an effort selector per tier for Claude and Codex.
+It derives choices from the selected model's catalog entry, disables it when
+the entry advertises no modes, retains an invalid saved value only as an
+explained disabled option, and clears an incompatible effort in the same save
+that changes the model. Other runtime cards state that effort is unsupported.
+[src: file: frontend/src/components/settings/AgentsSection.tsx:150-205]
+[src: file: frontend/src/components/settings/AgentsSection.tsx:1245-1310]
+
 ## Migration and test invariants
 
 Migration 162 creates both catalog tables and keys the refresh log by

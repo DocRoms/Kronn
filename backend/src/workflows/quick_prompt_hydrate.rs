@@ -90,6 +90,14 @@ pub async fn hydrate_step_from_quick_prompt(
     // onto the step when the step doesn't already set one, so a QP-driven step
     // runs on the QP's model (consumed via runner::effective_model_flag).
     let qp_model = qp.agent_settings.as_ref().and_then(|s| s.model.clone());
+    // KT-646 — same rule as `qp_model`: copy the QP's explicit reasoning
+    // effort onto the step when the step doesn't already set one, so a
+    // QP-driven step actually carries the effort the QP author picked
+    // (consumed via `runner::effective_reasoning_effort`).
+    let qp_effort = qp
+        .agent_settings
+        .as_ref()
+        .and_then(|s| s.reasoning_effort.clone());
     let qp_connection = qp.connection_id.clone();
     match step.agent_settings.as_mut() {
         Some(settings) => {
@@ -98,6 +106,9 @@ pub async fn hydrate_step_from_quick_prompt(
             }
             if settings.model.is_none() {
                 settings.model = qp_model;
+            }
+            if settings.reasoning_effort.is_none() {
+                settings.reasoning_effort = qp_effort;
             }
             // Same merge rule as the rest: an explicit step choice wins, and a
             // step that named no connection inherits the QP's.
@@ -109,7 +120,7 @@ pub async fn hydrate_step_from_quick_prompt(
             step.agent_settings = Some(crate::models::AgentSettings {
                 model: qp_model,
                 tier: Some(qp.tier),
-                reasoning_effort: None,
+                reasoning_effort: qp_effort,
                 max_tokens: None,
                 connection_id: qp_connection,
             });
@@ -473,6 +484,65 @@ mod tests {
             step.agent_settings.as_ref().and_then(|s| s.model.clone()),
             Some("llama3.3:70b".to_string()),
             "an explicit step model must win over the QP's"
+        );
+    }
+
+    #[tokio::test]
+    async fn hydrates_qp_reasoning_effort_into_step() {
+        // KT-646 — mirrors `hydrates_qp_model_into_step`: the QP's explicit
+        // reasoning effort must reach the step the same way its model does.
+        let db = Database::open_in_memory().unwrap();
+        let mut qp = make_qp("qp-effort", "Résume {{host}}");
+        qp.agent_settings = Some(crate::models::AgentSettings {
+            model: None,
+            tier: None,
+            reasoning_effort: Some("high".to_string()),
+            max_tokens: None,
+            connection_id: None,
+        });
+        let qp_id = seed_qp(&db, qp).await;
+        let mut step = blank_step(Some(qp_id));
+        hydrate_step_from_quick_prompt(&mut step, &db)
+            .await
+            .unwrap();
+        assert_eq!(
+            step.agent_settings
+                .as_ref()
+                .and_then(|s| s.reasoning_effort.clone()),
+            Some("high".to_string()),
+            "QP's explicit reasoning effort must reach the step (and survive the DB round-trip)"
+        );
+    }
+
+    #[tokio::test]
+    async fn step_reasoning_effort_wins_over_qp_reasoning_effort() {
+        let db = Database::open_in_memory().unwrap();
+        let mut qp = make_qp("qp-effort2", "x");
+        qp.agent_settings = Some(crate::models::AgentSettings {
+            model: None,
+            tier: None,
+            reasoning_effort: Some("high".to_string()),
+            max_tokens: None,
+            connection_id: None,
+        });
+        let qp_id = seed_qp(&db, qp).await;
+        let mut step = blank_step(Some(qp_id));
+        step.agent_settings = Some(crate::models::AgentSettings {
+            model: None,
+            tier: None,
+            reasoning_effort: Some("low".to_string()),
+            max_tokens: None,
+            connection_id: None,
+        });
+        hydrate_step_from_quick_prompt(&mut step, &db)
+            .await
+            .unwrap();
+        assert_eq!(
+            step.agent_settings
+                .as_ref()
+                .and_then(|s| s.reasoning_effort.clone()),
+            Some("low".to_string()),
+            "an explicit step reasoning effort must win over the QP's"
         );
     }
 

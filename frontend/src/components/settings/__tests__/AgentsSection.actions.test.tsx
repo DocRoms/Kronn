@@ -16,7 +16,7 @@
 // vi.hoisted mock fns + the inline `t` echo helper). No real person names.
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, fireEvent, waitFor, cleanup, act } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, cleanup, act, within } from '@testing-library/react';
 import { readFileSync } from 'node:fs';
 import { buildApiMock } from '../../../test/apiMock';
 import type { AgentDetection, AgentsConfig, AgentType } from '../../../types/generated';
@@ -676,7 +676,7 @@ describe('AgentsSection — observed model costs', () => {
     for (const tier of ['economy', 'default', 'reasoning']) {
       const select = await screen.findByLabelText(`disc.modelTier ${tier}`);
       fireEvent.focus(select);
-      expect(screen.getAllByRole('option').map(option => option.dataset.value)).toEqual(expectedModels);
+      expect(within(screen.getByRole('listbox')).getAllByRole('option').map(option => option.dataset.value)).toEqual(expectedModels);
       fireEvent.keyDown(select, { key: 'Escape' });
     }
   });

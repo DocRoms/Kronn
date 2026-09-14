@@ -5698,6 +5698,7 @@ Suite de la réponse.";
             true,
             "worker context",
             None,
+            None,
             true,
             Some(worktree.path()),
             None,
@@ -5762,6 +5763,7 @@ Suite de la réponse.";
             "test prompt",
             false,
             "worker context",
+            None,
             None,
             true,
             Some(worktree.path()),
@@ -5834,6 +5836,7 @@ Suite de la réponse.";
             "test prompt",
             false,
             &oversized_system_prompt,
+            None,
             None,
             true,
             Some(worktree.path()),
@@ -6257,6 +6260,7 @@ Suite de la réponse.";
             true,
             "worker context",
             None,
+            None,
             true,
             None,
             None,
@@ -6285,6 +6289,7 @@ Suite de la réponse.";
             "test prompt",
             true,
             "worker context",
+            None,
             None,
             true,
             None,
@@ -6378,6 +6383,7 @@ Suite de la réponse.";
                 "test prompt",
                 true,
                 "worker context",
+                None,
                 None,
                 true,
                 None,
@@ -7117,6 +7123,7 @@ Suite de la réponse.";
                 economy: Some("custom-haiku-3".into()),
                 default: None,
                 reasoning: None,
+                ..Default::default()
             },
             ..Default::default()
         };
@@ -7148,6 +7155,7 @@ Suite de la réponse.";
                 economy: None,
                 default: Some("gemma3:27b".into()),
                 reasoning: None,
+                ..Default::default()
             },
             ..Default::default()
         };
@@ -7179,6 +7187,7 @@ Suite de la réponse.";
                 economy: None,
                 default: Some("qwen3:32b".into()),
                 reasoning: None,
+                ..Default::default()
             },
             ..Default::default()
         };
@@ -7195,6 +7204,7 @@ Suite de la réponse.";
                 economy: Some("qwen3:4b".into()),
                 default: Some("qwen3:32b".into()),
                 reasoning: None,
+                ..Default::default()
             },
             ..Default::default()
         };
@@ -7614,6 +7624,159 @@ Suite de la réponse.";
         );
     }
 
+    // ─── effective_reasoning_effort: KT-646 precedence + agent gating ─────────
+
+    #[test]
+    fn only_claude_and_codex_have_a_verified_effort_transport() {
+        assert!(agent_supports_reasoning_effort(&AgentType::ClaudeCode));
+        assert!(agent_supports_reasoning_effort(&AgentType::Codex));
+        assert!(!agent_supports_reasoning_effort(&AgentType::GeminiCli));
+    }
+
+    #[test]
+    fn reasoning_effort_override_wins_and_is_trimmed() {
+        assert_eq!(
+            reasoning_effort_candidate(Some(" high "), Some("pinned"), Some("tier"), Some("low")),
+            Some("high".into()),
+            "an execution-level override must beat the tier preset",
+        );
+    }
+
+    #[test]
+    fn reasoning_effort_blank_override_falls_back_to_same_model_preset() {
+        assert_eq!(
+            reasoning_effort_candidate(Some("   "), Some("tier"), Some("tier"), Some("low")),
+            Some("low".into()),
+        );
+    }
+
+    #[test]
+    fn reasoning_effort_unset_preset_means_cli_default() {
+        // No override, no config at all → None (no flag sent, CLI default
+        // applies) — this is the pre-existing/untouched-config behaviour.
+        assert_eq!(
+            reasoning_effort_candidate(None, Some("tier"), Some("tier"), None),
+            None,
+        );
+    }
+
+    #[test]
+    fn reasoning_effort_does_not_apply_without_its_own_tier_preset() {
+        assert_eq!(
+            reasoning_effort_candidate(None, Some("economy"), Some("economy"), None),
+            None,
+        );
+    }
+
+    #[test]
+    fn reasoning_effort_does_not_carry_preset_onto_a_different_internal_model_pin() {
+        // The Reasoning tier's preset ("high") was calibrated for whatever
+        // model that tier resolves to. A step that pins a DIFFERENT explicit
+        // model, with no effort override of its own, must not silently
+        // inherit it.
+        assert_eq!(
+            reasoning_effort_candidate(None, Some("internal-pin"), Some("tier-model"), Some("high")),
+            None,
+            "an explicit model pin without its own effort override must not inherit the tier preset",
+        );
+    }
+
+    #[test]
+    fn reasoning_effort_explicit_override_still_applies_alongside_a_model_pin() {
+        // An operator who explicitly wants an effort on a pinned model sets
+        // it explicitly; that request still wins.
+        assert_eq!(
+            reasoning_effort_candidate(Some("low"), Some("pinned"), Some("tier"), Some("high")),
+            Some("low".into()),
+        );
+    }
+
+    #[test]
+    fn reasoning_effort_is_rejected_when_the_catalogue_does_not_advertise_it() {
+        assert!(!effort_is_advertised("high", &["low".into(), "medium".into()]));
+        assert!(effort_is_advertised("high", &["low".into(), "high".into()]));
+    }
+
+    #[test]
+    fn launch_resolution_rejects_an_explicit_effort_without_a_catalogue_projection() {
+        let error = resolve_reasoning_effort(
+            Some("high"),
+            Some("manual-model"),
+            &AgentType::ClaudeCode,
+            ModelTier::Default,
+            None,
+        )
+        .expect_err("a mode absent from the available catalogue must not be silently omitted");
+        assert!(
+            error.contains("Cannot apply reasoning effort 'high'"),
+            "{error}"
+        );
+        assert!(error.contains("manual-model"), "{error}");
+    }
+
+    // ─── Codex CLI arg construction: reasoning effort transmission ────────────
+
+    #[test]
+    fn codex_command_sends_model_reasoning_effort_override() {
+        let (_, _, args, _, _, _) = agent_command_with_task_worker_policy(
+            &AgentType::Codex,
+            "prompt",
+            false,
+            "",
+            None,
+            Some("high"),
+            false,
+            None,
+            None,
+        );
+        let idx = args
+            .iter()
+            .position(|a| a == "model_reasoning_effort=\"high\"")
+            .expect("Codex args must carry the resolved reasoning effort as a -c TOML override");
+        assert_eq!(args[idx - 1], "-c");
+    }
+
+    #[test]
+    fn codex_command_omits_reasoning_effort_flag_when_unresolved() {
+        let (_, _, args, _, _, _) = agent_command_with_task_worker_policy(
+            &AgentType::Codex,
+            "prompt",
+            false,
+            "",
+            None,
+            None,
+            false,
+            None,
+            None,
+        );
+        assert!(
+            !args
+                .iter()
+                .any(|a| a.starts_with("model_reasoning_effort=")),
+            "no resolved effort must mean no override flag, not a guessed one",
+        );
+    }
+
+    #[test]
+    fn claude_code_command_sends_the_resolved_effort_flag() {
+        let (_, _, args, _, _, _) = agent_command_with_task_worker_policy(
+            &AgentType::ClaudeCode,
+            "prompt",
+            false,
+            "",
+            None,
+            Some("high"),
+            false,
+            None,
+            None,
+        );
+        let index = args
+            .iter()
+            .position(|arg| arg == "--effort")
+            .expect("Claude argv must include --effort");
+        assert_eq!(args.get(index + 1), Some(&"high".to_string()));
+    }
+
     // ─── Claude Code: prompt is always last arg (required for --mcp-config injection)
 
     #[test]
@@ -7747,6 +7910,7 @@ Suite de la réponse.";
             false,
             "",
             None,
+            None,
             false,
             None,
             Some("2c19fd03-fde4-4c0d-a893-adae1d816df2"),
@@ -7765,6 +7929,7 @@ Suite de la réponse.";
             "the whole history",
             false,
             "",
+            None,
             None,
             false,
             None,
@@ -7858,6 +8023,7 @@ Suite de la réponse.";
             "the prompt",
             true,
             "",
+            None,
             None,
             true,
             None,
