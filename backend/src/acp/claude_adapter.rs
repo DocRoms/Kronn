@@ -11,7 +11,7 @@
 //! - `--output-format stream-json --include-partial-messages --verbose`
 //!   streams live during a turn.
 //! - `--mcp-config <safe-json> --strict-mcp-config` always supplies a frozen
-//!   registry: the exact authorized project set or an explicitly empty one.
+//!   registry: the exact authorized project set (or none), plus Kronn's own bridge.
 //!   Kronn parses the local project registry to validate that shape, but
 //!   never serializes secret values into argv, prompts, events, client
 //!   payloads, or audit entries; a credential-bearing or mixed file is
@@ -113,7 +113,11 @@ impl AcpTransport for ClaudeAcpAdapter {
         request: AcpInitialize,
     ) -> Result<AcpNegotiatedCapabilities, AcpError> {
         *self.cwd.lock().await = Some(PathBuf::from(&request.cwd));
-        let servers = self.broker.authorize_mcp_servers(request.mcp_servers);
+        let mut servers = self.broker.authorize_mcp_servers(request.mcp_servers);
+        // The runner supplies its internal bridge plus the project registry,
+        // which may contain that same declaration. Authorization is a set.
+        servers.sort_by(|left, right| left.id.cmp(&right.id));
+        servers.dedup_by(|left, right| left.id == right.id);
         let authorized_file =
             crate::core::mcp_scanner::read_mcp_json(&request.cwd).filter(|file| {
                 file.mcp_servers.len() == servers.len()
@@ -129,12 +133,37 @@ impl AcpTransport for ClaudeAcpAdapter {
         // Always supply a strict registry, even when absent/invalid/refused.
         // Freeze the exact authorized snapshot: passing its path would allow
         // a replacement between negotiation and CLI startup to widen scope.
-        *self.project_mcp_config.lock().await = match authorized_file {
-            Some(file) => serde_json::to_string(&file).map_err(|_| {
-                AcpError::Transport("Cannot serialize scoped Claude MCP config".into())
-            })?,
-            None => r#"{"mcpServers":{}}"#.into(),
-        };
+        let mut file = authorized_file.unwrap_or(crate::core::mcp_scanner::McpJsonFile {
+            mcp_servers: Default::default(),
+        });
+        if self.launch.worker_context.is_none() {
+            // This is Kronn's own executable, not a user/project declaration.
+            // Keep room tools available even without a project, just as the
+            // Codex adapter does, without restoring any global MCP registry.
+            let script = crate::agents::runner::disc_introspection_mcp_path().ok_or_else(|| {
+                AcpError::Transport("Claude ACP internal bridge is unavailable".into())
+            })?;
+            let bridge = crate::acp::AcpMcpServer {
+                id: "kronn-internal".into(),
+                command: "python3".into(),
+                args: vec![script.clone()],
+                allowed_tools: Vec::new(),
+            };
+            self.broker.register_trusted_mcp_server(&bridge);
+            servers.retain(|server| server.id != bridge.id);
+            servers.push(bridge);
+            file.mcp_servers.insert(
+                "kronn-internal".into(),
+                crate::core::mcp_scanner::McpServerEntry {
+                    command: Some("python3".into()),
+                    args: Some(vec![script]),
+                    url: None,
+                    env: Default::default(),
+                },
+            );
+        }
+        *self.project_mcp_config.lock().await = serde_json::to_string(&file)
+            .map_err(|_| AcpError::Transport("Cannot serialize scoped Claude MCP config".into()))?;
         let mut allowed_tools = Vec::new();
         for server in servers {
             if server.allowed_tools.is_empty() {
@@ -614,7 +643,9 @@ exec sleep 30"#,
 
         let argv = std::fs::read_to_string(&argv_file).unwrap();
         assert!(
-            argv.contains("--strict-mcp-config") && argv.contains(r#"{"mcpServers":{}}"#),
+            argv.contains("--strict-mcp-config")
+                && argv.contains("kronn-internal")
+                && !argv.contains("private-server"),
             "refused config must not inherit the global registry: {argv}"
         );
         assert!(
@@ -686,8 +717,16 @@ exec sleep 30"#,
                 .windows(2)
                 .find(|p| p[0] == "--mcp-config")
                 .expect("explicit scoped registry")[1];
-            let value: serde_json::Value = serde_json::from_str(selected)
+            let mut value: serde_json::Value = serde_json::from_str(selected)
                 .expect("frozen safe inline config, not a mutable file path");
+            assert_eq!(
+                value.pointer("/mcpServers/kronn-internal/command"),
+                Some(&serde_json::json!("python3"))
+            );
+            value["mcpServers"]
+                .as_object_mut()
+                .unwrap()
+                .remove("kronn-internal");
             let expected = if case == "changed" {
                 serde_json::json!({"mcpServers":{"safe":{"command":"safe-server"}}})
             } else {
@@ -726,10 +765,10 @@ exec sleep 30"#,
             })
             .await
             .unwrap();
-        assert_eq!(
-            *adapter.project_mcp_config.lock().await,
-            r#"{"mcpServers":{}}"#
-        );
+        let value: serde_json::Value =
+            serde_json::from_str(&adapter.project_mcp_config.lock().await).unwrap();
+        assert_eq!(value["mcpServers"].as_object().unwrap().len(), 1);
+        assert!(value["mcpServers"].get("kronn-internal").is_some());
     }
 
     #[tokio::test]

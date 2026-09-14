@@ -106,8 +106,9 @@ project path never reuses that identifier.
   the trusted `kronn-internal` bridge forwards only a fixed list of env-var
   names. Claude freezes a safe inline snapshot only when the entire project
   file matches the broker-authorized commands and arguments. An absent,
-  malformed or refused file produces an explicitly empty strict registry,
-  never an implicit fallback to the account's global MCP servers. The CLI
+  malformed or refused file contributes no project servers. Kronn adds only
+  its own trusted internal bridge, so a project-less discussion can still use
+  room tools without falling back to the account's global MCP servers. The CLI
   cannot reload a replacement file after authorization. Worker registries
   remain separately narrowed to the internal bridge. Prompts are written on
   stdin for both adapters, never argv. Secret

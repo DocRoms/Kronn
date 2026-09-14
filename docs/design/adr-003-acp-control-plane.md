@@ -1,6 +1,6 @@
 # ADR-003 — ACP control-plane boundary
 
-- **Status:** Accepted for the KT-368 foundation; extended 2026-09-01 (KT-542) with the Codex/Claude ACP adapters and the ACP permission broker.
+- **Status:** Accepted for the KT-368 foundation; extended 2026-09-01 (KT-542) with adapters/broker, and 2026-09-14 (KT-652) with default adapters and worker isolation.
 - **Date:** 2026-08-30.
 - **Scope:** ACP transport ownership, runtime identity, and the boundary with MCP and HTTP model providers.
 
@@ -18,7 +18,33 @@ OpenAI-compatible HTTP remains a separate runtime-to-model-provider transport in
 
 OpenCode, Gemini CLI, GitHub Copilot CLI, Kiro, and Vibe run over the same native ACP transport through their vendor-documented subprocess command: `opencode acp`, `gemini --acp`, `copilot --acp`, `kiro-cli acp`, and `vibe-acp`. Those commands are the single source of truth, kept pure so they are unit-tested without spawning a process; an agent with no verified command returns `None` and stays on the observable direct-CLI migration route rather than guessing a flag. [src: file: backend/src/acp.rs:135-148]
 
-Codex and Claude Code have an evaluated adapter (KT-542): `ClaudeAcpAdapter` and `CodexAcpAdapter` implement `AcpTransport` behind the same `AcpHost` as native agents, but `DirectCliMigration` stays the production **default** for both — `production_route()` is unchanged and still returns `DirectCliMigration` for them [src: file: backend/src/acp.rs:94-106]. An operator opts in per agent with `KRONN_ACP_ADAPTER_CODEX` / `KRONN_ACP_ADAPTER_CLAUDE`; `resolve_acp_route()` is the only function that can turn that default into `AdaptedAcp`, and only for the one agent whose variable is set — it never widens another agent's route [src: file: backend/src/acp.rs:78-133]. `start_agent_with_config` reads this at dispatch time and logs which route was taken, so the fallback is explicit and observable rather than silent [src: file: backend/src/agents/runner.rs:2912-2956]. Task workers are excluded from `AdaptedAcp` unconditionally regardless of the toggle — they keep the narrow, isolated worktree policy the direct-CLI builder already applies (`--setting-sources ""`, `--ignore-user-config`, the 3-tool allowlist) [src: file: backend/src/agents/runner.rs:2931-2937]. Neither adapter has a native ACP subcommand to spawn: `codex --help`/`claude --help` were run against the installed binaries (codex-cli 0.151.0, Claude Code 2.1.207) and neither exposes one — `codex app-server` exists but is `[experimental]`, daemon/proxy-shaped, and not a simple spawn-and-speak-stdio process, so it was evaluated and rejected as not "vendor-documented" in the sense `native_acp_command` requires [src: file: backend/src/acp/codex_adapter.rs:1-33]. HTTP model providers remain a distinct route. This prevents an unwired adapter from being presented as active ACP and never maps an unknown identity to `Custom`. [src: file: backend/src/acp.rs:150-160]
+KT-542 initially delivered opt-in Claude/Codex adapters. The human-approved
+KT-652 scope completes the default route in 0.13.0: both use `AdaptedAcp`
+behind the shared `AcpHost`, including task workers. An explicit false
+`KRONN_ACP_ADAPTER_CODEX` / `KRONN_ACP_ADAPTER_CLAUDE` override selects the
+direct compatibility route; unset uses the adapter. Both choices are logged.
+An adapter failure never automatically replays a submitted prompt in the
+direct runner. Worker arguments reuse the narrow direct worker builder and
+the same process launcher: fresh session, isolated settings/MCP/tools,
+worktree-local temporary files and per-execution delivery context. A worker's
+policy takes precedence over `full_access`. Neither adapter claims vendor
+ACP wire support: they continue to drive the existing non-interactive CLI
+protocols. HTTP providers remain a distinct route.
+[src: user: 2026-09-14: proposal:d2b26053-d297-48e3-8c08-1024053142ec:0]
+[src: file: backend/src/acp.rs:103]
+[src: file: backend/src/agents/runner.rs:3297]
+[src: file: backend/tests/adapter_worker_policy.rs:1]
+
+KT-652 also tightens Claude's MCP boundary described above: the authorized
+project registry is frozen as safe inline JSON, never a mutable file path.
+Absent/invalid/mixed configurations contribute no project servers; only
+Kronn's independently located trusted bridge is retained, including for
+project-less discussions. Strict mode never restores the account's global
+registry. Duplicate copies of the same authorized declaration do not remove
+that bridge. Both adapters share cancellable child ownership, including
+cancellation during startup and while awaiting process exit.
+[src: file: backend/src/acp/claude_adapter.rs:112]
+[src: file: backend/src/acp/adapter_process.rs:1]
 
 ### Codex/Claude adapter session lifecycle
 
