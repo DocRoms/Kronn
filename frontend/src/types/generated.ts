@@ -219,7 +219,19 @@ gate_status: string, override_value?: string | null,
  */
 code_locations?: string | null, created_at: string, resolved_at?: string | null, };
 
-export type AgentDetection = { name: string, agent_type: AgentType, installed: boolean, enabled: boolean, path: string | null, version: string | null, latest_version: string | null, origin: string, install_command: string | null, host_managed: boolean, host_label: string | null,
+export type AgentDetection = { name: string, agent_type: AgentType, installed: boolean, enabled: boolean, path: string | null, version: string | null, latest_version: string | null,
+/**
+ * Time at which the official release source was last checked (RFC 3339).
+ */
+version_checked_at?: string,
+/**
+ * Readable reason why the latest version is unknown or stale.
+ */
+version_check_error?: string,
+/**
+ * Official release endpoint consulted for this tool.
+ */
+version_source_url?: string, origin: string, install_command: string | null, host_managed: boolean, host_label: string | null,
 /**
  * Agent is runnable via npx/uvx fallback even when no local binary is found
  */
@@ -5424,9 +5436,9 @@ available: boolean,
  */
 installed: string | null,
 /**
- * Latest known stable version from our bumped-per-release registry.
+ * Latest stable version from the official release source.
  */
-latest_known: string,
+latest_known: string | null, checked_at: string | null, check_error: string | null,
 /**
  * True iff `installed < latest_known` under lenient semver. The
  * frontend renders the "update available" pill from this flag only —

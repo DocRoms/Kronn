@@ -2523,6 +2523,7 @@ const en: TranslationDict = {
   'config.installed': 'installed',
   'config.installedPlural': 'installed',
   'config.refresh': 'Refresh',
+  'config.releaseSource': 'release source',
   'config.fullAccess': 'Allows web access, file modifications and command execution.',
   'config.fullAccessAcp': 'Widens live ACP permission auto-approval scope (OpenCode has no dedicated CLI flag).',
   'config.autoApply': 'Automatically applies changes without confirmation.',

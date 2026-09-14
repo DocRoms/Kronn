@@ -675,6 +675,18 @@ pub struct AgentDetection {
     pub path: Option<String>,
     pub version: Option<String>,
     pub latest_version: Option<String>,
+    /// Time at which the official release source was last checked (RFC 3339).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub version_checked_at: Option<String>,
+    /// Readable reason why the latest version is unknown or stale.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub version_check_error: Option<String>,
+    /// Official release endpoint consulted for this tool.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub version_source_url: Option<String>,
     pub origin: String,
     pub install_command: Option<String>,
     #[serde(default)]

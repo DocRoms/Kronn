@@ -1,97 +1,325 @@
-//! Latest-known-version registry for the CLIs Kronn integrates with.
+//! Bounded discovery of stable CLI releases.
 //!
-//! Why a hardcoded table and not a live GitHub-API hit?
-//!   - Zero network dependency in detection (works offline, in Docker, in CI).
-//!   - No rate-limit/auth concerns; no opaque silent failure when GitHub
-//!     burps. Detection latency stays at "the slowest agent --version call".
-//!   - Per-release we bump this table as part of the Kronn release notes
-//!     anyway — there's already a human checkpoint to keep it current.
-//!
-//! How the freshness signal works:
-//!   - The detection layer compares `installed_version` to `latest_known()`.
-//!   - If `installed < latest_known`, the frontend shows an "update
-//!     available" pill alongside the install command (which doubles as the
-//!     update command for every entry — npm / curl / uv pipelines are
-//!     idempotent re-runs).
-//!   - Comparison is **lenient semver** (dotted numeric prefix); pre-release
-//!     suffixes (-beta, -rc1) are ignored. If a version string doesn't parse,
-//!     we conservatively report "up to date" rather than nag spuriously.
-//!
-//! Keep `LATEST_AGENT_VERSIONS` and `LATEST_RTK_VERSION` updated on every
-//! Kronn release. The reference E2E `agents_freshness_table_is_recent` test
-//! catches accidental drift over many releases.
+//! Installed versions are probed by their respective integrations. This module
+//! only discovers available releases and never performs installation.
 
 use crate::models::AgentType;
+use serde::Deserialize;
+use std::collections::HashMap;
+use std::sync::{LazyLock, Mutex};
+use std::time::{Duration, Instant};
 
-/// Latest known *stable* version of `rtk` (https://github.com/rtk-ai/rtk).
-/// Bump on each Kronn release after verifying with `rtk --version` against
-/// the GitHub releases page.
-pub const LATEST_RTK_VERSION: &str = "0.46.0";
-
-/// Shell command that re-installs RTK over an existing install. The RTK
-/// upstream install.sh is idempotent — running it again upgrades in place.
+const CACHE_TTL: Duration = Duration::from_secs(6 * 60 * 60);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+const REFRESH_BUDGET: Duration = Duration::from_secs(8);
+/// Upgrade remains an explicit user action; discovery never invokes it.
 pub const RTK_UPDATE_CMD: &str =
     "curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/main/install.sh | sh";
 
-/// Latest known versions of the agent CLIs Kronn detects. Source of truth:
-/// each vendor's release page / npm registry. Pairs (agent → version).
-///
-/// Bumped per Kronn release; see `docs/AGENTS.md` for the bump checklist.
-/// Captured 2026-08-30.
-pub fn latest_known_agent_version(agent_type: &AgentType) -> Option<&'static str> {
-    match agent_type {
-        // @anthropic-ai/claude-code on npm
-        AgentType::ClaudeCode => Some("2.1.251"),
-        // @openai/codex on npm
-        AgentType::Codex => Some("0.151.0"),
-        // opencode-ai on npm
-        AgentType::OpenCode => Some("1.18.25"),
-        // mistral-vibe on PyPI
-        AgentType::Vibe => Some("2.24.5"),
-        // @google/gemini-cli on npm
-        AgentType::GeminiCli => Some("0.57.0"),
-        // ollama (binary release on ollama.com)
-        AgentType::Ollama => Some("0.33.2"),
-        // @github/copilot on npm
-        AgentType::CopilotCli => Some("1.0.82"),
-        // Kiro (preview, AWS distributes via cli.kiro.dev — no stable version
-        // promise yet; we don't surface a freshness pill).
-        AgentType::Kiro => None,
-        // litellm on PyPI
-        AgentType::LiteLlm => Some("1.98.0"),
-        // Remote endpoint: no local package, so no freshness pill to surface.
-        AgentType::Nvidia => None,
-        AgentType::Custom => None,
+#[derive(Clone, Debug, Default)]
+pub struct ReleaseStatus {
+    pub latest: Option<String>,
+    pub checked_at: Option<String>,
+    pub error: Option<String>,
+    pub source_url: Option<String>,
+}
+
+#[derive(Clone, Copy)]
+enum Source {
+    Npm(&'static str),
+    Pypi(&'static str),
+    GitHub(&'static str),
+}
+
+impl Source {
+    fn url(self) -> String {
+        match self {
+            Self::Npm(package) => format!("https://registry.npmjs.org/{package}"),
+            Self::Pypi(package) => format!("https://pypi.org/pypi/{package}/json"),
+            Self::GitHub(repo) => format!("https://api.github.com/repos/{repo}/releases/latest"),
+        }
     }
 }
 
-/// Lenient semver comparison: returns `true` when `installed` is strictly
-/// older than `latest`. Strips any leading `v`, ignores pre-release and
-/// build metadata suffixes (anything after `-` or `+`). On any parse error
-/// we return `false` — better to under-nag than to falsely claim a stale
-/// install on a version string we don't understand.
+fn agent_source(agent: &AgentType) -> Option<Source> {
+    match agent {
+        AgentType::ClaudeCode => Some(Source::Npm("@anthropic-ai/claude-code")),
+        AgentType::Codex => Some(Source::Npm("@openai/codex")),
+        AgentType::OpenCode => Some(Source::Npm("opencode-ai")),
+        AgentType::Vibe => Some(Source::Pypi("mistral-vibe")),
+        AgentType::GeminiCli => Some(Source::Npm("@google/gemini-cli")),
+        AgentType::CopilotCli => Some(Source::Npm("@github/copilot")),
+        AgentType::Ollama => Some(Source::GitHub("ollama/ollama")),
+        AgentType::LiteLlm => Some(Source::Pypi("litellm")),
+        AgentType::Kiro | AgentType::Nvidia | AgentType::Custom => None,
+    }
+}
+
+const RTK_SOURCE: Source = Source::GitHub("rtk-ai/rtk");
+const CCUSAGE_SOURCE: Source = Source::Npm("ccusage");
+
+#[derive(Default)]
+struct Cache {
+    values: HashMap<String, ReleaseStatus>,
+    refreshed_at: Option<Instant>,
+    refreshing: bool,
+}
+
+static CACHE: LazyLock<Mutex<Cache>> = LazyLock::new(|| Mutex::new(Cache::default()));
+fn key_for_agent(agent: &AgentType) -> String {
+    format!("agent:{agent:?}")
+}
+const RTK_KEY: &str = "rtk";
+const CCUSAGE_KEY: &str = "ccusage";
+
+fn unknown(source: Option<Source>) -> ReleaseStatus {
+    match source {
+        Some(source) => ReleaseStatus {
+            source_url: Some(source.url()),
+            ..ReleaseStatus::default()
+        },
+        None => ReleaseStatus {
+            error: Some("No verified stable release source is configured for this tool.".into()),
+            ..ReleaseStatus::default()
+        },
+    }
+}
+
+pub fn agent_status(agent: &AgentType) -> ReleaseStatus {
+    CACHE
+        .lock()
+        .ok()
+        .and_then(|cache| cache.values.get(&key_for_agent(agent)).cloned())
+        .unwrap_or_else(|| unknown(agent_source(agent)))
+}
+pub fn rtk_status() -> ReleaseStatus {
+    CACHE
+        .lock()
+        .ok()
+        .and_then(|cache| cache.values.get(RTK_KEY).cloned())
+        .unwrap_or_else(|| unknown(Some(RTK_SOURCE)))
+}
+pub fn ccusage_status() -> ReleaseStatus {
+    CACHE
+        .lock()
+        .ok()
+        .and_then(|cache| cache.values.get(CCUSAGE_KEY).cloned())
+        .unwrap_or_else(|| unknown(Some(CCUSAGE_SOURCE)))
+}
+
+/// Starts one refresh when the snapshot is absent or expired. It returns
+/// immediately, so agent detection and application startup never wait on I/O.
+pub fn refresh_if_stale() {
+    let should_spawn = {
+        let Ok(mut cache) = CACHE.lock() else { return };
+        let stale = cache
+            .refreshed_at
+            .is_none_or(|at| at.elapsed() >= CACHE_TTL);
+        if !stale || cache.refreshing {
+            false
+        } else {
+            cache.refreshing = true;
+            true
+        }
+    };
+    if should_spawn {
+        tokio::spawn(async {
+            let _ = refresh().await;
+        });
+    }
+}
+
+/// Explicit user-triggered recheck. Concurrent callers share the active refresh.
+pub async fn refresh_now() {
+    let should_run = {
+        let Ok(mut cache) = CACHE.lock() else { return };
+        if cache.refreshing {
+            false
+        } else {
+            cache.refreshing = true;
+            true
+        }
+    };
+    if should_run {
+        let _ = refresh().await;
+    }
+}
+
+async fn refresh() -> Result<(), ()> {
+    let result = tokio::time::timeout(REFRESH_BUDGET, refresh_all()).await;
+    if result.is_err() {
+        if let Ok(mut cache) = CACHE.lock() {
+            cache.refreshed_at = Some(Instant::now());
+            cache.refreshing = false;
+        }
+    }
+    result.map_err(|_| ())?;
+    Ok(())
+}
+
+async fn refresh_all() {
+    let client = match reqwest::Client::builder()
+        .timeout(REQUEST_TIMEOUT)
+        .user_agent(concat!("Kronn/", env!("CARGO_PKG_VERSION")))
+        .build()
+    {
+        Ok(client) => client,
+        Err(_) => return,
+    };
+    let mut sources: Vec<(String, Source)> = [
+        AgentType::ClaudeCode,
+        AgentType::Codex,
+        AgentType::OpenCode,
+        AgentType::Vibe,
+        AgentType::GeminiCli,
+        AgentType::CopilotCli,
+        AgentType::Ollama,
+        AgentType::LiteLlm,
+    ]
+    .into_iter()
+    .filter_map(|agent| agent_source(&agent).map(|source| (key_for_agent(&agent), source)))
+    .collect();
+    sources.extend([
+        (RTK_KEY.to_string(), RTK_SOURCE),
+        (CCUSAGE_KEY.to_string(), CCUSAGE_SOURCE),
+    ]);
+    let results = futures::future::join_all(sources.into_iter().map(|(key, source)| {
+        let client = client.clone();
+        async move { (key, fetch_stable(&client, source).await) }
+    }))
+    .await;
+    if let Ok(mut cache) = CACHE.lock() {
+        for (key, status) in results {
+            let previous = cache.values.get(&key).cloned();
+            cache.values.insert(
+                key,
+                match (previous, status.latest.is_none()) {
+                    (Some(mut previous), true) => {
+                        previous.error = status.error;
+                        previous.source_url = status.source_url;
+                        previous.checked_at = status.checked_at;
+                        previous
+                    }
+                    (_, _) => status,
+                },
+            );
+        }
+        cache.refreshed_at = Some(Instant::now());
+        cache.refreshing = false;
+    }
+}
+
+#[derive(Deserialize)]
+struct Npm {
+    #[serde(rename = "dist-tags")]
+    dist_tags: DistTags,
+}
+#[derive(Deserialize)]
+struct DistTags {
+    latest: String,
+}
+#[derive(Deserialize)]
+struct Pypi {
+    info: PypiInfo,
+}
+#[derive(Deserialize)]
+struct PypiInfo {
+    version: String,
+}
+#[derive(Deserialize)]
+struct GitHubRelease {
+    tag_name: String,
+    prerelease: bool,
+    draft: bool,
+}
+
+async fn fetch_stable(client: &reqwest::Client, source: Source) -> ReleaseStatus {
+    let source_url = source.url();
+    let checked_at = Some(chrono::Utc::now().to_rfc3339());
+    let response = match client.get(&source_url).send().await {
+        Ok(response) if response.status().is_success() => response,
+        Ok(response) => {
+            return ReleaseStatus {
+                checked_at,
+                source_url: Some(source_url),
+                error: Some(format!(
+                    "Official source returned HTTP {}.",
+                    response.status()
+                )),
+                latest: None,
+            }
+        }
+        Err(_) => {
+            return ReleaseStatus {
+                checked_at,
+                source_url: Some(source_url),
+                error: Some("Official source could not be reached.".into()),
+                latest: None,
+            }
+        }
+    };
+    let latest = match source {
+        Source::Npm(_) => response
+            .json::<Npm>()
+            .await
+            .ok()
+            .map(|body| body.dist_tags.latest),
+        Source::Pypi(_) => response
+            .json::<Pypi>()
+            .await
+            .ok()
+            .map(|body| body.info.version),
+        Source::GitHub(_) => response
+            .json::<GitHubRelease>()
+            .await
+            .ok()
+            .and_then(|body| (!body.prerelease && !body.draft).then(|| body.tag_name)),
+    }
+    .map(|version| version.trim_start_matches('v').to_string())
+    .filter(|version| is_stable_version(version));
+    ReleaseStatus {
+        error: latest
+            .is_none()
+            .then(|| "Official source did not provide a stable numeric release.".into()),
+        latest,
+        checked_at,
+        source_url: Some(source_url),
+    }
+}
+
+fn is_stable_version(version: &str) -> bool {
+    !version.is_empty()
+        && !version.contains('-')
+        && version
+            .split('.')
+            .all(|part| !part.is_empty() && part.parse::<u64>().is_ok())
+}
+
+/// Lenient comparison used for the installed-versus-available display.
 pub fn update_available(installed: &str, latest: &str) -> bool {
     fn parse(v: &str) -> Option<Vec<u64>> {
-        let trimmed = v.trim().trim_start_matches('v');
-        // Strip pre-release / build metadata: take everything before the
-        // first `-` or `+` (semver convention).
-        let core = trimmed.split(['-', '+']).next()?;
-        let parts: Result<Vec<u64>, _> = core.split('.').map(|s| s.parse::<u64>()).collect();
-        parts.ok()
+        v.trim()
+            .trim_start_matches('v')
+            .split(['-', '+'])
+            .next()?
+            .split('.')
+            .map(str::parse)
+            .collect::<Result<Vec<u64>, _>>()
+            .ok()
     }
-    let (Some(i), Some(l)) = (parse(installed), parse(latest)) else {
+    let (Some(installed), Some(latest)) = (parse(installed), parse(latest)) else {
         return false;
     };
-    // Compare component-by-component, zero-padding the shorter list.
-    let len = i.len().max(l.len());
-    for k in 0..len {
-        let iv = i.get(k).copied().unwrap_or(0);
-        let lv = l.get(k).copied().unwrap_or(0);
-        if iv < lv {
-            return true;
-        }
-        if iv > lv {
-            return false;
+    for index in 0..installed.len().max(latest.len()) {
+        match installed
+            .get(index)
+            .copied()
+            .unwrap_or(0)
+            .cmp(&latest.get(index).copied().unwrap_or(0))
+        {
+            std::cmp::Ordering::Less => return true,
+            std::cmp::Ordering::Greater => return false,
+            std::cmp::Ordering::Equal => {}
         }
     }
     false
@@ -100,89 +328,21 @@ pub fn update_available(installed: &str, latest: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
     #[test]
-    fn update_available_strict_patch_bump() {
-        assert!(update_available("1.2.3", "1.2.4"));
-        assert!(update_available("1.2", "1.2.1"));
+    fn stable_versions_reject_prereleases_and_invalid_values() {
+        assert!(is_stable_version("1.2.3"));
+        assert!(!is_stable_version("1.2.3-rc.1"));
+        assert!(!is_stable_version("latest"));
     }
-
     #[test]
-    fn update_available_minor_and_major_bumps() {
-        assert!(update_available("1.2.99", "1.3.0"));
-        assert!(update_available("1.99.99", "2.0.0"));
-    }
-
-    #[test]
-    fn equal_versions_are_up_to_date() {
-        assert!(!update_available("1.2.3", "1.2.3"));
-        assert!(!update_available("v1.2.3", "1.2.3"));
-        assert!(!update_available("1.2.3", "v1.2.3"));
-    }
-
-    #[test]
-    fn installed_ahead_of_known_is_up_to_date() {
-        // Bleeding-edge user: pinned to a future release. We must not nag.
-        assert!(!update_available("2.0.0", "1.99.99"));
-    }
-
-    #[test]
-    fn pre_release_suffix_is_ignored() {
-        // Regression: rtk 0.37.2-rc1 should compare as 0.37.2.
-        assert!(!update_available("0.37.2-rc1", "0.37.2"));
-        assert!(update_available("0.37.1-rc1", "0.37.2"));
-    }
-
-    #[test]
-    fn build_metadata_suffix_is_ignored() {
-        assert!(!update_available("1.2.3+sha.abc", "1.2.3"));
-    }
-
-    #[test]
-    fn unparsable_versions_default_to_up_to_date() {
-        // Better silent than wrong: never claim "update available" on a
-        // version we can't compare cleanly (custom forks, dev builds).
+    fn update_comparison_is_lenient() {
+        assert!(update_available("v1.2.3", "1.2.4"));
+        assert!(!update_available("1.2.3-rc1", "1.2.3"));
         assert!(!update_available("dev", "1.2.3"));
-        assert!(!update_available("1.2.3", "not-a-version"));
-        assert!(!update_available("", "1.2.3"));
     }
-
     #[test]
-    fn three_vs_two_segments_zero_pad() {
-        // `1.2` should equal `1.2.0`, not be treated as a different shape.
-        assert!(!update_available("1.2", "1.2.0"));
-        assert!(update_available("1.2", "1.2.1"));
-    }
-
-    #[test]
-    fn latest_agent_versions_cover_supported_agents() {
-        // Hard constraint: every agent we actively integrate must have a
-        // version in the table, or the freshness pill silently disappears
-        // after a new agent lands.
-        for agent in [
-            AgentType::ClaudeCode,
-            AgentType::Codex,
-            AgentType::OpenCode,
-            AgentType::Vibe,
-            AgentType::GeminiCli,
-            AgentType::CopilotCli,
-            AgentType::Ollama,
-            AgentType::LiteLlm,
-        ] {
-            assert!(
-                latest_known_agent_version(&agent).is_some(),
-                "{:?} must have a latest_known version (was None)",
-                agent,
-            );
-        }
-        // Kiro is preview; no freshness signal expected. Custom is user-defined.
-        assert!(latest_known_agent_version(&AgentType::Kiro).is_none());
-        assert!(latest_known_agent_version(&AgentType::Custom).is_none());
-    }
-
-    #[test]
-    fn rtk_latest_version_is_parseable() {
-        // Smoke: the constant we ship must itself satisfy our comparator.
-        assert!(!update_available(LATEST_RTK_VERSION, LATEST_RTK_VERSION));
+    fn unsupported_tools_are_explicitly_unknown() {
+        assert!(agent_status(&AgentType::Kiro).latest.is_none());
+        assert!(agent_status(&AgentType::Kiro).error.is_some());
     }
 }

@@ -2533,6 +2533,7 @@ const fr: TranslationDict = {
   'config.installed': 'installé',
   'config.installedPlural': 'installés',
   'config.refresh': 'Rafraîchir',
+  'config.releaseSource': 'source de version',
   'config.fullAccess': 'Autorise l\'accès web, la modification de fichiers et l\'exécution de commandes.',
   'config.fullAccessAcp': 'Élargit l\'auto-approbation des permissions ACP en direct (OpenCode n\'a pas d\'indicateur CLI dédié).',
   'config.autoApply': 'Applique automatiquement les modifications sans confirmation.',

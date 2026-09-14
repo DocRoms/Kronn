@@ -717,6 +717,12 @@ export function AgentsSection({
                   {renderAgentNameControl(agent.agent_type, agent.name)}
                   <span className="set-origin-badge">{agent.origin}</span>
                   {agent.version && <code className="set-code text-xs">v{agent.version}</code>}
+                  {agent.version_check_error && (
+                    <span className="set-origin-badge" title={agent.version_check_error}>?</span>
+                  )}
+                  {agent.version_source_url && (
+                    <a className="set-origin-badge" href={agent.version_source_url} target="_blank" rel="noreferrer" title={agent.version_checked_at ?? agent.version_source_url}>{t('config.releaseSource')}</a>
+                  )}
                   {/* Lenient semver compare (mirror of backend `versions.rs`).
                    *  Pre-fix this used `!==` which fired on `v2.0.51` vs
                    *  `2.0.51` etc. Now clicking the pill opens an upgrade
@@ -1535,7 +1541,7 @@ export function AgentsSection({
             >
               <FolderSearch size={10} /> {t('config.discoverKeys')}
             </button>
-            <button className="set-icon-btn" onClick={() => refetchAgents()} title={t('config.refresh')} aria-label={t('config.refresh')}>
+            <button className="set-icon-btn" onClick={async () => { try { await agentsApi.versionCheck(); } finally { refetchAgents(); } }} title={t('config.refresh')} aria-label={t('config.refresh')}>
               <RefreshCw size={12} />
             </button>
           </div>

@@ -1345,6 +1345,7 @@ export const projects = {
 
 export const agents = {
   detect: () => api<AgentDetection[]>('GET', '/agents'),
+  versionCheck: () => api<AgentDetection[]>('POST', '/agents/version-check'),
   quotaStates: () => api<ProviderQuotaState[]>('GET', '/orchestration/provider-quotas'),
   rearmQuota: (provider: AgentType, idempotencyKey: string) =>
     api<boolean>('POST', `/orchestration/provider-quotas/${encodeURIComponent(provider)}/rearm`, { confirmed: true, idempotency_key: idempotencyKey }),
@@ -2667,7 +2668,9 @@ export interface RtkSavings {
 export interface RtkVersionInfo {
   available: boolean;
   installed: string | null;
-  latest_known: string;
+  latest_known: string | null;
+  checked_at: string | null;
+  check_error: string | null;
   update_available: boolean;
   update_command: string;
 }

@@ -45,7 +45,7 @@ export function CompressionSection({ agents, onActivated, toast, t }: Compressio
   // single source of truth on the backend (see `core::versions`).
   const [versionInfo, setVersionInfo] = useState<{
     installed: string | null;
-    latest: string;
+    latest: string | null;
     updateAvailable: boolean;
     updateCommand: string;
   } | null>(null);
@@ -233,11 +233,11 @@ export function CompressionSection({ agents, onActivated, toast, t }: Compressio
                   type="button"
                   className="set-compression-update-pill"
                   onClick={() => setShowUpdateModal(true)}
-                  aria-label={t('config.rtk.updateAvailableAria', visibleVersionInfo.installed, visibleVersionInfo.latest)}
-                  title={t('config.rtk.updateAvailableTitle', visibleVersionInfo.installed, visibleVersionInfo.latest)}
+                  aria-label={t('config.rtk.updateAvailableAria', visibleVersionInfo.installed, visibleVersionInfo.latest ?? '?')}
+                  title={t('config.rtk.updateAvailableTitle', visibleVersionInfo.installed, visibleVersionInfo.latest ?? '?')}
                 >
                   <ArrowUpCircle size={10} />
-                  <span>{t('config.rtk.updateAvailable', visibleVersionInfo.latest)}</span>
+                  <span>{t('config.rtk.updateAvailable', visibleVersionInfo.latest ?? '?')}</span>
                 </button>
               )}
             </div>
@@ -378,7 +378,7 @@ export function CompressionSection({ agents, onActivated, toast, t }: Compressio
               <p>
                 {t('config.rtk.updateModalBody',
                   visibleVersionInfo.installed ?? '?',
-                  visibleVersionInfo.latest)}
+                  visibleVersionInfo.latest ?? '?')}
               </p>
               <div className="set-compression-install-label">{t('config.rtk.installCommand')}</div>
               <pre className="set-compression-install-cmd">{visibleVersionInfo.updateCommand}</pre>

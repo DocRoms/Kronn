@@ -2493,6 +2493,7 @@ const zh: TranslationDict = {
   "config.installed": "已安装",
   "config.installedPlural": "已安装",
   "config.refresh": "刷新",
+  "config.releaseSource": "发布来源",
   "config.fullAccess": "允许网页访问、文件修改和命令执行。",
   "config.fullAccessAcp": "扩大实时 ACP 权限自动批准范围（OpenCode 没有专用的 CLI 标志）。",
   "config.autoApply": "自动应用更改，无需确认。",

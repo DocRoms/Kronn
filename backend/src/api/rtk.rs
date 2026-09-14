@@ -398,8 +398,10 @@ pub struct RtkVersionInfo {
     /// Numeric prefix of `rtk --version`'s stdout, e.g. "0.37.2". `None`
     /// when the call failed or the output couldn't be parsed.
     pub installed: Option<String>,
-    /// Latest known stable version from our bumped-per-release registry.
-    pub latest_known: String,
+    /// Latest stable version from the official release source.
+    pub latest_known: Option<String>,
+    pub checked_at: Option<String>,
+    pub check_error: Option<String>,
     /// True iff `installed < latest_known` under lenient semver. The
     /// frontend renders the "update available" pill from this flag only —
     /// keeps the freshness logic centralised in one Rust comparator.
@@ -415,12 +417,16 @@ pub struct RtkVersionInfo {
 /// this to surface an "update available" pill in the RTK section
 /// without re-implementing semver compare in TypeScript.
 pub async fn version() -> Json<ApiResponse<RtkVersionInfo>> {
-    let latest_known = crate::core::versions::LATEST_RTK_VERSION.to_string();
+    crate::core::versions::refresh_if_stale();
+    let release = crate::core::versions::rtk_status();
+    let latest_known = release.latest;
     let update_command = crate::core::versions::RTK_UPDATE_CMD.to_string();
     let empty = RtkVersionInfo {
         available: false,
         installed: None,
         latest_known: latest_known.clone(),
+        checked_at: release.checked_at.clone(),
+        check_error: release.error.clone(),
         update_available: false,
         update_command: update_command.clone(),
     };
@@ -438,12 +444,15 @@ pub async fn version() -> Json<ApiResponse<RtkVersionInfo>> {
     let installed = stdout.split_whitespace().nth(1).map(|s| s.to_string());
     let update_available = installed
         .as_deref()
-        .map(|i| crate::core::versions::update_available(i, &latest_known))
+        .zip(latest_known.as_deref())
+        .map(|(installed, latest)| crate::core::versions::update_available(installed, latest))
         .unwrap_or(false);
     Json(ApiResponse::ok(RtkVersionInfo {
         available: installed.is_some(),
         installed,
         latest_known,
+        checked_at: release.checked_at,
+        check_error: release.error,
         update_available,
         update_command,
     }))
