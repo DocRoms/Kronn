@@ -1376,16 +1376,16 @@ pub async fn wait_for_peer(
                             .map(|serialized| {
                                 serialized
                                     .split(',')
-                                    .filter_map(|target| {
+                                    .map(|target| {
                                         let mut fields = target.splitn(5, '|');
-                                        let kind = match fields.next()? {
+                                        let kind = match fields.next().ok_or_else(|| rusqlite::Error::InvalidQuery)? {
                                             "discussion_agent" => MessageTargetKind::DiscussionAgent,
                                             "cli" => MessageTargetKind::Cli,
                                             _ => MessageTargetKind::Agent,
                                         };
                                         let agent_type = crate::db::discussions::parse_agent_type(
-                                            fields.next()?,
-                                        );
+                                            fields.next().ok_or_else(|| rusqlite::Error::InvalidQuery)?,
+                                        )?;
                                         let connection_id = fields
                                             .next()
                                             .filter(|value| !value.is_empty())
@@ -1398,7 +1398,7 @@ pub async fn wait_for_peer(
                                             Some("reasoning") => Some(crate::models::ModelTier::Reasoning),
                                             _ => None,
                                         };
-                                        Some(MessageTarget {
+                                        Ok(MessageTarget {
                                             connection_id,
                                             kind,
                                             agent_type,
@@ -1406,20 +1406,19 @@ pub async fn wait_for_peer(
                                             tier,
                                         })
                                     })
-                                    .collect::<Vec<_>>()
+                                    .collect::<rusqlite::Result<Vec<_>>>()
                             })
+                            .transpose()?
                             .unwrap_or_default();
                         let author_agent_type = r.get::<_, Option<String>>(11)?;
                         let author_cli_session_id = r.get::<_, Option<i64>>(12)?;
-                        let reply_target =
-                            author_agent_type.zip(author_cli_session_id).map(
-                                |(agent_type, cli_session_id)| {
-                                    MessageTarget::cli(
-                                        crate::db::discussions::parse_agent_type(&agent_type),
-                                        cli_session_id,
-                                    )
-                                },
-                            );
+                        let reply_target = author_agent_type
+                            .zip(author_cli_session_id)
+                            .map(|(agent_type, cli_session_id)| {
+                                crate::db::discussions::parse_agent_type(&agent_type)
+                                    .map(|agent_type| MessageTarget::cli(agent_type, cli_session_id))
+                            })
+                            .transpose()?;
                         Ok(WaitForPeerMessage {
                             message_id: r.get(0)?,
                             sort_order: r.get(1)?,
@@ -1860,15 +1859,17 @@ fn load_awareness_batch(
                 .map(|serialized| {
                     serialized
                         .split(',')
-                        .filter_map(|target| {
+                        .map(|target| {
                             let mut fields = target.splitn(5, '|');
-                            let kind = match fields.next()? {
-                                "discussion_agent" => MessageTargetKind::DiscussionAgent,
-                                "cli" => MessageTargetKind::Cli,
-                                _ => MessageTargetKind::Agent,
-                            };
-                            let agent_type =
-                                crate::db::discussions::parse_agent_type(fields.next()?);
+                            let kind =
+                                match fields.next().ok_or_else(|| rusqlite::Error::InvalidQuery)? {
+                                    "discussion_agent" => MessageTargetKind::DiscussionAgent,
+                                    "cli" => MessageTargetKind::Cli,
+                                    _ => MessageTargetKind::Agent,
+                                };
+                            let agent_type = crate::db::discussions::parse_agent_type(
+                                fields.next().ok_or_else(|| rusqlite::Error::InvalidQuery)?,
+                            )?;
                             let connection_id = fields
                                 .next()
                                 .filter(|value| !value.is_empty())
@@ -1880,7 +1881,7 @@ fn load_awareness_batch(
                                 Some("reasoning") => Some(crate::models::ModelTier::Reasoning),
                                 _ => None,
                             };
-                            Some(MessageTarget {
+                            Ok(MessageTarget {
                                 connection_id,
                                 kind,
                                 agent_type,
@@ -1888,8 +1889,9 @@ fn load_awareness_batch(
                                 tier,
                             })
                         })
-                        .collect::<Vec<_>>()
+                        .collect::<rusqlite::Result<Vec<_>>>()
                 })
+                .transpose()?
                 .unwrap_or_default();
             let author_cli_session_id = r.get::<_, Option<i64>>(11)?;
             let addressed_to_caller = targets.iter().any(|target| {
@@ -3853,6 +3855,80 @@ mod tests {
             target.messages[0].target_agents,
             vec!["Codex", "ClaudeCode"],
         );
+    }
+
+    #[tokio::test]
+    async fn wait_for_peer_rejects_unknown_persisted_target_and_preserves_custom() {
+        let state = make_state_with_disc("d-wait-invalid-target").await;
+        state
+            .db
+            .with_conn(|conn| {
+                let now = chrono::Utc::now().to_rfc3339();
+                conn.execute(
+                    "INSERT INTO messages (id, discussion_id, role, content, timestamp, sort_order)
+                     VALUES ('msg-invalid-target', 'd-wait-invalid-target', 'User', 'route', ?1, 1)",
+                    rusqlite::params![now],
+                )?;
+                conn.execute(
+                    "INSERT INTO message_targets (message_id, target_kind, agent_type, position)
+                     VALUES ('msg-invalid-target', 'agent', 'Custom', 0)",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let custom = wait_for_peer(
+            State(state.clone()),
+            Path("d-wait-invalid-target".to_string()),
+            Query(WaitForPeerQuery {
+                since_sort_order: Some(0),
+                timeout_secs: Some(1),
+                exclude_agent_type: None,
+                session_id: None,
+                conversation_id: None,
+                ack_awareness_upto: None,
+            }),
+        )
+        .await
+        .0;
+        assert!(custom.success, "got error: {:?}", custom.error);
+        assert_eq!(
+            custom.data.unwrap().messages[0].target_agents,
+            vec!["Custom"]
+        );
+
+        state
+            .db
+            .with_conn(|conn| {
+                conn.execute(
+                    "UPDATE message_targets SET agent_type = 'sensitive-unknown-agent'
+                     WHERE message_id = 'msg-invalid-target'",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let rejected = wait_for_peer(
+            State(state),
+            Path("d-wait-invalid-target".to_string()),
+            Query(WaitForPeerQuery {
+                since_sort_order: Some(0),
+                timeout_secs: Some(1),
+                exclude_agent_type: None,
+                session_id: None,
+                conversation_id: None,
+                ack_awareness_upto: None,
+            }),
+        )
+        .await
+        .0;
+        assert!(!rejected.success);
+        let error = rejected.error.unwrap();
+        assert!(error.contains("unknown persisted agent type"));
+        assert!(!error.contains("sensitive-unknown-agent"));
     }
 
     #[tokio::test]
