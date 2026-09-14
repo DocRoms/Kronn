@@ -2573,13 +2573,15 @@ pub fn commit_delivery_checkpoint(
             // (4) Principal-targeted review request in the PARENT room, ZERO dispatch (no
             // phantom native turn; a joined-CLI principal is woken by wait_for_peer).
             //
-            // KT-648 — the identity is deterministic, and the attempt guard above is what
-            // keeps it unique. Should an unforeseen path hand us one that is already taken,
-            // re-key THIS obligation instead of hitting `messages.id`: a PRIMARY KEY error
-            // would roll the transition, the manifest and the obligation event back
-            // together and strand the execution in `Working` for good. Re-keying is the
-            // only option that neither rewrites a message we do not own nor leaves a stale
-            // `head_sha` standing as the live review obligation.
+            // KT-648 — a repeated delivery is short-circuited above, by the
+            // `AwaitingReview` + existing-delivery arm: THAT is what makes this checkpoint
+            // idempotent. The attempt guard in `reassign_execution_worker` is what keeps
+            // the identity from repeating. Neither is the PRIMARY KEY, and a violation
+            // here would not skip an insert — it would roll the transition, the manifest
+            // and the obligation event back together and strand the execution in
+            // `Working`. So should an unforeseen path still hand us a taken identity,
+            // re-key THIS obligation: skipping would leave a stale `head_sha` standing as
+            // the live obligation, and rewriting would edit a message we do not own.
             let mut review_request = input.review_request.clone();
             let identity_taken: bool = tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM messages WHERE id = ?1)",
@@ -2587,12 +2589,37 @@ pub fn commit_delivery_checkpoint(
                 |row| row.get(0),
             )?;
             if identity_taken {
-                let occurrence: i64 = tx.query_row(
+                // Counting the taken identities is not choosing a free one — gaps exist,
+                // and anybody may hold any suffix. Walk the family instead. `taken` of
+                // them are occupied, so among the `taken + 1` candidates `:r0..=:r{taken}`
+                // at least one is free by construction: the search is finite and needs no
+                // arbitrary cap that could turn into a permanent refusal.
+                let taken: i64 = tx.query_row(
                     "SELECT COUNT(*) FROM messages WHERE id = ?1 OR id LIKE ?2",
                     params![&review_request.id, format!("{}:r%", review_request.id)],
                     |row| row.get(0),
                 )?;
-                review_request.id = format!("{}:r{occurrence}", review_request.id);
+                let base = review_request.id.clone();
+                let free = (0..=taken).find_map(|candidate| {
+                    let id = format!("{base}:r{candidate}");
+                    match tx.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM messages WHERE id = ?1)",
+                        [&id],
+                        |row| row.get::<_, bool>(0),
+                    ) {
+                        Ok(false) => Some(Ok(id)),
+                        Ok(true) => None,
+                        Err(error) => Some(Err(error)),
+                    }
+                });
+                match free {
+                    Some(Ok(id)) => review_request.id = id,
+                    Some(Err(error)) => return Err(error.into()),
+                    None => bail!(
+                        "no free review-request identity under {base}: {taken} taken, \
+                         which the pigeonhole above rules out"
+                    ),
+                }
             }
             let targets = [input.principal_target.clone()];
             crate::db::discussions::insert_message_with_targets_and_dispatches_within_tx(
