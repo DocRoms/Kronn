@@ -65,13 +65,22 @@ fn preset_name(preset: ExternalApiConnectionPreset) -> &'static str {
     }
 }
 
-fn parse_preset(value: &str) -> ExternalApiConnectionPreset {
-    match value {
+fn parse_preset(value: &str) -> rusqlite::Result<ExternalApiConnectionPreset> {
+    Ok(match value {
         "litellm" => ExternalApiConnectionPreset::LiteLlm,
         "nvidia" => ExternalApiConnectionPreset::Nvidia,
         "open_router" => ExternalApiConnectionPreset::OpenRouter,
-        _ => ExternalApiConnectionPreset::Other,
-    }
+        "other" => ExternalApiConnectionPreset::Other,
+        _ => {
+            return Err(rusqlite::Error::FromSqlConversionFailure(
+                0,
+                rusqlite::types::Type::Text,
+                Box::new(anyhow::anyhow!(
+                    "unknown persisted external connection preset"
+                )),
+            ));
+        }
+    })
 }
 
 fn row_to_connection(row: &rusqlite::Row<'_>) -> rusqlite::Result<ExternalApiConnection> {
@@ -81,7 +90,7 @@ fn row_to_connection(row: &rusqlite::Row<'_>) -> rusqlite::Result<ExternalApiCon
         mention_alias: row.get(2)?,
         endpoint: row.get(3)?,
         credential_slug: row.get(4)?,
-        origin_preset: parse_preset(&row.get::<_, String>(5)?),
+        origin_preset: parse_preset(&row.get::<_, String>(5)?)?,
         economy_model: row.get(6)?,
         default_model: row.get(7)?,
         reasoning_model: row.get(8)?,

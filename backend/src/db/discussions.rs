@@ -527,7 +527,7 @@ fn map_discussion_row(row: &rusqlite::Row) -> rusqlite::Result<Discussion> {
         id: row.get(0)?,
         project_id: row.get(1)?,
         title: row.get(2)?,
-        agent: parse_agent_type(&agent_str),
+        agent: parse_agent_type(&agent_str)?,
         language: row.get(4)?,
         participants: serde_json::from_str(&participants_str).unwrap_or_default(),
         messages: vec![],
@@ -592,8 +592,7 @@ pub fn list_discussions_by_run(conn: &Connection, run_id: &str) -> Result<Vec<Di
     let mut stmt = conn.prepare(&sql)?;
     let discussions: Vec<Discussion> = stmt
         .query_map(params![run_id], map_discussion_row)?
-        .filter_map(|r| r.ok())
-        .collect();
+        .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(discussions)
 }
 
@@ -615,8 +614,7 @@ pub fn list_discussions_paginated(
 
     let discussions: Vec<Discussion> = stmt
         .query_map([], map_discussion_row)?
-        .filter_map(|r| r.ok())
-        .collect();
+        .collect::<rusqlite::Result<Vec<_>>>()?;
 
     // Don't load messages for the list view — messages are only loaded
     // for individual discussions via get_discussion(). With 200+ discussions
@@ -673,7 +671,7 @@ pub fn get_discussion(conn: &Connection, id: &str) -> Result<Option<Discussion>>
                 id: row.get(0)?,
                 project_id: row.get(1)?,
                 title: row.get(2)?,
-                agent: parse_agent_type(&agent_str),
+                agent: parse_agent_type(&agent_str)?,
                 language: row.get(4)?,
                 participants: serde_json::from_str(&participants_str).unwrap_or_default(),
                 messages: vec![],
@@ -716,7 +714,7 @@ pub fn get_discussion(conn: &Connection, id: &str) -> Result<Option<Discussion>>
                 connection_id: row.get::<_, Option<String>>(33).unwrap_or(None),
             })
         })
-        .ok();
+        .optional()?;
 
     if let Some(mut d) = disc {
         d.messages = list_messages(conn, &d.id)?;
@@ -1025,7 +1023,8 @@ pub fn get_discussion_agent(conn: &Connection, id: &str) -> Result<Option<AgentT
             row.get::<_, String>(0)
         })
         .optional()?
-        .map(|agent| parse_agent_type(&agent)))
+        .map(|agent| parse_agent_type(&agent))
+        .transpose()?)
 }
 
 pub fn update_discussion_tier(conn: &Connection, id: &str, tier: &ModelTier) -> Result<bool> {
@@ -1804,7 +1803,7 @@ pub fn insert_native_agent_message_with_checkpoint(
     )?;
     let mut attached_agents =
         serde_json::from_str::<Vec<AgentType>>(&participants_json).unwrap_or_default();
-    let primary_agent = parse_agent_type(&primary_agent);
+    let primary_agent = parse_agent_type(&primary_agent)?;
     if !attached_agents.contains(&primary_agent) {
         attached_agents.push(primary_agent);
     }
@@ -1831,12 +1830,11 @@ pub fn insert_native_agent_message_with_checkpoint(
             crate::db::discussion_sessions::resolve_cli_session_mentions(&msg.content, &joined)
                 .into_iter()
                 .filter_map(|pk| {
-                    views
-                        .iter()
-                        .find(|v| v.id == pk)
-                        .map(|v| MessageTarget::cli(parse_agent_type(&v.agent_type), pk))
+                    views.iter().find(|v| v.id == pk).map(|v| {
+                        parse_agent_type(&v.agent_type).map(|agent| MessageTarget::cli(agent, pk))
+                    })
                 })
-                .collect()
+                .collect::<rusqlite::Result<Vec<_>>>()?
         } else {
             Vec::new()
         };
@@ -2301,7 +2299,7 @@ fn list_all_messages(
                 role: parse_role(&role_str),
                 channel: parse_message_channel(&channel_str),
                 content: row.get(4)?,
-                agent_type: agent_type_str.map(|s| parse_agent_type(&s)),
+                agent_type: agent_type_str.map(|s| parse_agent_type(&s)).transpose()?,
                 timestamp: parse_dt(row.get::<_, String>(6)?),
                 tokens_used: row.get::<_, i64>(7).unwrap_or(0) as u64,
                 auth_mode: row.get(8)?,
@@ -2331,7 +2329,7 @@ fn list_all_messages(
         ))
     })?;
 
-    for row in rows.filter_map(|r| r.ok()) {
+    for row in rows.collect::<rusqlite::Result<Vec<_>>>()? {
         map.entry(row.0).or_default().push(row.1);
     }
 
@@ -2379,7 +2377,7 @@ pub fn list_messages(conn: &Connection, discussion_id: &str) -> Result<Vec<Discu
                 role: parse_role(&role_str),
                 channel: parse_message_channel(&channel_str),
                 content: row.get(3)?,
-                agent_type: agent_type_str.map(|s| parse_agent_type(&s)),
+                agent_type: agent_type_str.map(|s| parse_agent_type(&s)).transpose()?,
                 timestamp: parse_dt(row.get::<_, String>(5)?),
                 tokens_used: row.get::<_, i64>(6).unwrap_or(0) as u64,
                 auth_mode: row.get(7)?,
@@ -2400,7 +2398,8 @@ pub fn list_messages(conn: &Connection, discussion_id: &str) -> Result<Vec<Discu
                 target_agent: row
                     .get::<_, Option<String>>(16)
                     .unwrap_or(None)
-                    .map(|s| parse_agent_type(&s)),
+                    .map(|s| parse_agent_type(&s))
+                    .transpose()?,
                 reply_to_message_id: row.get::<_, Option<String>>(17).unwrap_or(None),
                 session_tokens_at_message: row.get::<_, Option<i64>>(18).unwrap_or(None),
                 recovered_partial: row
@@ -2410,8 +2409,7 @@ pub fn list_messages(conn: &Connection, discussion_id: &str) -> Result<Vec<Discu
                 author_cli_ordinal: row.get::<_, Option<i64>>(20).unwrap_or(None),
             })
         })?
-        .filter_map(|r| r.ok())
-        .collect();
+        .collect::<rusqlite::Result<Vec<_>>>()?;
 
     Ok(messages)
 }
@@ -2454,7 +2452,9 @@ pub fn list_notes(
                     role: parse_role(&role),
                     channel: parse_message_channel(&channel),
                     content: row.get(4)?,
-                    agent_type: agent_type.map(|value| parse_agent_type(&value)),
+                    agent_type: agent_type
+                        .map(|value| parse_agent_type(&value))
+                        .transpose()?,
                     timestamp: parse_dt(row.get::<_, String>(6)?),
                     tokens_used: row.get::<_, i64>(7).unwrap_or(0) as u64,
                     auth_mode: row.get(8)?,
@@ -2472,7 +2472,8 @@ pub fn list_notes(
                     model: row.get(16)?,
                     target_agent: row
                         .get::<_, Option<String>>(17)?
-                        .map(|value| parse_agent_type(&value)),
+                        .map(|value| parse_agent_type(&value))
+                        .transpose()?,
                     reply_to_message_id: row.get(18)?,
                 },
             ))
@@ -2766,7 +2767,7 @@ pub fn list_message_targets(conn: &Connection, message_id: &str) -> Result<Vec<M
             };
             Ok(MessageTarget {
                 kind,
-                agent_type: parse_agent_type(&row.get::<_, String>(1)?),
+                agent_type: parse_agent_type(&row.get::<_, String>(1)?)?,
                 connection_id: row.get(2)?,
                 cli_session_id: row.get(3)?,
                 tier: match row.get::<_, Option<String>>(4)?.as_deref() {
@@ -2805,7 +2806,7 @@ pub fn list_discussion_message_targets(
         };
         let target = MessageTarget {
             kind,
-            agent_type: parse_agent_type(&row.get::<_, String>(2)?),
+            agent_type: parse_agent_type(&row.get::<_, String>(2)?)?,
             connection_id: row.get(3)?,
             cli_session_id: row.get(4)?,
             tier: match row.get::<_, Option<String>>(5)?.as_deref() {
@@ -2869,7 +2870,7 @@ pub fn message_cli_author_target(
         params![message_id, discussion_id],
         |row| {
             Ok(MessageTarget::cli(
-                parse_agent_type(&row.get::<_, String>(0)?),
+                parse_agent_type(&row.get::<_, String>(0)?)?,
                 row.get(1)?,
             ))
         },
@@ -3748,8 +3749,8 @@ pub fn update_message_tokens(
     Ok(())
 }
 
-pub(crate) fn parse_agent_type(s: &str) -> AgentType {
-    match s {
+pub(crate) fn parse_agent_type(s: &str) -> rusqlite::Result<AgentType> {
+    Ok(match s {
         "ClaudeCode" => AgentType::ClaudeCode,
         "Codex" => AgentType::Codex,
         "OpenCode" => AgentType::OpenCode,
@@ -3760,8 +3761,15 @@ pub(crate) fn parse_agent_type(s: &str) -> AgentType {
         "Ollama" => AgentType::Ollama,
         "LiteLlm" => AgentType::LiteLlm,
         "Nvidia" => AgentType::Nvidia,
-        _ => AgentType::Custom,
-    }
+        "Custom" => AgentType::Custom,
+        _ => {
+            return Err(rusqlite::Error::FromSqlConversionFailure(
+                0,
+                rusqlite::types::Type::Text,
+                Box::new(anyhow::anyhow!("unknown persisted agent type")),
+            ));
+        }
+    })
 }
 
 fn format_agent_type(a: &AgentType) -> String {

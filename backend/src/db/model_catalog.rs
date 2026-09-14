@@ -125,8 +125,8 @@ pub(crate) fn format_agent_type(agent_type: &AgentType) -> &'static str {
     }
 }
 
-pub(crate) fn parse_agent_type(s: &str) -> AgentType {
-    match s {
+pub(crate) fn parse_agent_type(s: &str) -> rusqlite::Result<AgentType> {
+    Ok(match s {
         "ClaudeCode" => AgentType::ClaudeCode,
         "Codex" => AgentType::Codex,
         "OpenCode" => AgentType::OpenCode,
@@ -137,8 +137,15 @@ pub(crate) fn parse_agent_type(s: &str) -> AgentType {
         "Ollama" => AgentType::Ollama,
         "LiteLlm" => AgentType::LiteLlm,
         "Nvidia" => AgentType::Nvidia,
-        _ => AgentType::Custom,
-    }
+        "Custom" => AgentType::Custom,
+        _ => {
+            return Err(rusqlite::Error::FromSqlConversionFailure(
+                0,
+                rusqlite::types::Type::Text,
+                Box::new(anyhow::anyhow!("unknown persisted agent type")),
+            ));
+        }
+    })
 }
 
 fn parse_provenance(s: &str) -> ModelProvenance {
@@ -225,7 +232,7 @@ fn row_to_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<CatalogModelEntry> 
     Ok(CatalogModelEntry {
         id: row.get(0)?,
         runtime_target_id: row.get(1)?,
-        agent_type: parse_agent_type(&row.get::<_, String>(2)?),
+        agent_type: parse_agent_type(&row.get::<_, String>(2)?)?,
         model_id: row.get(3)?,
         display_name: row.get(4)?,
         display_alias: row.get(5)?,
@@ -736,7 +743,7 @@ pub fn get_refresh_log(conn: &Connection, runtime_target_id: &str) -> Result<Opt
             |row| {
                 Ok(RefreshLog {
                     runtime_target_id: row.get(0)?,
-                    agent_type: parse_agent_type(&row.get::<_, String>(1)?),
+                    agent_type: parse_agent_type(&row.get::<_, String>(1)?)?,
                     last_live_success_at: row
                         .get::<_, Option<String>>(2)?
                         .map(parse_dt),
