@@ -10,12 +10,12 @@
 //!   a process just to learn an id, unlike Codex.
 //! - `--output-format stream-json --include-partial-messages --verbose`
 //!   streams live during a turn.
-//! - `--mcp-config <file> --strict-mcp-config` is used only when the complete
-//!   project file matches the broker-authorized, non-secret server set.
+//! - `--mcp-config <safe-json> --strict-mcp-config` always supplies a frozen
+//!   registry: the exact authorized project set or an explicitly empty one.
 //!   Kronn parses the local project registry to validate that shape, but
 //!   never serializes secret values into argv, prompts, events, client
 //!   payloads, or audit entries; a credential-bearing or mixed file is
-//!   omitted wholesale.
+//!   refused wholesale, without falling back to the global account registry.
 //!
 //! There is no `--permission-prompt-tool` (or equivalent) flag in this CLI
 //! version, so Claude cannot call back into Kronn mid-turn the way a native
@@ -46,7 +46,7 @@ pub struct ClaudeAcpAdapter {
     reasoning_effort: Option<String>,
     broker: AcpPermissionBroker,
     allowed_tools: Mutex<Vec<String>>,
-    project_mcp_config_allowed: AtomicBool,
+    project_mcp_config: Mutex<String>,
     discussion_id: Option<String>,
     has_run_before: AtomicBool,
     current_child: Mutex<Option<Child>>,
@@ -68,7 +68,7 @@ impl ClaudeAcpAdapter {
             reasoning_effort,
             broker: AcpPermissionBroker::scoped(full_access, scope),
             allowed_tools: Mutex::new(Vec::new()),
-            project_mcp_config_allowed: AtomicBool::new(false),
+            project_mcp_config: Mutex::new(r#"{"mcpServers":{}}"#.into()),
             discussion_id,
             has_run_before: AtomicBool::new(false),
             current_child: Mutex::new(None),
@@ -104,11 +104,6 @@ impl ClaudeAcpAdapter {
     pub fn permission_audit_log(&self) -> Vec<AcpAuditEntry> {
         self.broker.audit_log()
     }
-
-    fn mcp_config_path(cwd: &std::path::Path) -> Option<PathBuf> {
-        let candidate = cwd.join(".mcp.json");
-        candidate.exists().then_some(candidate)
-    }
 }
 
 #[async_trait]
@@ -119,18 +114,27 @@ impl AcpTransport for ClaudeAcpAdapter {
     ) -> Result<AcpNegotiatedCapabilities, AcpError> {
         *self.cwd.lock().await = Some(PathBuf::from(&request.cwd));
         let servers = self.broker.authorize_mcp_servers(request.mcp_servers);
-        let authorized_ids: std::collections::BTreeSet<_> =
-            servers.iter().map(|server| server.id.as_str()).collect();
-        let config_is_exactly_authorized = crate::core::mcp_scanner::read_mcp_json(&request.cwd)
-            .is_some_and(|file| {
-                file.mcp_servers.len() == authorized_ids.len()
+        let authorized_file =
+            crate::core::mcp_scanner::read_mcp_json(&request.cwd).filter(|file| {
+                file.mcp_servers.len() == servers.len()
                     && file.mcp_servers.iter().all(|(id, entry)| {
-                        authorized_ids.contains(id.as_str())
+                        servers.iter().any(|server| {
+                            server.id == *id
+                                && entry.command.as_deref() == Some(server.command.as_str())
+                                && entry.args.as_deref().unwrap_or_default() == server.args
+                        }) && entry.url.is_none()
                             && !crate::core::mcp_scanner::mcp_entry_leaks_secret(entry)
                     })
             });
-        self.project_mcp_config_allowed
-            .store(config_is_exactly_authorized, Ordering::SeqCst);
+        // Always supply a strict registry, even when absent/invalid/refused.
+        // Freeze the exact authorized snapshot: passing its path would allow
+        // a replacement between negotiation and CLI startup to widen scope.
+        *self.project_mcp_config.lock().await = match authorized_file {
+            Some(file) => serde_json::to_string(&file).map_err(|_| {
+                AcpError::Transport("Cannot serialize scoped Claude MCP config".into())
+            })?,
+            None => r#"{"mcpServers":{}}"#.into(),
+        };
         let mut allowed_tools = Vec::new();
         for server in servers {
             if server.allowed_tools.is_empty() {
@@ -234,14 +238,9 @@ impl AcpTransport for ClaudeAcpAdapter {
             args.push("--effort".into());
             args.push(effort.clone());
         }
-        if self.launch.worker_context.is_none()
-            && self.project_mcp_config_allowed.load(Ordering::SeqCst)
-        {
-            let mcp_config = Self::mcp_config_path(&cwd).ok_or_else(|| {
-                AcpError::Transport("authorized Claude MCP config disappeared".into())
-            })?;
+        if self.launch.worker_context.is_none() {
             args.push("--mcp-config".into());
-            args.push(mcp_config.to_string_lossy().into_owned());
+            args.push(self.project_mcp_config.lock().await.clone());
             args.push("--strict-mcp-config".into());
         }
         let allowed_tools = self.allowed_tools.lock().await.clone();
@@ -619,8 +618,8 @@ mod tests {
 
         let argv = std::fs::read_to_string(&argv_file).unwrap();
         assert!(
-            !argv.contains("--mcp-config"),
-            "unsafe config leaked: {argv}"
+            argv.contains("--strict-mcp-config") && argv.contains(r#"{"mcpServers":{}}"#),
+            "refused config must not inherit the global registry: {argv}"
         );
         assert!(
             !argv.contains(secret),
@@ -731,7 +730,10 @@ mod tests {
             })
             .await
             .unwrap();
-        assert!(!adapter.project_mcp_config_allowed.load(Ordering::SeqCst));
+        assert_eq!(
+            *adapter.project_mcp_config.lock().await,
+            r#"{"mcpServers":{}}"#
+        );
     }
 
     #[tokio::test]

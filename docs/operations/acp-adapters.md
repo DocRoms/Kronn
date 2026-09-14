@@ -17,32 +17,38 @@ own documented, stable, non-interactive flags underneath — `claude --print
 --output-format stream-json --session-id/--resume …` and `codex exec [--json]`
 / `codex exec resume <thread_id> [--json]` — instead of ACP JSON-RPC.
 
-**Direct CLI migration remains the production default for both agents.** The
-adapters are an explicit, per-agent, off-by-default opt-in.
+**ACP adapters are the production default for both agents (KT-652).** Direct
+CLI remains an explicit, per-agent compatibility route. This changes transport
+selection, not the number of CLI processes: both still spawn once per turn.
+[src: file: backend/src/acp.rs:103]
 
-## Enabling it
+## Explicit compatibility override
 
 ```bash
-# Codex only
-KRONN_ACP_ADAPTER_CODEX=1
+# Codex direct CLI only
+KRONN_ACP_ADAPTER_CODEX=0
 
-# Claude Code only
-KRONN_ACP_ADAPTER_CLAUDE=1
+# Claude Code direct CLI only
+KRONN_ACP_ADAPTER_CLAUDE=0
 ```
 
 Set either (or both) in the backend's environment before starting Kronn.
-Each toggle only affects its own agent — enabling Codex's adapter never
-changes Claude's route, and vice versa (`crate::acp::resolve_acp_route`,
-`backend/src/acp.rs`). Unset the variable to fall back to direct CLI
-migration immediately; no other state changes, and the agent's identity/model
+Each toggle only affects its own agent. Unset means the default adapter;
+`1`/`true` explicitly enables it. Other explicit values, including empty or
+malformed ones, retain the previous strict false interpretation and select
+direct CLI. The agent's identity/model
 selectors are unaffected either way (`AgentType::Codex`/`AgentType::ClaudeCode`
 stay exactly what they were).
 
-Task workers (durable delegated executions with an isolated worktree) always
-use direct CLI migration, regardless of the toggle — the adapters do not yet
-carry the task-worker-specific sandbox/tool-allowlist policy
-(`backend/src/agents/runner.rs`, the `AdaptedAcp if !task_worker` dispatch
-guard).
+Task workers follow the same transport choice. Their adapter arguments reuse
+the direct worker builder: isolated settings, workspace sandbox, restricted
+tools and only the internal delivery bridge. Workers always start fresh, even
+with a resume hint, and `full_access` cannot override their worker policy.
+The common process launcher supplies delivery context and worktree-local
+temporary files. It removes inherited worker context from ordinary turns and
+the permissive container marker from workers.
+[src: file: backend/src/agents/runner.rs:3333]
+[src: file: backend/tests/adapter_worker_policy.rs:1]
 
 ## Observability
 
@@ -52,8 +58,8 @@ adapter's empty configuration options. See [catalogue discovery and selector
 freshness](../gotchas/claude-catalogue-discovery.md).
 
 When the adapter route is taken, the backend logs an `info`-level line
-(`"KRONN_ACP_ADAPTER_* opt-in active: starting an isolated ACP adapter
-session…"`) naming the agent, so which transport a given run used is visible
+(`"Starting shared ACP adapter session…"`) naming the agent and worker mode;
+the direct compatibility override is also logged. The actual route is visible
 in the logs without inspecting code.
 
 Every permission decision — live, for a native ACP agent's
@@ -98,10 +104,13 @@ project path never reuses that identifier.
   declarations. Codex receives a complete `mcp_servers={...}` override, so
   its global multi-project configuration cannot bleed into this discussion;
   the trusted `kronn-internal` bridge forwards only a fixed list of env-var
-  names. Claude loads the project `.mcp.json` with `--strict-mcp-config` only
-  when the whole file exactly matches the broker-authorized set; otherwise
-  the config is omitted rather than partially authorizing a secret-bearing
-  file. Prompts are written on stdin for both adapters, never argv. Secret
+  names. Claude freezes a safe inline snapshot only when the entire project
+  file matches the broker-authorized commands and arguments. An absent,
+  malformed or refused file produces an explicitly empty strict registry,
+  never an implicit fallback to the account's global MCP servers. The CLI
+  cannot reload a replacement file after authorization. Worker registries
+  remain separately narrowed to the internal bridge. Prompts are written on
+  stdin for both adapters, never argv. Secret
   values therefore enter neither adapter argv, ACP payloads, events, nor
   audit records.
 
@@ -110,8 +119,9 @@ project path never reuses that identifier.
 - **No live permission negotiation for the adapters.** Permission policy is
   computed once per session, not per tool call, because neither CLI's
   non-interactive mode offers a live callback.
-- **Task workers are excluded** (see above) — they stay on direct CLI
-  migration unconditionally.
+- **No automatic prompt replay.** Adapter failures do not retry the submitted
+  prompt through the direct runner. Switching the compatibility override is
+  an operator action, not an error-recovery guess.
 - **Credential-bearing project MCP entries are omitted.** Secure credential
   injection without putting values in adapter argv/payloads is not implemented
   yet. A project mixing safe and credential-bearing entries is therefore

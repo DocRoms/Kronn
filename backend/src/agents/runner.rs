@@ -3295,6 +3295,10 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
     // model output. The ACP host owns initialize/session/prompt/cancel and
     // forwards only normalized text updates to the existing stream consumer.
     let acp_route = crate::acp::resolve_acp_route(config.agent_type);
+    if acp_route == crate::acp::AcpProductionRoute::DirectCliMigration {
+        tracing::info!(agent = ?config.agent_type, task_worker,
+            "Explicit KRONN_ACP_ADAPTER_* override selects direct CLI compatibility; no automatic prompt replay");
+    }
     // The discussion dispatcher proves the cursor, identity and worthwhile
     // delta as one unit. Never reload a durable id here: doing so would pair a
     // rejected full transcript with a resumed native session and duplicate its
@@ -3330,8 +3334,8 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
         crate::acp::AcpProductionRoute::AdaptedAcp => {
             tracing::info!(
                 agent = ?config.agent_type,
-                "KRONN_ACP_ADAPTER_* opt-in active: starting an isolated ACP adapter session \
-                 (unset the variable to fall back to direct CLI migration)"
+                task_worker,
+                "Starting shared ACP adapter session (KRONN_ACP_ADAPTER_*=0 selects direct CLI compatibility)"
             );
             let request = AcpSessionRequest {
                 agent_type: config.agent_type,
@@ -3721,12 +3725,9 @@ async fn start_native_acp(
     run_acp_session(request, transport).await
 }
 
-/// Codex/Claude via the isolated ACP adapters (`ClaudeAcpAdapter`,
-/// `CodexAcpAdapter`), only reachable when an operator has explicitly
-/// enabled `KRONN_ACP_ADAPTER_CODEX`/`KRONN_ACP_ADAPTER_CLAUDE`
-/// (`crate::acp::resolve_acp_route`). Direct CLI migration remains the
-/// default and the observable fallback (see the caller in
-/// `start_agent_with_config`).
+/// Default Claude/Codex route, with the same launch boundary for delegated
+/// workers. Explicit false environment overrides retain direct compatibility;
+/// adapter prompt failures never automatically switch to the direct runner.
 ///
 /// Unlike native ACP agents, neither CLI has a session-config-options
 /// catalogue or a live permission callback: the model is resolved once here

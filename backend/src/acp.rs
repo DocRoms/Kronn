@@ -92,18 +92,14 @@ pub enum AcpProductionRoute {
     NativeAcp,
     /// Codex/Claude via `ClaudeAcpAdapter`/`CodexAcpAdapter` — the same
     /// `AcpHost` as native agents, but the wire is each CLI's own
-    /// non-interactive protocol rather than ACP JSON-RPC. Only reachable
-    /// through [`resolve_acp_route`]; [`production_route`] never returns it.
+    /// non-interactive protocol rather than ACP JSON-RPC.
     AdaptedAcp,
     DirectCliMigration,
     HttpModelProvider,
 }
 
-/// The default/candidate route for an agent, assuming no adapter opt-in.
-/// Deliberately pure and unaware of any runtime toggle: Codex/Claude keep
-/// returning `DirectCliMigration` here even after the adapters exist, so the
-/// conservative default never silently changes. Use [`resolve_acp_route`] at
-/// actual dispatch time to honor the explicit, observable opt-in toggle.
+/// Product defaults, independent of per-agent runtime overrides. Claude and
+/// Codex use the shared ACP host; an explicit override can retain direct CLI.
 pub fn production_route(agent: &AgentType) -> AcpProductionRoute {
     match agent {
         AgentType::OpenCode
@@ -111,32 +107,26 @@ pub fn production_route(agent: &AgentType) -> AcpProductionRoute {
         | AgentType::CopilotCli
         | AgentType::Kiro
         | AgentType::Vibe => AcpProductionRoute::NativeAcp,
-        AgentType::ClaudeCode | AgentType::Codex => AcpProductionRoute::DirectCliMigration,
+        AgentType::ClaudeCode | AgentType::Codex => AcpProductionRoute::AdaptedAcp,
         AgentType::Ollama | AgentType::LiteLlm | AgentType::Nvidia | AgentType::Custom => {
             AcpProductionRoute::HttpModelProvider
         }
     }
 }
 
-/// Strict boolean parse for a `KRONN_ACP_ADAPTER_*` toggle. Only `1`/`true`
-/// (case-insensitive, surrounding whitespace ignored) activate the adapter;
-/// unset, empty, `0`, `false`, or any other value all mean "off" and keep the
-/// conservative direct-CLI default. Presence-only parsing (`.is_ok()`) used to
-/// activate the adapter for ANY value including `"0"`/`"false"` — an operator
-/// clearing the toggle by setting it to a falsy string instead of unsetting it
-/// would silently keep routing through the ACP adapter (KT-542 review fix).
+/// Absence uses the product default. Explicit values retain the established
+/// strict boolean interpretation: only `1`/`true` enable, including whitespace
+/// and case normalization. Empty, malformed and false values keep direct CLI.
 fn env_flag_enabled(var: &str) -> bool {
-    std::env::var(var)
-        .map(|value| matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true"))
-        .unwrap_or(false)
+    match std::env::var(var) {
+        Ok(value) => matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true"),
+        Err(std::env::VarError::NotPresent) => true,
+        Err(std::env::VarError::NotUnicode(_)) => false,
+    }
 }
 
-/// Per-agent, explicit, environment-driven opt-in for the Codex/Claude ACP
-/// adapters. Off by default: direct-CLI migration stays the production
-/// default for both agents until an operator turns the adapter on for that
-/// specific agent. Reading the toggle at call time (rather than baking it
-/// into a `once_cell`) keeps it test-friendly and trivially observable —
-/// `kronn doctor`/logs can report the exact variable an operator would set.
+/// Per-agent runtime override, read for each launch. Unset means adapted ACP;
+/// `0` or `false` selects the explicit direct-CLI compatibility route.
 pub fn acp_adapter_enabled(agent: &AgentType) -> bool {
     match agent {
         AgentType::Codex => env_flag_enabled("KRONN_ACP_ADAPTER_CODEX"),
@@ -145,14 +135,11 @@ pub fn acp_adapter_enabled(agent: &AgentType) -> bool {
     }
 }
 
-/// The route actually taken for one dispatch, honoring the explicit opt-in
-/// toggle on top of the conservative default from [`production_route`].
-/// Never widens any OTHER agent's route: only a `DirectCliMigration` default
-/// can become `AdaptedAcp`, and only when that agent's toggle is set.
+/// Resolve the actual dispatch without changing any other agent's route.
 pub fn resolve_acp_route(agent: &AgentType) -> AcpProductionRoute {
     let default_route = production_route(agent);
-    if default_route == AcpProductionRoute::DirectCliMigration && acp_adapter_enabled(agent) {
-        AcpProductionRoute::AdaptedAcp
+    if default_route == AcpProductionRoute::AdaptedAcp && !acp_adapter_enabled(agent) {
+        AcpProductionRoute::DirectCliMigration
     } else {
         default_route
     }
@@ -1547,7 +1534,7 @@ mod tests {
     }
 
     #[test]
-    fn production_routes_never_overstate_unwired_acp_adapters() {
+    fn production_routes_distinguish_native_adapted_and_http_transports() {
         for agent in [
             AgentType::OpenCode,
             AgentType::GeminiCli,
@@ -1563,10 +1550,7 @@ mod tests {
             );
         }
         for agent in [AgentType::Codex, AgentType::ClaudeCode] {
-            assert_eq!(
-                production_route(&agent),
-                AcpProductionRoute::DirectCliMigration
-            );
+            assert_eq!(production_route(&agent), AcpProductionRoute::AdaptedAcp);
             assert_ne!(acp_agent(&agent), None);
         }
         for agent in [
@@ -1585,16 +1569,16 @@ mod tests {
 
     #[test]
     #[serial_test::serial(acp_adapter_env_toggle)]
-    fn the_adapted_route_is_off_by_default_and_never_widens_other_agents() {
+    fn the_adapted_route_is_default_and_never_widens_other_agents() {
         std::env::remove_var("KRONN_ACP_ADAPTER_CODEX");
         std::env::remove_var("KRONN_ACP_ADAPTER_CLAUDE");
         assert_eq!(
             resolve_acp_route(&AgentType::Codex),
-            AcpProductionRoute::DirectCliMigration
+            AcpProductionRoute::AdaptedAcp
         );
         assert_eq!(
             resolve_acp_route(&AgentType::ClaudeCode),
-            AcpProductionRoute::DirectCliMigration
+            AcpProductionRoute::AdaptedAcp
         );
         // A route that was never DirectCliMigration to begin with must never
         // become AdaptedAcp, no matter what the toggle says.
@@ -1608,26 +1592,26 @@ mod tests {
     fn each_agent_s_toggle_only_widens_that_agent_s_own_route() {
         std::env::remove_var("KRONN_ACP_ADAPTER_CODEX");
         std::env::remove_var("KRONN_ACP_ADAPTER_CLAUDE");
-        std::env::set_var("KRONN_ACP_ADAPTER_CODEX", "1");
+        std::env::set_var("KRONN_ACP_ADAPTER_CODEX", "0");
         assert_eq!(
             resolve_acp_route(&AgentType::Codex),
-            AcpProductionRoute::AdaptedAcp
+            AcpProductionRoute::DirectCliMigration
         );
         assert_eq!(
             resolve_acp_route(&AgentType::ClaudeCode),
-            AcpProductionRoute::DirectCliMigration,
+            AcpProductionRoute::AdaptedAcp,
             "Claude's route must stay unaffected by Codex's toggle"
         );
         std::env::remove_var("KRONN_ACP_ADAPTER_CODEX");
 
-        std::env::set_var("KRONN_ACP_ADAPTER_CLAUDE", "1");
+        std::env::set_var("KRONN_ACP_ADAPTER_CLAUDE", "0");
         assert_eq!(
             resolve_acp_route(&AgentType::ClaudeCode),
-            AcpProductionRoute::AdaptedAcp
+            AcpProductionRoute::DirectCliMigration
         );
         assert_eq!(
             resolve_acp_route(&AgentType::Codex),
-            AcpProductionRoute::DirectCliMigration,
+            AcpProductionRoute::AdaptedAcp,
             "Codex's route must stay unaffected by Claude's toggle"
         );
         std::env::remove_var("KRONN_ACP_ADAPTER_CLAUDE");
@@ -1659,8 +1643,8 @@ mod tests {
         std::env::remove_var("KRONN_ACP_ADAPTER_CODEX");
         assert_eq!(
             resolve_acp_route(&AgentType::Codex),
-            AcpProductionRoute::DirectCliMigration,
-            "unset must stay direct-CLI"
+            AcpProductionRoute::AdaptedAcp,
+            "unset must use the product adapter default"
         );
     }
 
