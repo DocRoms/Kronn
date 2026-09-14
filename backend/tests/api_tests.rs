@@ -16,6 +16,7 @@ use axum::{
 use http_body_util::BodyExt;
 use serde_json::Value;
 use serial_test::serial;
+use sha2::{Digest, Sha256};
 use tokio::sync::RwLock;
 use tower::ServiceExt;
 
@@ -2317,6 +2318,130 @@ async fn post_json(app: Router, uri: &str, body: Value) -> (StatusCode, Value) {
         )
     });
     (status, json)
+}
+
+#[tokio::test]
+async fn orchestrator_return_resume_route_authenticates_and_replays_exact_rotation() {
+    let state = test_state();
+    let token = "kr-resume-11111111111111111111111111111111";
+    let next = "kr-resume-22222222222222222222222222222222";
+    let execution_id = state.db.with_conn(move |conn| {
+        let now = chrono::Utc::now().to_rfc3339();
+        for id in ["return-http-parent", "return-http-child"] {
+            conn.execute(
+                "INSERT INTO discussions(id, title, created_at, updated_at) VALUES (?1, 'return', ?2, ?2)",
+                rusqlite::params![id, now],
+            )?;
+        }
+        conn.execute(
+            "INSERT INTO discussion_sessions(id, disc_id, agent_type, session_id, role, status, joined_at, resume_token_hash) \
+             VALUES (657, 'return-http-child', 'Codex', 'live-before', 'peer', 'active', ?1, ?2)",
+            rusqlite::params![now, format!("{:x}", Sha256::digest(token.as_bytes()))],
+        )?;
+        conn.execute(
+            "INSERT INTO planning_tasks(id, task_number, title, created_at, updated_at) \
+             VALUES ('return-http-task', 657, 'return route', ?1, ?1)",
+            [&now],
+        )?;
+        let actor = kronn::models::OrchestrationActor {
+            kind: kronn::models::PlanningActorKind::Backend,
+            id: Some("api-test".into()),
+            session_id: None,
+            source_message_id: None,
+        };
+        let execution = kronn::db::orchestration::launch_single_task(
+            conn,
+            &kronn::models::LaunchSingleTaskInput::new(
+                "return-http-task", "return-http-parent",
+            ),
+            &actor,
+        )?.execution;
+        conn.execute(
+            "UPDATE task_executions SET sub_discussion_id='return-http-child', \
+             worker_target_kind='cli', worker_cli_session_id=657, worker_agent_type='Codex', \
+             status='Working' WHERE id=?1",
+            [&execution.id],
+        )?;
+        kronn::db::disc_source::bind_to_source(
+            conn, "return-http-child", "Codex", "cli-return-http",
+        )?;
+        conn.execute(
+            "INSERT INTO task_execution_cli_bindings \
+             (task_execution_id, cli_session_id, source_agent, source_session_id, pinned_at) \
+             VALUES (?1, 657, 'Codex', 'cli-return-http', ?2)",
+            rusqlite::params![execution.id, now],
+        )?;
+        kronn::db::orchestration::transition_execution(
+            conn,
+            &execution.id,
+            kronn::models::TaskExecutionStatus::Cancelled,
+            &actor,
+            serde_json::json!({}),
+        )?;
+        Ok(execution.id)
+    }).await.unwrap();
+
+    let request = serde_json::json!({
+        "agent_type": "Codex",
+        "session_id": "live-after",
+        "resume_token": token,
+        "next_resume_token": next,
+        "expected_child_disc_id": "return-http-child"
+    });
+    let app = build_router_with_auth(state.clone(), false);
+    let (status, first) = post_json(
+        app.clone(),
+        "/api/discussions/orchestrator-return-resume",
+        request.clone(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(first["success"], true, "{first}");
+    assert_eq!(first["data"]["disc_id"], "return-http-parent");
+    assert_eq!(first["data"]["session_pk"], 657);
+
+    let (_, replay) = post_json(
+        app.clone(),
+        "/api/discussions/orchestrator-return-resume",
+        request,
+    )
+    .await;
+    assert_eq!(replay["success"], true, "lost-response replay: {replay}");
+    assert_eq!(replay["data"]["session_pk"], 657);
+
+    let (_, divergent) = post_json(
+        app,
+        "/api/discussions/orchestrator-return-resume",
+        serde_json::json!({
+            "agent_type": "Codex",
+            "session_id": "must-not-win",
+            "resume_token": token,
+            "next_resume_token": "kr-resume-33333333333333333333333333333333",
+            "expected_child_disc_id": "return-http-child"
+        }),
+    )
+    .await;
+    assert_eq!(divergent["success"], false, "{divergent}");
+
+    state
+        .db
+        .with_conn(move |conn| {
+            let (disc_id, session_id): (String, String) = conn.query_row(
+                "SELECT disc_id, session_id FROM discussion_sessions WHERE id=657",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            assert_eq!(disc_id, "return-http-parent");
+            assert_eq!(session_id, "live-after");
+            let traces: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM messages WHERE id LIKE 'orch-return-%:' || ?1 || ':Cancelled'",
+            [&execution_id], |row| row.get(0),
+        )?;
+            assert_eq!(traces, 2);
+            Ok(())
+        })
+        .await
+        .unwrap();
 }
 
 /// Send a DELETE request and return (status, parsed JSON body).

@@ -9755,6 +9755,39 @@ class DurableSessionLinkTests(unittest.TestCase):
             result = self.mod.call_disc_wait_for_peer({"timeout_secs": 1})
         self.assertEqual(result["messages"], child["messages"])
 
+    def test_return_local_promotion_failure_replays_the_same_successor(self):
+        self.mod._set_current_disc_id("d-child")
+        self.mod._write_binding(
+            "d-child", "kr-resume-old", agent_type="Codex",
+            last_read_sort_order=4, return_disc_id="d-parent",
+            return_read_sort_order=37,
+        )
+        bodies = []
+
+        def respond(method, path, body=None):
+            self.assertEqual(path, "/api/discussions/orchestrator-return-resume")
+            bodies.append(dict(body))
+            return {"success": True, "data": {
+                "disc_id": "d-parent", "session_pk": 1,
+                "resume_token": body["next_resume_token"],
+            }}
+
+        real_write = self.mod._write_binding
+        writes = {"count": 0}
+
+        def fail_first_parent_promotion(*args, **kwargs):
+            if args[0] == "d-parent" and writes["count"] == 0:
+                writes["count"] += 1
+                return False
+            return real_write(*args, **kwargs)
+
+        with mock.patch.object(self.mod, "_http", side_effect=respond), \
+             mock.patch.object(self.mod, "_write_binding", side_effect=fail_first_parent_promotion):
+            self.assertIsNone(self.mod._attempt_orchestrator_return_resume())
+            self.assertEqual(self.mod._attempt_orchestrator_return_resume(), "d-parent")
+        self.assertEqual(bodies[0], bodies[1])
+        self.assertEqual(self.mod._read_binding()["disc_id"], "d-parent")
+
     def test_unrelated_runtime_conflict_never_calls_return_recovery(self):
         self.mod._set_current_disc_id("d-deliberate-third")
         self.mod._write_binding(
