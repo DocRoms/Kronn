@@ -421,6 +421,23 @@ pub async fn execute_step(
                         );
                         let mut final_validation_error: Option<String> = validation_error.clone();
                         let mut repair_valid = false;
+                        if let Err(error) = preflight_workflow_launch(
+                            catalog_db,
+                            step,
+                            resolved_connection.as_ref(),
+                            model_override.as_deref(),
+                            model_tiers,
+                        )
+                        .await
+                        {
+                            tracing::warn!(
+                                "Step '{}': repair preflight failed: {}",
+                                step.name,
+                                error
+                            );
+                            last_error = error.to_string();
+                            continue;
+                        }
                         let repair_res = run_agent_with_timeout(
                             step,
                             project_path,
@@ -500,6 +517,23 @@ pub async fn execute_step(
                             );
                             let escalated = escalation_step(step);
                             let escalated_model = step_model_override(&escalated, None);
+                            if let Err(error) = preflight_workflow_launch(
+                                catalog_db,
+                                &escalated,
+                                None,
+                                escalated_model.as_deref(),
+                                model_tiers,
+                            )
+                            .await
+                            {
+                                tracing::warn!(
+                                    target: "kronn::ollama::escalation",
+                                    step = %step.name,
+                                    error = %error,
+                                    "escalation catalog preflight refused dispatch"
+                                );
+                                continue;
+                            }
                             let esc_res = run_agent_with_timeout(
                                 &escalated,
                                 project_path,
@@ -611,6 +645,7 @@ pub async fn execute_step(
                         external_http.as_ref(),
                         model_override.as_deref(),
                         resolved_connection.as_ref(),
+                        catalog_db,
                     ).await {
                         Ok((converged, debate_tokens, debate_tool_calls)) => {
                             total_tokens += debate_tokens;
@@ -916,7 +951,50 @@ pub(crate) async fn resolve_step_connection(
         );
     }
 
+    if connection
+        .endpoint
+        .as_deref()
+        .is_none_or(|endpoint| endpoint.trim().is_empty())
+    {
+        anyhow::bail!("External API connection {connection_id} has no HTTP endpoint");
+    }
+
     Ok(Some(connection))
+}
+
+async fn preflight_workflow_launch(
+    catalog_db: Option<&crate::db::Database>,
+    step: &WorkflowStep,
+    connection: Option<&ExternalApiConnection>,
+    effective_model: Option<&str>,
+    model_tiers: Option<&crate::models::setup::ModelTiersConfig>,
+) -> Result<()> {
+    let Some(database) = catalog_db else {
+        return Ok(());
+    };
+    let runtime_target_id = connection
+        .map(|connection| crate::db::model_catalog::http_runtime_target_id(&connection.id));
+    let tier = step
+        .agent_settings
+        .as_ref()
+        .and_then(|settings| settings.tier)
+        .unwrap_or_default();
+    if let Some(failure) = crate::core::model_catalog::preflight_check(
+        database,
+        runtime_target_id.as_deref(),
+        step.agent.clone(),
+        tier,
+        effective_model,
+        model_tiers,
+    )
+    .await
+    {
+        anyhow::bail!(
+            "model_catalog_preflight_failed:{}",
+            serde_json::to_string(&failure).unwrap_or_default()
+        );
+    }
+    Ok(())
 }
 
 /// Run an agent with optional stall timeout.
@@ -1288,6 +1366,7 @@ async fn run_multi_agent_debate(
     external_http: Option<&runner::ExternalHttpRuntime>,
     author_model: Option<&str>,
     author_connection: Option<&ExternalApiConnection>,
+    catalog_db: Option<&crate::db::Database>,
 ) -> Result<(String, u64, Vec<NativeToolCallLog>)> {
     let max_rounds = cfg.max_rounds.unwrap_or(3).clamp(1, 5);
     let approved = |t: &str| {
@@ -1351,6 +1430,17 @@ async fn run_multi_agent_debate(
              You are the REVIEWER (round {n}/{max}). Read the relevant project files, then challenge the plan/output above on relevance, completeness, correctness and scope. Be concrete and actionable — do NOT rewrite it yourself. If, and ONLY if, you genuinely judge it ready, end your reply with a line containing exactly [CONSENSUS: APPROVED].",
             debate = cfg.debate_prompt, transcript = transcript, n = round + 1, max = max_rounds
         );
+        let reviewer_connection = reviewer_shares_the_step_connection
+            .then_some(author_connection)
+            .flatten();
+        preflight_workflow_launch(
+            catalog_db,
+            &reviewer_step,
+            reviewer_connection,
+            reviewer_model.as_deref(),
+            model_tiers,
+        )
+        .await?;
         let rev = run_agent_with_timeout(
             &reviewer_step,
             project_path,
@@ -1407,6 +1497,14 @@ async fn run_multi_agent_debate(
              You are the PLAN AUTHOR ({author:?}). Address the reviewer's critique above: revise your plan/output accordingly. Re-emit your COMPLETE updated output in the SAME format you used originally. If you have addressed everything and now agree the result is ready, additionally end with a line containing exactly [CONSENSUS: APPROVED].{addendum}",
             transcript = transcript, author = step.agent, addendum = envelope_addendum
         );
+        preflight_workflow_launch(
+            catalog_db,
+            &author_step,
+            author_connection,
+            author_model,
+            model_tiers,
+        )
+        .await?;
         let auth = run_agent_with_timeout(
             &author_step,
             project_path,

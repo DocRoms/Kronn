@@ -122,8 +122,10 @@ steps fail closed when their named connection cannot be resolved; their initial
 and immediate pre-dispatch checks use its `http:<connection-id>` target and
 effective model. The guard remains caller-owned; centralizing it
 at the runner boundary is a possible follow-up once overlapping runner work is
-integrated. [src: file: backend/src/api/discussions/orchestration.rs:235-385]
-[src: file: backend/src/workflows/steps.rs:241-310]
+integrated. [src: file: backend/src/api/discussions/orchestration.rs:60-130]
+[src: file: backend/src/api/discussions/orchestration.rs:650-1035]
+[src: file: backend/src/workflows/steps.rs:241-330]
+[src: file: backend/src/workflows/steps.rs:888-930]
 [src: file: backend/src/workflows/runner.rs:815-850]
 
 ## Sources

@@ -453,14 +453,18 @@ pub async fn orchestrate(
             .filter(|d| (d.installed || d.runtime_available) && d.enabled)
             .map(|d| d.agent_type.clone())
             .collect();
-        let missing: Vec<_> = agents
+        let missing: Vec<_> = participants
             .iter()
-            .filter(|a| {
+            // A validated named HTTP connection is itself the runtime. Only
+            // participants without one need a locally runnable agent binary.
+            .filter(|participant| participant.connection_id.is_none())
+            .map(|participant| &participant.agent_type)
+            .filter(|agent| {
                 !usable
                     .iter()
-                    .any(|u| std::mem::discriminant(u) == std::mem::discriminant(*a))
+                    .any(|usable| std::mem::discriminant(usable) == std::mem::discriminant(*agent))
             })
-            .map(|a| format!("{:?}", a))
+            .map(|agent| format!("{:?}", agent))
             .collect();
         if !missing.is_empty() {
             let msg = format!(
@@ -668,7 +672,7 @@ pub async fn orchestrate(
             {
                 Ok(snapshot) => snapshot,
                 Err(error) => {
-                    emit!(AgentStreamEvent::AgentError {
+                    emit!(AgentStreamEvent::Error {
                         data: serde_json::json!({
                             "agent": primary_agent_type, "round": "summary", "error": error,
                         })
@@ -771,7 +775,7 @@ pub async fn orchestrate(
                 {
                     Ok(snapshot) => snapshot,
                     Err(error) => {
-                        emit!(AgentStreamEvent::AgentError {
+                        emit!(AgentStreamEvent::Error {
                             data: serde_json::json!({
                                 "agent": agent_name, "agent_type": agent_type,
                                 "round": round, "error": error,
@@ -1004,7 +1008,7 @@ pub async fn orchestrate(
             {
                 Ok(snapshot) => snapshot,
                 Err(error) => {
-                    emit!(AgentStreamEvent::AgentError {
+                    emit!(AgentStreamEvent::Error {
                         data: serde_json::json!({
                             "agent": primary_agent_type, "round": "synthesis", "error": error,
                         })

@@ -74,8 +74,10 @@ under an unrelated agent.
   immediately before each launch. A future
   centralized guard can make this invariant structural once the agent runner
   is available for that refactor. [src: file:
-  backend/src/api/discussions/orchestration.rs:235-385] [src: file:
-  backend/src/workflows/steps.rs:241-310]
+  backend/src/api/discussions/orchestration.rs:60-130] [src: file:
+  backend/src/api/discussions/orchestration.rs:650-1035] [src: file:
+  backend/src/workflows/steps.rs:241-330] [src: file:
+  backend/src/workflows/steps.rs:888-930]
 - **Mid-thread `@mention` autocomplete doesn't suggest connection aliases.**
   The composer's autocomplete only lists built-in agents; typing a
   connection's exact alias (e.g. `@groq`) still dispatches correctly — the
