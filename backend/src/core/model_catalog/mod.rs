@@ -45,8 +45,9 @@ static RESOLVED_TIERS: LazyLock<std::sync::RwLock<HashMap<(String, u8), String>>
 /// The runner starts after catalogue preflight, on a synchronous hot path. Keep
 /// the discovered effort modes alongside the tier projection so it can reject a
 /// stale or incompatible preset without inventing a provider-wide effort list.
-static RESOLVED_REASONING_MODES: LazyLock<std::sync::RwLock<HashMap<(String, String), Vec<String>>>> =
-    LazyLock::new(|| std::sync::RwLock::new(HashMap::new()));
+static RESOLVED_REASONING_MODES: LazyLock<
+    std::sync::RwLock<HashMap<(String, String), Vec<String>>>,
+> = LazyLock::new(|| std::sync::RwLock::new(HashMap::new()));
 
 fn tier_key(tier: ModelTier) -> u8 {
     match tier {

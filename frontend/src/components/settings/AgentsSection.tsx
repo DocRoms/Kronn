@@ -155,49 +155,48 @@ export function AgentsSection({
   }>>({});
   const [savingTiers, setSavingTiers] = useState(false);
   const catalog = useApi(() => modelCatalogApi.list(), []);
-  const saveModelTier = useAsyncGuard(async (agentKey: keyof ModelTiersConfig, field: ModelTier, value: string) => {
+  // `useAsyncGuard` deliberately keeps its first callback. Keep the catalogue
+  // snapshot in a ref so a save after its asynchronous load validates against
+  // the current snapshot, not the mount-time `undefined` value.
+  const catalogRef = useRef(catalog.data);
+  catalogRef.current = catalog.data;
+  const saveTierPreference = useAsyncGuard(async (
+    agentKey: keyof ModelTiersConfig,
+    field: ModelTier,
+    change: { kind: 'model' | 'effort'; value: string },
+  ) => {
     setSavingTiers(true);
     try {
       // Other cards edit this same document; never replace it from our mount-time snapshot.
       const current = await configApi.getModelTiers();
-      const next: ModelTiersConfig = { ...current, [agentKey]: { ...current[agentKey], [field]: value || null } };
-      // An effort belongs to an exact discovered model, never to a provider
-      // family. If a new known model does not advertise the saved mode, clear
-      // it in the same write rather than presenting an ignored preference.
       const agent = Object.entries(AGENT_TIER_KEY).find(([, key]) => key === agentKey)?.[0] as AgentType | undefined;
       const effortField = `${field}_effort` as keyof ModelTierConfig;
-      const selectedModel = value.trim() || (agent
-        ? catalog.data?.targets
-          .find(target => target.runtime_target_id === modelRuntimeTargetId(agent))
-          ?.models.find(model => model.tier_assignment === field)?.model_id
-        : undefined);
-      const selected = agent && selectedModel
-        ? catalog.data?.targets
-          .find(target => target.runtime_target_id === modelRuntimeTargetId(agent))
-          ?.models.find(model => model.model_id === selectedModel)
+      const snapshot = catalogRef.current;
+      const target = agent
+        ? snapshot?.targets.find(view => view.runtime_target_id === modelRuntimeTargetId(agent))
         : undefined;
-      const savedEffort = next[agentKey][effortField];
-      if (selected && typeof savedEffort === 'string' && !selected.reasoning_modes.includes(savedEffort)) {
-        next[agentKey] = { ...next[agentKey], [effortField]: null };
+      const selectedModel = (change.kind === 'model' ? change.value : current[agentKey][field] ?? '').trim()
+        || target?.models.find(model => model.tier_assignment === field)?.model_id;
+      const selected = agent && selectedModel
+        ? target?.models.find(model => model.model_id === selectedModel)
+        : undefined;
+      if (change.kind === 'effort' && change.value &&
+          (!selected || selected.availability !== 'available' || !selected.reasoning_modes.includes(change.value))) {
+        toast(t('config.reasoningEffortUnavailable'), 'error');
+        return;
       }
-      await configApi.setModelTiers(next);
-      setTierEditing(editableTiers(next));
-      toast(t('config.saved'), 'success');
-    } catch {
-      toast(t('config.saveError'), 'error');
-    } finally {
-      setSavingTiers(false);
-    }
-  });
-  const saveTierEffort = useAsyncGuard(async (agentKey: keyof ModelTiersConfig, field: ModelTier, value: string) => {
-    setSavingTiers(true);
-    try {
-      const current = await configApi.getModelTiers();
-      const effortField = `${field}_effort` as keyof ModelTierConfig;
-      const next: ModelTiersConfig = {
-        ...current,
-        [agentKey]: { ...current[agentKey], [effortField]: value || null },
-      };
+      const nextAgent = { ...current[agentKey] };
+      if (change.kind === 'model') nextAgent[field] = change.value || null;
+      else nextAgent[effortField] = change.value || null;
+      // A model and its effort are one document transaction. Switching models
+      // atomically removes an effort that the current available entry cannot
+      // accept, including the no-entry fallback when the tier is cleared.
+      const savedEffort = nextAgent[effortField];
+      if (change.kind === 'model' && typeof savedEffort === 'string' && savedEffort &&
+          (!selected || selected.availability !== 'available' || !selected.reasoning_modes.includes(savedEffort))) {
+        nextAgent[effortField] = null;
+      }
+      const next: ModelTiersConfig = { ...current, [agentKey]: nextAgent };
       await configApi.setModelTiers(next);
       setTierEditing(editableTiers(next));
       toast(t('config.saved'), 'success');
@@ -1198,7 +1197,7 @@ export function AgentsSection({
               if (!editing) return null;
               const modelsUrl = AGENT_MODELS_URL[agentKey];
               const target = catalog.data?.targets.find(view => view.runtime_target_id === modelRuntimeTargetId(agent.agent_type));
-              const saveTiers = (field: ModelTier, value: string) => saveModelTier(agentKey, field, value);
+              const saveTiers = (field: ModelTier, value: string) => saveTierPreference(agentKey, field, { kind: 'model', value });
               const supportsEffort = agent.agent_type === 'ClaudeCode' || agent.agent_type === 'Codex';
 
               // KT-337 — a fetched-catalogue provider needs a free-text field, not a
@@ -1287,7 +1286,9 @@ export function AgentsSection({
                 const configuredModel = editing[field]
                   || target?.models.find(model => model.tier_assignment === field)?.model_id;
                 const entry = target?.models.find(model => model.model_id === configuredModel);
-                const modes = entry?.reasoning_modes ?? [];
+                // Match the runner's projection: unavailable and unknown
+                // entries have no launchable effort modes.
+                const modes = entry?.availability === 'available' ? entry.reasoning_modes : [];
                 const saved = editing[effortField];
                 const supported = modes.includes(saved);
                 return (
@@ -1299,7 +1300,7 @@ export function AgentsSection({
                       data-model-tier-effort={field}
                       value={saved}
                       disabled={savingTiers || catalog.loading || modes.length === 0}
-                      onChange={event => void saveTierEffort(agentKey, field, event.target.value)}
+                      onChange={event => void saveTierPreference(agentKey, field, { kind: 'effort', value: event.target.value })}
                     >
                       <option value="">{t('config.defaultModel')}</option>
                       {saved && !supported && <option value={saved} disabled>{saved} — {t('config.reasoningEffortUnavailable')}</option>}

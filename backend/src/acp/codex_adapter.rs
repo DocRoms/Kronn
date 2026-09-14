@@ -613,16 +613,27 @@ mod tests {
         ));
         let adapter = CodexAcpAdapter {
             program: fixture.to_string_lossy().into_owned(),
-            ..CodexAcpAdapter::new(Some("gpt-test".into()), Some("high".into()), false, None, None,
-                AcpSessionScope::new(Some(dir.path().to_path_buf()), "effort"))
+            ..CodexAcpAdapter::new(
+                Some("gpt-test".into()),
+                Some("high".into()),
+                false,
+                None,
+                None,
+                AcpSessionScope::new(Some(dir.path().to_path_buf()), "effort"),
+            )
         };
         let mut host = AcpHost::new(1, std::sync::Arc::new(adapter));
-        host.negotiate(init_request(&dir.path().to_string_lossy())).await.unwrap();
+        host.negotiate(init_request(&dir.path().to_string_lossy()))
+            .await
+            .unwrap();
         let target = host.create_session().await.unwrap();
         let (tx, _rx) = mpsc::channel(16);
         host.prompt(&target, "hello", tx).await.unwrap();
         let args = std::fs::read_to_string(argv).unwrap();
-        assert!(args.contains("model_reasoning_effort=\"high\""), "argv: {args}");
+        assert!(
+            args.contains("model_reasoning_effort=\"high\""),
+            "argv: {args}"
+        );
     }
 
     #[tokio::test]

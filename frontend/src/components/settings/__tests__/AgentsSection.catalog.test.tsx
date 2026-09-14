@@ -240,6 +240,40 @@ describe('AgentsSection — runtime catalogue and tier preservation (KT-531)', (
     }));
   });
 
+  it('uses the catalogue that arrived after mount when clearing an incompatible effort', async () => {
+    let resolveCatalog!: (snapshot: ModelCatalogSnapshot) => void;
+    list.mockImplementationOnce(() => new Promise<ModelCatalogSnapshot>(resolve => { resolveCatalog = resolve; }));
+    const current = tiers();
+    current.claude_code.economy_effort = 'high';
+    getTiers.mockResolvedValue(current);
+    show();
+    await act(async () => resolveCatalog({ targets: [target([
+      model('sonnet', { reasoning_modes: ['high'] }),
+      model('haiku', { reasoning_modes: ['low'] }),
+    ])] }));
+    const input = await picker();
+    fireEvent.focus(input);
+    fireEvent.click(await screen.findByRole('option', { name: 'haiku' }));
+    await waitFor(() => expect(setTiers).toHaveBeenCalledWith({
+      ...current,
+      claude_code: { ...current.claude_code, economy: 'haiku', economy_effort: null },
+    }));
+  });
+
+  it('rejects an effort selection when the current catalogue marks its model unavailable', async () => {
+    const current = tiers();
+    current.claude_code.economy_effort = 'high';
+    getTiers.mockResolvedValue(current);
+    list.mockResolvedValue({ targets: [target([
+      model('sonnet', { availability: 'unavailable', reasoning_modes: ['high'] }),
+    ])] });
+    const toast = show();
+    const effort = await screen.findByLabelText('config.reasoningEffort economy');
+    expect(effort).toBeDisabled();
+    expect(within(effort).getByRole('option', { name: /high.*reasoningEffortUnavailable/ })).toBeInTheDocument();
+    expect(toast).not.toHaveBeenCalledWith('config.saved', 'success');
+  });
+
   it('persists only a model-advertised effort preset', async () => {
     show();
     const effort = await screen.findByLabelText('config.reasoningEffort economy');

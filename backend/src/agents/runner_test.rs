@@ -7700,6 +7700,23 @@ Suite de la réponse.";
         assert!(effort_is_advertised("high", &["low".into(), "high".into()]));
     }
 
+    #[test]
+    fn launch_resolution_rejects_an_explicit_effort_without_a_catalogue_projection() {
+        let error = resolve_reasoning_effort(
+            Some("high"),
+            Some("manual-model"),
+            &AgentType::ClaudeCode,
+            ModelTier::Default,
+            None,
+        )
+        .expect_err("a mode absent from the available catalogue must not be silently omitted");
+        assert!(
+            error.contains("Cannot apply reasoning effort 'high'"),
+            "{error}"
+        );
+        assert!(error.contains("manual-model"), "{error}");
+    }
+
     // ─── Codex CLI arg construction: reasoning effort transmission ────────────
 
     #[test]
@@ -7736,7 +7753,9 @@ Suite de la réponse.";
             None,
         );
         assert!(
-            !args.iter().any(|a| a.starts_with("model_reasoning_effort=")),
+            !args
+                .iter()
+                .any(|a| a.starts_with("model_reasoning_effort=")),
             "no resolved effort must mean no override flag, not a guessed one",
         );
     }
@@ -7754,7 +7773,10 @@ Suite de la réponse.";
             None,
             None,
         );
-        let index = args.iter().position(|arg| arg == "--effort").expect("Claude argv must include --effort");
+        let index = args
+            .iter()
+            .position(|arg| arg == "--effort")
+            .expect("Claude argv must include --effort");
         assert_eq!(args.get(index + 1), Some(&"high".to_string()));
     }
 

@@ -2796,6 +2796,7 @@ fn tier_reasoning_effort(
 /// resolved model; this permits call sites that pre-resolve that same model,
 /// while preventing an unrelated internal model pin from carrying an
 /// incompatible effort. Kept `pub(crate)` for argv-boundary regression tests.
+#[cfg(test)]
 pub(crate) fn effective_reasoning_effort(
     effort_override: Option<&str>,
     model_override: Option<&str>,
@@ -2803,8 +2804,30 @@ pub(crate) fn effective_reasoning_effort(
     tier: ModelTier,
     model_tiers: Option<&ModelTiersConfig>,
 ) -> Option<String> {
+    resolve_reasoning_effort(
+        effort_override,
+        model_override,
+        agent_type,
+        tier,
+        model_tiers,
+    )
+    .ok()
+    .flatten()
+}
+
+/// Runtime boundary for the resolved effort. Unlike the UI helper above, this
+/// never turns a configured but unlaunchable effort into an omitted flag: a
+/// caller must surface the catalogue mismatch instead of claiming the CLI
+/// default applied the setting.
+fn resolve_reasoning_effort(
+    effort_override: Option<&str>,
+    model_override: Option<&str>,
+    agent_type: &AgentType,
+    tier: ModelTier,
+    model_tiers: Option<&ModelTiersConfig>,
+) -> Result<Option<String>, String> {
     if !agent_supports_reasoning_effort(agent_type) {
-        return None;
+        return Ok(None);
     }
     let tier_model = resolve_model_flag(agent_type, tier, model_tiers);
     let selected_model = effective_model_flag(model_override, agent_type, tier, model_tiers);
@@ -2813,12 +2836,23 @@ pub(crate) fn effective_reasoning_effort(
         selected_model.as_deref(),
         tier_model.as_deref(),
         tier_reasoning_effort(agent_type, tier, model_tiers).as_deref(),
-    )?;
+    );
 
-    let model = selected_model?;
+    let Some(candidate) = candidate else {
+        return Ok(None);
+    };
+
+    let model = selected_model.ok_or_else(|| {
+        format!(
+            "Cannot apply reasoning effort '{candidate}': no available model is resolved for this run. Choose an available catalogue model or clear the effort setting."
+        )
+    })?;
     crate::core::model_catalog::reasoning_modes_for_agent_model(agent_type, &model)
         .filter(|modes| effort_is_advertised(&candidate, modes))
-        .map(|_| candidate)
+        .map(|_| Some(candidate.clone()))
+        .ok_or_else(|| format!(
+            "Cannot apply reasoning effort '{candidate}' to model '{model}': the current catalogue does not list that available model/mode combination. Refresh the model catalogue or choose a supported effort."
+        ))
 }
 
 /// Pure precedence portion of effort resolution. The catalogue validation is
@@ -2829,11 +2863,19 @@ pub(crate) fn reasoning_effort_candidate(
     tier_model: Option<&str>,
     tier_preset: Option<&str>,
 ) -> Option<String> {
-    if let Some(effort) = effort_override.map(str::trim).filter(|value| !value.is_empty()) {
+    if let Some(effort) = effort_override
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
         return Some(effort.to_owned());
     }
     (selected_model == tier_model)
-        .then(|| tier_preset.map(str::trim).filter(|value| !value.is_empty()).map(str::to_owned))
+        .then(|| {
+            tier_preset
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+        })
         .flatten()
 }
 
@@ -3248,13 +3290,13 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
     // KT-646 — resolve reasoning effort the same way: explicit override wins,
     // else the tier's configured preset, else no flag (CLI default). Gated to
     // agents with a proven contract; every other agent gets `None` here.
-    let reasoning_effort = effective_reasoning_effort(
+    let reasoning_effort = resolve_reasoning_effort(
         config.reasoning_effort_override,
         config.model_override,
         config.agent_type,
         config.tier,
         config.model_tiers,
-    );
+    )?;
 
     let task_worker = config.task_worker_context.is_some();
     if task_worker
@@ -8589,9 +8631,8 @@ fn agent_command_with_task_worker_policy(
     mcp_context: &str,
     model_flag: Option<&str>,
     // KT-646 — resolved reasoning effort (see `effective_reasoning_effort`).
-    // Only the Codex branch consumes it today: it is the one agent
-    // `agent_supports_reasoning_effort` returns true for, so callers on
-    // every other agent always pass `None` here in practice.
+    // Only the Claude Code and Codex branches consume it: those are the
+    // agents `agent_supports_reasoning_effort` has a verified transport for.
     reasoning_effort: Option<&str>,
     task_worker: bool,
     task_work_dir: Option<&Path>,

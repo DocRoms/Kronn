@@ -82,7 +82,13 @@ impl ClaudeAcpAdapter {
     ) -> Self {
         Self {
             program: program.into(),
-            ..Self::new(model, None, full_access, None, AcpSessionScope::new(None, "test"))
+            ..Self::new(
+                model,
+                None,
+                full_access,
+                None,
+                AcpSessionScope::new(None, "test"),
+            )
         }
     }
 
@@ -455,11 +461,18 @@ mod tests {
         ));
         let adapter = ClaudeAcpAdapter {
             program: fixture.to_string_lossy().into_owned(),
-            ..ClaudeAcpAdapter::new(Some("sonnet".into()), Some("high".into()), false, None,
-                AcpSessionScope::new(Some(dir.path().to_path_buf()), "effort"))
+            ..ClaudeAcpAdapter::new(
+                Some("sonnet".into()),
+                Some("high".into()),
+                false,
+                None,
+                AcpSessionScope::new(Some(dir.path().to_path_buf()), "effort"),
+            )
         };
         let mut host = AcpHost::new(1, std::sync::Arc::new(adapter));
-        host.negotiate(init_request(&dir.path().to_string_lossy())).await.unwrap();
+        host.negotiate(init_request(&dir.path().to_string_lossy()))
+            .await
+            .unwrap();
         let target = host.create_session().await.unwrap();
         let (tx, _rx) = mpsc::channel(16);
         host.prompt(&target, "hello", tx).await.unwrap();
@@ -532,7 +545,8 @@ mod tests {
 
     #[test]
     fn full_access_is_translated_into_a_skip_permissions_flag_and_audited() {
-        let adapter = ClaudeAcpAdapter::new(None, None, true, None, AcpSessionScope::new(None, "test"));
+        let adapter =
+            ClaudeAcpAdapter::new(None, None, true, None, AcpSessionScope::new(None, "test"));
         assert!(adapter.broker.session_policy().claude_skip_permissions);
         assert!(adapter
             .permission_audit_log()
