@@ -218,7 +218,7 @@ pub(crate) async fn canonical_targets(
     // Naming the joined sessions is what `no_agent` already promises: "joined
     // peers remain participants and continue receiving turns".
     if !target_all && requested.is_empty() && no_agent && !sessions.is_empty() {
-        return Ok(sessions
+        return sessions
             .iter()
             .map(|session| {
                 Ok(MessageTarget::cli(
@@ -227,7 +227,7 @@ pub(crate) async fn canonical_targets(
                 ))
             })
             .collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(|error| error.to_string())?);
+            .map_err(|error| error.to_string());
     }
 
     let mut candidates = if target_all {
