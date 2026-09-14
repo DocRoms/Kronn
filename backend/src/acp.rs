@@ -452,6 +452,11 @@ pub struct AcpJsonRpcTransport {
     broker: Arc<AcpPermissionBroker>,
 }
 
+/// How long `shutdown` waits for the stdout dispatcher after the child is
+/// reaped. Only a descendant holding the inherited pipe can exceed this, and
+/// blocking shutdown on that is worse than abandoning the drain.
+const DISPATCHER_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// The process and the task draining its stdout have one lifecycle. Keeping
 /// them together lets shutdown reap the process before joining the dispatcher.
 struct AcpProcess {
@@ -622,7 +627,7 @@ impl AcpJsonRpcTransport {
                     let _ = notifications.send(message);
                 }
             }
-        });
+        })
     }
 
     async fn request(&self, method: &str, params: Value) -> Result<Value, AcpError> {
@@ -1119,9 +1124,29 @@ impl AcpTransport for AcpJsonRpcTransport {
                 errors.push(format!("wait for ACP process: {error}"));
             }
         }
-        if let Some(dispatcher) = process.dispatcher.take() {
-            if let Err(error) = dispatcher.await {
-                errors.push(format!("join ACP dispatcher: {error}"));
+        if let Some(mut dispatcher) = process.dispatcher.take() {
+            // The dispatcher blocks on the child's stdout. Reaping the child
+            // does not close that pipe when a DESCENDANT inherited it, so an
+            // unbounded join would hang shutdown forever. Bound the wait, then
+            // abort: dropping a `JoinHandle` only detaches, it never cancels.
+            // `&mut` keeps the handle usable after the timeout consumes it.
+            match timeout(DISPATCHER_JOIN_TIMEOUT, &mut dispatcher).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => errors.push(format!("join ACP dispatcher: {error}")),
+                Err(_) => {
+                    // NOT an error: the child is reaped and the task is
+                    // cancelled, so nothing leaks. Only a descendant holding the
+                    // inherited pipe reaches here, and failing a shutdown for it
+                    // would turn a SUCCESSFUL discovery into a provider error
+                    // (`acp_discovery::discover_with_transport` maps any
+                    // shutdown error onto its outcome). Visible, not fatal.
+                    dispatcher.abort();
+                    tracing::warn!(
+                        agent = ?self.agent,
+                        "ACP dispatcher still held the inherited stdout after the process was \
+                         reaped; aborted the drain"
+                    );
+                }
             }
         }
         if errors.is_empty() {
@@ -2129,23 +2154,42 @@ done"#]);
     #[cfg(unix)]
     struct FixtureCleanup {
         pid_file: tempfile::NamedTempFile,
+        /// Armed until the test has OBSERVED the process gone. After that the
+        /// kernel may hand the same number to somebody else, so the guard must
+        /// not fire: signalling a recycled PID is worse than leaking nothing.
+        armed: bool,
     }
 
     #[cfg(unix)]
     impl FixtureCleanup {
+        fn new() -> Self {
+            Self {
+                pid_file: tempfile::NamedTempFile::new().unwrap(),
+                armed: true,
+            }
+        }
+
         fn pid(&self) -> Option<String> {
             std::fs::read_to_string(self.pid_file.path())
                 .ok()
                 .filter(|pid| !pid.trim().is_empty())
                 .map(|pid| pid.trim().to_owned())
         }
+
+        fn disarm(&mut self) {
+            self.armed = false;
+        }
     }
 
     #[cfg(unix)]
     impl Drop for FixtureCleanup {
         fn drop(&mut self) {
-            // The fixture writes only its own PID. This best-effort guard is
-            // deliberately precise: a failed assertion cannot sweep unrelated PIDs.
+            // The fixture writes only its own PID, and the guard is disarmed as
+            // soon as the test has seen that PID disappear. What remains is the
+            // failure path: a process this test started and nobody reaped.
+            if !self.armed {
+                return;
+            }
             if let Some(pid) = self.pid() {
                 let _ = std::process::Command::new("kill")
                     .args(["-TERM", &pid])
@@ -2154,14 +2198,19 @@ done"#]);
         }
     }
 
+    /// Poll interval for the fixture guards. `yield_now` would spin the
+    /// scheduler and fork a `kill` per iteration; this stays quiet.
+    #[cfg(unix)]
+    const FIXTURE_POLL: Duration = Duration::from_millis(10);
+
     #[cfg(unix)]
     async fn fixture_pid(cleanup: &FixtureCleanup) -> String {
-        timeout(Duration::from_secs(1), async {
+        timeout(Duration::from_secs(5), async {
             loop {
                 if let Some(pid) = cleanup.pid() {
                     return pid;
                 }
-                tokio::task::yield_now().await;
+                tokio::time::sleep(FIXTURE_POLL).await;
             }
         })
         .await
@@ -2178,9 +2227,9 @@ done"#]);
 
     #[cfg(unix)]
     async fn fixture_exits(pid: &str) -> bool {
-        timeout(Duration::from_secs(1), async {
+        timeout(Duration::from_secs(5), async {
             while fixture_is_running(pid) {
-                tokio::task::yield_now().await;
+                tokio::time::sleep(FIXTURE_POLL).await;
             }
         })
         .await
@@ -2190,9 +2239,7 @@ done"#]);
     #[cfg(unix)]
     #[tokio::test]
     async fn rejected_negotiation_abandons_and_terminates_the_owned_fixture_process() {
-        let cleanup = FixtureCleanup {
-            pid_file: tempfile::NamedTempFile::new().unwrap(),
-        };
+        let mut cleanup = FixtureCleanup::new();
         let mut command = crate::core::cmd::async_cmd("sh");
         command
             .env("PID_FILE", cleanup.pid_file.path())
@@ -2220,8 +2267,13 @@ done"#]);
         drop(host);
         drop(transport);
 
+        let exited = fixture_exits(&pid).await;
+        if exited {
+            // Observed gone: the number may now belong to someone else.
+            cleanup.disarm();
+        }
         assert!(
-            fixture_exits(&pid).await,
+            exited,
             "dropping the rejected transport must terminate its owned fixture"
         );
     }
@@ -2229,9 +2281,7 @@ done"#]);
     #[cfg(unix)]
     #[tokio::test]
     async fn shutdown_is_idempotent_and_reaps_the_owned_fixture_process() {
-        let cleanup = FixtureCleanup {
-            pid_file: tempfile::NamedTempFile::new().unwrap(),
-        };
+        let mut cleanup = FixtureCleanup::new();
         let mut command = crate::core::cmd::async_cmd("sh");
         command.env("PID_FILE", cleanup.pid_file.path()).args([
             "-c",
@@ -2246,8 +2296,12 @@ while IFS= read -r _; do :; done"#,
         transport.shutdown().await.unwrap();
         transport.shutdown().await.unwrap();
 
+        let exited = fixture_exits(&pid).await;
+        if exited {
+            cleanup.disarm();
+        }
         assert!(
-            fixture_exits(&pid).await,
+            exited,
             "shutdown must wait until the owned fixture is reaped"
         );
     }
