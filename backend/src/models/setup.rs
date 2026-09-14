@@ -614,6 +614,19 @@ pub struct ModelTierConfig {
     pub default: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<String>,
+    /// KT-646 — optional reasoning-effort preset for the `economy` slot.
+    /// `None` means "pass no effort flag, the runtime's own CLI default
+    /// applies" — never a silently assigned `high`/`max`. Only consumed for
+    /// an agent `runner::agent_supports_reasoning_effort` returns true for;
+    /// every other agent ignores it (see `runner::effective_reasoning_effort`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub economy_effort: Option<String>,
+    /// Same as `economy_effort`, paired with the `default` tier slot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_effort: Option<String>,
+    /// Same as `economy_effort`, paired with the `reasoning` tier slot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
 }
 
 /// Global model tier overrides per agent.

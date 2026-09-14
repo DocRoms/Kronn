@@ -7,6 +7,30 @@ use kronn::models::{
 };
 use serial_test::serial;
 
+/// Both shipped entry points must finish loading the durable projection
+/// before a workflow, batch or discussion can launch an agent. The SQLite
+/// tests below own bootstrap behavior; this guard owns entry-point wiring.
+#[test]
+fn both_entry_points_bootstrap_the_catalog_before_starting_workers() {
+    for (name, source) in [
+        ("standalone", include_str!("../src/main.rs")),
+        (
+            "desktop",
+            include_str!("../../desktop/src-tauri/src/main.rs"),
+        ),
+    ] {
+        let bootstrap = source
+            .find("migrate_hardcoded_catalog_once(&database, &app_config).await")
+            .unwrap_or_else(|| panic!("{name} must await durable catalog bootstrap"));
+        let workers = source.find("let workflow_engine =").unwrap();
+        let serve = source.find("axum::serve(").unwrap();
+        assert!(
+            bootstrap < workers && bootstrap < serve,
+            "{name} must bootstrap before launches"
+        );
+    }
+}
+
 async fn pin_cached_claude_catalog(database: &Database) -> chrono::DateTime<chrono::Utc> {
     // Integration tests link the production library, so an absent refresh log
     // would probe the installed CLI and overwrite this migration-only fixture.
@@ -167,6 +191,11 @@ async fn historical_bootstrap_does_not_compete_with_an_existing_manual_tier() {
     model_catalog::migrate_hardcoded_catalog_once(&database, &default_config())
         .await
         .unwrap();
+    assert_eq!(
+        model_catalog::reasoning_modes_for_agent_model(&AgentType::ClaudeCode, "operator/known"),
+        Some(vec!["high".into()]),
+        "bootstrap must populate effort modes before the first run"
+    );
     let rows = database
         .with_read_conn(|conn| store::list_for_target(conn, "agent:claude-code"))
         .await

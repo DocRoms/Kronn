@@ -12,6 +12,14 @@ import type { Page, Locator } from '@playwright/test';
 export class SettingsPage {
   constructor(private readonly page: Page) {}
 
+  modelPreset(agentType: string, tier: string): Locator {
+    return this.page.locator(`[data-model-tier-agent="${agentType}"][data-model-tier="${tier}"]`);
+  }
+
+  effortPreset(agentType: string, tier: string): Locator {
+    return this.page.locator(`[data-model-tier-effort-agent="${agentType}"][data-model-tier-effort="${tier}"]`);
+  }
+
   /** Agent settings live in a folded card; opening it never changes access. */
   async openAgentConfiguration(agentType: string): Promise<Locator> {
     const toggle = this.page.getByTestId(`agent-configure-${agentType}`);

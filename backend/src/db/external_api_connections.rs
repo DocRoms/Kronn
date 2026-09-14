@@ -506,11 +506,13 @@ mod tests {
             economy: Some("lite-economy".into()),
             default: Some("lite-default".into()),
             reasoning: Some("lite-reasoning".into()),
+            ..Default::default()
         };
         config.agents.model_tiers.nvidia = ModelTierConfig {
             economy: Some("nim-economy".into()),
             default: Some("nim-default".into()),
             reasoning: Some("nim-reasoning".into()),
+            ..Default::default()
         };
         config.tokens.keys = vec![
             ApiKey {
