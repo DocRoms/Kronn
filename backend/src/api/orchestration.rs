@@ -14358,43 +14358,151 @@ mod tests {
     /// REVIEWED, but attempt N owns its delivery and message identities as
     /// soon as it was DELIVERED. Its own comment already says
     /// "delivery/review/message"; this pins the code to it.
+    ///
+    /// The three origins are exercised separately rather than by equivalence:
+    /// what differs between them is not the guard but what brings a delivered
+    /// execution to `Escalated` with no review, and nothing keeps that shared.
+    /// The review-wait and total-duration doors run the real watchdog entry
+    /// point; the unavailable-worker door is the state its reconciler leaves.
     #[tokio::test]
     async fn reassigning_an_attempt_that_already_delivered_advances_it() {
-        let repo = init_repo();
-        let db = Database::open_in_memory().unwrap();
-        let (_parent, _child, exec_id, _head, _path) =
-            delivered_awaiting_review(&db, repo.path()).await;
-        let before = exec_of(&db, &exec_id).await;
+        for origin in ["review_wait", "total_duration", "agent_unavailable"] {
+            let repo = init_repo();
+            let db = Database::open_in_memory().unwrap();
+            let (_parent, _child, exec_id, _head, _path) =
+                delivered_awaiting_review(&db, repo.path()).await;
+            let before = exec_of(&db, &exec_id).await;
+            assert_eq!(before.status, TaskExecutionStatus::AwaitingReview);
 
-        let execution_id = exec_id.clone();
-        let reassigned = db
-            .with_conn(move |conn| {
-                crate::db::orchestration::transition_execution(
-                    conn,
-                    &execution_id,
-                    TaskExecutionStatus::Escalated,
-                    &backend_actor(),
-                    serde_json::json!({ "timeout_kind": "review_wait" }),
-                )?;
-                Ok(crate::db::orchestration::reassign_execution_worker(
-                    conn,
-                    &execution_id,
-                    &crate::models::CampaignWorkerSelection {
-                        target: MessageTarget::cli(AgentType::ClaudeCode, 101),
-                        model: None,
-                        profile_id: None,
-                    },
-                    "the worker session disappeared",
-                    &backend_actor(),
-                )?)
+            let execution_id = exec_id.clone();
+            db.with_conn(move |conn| {
+                match origin {
+                    "review_wait" => {
+                        crate::db::orchestration::apply_execution_timeout(
+                            conn,
+                            &execution_id,
+                            crate::models::ExecutionTimeoutKind::ReviewWait,
+                        )?;
+                    }
+                    "total_duration" => {
+                        crate::db::orchestration::apply_execution_timeout(
+                            conn,
+                            &execution_id,
+                            crate::models::ExecutionTimeoutKind::TotalDuration,
+                        )?;
+                    }
+                    // The worker's CLI session is gone after a restart: the
+                    // reconciler parks the execution without any review.
+                    _ => {
+                        crate::db::orchestration::transition_execution(
+                            conn,
+                            &execution_id,
+                            TaskExecutionStatus::Escalated,
+                            &backend_actor(),
+                            serde_json::json!({ "recovery": "agent_unavailable" }),
+                        )?;
+                        conn.execute(
+                            "UPDATE task_execution_recovery SET recovery_action = \
+                                    'block_agent_unavailable' WHERE task_execution_id = ?1",
+                            rusqlite::params![execution_id],
+                        )?;
+                    }
+                }
+                Ok(())
             })
             .await
             .unwrap();
+            let escalated = exec_of(&db, &exec_id).await;
+            assert_eq!(
+                escalated.status,
+                TaskExecutionStatus::Escalated,
+                "{origin}: the execution must be parked before the reassignment"
+            );
 
+            let execution_id = exec_id.clone();
+            let reassigned = db
+                .with_conn(move |conn| {
+                    Ok(crate::db::orchestration::reassign_execution_worker(
+                        conn,
+                        &execution_id,
+                        &crate::models::CampaignWorkerSelection {
+                            target: MessageTarget::cli(AgentType::ClaudeCode, 101),
+                            model: None,
+                            profile_id: None,
+                        },
+                        "the worker never handed anything back",
+                        &backend_actor(),
+                    )?)
+                })
+                .await
+                .unwrap();
+
+            assert_eq!(
+                reassigned.attempt_no,
+                before.attempt_no + 1,
+                "{origin}: an attempt that already delivered cannot be reused"
+            );
+        }
+    }
+
+    /// KT-648 — the belt. With the guard above, an already-taken obligation id
+    /// is a path nobody has foreseen; it must still never abort the delivery.
+    /// Re-keying is the only answer that neither rewrites a message this
+    /// delivery does not own nor leaves a stale `head_sha` standing as the
+    /// live obligation.
+    #[tokio::test]
+    async fn an_occupied_review_identity_never_aborts_the_delivery() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (_task_ref, parent, _child, exec_id) = attached_cli_worker(&db, repo.path()).await;
+        seed_cli_session(&db, 102, &parent, "sess-b").await;
+
+        // Somebody else already holds the identity this delivery will mint.
+        let squatter_id = format!("orch-review-request:{exec_id}:0");
+        let squatter_parent = parent.clone();
+        let squatter = squatter_id.clone();
+        db.with_conn(move |conn| {
+            let message = orchestrator_message(squatter, "not this delivery's obligation".into());
+            crate::db::discussions::insert_message(conn, &squatter_parent, &message)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        let manifest = clean_manifest_for_execution(&db, &exec_id).await;
+        let delivered = deliver_worker_manifest(&db, &exec_id, "ClaudeCode", "sess-a", &manifest)
+            .await
+            .expect("an occupied identity must not abort the delivery");
+        assert!(matches!(delivered, DeliverOutcome::Delivered { .. }));
         assert_eq!(
-            reassigned.attempt_no,
-            before.attempt_no + 1,
-            "an attempt that already delivered cannot be reused for the next delivery"
+            exec_of(&db, &exec_id).await.status,
+            TaskExecutionStatus::AwaitingReview
+        );
+
+        let squatter_read = squatter_id.clone();
+        let (untouched, obligations): (String, i64) = db
+            .with_conn(move |conn| {
+                let untouched = conn.query_row(
+                    "SELECT content FROM messages WHERE id = ?1",
+                    rusqlite::params![squatter_read],
+                    |row| row.get::<_, String>(0),
+                )?;
+                let obligations = conn.query_row(
+                    "SELECT COUNT(*) FROM messages WHERE id LIKE ?1",
+                    rusqlite::params![format!("{squatter_read}:r%")],
+                    |row| row.get::<_, i64>(0),
+                )?;
+                Ok((untouched, obligations))
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            untouched, "not this delivery's obligation",
+            "the delivery must never rewrite a message it does not own"
+        );
+        assert_eq!(
+            obligations, 1,
+            "the obligation is published under an identity of its own"
         );
     }
 

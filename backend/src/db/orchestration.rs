@@ -2460,8 +2460,11 @@ pub struct DeliveryCheckpoint<'a> {
     pub manifest_json: &'a str,
     /// The principal (parent) room the review request is posted into.
     pub parent_discussion_id: &'a str,
-    /// Pre-built review-request message — its id is deterministic per `(exec, attempt)`, so
-    /// a resume never double-posts (the message PK rejects it).
+    /// Pre-built review-request message. Its id is deterministic per `(exec, attempt)`,
+    /// which keeps a resume from posting a second obligation — but the PRIMARY KEY is
+    /// not what enforces that: a violation here would abort the whole delivery, not
+    /// skip one insert. The attempt guard in `reassign_execution_worker` is what keeps
+    /// the identity unique; `commit_delivery_checkpoint` re-keys defensively (KT-648).
     pub review_request: &'a DiscussionMessage,
     /// The exact principal target the review request is addressed to (the parent's native
     /// agent). Posted with ZERO dispatch: a joined-CLI principal is woken via
@@ -2569,11 +2572,33 @@ pub fn commit_delivery_checkpoint(
             )?;
             // (4) Principal-targeted review request in the PARENT room, ZERO dispatch (no
             // phantom native turn; a joined-CLI principal is woken by wait_for_peer).
+            //
+            // KT-648 — the identity is deterministic, and the attempt guard above is what
+            // keeps it unique. Should an unforeseen path hand us one that is already taken,
+            // re-key THIS obligation instead of hitting `messages.id`: a PRIMARY KEY error
+            // would roll the transition, the manifest and the obligation event back
+            // together and strand the execution in `Working` for good. Re-keying is the
+            // only option that neither rewrites a message we do not own nor leaves a stale
+            // `head_sha` standing as the live review obligation.
+            let mut review_request = input.review_request.clone();
+            let identity_taken: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM messages WHERE id = ?1)",
+                [&review_request.id],
+                |row| row.get(0),
+            )?;
+            if identity_taken {
+                let occurrence: i64 = tx.query_row(
+                    "SELECT COUNT(*) FROM messages WHERE id = ?1 OR id LIKE ?2",
+                    params![&review_request.id, format!("{}:r%", review_request.id)],
+                    |row| row.get(0),
+                )?;
+                review_request.id = format!("{}:r{occurrence}", review_request.id);
+            }
             let targets = [input.principal_target.clone()];
             crate::db::discussions::insert_message_with_targets_and_dispatches_within_tx(
                 &tx,
                 input.parent_discussion_id,
-                input.review_request,
+                &review_request,
                 &targets,
                 &[],
                 None,
@@ -4805,8 +4830,13 @@ pub fn reassign_execution_worker(
         // send-backs did the same after an approve. In both cases attempt N already owns its
         // delivery/review/message audit identities, so the next delivery must use N+1.
         // Correct rows already point at an unreviewed attempt, making this idempotent.
+        // KT-648: a DELIVERY is enough. An escalation that never produced a review —
+        // a review-wait or total timeout, or a worker that became unavailable —
+        // leaves the attempt reviewless while it already owns its message identities.
         let repaired_rework_attempt =
-            crate::db::worker_reviews::get_review(conn, exec_id, execution.attempt_no)?.is_some();
+            crate::db::worker_reviews::get_review(conn, exec_id, execution.attempt_no)?.is_some()
+                || crate::db::worker_deliveries::get_delivery(conn, exec_id, execution.attempt_no)?
+                    .is_some();
         if repaired_rework_attempt {
             conn.execute(
                 "UPDATE task_executions SET attempt_no = attempt_no + 1, updated_at = ?2 \
