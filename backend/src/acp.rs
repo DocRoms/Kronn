@@ -2287,98 +2287,124 @@ done"#]);
             .expect_err("a cancelled shutdown must not leave the drain detached");
     }
 
-    /// A liveness rendezvous the TEST owns, with no PID anywhere.
+    /// A liveness rendezvous the TEST owns, over a real async socket.
     ///
-    /// The fixture holds a FIFO open for writing; the test holds the read end.
-    /// While the process lives the pipe stays open, and when it dies the kernel
-    /// closes its end — the test observes EOF. That EOF is an event, so nothing
-    /// is polled and nothing is slept on. On a failure path the test simply
-    /// drops its end: the fixture, blocked on a stdin that the transport owns,
-    /// is terminated by `kill_on_drop`, and no signal is ever sent to a number
-    /// that may have been recycled.
+    /// A FIFO read through `tokio::fs` is delegated to `spawn_blocking`, where
+    /// a future timeout does not cancel the blocking call — a RED could pin a
+    /// blocking-pool thread for the rest of the suite. A `UnixStream` is polled
+    /// by the reactor instead: every wait here is cancellable.
+    ///
+    /// The fixture exits on its OWN when the test drops the connection, so
+    /// cleanup works against the broken implementation too. It deliberately
+    /// SURVIVES stdin EOF, the way a real agent does — otherwise dropping the
+    /// transport would end it for a reason that has nothing to do with process
+    /// ownership, and the RED would pass without the fix.
     #[cfg(unix)]
-    struct FixtureLiveness {
+    struct FixtureLink {
         _dir: tempfile::TempDir,
         path: std::path::PathBuf,
+        listener: tokio::net::UnixListener,
     }
 
+    /// Anti-hang bound only: every wait below resolves on a socket event, and
+    /// this exists so a broken build fails instead of blocking the suite.
     #[cfg(unix)]
-    impl FixtureLiveness {
+    const FIXTURE_GUARD: Duration = Duration::from_secs(30);
+
+    #[cfg(unix)]
+    impl FixtureLink {
         fn new() -> Self {
             let dir = tempfile::tempdir().unwrap();
-            let path = dir.path().join("alive");
-            let status = std::process::Command::new("mkfifo")
-                .arg(&path)
-                .status()
-                .expect("mkfifo must be available on a unix test host");
-            assert!(status.success(), "mkfifo failed for {path:?}");
-            Self { _dir: dir, path }
+            let path = dir.path().join("acp-fixture.sock");
+            let listener = tokio::net::UnixListener::bind(&path).unwrap();
+            Self {
+                _dir: dir,
+                path,
+                listener,
+            }
         }
 
-        /// Opens the read end and waits for the fixture's READY byte, proving
-        /// the process reached its blocking state before the test acts.
-        async fn wait_ready(&self) -> tokio::fs::File {
-            let mut reader = timeout(FIXTURE_GUARD, tokio::fs::File::open(&self.path))
+        /// python3 is already a project dependency (`core::mcp_scanner`,
+        /// `core::quick_exec`). Only the stdlib is used here.
+        fn command(&self, initialize_reply: Option<&str>) -> tokio::process::Command {
+            let mut command = crate::core::cmd::async_cmd("python3");
+            command.env("ACP_SOCK", &self.path);
+            if let Some(reply) = initialize_reply {
+                command.env("ACP_REPLY", reply);
+            }
+            command.args([
+                "-c",
+                r#"
+import os, select, socket, sys
+
+sock = socket.socket(socket.AF_UNIX)
+sock.connect(os.environ["ACP_SOCK"])
+sock.sendall(b"READY")
+
+reply = os.environ.get("ACP_REPLY", "")
+stdin = sys.stdin.buffer
+watch = [sock, stdin]
+while True:
+    ready, _, _ = select.select(watch, [], [])
+    if sock in ready:
+        if not sock.recv(1):
+            break                 # the test released us: exit on our own
+    if stdin in ready:
+        line = stdin.readline()
+        if not line:
+            watch = [sock]        # a real agent survives stdin EOF
+        elif reply and '"method":"initialize"' in line.decode("utf-8", "replace"):
+            sys.stdout.write(reply + "\n")
+            sys.stdout.flush()
+"#,
+            ]);
+            command
+        }
+
+        /// Accept the fixture and read its READY, proving it reached its
+        /// blocking state before the test acts on the transport.
+        async fn accept_ready(&self) -> tokio::net::UnixStream {
+            let (mut stream, _) = timeout(FIXTURE_GUARD, self.listener.accept())
                 .await
-                .expect("opening the liveness pipe must not hang")
-                .expect("the fixture must open its liveness pipe");
+                .expect("the fixture must connect")
+                .expect("the fixture must connect");
             let mut ready = [0u8; 5];
-            timeout(FIXTURE_GUARD, reader.read_exact(&mut ready))
+            timeout(FIXTURE_GUARD, stream.read_exact(&mut ready))
                 .await
                 .expect("the fixture must announce itself")
                 .expect("the fixture must announce itself");
             assert_eq!(&ready, b"READY");
-            reader
+            stream
         }
     }
 
-    /// Anti-hang bound only: every wait below resolves on an event, and this
-    /// exists so a broken build fails instead of blocking the suite forever.
+    /// EOF on the socket means the fixture is gone. An IO error is NOT counted
+    /// as success: it would prove nothing about the process.
     #[cfg(unix)]
-    const FIXTURE_GUARD: Duration = Duration::from_secs(30);
-
-    /// EOF on the liveness pipe means every writer is gone — the fixture and
-    /// anything that inherited its descriptors. An IO error is NOT treated as
-    /// success: it would prove nothing about the process.
-    #[cfg(unix)]
-    async fn fixture_is_gone(reader: &mut tokio::fs::File) -> bool {
+    async fn fixture_is_gone(stream: &mut tokio::net::UnixStream) -> bool {
         let mut rest = Vec::new();
         matches!(
-            timeout(FIXTURE_GUARD, reader.read_to_end(&mut rest)).await,
+            timeout(FIXTURE_GUARD, stream.read_to_end(&mut rest)).await,
             Ok(Ok(_))
         )
     }
 
-    #[cfg(unix)]
-    fn fixture_command(liveness: &FixtureLiveness, script: &str) -> tokio::process::Command {
-        let mut command = crate::core::cmd::async_cmd("sh");
-        command.env("ALIVE", &liveness.path).args(["-c", script]);
-        command
-    }
-
     /// DoD — abandonment: a transport dropped after a REJECTED negotiation must
-    /// not leave its process behind. Observed through the pipe closing, never
-    /// through a PID.
+    /// not leave its process behind. The fixture ignores stdin EOF, so only
+    /// real process ownership can end it.
     #[cfg(unix)]
     #[tokio::test]
     async fn a_rejected_negotiation_dropped_terminates_the_owned_fixture() {
-        let liveness = FixtureLiveness::new();
-        let command = fixture_command(
-            &liveness,
-            r#"exec 3>"$ALIVE"
-printf 'READY' >&3
-while IFS= read -r line; do
-    case "$line" in
-        *'"method":"initialize"'*) printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":2}}' ;;
-    esac
-done"#,
-        );
+        let link = FixtureLink::new();
+        let command = link.command(Some(
+            r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":2}}"#,
+        ));
         let transport = Arc::new(
             AcpJsonRpcTransport::spawn(AcpAgent::OpenCode, command, false)
                 .await
                 .unwrap(),
         );
-        let mut alive = liveness.wait_ready().await;
+        let mut alive = link.accept_ready().await;
         let mut host = AcpHost::new(1, transport.clone());
 
         assert_eq!(
@@ -2401,17 +2427,11 @@ done"#,
     #[cfg(unix)]
     #[tokio::test]
     async fn shutdown_is_idempotent_and_reaps_the_owned_fixture() {
-        let liveness = FixtureLiveness::new();
-        let command = fixture_command(
-            &liveness,
-            r#"exec 3>"$ALIVE"
-printf 'READY' >&3
-while IFS= read -r _; do :; done"#,
-        );
-        let transport = AcpJsonRpcTransport::spawn(AcpAgent::OpenCode, command, false)
+        let link = FixtureLink::new();
+        let transport = AcpJsonRpcTransport::spawn(AcpAgent::OpenCode, link.command(None), false)
             .await
             .unwrap();
-        let mut alive = liveness.wait_ready().await;
+        let mut alive = link.accept_ready().await;
 
         transport.shutdown().await.unwrap();
         transport.shutdown().await.unwrap();
