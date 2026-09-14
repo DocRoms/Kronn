@@ -201,8 +201,9 @@ operator-overridable through the same manual-entry path as
 `UpsertManualModelRequest` preserves the existing value (COALESCE) instead
 of clearing it, so an unrelated edit (e.g. a rename) cannot silently wipe an
 auto-detected or previously-confirmed assessment.
-[src: file: backend/src/db/model_catalog.rs (derive_opencode_zen_overlay, reconcile_live)]
+[src: file: backend/src/db/model_catalog.rs:501]
+[src: file: backend/src/db/model_catalog.rs:537]
 [src: file: backend/src/db/sql/164_model_catalog_cost_privacy.sql]
-[src: file: backend/src/models/model_catalog.rs (ModelCostHint)]
+[src: file: backend/src/models/model_catalog.rs:76]
 [src: url: https://opencode.ai/docs/zen/]
 [src: url: https://opencode.ai/zen/v1/models]

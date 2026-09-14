@@ -3504,12 +3504,18 @@ pub fn apply_remote_message_revision_with_targets(
         return Ok(false);
     }
 
-    let Some((current_content, target_sort_order)) = transaction
+    let Some((current_content, target_sort_order, channel)) = transaction
         .query_row(
-            "SELECT content, sort_order FROM messages
+            "SELECT content, sort_order, channel FROM messages
              WHERE id = ?1 AND discussion_id = ?2 AND role = 'User'",
             params![event.target_message_id, event.discussion_id],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
         )
         .optional()?
     else {
@@ -3518,6 +3524,9 @@ pub fn apply_remote_message_revision_with_targets(
     if content_hash(&current_content) != event.previous_content_hash {
         return Ok(false);
     }
+    // The event uses the existing wire contract; the target's persisted
+    // channel decides its semantics, never an untrusted wire target list.
+    let is_note = channel == "note";
 
     let local_sort_order: i64 = transaction.query_row(
         "UPDATE discussions
@@ -3527,8 +3536,16 @@ pub fn apply_remote_message_revision_with_targets(
         [&event.discussion_id],
         |row| row.get(0),
     )?;
-    transaction.execute(
-        "INSERT INTO message_tombstones (
+    if is_note {
+        // A correction to a note has no conversation projection to discard.
+        // Keep its written-at date, routing and the main-thread summary intact.
+        transaction.execute(
+            "UPDATE messages SET content = ?1 WHERE id = ?2 AND discussion_id = ?3",
+            params![event.content, event.target_message_id, event.discussion_id],
+        )?;
+    } else {
+        transaction.execute(
+            "INSERT INTO message_tombstones (
              id, discussion_id, role, content, agent_type, timestamp, sort_order,
              tokens_used, auth_mode, model_tier, cost_usd, author_pseudo,
              author_avatar_email, source_msg_id, duration_ms, lint_report, model,
@@ -3543,35 +3560,40 @@ pub fn apply_remote_message_revision_with_targets(
          FROM messages
          WHERE discussion_id = ?1 AND sort_order > ?2
            AND role IN ('Agent', 'System')",
-        params![
-            event.discussion_id,
-            target_sort_order,
-            event.id,
-            event.revision,
-        ],
-    )?;
-    transaction.execute(
-        "DELETE FROM messages
+            params![
+                event.discussion_id,
+                target_sort_order,
+                event.id,
+                event.revision,
+            ],
+        )?;
+        transaction.execute(
+            "DELETE FROM messages
          WHERE discussion_id = ?1 AND sort_order > ?2
            AND role IN ('Agent', 'System')",
-        params![event.discussion_id, target_sort_order],
-    )?;
-    transaction.execute(
-        "UPDATE messages SET content = ?1, timestamp = ?2
+            params![event.discussion_id, target_sort_order],
+        )?;
+        transaction.execute(
+            "UPDATE messages SET content = ?1, timestamp = ?2
          WHERE id = ?3 AND discussion_id = ?4",
-        params![
-            event.content,
-            event.revision,
-            event.target_message_id,
-            event.discussion_id,
-        ],
-    )?;
-    replace_message_targets(&transaction, &event.target_message_id, targets)?;
-    let target_agent_json = event
-        .target_agent
-        .as_ref()
-        .map(serde_json::to_string)
-        .transpose()?;
+            params![
+                event.content,
+                event.revision,
+                event.target_message_id,
+                event.discussion_id,
+            ],
+        )?;
+        replace_message_targets(&transaction, &event.target_message_id, targets)?;
+    }
+    let target_agent_json = if is_note {
+        None
+    } else {
+        event
+            .target_agent
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?
+    };
     transaction.execute(
         "INSERT INTO message_revision_events (
              id, discussion_id, target_message_id, previous_content_hash,
@@ -3592,14 +3614,16 @@ pub fn apply_remote_message_revision_with_targets(
             event.created_at.to_rfc3339(),
         ],
     )?;
-    transaction.execute(
-        "UPDATE discussions SET message_count = (
-             SELECT COUNT(*) FROM messages WHERE discussion_id = ?1
-         ) WHERE id = ?1",
-        [&event.discussion_id],
-    )?;
-    invalidate_summary_cache(&transaction, &event.discussion_id)?;
-    update_discussion_timestamp(&transaction, &event.discussion_id)?;
+    if !is_note {
+        transaction.execute(
+            "UPDATE discussions SET message_count = (
+                 SELECT COUNT(*) FROM messages WHERE discussion_id = ?1
+             ) WHERE id = ?1",
+            [&event.discussion_id],
+        )?;
+        invalidate_summary_cache(&transaction, &event.discussion_id)?;
+        update_discussion_timestamp(&transaction, &event.discussion_id)?;
+    }
     transaction.commit()?;
     Ok(true)
 }
