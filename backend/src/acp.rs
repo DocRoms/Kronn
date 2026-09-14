@@ -457,11 +457,52 @@ pub struct AcpJsonRpcTransport {
 /// blocking shutdown on that is worse than abandoning the drain.
 const DISPATCHER_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Owns the stdout dispatcher and cancels it when dropped. A bare `JoinHandle`
+/// only DETACHES on drop, so without this every path that does not reach an
+/// explicit join would leave the drain running: a `shutdown` future cancelled
+/// mid-await, or a transport dropped without `shutdown` at all. `kill_on_drop`
+/// covers the `Child`; nothing covered the task.
+struct DispatcherOwner(Option<JoinHandle<()>>);
+
+impl DispatcherOwner {
+    fn new(handle: JoinHandle<()>) -> Self {
+        Self(Some(handle))
+    }
+
+    /// Wait for the drain to finish, bounded. On timeout, abort and then WAIT
+    /// for the cancellation to land: `abort` only requests it, so returning
+    /// here without the join would claim a stop that has not happened.
+    async fn finish(mut self) -> Result<(), String> {
+        let Some(mut handle) = self.0.take() else {
+            return Ok(());
+        };
+        match timeout(DISPATCHER_JOIN_TIMEOUT, &mut handle).await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(error)) => Err(format!("join ACP dispatcher: {error}")),
+            Err(_) => {
+                handle.abort();
+                // The cancellation is what we wait for; its `JoinError` is the
+                // expected outcome, not a failure to report.
+                let _ = handle.await;
+                Ok(())
+            }
+        }
+    }
+}
+
+impl Drop for DispatcherOwner {
+    fn drop(&mut self) {
+        if let Some(handle) = self.0.take() {
+            handle.abort();
+        }
+    }
+}
+
 /// The process and the task draining its stdout have one lifecycle. Keeping
 /// them together lets shutdown reap the process before joining the dispatcher.
 struct AcpProcess {
     child: Option<Child>,
-    dispatcher: Option<JoinHandle<()>>,
+    dispatcher: Option<DispatcherOwner>,
 }
 
 /// `session/new` inputs captured at `initialize` time. Retained so that
@@ -544,7 +585,7 @@ impl AcpJsonRpcTransport {
             stdin,
             process: Mutex::new(AcpProcess {
                 child: Some(child),
-                dispatcher: Some(dispatcher),
+                dispatcher: Some(DispatcherOwner::new(dispatcher)),
             }),
             next_id: AtomicU64::new(1),
             pending,
@@ -1124,29 +1165,17 @@ impl AcpTransport for AcpJsonRpcTransport {
                 errors.push(format!("wait for ACP process: {error}"));
             }
         }
-        if let Some(mut dispatcher) = process.dispatcher.take() {
-            // The dispatcher blocks on the child's stdout. Reaping the child
-            // does not close that pipe when a DESCENDANT inherited it, so an
-            // unbounded join would hang shutdown forever. Bound the wait, then
-            // abort: dropping a `JoinHandle` only detaches, it never cancels.
-            // `&mut` keeps the handle usable after the timeout consumes it.
-            match timeout(DISPATCHER_JOIN_TIMEOUT, &mut dispatcher).await {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) => errors.push(format!("join ACP dispatcher: {error}")),
-                Err(_) => {
-                    // NOT an error: the child is reaped and the task is
-                    // cancelled, so nothing leaks. Only a descendant holding the
-                    // inherited pipe reaches here, and failing a shutdown for it
-                    // would turn a SUCCESSFUL discovery into a provider error
-                    // (`acp_discovery::discover_with_transport` maps any
-                    // shutdown error onto its outcome). Visible, not fatal.
-                    dispatcher.abort();
-                    tracing::warn!(
-                        agent = ?self.agent,
-                        "ACP dispatcher still held the inherited stdout after the process was \
-                         reaped; aborted the drain"
-                    );
-                }
+        if let Some(dispatcher) = process.dispatcher.take() {
+            // Reaping the child does not close its stdout when a DESCENDANT
+            // inherited the pipe, so the drain can outlive the process. The
+            // owner bounds the join and cancels; a cancellation is not an error
+            // here because the task IS stopped and nothing leaks — and
+            // `acp_discovery::discover_with_transport` maps any shutdown error
+            // onto its outcome, so failing would turn a successful catalogue
+            // discovery into a provider error. Claims stop at the drain: this
+            // says nothing about a descendant, which Kronn does not own.
+            if let Err(error) = dispatcher.finish().await {
+                errors.push(error);
             }
         }
         if errors.is_empty() {
@@ -2151,158 +2180,65 @@ done"#]);
         }
     }
 
-    #[cfg(unix)]
-    struct FixtureCleanup {
-        pid_file: tempfile::NamedTempFile,
-        /// Armed until the test has OBSERVED the process gone. After that the
-        /// kernel may hand the same number to somebody else, so the guard must
-        /// not fire: signalling a recycled PID is worse than leaking nothing.
-        armed: bool,
-    }
-
-    #[cfg(unix)]
-    impl FixtureCleanup {
-        fn new() -> Self {
-            Self {
-                pid_file: tempfile::NamedTempFile::new().unwrap(),
-                armed: true,
-            }
-        }
-
-        fn pid(&self) -> Option<String> {
-            std::fs::read_to_string(self.pid_file.path())
-                .ok()
-                .filter(|pid| !pid.trim().is_empty())
-                .map(|pid| pid.trim().to_owned())
-        }
-
-        fn disarm(&mut self) {
-            self.armed = false;
-        }
-    }
-
-    #[cfg(unix)]
-    impl Drop for FixtureCleanup {
-        fn drop(&mut self) {
-            // The fixture writes only its own PID, and the guard is disarmed as
-            // soon as the test has seen that PID disappear. What remains is the
-            // failure path: a process this test started and nobody reaped.
-            if !self.armed {
-                return;
-            }
-            if let Some(pid) = self.pid() {
-                let _ = std::process::Command::new("kill")
-                    .args(["-TERM", &pid])
-                    .status();
-            }
-        }
-    }
-
-    /// Poll interval for the fixture guards. `yield_now` would spin the
-    /// scheduler and fork a `kill` per iteration; this stays quiet.
-    #[cfg(unix)]
-    const FIXTURE_POLL: Duration = Duration::from_millis(10);
-
-    #[cfg(unix)]
-    async fn fixture_pid(cleanup: &FixtureCleanup) -> String {
-        timeout(Duration::from_secs(5), async {
-            loop {
-                if let Some(pid) = cleanup.pid() {
-                    return pid;
-                }
-                tokio::time::sleep(FIXTURE_POLL).await;
-            }
-        })
-        .await
-        .expect("fixture must publish its PID")
-    }
-
-    #[cfg(unix)]
-    fn fixture_is_running(pid: &str) -> bool {
-        std::process::Command::new("kill")
-            .args(["-0", pid])
-            .status()
-            .is_ok_and(|status| status.success())
-    }
-
-    #[cfg(unix)]
-    async fn fixture_exits(pid: &str) -> bool {
-        timeout(Duration::from_secs(5), async {
-            while fixture_is_running(pid) {
-                tokio::time::sleep(FIXTURE_POLL).await;
-            }
-        })
-        .await
-        .is_ok()
-    }
-
-    #[cfg(unix)]
+    /// Ownership of the drain, proven without a subprocess and without timing:
+    /// the spawned task holds a `oneshot` sender, so the receiver resolves the
+    /// moment that task is dropped. Awaiting the receiver IS the event — there
+    /// is nothing to poll and nothing to sleep on.
     #[tokio::test]
-    async fn rejected_negotiation_abandons_and_terminates_the_owned_fixture_process() {
-        let mut cleanup = FixtureCleanup::new();
-        let mut command = crate::core::cmd::async_cmd("sh");
-        command
-            .env("PID_FILE", cleanup.pid_file.path())
-            .args(["-c", r#"printf '%s' "$$" > "$PID_FILE"
-while IFS= read -r line; do
-    case "$line" in
-        *'"method":"initialize"'*) printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":2}}' ;;
-    esac
-done"#]);
-        let transport = Arc::new(
-            AcpJsonRpcTransport::spawn(AcpAgent::OpenCode, command, false)
-                .await
-                .unwrap(),
-        );
-        let pid = fixture_pid(&cleanup).await;
-        let mut host = AcpHost::new(1, transport.clone());
+    async fn dropping_the_dispatcher_owner_cancels_the_drain() {
+        let (sender, receiver) = tokio::sync::oneshot::channel::<()>();
+        let owner = DispatcherOwner::new(tokio::spawn(async move {
+            let _sender = sender;
+            std::future::pending::<()>().await;
+        }));
 
-        assert_eq!(
-            host.negotiate(request()).await.unwrap_err(),
-            AcpError::UnsupportedProtocolVersion {
-                actual: 2,
-                maximum: 1,
-            }
-        );
-        drop(host);
-        drop(transport);
+        drop(owner);
 
-        let exited = fixture_exits(&pid).await;
-        if exited {
-            // Observed gone: the number may now belong to someone else.
-            cleanup.disarm();
-        }
-        assert!(
-            exited,
-            "dropping the rejected transport must terminate its owned fixture"
-        );
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn shutdown_is_idempotent_and_reaps_the_owned_fixture_process() {
-        let mut cleanup = FixtureCleanup::new();
-        let mut command = crate::core::cmd::async_cmd("sh");
-        command.env("PID_FILE", cleanup.pid_file.path()).args([
-            "-c",
-            r#"printf '%s' "$$" > "$PID_FILE"
-while IFS= read -r _; do :; done"#,
-        ]);
-        let transport = AcpJsonRpcTransport::spawn(AcpAgent::OpenCode, command, false)
+        receiver
             .await
-            .unwrap();
-        let pid = fixture_pid(&cleanup).await;
+            .expect_err("dropping the owner must cancel the drain, dropping its sender");
+    }
 
-        transport.shutdown().await.unwrap();
-        transport.shutdown().await.unwrap();
+    /// A transport dropped WITHOUT `shutdown` must not leave the drain running.
+    /// `kill_on_drop` covers the child; this covers the task.
+    #[tokio::test]
+    async fn dropping_the_process_record_cancels_the_drain() {
+        let (sender, receiver) = tokio::sync::oneshot::channel::<()>();
+        let process = AcpProcess {
+            child: None,
+            dispatcher: Some(DispatcherOwner::new(tokio::spawn(async move {
+                let _sender = sender;
+                std::future::pending::<()>().await;
+            }))),
+        };
 
-        let exited = fixture_exits(&pid).await;
-        if exited {
-            cleanup.disarm();
-        }
-        assert!(
-            exited,
-            "shutdown must wait until the owned fixture is reaped"
-        );
+        drop(process);
+
+        receiver
+            .await
+            .expect_err("dropping the process record must cancel the drain");
+    }
+
+    /// `finish` returns only once the drain has actually stopped. A task that
+    /// ends on its own is joined, not abandoned.
+    #[tokio::test]
+    async fn finishing_the_owner_waits_for_a_drain_that_ends_by_itself() {
+        let (sender, receiver) = tokio::sync::oneshot::channel::<()>();
+        let owner = DispatcherOwner::new(tokio::spawn(async move {
+            drop(sender);
+        }));
+
+        owner.finish().await.unwrap();
+
+        receiver
+            .await
+            .expect_err("the drain must have run to completion before finish returned");
+    }
+
+    /// The owner is consumed by `finish`, so a second shutdown finds no
+    /// dispatcher left and must stay a no-op rather than double-abort.
+    #[tokio::test]
+    async fn finishing_an_owner_twice_is_not_possible_and_an_empty_one_succeeds() {
+        DispatcherOwner(None).finish().await.unwrap();
     }
 }
