@@ -30,7 +30,8 @@ describe('ModelCatalogPicker', () => {
     rendered.rerender(<ModelCatalogPicker agent="Custom" connectionId="two" value="same-id" onChange={change} />);
     expect(screen.getByRole('combobox', { name: 'wiz.model' })).toHaveValue('Two');
     expect(change).not.toHaveBeenCalled();
-    expect(list).toHaveBeenCalledTimes(1);
+    expect(list).toHaveBeenCalledTimes(2); // One read when switching runtime, never on typing.
+    await act(async () => {});
   });
 
   it('keeps an unadvertised saved reasoning mode visibly unavailable without rewriting it', async () => {

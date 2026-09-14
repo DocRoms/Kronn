@@ -7,6 +7,38 @@ use kronn::models::{
 };
 use serial_test::serial;
 
+async fn pin_cached_claude_catalog(database: &Database) -> chrono::DateTime<chrono::Utc> {
+    // Integration tests link the production library, so an absent refresh log
+    // would probe the installed CLI and overwrite this migration-only fixture.
+    database
+        .with_conn(|conn| {
+            store::record_refresh_failure(
+                conn,
+                "agent:claude-code",
+                &AgentType::ClaudeCode,
+                ModelUnavailableReason::Unsupported,
+                "Migration fixture: use the cached catalogue without CLI discovery",
+            )?;
+            Ok(store::get_refresh_log(conn, "agent:claude-code")?
+                .unwrap()
+                .last_attempt_at)
+        })
+        .await
+        .unwrap()
+}
+
+async fn assert_no_claude_refresh(database: &Database, before: chrono::DateTime<chrono::Utc>) {
+    let after = database
+        .with_read_conn(|conn| store::get_refresh_log(conn, "agent:claude-code"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        after.last_attempt_at, before,
+        "migration preflight must not probe the host CLI"
+    );
+}
+
 #[tokio::test]
 #[serial]
 async fn ollama_bootstrap_preserves_the_configured_default_instead_of_its_old_seed() {
@@ -192,6 +224,7 @@ async fn an_existing_historical_identity_keeps_its_other_tier_and_explicit_confi
         })
         .await
         .unwrap();
+    let refresh_before = pin_cached_claude_catalog(&database).await;
     let refusal = model_catalog::preflight_check(
         &database,
         None,
@@ -202,7 +235,10 @@ async fn an_existing_historical_identity_keeps_its_other_tier_and_explicit_confi
     )
     .await
     .unwrap();
+    assert_eq!(refusal.reason, ModelUnavailableReason::Unsupported);
+    assert_eq!(refusal.detail, "fixture only");
     assert_eq!(serde_json::to_value(refusal).unwrap()["model_id"], "haiku");
+    assert_no_claude_refresh(&database, refresh_before).await;
 }
 
 #[tokio::test]
@@ -244,6 +280,7 @@ async fn one_configured_identity_can_still_resolve_multiple_explicit_tiers() {
         })
         .await
         .unwrap();
+    let refresh_before = pin_cached_claude_catalog(&database).await;
     for tier in [ModelTier::Economy, ModelTier::Default] {
         let refusal = model_catalog::preflight_check(
             &database,
@@ -255,9 +292,12 @@ async fn one_configured_identity_can_still_resolve_multiple_explicit_tiers() {
         )
         .await
         .unwrap();
+        assert_eq!(refusal.reason, ModelUnavailableReason::Unsupported);
+        assert_eq!(refusal.detail, "fixture only");
         assert_eq!(
             serde_json::to_value(refusal).unwrap()["model_id"],
             "operator/shared"
         );
+        assert_no_claude_refresh(&database, refresh_before).await;
     }
 }

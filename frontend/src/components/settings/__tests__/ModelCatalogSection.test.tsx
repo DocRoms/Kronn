@@ -99,6 +99,19 @@ describe('ModelCatalogSection', () => {
   });
   afterEach(cleanup);
 
+  it('labels the changing Claude default alias without relabelling other runtimes or model ids', async () => {
+    listMock.mockResolvedValue({ targets: ['agent:claude-code', 'agent:codex'].map(target => ({
+      runtime_target_id: target, target_label: target, agent_type: target === 'agent:claude-code' ? 'ClaudeCode' : 'Codex',
+      stale: false, live_refresh_ok: true,
+      models: ['default', 'fable'].map(id => ({ ...model({ id: `${target}:${id}`, model_id: id, display_name: id }), runtime_target_id: target })),
+    })) });
+    render(<ModelCatalogSection />);
+    const row = await screen.findByTestId('model-catalog-row-agent:claude-code:default');
+    expect(row).toHaveTextContent('modelCatalog.cliDefault');
+    expect(screen.getByTestId('model-catalog-row-agent:codex:default')).not.toHaveTextContent('modelCatalog.cliDefault');
+    expect(screen.getByTestId('model-catalog-row-agent:claude-code:fable')).not.toHaveTextContent('modelCatalog.cliDefault');
+  });
+
   it.each(['create', 'update', 'delete', 'refresh'] as const)('serializes synchronous %s clicks until reload finishes and permits retry', async (operation) => {
     render(<ModelCatalogSection />);
     await findSourceChip('Router one');

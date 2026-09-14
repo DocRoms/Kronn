@@ -46,6 +46,11 @@ guard).
 
 ## Observability
 
+Claude's SDK model catalogue is discovered independently of these execution
+toggles. It uses an initialization-only, no-prompt CLI process, not the ACP
+adapter's empty configuration options. See [catalogue discovery and selector
+freshness](../gotchas/claude-catalogue-discovery.md).
+
 When the adapter route is taken, the backend logs an `info`-level line
 (`"KRONN_ACP_ADAPTER_* opt-in active: starting an isolated ACP adapter
 session…"`) naming the agent, so which transport a given run used is visible

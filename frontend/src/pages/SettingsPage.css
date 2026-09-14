@@ -2704,6 +2704,11 @@
   font-weight: 700;
 }
 
+.set-model-catalog-model-open .set-model-catalog-alias-note {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
 .set-model-catalog-model[data-availability='unavailable'] {
   border-style: dashed;
   opacity: 0.78;

@@ -74,6 +74,31 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe('AgentsSection — runtime catalogue and tier preservation (KT-531)', () => {
+  it('reveals Fable after automatic refresh without changing tiers until an explicit choice', async () => {
+    list.mockResolvedValue({ targets: [target([model('sonnet')], { stale: true, live_refresh_ok: false })] });
+    let finish!: (view: ModelCatalogView) => void;
+    refresh.mockReturnValue(new Promise(resolve => { finish = resolve; }));
+    show();
+    const input = await picker();
+    await waitFor(() => expect(refresh).toHaveBeenCalledTimes(1));
+    expect(input).toHaveValue('sonnet');
+    expect(input).not.toBeDisabled();
+    await act(async () => finish(target([model('sonnet'), model('claude-fable-5-1[1m]', {
+      display_name: 'Fable', reasoning_modes: ['low', 'medium', 'high', 'xhigh', 'max'],
+    })])));
+    expect(setTiers).not.toHaveBeenCalled();
+    expect(input).toHaveValue('sonnet');
+    fireEvent.focus(input);
+    const option = await screen.findByRole('option', { name: 'Fable' });
+    expect(option).toHaveTextContent('claude-fable-5-1[1m]');
+    expect(option).toHaveTextContent('modelCatalog.accessUnverified');
+    expect(option).toHaveTextContent('xhigh, max');
+    fireEvent.click(option);
+    await waitFor(() => expect(setTiers).toHaveBeenCalledWith({
+      ...tiers(), claude_code: { ...tiers().claude_code, economy: 'claude-fable-5-1[1m]' },
+    }));
+  });
+
   it('offers new catalogue models, never models from another runtime of the same family', async () => {
     list.mockResolvedValue({ targets: [
       target([model('new-model', { display_alias: 'Nouveau modèle' })]),
@@ -87,6 +112,14 @@ describe('AgentsSection — runtime catalogue and tier preservation (KT-531)', (
     expect(option).toHaveTextContent('high');
     expect(screen.queryByRole('option', { name: 'http-only' })).not.toBeInTheDocument();
     expect(screen.queryByRole('option', { name: 'haiku' })).not.toBeInTheDocument();
+  });
+
+  it('labels the Claude default alias as a changing CLI choice without selecting it', async () => {
+    list.mockResolvedValue({ targets: [target([model('default', { display_name: 'Default' }), model('sonnet')])] });
+    show();
+    fireEvent.focus(await picker());
+    expect(await screen.findByRole('option', { name: 'Default — modelCatalog.cliDefault' })).toBeEnabled();
+    expect(setTiers).not.toHaveBeenCalled();
   });
 
   it('exposes all OpenCode tiers without erasing configured models missing from the catalogue', async () => {
@@ -230,6 +263,7 @@ describe('AgentsSection — runtime catalogue and tier preservation (KT-531)', (
     const option = await screen.findByRole('option', { name: 'manual-model' });
     expect(option).toHaveTextContent('modelCatalog.provenance.manual');
     expect(option).not.toBeDisabled();
-    expect(refresh).not.toHaveBeenCalled();
+    expect(refresh).toHaveBeenCalledWith({ runtime_target_id: runtime, agent_type: agentType, force: false });
+    expect(setTiers).not.toHaveBeenCalled();
   });
 });
