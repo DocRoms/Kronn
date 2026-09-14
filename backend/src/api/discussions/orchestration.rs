@@ -1866,6 +1866,39 @@ mod orchestrate_validation_tests {
             .unwrap();
     }
 
+    async fn set_catalog_for(
+        state: &crate::AppState,
+        connection_id: &str,
+        agent: AgentType,
+        model: &str,
+        capabilities: &[&str],
+    ) {
+        let target = crate::db::model_catalog::http_runtime_target_id(connection_id);
+        let model = model.to_string();
+        let capabilities = capabilities
+            .iter()
+            .map(|value| value.to_string())
+            .collect::<Vec<_>>();
+        state
+            .db
+            .with_conn(move |conn| {
+                crate::db::model_catalog::reconcile_live(
+                    conn,
+                    &target,
+                    &agent,
+                    &[crate::db::model_catalog::DiscoveredModel {
+                        model_id: model.clone(),
+                        display_name: model,
+                        capabilities,
+                        reasoning_modes: Vec::new(),
+                        default_reasoning_mode: None,
+                    }],
+                )
+            })
+            .await
+            .unwrap();
+    }
+
     fn no_tokens() -> TokensConfig {
         TokensConfig {
             anthropic: None,
@@ -1967,6 +2000,100 @@ mod orchestrate_validation_tests {
         assert!(body.contains("unsupported"), "{body}");
         assert!(provider_a.received_requests().await.unwrap().is_empty());
         assert!(provider_b.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn orchestrate_rechecks_changed_catalog_before_the_next_round() {
+        let provider_a = MockServer::start().await;
+        let provider_b = MockServer::start().await;
+        let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+        let started_tx = Arc::new(std::sync::Mutex::new(Some(started_tx)));
+        let release_rx = Arc::new(std::sync::Mutex::new(release_rx));
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with({
+                let started_tx = started_tx.clone();
+                let release_rx = release_rx.clone();
+                move |_: &wiremock::Request| {
+                    if let Some(sender) = started_tx.lock().unwrap().take() {
+                        sender.send(()).unwrap();
+                        release_rx.lock().unwrap().recv().unwrap();
+                    }
+                    ResponseTemplate::new(200).set_body_string(summary_sse("round A"))
+                }
+            })
+            .mount(&provider_a)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(summary_sse("round B")))
+            .mount(&provider_b)
+            .await;
+
+        let mut primary = connection("connection-a", "model-a");
+        primary.endpoint = Some(provider_a.uri());
+        primary.origin_preset = ExternalApiConnectionPreset::Nvidia;
+        let mut secondary = connection("connection-b", "model-b");
+        secondary.endpoint = Some(provider_b.uri());
+        let state = state_with_connections(vec![primary, secondary]).await;
+        set_catalog_for(
+            &state,
+            "connection-a",
+            AgentType::Nvidia,
+            "model-a",
+            &["chat"],
+        )
+        .await;
+        set_catalog(&state, "connection-b", "model-b", &["chat"]).await;
+        let mut disc = discussion("connection-a");
+        disc.agent = AgentType::Nvidia;
+        let disc_id = disc.id.clone();
+        state
+            .db
+            .with_conn(move |conn| crate::db::discussions::insert_discussion(conn, &disc))
+            .await
+            .unwrap();
+
+        let run_state = state.clone();
+        let run = tokio::spawn(async move {
+            let response = super::orchestrate(
+                axum::extract::State(run_state),
+                axum::extract::Path(disc_id),
+                axum::Json(crate::models::OrchestrationRequest {
+                    agents: vec![
+                        OrchestrationParticipant {
+                            agent_type: AgentType::Custom,
+                            connection_id: Some("connection-b".into()),
+                        },
+                        OrchestrationParticipant {
+                            agent_type: AgentType::Nvidia,
+                            connection_id: Some("connection-a".into()),
+                        },
+                    ],
+                    max_rounds: Some(2),
+                    skill_ids: vec![],
+                    profile_ids: vec![],
+                    directive_ids: vec![],
+                }),
+            )
+            .await
+            .into_response();
+            response.into_body().collect().await.unwrap().to_bytes()
+        });
+
+        tokio::task::spawn_blocking(move || started_rx.recv().unwrap())
+            .await
+            .unwrap();
+        set_catalog(&state, "connection-b", "model-b", &["video"]).await;
+        release_tx.send(()).unwrap();
+        let body = run.await.unwrap();
+        let body = String::from_utf8_lossy(&body);
+
+        assert!(body.contains("event: error"), "{body}");
+        assert!(body.contains("unsupported"), "{body}");
+        assert_eq!(provider_b.received_requests().await.unwrap().len(), 1);
+        assert_eq!(provider_a.received_requests().await.unwrap().len(), 1);
     }
 
     #[tokio::test]
