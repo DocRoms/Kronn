@@ -23,6 +23,7 @@
 // `lib/api.ts`, that test will fail until the default mock covers it.
 
 import { vi } from 'vitest';
+import type { RtkVersionInfo } from '../types/generated';
 
 type AnyFn = (...args: unknown[]) => unknown;
 type PartialDeep<T> = { [K in keyof T]?: T[K] extends object ? PartialDeep<T[K]> : T[K] };
@@ -330,6 +331,7 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
 
     agents: {
       listAll: resolve([]),
+      versionCheck: resolve([]),
     },
 
     mcps: {
@@ -528,6 +530,11 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
     },
 
     rtk: {
+      version: resolve({
+        available: false, installed: null, latest_known: null, checked_at: null,
+        check_error: null, update_available: false, update_command: '',
+        ccusage: { installed: null, latest: null, checked_at: null, check_error: null, update_available: false },
+      } satisfies RtkVersionInfo),
       activate: resolve({ success: true, stdout: '', stderr: '' }),
       deactivate: resolve({ success: true, stdout: '', stderr: '' }),
       savings: resolve({ available: false, total_tokens_saved: 0, ratio_percent: 0, sample_count: 0 }),

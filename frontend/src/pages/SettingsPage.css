@@ -2704,6 +2704,11 @@
   font-weight: 700;
 }
 
+.set-model-catalog-model-open .set-model-catalog-alias-note {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
 .set-model-catalog-model[data-availability='unavailable'] {
   border-style: dashed;
   opacity: 0.78;
@@ -3480,6 +3485,12 @@
   border-color: color-mix(in srgb, var(--agent-color) 22%, transparent);
   background: color-mix(in srgb, var(--agent-color) 8%, transparent);
   color: color-mix(in srgb, var(--agent-color) 78%, var(--kr-text-primary));
+}
+
+.set-agent-row .set-agent-release-error {
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .set-agent-runtime-state {

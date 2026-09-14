@@ -2460,8 +2460,11 @@ pub struct DeliveryCheckpoint<'a> {
     pub manifest_json: &'a str,
     /// The principal (parent) room the review request is posted into.
     pub parent_discussion_id: &'a str,
-    /// Pre-built review-request message — its id is deterministic per `(exec, attempt)`, so
-    /// a resume never double-posts (the message PK rejects it).
+    /// Pre-built review-request message. Its id is deterministic per `(exec, attempt)`,
+    /// which keeps a resume from posting a second obligation — but the PRIMARY KEY is
+    /// not what enforces that: a violation here would abort the whole delivery, not
+    /// skip one insert. The attempt guard in `reassign_execution_worker` is what keeps
+    /// the identity unique; `commit_delivery_checkpoint` re-keys defensively (KT-648).
     pub review_request: &'a DiscussionMessage,
     /// The exact principal target the review request is addressed to (the parent's native
     /// agent). Posted with ZERO dispatch: a joined-CLI principal is woken via
@@ -2569,11 +2572,60 @@ pub fn commit_delivery_checkpoint(
             )?;
             // (4) Principal-targeted review request in the PARENT room, ZERO dispatch (no
             // phantom native turn; a joined-CLI principal is woken by wait_for_peer).
+            //
+            // KT-648 — a repeated delivery is short-circuited above, by the
+            // `AwaitingReview` + existing-delivery arm: THAT is what makes this checkpoint
+            // idempotent. The attempt guard in `reassign_execution_worker` is what keeps
+            // the identity from repeating. Neither is the PRIMARY KEY, and a violation
+            // here would not skip an insert — it would roll the transition, the manifest
+            // and the obligation event back together and strand the execution in
+            // `Working`. So should an unforeseen path still hand us a taken identity,
+            // re-key THIS obligation: skipping would leave a stale `head_sha` standing as
+            // the live obligation, and rewriting would edit a message we do not own.
+            let mut review_request = input.review_request.clone();
+            let identity_taken: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM messages WHERE id = ?1)",
+                [&review_request.id],
+                |row| row.get(0),
+            )?;
+            if identity_taken {
+                // Counting the taken identities is not choosing a free one — gaps exist,
+                // and anybody may hold any suffix. Walk the family instead. `taken` of
+                // them are occupied, so among the `taken + 1` candidates `:r0..=:r{taken}`
+                // at least one is free by construction: the search is finite and needs no
+                // arbitrary cap that could turn into a permanent refusal.
+                let taken: i64 = tx.query_row(
+                    "SELECT COUNT(*) FROM messages WHERE id = ?1 OR id LIKE ?2",
+                    params![&review_request.id, format!("{}:r%", review_request.id)],
+                    |row| row.get(0),
+                )?;
+                let base = review_request.id.clone();
+                let free = (0..=taken).find_map(|candidate| {
+                    let id = format!("{base}:r{candidate}");
+                    match tx.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM messages WHERE id = ?1)",
+                        [&id],
+                        |row| row.get::<_, bool>(0),
+                    ) {
+                        Ok(false) => Some(Ok(id)),
+                        Ok(true) => None,
+                        Err(error) => Some(Err(error)),
+                    }
+                });
+                match free {
+                    Some(Ok(id)) => review_request.id = id,
+                    Some(Err(error)) => return Err(error.into()),
+                    None => bail!(
+                        "no free review-request identity under {base}: {taken} taken, \
+                         which the pigeonhole above rules out"
+                    ),
+                }
+            }
             let targets = [input.principal_target.clone()];
             crate::db::discussions::insert_message_with_targets_and_dispatches_within_tx(
                 &tx,
                 input.parent_discussion_id,
-                input.review_request,
+                &review_request,
                 &targets,
                 &[],
                 None,
@@ -3414,9 +3466,20 @@ enum CampaignGate {
 /// Post the campaign's human-gate event in the PARENT room, message and card in
 /// the same transaction.
 ///
-/// Deterministic per `(run, execution, side)`: a replay after a restart finds
-/// the same ids and publishes nothing, while a genuinely new escalation on
-/// another execution gets its own card.
+/// Keyed on the OCCURRENCE, not on the execution. The first version keyed on
+/// `(run, execution, side)` and claimed, in this very comment, a replay safety
+/// it did not implement: a second escalation of the same execution re-inserted
+/// the same `messages.id`, the UNIQUE constraint fired inside the caller's
+/// savepoint, and the whole transition rolled back — so an execution that had
+/// been parked on a human once could never be parked again.
+///
+/// The occurrence is counted from the journal rather than from a status
+/// counter. `attempt_no` only advances when the current attempt already carries
+/// a review, and `assignment_generation` only advances on a reassignment, while
+/// `Escalated -> Approved -> ... -> Working -> Escalated` is a legal loop that
+/// touches neither. Transitions INTO `Escalated` are the thing being counted,
+/// and `can_transition_to` refuses `Escalated -> Escalated`, so each one is a
+/// distinct gate.
 fn publish_campaign_gate_card(
     conn: &Connection,
     exec_id: &str,
@@ -3468,8 +3531,42 @@ fn publish_campaign_gate_card(
         ),
     };
 
+    // Counted BEFORE `record_execution_event` writes this transition — see the
+    // call order in `transition_execution` — so for an opening gate the count
+    // is this gate's own index, and for a closing one the escalation it closes
+    // is already journalled.
+    let escalations: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM task_execution_events \
+         WHERE task_execution_id = ?1 AND to_status = 'Escalated'",
+        [exec_id],
+        |row| row.get(0),
+    )?;
+    let occurrence = match gate {
+        CampaignGate::AwaitingHuman => escalations,
+        CampaignGate::Resumed => escalations.saturating_sub(1),
+    };
+    let message_id = format!("orch-campaign-gate:{run_id}:{exec_id}:{side}:{occurrence}");
+
+    // Skip the publication rather than raise on a duplicate id. Every query
+    // here still returns a `Result`, so this does not make the gate incapable
+    // of aborting a transition — it removes the ONE abort this code was
+    // creating: a repeated deterministic id hitting `messages.id`. That matters
+    // because the principle three functions up, in `publish_steering_card`,
+    // says losing a card is cheaper than aborting a terminal transition, and
+    // this insert was buying the opposite. Same shape the resume path already
+    // uses for its own deterministic id (`api/orchestration.rs`,
+    // `orch-resume-worker`).
+    let already_posted: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM messages WHERE id = ?1)",
+        [&message_id],
+        |row| row.get(0),
+    )?;
+    if already_posted {
+        return Ok(());
+    }
+
     let message = DiscussionMessage {
-        id: format!("orch-campaign-gate:{run_id}:{exec_id}:{side}"),
+        id: message_id,
         role: MessageRole::User,
         channel: MessageChannel::Main,
         content,
@@ -3506,7 +3603,7 @@ fn publish_campaign_gate_card(
         &message.id,
         crate::db::discussion_important::SteeringCard {
             category,
-            dedup_key: &format!("orch.campaign.gate.{run_id}.{exec_id}.{side}"),
+            dedup_key: &format!("orch.campaign.gate.{run_id}.{exec_id}.{side}.{occurrence}"),
             title: &format!("{reference} — {title}"),
             highlight: &highlight,
             impact: &impact,
@@ -4760,8 +4857,13 @@ pub fn reassign_execution_worker(
         // send-backs did the same after an approve. In both cases attempt N already owns its
         // delivery/review/message audit identities, so the next delivery must use N+1.
         // Correct rows already point at an unreviewed attempt, making this idempotent.
+        // KT-648: a DELIVERY is enough. An escalation that never produced a review —
+        // a review-wait or total timeout, or a worker that became unavailable —
+        // leaves the attempt reviewless while it already owns its message identities.
         let repaired_rework_attempt =
-            crate::db::worker_reviews::get_review(conn, exec_id, execution.attempt_no)?.is_some();
+            crate::db::worker_reviews::get_review(conn, exec_id, execution.attempt_no)?.is_some()
+                || crate::db::worker_deliveries::get_delivery(conn, exec_id, execution.attempt_no)?
+                    .is_some();
         if repaired_rework_attempt {
             conn.execute(
                 "UPDATE task_executions SET attempt_no = attempt_no + 1, updated_at = ?2 \

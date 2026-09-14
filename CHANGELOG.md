@@ -13,8 +13,30 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Added
 
-- Important messages are objects, not formatting. An agent publishes a
-  `kronn-important` block — a decision, a scope change, a DoD waiver, a blocking
+- Installed CLI versions are compared with current stable releases from their
+  official sources. RTK and ccusage have separate checks and diagnostics;
+  checking never installs an update. Cached results and an explicit recheck
+  keep discovery bounded instead of hard-coding the next version to expect.
+- Claude model pickers use the installed runtime's account-specific catalogue,
+  including newly exposed model identifiers, and share refreshed results.
+  A transient discovery failure preserves known available choices; an actual
+  authentication or availability failure is still reported.
+- Claude and Codex tiers can pair a model with an optional reasoning effort
+  advertised by that model. An execution override wins over a same-model tier
+  preset; leaving both empty sends no effort flag and keeps the CLI default.
+  Changing models clears an incompatible preset in the same save. A Quick
+  Prompt launch keeps its explicit effort independently of later prompt edits
+  or deletion, bound to that discussion's agent, tier and resolved model.
+- **Important message** opens a plain-text form above the ordinary composer:
+  Information, Decision or Blocker, with an optional link to an existing task
+  in this discussion's plan. No JSON to write and no permanent key field in the
+  normal composer. Publishing never creates, edits or completes a task; the
+  card's link opens that task in the plan. The ordinary draft stays independent.
+  Form drafts survive closing and navigation in memory, not a browser reload.
+  An uncertain send keeps its original identity for reconciliation instead of
+  blindly publishing again.
+- Important messages are persisted objects, not formatting. The structured
+  `kronn-important` contract also supports a scope change, a DoD waiver, a blocking
   alert, an action needed from a human, an accepted delivery — and Kronn keeps a
   card the discussion can filter, count and step through, instead of a bold line
   that scrolls away. A worker's delivery report stays a delivery report: when a
@@ -24,9 +46,10 @@ Release notes for 0.9.3 and earlier are available in the
   Settings and a single-use proof bound to the room and to the exact text, so a
   captured request cannot be replayed or aimed somewhere else. A worker
   publishes none while it is working, holding a valid credential or not — it
-  reports through its delivery. **An install publishes no cards until an
-  operator enrols one**, which is deliberate: the message still posts, and the
-  response says what was refused.
+  reports through its delivery. Caller-authored cards require an enrolled
+  credential; without accepted authority the ordinary message still posts and
+  the response explains the refused card. Kronn's own orchestration steering
+  events use their backend authority and do not require a human credential.
 - The publication bootstrap can be rotated, and recovered when it is lost.
   Rotating it from Settings writes the replacement to the operator's private
   file and answers with the path — the secret travels over no wire, and the
@@ -60,6 +83,12 @@ Release notes for 0.9.3 and earlier are available in the
   that reached a terminal state stop holding the lock, and an audited manual
   re-arm releases the rest without replaying any old work.
 
+- A reassigned worker can deliver again after a timeout or unavailability
+  interrupted an unreviewed delivery. The next attempt gets fresh review
+  identities; an already occupied message ID no longer rolls the delivery
+  back. Earlier messages stay intact and the new request names the current
+  commit to review.
+
 - Quick Prompts read `{{env.NAME}}` like every other placeholder, and their
   editor offers the project's own environment names rather than a blank field.
 
@@ -76,7 +105,8 @@ Release notes for 0.9.3 and earlier are available in the
   re-sort. So the scope is a filter, title / content / both, and it is
   remembered between visits. Under "both", a title match now comes before a
   content match: someone searching for a name is looking for a place, not for
-  an occurrence. The MCP search agents use gained the same scope.
+  an occurrence. Both HTTP search endpoints gained the same scope; the MCP
+  `disc_search` tool does not offer it yet, so an agent's search stays unscoped.
 - An approved delegation now publishes its report. The derivation and the
   store existed but nothing called them, so an accepted delivery produced
   nothing at all. Both approval paths publish it — the ordinary one, and a
@@ -95,8 +125,11 @@ Release notes for 0.9.3 and earlier are available in the
   along (their discussions stay), the workflow steps a prompt or an API is
   used by (they fail on their next run), or that nothing else is touched. A
   count that cannot be read says so, instead of reading as nothing.
-- A clip's last frame can be kept as an asset of its own, decoded server-side
-  by the one decoder able to read it, with a link back to the clip it came from.
+- A clip's last frame can be kept as an asset of its own, with a link back to
+  the clip it came from. It is decoded in the browser, by the player already
+  showing the clip, and runs only from a click in that viewer — there is no
+  headless path, so no agent can ask for it through MCP. It works wherever the
+  interface is served, Docker included.
 - Image and video generation on HTTP connections (LiteLLM, NVIDIA, OpenRouter).
   Media models are configured as their own slots on a connection — modalities,
   not quality tiers — so a text step can never select "tier Image". A
@@ -302,7 +335,7 @@ Release notes for 0.9.3 and earlier are available in the
 
 - An agent's prompt no longer carries every MCP server's documentation. It
   concatenated all of `docs/operations/mcp-servers/*.md` in full on every spawn
-  — 69 557 bytes on the Kronn project, 45 465 of them for `kronn-internal.md`
+  — 69 196 bytes on the recorded Kronn benchmark, 45 465 for `kronn-internal.md`
   alone — whatever the discussion was about. It now carries the server listing,
   the `mcp__<server>__<tool>` convention, a pointer to `tool_manual` for the
   Kronn tools, and where to read a server's own notes if the agent is going to
@@ -318,13 +351,14 @@ Release notes for 0.9.3 and earlier are available in the
   `Off`, acting as a master kill-switch, so a discussion displaying `Auto` never
   summarised — a strategy shown in the interface that could not apply. Removed
   rather than repaired, because every runtime can now read the thread back
-  itself (`disc_read` over MCP or as a declared tool), which is cheaper and more
+  itself (`disc_meta` and `disc_get_message` over MCP, or a declared tool),
+  which is cheaper and more
   precise than a summary produced in advance for a need nobody expressed. The
   `Auto` strategy no longer exists; rows written before 0.13.0 read back as
   `OnDemand`, which keeps `disc_summarize` and the summarise action working for
   an agent or a human reopening a long room. When history is trimmed, the notice
-  now points the agent at `disc_read` first, and at the user only if the answer
-  is not in the thread.
+  now tells the agent to reread the thread first, and to ask the user only if
+  the answer is not there.
 
 ### Fixed
 
@@ -368,8 +402,8 @@ Release notes for 0.9.3 and earlier are available in the
 
 - The frontend lint gate is green again, by fixing what it flagged rather than
   by raising its ceiling. The release had added twenty-six warnings to a budget
-  that had four left; all twenty-six are gone, and the count is 64 against a
-  ceiling of 72. Nearly all described one habit — state written in an effect to
+  that had four left; all twenty-six are gone, and the final frontend candidate
+  measures 63 warnings against a ceiling of 63. Nearly all described one habit — state written in an effect to
   correct what the render before it already showed — so those values are
   resolved where they are used, and the ones describing a particular thing now
   carry which thing. Two genuine exceptions are declared at the line with their
@@ -413,6 +447,12 @@ Release notes for 0.9.3 and earlier are available in the
   caller. It keeps a shared room from being tidied by accident; it prevents
   nothing. An unsigned note counts as this machine's own, so nobody is locked
   out of the notes they wrote before setting a pseudo.
+  Successive corrections now share the discussion's ordered revision sequence.
+  Updating the text and recording its history are atomic: an audit failure
+  leaves the original note intact instead of changing it behind an error.
+  Shared-note corrections keep their note semantics on the receiving peer:
+  they no longer remove later conversation replies, change the note's written
+  date, or replace its routing. Synchronization and the revision trail remain.
 
 - A deleted note leaves the notes list. Its tombstone stays in the transcript,
   where a gap has to be explained, but a list of notes is not a transcript:
@@ -427,8 +467,8 @@ Release notes for 0.9.3 and earlier are available in the
   tool that adds one; the task, its history and its other discussions are kept.
   It fits under the MCP surface ceiling rather than over it: the four heaviest
   descriptions it pushed past the line were tightened by nearly what it costs,
-  and the ceiling was lowered to the new measurement rather than raised to
-  admit it.
+  and the ceiling moved by six bytes to admit it, then came back down as the
+  surface was trimmed further.
 
 - Kronn stopped telling agents to run linters the project does not have. A
   `composer.json` was enough to write `Lint: phpcs` into all eight generated
@@ -488,8 +528,8 @@ Release notes for 0.9.3 and earlier are available in the
   in a discussion and lapse on a page.
 
 - A prompt's version history no longer outlives the prompt it belongs to.
-- A clip stored as `text/plain` by its provider still plays as a clip.
-- Batch steps stop accepting a per-item prompt that nothing ever read.
+- A clip recorded as `text/plain` still plays as a clip.
+- A Quick Prompt batch run stops accepting a per-item prompt that nothing ever read.
 - The agent bootstrap (`docs/AGENTS.md`) is back under its context ceiling
   without the ceiling moving. The 716 bytes over were exactly what 0.13.0 had
   added: two verbose rows in the task router and a section holding a single

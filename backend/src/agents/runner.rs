@@ -2363,6 +2363,12 @@ pub struct AgentStartConfig<'a> {
     /// supports a `--model` flag (incl. both Ollama paths). `None` = resolve
     /// the model from `tier` as before.
     pub model_override: Option<&'a str>,
+    /// KT-646 — explicit per-step / per-QP reasoning-effort override, from
+    /// `AgentSettings.reasoning_effort`. Wins over the tier's configured
+    /// preset unconditionally (see `effective_reasoning_effort`). `None`
+    /// falls back to the tier preset, then to no flag at all. Ignored for
+    /// every agent `agent_supports_reasoning_effort` returns false for.
+    pub reasoning_effort_override: Option<&'a str>,
     /// KT-405 — persistent per-model context overrides (`ServerConfig`), keyed
     /// by exact model tag. `None` is reserved for callers with no server config
     /// in scope (mainly isolated tests); discussions and workflows pass it.
@@ -2435,6 +2441,7 @@ impl<'a> AgentStartConfig<'a> {
             task_worker_context: None,
             ollama_format: None,
             model_override: None,
+            reasoning_effort_override: None,
             ollama_context_overrides: None,
             http_request_timeout: None,
             cancel_token: None,
@@ -2734,6 +2741,126 @@ pub(crate) fn effective_model_flag(
         Some(m) if !m.trim().is_empty() => Some(m.to_string()),
         _ => resolve_model_flag(agent_type, tier, model_tiers),
     }
+}
+
+/// True for an agent whose CLI has a verified per-run effort transport.
+/// Codex accepts `-c model_reasoning_effort=<value>` and Claude Code accepts
+/// `--effort <level>`; the catalogue remains authoritative for which values a
+/// particular selected model accepts. Other runtimes must not receive a
+/// guessed parameter.
+pub(crate) fn agent_supports_reasoning_effort(agent_type: &AgentType) -> bool {
+    matches!(agent_type, AgentType::Codex | AgentType::ClaudeCode)
+}
+
+/// Look up the reasoning-effort preset paired with `tier` in `overrides`,
+/// mirroring `configured_model_flag`'s per-tier match without inventing a
+/// fallback across tiers.
+fn tier_reasoning_effort(
+    agent_type: &AgentType,
+    tier: ModelTier,
+    overrides: Option<&ModelTiersConfig>,
+) -> Option<String> {
+    let cfg = overrides?;
+    let agent_cfg = match agent_type {
+        AgentType::ClaudeCode => &cfg.claude_code,
+        AgentType::Codex => &cfg.codex,
+        AgentType::OpenCode => &cfg.open_code,
+        AgentType::GeminiCli => &cfg.gemini_cli,
+        AgentType::Kiro => &cfg.kiro,
+        AgentType::Vibe => &cfg.vibe,
+        AgentType::CopilotCli => &cfg.copilot_cli,
+        AgentType::Ollama => &cfg.ollama,
+        AgentType::LiteLlm => &cfg.lite_llm,
+        AgentType::Nvidia => &cfg.nvidia,
+        AgentType::Custom => return None,
+    };
+    let effort = match tier {
+        ModelTier::Economy => &agent_cfg.economy_effort,
+        ModelTier::Reasoning => &agent_cfg.reasoning_effort,
+        ModelTier::Default => &agent_cfg.default_effort,
+    };
+    effort
+        .as_ref()
+        .map(|v| v.trim())
+        .filter(|v| !v.is_empty())
+        .map(str::to_string)
+}
+
+/// Resolve the effective reasoning-effort value for a run, mirroring
+/// `effective_model_flag`'s precedence: an explicit per-step / per-QP
+/// `AgentSettings.reasoning_effort` wins outright (blank treated as unset);
+/// otherwise the tier's configured preset applies; `None` means "no flag —
+/// the CLI's own default applies", never a silently assigned `high`/`max`.
+/// The chosen model's current catalogue entry must advertise the candidate
+/// mode. A preset is only inherited when the final model is the tier's own
+/// resolved model; this permits call sites that pre-resolve that same model,
+/// while preventing an unrelated internal model pin from carrying an
+/// incompatible effort. This runtime boundary never turns a configured but
+/// unlaunchable effort into an omitted flag: a
+/// caller must surface the catalogue mismatch instead of claiming the CLI
+/// default applied the setting.
+fn resolve_reasoning_effort(
+    effort_override: Option<&str>,
+    model_override: Option<&str>,
+    agent_type: &AgentType,
+    tier: ModelTier,
+    model_tiers: Option<&ModelTiersConfig>,
+) -> Result<Option<String>, String> {
+    if !agent_supports_reasoning_effort(agent_type) {
+        return Ok(None);
+    }
+    let tier_model = resolve_model_flag(agent_type, tier, model_tiers);
+    let selected_model = effective_model_flag(model_override, agent_type, tier, model_tiers);
+    let candidate = reasoning_effort_candidate(
+        effort_override,
+        selected_model.as_deref(),
+        tier_model.as_deref(),
+        tier_reasoning_effort(agent_type, tier, model_tiers).as_deref(),
+    );
+
+    let Some(candidate) = candidate else {
+        return Ok(None);
+    };
+
+    let model = selected_model.ok_or_else(|| {
+        format!(
+            "Cannot apply reasoning effort '{candidate}': no available model is resolved for this run. Choose an available catalogue model or clear the effort setting."
+        )
+    })?;
+    crate::core::model_catalog::reasoning_modes_for_agent_model(agent_type, &model)
+        .filter(|modes| effort_is_advertised(&candidate, modes))
+        .map(|_| Some(candidate.clone()))
+        .ok_or_else(|| format!(
+            "Cannot apply reasoning effort '{candidate}' to model '{model}': the current catalogue does not list that available model/mode combination. Refresh the model catalogue or choose a supported effort."
+        ))
+}
+
+/// Pure precedence portion of effort resolution. The catalogue validation is
+/// intentionally separate so it cannot be bypassed by an execution override.
+pub(crate) fn reasoning_effort_candidate(
+    effort_override: Option<&str>,
+    selected_model: Option<&str>,
+    tier_model: Option<&str>,
+    tier_preset: Option<&str>,
+) -> Option<String> {
+    if let Some(effort) = effort_override
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return Some(effort.to_owned());
+    }
+    (selected_model == tier_model)
+        .then(|| {
+            tier_preset
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+        })
+        .flatten()
+}
+
+pub(crate) fn effort_is_advertised(candidate: &str, modes: &[String]) -> bool {
+    modes.iter().any(|mode| mode == candidate)
 }
 
 fn missing_ollama_model_error() -> String {
@@ -3140,6 +3267,16 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
         config.tier,
         config.model_tiers,
     );
+    // KT-646 — resolve reasoning effort the same way: explicit override wins,
+    // else the tier's configured preset, else no flag (CLI default). Gated to
+    // agents with a proven contract; every other agent gets `None` here.
+    let reasoning_effort = resolve_reasoning_effort(
+        config.reasoning_effort_override,
+        config.model_override,
+        config.agent_type,
+        config.tier,
+        config.model_tiers,
+    )?;
 
     let task_worker = config.task_worker_context.is_some();
     if task_worker
@@ -3177,6 +3314,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                 system_context: &extra_context,
                 project_path: config.project_path,
                 model_flag: model_flag.as_deref(),
+                reasoning_effort: reasoning_effort.as_deref(),
                 parent_cancel: config.cancel_token.as_ref(),
                 discussion_id: config.discussion_id,
                 resume_id: acp_resume_id,
@@ -3208,6 +3346,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                 system_context: &extra_context,
                 project_path: config.project_path,
                 model_flag: model_flag.as_deref(),
+                reasoning_effort: reasoning_effort.as_deref(),
                 parent_cancel: config.cancel_token.as_ref(),
                 discussion_id: config.discussion_id,
                 resume_id: acp_resume_id,
@@ -3219,6 +3358,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                 return run_acp_session(
                     AcpSessionRequest {
                         model_flag: None,
+                        reasoning_effort: None,
                         ..request
                     },
                     transport,
@@ -3236,6 +3376,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
             config.full_access,
             &extra_context,
             model_flag.as_deref(),
+            reasoning_effort.as_deref(),
             task_worker,
             task_worker.then_some(work_dir.as_path()),
             // A task worker never resumes: its worktree is fresh and its
@@ -3476,6 +3617,7 @@ struct AcpSessionRequest<'a> {
     system_context: &'a str,
     project_path: &'a str,
     model_flag: Option<&'a str>,
+    reasoning_effort: Option<&'a str>,
     parent_cancel: Option<&'a tokio_util::sync::CancellationToken>,
     discussion_id: Option<&'a str>,
     resume_id: Option<&'a str>,
@@ -3533,6 +3675,7 @@ async fn start_adapted_acp(
 
     let agent_type = request.agent_type;
     let model = request.model_flag.map(str::to_owned);
+    let reasoning_effort = request.reasoning_effort.map(str::to_owned);
     if let Some(model) = &model {
         tracing::debug!(agent = ?agent_type, model, "ACP adapter model applied via direct CLI flag");
     }
@@ -3545,12 +3688,14 @@ async fn start_adapted_acp(
     let transport: Arc<dyn AcpTransport> = match agent_type {
         AgentType::ClaudeCode => Arc::new(ClaudeAcpAdapter::new(
             model,
+            reasoning_effort,
             full_access,
             discussion_id,
             scope,
         )),
         AgentType::Codex => Arc::new(CodexAcpAdapter::new(
             model,
+            reasoning_effort,
             full_access,
             request.resume_id.map(str::to_owned),
             discussion_id,
@@ -3561,6 +3706,7 @@ async fn start_adapted_acp(
     run_acp_session(
         AcpSessionRequest {
             model_flag: None,
+            reasoning_effort: None,
             ..request
         },
         transport,
@@ -3584,6 +3730,7 @@ async fn run_acp_session(
         system_context,
         project_path,
         model_flag,
+        reasoning_effort: _,
         parent_cancel,
         discussion_id: _,
         resume_id,
@@ -3597,25 +3744,51 @@ async fn run_acp_session(
 
     let mut host = AcpHost::new(1, transport);
     let mcp_servers = acp_project_mcp_servers(project_path);
-    host.negotiate(AcpInitialize {
-        protocol_version: 1,
-        cwd: work_dir.to_string_lossy().into_owned(),
-        mcp_servers: mcp_servers.clone(),
-    })
-    .await
-    .map_err(|error| format!("{agent_type:?} ACP initialize failed: {error}"))?;
+    if let Err(error) = host
+        .negotiate(AcpInitialize {
+            protocol_version: 1,
+            cwd: work_dir.to_string_lossy().into_owned(),
+            mcp_servers: mcp_servers.clone(),
+        })
+        .await
+    {
+        return Err(acp_start_failure(
+            &host,
+            format!("{agent_type:?} ACP initialize failed: {error}"),
+        )
+        .await);
+    }
     if !mcp_servers.is_empty() {
-        host.require_capability(AcpCapability::McpInjection)
-            .map_err(|error| {
-                format!("{agent_type:?} ACP cannot start with the project MCP registry: {error}")
-            })?;
+        if let Err(error) = host.require_capability(AcpCapability::McpInjection) {
+            return Err(acp_start_failure(
+                &host,
+                format!("{agent_type:?} ACP cannot start with the project MCP registry: {error}"),
+            )
+            .await);
+        }
     }
     let (resumed, resume_failed) = match resume_id {
         Some(conversation_id) => {
-            let agent = acp_agent(agent_type)
-                .ok_or_else(|| format!("{agent_type:?} has no ACP session identity"))?;
-            let target = AcpSessionTarget::new(agent, conversation_id.to_owned())
-                .map_err(|error| format!("{agent_type:?} ACP resume target is invalid: {error}"))?;
+            let agent = match acp_agent(agent_type) {
+                Some(agent) => agent,
+                None => {
+                    return Err(acp_start_failure(
+                        &host,
+                        format!("{agent_type:?} has no ACP session identity"),
+                    )
+                    .await)
+                }
+            };
+            let target = match AcpSessionTarget::new(agent, conversation_id.to_owned()) {
+                Ok(target) => target,
+                Err(error) => {
+                    return Err(acp_start_failure(
+                        &host,
+                        format!("{agent_type:?} ACP resume target is invalid: {error}"),
+                    )
+                    .await)
+                }
+            };
             match host.resume_session(&target).await {
                 Ok(()) => (Some(target), false),
                 // Capability absence and a positively identified missing
@@ -3627,7 +3800,11 @@ async fn run_acp_session(
                 }) => (None, true),
                 Err(crate::acp::AcpError::SessionNotFound) => (None, true),
                 Err(error) => {
-                    return Err(format!("{agent_type:?} ACP session resume failed: {error}"));
+                    return Err(acp_start_failure(
+                        &host,
+                        format!("{agent_type:?} ACP session resume failed: {error}"),
+                    )
+                    .await);
                 }
             }
         }
@@ -3635,16 +3812,25 @@ async fn run_acp_session(
     };
     let session = match resumed {
         Some(target) => target,
-        None => host
-            .create_session()
-            .await
-            .map_err(|error| format!("{agent_type:?} ACP session creation failed: {error}"))?,
+        None => match host.create_session().await {
+            Ok(session) => session,
+            Err(error) => {
+                return Err(acp_start_failure(
+                    &host,
+                    format!("{agent_type:?} ACP session creation failed: {error}"),
+                )
+                .await)
+            }
+        },
     };
     if let Some(store) = session_store.as_ref() {
         if AcpSessionStore::tracks(agent_type) {
-            store
+            if let Err(error) = store
                 .persist(agent_type, work_dir, &session.session_id)
-                .await?;
+                .await
+            {
+                return Err(acp_start_failure(&host, error).await);
+            }
         }
     }
     // Apply the resolved tier/model against the options the session actually
@@ -3661,9 +3847,11 @@ async fn run_acp_session(
                 "ACP session exposes no matching model option; keeping its default"
             ),
             Err(error) => {
-                return Err(format!(
-                    "{agent_type:?} ACP model selection failed: {error}"
-                ))
+                return Err(acp_start_failure(
+                    &host,
+                    format!("{agent_type:?} ACP model selection failed: {error}"),
+                )
+                .await)
             }
         }
     }
@@ -3694,13 +3882,22 @@ async fn run_acp_session(
 
     // Match the async agent task to the AgentProcess lifecycle without treating
     // the ACP child itself as a line-producing text process.
-    let mut lifeline = async_cmd("sh")
+    let mut lifeline = match async_cmd("sh")
         .args(["-c", r#"read -r s; exit "${s:-1}""#])
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .map_err(|error| format!("OpenCode ACP lifeline spawn failed: {error}"))?;
+    {
+        Ok(lifeline) => lifeline,
+        Err(error) => {
+            return Err(acp_start_failure(
+                &host,
+                format!("OpenCode ACP lifeline spawn failed: {error}"),
+            )
+            .await)
+        }
+    };
     let lifeline_stdin = lifeline.stdin.take();
 
     tokio::spawn(async move {
@@ -3817,6 +4014,16 @@ fn acp_failure_diagnostic(operation: &str, error: &str) -> String {
         excerpt.push('…');
     }
     format!("ACP {operation} failed: {excerpt}")
+}
+
+/// Preserve the startup failure while surfacing a lifecycle failure as well.
+/// Native transports own a subprocess, so every return before the turn task is
+/// spawned must explicitly finish that transport.
+async fn acp_start_failure(host: &crate::acp::AcpHost, failure: String) -> String {
+    match host.shutdown().await {
+        Ok(()) => failure,
+        Err(error) => format!("{failure}; ACP shutdown failed: {error}"),
+    }
 }
 
 /// ACP receives only command-only MCP declarations from Kronn's canonical
@@ -8446,6 +8653,7 @@ fn agent_command(
         full_access,
         mcp_context,
         model_flag,
+        None,
         false,
         None,
         None,
@@ -8462,6 +8670,10 @@ fn agent_command_with_task_worker_policy(
     full_access: bool,
     mcp_context: &str,
     model_flag: Option<&str>,
+    // KT-646 — resolved reasoning effort (see `effective_reasoning_effort`).
+    // Only the Claude Code and Codex branches consume it: those are the
+    // agents `agent_supports_reasoning_effort` has a verified transport for.
+    reasoning_effort: Option<&str>,
     task_worker: bool,
     task_work_dir: Option<&Path>,
     // The CLI conversation to continue instead of narrating the history again.
@@ -8498,6 +8710,10 @@ fn agent_command_with_task_worker_policy(
             if let Some(model) = model_flag {
                 args.push("--model".into());
                 args.push(model.into());
+            }
+            if let Some(effort) = reasoning_effort {
+                args.push("--effort".into());
+                args.push(effort.into());
             }
             if task_worker {
                 // Ignore user/project settings so a previously configured
@@ -8565,6 +8781,18 @@ fn agent_command_with_task_worker_policy(
             } else {
                 codex_kronn_internal_env_override()
             });
+            // KT-646 — official per-run TOML override for reasoning effort
+            // (https://learn.chatgpt.com/docs/config-file/config-reference,
+            // https://learn.chatgpt.com/docs/developer-commands?surface=cli).
+            // `serde_json::to_string` gives a correctly quoted/escaped TOML
+            // string value, matching how the MCP overrides above are quoted.
+            if let Some(effort) = reasoning_effort {
+                args.push("-c".into());
+                args.push(format!(
+                    "model_reasoning_effort={}",
+                    serde_json::to_string(effort).unwrap_or_else(|_| "\"\"".into())
+                ));
+            }
             // Codex requires a trusted git directory by default.
             // Inside Docker the paths are mapped, so skip the check.
             args.push("--skip-git-repo-check".into());
@@ -10079,6 +10307,7 @@ mod acp_resume_tests {
                 system_context: "",
                 project_path: "",
                 model_flag: None,
+                reasoning_effort: None,
                 parent_cancel,
                 discussion_id: None,
                 resume_id,
@@ -10387,6 +10616,7 @@ mod acp_resume_tests {
                     system_context: "",
                     project_path: "",
                     model_flag: None,
+                    reasoning_effort: None,
                     parent_cancel: None,
                     discussion_id: None,
                     resume_id: Some("recorded-session"),

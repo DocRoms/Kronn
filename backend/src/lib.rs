@@ -1138,6 +1138,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         )
         // ── Agents ──
         .route("/api/agents", get(api::agents::detect))
+        .route(
+            "/api/agents/version-check",
+            post(api::agents::version_check),
+        )
         .route("/api/agents/install", post(api::agents::install))
         .route("/api/agents/uninstall", post(api::agents::uninstall))
         .route("/api/agents/toggle", post(api::agents::toggle))

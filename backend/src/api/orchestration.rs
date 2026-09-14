@@ -9926,6 +9926,9 @@ mod tests {
                 path: None,
                 version: None,
                 latest_version: None,
+                version_checked_at: None,
+                version_check_error: None,
+                version_source_url: None,
                 origin: "test".into(),
                 install_command: None,
                 host_managed: false,
@@ -9958,6 +9961,9 @@ mod tests {
                 path: None,
                 version: None,
                 latest_version: None,
+                version_checked_at: None,
+                version_check_error: None,
+                version_source_url: None,
                 origin: "test".into(),
                 install_command: None,
                 host_managed: false,
@@ -10072,6 +10078,9 @@ mod tests {
             path: Some("copilot".into()),
             version: None,
             latest_version: None,
+            version_checked_at: None,
+            version_check_error: None,
+            version_source_url: None,
             origin: "test".into(),
             install_command: None,
             host_managed: false,
@@ -10149,6 +10158,9 @@ mod tests {
             path: Some("codex".into()),
             version: None,
             latest_version: None,
+            version_checked_at: None,
+            version_check_error: None,
+            version_source_url: None,
             origin: "test".into(),
             install_command: None,
             host_managed: false,
@@ -14229,6 +14241,366 @@ mod tests {
         );
     }
 
+    /// KT-648 — an escalation that never produced a REVIEW leaves the attempt
+    /// where it was, so the next delivery rebuilds the review-request id the
+    /// first one already posted. `messages.id` is a primary key, the insert
+    /// sits inside the transaction that commits `Working -> AwaitingReview`,
+    /// and the violation therefore rolls the whole delivery back instead of
+    /// skipping one message: the execution can never hand its work over again.
+    #[tokio::test]
+    async fn a_reassigned_unreviewed_delivery_can_be_delivered_again() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (_parent, _child, exec_id, _head, _path) =
+            delivered_awaiting_review(&db, repo.path()).await;
+        let delivered = exec_of(&db, &exec_id).await;
+        assert_eq!(delivered.status, TaskExecutionStatus::AwaitingReview);
+        let first_attempt = delivered.attempt_no;
+
+        // What `apply_execution_timeout` does when the review clock expires:
+        // escalate and park on a human, writing no `worker_reviews` row.
+        let execution_id = exec_id.clone();
+        db.with_conn(move |conn| {
+            crate::db::orchestration::transition_execution(
+                conn,
+                &execution_id,
+                TaskExecutionStatus::Escalated,
+                &backend_actor(),
+                serde_json::json!({ "timeout_kind": "review_wait" }),
+            )?;
+            conn.execute(
+                "UPDATE task_execution_recovery SET recovery_action = 'await_human', \
+                        review_deadline_at = NULL, pending = 0 WHERE task_execution_id = ?1",
+                rusqlite::params![execution_id],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        // The principal recovers the SAME joined CLI — the one assignment the
+        // reassignment contract lets a child room keep.
+        let execution_id = exec_id.clone();
+        db.with_conn(move |conn| {
+            crate::db::orchestration::reassign_execution_worker(
+                conn,
+                &execution_id,
+                &crate::models::CampaignWorkerSelection {
+                    target: MessageTarget::cli(AgentType::ClaudeCode, 101),
+                    model: None,
+                    profile_id: None,
+                },
+                "the review never came back",
+                &backend_actor(),
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        // `Escalated -> Working`, the documented reassignment path
+        // (`reassign_native_execution` drives it at the API boundary).
+        let execution_id = exec_id.clone();
+        db.with_conn(move |conn| {
+            crate::db::orchestration::transition_execution(
+                conn,
+                &execution_id,
+                TaskExecutionStatus::Working,
+                &backend_actor(),
+                serde_json::json!({ "recovery": "worker_reassigned" }),
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        let manifest = clean_manifest_for_execution(&db, &exec_id).await;
+        let redelivery = deliver_worker_manifest(&db, &exec_id, "ClaudeCode", "sess-a", &manifest)
+            .await
+            .expect("a re-delivery must not abort on a message primary key");
+        assert!(
+            matches!(redelivery, DeliverOutcome::Delivered { .. }),
+            "the recovered worker must be able to hand its work back: {redelivery:?}"
+        );
+        let after = exec_of(&db, &exec_id).await;
+        assert_eq!(
+            after.status,
+            TaskExecutionStatus::AwaitingReview,
+            "a collision rolls the transition back and strands the execution in Working"
+        );
+
+        let execution_id = exec_id.clone();
+        let second_attempt = after.attempt_no;
+        let obligations = db
+            .with_conn(move |conn| {
+                Ok(conn.query_row(
+                    "SELECT COUNT(*) FROM messages WHERE id IN (?1, ?2)",
+                    rusqlite::params![
+                        format!("orch-review-request:{execution_id}:{first_attempt}"),
+                        format!("orch-review-request:{execution_id}:{second_attempt}"),
+                    ],
+                    |row| row.get::<_, i64>(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert_ne!(
+            first_attempt, second_attempt,
+            "a delivered attempt must not be reused: its message identities are already spent"
+        );
+        assert_eq!(
+            obligations, 2,
+            "both review obligations keep distinct durable message ids"
+        );
+    }
+
+    /// KT-648 — the attempt guard asks whether the current attempt was
+    /// REVIEWED, but attempt N owns its delivery and message identities as
+    /// soon as it was DELIVERED. Its own comment already says
+    /// "delivery/review/message"; this pins the code to it.
+    ///
+    /// The three origins are exercised separately rather than by equivalence:
+    /// what differs between them is not the guard but what brings a delivered
+    /// execution to `Escalated` with no review, and nothing keeps that shared.
+    /// The review-wait and total-duration doors run the real watchdog entry
+    /// point; the unavailable-worker door is the state its reconciler leaves.
+    #[tokio::test]
+    async fn reassigning_an_attempt_that_already_delivered_advances_it() {
+        for origin in ["review_wait", "total_duration", "agent_unavailable"] {
+            let repo = init_repo();
+            let db = Database::open_in_memory().unwrap();
+            let (_parent, _child, exec_id, _head, _path) =
+                delivered_awaiting_review(&db, repo.path()).await;
+            let before = exec_of(&db, &exec_id).await;
+            assert_eq!(before.status, TaskExecutionStatus::AwaitingReview);
+
+            let execution_id = exec_id.clone();
+            db.with_conn(move |conn| {
+                match origin {
+                    "review_wait" => {
+                        crate::db::orchestration::apply_execution_timeout(
+                            conn,
+                            &execution_id,
+                            crate::models::ExecutionTimeoutKind::ReviewWait,
+                        )?;
+                    }
+                    "total_duration" => {
+                        crate::db::orchestration::apply_execution_timeout(
+                            conn,
+                            &execution_id,
+                            crate::models::ExecutionTimeoutKind::TotalDuration,
+                        )?;
+                    }
+                    // The worker's CLI session is gone after a restart: the
+                    // reconciler parks the execution without any review.
+                    _ => {
+                        crate::db::orchestration::transition_execution(
+                            conn,
+                            &execution_id,
+                            TaskExecutionStatus::Escalated,
+                            &backend_actor(),
+                            serde_json::json!({ "recovery": "agent_unavailable" }),
+                        )?;
+                        conn.execute(
+                            "UPDATE task_execution_recovery SET recovery_action = \
+                                    'block_agent_unavailable' WHERE task_execution_id = ?1",
+                            rusqlite::params![execution_id],
+                        )?;
+                    }
+                }
+                Ok(())
+            })
+            .await
+            .unwrap();
+            let escalated = exec_of(&db, &exec_id).await;
+            assert_eq!(
+                escalated.status,
+                TaskExecutionStatus::Escalated,
+                "{origin}: the execution must be parked before the reassignment"
+            );
+
+            let execution_id = exec_id.clone();
+            let reassigned = db
+                .with_conn(move |conn| {
+                    crate::db::orchestration::reassign_execution_worker(
+                        conn,
+                        &execution_id,
+                        &crate::models::CampaignWorkerSelection {
+                            target: MessageTarget::cli(AgentType::ClaudeCode, 101),
+                            model: None,
+                            profile_id: None,
+                        },
+                        "the worker never handed anything back",
+                        &backend_actor(),
+                    )
+                })
+                .await
+                .unwrap();
+
+            assert_eq!(
+                reassigned.attempt_no,
+                before.attempt_no + 1,
+                "{origin}: an attempt that already delivered cannot be reused"
+            );
+        }
+    }
+
+    /// KT-648 — the belt. With the guard above, an already-taken obligation id
+    /// is a path nobody has foreseen; it must still never abort the delivery.
+    /// Re-keying is the only answer that neither rewrites a message this
+    /// delivery does not own nor leaves a stale `head_sha` standing as the
+    /// live obligation.
+    #[tokio::test]
+    async fn an_occupied_review_identity_never_aborts_the_delivery() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (_task_ref, parent, _child, exec_id) = attached_cli_worker(&db, repo.path()).await;
+        seed_cli_session(&db, 102, &parent, "sess-b").await;
+
+        // Somebody else already holds the identity this delivery will mint.
+        let squatter_id = format!("orch-review-request:{exec_id}:0");
+        let squatter_parent = parent.clone();
+        let squatter = squatter_id.clone();
+        db.with_conn(move |conn| {
+            let message = orchestrator_message(squatter, "not this delivery's obligation".into());
+            crate::db::discussions::insert_message(conn, &squatter_parent, &message)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        let manifest = clean_manifest_for_execution(&db, &exec_id).await;
+        let delivered = deliver_worker_manifest(&db, &exec_id, "ClaudeCode", "sess-a", &manifest)
+            .await
+            .expect("an occupied identity must not abort the delivery");
+        assert!(matches!(delivered, DeliverOutcome::Delivered { .. }));
+        assert_eq!(
+            exec_of(&db, &exec_id).await.status,
+            TaskExecutionStatus::AwaitingReview
+        );
+
+        let squatter_read = squatter_id.clone();
+        let (untouched, obligations): (String, i64) = db
+            .with_conn(move |conn| {
+                let untouched = conn.query_row(
+                    "SELECT content FROM messages WHERE id = ?1",
+                    rusqlite::params![squatter_read],
+                    |row| row.get::<_, String>(0),
+                )?;
+                let obligations = conn.query_row(
+                    "SELECT COUNT(*) FROM messages WHERE id LIKE ?1",
+                    rusqlite::params![format!("{squatter_read}:r%")],
+                    |row| row.get::<_, i64>(0),
+                )?;
+                Ok((untouched, obligations))
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            untouched, "not this delivery's obligation",
+            "the delivery must never rewrite a message it does not own"
+        );
+        assert_eq!(
+            obligations, 1,
+            "the obligation is published under an identity of its own"
+        );
+    }
+
+    /// KT-648 — re-keying must land on an identity that is actually FREE.
+    /// Counting the occupied ones is not the same thing: with `base` and
+    /// `base:r2` taken the count is two, and the next obligation aims at
+    /// `base:r2` — the very collision this belt exists to avoid, reproduced
+    /// inside the belt. Gaps are possible, and a third party may hold any
+    /// suffix, so the allocation has to prove the identity is unused.
+    #[tokio::test]
+    async fn re_keying_skips_identities_that_are_already_taken() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (_task_ref, parent, _child, exec_id) = attached_cli_worker(&db, repo.path()).await;
+        seed_cli_session(&db, 102, &parent, "sess-b").await;
+        let head = git_rev(
+            Path::new(&managed_worktree_path(&db, &exec_id).await),
+            "HEAD",
+        );
+
+        // A gap, on purpose: `base` and `base:r2` are taken, `base:r0` and
+        // `base:r1` are not. A counter lands on `base:r2`.
+        let base = format!("orch-review-request:{exec_id}:0");
+        let squatters = vec![base.clone(), format!("{base}:r2")];
+        let squatted = squatters.clone();
+        let squat_parent = parent.clone();
+        db.with_conn(move |conn| {
+            for (index, id) in squatted.iter().enumerate() {
+                let message =
+                    orchestrator_message(id.clone(), format!("someone else's message {index}"));
+                crate::db::discussions::insert_message(conn, &squat_parent, &message)?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        let manifest = clean_manifest_for_execution(&db, &exec_id).await;
+        let delivered = deliver_worker_manifest(&db, &exec_id, "ClaudeCode", "sess-a", &manifest)
+            .await
+            .expect("an occupied identity must not abort the delivery");
+        assert!(matches!(delivered, DeliverOutcome::Delivered { .. }));
+        assert_eq!(
+            exec_of(&db, &exec_id).await.status,
+            TaskExecutionStatus::AwaitingReview
+        );
+
+        // The obligation must be a REAL one: this delivery's head, addressed to
+        // the principal. A message merely existing under a free id proves nothing.
+        let probe_base = base.clone();
+        let probe_squatters = squatters.clone();
+        let probe_parent = parent.clone();
+        let (content, targets, expected_target, untouched): (String, String, String, i64) = db
+            .with_conn(move |conn| {
+                let (id, content): (String, String) = conn.query_row(
+                    "SELECT id, content FROM messages
+                     WHERE id LIKE ?1 AND id NOT IN (?2, ?3)",
+                    rusqlite::params![
+                        format!("{probe_base}:r%"),
+                        probe_squatters[0],
+                        probe_squatters[1]
+                    ],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )?;
+                // The EXACT principal target, not a count: a wrong target counts too.
+                let targets = conn.query_row(
+                    "SELECT t.target_kind || ':' || t.agent_type
+                     FROM message_targets t WHERE t.message_id = ?1
+                     ORDER BY t.position",
+                    rusqlite::params![id],
+                    |row| row.get::<_, String>(0),
+                )?;
+                let untouched = conn.query_row(
+                    "SELECT COUNT(*) FROM messages
+                     WHERE id IN (?1, ?2) AND content LIKE 'someone else''s message%'",
+                    rusqlite::params![probe_squatters[0], probe_squatters[1]],
+                    |row| row.get::<_, i64>(0),
+                )?;
+                let expected_target = conn.query_row(
+                    "SELECT 'discussion_agent:' || agent FROM discussions WHERE id = ?1",
+                    rusqlite::params![probe_parent],
+                    |row| row.get::<_, String>(0),
+                )?;
+                Ok((content, targets, expected_target, untouched))
+            })
+            .await
+            .unwrap();
+        assert!(
+            content.contains(&head),
+            "the re-keyed obligation must carry THIS delivery's head, not a stale one"
+        );
+        assert_eq!(
+            targets, expected_target,
+            "the re-keyed obligation stays addressed to the principal itself"
+        );
+        assert_eq!(untouched, 2, "neither occupant may be rewritten");
+    }
+
     #[tokio::test]
     async fn resumed_validating_checkpoint_does_not_duplicate_a_persisted_validation() {
         let repo = init_repo();
@@ -15830,7 +16202,13 @@ mod tests {
     async fn cli_worker_room_append_never_falls_back_to_a_native_worker() {
         let repo = init_repo();
         let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
-        let (_, _, child, exec_id) = attached_cli_worker(&db, repo.path()).await;
+        let (_, parent, child, exec_id) = attached_cli_worker(&db, repo.path()).await;
+        let parent_before = {
+            let parent = parent.clone();
+            db.with_conn(move |conn| crate::db::discussions::list_messages(conn, &parent))
+                .await
+                .unwrap()
+        };
         db.with_conn(|conn| {
             // Reproduce the legacy child whose UI flag never disabled the
             // native default, after its joined worker became unavailable.
@@ -15876,6 +16254,24 @@ mod tests {
             "the worker's message must remain publishable"
         );
         assert_eq!(response.data.unwrap().appended, 1);
+        let parent_after = db
+            .with_conn(move |conn| crate::db::discussions::list_messages(conn, &parent))
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(parent_after).unwrap(),
+            serde_json::to_value(parent_before).unwrap(),
+            "a worker status append must not copy technical chatter into the parent"
+        );
+        let child_messages = {
+            let child = child.clone();
+            db.with_conn(move |conn| crate::db::discussions::list_messages(conn, &child))
+                .await
+                .unwrap()
+        };
+        assert!(child_messages
+            .iter()
+            .any(|message| { message.content == "Work remains in progress; no delivery yet." }));
         let jobs = db
             .with_conn(move |conn| {
                 crate::db::agent_dispatch::list_active_for_discussion(
@@ -18405,6 +18801,23 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
         let (parent, _child, exec_id, _head, _path) =
             delivered_awaiting_review(&db, repo.path()).await;
+
+        let reports_before_review = {
+            let parent = parent.clone();
+            db.with_conn(move |conn| {
+                Ok(conn.query_row(
+                    "SELECT COUNT(*) FROM messages WHERE discussion_id = ?1 AND content LIKE '## ✅ Delivery accepted%'",
+                    [parent],
+                    |row| row.get::<_, i64>(0),
+                )?)
+            })
+            .await
+            .unwrap()
+        };
+        assert_eq!(
+            reports_before_review, 0,
+            "a delivered but unreviewed result must not appear as an accepted report"
+        );
 
         let approve = review_approve(&db, &exec_id).await;
         let outcome = decide_review(&db, &exec_id, &approve, "ClaudeCode", "sess-b")

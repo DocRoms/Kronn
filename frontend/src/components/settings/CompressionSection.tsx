@@ -1,7 +1,8 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import { Leaf, ExternalLink, Loader2, Info, X, Square, ChevronDown, ChevronUp, ArrowUpCircle, Copy } from 'lucide-react';
-import { rtk as rtkApi } from '../../lib/api';
-import type { AgentDetection } from '../../types/generated';
+import { rtk as rtkApi, agents as agentsApi } from '../../lib/api';
+import type { AgentDetection, RtkVersionInfo } from '../../types/generated';
+import { useAsyncGuard } from '../../hooks/useAsyncGuard';
 import type { ToastFn } from '../../hooks/useToast';
 import { RTK_APPLICABLE } from '../../lib/constants';
 import { ContextHelp } from '../ContextHelp';
@@ -43,12 +44,10 @@ export function CompressionSection({ agents, onActivated, toast, t }: Compressio
   // and a latest-known version AND the comparator (in Rust) says the
   // installed is older. We don't recompute it client-side to keep the
   // single source of truth on the backend (see `core::versions`).
-  const [versionInfo, setVersionInfo] = useState<{
-    installed: string | null;
-    latest: string;
-    updateAvailable: boolean;
-    updateCommand: string;
-  } | null>(null);
+  const [versionInfo, setVersionInfo] = useState<RtkVersionInfo | null>(null);
+  const [checkingVersions, setCheckingVersions] = useState(false);
+  const [versionRequestFailed, setVersionRequestFailed] = useState(false);
+  const versionRequestId = useRef(0);
   const [showUpdateModal, setShowUpdateModal] = useState(false);
 
   // Any installed RTK-applicable agent => binary either detected or not.
@@ -84,21 +83,45 @@ export function CompressionSection({ agents, onActivated, toast, t }: Compressio
     }).catch(() => {
       if (!cancelled) setSavings({ total: 0, ratio: 0, samples: 0, available: false });
     });
+    return () => { cancelled = true; };
+  }, [rtkBinaryAvailable, configured]);
+
+  // ccUsage discovery is independent of whether RTK itself is installed.
+  // A late mount-time response cannot overwrite an explicit recheck result.
+  useEffect(() => {
+    let cancelled = false;
+    const requestId = ++versionRequestId.current;
     rtkApi.version().then(v => {
-      if (!cancelled) setVersionInfo({
-        installed: v.installed,
-        latest: v.latest_known,
-        updateAvailable: v.update_available,
-        updateCommand: v.update_command,
-      });
+      if (cancelled || versionRequestId.current !== requestId) return;
+      setVersionInfo(v);
+      setVersionRequestFailed(false);
     }).catch(() => {
-      if (!cancelled) setVersionInfo(null);
+      if (!cancelled && versionRequestId.current === requestId) setVersionRequestFailed(true);
     });
     return () => { cancelled = true; };
   }, [rtkBinaryAvailable, configured]);
 
+  const recheckVersions = useAsyncGuard(async () => {
+    const requestId = ++versionRequestId.current;
+    setCheckingVersions(true);
+    try {
+      await agentsApi.versionCheck();
+      const next = await rtkApi.version();
+      if (versionRequestId.current === requestId) {
+        setVersionInfo(next);
+        setVersionRequestFailed(false);
+      }
+      onActivated?.();
+    } catch {
+      if (versionRequestId.current === requestId) setVersionRequestFailed(true);
+      toast?.(t('config.releaseCheckRequestFailed'), 'error');
+    } finally {
+      setCheckingVersions(false);
+    }
+  });
+
   const visibleSavings = rtkBinaryAvailable ? savings : null;
-  const visibleVersionInfo = rtkBinaryAvailable ? versionInfo : null;
+  const visibleVersionInfo = versionInfo;
 
   const handleActivate = async () => {
     setActivating(true);
@@ -228,20 +251,40 @@ export function CompressionSection({ agents, onActivated, toast, t }: Compressio
                *  installed < latest_known under lenient semver. Click
                *  opens a small modal with a copyable upgrade command
                *  (RTK install.sh is idempotent — re-runs upgrade). */}
-              {visibleVersionInfo?.updateAvailable && visibleVersionInfo.installed && (
+              {rtkBinaryAvailable && visibleVersionInfo?.update_available && visibleVersionInfo.installed && (
                 <button
                   type="button"
                   className="set-compression-update-pill"
                   onClick={() => setShowUpdateModal(true)}
-                  aria-label={t('config.rtk.updateAvailableAria', visibleVersionInfo.installed, visibleVersionInfo.latest)}
-                  title={t('config.rtk.updateAvailableTitle', visibleVersionInfo.installed, visibleVersionInfo.latest)}
+                  aria-label={t('config.rtk.updateAvailableAria', visibleVersionInfo.installed, visibleVersionInfo.latest_known ?? '?')}
+                  title={t('config.rtk.updateAvailableTitle', visibleVersionInfo.installed, visibleVersionInfo.latest_known ?? '?')}
                 >
                   <ArrowUpCircle size={10} />
-                  <span>{t('config.rtk.updateAvailable', visibleVersionInfo.latest)}</span>
+                  <span>{t('config.rtk.updateAvailable', visibleVersionInfo.latest_known ?? '?')}</span>
                 </button>
               )}
             </div>
             <p className="set-compression-explainer">{t('config.rtk.explainer')}</p>
+            {visibleVersionInfo && (
+              <div className="set-compression-explainer">
+                <span>{t('config.rtkVersion', visibleVersionInfo.installed ?? t('config.versionUnknown'), visibleVersionInfo.latest_known ?? t('config.versionUnknown'))}</span>
+                {visibleVersionInfo.check_error && <p role="status">{t('config.releaseCheckFailed', visibleVersionInfo.check_error)}</p>}
+                <p>{visibleVersionInfo.checked_at ? t('config.releaseCheckedAt', visibleVersionInfo.checked_at) : t('config.releaseNotChecked')}</p>
+              </div>
+            )}
+            {visibleVersionInfo?.ccusage && (
+              <div className="set-compression-explainer">
+                <span>{t('config.ccusageVersion', visibleVersionInfo.ccusage.installed ?? t('config.versionUnknown'), visibleVersionInfo.ccusage.latest ?? t('config.versionUnknown'))}</span>
+                {visibleVersionInfo.ccusage.update_available ? ` · ${t('config.updateAvailable')}` : ''}
+                {visibleVersionInfo.ccusage.check_error && <p role="status">{t('config.releaseCheckFailed', visibleVersionInfo.ccusage.check_error)}</p>}
+                <p>{visibleVersionInfo.ccusage.checked_at ? t('config.releaseCheckedAt', visibleVersionInfo.ccusage.checked_at) : t('config.releaseNotChecked')}</p>
+              </div>
+            )}
+            {versionRequestFailed && <p role="status">{t('config.releaseCheckRequestFailed')}</p>}
+            <button type="button" className="set-action-btn" disabled={checkingVersions} onClick={() => void recheckVersions()}>
+              {checkingVersions && <Loader2 size={12} className="spin" />}
+              {t('config.recheckVersions')}
+            </button>
           </div>
         </div>
 
@@ -378,14 +421,14 @@ export function CompressionSection({ agents, onActivated, toast, t }: Compressio
               <p>
                 {t('config.rtk.updateModalBody',
                   visibleVersionInfo.installed ?? '?',
-                  visibleVersionInfo.latest)}
+                  visibleVersionInfo.latest_known ?? '?')}
               </p>
               <div className="set-compression-install-label">{t('config.rtk.installCommand')}</div>
-              <pre className="set-compression-install-cmd">{visibleVersionInfo.updateCommand}</pre>
+              <pre className="set-compression-install-cmd">{visibleVersionInfo.update_command}</pre>
               <button
                 type="button"
                 className="set-compression-copy-btn"
-                onClick={() => navigator.clipboard.writeText(visibleVersionInfo.updateCommand).catch(() => {})}
+                onClick={() => navigator.clipboard.writeText(visibleVersionInfo.update_command).catch(() => {})}
                 aria-label={t('common.copy')}
               >
                 <Copy size={12} /> {t('common.copy')}

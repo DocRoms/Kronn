@@ -45,7 +45,8 @@ export function ImportantMessageForm({ discussionId, grant, onGrantChange, onPub
   };
   const publish = async () => {
     const current = readDraft(discussionId);
-    if (pending.has(discussionId) || !current.content.trim() || !grant.trim() || missingTask) return;
+    if (pending.has(discussionId) || !current.content.trim() || !grant.trim()
+      || (missingTask && current.state !== 'uncertain')) return;
     const active = { controller: new AbortController(), sending: false };
     pending.set(discussionId, active);
     const body = current.submitted ?? importantMessageFence(current.content, current.category, current.taskRef, current.factId, t('disc.important.unspecifiedImpact'));
@@ -110,7 +111,7 @@ export function ImportantMessageForm({ discussionId, grant, onGrantChange, onPub
       {draft.state !== 'editing' && <p role="status" className="settings-hint">{t(`disc.important.status.${draft.state}`)}</p>}
       <div className="disc-important-form-actions">
         <button type="button" disabled={draft.state === 'sending'} onClick={close}>{draft.state === 'preparing' ? t('disc.important.cancelPreparing') : t('common.cancel')}</button>
-        <button type="button" disabled={!draft.content.trim() || !grant.trim() || busy || missingTask} onClick={() => void publish()}><Send size={14} aria-hidden="true" /> {t('disc.important.publish')}</button>
+        <button type="button" disabled={!draft.content.trim() || !grant.trim() || busy || (missingTask && draft.state !== 'uncertain')} onClick={() => void publish()}><Send size={14} aria-hidden="true" /> {t('disc.important.publish')}</button>
       </div>
     </div>}
   </section>;

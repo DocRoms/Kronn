@@ -1026,6 +1026,171 @@ mod tests {
         assert_eq!(events, 1);
     }
 
+    fn remote_note_revision_fixture() -> (Connection, Connection) {
+        let source = test_conn();
+        let mirror = test_conn();
+        let mut note = make_message("shared-note", MessageRole::User, None);
+        note.channel = crate::models::MessageChannel::Note;
+        note.content = "original shared note".into();
+        for conn in [&source, &mirror] {
+            insert_discussion(conn, &make_discussion("shared-note-disc")).unwrap();
+            insert_note_message(conn, "shared-note-disc", &note).unwrap();
+            for (id, role, agent) in [
+                (
+                    "later-agent",
+                    MessageRole::Agent,
+                    Some(AgentType::ClaudeCode),
+                ),
+                ("later-system", MessageRole::System, None),
+                ("later-user", MessageRole::User, None),
+            ] {
+                insert_message(conn, "shared-note-disc", &make_message(id, role, agent)).unwrap();
+            }
+            update_summary_cache(conn, "shared-note-disc", "unchanged main-thread summary", 3)
+                .unwrap();
+        }
+        (source, mirror)
+    }
+
+    fn remote_note_projection(conn: &Connection) -> String {
+        // Own fixture only. Capture the complete message projection as well as
+        // the state a note correction must not consume or invalidate.
+        conn.query_row(
+            "SELECT json_object(
+                'messages', (SELECT json_group_array(json_array(id, content, timestamp, sort_order, channel)) FROM (SELECT * FROM messages ORDER BY sort_order)),
+                'sequence', next_message_seq, 'summary', summary_cache,
+                'message_count', message_count, 'updated_at', updated_at,
+                'awaiting', awaiting_agent,
+                'events', (SELECT COUNT(*) FROM message_revision_events),
+                'tombstones', (SELECT COUNT(*) FROM message_tombstones),
+                'targets', (SELECT COUNT(*) FROM message_targets),
+                'dispatches', (SELECT COUNT(*) FROM agent_dispatch_jobs))
+             FROM discussions WHERE id = 'shared-note-disc'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap()
+    }
+
+    fn remote_note_main_messages(conn: &Connection) -> Vec<DiscussionMessage> {
+        list_messages(conn, "shared-note-disc")
+            .unwrap()
+            .into_iter()
+            .filter(|message| message.channel == crate::models::MessageChannel::Main)
+            .collect()
+    }
+
+    #[test]
+    fn remote_note_revisions_preserve_the_conversation_and_written_at() {
+        let (source, mirror) = remote_note_revision_fixture();
+        let before_messages = remote_note_main_messages(&mirror);
+        let written_at: String = mirror
+            .query_row(
+                "SELECT timestamp FROM messages WHERE id = 'shared-note'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let next_sequence: i64 = mirror
+            .query_row(
+                "SELECT next_message_seq FROM discussions WHERE id = 'shared-note-disc'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        for (index, content) in ["first remote correction", "second remote correction"]
+            .into_iter()
+            .enumerate()
+        {
+            revise_note_message(&source, "shared-note-disc", "shared-note", content).unwrap();
+            let event = list_revision_events_after(&source, "shared-note-disc", 0)
+                .unwrap()
+                .pop()
+                .unwrap();
+            // A wire target must never turn a note into a conversation dispatch.
+            let targets = [MessageTarget::agent(AgentType::Codex)];
+            assert!(apply_remote_message_revision_with_targets(&mirror, &event, &targets).unwrap());
+            let after_messages = remote_note_main_messages(&mirror);
+            assert_eq!(
+                serde_json::to_value(&after_messages).unwrap(),
+                serde_json::to_value(&before_messages).unwrap(),
+                "a note revision must preserve all later conversation messages"
+            );
+            let (actual_content, actual_written_at): (String, String) = mirror
+                .query_row(
+                    "SELECT content, timestamp FROM messages WHERE id = 'shared-note'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(actual_content, content);
+            assert_eq!(
+                actual_written_at, written_at,
+                "an edit must not replace the note's written-at date"
+            );
+            assert!(list_message_targets(&mirror, "shared-note")
+                .unwrap()
+                .is_empty());
+            let event_sort: i64 = mirror
+                .query_row(
+                    "SELECT sort_order FROM message_revision_events WHERE id = ?1",
+                    [&event.id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(event_sort, next_sequence + index as i64);
+            let (jobs, tombstones, summary): (i64, i64, String) = mirror.query_row(
+                "SELECT (SELECT COUNT(*) FROM agent_dispatch_jobs), (SELECT COUNT(*) FROM message_tombstones), summary_cache FROM discussions WHERE id = 'shared-note-disc'",
+                [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            ).unwrap();
+            assert_eq!((jobs, tombstones), (0, 0));
+            assert_eq!(summary, "unchanged main-thread summary");
+            let applied = remote_note_projection(&mirror);
+            assert!(
+                !apply_remote_message_revision_with_targets(&mirror, &event, &targets).unwrap()
+            );
+            assert_eq!(
+                remote_note_projection(&mirror),
+                applied,
+                "a duplicate must consume no state"
+            );
+        }
+    }
+
+    #[test]
+    fn remote_note_revision_audit_failure_is_atomic_and_divergence_is_a_noop() {
+        let (source, mirror) = remote_note_revision_fixture();
+        revise_note_message(
+            &source,
+            "shared-note-disc",
+            "shared-note",
+            "remote correction",
+        )
+        .unwrap();
+        let event = list_revision_events_after(&source, "shared-note-disc", 0)
+            .unwrap()
+            .pop()
+            .unwrap();
+        let before = remote_note_projection(&mirror);
+        mirror.execute_batch("CREATE TRIGGER refuse_remote_note_audit BEFORE INSERT ON message_revision_events BEGIN SELECT RAISE(ABORT, 'injected remote audit failure'); END;").unwrap();
+        let error = apply_remote_message_revision(&mirror, &event).unwrap_err();
+        assert!(error.to_string().contains("injected remote audit failure"));
+        assert_eq!(remote_note_projection(&mirror), before);
+        mirror
+            .execute_batch("DROP TRIGGER refuse_remote_note_audit;")
+            .unwrap();
+        let mut divergent = event.clone();
+        divergent.previous_content_hash = content_hash("a different local revision");
+        assert!(!apply_remote_message_revision(&mirror, &divergent).unwrap());
+        assert_eq!(remote_note_projection(&mirror), before);
+        assert!(apply_remote_message_revision(&mirror, &event).unwrap());
+        assert_eq!(
+            remote_note_main_messages(&mirror).len(),
+            3,
+            "retrying the same event must preserve the conversation too"
+        );
+    }
+
     // ═══════════════════════════════════════════════════════════════════════════
     // update_message_tokens
     // ═══════════════════════════════════════════════════════════════════════════
@@ -1512,6 +1677,98 @@ mod tests {
             )
             .unwrap();
         assert_eq!(after, written_at);
+    }
+
+    #[test]
+    fn note_revisions_repeat_across_notes_and_share_the_discussion_sequence() {
+        let conn = test_conn();
+        insert_discussion(&conn, &make_discussion("note-repeat")).unwrap();
+        for id in ["note-a", "note-b"] {
+            let mut note = make_message(id, MessageRole::User, None);
+            note.channel = crate::models::MessageChannel::Note;
+            note.content = "original".into();
+            insert_note_message(&conn, "note-repeat", &note).unwrap();
+        }
+        let mut previous_a = "original".to_string();
+        let mut previous_b = "original".to_string();
+        for (index, id) in ["note-a", "note-a", "note-b", "note-a", "note-b"]
+            .into_iter()
+            .enumerate()
+        {
+            let next = format!("revision-{index}");
+            let previous = if id == "note-a" {
+                &mut previous_a
+            } else {
+                &mut previous_b
+            };
+            let revision = revise_note_message(&conn, "note-repeat", id, &next)
+                .expect("every correction in the same discussion must succeed");
+            let (hash, content, at): (String, String, String) = conn.query_row(
+                "SELECT previous_content_hash, content, revision FROM message_revision_events WHERE target_message_id = ?1 ORDER BY sort_order DESC LIMIT 1",
+                [id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            ).unwrap();
+            assert_eq!(hash, content_hash(previous));
+            assert_eq!(content, next);
+            assert_eq!(at, revision);
+            chrono::DateTime::parse_from_rfc3339(&at).unwrap();
+            *previous = next;
+        }
+        let events: Vec<i64> = conn.prepare("SELECT sort_order FROM message_revision_events WHERE discussion_id = 'note-repeat' ORDER BY sort_order").unwrap()
+            .query_map([], |row| row.get(0)).unwrap().map(Result::unwrap).collect();
+        assert_eq!(events, vec![3, 4, 5, 6, 7]);
+        let turn = make_message("after-edits", MessageRole::User, None);
+        insert_message(&conn, "note-repeat", &turn).unwrap();
+        let sort: i64 = conn
+            .query_row(
+                "SELECT sort_order FROM messages WHERE id = 'after-edits'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(sort, 8);
+        let jobs: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM agent_dispatch_jobs WHERE discussion_id = 'note-repeat'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(jobs, 0, "editing a note must never wake an agent");
+    }
+
+    #[test]
+    fn note_revision_audit_failure_rolls_back_content_and_sequence() {
+        let conn = test_conn();
+        insert_discussion(&conn, &make_discussion("note-atomic")).unwrap();
+        let mut note = make_message("atomic-note", MessageRole::User, None);
+        note.channel = crate::models::MessageChannel::Note;
+        note.content = "keep me".into();
+        insert_note_message(&conn, "note-atomic", &note).unwrap();
+        let before: (String, String, i64) = conn.query_row(
+            "SELECT m.content, m.timestamp, d.next_message_seq FROM messages m JOIN discussions d ON m.discussion_id = d.id WHERE m.id = 'atomic-note'", [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        ).unwrap();
+        conn.execute_batch("CREATE TRIGGER refuse_note_audit BEFORE INSERT ON message_revision_events BEGIN SELECT RAISE(ABORT, 'injected audit failure'); END;").unwrap();
+        let error =
+            revise_note_message(&conn, "note-atomic", "atomic-note", "must roll back").unwrap_err();
+        assert!(error.to_string().contains("injected audit failure"));
+        let after: (String, String, i64) = conn.query_row(
+            "SELECT m.content, m.timestamp, d.next_message_seq FROM messages m JOIN discussions d ON m.discussion_id = d.id WHERE m.id = 'atomic-note'", [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        ).unwrap();
+        assert_eq!(
+            after, before,
+            "an audit failure must leave the note and sequence unchanged"
+        );
+        let count: i64 = conn
+            .query_row("SELECT count(*) FROM message_revision_events", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 0);
+        conn.execute_batch("DROP TRIGGER refuse_note_audit;")
+            .unwrap();
+        revise_note_message(&conn, "note-atomic", "atomic-note", "retry succeeds").unwrap();
     }
 
     /// The endpoint rewrites notes; pointing it at a conversation turn must not

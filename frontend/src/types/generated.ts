@@ -219,7 +219,19 @@ gate_status: string, override_value?: string | null,
  */
 code_locations?: string | null, created_at: string, resolved_at?: string | null, };
 
-export type AgentDetection = { name: string, agent_type: AgentType, installed: boolean, enabled: boolean, path: string | null, version: string | null, latest_version: string | null, origin: string, install_command: string | null, host_managed: boolean, host_label: string | null,
+export type AgentDetection = { name: string, agent_type: AgentType, installed: boolean, enabled: boolean, path: string | null, version: string | null, latest_version: string | null,
+/**
+ * Time at which the official release source was last checked (RFC 3339).
+ */
+version_checked_at?: string,
+/**
+ * Readable reason why the latest version is unknown or stale.
+ */
+version_check_error?: string,
+/**
+ * Official release endpoint consulted for this tool.
+ */
+version_source_url?: string, origin: string, install_command: string | null, host_managed: boolean, host_label: string | null,
 /**
  * Agent is runnable via npx/uvx fallback even when no local binary is found
  */
@@ -1098,6 +1110,8 @@ found: boolean, shared_id: string | null, title: string | null, };
 export type CleanupOrphanEnvRequest = { keys: Array<string>, };
 
 export type CleanupOrphanEnvResponse = { configs_updated: number, total_keys_removed: number, };
+
+export type CliReleaseInfo = { installed: string | null, latest: string | null, checked_at: string | null, check_error: string | null, update_available: boolean, };
 
 /**
  * One vendor's counters for one CLI session. A `None` counter is a counter the
@@ -3903,7 +3917,23 @@ export type ModelTierConfig = { economy?: string | null,
  * applies, preserving backward compatibility for users who never
  * touched the setting.
  */
-default?: string | null, reasoning?: string | null, };
+default?: string | null, reasoning?: string | null,
+/**
+ * KT-646 — optional reasoning-effort preset for the `economy` slot.
+ * `None` means "pass no effort flag, the runtime's own CLI default
+ * applies" — never a silently assigned `high`/`max`. Only consumed for
+ * an agent `runner::agent_supports_reasoning_effort` returns true for;
+ * every other agent ignores it (see `runner::effective_reasoning_effort`).
+ */
+economy_effort?: string | null,
+/**
+ * Same as `economy_effort`, paired with the `default` tier slot.
+ */
+default_effort?: string | null,
+/**
+ * Same as `economy_effort`, paired with the `reasoning` tier slot.
+ */
+reasoning_effort?: string | null, };
 
 /**
  * Global model tier overrides per agent.
@@ -5424,9 +5454,9 @@ available: boolean,
  */
 installed: string | null,
 /**
- * Latest known stable version from our bumped-per-release registry.
+ * Latest stable version from the official release source.
  */
-latest_known: string,
+latest_known: string | null, checked_at: string | null, check_error: string | null,
 /**
  * True iff `installed < latest_known` under lenient semver. The
  * frontend renders the "update available" pill from this flag only —
@@ -5437,7 +5467,12 @@ update_available: boolean,
  * Copy-pasteable upgrade command (idempotent — RTK install.sh
  * upgrades in place).
  */
-update_command: string, };
+update_command: string,
+/**
+ * ccusage is invoked by Kronn's usage and RTK economics integrations.
+ * Its installed and available versions remain distinct from RTK's.
+ */
+ccusage: CliReleaseInfo, };
 
 export type RunAgentRequest = {
 /**

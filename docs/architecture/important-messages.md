@@ -188,6 +188,7 @@ identities, foreign keys, category checks and indexes.
   not summed into it. The database is still authoritative — nothing is lost —
   but a caller reading only the response for a multi-message append could
   under-count refusals/publications from earlier messages in the same call.
-- The onboarding tour's `important-messages` step is `optionalWhenMissing`:
-  the seeded demo discussion carries no card, so a brand-new user skips it
-  rather than seeing a live example.
+- The onboarding tour's `important-messages` step points at the publication
+  control (`.disc-important-publish`), which is always rendered, so every new
+  user sees it. It explains how a card is PUBLISHED; it does not show a live
+  card, because the seeded demo discussion carries none.

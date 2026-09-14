@@ -50,6 +50,7 @@ pub struct CodexAcpAdapter {
     program: String,
     cwd: Mutex<Option<PathBuf>>,
     model: Option<String>,
+    reasoning_effort: Option<String>,
     broker: AcpPermissionBroker,
     /// The real Codex `thread_id`, once known. Seeded at construction to
     /// resume a thread from a previous Kronn process; otherwise populated
@@ -65,6 +66,7 @@ pub struct CodexAcpAdapter {
 impl CodexAcpAdapter {
     pub fn new(
         model: Option<String>,
+        reasoning_effort: Option<String>,
         full_access: bool,
         seed_native_thread_id: Option<String>,
         discussion_id: Option<String>,
@@ -74,6 +76,7 @@ impl CodexAcpAdapter {
             program: "codex".to_owned(),
             cwd: Mutex::new(None),
             model,
+            reasoning_effort,
             broker: AcpPermissionBroker::scoped(full_access, scope),
             thread_id: Mutex::new(seed_native_thread_id),
             current_child: Mutex::new(None),
@@ -93,6 +96,7 @@ impl CodexAcpAdapter {
             program: program.into(),
             ..Self::new(
                 model,
+                None,
                 full_access,
                 seed_native_thread_id,
                 None,
@@ -359,6 +363,13 @@ impl AcpTransport for CodexAcpAdapter {
             args.push("--model".into());
             args.push(model.clone());
         }
+        if let Some(effort) = &self.reasoning_effort {
+            args.push("-c".into());
+            args.push(format!(
+                "model_reasoning_effort={}",
+                serde_json::to_string(effort).unwrap_or_else(|_| "\"\"".into())
+            ));
+        }
         // `--sandbox` is not accepted by `codex exec resume` (verified via
         // `codex exec resume --help`): only the first turn of a thread can
         // set it.
@@ -593,6 +604,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn prompt_forwards_resolved_effort_to_the_cli() {
+        let dir = tempfile::tempdir().unwrap();
+        let argv = dir.path().join("argv.txt");
+        let fixture = crate::acp::test_support::write_fixture_script(dir.path(), &format!(
+            "printf '%s\\n' \"$*\" > '{}'\nprintf '%s\\n' '{{\"type\":\"thread.started\",\"thread_id\":\"th-effort\"}}'\nprintf '%s\\n' '{{\"type\":\"turn.completed\",\"usage\":{{\"input_tokens\":1,\"output_tokens\":1}}}}'",
+            argv.display(),
+        ));
+        let adapter = CodexAcpAdapter {
+            program: fixture.to_string_lossy().into_owned(),
+            ..CodexAcpAdapter::new(
+                Some("gpt-test".into()),
+                Some("high".into()),
+                false,
+                None,
+                None,
+                AcpSessionScope::new(Some(dir.path().to_path_buf()), "effort"),
+            )
+        };
+        let mut host = AcpHost::new(1, std::sync::Arc::new(adapter));
+        host.negotiate(init_request(&dir.path().to_string_lossy()))
+            .await
+            .unwrap();
+        let target = host.create_session().await.unwrap();
+        let (tx, _rx) = mpsc::channel(16);
+        host.prompt(&target, "hello", tx).await.unwrap();
+        let args = std::fs::read_to_string(argv).unwrap();
+        assert!(
+            args.contains("model_reasoning_effort=\"high\""),
+            "argv: {args}"
+        );
+    }
+
+    #[tokio::test]
     async fn a_second_turn_resumes_the_captured_thread() {
         let dir = tempfile::tempdir().unwrap();
         let fixture = crate::acp::test_support::write_fixture_script(dir.path(), FIXTURE_BODY);
@@ -768,6 +812,7 @@ mod tests {
         let adapter = CodexAcpAdapter {
             program: fixture.to_string_lossy().into_owned(),
             ..CodexAcpAdapter::new(
+                None,
                 None,
                 false,
                 None,

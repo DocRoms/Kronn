@@ -24,6 +24,123 @@ use kronn::models::WsMessage;
 use kronn::{build_router_with_auth, AppState, DEFAULT_MAX_CONCURRENT_AGENTS};
 
 #[tokio::test]
+async fn qp_effort_is_snapshotted_by_discussion_not_mutable_prompt_version() {
+    let state = test_state();
+    state.config.write().await.encryption_secret = Some(kronn::core::crypto::generate_secret());
+    for agent in ["ClaudeCode", "Codex"] {
+        let id = format!("qp-effort-{agent}");
+        let qp: kronn::models::QuickPrompt = serde_json::from_value(serde_json::json!({
+            "id": id, "name": "Effort snapshot", "icon": "", "prompt_template": "test",
+            "variables": [], "agent": agent, "project_id": null, "skill_ids": [],
+            "profile_ids": [], "directive_ids": [], "tier": "default",
+            "agent_settings": {"model": "test-model", "reasoning_effort": "low"},
+            "description": "", "created_at": chrono::Utc::now(), "updated_at": chrono::Utc::now()
+        }))
+        .unwrap();
+        state
+            .db
+            .with_conn(move |conn| kronn::db::quick_prompts::insert_quick_prompt(conn, &qp))
+            .await
+            .unwrap();
+        let (_, result) = post_json(
+            build_router_with_auth(state.clone(), false),
+            "/api/discussions",
+            serde_json::json!({
+                "title": "Snapshot", "agent": agent, "initial_prompt": "test", "tier": "default",
+                "originating_qp_id": id, "no_agent": true
+            }),
+        )
+        .await;
+        assert_eq!(result["success"], true, "{result}");
+        let did = result["data"]["id"].as_str().unwrap().to_owned();
+        assert_eq!(result["data"]["model"], "test-model");
+        let expected_agent = agent.to_owned();
+        state.db.with_conn(move |conn| {
+            let read = |conn: &rusqlite::Connection| -> rusqlite::Result<(String, String, String)> {
+                conn.query_row("SELECT agent, model, effort FROM discussion_effort_snapshots WHERE discussion_id = ?1", [&did], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            };
+            let snapshot = read(conn)?;
+            assert_eq!(snapshot, (expected_agent, "test-model".into(), "low".into()));
+            let mut qp = kronn::db::quick_prompts::get_quick_prompt(conn, &id)?.unwrap();
+            qp.agent_settings.as_mut().unwrap().reasoning_effort = Some("high".into());
+            kronn::db::quick_prompts::update_quick_prompt(conn, &qp)?;
+            assert_eq!(read(conn)?, snapshot, "QP edits must not change a launched discussion");
+            kronn::db::quick_prompts::delete_quick_prompt(conn, &id)?;
+            assert_eq!(read(conn)?, snapshot, "QP deletion must not lose the resume setting");
+            Ok(())
+        }).await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn cli_release_recheck_returns_agent_metadata_and_distinct_rtk_ccusage_versions() {
+    let app = test_app();
+    let (status, result) = post_json(
+        app.clone(),
+        "/api/agents/version-check",
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(result["success"], true, "{result}");
+    let agents = result["data"].as_array().expect("agent snapshot");
+    assert!(!agents.is_empty());
+    let claude = agents
+        .iter()
+        .find(|agent| agent["agent_type"] == "ClaudeCode")
+        .unwrap();
+    assert_eq!(
+        claude["version_source_url"],
+        "https://registry.npmjs.org/@anthropic-ai/claude-code/latest"
+    );
+    assert!(claude["version_checked_at"].is_string());
+    // No public source is invented for an unsupported runtime.
+    let kiro = agents
+        .iter()
+        .find(|agent| agent["agent_type"] == "Kiro")
+        .unwrap();
+    assert!(kiro["latest_version"].is_null());
+    assert!(kiro["version_source_url"].is_null());
+    assert!(kiro["version_check_error"].is_string());
+
+    let (status, result) = get_json(app, "/api/rtk/version").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(result["success"], true, "{result}");
+    let versions: kronn::api::rtk::RtkVersionInfo =
+        serde_json::from_value(result["data"].clone()).unwrap();
+    assert!(versions.checked_at.is_some());
+    assert!(versions.ccusage.checked_at.is_some());
+    assert_eq!(
+        versions.update_available,
+        versions
+            .installed
+            .as_deref()
+            .zip(versions.latest_known.as_deref())
+            .is_some_and(
+                |(installed, latest)| kronn::core::versions::update_available(installed, latest)
+            )
+    );
+    assert_eq!(
+        versions.ccusage.update_available,
+        versions
+            .ccusage
+            .installed
+            .as_deref()
+            .zip(versions.ccusage.latest.as_deref())
+            .is_some_and(
+                |(installed, latest)| kronn::core::versions::update_available(installed, latest)
+            )
+    );
+    // An unavailable network yields an explicit failure, never a made-up version.
+    if versions.latest_known.is_none() {
+        assert!(versions.check_error.is_some());
+    }
+    if versions.ccusage.latest.is_none() {
+        assert!(versions.ccusage.check_error.is_some());
+    }
+}
+
+#[tokio::test]
 async fn orchestration_recovery_routes_return_structured_missing_execution_errors() {
     let app = test_app();
     let missing = "00000000-0000-0000-0000-000000000000";

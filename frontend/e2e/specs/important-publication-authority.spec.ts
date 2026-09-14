@@ -324,8 +324,10 @@ test.describe.serial('publication authority, end to end', () => {
         const taskBefore = (await (await request.get(`/api/planning/tasks/${task.id}`)).json()).data;
         const dashboard = new DashboardPage(page);
         await dashboard.goto();
-        await dashboard.openDiscussion(room);
+        // Select at the tested width so the real mobile handler closes its
+        // sidebar. Resizing an already-selected desktop room leaves it open.
         await page.setViewportSize({ width, height: 1000 });
+        await dashboard.openDiscussion(room);
         const form = new ImportantMessagePage(page);
         await form.ordinaryComposer.fill('Ma réponse ordinaire reste intacte é🙂');
         await form.fill('Une information utile é🙂', grant);
