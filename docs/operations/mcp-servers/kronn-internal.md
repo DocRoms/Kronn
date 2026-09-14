@@ -135,6 +135,20 @@ Bidirectional gateway between a CLI agent (Claude Code, Codex, Gemini, Kiro, Vib
    owner-only credential during the first MCP-only reload, then persist the
    rotated successor under the conversation-keyed path so a later full
    `codex resume` reboot remains linked.
+   An accepted delegated CLI worker also persists a narrow child-to-origin
+   handoff marker. After the execution reaches a terminal state, the bridge may
+   return to the origin without a new join token only through the dedicated
+   authenticated recovery endpoint. The backend requires the exact session,
+   credential, accepted execution, child/origin pair, durable source ownership,
+   membership, and both orchestrator return traces. Ordinary resume remains
+   strict about its expected room, and a runtime already bound to a third room
+   is never moved by the handoff marker. Child messages already returned by a
+   wait are delivered before a later wait follows the proven return; the
+   origin's own acknowledged cursor is restored rather than replacing it with
+   the child's cursor.
+   `[src: file: backend/scripts/disc-introspection-mcp.py:3521-3580]`
+   `[src: file: backend/scripts/disc-introspection-mcp.py:4008-4074]`
+   `[src: file: backend/src/db/cli_worker_bindings.rs:190-279]`
    `[src: file: backend/scripts/disc-introspection-mcp.py:2603-2635]`
    `[src: file: backend/scripts/disc-introspection-mcp.py:2839-2857]`
    `[src: file: backend/scripts/disc-introspection-mcp.py:3033-3118]`

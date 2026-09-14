@@ -3547,6 +3547,13 @@ def _write_binding(
             and existing.get("disc_id") == disc_id
         ):
             last_read_sort_order = existing.get("last_read_sort_order")
+        # Normal rewrites of the same child binding (cursor acknowledgement,
+        # pending credential rotation, and promotion after resume) must retain
+        # the accepted-worker handoff.  A write for another disc deliberately
+        # does not inherit it: successful return and explicit joins clear it.
+        if existing and existing.get("disc_id") == disc_id and return_disc_id is None:
+            return_disc_id = existing.get("return_disc_id")
+            return_read_sort_order = existing.get("return_read_sort_order")
 
         fd, tmp = tempfile.mkstemp(prefix=".disc-binding-", suffix=".tmp", dir=_BINDING_DIR)
         try:
@@ -4021,6 +4028,11 @@ def _attempt_orchestrator_return_resume():
         child = b.get("disc_id")
         origin = b.get("return_disc_id")
         if not child or not origin or child == origin:
+            return None
+        # The marker authorizes exactly the runtime child that accepted the
+        # offer.  A bridge deliberately rebound to a third room must never use
+        # a stale child credential to move itself again.
+        if _CURRENT_DISC_ID not in (None, child):
             return None
         old_token = b["resume_token"]
         next_token = b.get("pending_resume_token")
@@ -5906,10 +5918,21 @@ def call_task_exec_accept_worker_offer(args):
         prior_binding.get("resume_token") if isinstance(prior_binding, dict) else None
     )
     if resume_token:
-        origin_disc_id = (
-            prior_binding.get("disc_id") if isinstance(prior_binding, dict) else None
+        same_child_handoff = (
+            isinstance(prior_binding, dict)
+            and prior_binding.get("disc_id") == child_disc_id
+            and prior_binding.get("return_disc_id")
         )
-        origin_cursor = _read_cursor(origin_disc_id) if origin_disc_id else None
+        origin_disc_id = (
+            prior_binding.get("return_disc_id") if same_child_handoff
+            else prior_binding.get("disc_id") if isinstance(prior_binding, dict)
+            else None
+        )
+        origin_cursor = (
+            prior_binding.get("return_read_sort_order") if same_child_handoff else None
+        )
+        if origin_cursor is None:
+            origin_cursor = _read_cursor(origin_disc_id) if origin_disc_id else None
         if origin_cursor is None and isinstance(prior_binding, dict):
             origin_cursor = prior_binding.get("last_read_sort_order")
         _write_binding(
@@ -7080,16 +7103,16 @@ def call_disc_wait_for_peer(args):
         # returns `result` further down — so an intermediate poll's count is
         # reported, never dropped on a cursor advance (KT-330 DoD-3).
         _carry_withheld_total(result, withheld_total)
-        # Accepted workers carry a bounded local handoff marker. Only those
-        # child waits probe the authenticated return endpoint, including the
-        # first response after the server has already moved their membership.
+        if result.get("messages") or not result.get("timed_out"):
+            return result
+        # Accepted workers carry a bounded local handoff marker. Probe only
+        # after a quiet child response: a batch already delivered by the child
+        # must reach the caller before a subsequent wait follows the return.
         returned_to = _attempt_orchestrator_return_resume()
         if returned_to:
             poll_args.pop("since_sort_order", None)
             poll_args["since_sort_order"] = _read_cursor(returned_to)
             continue
-        if result.get("messages") or not result.get("timed_out"):
-            return result
         # Quiet poll — keep waiting bridge-side unless something changed.
         reason = _wait_abort_reason()
         if reason == "cancelled":
