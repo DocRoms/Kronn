@@ -31,6 +31,10 @@ for (const width of [1440, 390]) {
     const compression = page.locator('.set-compression').filter({ hasText: /ccusage.*20\.1\.0/i });
     await expect(compression).toContainText('20.1.2');
     await expect(compression).toContainText(error);
+    const recheck = compression.getByRole('button', { name: 'Revérifier les versions disponibles', exact: true });
+    await recheck.focus();
+    await expect(recheck).toBeFocused();
+    expect(await recheck.evaluate(node => node.getBoundingClientRect().height)).toBeGreaterThanOrEqual(30);
     for (const container of [heading, compression]) {
       await expect.poll(() => container.evaluate(node => node.scrollWidth - node.clientWidth)).toBeLessThanOrEqual(1);
     }

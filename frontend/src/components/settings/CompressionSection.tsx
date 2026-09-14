@@ -281,7 +281,7 @@ export function CompressionSection({ agents, onActivated, toast, t }: Compressio
               </div>
             )}
             {versionRequestFailed && <p role="status">{t('config.releaseCheckRequestFailed')}</p>}
-            <button type="button" className="set-btn-sm" disabled={checkingVersions} onClick={() => void recheckVersions()}>
+            <button type="button" className="set-action-btn" disabled={checkingVersions} onClick={() => void recheckVersions()}>
               {checkingVersions && <Loader2 size={12} className="spin" />}
               {t('config.recheckVersions')}
             </button>
