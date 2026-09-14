@@ -13,6 +13,7 @@ use thiserror::Error;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout};
 use tokio::sync::{broadcast, mpsc, oneshot, Mutex};
+use tokio::task::JoinHandle;
 use tokio::time::{timeout, Duration};
 
 use crate::models::AgentType;
@@ -442,13 +443,20 @@ pub trait AcpTransport: Send + Sync {
 pub struct AcpJsonRpcTransport {
     agent: AcpAgent,
     stdin: Arc<Mutex<ChildStdin>>,
-    child: Mutex<Child>,
+    process: Mutex<AcpProcess>,
     next_id: AtomicU64,
     pending: PendingRequests,
     notifications: broadcast::Sender<Value>,
     session_setup: Mutex<Option<AcpSessionSetup>>,
     config_options: Mutex<Vec<AcpConfigOption>>,
     broker: Arc<AcpPermissionBroker>,
+}
+
+/// The process and the task draining its stdout have one lifecycle. Keeping
+/// them together lets shutdown reap the process before joining the dispatcher.
+struct AcpProcess {
+    child: Option<Child>,
+    dispatcher: Option<JoinHandle<()>>,
 }
 
 /// `session/new` inputs captured at `initialize` time. Retained so that
@@ -499,7 +507,8 @@ impl AcpJsonRpcTransport {
         command
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null());
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true);
         let mut child = command
             .spawn()
             .map_err(|error| AcpError::Transport(format!("spawn ACP process: {error}")))?;
@@ -518,7 +527,7 @@ impl AcpJsonRpcTransport {
             Some(scope) => AcpPermissionBroker::scoped(full_access, scope),
             None => AcpPermissionBroker::new(full_access),
         });
-        Self::start_dispatcher(
+        let dispatcher = Self::start_dispatcher(
             BufReader::new(stdout),
             stdin.clone(),
             pending.clone(),
@@ -528,7 +537,10 @@ impl AcpJsonRpcTransport {
         Ok(Self {
             agent,
             stdin,
-            child: Mutex::new(child),
+            process: Mutex::new(AcpProcess {
+                child: Some(child),
+                dispatcher: Some(dispatcher),
+            }),
             next_id: AtomicU64::new(1),
             pending,
             notifications,
@@ -550,7 +562,7 @@ impl AcpJsonRpcTransport {
         pending: PendingRequests,
         notifications: broadcast::Sender<Value>,
         broker: Arc<AcpPermissionBroker>,
-    ) {
+    ) -> JoinHandle<()> {
         tokio::spawn(async move {
             loop {
                 let mut line = String::new();
@@ -1094,10 +1106,29 @@ impl AcpTransport for AcpJsonRpcTransport {
     }
 
     async fn shutdown(&self) -> Result<(), AcpError> {
-        let mut child = self.child.lock().await;
-        child
-            .start_kill()
-            .map_err(|error| AcpError::Transport(format!("stop ACP process: {error}")))
+        // Hold the lifecycle lock through completion so concurrent calls are
+        // idempotent: the first caller reaps and joins, later callers observe
+        // an already-finished lifecycle instead of racing the reap.
+        let mut process = self.process.lock().await;
+        let mut errors = Vec::new();
+        if let Some(mut child) = process.child.take() {
+            if let Err(error) = child.start_kill() {
+                errors.push(format!("stop ACP process: {error}"));
+            }
+            if let Err(error) = child.wait().await {
+                errors.push(format!("wait for ACP process: {error}"));
+            }
+        }
+        if let Some(dispatcher) = process.dispatcher.take() {
+            if let Err(error) = dispatcher.await {
+                errors.push(format!("join ACP dispatcher: {error}"));
+            }
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(AcpError::Transport(errors.join("; ")))
+        }
     }
 }
 
@@ -2093,5 +2124,131 @@ done"#]);
             }
             transport.shutdown().await.unwrap();
         }
+    }
+
+    #[cfg(unix)]
+    struct FixtureCleanup {
+        pid_file: tempfile::NamedTempFile,
+    }
+
+    #[cfg(unix)]
+    impl FixtureCleanup {
+        fn pid(&self) -> Option<String> {
+            std::fs::read_to_string(self.pid_file.path())
+                .ok()
+                .filter(|pid| !pid.trim().is_empty())
+                .map(|pid| pid.trim().to_owned())
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for FixtureCleanup {
+        fn drop(&mut self) {
+            // The fixture writes only its own PID. This best-effort guard is
+            // deliberately precise: a failed assertion cannot sweep unrelated PIDs.
+            if let Some(pid) = self.pid() {
+                let _ = std::process::Command::new("kill")
+                    .args(["-TERM", &pid])
+                    .status();
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    async fn fixture_pid(cleanup: &FixtureCleanup) -> String {
+        timeout(Duration::from_secs(1), async {
+            loop {
+                if let Some(pid) = cleanup.pid() {
+                    return pid;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("fixture must publish its PID")
+    }
+
+    #[cfg(unix)]
+    fn fixture_is_running(pid: &str) -> bool {
+        std::process::Command::new("kill")
+            .args(["-0", pid])
+            .status()
+            .is_ok_and(|status| status.success())
+    }
+
+    #[cfg(unix)]
+    async fn fixture_exits(pid: &str) -> bool {
+        timeout(Duration::from_secs(1), async {
+            while fixture_is_running(pid) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .is_ok()
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn rejected_negotiation_abandons_and_terminates_the_owned_fixture_process() {
+        let cleanup = FixtureCleanup {
+            pid_file: tempfile::NamedTempFile::new().unwrap(),
+        };
+        let mut command = crate::core::cmd::async_cmd("sh");
+        command
+            .env("PID_FILE", cleanup.pid_file.path())
+            .args(["-c", r#"printf '%s' "$$" > "$PID_FILE"
+while IFS= read -r line; do
+    case "$line" in
+        *'"method":"initialize"'*) printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":2}}' ;;
+    esac
+done"#]);
+        let transport = Arc::new(
+            AcpJsonRpcTransport::spawn(AcpAgent::OpenCode, command, false)
+                .await
+                .unwrap(),
+        );
+        let pid = fixture_pid(&cleanup).await;
+        let mut host = AcpHost::new(1, transport.clone());
+
+        assert_eq!(
+            host.negotiate(request()).await.unwrap_err(),
+            AcpError::UnsupportedProtocolVersion {
+                actual: 2,
+                maximum: 1,
+            }
+        );
+        drop(host);
+        drop(transport);
+
+        assert!(
+            fixture_exits(&pid).await,
+            "dropping the rejected transport must terminate its owned fixture"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shutdown_is_idempotent_and_reaps_the_owned_fixture_process() {
+        let cleanup = FixtureCleanup {
+            pid_file: tempfile::NamedTempFile::new().unwrap(),
+        };
+        let mut command = crate::core::cmd::async_cmd("sh");
+        command.env("PID_FILE", cleanup.pid_file.path()).args([
+            "-c",
+            r#"printf '%s' "$$" > "$PID_FILE"
+while IFS= read -r _; do :; done"#,
+        ]);
+        let transport = AcpJsonRpcTransport::spawn(AcpAgent::OpenCode, command, false)
+            .await
+            .unwrap();
+        let pid = fixture_pid(&cleanup).await;
+
+        transport.shutdown().await.unwrap();
+        transport.shutdown().await.unwrap();
+
+        assert!(
+            fixture_exits(&pid).await,
+            "shutdown must wait until the owned fixture is reaped"
+        );
     }
 }

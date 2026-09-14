@@ -61,19 +61,32 @@ async fn discover_with_transport(
         })
         .await
     {
-        return classify_acp_error(error);
+        return discovery_failure(&host, error).await;
     }
     let session = match host.create_session().await {
         Ok(session) => session,
-        Err(error) => return classify_acp_error(error),
+        Err(error) => return discovery_failure(&host, error).await,
     };
     let options = host.config_options().await;
-    let _ = host.shutdown().await;
+    if let Err(error) = host.shutdown().await {
+        return classify_acp_error(error);
+    }
     let _ = session; // discovery never prompts; the session exists only to fetch config options
 
     match models_from_config_options(&options) {
         Some(models) if !models.is_empty() => DiscoveryOutcome::Live(models),
         _ => DiscoveryOutcome::Unsupported,
+    }
+}
+
+/// Preserve the discovery failure and expose cleanup failures instead of
+/// returning while a native ACP transport still owns its subprocess.
+async fn discovery_failure(host: &AcpHost, failure: AcpError) -> DiscoveryOutcome {
+    match host.shutdown().await {
+        Ok(()) => classify_acp_error(failure),
+        Err(shutdown) => {
+            DiscoveryOutcome::ProviderError(format!("{failure}; ACP shutdown failed: {shutdown}"))
+        }
     }
 }
 
