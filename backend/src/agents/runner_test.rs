@@ -7693,7 +7693,10 @@ Suite de la réponse.";
 
     #[test]
     fn reasoning_effort_is_rejected_when_the_catalogue_does_not_advertise_it() {
-        assert!(!effort_is_advertised("high", &["low".into(), "medium".into()]));
+        assert!(!effort_is_advertised(
+            "high",
+            &["low".into(), "medium".into()]
+        ));
         assert!(effort_is_advertised("high", &["low".into(), "high".into()]));
     }
 
