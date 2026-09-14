@@ -421,7 +421,7 @@ export function ModelCatalogSection({ onCatalogChanged, sharedCatalog }: {
                       <span>{row.model.display_alias ?? row.model.display_name}</span>
                       <small>{row.model.model_id}</small>
                       {row.targetId === 'agent:claude-code' && row.model.model_id === 'default' && (
-                        <small>{t('modelCatalog.cliDefault')}</small>
+                        <small className="set-model-catalog-alias-note">{t('modelCatalog.cliDefault')}</small>
                       )}
                     </button>
                   </td>
