@@ -14422,7 +14422,7 @@ mod tests {
             let execution_id = exec_id.clone();
             let reassigned = db
                 .with_conn(move |conn| {
-                    Ok(crate::db::orchestration::reassign_execution_worker(
+                    crate::db::orchestration::reassign_execution_worker(
                         conn,
                         &execution_id,
                         &crate::models::CampaignWorkerSelection {
@@ -14432,7 +14432,7 @@ mod tests {
                         },
                         "the worker never handed anything back",
                         &backend_actor(),
-                    )?)
+                    )
                 })
                 .await
                 .unwrap();
