@@ -2424,6 +2424,75 @@ async fn orchestrator_return_resume_route_authenticates_and_replays_exact_rotati
     assert_eq!(accepted["success"], true, "{accepted}");
     assert_eq!(accepted["data"]["child_discussion_id"], child_id);
 
+    let (status, brief) = get_json(
+        app.clone(),
+        &format!(
+            "/api/discussions/{child_id}/wait?since_sort_order=-1&timeout_secs=0&exclude_agent_type=Codex&session_id=live-before"
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(brief["success"], true, "{brief}");
+    let brief_cursor = brief["data"]["latest_sort_order"].as_i64().unwrap();
+    assert!(brief["data"]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|message| {
+            message["message_id"]
+                .as_str()
+                .is_some_and(|id| id.starts_with("orch-brief:"))
+        }));
+    let (_, acknowledged) = get_json(
+        app.clone(),
+        &format!(
+            "/api/discussions/{child_id}/wait?since_sort_order={brief_cursor}&timeout_secs=0&exclude_agent_type=Codex&session_id=live-before"
+        ),
+    )
+    .await;
+    assert_eq!(acknowledged["success"], true, "{acknowledged}");
+    assert_eq!(acknowledged["data"]["timed_out"], true);
+
+    let before_refusal = state
+        .db
+        .with_conn(|conn| {
+            conn.query_row(
+                "SELECT disc_id, session_id, resume_token_hash FROM discussion_sessions WHERE id=657",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?)),
+            )
+        })
+        .await
+        .unwrap();
+    for refusal in [
+        serde_json::json!({"agent_type":"Codex","session_id":"must-not-win","resume_token":"kr-resume-ffffffffffffffffffffffffffffffff","expected_child_disc_id":child_id}),
+        serde_json::json!({"agent_type":"ClaudeCode","session_id":"must-not-win","resume_token":token,"expected_child_disc_id":child_id}),
+        serde_json::json!({"agent_type":"Codex","session_id":"must-not-win","resume_token":token,"expected_child_disc_id":child_id}),
+    ] {
+        let (_, refused) = post_json(
+            app.clone(),
+            "/api/discussions/orchestrator-return-resume",
+            refusal,
+        )
+        .await;
+        assert_eq!(refused["success"], false, "{refused}");
+    }
+    let after_refusal = state
+        .db
+        .with_conn(|conn| {
+            conn.query_row(
+                "SELECT disc_id, session_id, resume_token_hash FROM discussion_sessions WHERE id=657",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?)),
+            )
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        after_refusal, before_refusal,
+        "refusals must not mutate the session"
+    );
+
     let (workspace, dod_id) = state
         .db
         .with_conn({
@@ -2519,6 +2588,40 @@ async fn orchestrator_return_resume_route_authenticates_and_replays_exact_rotati
     .await;
     assert_eq!(replay["success"], true, "lost-response replay: {replay}");
     assert_eq!(replay["data"]["session_pk"], 657);
+
+    let (_, appended) = post_json(
+        app.clone(),
+        "/api/disc/append",
+        serde_json::json!({
+            "disc_id":"return-http-parent", "session_id":"live-after", "session_credential":next,
+            "messages":[{"source_msg_id":"return-parent-write","role":"Agent","content":"worker is back","agent_type":"Codex"}]
+        }),
+    )
+    .await;
+    assert_eq!(appended["success"], true, "{appended}");
+    assert_eq!(appended["data"]["appended"], 1);
+    let (_, human) = post_json(
+        app.clone(),
+        "/api/disc/append",
+        serde_json::json!({
+            "disc_id":"return-http-parent",
+            "messages":[{"source_msg_id":"return-parent-read","role":"User","content":"parent reply"}]
+        }),
+    )
+    .await;
+    assert_eq!(human["success"], true, "{human}");
+    let (_, parent_read) = get_json(
+        app.clone(),
+        "/api/discussions/return-http-parent/wait?since_sort_order=-1&timeout_secs=0&exclude_agent_type=Codex&session_id=live-after",
+    )
+    .await;
+    assert_eq!(parent_read["success"], true, "{parent_read}");
+    assert!(parent_read["data"]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|message| message["content"] == "parent reply"
+            && message["addressed_to_caller"] == true));
 
     let (_, divergent) = post_json(
         app,
