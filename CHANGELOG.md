@@ -83,6 +83,12 @@ Release notes for 0.9.3 and earlier are available in the
   that reached a terminal state stop holding the lock, and an audited manual
   re-arm releases the rest without replaying any old work.
 
+- A reassigned worker can deliver again after a timeout or unavailability
+  interrupted an unreviewed delivery. The next attempt gets fresh review
+  identities; an already occupied message ID no longer rolls the delivery
+  back. Earlier messages stay intact and the new request names the current
+  commit to review.
+
 - Quick Prompts read `{{env.NAME}}` like every other placeholder, and their
   editor offers the project's own environment names rather than a blank field.
 
@@ -444,6 +450,9 @@ Release notes for 0.9.3 and earlier are available in the
   Successive corrections now share the discussion's ordered revision sequence.
   Updating the text and recording its history are atomic: an audit failure
   leaves the original note intact instead of changing it behind an error.
+  Shared-note corrections keep their note semantics on the receiving peer:
+  they no longer remove later conversation replies, change the note's written
+  date, or replace its routing. Synchronization and the revision trail remain.
 
 - A deleted note leaves the notes list. Its tombstone stays in the transcript,
   where a gap has to be explained, but a list of notes is not a transcript:
