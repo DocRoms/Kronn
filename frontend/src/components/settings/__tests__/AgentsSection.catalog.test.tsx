@@ -284,6 +284,23 @@ describe('AgentsSection — runtime catalogue and tier preservation (KT-531)', (
     }));
   });
 
+  it.each(['missing', 'unsupported', 'unavailable'] as const)('lets the operator clear an effort when its model is %s', async state => {
+    const current = tiers();
+    current.claude_code.economy_effort = 'high';
+    getTiers.mockResolvedValue(current);
+    list.mockResolvedValue({ targets: [target(state === 'missing' ? [] : [model('sonnet', {
+      availability: state === 'unavailable' ? 'unavailable' : 'available', reasoning_modes: [],
+    })])] });
+    show();
+    const effort = await screen.findByLabelText('config.reasoningEffort economy');
+    expect(effort).toHaveValue('high');
+    expect(effort).toBeEnabled();
+    fireEvent.change(effort, { target: { value: '' } });
+    await waitFor(() => expect(setTiers).toHaveBeenCalledWith({
+      ...current, claude_code: { ...current.claude_code, economy_effort: null },
+    }));
+  });
+
   it.each(['Kiro', 'Vibe'] as const)('offers configured manual models for %s instead of N/A', async agentType => {
     const runtime = `agent:${agentType.toLowerCase()}`;
     list.mockResolvedValue({ targets: [target([
