@@ -10261,6 +10261,7 @@ mod acp_resume_tests {
         resume_outcome: ResumeOutcome,
         prompt_outcome: PromptOutcome,
         native_session_id: Option<String>,
+        shutdown_error: Option<String>,
         created: AtomicUsize,
         resumed: AtomicUsize,
         cancelled: AtomicUsize,
@@ -10356,7 +10357,10 @@ mod acp_resume_tests {
             Ok(())
         }
         async fn shutdown(&self) -> Result<(), AcpError> {
-            Ok(())
+            match &self.shutdown_error {
+                Some(error) => Err(AcpError::Transport(error.clone())),
+                None => Ok(()),
+            }
         }
     }
 
@@ -10369,6 +10373,7 @@ mod acp_resume_tests {
             resume_outcome,
             prompt_outcome,
             native_session_id: None,
+            shutdown_error: None,
             created: AtomicUsize::new(0),
             resumed: AtomicUsize::new(0),
             cancelled: AtomicUsize::new(0),
@@ -10773,6 +10778,7 @@ mod acp_resume_tests {
             resume_outcome: ResumeOutcome::Missing,
             prompt_outcome: PromptOutcome::Complete,
             native_session_id: Some("runtime-session".into()),
+            shutdown_error: None,
             created: AtomicUsize::new(0),
             resumed: AtomicUsize::new(0),
             cancelled: AtomicUsize::new(0),
@@ -10796,6 +10802,28 @@ mod acp_resume_tests {
             .captured_stderr()
             .iter()
             .any(|line| line.contains("ACP session persistence failed")));
+    }
+
+    #[tokio::test]
+    async fn run_acp_session_reports_a_redacted_shutdown_failure_instead_of_success() {
+        let mut transport = transport(ResumeOutcome::Missing, PromptOutcome::Complete);
+        Arc::get_mut(&mut transport).unwrap().shutdown_error =
+            Some("cleanup failed: APP_SECRET=fixture-value".into());
+        let mut process =
+            run_fixture(transport, &AgentType::OpenCode, None, None, None, None).await;
+
+        assert!(collect_output(&mut process).await.contains("first chunk"));
+        assert!(
+            !process.child.wait().await.expect("lifeline").success(),
+            "a completed response with failed process cleanup is not a clean success"
+        );
+        let diagnostics = process.captured_stderr();
+        assert!(diagnostics
+            .iter()
+            .any(|line| line.contains("ACP shutdown failed")));
+        assert!(diagnostics
+            .iter()
+            .all(|line| !line.contains("fixture-value")));
     }
 
     #[test]
