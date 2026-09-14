@@ -41,19 +41,24 @@ A FIFO read through `tokio::fs` was tried first and rejected: it is delegated to
 red run could pin a blocking-pool thread for the rest of the suite. The timeouts
 that remain are anti-hang bounds, never waits — every one of them resolves on a
 socket event.
-[src: file: backend/src/acp.rs:2317-2458]
+[src: file: backend/src/acp.rs:2341-2482]
 
 The in-process tests pin the ownership rules without a subprocess and without
-timing: the drained task holds a `oneshot` sender, so the receiver resolving IS
+timing, including that a PANICKING drain is reported as an error rather than
+folded into the non-fatal cancellation policy: the drained task holds a `oneshot` sender, so the receiver resolving IS
 the event that the task was dropped. The cancellation test polls the `shutdown`
 future once before dropping it — an unpolled `async fn` has not run its body, so
 dropping it would exercise nothing and pass for the wrong reason.
-[src: file: backend/src/acp.rs:2211-2302]
+[src: file: backend/src/acp.rs:2211-2326]
 
 Before the runner hands ownership to its turn task, every startup failure must
 finish the ACP host — nine error returns, none of them propagating with `?`.
 Model catalogue discovery follows the same rule for negotiation and
-session-creation failures, and no longer discards its own cleanup error.
+session-creation failures, and no longer discards its own cleanup error. A
+scripted transport counts its shutdowns, so "did this path clean up?" is
+asserted on all three outcomes rather than read off the source — and a failing
+cleanup never replaces the failure that caused it.
 [src: file: backend/src/agents/runner.rs:3576-3858]
 [src: file: backend/src/agents/runner.rs:3875-3880]
 [src: file: backend/src/core/model_catalog/acp_discovery.rs:51-92]
+[src: file: backend/src/core/model_catalog/acp_discovery.rs:259-420]

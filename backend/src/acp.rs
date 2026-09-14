@@ -2270,6 +2270,30 @@ done"#]);
         DispatcherOwner(None).finish().await.unwrap();
     }
 
+    /// A drain that PANICS is a failure, not a stop we asked for. The nominal
+    /// join must surface it instead of folding it into the non-fatal policy
+    /// that covers the cancellation.
+    ///
+    /// This exercises the nominal branch: the task ends at once, so the bound
+    /// never elapses. The post-abort panic branch is written to the same rule
+    /// but is NOT covered here — reaching it would mean waiting out the bound.
+    #[tokio::test]
+    async fn a_panicking_drain_is_reported_as_an_error() {
+        let owner = DispatcherOwner::new(tokio::spawn(async {
+            panic!("the drain fell over");
+        }));
+
+        let error = owner
+            .finish()
+            .await
+            .expect_err("a panicking drain must not be reported as a clean stop");
+
+        assert!(
+            error.contains("join ACP dispatcher"),
+            "the panic must surface through the join, got: {error}"
+        );
+    }
+
     /// A `shutdown` future cancelled MID-AWAIT must still stop the drain.
     ///
     /// The future is polled once before being dropped, on purpose: an unpolled
