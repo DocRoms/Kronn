@@ -3521,6 +3521,8 @@ def _write_binding(
     agent_type=None,
     pending_resume_token=None,
     last_read_sort_order=None,
+    return_disc_id=None,
+    return_read_sort_order=None,
 ):
     """Persist the reload credential atomically, mode 0600. No-op when there is
     no durable identity (fail-closed). `pending_resume_token` is written before
@@ -3560,6 +3562,14 @@ def _write_binding(
                     and last_read_sort_order >= -1
                 ):
                     state["last_read_sort_order"] = last_read_sort_order
+                if return_disc_id:
+                    state["return_disc_id"] = return_disc_id
+                    if (
+                        isinstance(return_read_sort_order, int)
+                        and not isinstance(return_read_sort_order, bool)
+                        and return_read_sort_order >= -1
+                    ):
+                        state["return_read_sort_order"] = return_read_sort_order
                 json.dump(state, f)
                 f.flush()
                 os.fsync(f.fileno())
@@ -3993,6 +4003,63 @@ def _attempt_resume():
         _set_current_disc_id(disc_id)
         _set_read_cursor(disc_id, b.get("last_read_sort_order"))
         return disc_id
+
+
+def _attempt_orchestrator_return_resume():
+    """Follow only the child-to-origin handoff recorded at offer acceptance.
+
+    The opaque credential authenticates the request; the server independently
+    proves the exact terminal execution and orchestrator return. Pending token
+    persistence and exact replay mirror ordinary resume.
+    """
+    with _binding_transaction_lock() as locked:
+        if not locked:
+            return None
+        b = _read_binding()
+        if not b:
+            return None
+        child = b.get("disc_id")
+        origin = b.get("return_disc_id")
+        if not child or not origin or child == origin:
+            return None
+        old_token = b["resume_token"]
+        next_token = b.get("pending_resume_token")
+        agent_type = b.get("agent_type") or _agent_type_for_session()
+        if not next_token:
+            next_token = f"kr-resume-{secrets.token_hex(16)}"
+            if not _write_binding(
+                child, old_token, agent_type=agent_type,
+                pending_resume_token=next_token,
+                last_read_sort_order=b.get("last_read_sort_order"),
+                return_disc_id=origin,
+                return_read_sort_order=b.get("return_read_sort_order"),
+            ):
+                return None
+        body = {
+            "agent_type": agent_type,
+            "session_id": _session_id_for_caller(),
+            "resume_token": old_token,
+            "next_resume_token": next_token,
+            "expected_child_disc_id": child,
+        }
+        try:
+            result = _unwrap(_http(
+                "POST", "/api/discussions/orchestrator-return-resume", body
+            ))
+        except Exception:
+            return None
+        if not isinstance(result, dict) or result.get("disc_id") != origin \
+                or result.get("resume_token") != next_token:
+            return None
+        parent_cursor = b.get("return_read_sort_order")
+        if not _write_binding(
+            origin, next_token, agent_type=agent_type,
+            last_read_sort_order=parent_cursor,
+        ):
+            return None
+        _set_current_disc_id(origin)
+        _set_read_cursor(origin, parent_cursor)
+        return origin
 
 
 def _disc_id():
@@ -5839,11 +5906,21 @@ def call_task_exec_accept_worker_offer(args):
         prior_binding.get("resume_token") if isinstance(prior_binding, dict) else None
     )
     if resume_token:
+        origin_disc_id = (
+            prior_binding.get("disc_id") if isinstance(prior_binding, dict) else None
+        )
+        origin_cursor = _read_cursor(origin_disc_id) if origin_disc_id else None
+        if origin_cursor is None and isinstance(prior_binding, dict):
+            origin_cursor = prior_binding.get("last_read_sort_order")
         _write_binding(
             child_disc_id,
             resume_token,
             agent_type=source_agent,
             last_read_sort_order=_read_cursor(child_disc_id),
+            return_disc_id=(
+                origin_disc_id
+            ),
+            return_read_sort_order=origin_cursor,
         )
     result["local_rebound_to"] = child_disc_id
     return result
@@ -6032,6 +6109,13 @@ def call_disc_find_by_session(args):
     runtime_disc_id = _CURRENT_DISC_ID
     expected_disc_id = runtime_disc_id or resume_disc_id
     if found_disc_id and expected_disc_id and found_disc_id != expected_disc_id:
+        if (
+            isinstance(local_binding, dict)
+            and local_binding.get("disc_id") == expected_disc_id
+            and local_binding.get("return_disc_id") == found_disc_id
+            and _attempt_orchestrator_return_resume() == found_disc_id
+        ):
+            return _unwrap(_http("GET", f"/api/disc/find_by_session?{qs}"))
         return {
             "disc_id": found_disc_id,
             "runtime_bound": False,
@@ -6973,6 +7057,17 @@ def call_disc_wait_for_peer(args):
             elif aborted.reason != "cancelled":
                 quiet["hint"] = interrupted_hint
             return _carry_withheld_total(quiet, withheld_total)
+        except Exception:
+            # Terminal return can invalidate the child membership while this
+            # long-poll is in flight. Only an accepted-worker marker permits
+            # the authenticated recovery attempt; every other error remains
+            # unchanged.
+            returned_to = _attempt_orchestrator_return_resume()
+            if returned_to:
+                poll_args.pop("since_sort_order", None)
+                poll_args["since_sort_order"] = _read_cursor(returned_to)
+                continue
+            raise
         polls += 1
         if not isinstance(result, dict):
             return result
@@ -6985,6 +7080,14 @@ def call_disc_wait_for_peer(args):
         # returns `result` further down — so an intermediate poll's count is
         # reported, never dropped on a cursor advance (KT-330 DoD-3).
         _carry_withheld_total(result, withheld_total)
+        # Accepted workers carry a bounded local handoff marker. Only those
+        # child waits probe the authenticated return endpoint, including the
+        # first response after the server has already moved their membership.
+        returned_to = _attempt_orchestrator_return_resume()
+        if returned_to:
+            poll_args.pop("since_sort_order", None)
+            poll_args["since_sort_order"] = _read_cursor(returned_to)
+            continue
         if result.get("messages") or not result.get("timed_out"):
             return result
         # Quiet poll — keep waiting bridge-side unless something changed.

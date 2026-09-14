@@ -304,7 +304,12 @@ fn authenticated_return_resume_rotates_exact_worker_back_in_origin() {
 
     let next = "kr-resume-22222222222222222222222222222222";
     let resumed = super::resume_after_orchestrator_return(
-        &conn, AGENT, token, "adhoc-reloaded", Some(next), CHILD,
+        &conn,
+        AGENT,
+        token,
+        "adhoc-reloaded",
+        Some(next),
+        CHILD,
     )
     .unwrap();
     assert_eq!(resumed.disc_id, ORIGIN);
@@ -313,7 +318,12 @@ fn authenticated_return_resume_rotates_exact_worker_back_in_origin() {
     assert_eq!(membership(&conn), ORIGIN);
 
     let replay = super::resume_after_orchestrator_return(
-        &conn, AGENT, token, "adhoc-response-loss", Some(next), CHILD,
+        &conn,
+        AGENT,
+        token,
+        "adhoc-response-loss",
+        Some(next),
+        CHILD,
     )
     .unwrap();
     assert_eq!(replay.session_pk, 101);

@@ -236,6 +236,15 @@ pub struct PeerResumeRequest {
     pub expected_disc_id: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct OrchestratorReturnResumeRequest {
+    pub agent_type: String,
+    pub session_id: String,
+    pub resume_token: String,
+    pub next_resume_token: Option<String>,
+    pub expected_child_disc_id: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct PeerResumeResponse {
@@ -667,6 +676,55 @@ pub async fn peer_resume(
             cli_ordinal,
         })),
         Err(e) => Json(ApiResponse::err(e.to_string())),
+    }
+}
+
+/// A credential-authenticated, fail-closed child-to-origin recovery. The DB
+/// derives the origin and execution from the exact session and persisted
+/// orchestrator proof; the caller supplies only the child it is leaving.
+pub async fn orchestrator_return_resume(
+    State(state): State<AppState>,
+    Json(req): Json<OrchestratorReturnResumeRequest>,
+) -> Json<ApiResponse<PeerResumeResponse>> {
+    if req.agent_type.trim().is_empty()
+        || req.session_id.trim().is_empty()
+        || req.resume_token.trim().is_empty()
+        || req.expected_child_disc_id.trim().is_empty()
+    {
+        return Json(ApiResponse::err(
+            "required orchestrator return resume field missing",
+        ));
+    }
+    if let Some(next) = req.next_resume_token.as_deref() {
+        let suffix = next.strip_prefix("kr-resume-").unwrap_or_default();
+        if suffix.len() != 32 || !suffix.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Json(ApiResponse::err(
+                "next_resume_token must be kr-resume- followed by 32 hex characters",
+            ));
+        }
+    }
+    let result = state
+        .db
+        .with_conn(move |conn| {
+            db::cli_worker_bindings::resume_after_orchestrator_return(
+                conn,
+                &req.agent_type,
+                &req.resume_token,
+                &req.session_id,
+                req.next_resume_token.as_deref(),
+                &req.expected_child_disc_id,
+            )
+        })
+        .await;
+    match result {
+        Ok(resumed) => Json(ApiResponse::ok(PeerResumeResponse {
+            disc_id: resumed.disc_id,
+            session_pk: resumed.session_pk,
+            resume_token: resumed.resume_token,
+            self_alias: None,
+            cli_ordinal: None,
+        })),
+        Err(error) => Json(ApiResponse::err(error.to_string())),
     }
 }
 

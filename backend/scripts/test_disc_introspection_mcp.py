@@ -1283,6 +1283,7 @@ class TaskExecAcceptWorkerOfferTests(unittest.TestCase):
 
     def test_accept_derives_identity_and_rebinds_to_child(self):
         self.mod._set_current_disc_id("disc-origin")
+        self.mod._set_read_cursor("disc-origin", 19)
         http = mock.MagicMock(return_value={
             "success": True,
             "data": {
@@ -1326,6 +1327,8 @@ class TaskExecAcceptWorkerOfferTests(unittest.TestCase):
         self.assertEqual(bind_args[0], "disc-child")
         self.assertEqual(bind_args[1], "kr-resume-x")
         self.assertEqual(bind_kwargs.get("last_read_sort_order"), -1)
+        self.assertEqual(bind_kwargs.get("return_disc_id"), "disc-origin")
+        self.assertEqual(bind_kwargs.get("return_read_sort_order"), 19)
 
     def test_accept_requires_offer_id(self):
         with mock.patch.object(self.mod, "_http") as http:
@@ -9680,6 +9683,33 @@ class DurableSessionLinkTests(unittest.TestCase):
             call.args[1] != "/api/discussions/orchestrator-return-resume"
             for call in http.call_args_list
         ))
+
+    def test_live_child_wait_recovers_when_terminal_return_invalidates_poll(self):
+        self.mod._set_current_disc_id("d-child")
+        waits = iter([RuntimeError("session moved"), {
+            "timed_out": False,
+            "messages": [{"content": "parent turn"}],
+        }])
+
+        def wait_once(_args):
+            value = next(waits)
+            if isinstance(value, Exception):
+                raise value
+            return value
+
+        recoveries = iter(["d-parent", None])
+        def recover():
+            value = next(recoveries)
+            if value:
+                self.mod._set_current_disc_id(value)
+            return value
+
+        with mock.patch.object(self.mod, "_wait_once", side_effect=wait_once), \
+             mock.patch.object(self.mod, "_attempt_orchestrator_return_resume", side_effect=recover), \
+             mock.patch.object(self.mod, "_maybe_report_telemetry"):
+            result = self.mod.call_disc_wait_for_peer({"timeout_secs": 1})
+        self.assertEqual(result["messages"][0]["content"], "parent turn")
+        self.assertEqual(self.mod._CURRENT_DISC_ID, "d-parent")
 
     def test_an_explicit_third_party_lookup_stays_a_pure_read(self):
         reloaded = _load_module()
