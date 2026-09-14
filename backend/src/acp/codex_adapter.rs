@@ -32,10 +32,10 @@
 //! narrows the `kronn-internal` server's forwarded env var *names* — never
 //! values — exactly like today's direct-CLI Codex invocation.
 
+use crate::agents::runner::{AdapterLaunchOptions, SpawnIo};
 use async_trait::async_trait;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Child;
 use tokio::sync::{mpsc, Mutex};
@@ -61,6 +61,7 @@ pub struct CodexAcpAdapter {
     /// kronn-internal MCP bridge knows which discussion to introspect
     /// (KT-542 review: this was previously dropped on the adapter path).
     discussion_id: Option<String>,
+    launch: AdapterLaunchOptions,
 }
 
 impl CodexAcpAdapter {
@@ -81,7 +82,13 @@ impl CodexAcpAdapter {
             thread_id: Mutex::new(seed_native_thread_id),
             current_child: Mutex::new(None),
             discussion_id,
+            launch: AdapterLaunchOptions::default(),
         }
+    }
+
+    pub(crate) fn with_launch_options(mut self, launch: AdapterLaunchOptions) -> Self {
+        self.launch = launch;
+        self
     }
 
     /// Test-only: drive a fixture script instead of the real `codex` binary.
@@ -344,21 +351,28 @@ impl AcpTransport for CodexAcpAdapter {
         })?;
         let known_thread = self.thread_id.lock().await.clone();
 
-        let mut args: Vec<String> = vec!["exec".into()];
+        let mut args: Vec<String> = self
+            .launch
+            .worker_args
+            .clone()
+            .unwrap_or_else(|| vec!["exec".into()]);
         if let Some(thread) = &known_thread {
             args.push("resume".into());
             args.push(thread.clone());
         }
         args.push("--json".into());
-        args.push("--skip-git-repo-check".into());
-        args.push("-c".into());
-        args.push(
-            codex_project_mcp_override(&cwd, &self.broker).ok_or_else(|| {
-                AcpError::Transport(
-                    "Codex ACP adapter cannot build its project-scoped MCP configuration".into(),
-                )
-            })?,
-        );
+        if self.launch.worker_context.is_none() {
+            args.push("--skip-git-repo-check".into());
+            args.push("-c".into());
+            args.push(
+                codex_project_mcp_override(&cwd, &self.broker).ok_or_else(|| {
+                    AcpError::Transport(
+                        "Codex ACP adapter cannot build its project-scoped MCP configuration"
+                            .into(),
+                    )
+                })?,
+            );
+        }
         if let Some(model) = &self.model {
             args.push("--model".into());
             args.push(model.clone());
@@ -373,26 +387,25 @@ impl AcpTransport for CodexAcpAdapter {
         // `--sandbox` is not accepted by `codex exec resume` (verified via
         // `codex exec resume --help`): only the first turn of a thread can
         // set it.
-        if known_thread.is_none() {
+        if known_thread.is_none() && self.launch.worker_context.is_none() {
             if let Some(sandbox) = self.broker.session_policy().codex_sandbox {
                 args.push(format!("--sandbox={sandbox}"));
             }
         }
         args.push("-".into());
 
-        let mut command = crate::core::cmd::async_cmd(&self.program);
-        command
-            .args(&args)
-            .current_dir(&cwd)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null());
-        if let Some(discussion_id) = self.discussion_id.as_deref() {
-            command.env("KRONN_DISCUSSION_ID", discussion_id);
-        }
-        let mut child = command
-            .spawn()
-            .map_err(|error| AcpError::Transport(format!("spawn codex: {error}")))?;
+        let mut child = crate::agents::runner::try_spawn(
+            &self.program,
+            None,
+            &args,
+            &cwd,
+            "OPENAI_API_KEY",
+            self.launch.api_key.as_deref(),
+            SpawnIo::Adapter,
+            self.discussion_id.as_deref(),
+            self.launch.worker_context.as_ref(),
+        )
+        .map_err(AcpError::Transport)?;
         let mut stdin = child
             .stdin
             .take()

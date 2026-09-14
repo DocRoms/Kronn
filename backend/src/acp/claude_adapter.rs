@@ -25,7 +25,6 @@
 
 use async_trait::async_trait;
 use std::path::PathBuf;
-use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Child;
@@ -36,7 +35,9 @@ use super::{
     AcpAgent, AcpCapability, AcpConfigOption, AcpError, AcpInitialize, AcpNegotiatedCapabilities,
     AcpSessionEvent, AcpSessionTarget, AcpTransport,
 };
-use crate::agents::runner::{parse_claude_stream_line, StreamJsonEvent};
+use crate::agents::runner::{
+    parse_claude_stream_line, AdapterLaunchOptions, SpawnIo, StreamJsonEvent,
+};
 
 pub struct ClaudeAcpAdapter {
     program: String,
@@ -49,6 +50,7 @@ pub struct ClaudeAcpAdapter {
     discussion_id: Option<String>,
     has_run_before: AtomicBool,
     current_child: Mutex<Option<Child>>,
+    launch: AdapterLaunchOptions,
 }
 
 impl ClaudeAcpAdapter {
@@ -70,7 +72,13 @@ impl ClaudeAcpAdapter {
             discussion_id,
             has_run_before: AtomicBool::new(false),
             current_child: Mutex::new(None),
+            launch: AdapterLaunchOptions::default(),
         }
+    }
+
+    pub(crate) fn with_launch_options(mut self, launch: AdapterLaunchOptions) -> Self {
+        self.launch = launch;
+        self
     }
 
     /// Test-only: drive a fixture script instead of the real `claude` binary.
@@ -203,13 +211,15 @@ impl AcpTransport for ClaudeAcpAdapter {
         })?;
         let resuming = self.has_run_before.swap(true, Ordering::SeqCst);
 
-        let mut args: Vec<String> = vec![
-            "--print".into(),
-            "--output-format".into(),
-            "stream-json".into(),
-            "--verbose".into(),
-            "--include-partial-messages".into(),
-        ];
+        let mut args: Vec<String> = self.launch.worker_args.clone().unwrap_or_else(|| {
+            vec![
+                "--print".into(),
+                "--output-format".into(),
+                "stream-json".into(),
+                "--verbose".into(),
+                "--include-partial-messages".into(),
+            ]
+        });
         args.push(if resuming {
             "--resume".into()
         } else {
@@ -224,7 +234,9 @@ impl AcpTransport for ClaudeAcpAdapter {
             args.push("--effort".into());
             args.push(effort.clone());
         }
-        if self.project_mcp_config_allowed.load(Ordering::SeqCst) {
+        if self.launch.worker_context.is_none()
+            && self.project_mcp_config_allowed.load(Ordering::SeqCst)
+        {
             let mcp_config = Self::mcp_config_path(&cwd).ok_or_else(|| {
                 AcpError::Transport("authorized Claude MCP config disappeared".into())
             })?;
@@ -233,26 +245,25 @@ impl AcpTransport for ClaudeAcpAdapter {
             args.push("--strict-mcp-config".into());
         }
         let allowed_tools = self.allowed_tools.lock().await.clone();
-        if !allowed_tools.is_empty() {
+        if self.launch.worker_context.is_none() && !allowed_tools.is_empty() {
             args.push("--allowedTools".into());
             args.extend(allowed_tools);
         }
         if self.broker.session_policy().claude_skip_permissions {
             args.push("--dangerously-skip-permissions".into());
         }
-        let mut command = crate::core::cmd::async_cmd(&self.program);
-        command
-            .args(&args)
-            .current_dir(&cwd)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null());
-        if let Some(discussion_id) = self.discussion_id.as_deref() {
-            command.env("KRONN_DISCUSSION_ID", discussion_id);
-        }
-        let mut child = command
-            .spawn()
-            .map_err(|error| AcpError::Transport(format!("spawn claude: {error}")))?;
+        let mut child = crate::agents::runner::try_spawn(
+            &self.program,
+            None,
+            &args,
+            &cwd,
+            "ANTHROPIC_API_KEY",
+            self.launch.api_key.as_deref(),
+            SpawnIo::Adapter,
+            self.discussion_id.as_deref(),
+            self.launch.worker_context.as_ref(),
+        )
+        .map_err(AcpError::Transport)?;
         let mut stdin = child
             .stdin
             .take()
@@ -622,6 +633,74 @@ mod tests {
                     .iter()
                     .any(|location| location.contains(secret))
         }));
+    }
+
+    #[tokio::test]
+    async fn rejected_or_changed_registry_never_falls_back_to_global_mcp() {
+        for case in ["absent", "invalid", "mixed", "changed"] {
+            let dir = tempfile::tempdir().unwrap();
+            let config = dir.path().join(".mcp.json");
+            match case {
+                "invalid" => std::fs::write(&config, "not json").unwrap(),
+                "mixed" => std::fs::write(&config, r#"{"mcpServers":{"safe":{"command":"safe-server"},"private":{"command":"private-server","env":{"API_KEY":"fixture-secret"}}}}"#).unwrap(),
+                "changed" => std::fs::write(&config, r#"{"mcpServers":{"safe":{"command":"safe-server"}}}"#).unwrap(),
+                _ => {}
+            }
+            let argv_file = dir.path().join("argv");
+            let fixture = crate::acp::test_support::write_fixture_script(dir.path(), &format!(
+                "printf '%s\\n' \"$@\" > '{}'\ncat >/dev/null\nprintf '%s\\n' '{{\"type\":\"result\",\"subtype\":\"success\"}}'", argv_file.display()
+            ));
+            let adapter = ClaudeAcpAdapter {
+                program: fixture.to_string_lossy().into_owned(),
+                ..ClaudeAcpAdapter::new(
+                    None,
+                    None,
+                    false,
+                    None,
+                    AcpSessionScope::new(Some(dir.path().to_path_buf()), "fixture-discussion"),
+                )
+            };
+            let mut host = AcpHost::new(1, std::sync::Arc::new(adapter));
+            host.negotiate(AcpInitialize {
+                protocol_version: 1,
+                cwd: dir.path().to_string_lossy().into_owned(),
+                mcp_servers: vec![crate::acp::AcpMcpServer {
+                    id: "safe".into(),
+                    command: "safe-server".into(),
+                    args: vec![],
+                    allowed_tools: vec![],
+                }],
+            })
+            .await
+            .unwrap();
+            if case == "changed" {
+                std::fs::write(&config, r#"{"mcpServers":{"private":{"command":"private-server","env":{"API_KEY":"fixture-secret"}}}}"#).unwrap();
+            }
+            let target = host.create_session().await.unwrap();
+            let (tx, rx) = mpsc::channel(16);
+            host.prompt(&target, "fixture prompt", tx).await.unwrap();
+            drain(rx).await;
+            host.shutdown().await.unwrap();
+            let raw = std::fs::read_to_string(argv_file).unwrap();
+            let args: Vec<_> = raw.lines().collect();
+            assert!(
+                args.contains(&"--strict-mcp-config"),
+                "{case}: must disable the global MCP registry"
+            );
+            let selected = args
+                .windows(2)
+                .find(|p| p[0] == "--mcp-config")
+                .expect("explicit scoped registry")[1];
+            let value: serde_json::Value = serde_json::from_str(selected)
+                .expect("frozen safe inline config, not a mutable file path");
+            let expected = if case == "changed" {
+                serde_json::json!({"mcpServers":{"safe":{"command":"safe-server"}}})
+            } else {
+                serde_json::json!({"mcpServers":{}})
+            };
+            assert_eq!(value, expected, "{case}");
+            assert!(!raw.contains("fixture-secret"), "{case}");
+        }
     }
 
     #[tokio::test]
