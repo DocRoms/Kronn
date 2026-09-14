@@ -137,6 +137,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dropping_a_turn_releases_its_registered_process() {
+        let dir = tempfile::tempdir().unwrap();
+        let process = AdapterProcess::default();
+        let turn = process.begin_turn();
+        process.install(fixture(dir.path()), &turn).await.unwrap();
+
+        drop(turn);
+
+        assert!(
+            process.0.lock().unwrap().child.is_none(),
+            "an abandoned prompt must not retain its running child in the adapter"
+        );
+    }
+
+    #[tokio::test]
+    async fn overlapping_turn_is_rejected_without_replacing_the_active_cancellation() {
+        let process = AdapterProcess::default();
+        let active = process.begin_turn();
+        let overlap = process.begin_turn();
+
+        assert!(overlap.is_cancelled(), "one adapter cannot own two prompts");
+        drop(overlap);
+        process.cancel().await.unwrap();
+        assert!(
+            active.is_cancelled(),
+            "cancel must still reach the active turn"
+        );
+    }
+
+    #[test]
+    fn finishing_a_turn_permits_the_next_sequential_turn() {
+        let process = AdapterProcess::default();
+        let first = process.begin_turn();
+        drop(first);
+        let next = process.begin_turn();
+        assert!(!next.is_cancelled());
+    }
+
+    #[tokio::test]
     async fn cancellation_before_registration_rejects_and_reaps_the_child() {
         let dir = tempfile::tempdir().unwrap();
         let process = AdapterProcess::default();
