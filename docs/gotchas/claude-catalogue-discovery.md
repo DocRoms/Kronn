@@ -35,7 +35,9 @@ not a credential fingerprint or authorization grant. Recheck explicitly after
 changing the CLI account; no account, token or credential is copied into the
 catalogue. CLI aliases can change their resolution; the special `default`
 choice is labelled accordingly and is never automatically assigned to a tier.
+The same warning is shown in the Settings catalogue table, not just in pickers.
 [src: file: frontend/src/lib/modelCatalogSelection.ts:76]
+[src: file: frontend/src/components/settings/ModelCatalogSection.tsx:424]
 
 Opening a selector serves its saved snapshot first, then refreshes stale CLI
 targets without clearing visible options or user choices. Browser requests are
@@ -54,6 +56,14 @@ their return restores availability. Manual/migrated aliases and existing
 tiers are not removed merely because the CLI lists a different spelling.
 Refresh does not choose a replacement or write configuration.
 [src: file: backend/src/db/model_catalog.rs:600]
+
+Retaining a catalogue and allowing a launch are distinct decisions. Claude
+preflight tolerates a discovery `Timeout`/`ProviderError` only when the exact
+selected model is still `Available`. It keeps cached provenance and the error
+visible and leaves authentication to the execution boundary. `AuthRequired`,
+`CliMissing`, absent identities and positively unavailable models remain blocked
+when accompanied by a blocking refresh error. Other runtimes are unchanged.
+[src: file: backend/src/core/model_catalog/mod.rs:653]
 
 Regression coverage includes the initialization-only protocol, malformed and
 oversized responses, stderr EOF, namespace separation, missing effort levels,

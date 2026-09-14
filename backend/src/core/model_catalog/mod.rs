@@ -651,10 +651,24 @@ pub async fn preflight_check(
     };
 
     if let Some(view) = refresh_view {
-        if let Some(reason) = view
-            .last_error_reason
-            .filter(|reason| !matches!(reason, ModelUnavailableReason::Unsupported))
-        {
+        if let Some(reason) = view.last_error_reason.filter(|reason| {
+            // Claude discovery is not an account-access check. A transient
+            // probe failure does not invalidate an exact model still recorded
+            // Available; keep the error visible and let execution authenticate.
+            // Missing CLI/auth, unknown or disappeared identities and other
+            // runtimes retain their existing refusal policy.
+            let retained_claude_model = agent_type == AgentType::ClaudeCode
+                && matches!(
+                    reason,
+                    ModelUnavailableReason::Timeout | ModelUnavailableReason::ProviderError
+                )
+                && view.models.iter().any(|entry| {
+                    entry.runtime_target_id == runtime_target_id
+                        && entry.model_id == model_id
+                        && entry.availability == ModelAvailability::Available
+                });
+            !matches!(reason, ModelUnavailableReason::Unsupported) && !retained_claude_model
+        }) {
             return Some(CatalogPreflightFailure {
                 runtime_target_id,
                 agent_type,
@@ -726,7 +740,7 @@ pub async fn preflight_check(
 mod tests {
     use super::*;
     use crate::db::model_catalog as db;
-    use crate::models::UpsertManualModelRequest;
+    use crate::models::{ModelProvenance, UpsertManualModelRequest};
 
     fn test_db() -> Database {
         Database::open_in_memory().unwrap()
@@ -1242,6 +1256,153 @@ mod tests {
         assert_eq!(failure.reason, ModelUnavailableReason::AuthRequired);
         assert_eq!(failure.recommended_action, "authenticate");
         assert_eq!(failure.detail, "login required");
+    }
+
+    #[tokio::test]
+    async fn claude_transient_discovery_failure_keeps_a_known_available_model_launchable() {
+        for reason in [
+            ModelUnavailableReason::Timeout,
+            ModelUnavailableReason::ProviderError,
+        ] {
+            let database = test_db();
+            database
+                .with_conn(move |conn| {
+                    let target = db::agent_runtime_target_id(&AgentType::ClaudeCode);
+                    db::insert_migrated_seed(
+                        conn,
+                        &AgentType::ClaudeCode,
+                        &fable().model_id,
+                        "Fable",
+                        Some(ModelTier::Reasoning),
+                        &["chat".into()],
+                        &[],
+                    )?;
+                    db::reconcile_live(conn, &target, &AgentType::ClaudeCode, &[fable()])?;
+                    db::record_refresh_failure(
+                        conn,
+                        &target,
+                        &AgentType::ClaudeCode,
+                        reason,
+                        "temporary discovery failure",
+                    )
+                })
+                .await
+                .unwrap();
+            for selected in [None, Some(fable().model_id)] {
+                let failure = preflight_check(
+                    &database,
+                    None,
+                    AgentType::ClaudeCode,
+                    ModelTier::Reasoning,
+                    selected.as_deref(),
+                    None,
+                )
+                .await;
+                assert!(
+                    failure.is_none(),
+                    "cached Available Claude model must survive {reason:?}: {failure:?}"
+                );
+            }
+            let view = build_view(&database, "agent:claude-code".into(), AgentType::ClaudeCode)
+                .await
+                .unwrap();
+            assert!(
+                !view.live_refresh_ok,
+                "launchability must not relabel a failed discovery as verified"
+            );
+            assert_eq!(view.last_error_reason, Some(reason));
+            assert_eq!(view.models[0].provenance, ModelProvenance::Cached);
+        }
+    }
+
+    #[tokio::test]
+    async fn cached_claude_model_still_refuses_auth_missing_cli_and_unavailable_models() {
+        for reason in [
+            ModelUnavailableReason::AuthRequired,
+            ModelUnavailableReason::CliMissing,
+            ModelUnavailableReason::Timeout,
+            ModelUnavailableReason::ProviderError,
+        ] {
+            let database = test_db();
+            database
+                .with_conn(move |conn| {
+                    let target = db::agent_runtime_target_id(&AgentType::ClaudeCode);
+                    db::reconcile_live(conn, &target, &AgentType::ClaudeCode, &[fable()])?;
+                    if matches!(
+                        reason,
+                        ModelUnavailableReason::Timeout | ModelUnavailableReason::ProviderError
+                    ) {
+                        db::mark_unavailable(
+                            conn,
+                            &target,
+                            &fable().model_id,
+                            ModelUnavailableReason::Disappeared,
+                            Some("removed from catalogue"),
+                        )?;
+                    }
+                    db::record_refresh_failure(
+                        conn,
+                        &target,
+                        &AgentType::ClaudeCode,
+                        reason,
+                        "discovery failed",
+                    )
+                })
+                .await
+                .unwrap();
+            let failure = preflight_check(
+                &database,
+                None,
+                AgentType::ClaudeCode,
+                ModelTier::Default,
+                Some(&fable().model_id),
+                None,
+            )
+            .await
+            .expect("real refusal must remain blocking");
+            assert_eq!(failure.reason, reason);
+            assert_eq!(failure.model_id.as_deref(), Some(fable().model_id.as_str()));
+        }
+    }
+
+    #[tokio::test]
+    async fn transient_catalog_failure_does_not_allow_unknown_claude_or_change_codex_policy() {
+        for agent in [AgentType::ClaudeCode, AgentType::Codex] {
+            for reason in [
+                ModelUnavailableReason::Timeout,
+                ModelUnavailableReason::ProviderError,
+            ] {
+                let database = test_db();
+                let source_agent = agent.clone();
+                database
+                    .with_conn(move |conn| {
+                        let target = db::agent_runtime_target_id(&source_agent);
+                        if source_agent == AgentType::Codex {
+                            db::reconcile_live(conn, &target, &source_agent, &[fable()])?;
+                        }
+                        db::record_refresh_failure(
+                            conn,
+                            &target,
+                            &source_agent,
+                            reason,
+                            "discovery failed",
+                        )
+                    })
+                    .await
+                    .unwrap();
+                let failure = preflight_check(
+                    &database,
+                    None,
+                    agent.clone(),
+                    ModelTier::Default,
+                    Some(&fable().model_id),
+                    None,
+                )
+                .await
+                .expect("exception is only for known Available Claude entries");
+                assert_eq!(failure.reason, reason);
+            }
+        }
     }
 
     #[tokio::test]

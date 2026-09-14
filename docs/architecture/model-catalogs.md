@@ -61,10 +61,16 @@ Discussion dispatch is the shared boundary for ordinary discussions, Quick
 Prompts, comparisons and judges. It checks the exact durable target before
 marking the provider as started. Workflows check every statically reachable
 agent step before the first step and check each step again immediately before
-dispatch. A known unavailable model or a recent target refresh failure returns
+dispatch. A known unavailable model or a blocking target refresh failure returns
 a structured diagnostic and zero agent tokens are consumed. A stale CLI target
 first receives one bounded refresh attempt; the preflight consumes its
 normalized auth/timeout/missing-runtime result.
+For Claude only, a discovery `Timeout` or `ProviderError` does not block an exact
+model still recorded `Available`. The cached provenance and error remain visible;
+this is permission to attempt execution, not proof of account access. Missing CLI,
+authentication failures and unavailable/unknown identities are not covered by
+that exception, and other runtimes keep their existing failure policy.
+[src: file: backend/src/core/model_catalog/mod.rs:653]
 [src: file: backend/src/api/discussions/streaming.rs:2168-2220]
 [src: file: backend/src/workflows/runner.rs:738-858]
 [src: file: backend/src/workflows/steps.rs:220-286]

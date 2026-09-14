@@ -420,6 +420,9 @@ export function ModelCatalogSection({ onCatalogChanged, sharedCatalog }: {
                     <button type="button" className="set-model-catalog-model-open" onClick={() => openEdit(row.model)}>
                       <span>{row.model.display_alias ?? row.model.display_name}</span>
                       <small>{row.model.model_id}</small>
+                      {row.targetId === 'agent:claude-code' && row.model.model_id === 'default' && (
+                        <small>{t('modelCatalog.cliDefault')}</small>
+                      )}
                     </button>
                   </td>
                   <td><span className="set-model-catalog-target-cell">{row.targetLabel}</span></td>
