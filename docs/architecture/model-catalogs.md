@@ -110,6 +110,11 @@ documented per-run
 and Claude Code via its installed `--effort <level>` CLI flag. Direct CLI and
 the optional Claude/Codex ACP adapters carry the same resolved value; other
 ACP and HTTP routes receive no guessed parameter.
+The direct Codex runner still starts a fresh execution on each turn; its ACP
+adapter supports thread resume. Claude supports resume on both routes. Effort
+is transmitted on every supported fresh/resumed invocation; this feature does
+not add resume to the direct Codex runner. Delegated task workers retain their
+isolated direct-CLI route even when adapters are enabled.
 [src: file: backend/src/agents/runner.rs:2746-2850]
 [src: file: backend/src/acp/claude_adapter.rs:200-225]
 [src: file: backend/src/acp/codex_adapter.rs:358-374]

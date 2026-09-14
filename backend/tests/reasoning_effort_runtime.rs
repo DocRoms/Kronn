@@ -197,10 +197,15 @@ esac
                     expected,
                     "{agent:?} adapted={adapted} resume={resume} worker={worker}"
                 );
+                // The direct Codex runner intentionally starts fresh; only its
+                // ACP adapter consumes the resume hint. Effort must survive both.
+                let expects_resume =
+                    resume && !worker && (agent == AgentType::ClaudeCode || adapted);
                 assert_eq!(
                     args.iter()
                         .any(|arg| *arg == "--resume" || *arg == "resume"),
-                    resume && !worker
+                    expects_resume,
+                    "{agent:?} adapted={adapted} resume={resume} worker={worker}"
                 );
                 if worker {
                     assert!(args.contains(&if agent == AgentType::ClaudeCode {
