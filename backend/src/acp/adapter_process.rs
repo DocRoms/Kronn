@@ -1,0 +1,170 @@
+//! Process ownership shared by the two CLI-backed ACP adapters.
+use std::{process::ExitStatus, sync::Mutex};
+
+use tokio::process::Child;
+use tokio_util::sync::CancellationToken;
+
+use super::AcpError;
+
+/// Children come exclusively from the runner's group-owning launcher. Keeping
+/// the group guard with the Child covers dropped prompt/shutdown futures too.
+struct OwnedChild(Child);
+
+impl OwnedChild {
+    fn signal_group(&self) -> std::io::Result<()> {
+        #[cfg(unix)]
+        if let Some(pid) = self.0.id().filter(|pid| *pid > 1) {
+            if unsafe { libc::kill(-(pid as i32), libc::SIGKILL) } != 0 {
+                let error = std::io::Error::last_os_error();
+                if error.raw_os_error() != Some(libc::ESRCH) {
+                    return Err(error);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn stop(&mut self) -> Result<(), AcpError> {
+        let signal = self.signal_group();
+        let kill = self.0.start_kill();
+        let wait = self.0.wait().await;
+        let errors: Vec<_> = [signal.err(), kill.err(), wait.err()]
+            .into_iter()
+            .flatten()
+            .map(|error| error.to_string())
+            .collect();
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(AcpError::Transport(format!(
+                "stop adapter process: {}",
+                errors.join("; ")
+            )))
+        }
+    }
+}
+
+impl Drop for OwnedChild {
+    fn drop(&mut self) {
+        let _ = self.signal_group();
+        // The launcher also enables Child::kill_on_drop for portable cleanup.
+    }
+}
+
+#[derive(Default)]
+struct State {
+    child: Option<OwnedChild>,
+    cancel: CancellationToken,
+}
+
+#[derive(Default)]
+pub(super) struct AdapterProcess(Mutex<State>);
+
+impl AdapterProcess {
+    pub(super) fn begin_turn(&self) -> CancellationToken {
+        let mut state = self.0.lock().unwrap();
+        state.cancel = CancellationToken::new();
+        state.cancel.clone()
+    }
+
+    /// A cancel that arrives while resolving/spawning the executable remains
+    /// authoritative when the child is finally registered, before any write.
+    pub(super) async fn install(
+        &self,
+        child: Child,
+        cancel: &CancellationToken,
+    ) -> Result<(), AcpError> {
+        let mut child = OwnedChild(child);
+        {
+            let mut state = self.0.lock().unwrap();
+            if !cancel.is_cancelled() {
+                state.child = Some(child);
+                return Ok(());
+            }
+        }
+        child.stop().await?;
+        Err(AcpError::Transport(
+            "adapter turn was cancelled during startup".into(),
+        ))
+    }
+
+    pub(super) async fn wait(&self, cancel: &CancellationToken) -> Result<ExitStatus, AcpError> {
+        // Never hold the state lock while waiting: a process can close stdout
+        // before exiting, and cancel must still be able to signal its token.
+        let child = self.0.lock().unwrap().child.take();
+        let mut child =
+            child.ok_or_else(|| AcpError::Transport("adapter turn was cancelled".into()))?;
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => {
+                child.stop().await?;
+                Err(AcpError::Transport("adapter turn was cancelled".into()))
+            }
+            status = child.0.wait() => status.map_err(|error| AcpError::Transport(format!("wait for adapter: {error}"))),
+        }
+    }
+
+    pub(super) async fn cancel(&self) -> Result<(), AcpError> {
+        let child = {
+            let mut state = self.0.lock().unwrap();
+            state.cancel.cancel();
+            state.child.take()
+        };
+        if let Some(mut child) = child {
+            child.stop().await?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fixture(dir: &std::path::Path) -> Child {
+        crate::agents::runner::try_spawn(
+            "sh",
+            None,
+            &["-c".into(), "exec sleep 30".into()],
+            dir,
+            "",
+            None,
+            crate::agents::runner::SpawnIo::Adapter,
+            None,
+            None,
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn cancellation_before_registration_rejects_and_reaps_the_child() {
+        let dir = tempfile::tempdir().unwrap();
+        let process = AdapterProcess::default();
+        let token = process.begin_turn();
+        process.cancel().await.unwrap();
+        let result = process.install(fixture(dir.path()), &token).await;
+        assert!(
+            matches!(result, Err(AcpError::Transport(error)) if error.contains("cancelled during startup"))
+        );
+        assert!(process.0.lock().unwrap().child.is_none());
+        process.cancel().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancellation_interrupts_a_wait_that_already_owns_the_child() {
+        let dir = tempfile::tempdir().unwrap();
+        let process = AdapterProcess::default();
+        let token = process.begin_turn();
+        process.install(fixture(dir.path()), &token).await.unwrap();
+        let waiting = process.wait(&token);
+        tokio::pin!(waiting);
+        // Poll once so wait owns the child before cancel runs. No clock race.
+        assert!(futures::poll!(&mut waiting).is_pending());
+        process.cancel().await.unwrap();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(10), waiting)
+            .await
+            .unwrap();
+        assert!(matches!(result, Err(AcpError::Transport(error)) if error.contains("cancelled")));
+        process.cancel().await.unwrap();
+    }
+}

@@ -23,11 +23,11 @@
 //! by [`AcpPermissionBroker::session_policy`] and applied as static CLI flags
 //! instead of a live negotiation.
 
+use super::adapter_process::AdapterProcess;
 use async_trait::async_trait;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::Child;
 use tokio::sync::{mpsc, Mutex};
 
 use super::permission_broker::{AcpAuditEntry, AcpPermissionBroker, AcpSessionScope};
@@ -49,7 +49,7 @@ pub struct ClaudeAcpAdapter {
     project_mcp_config: Mutex<String>,
     discussion_id: Option<String>,
     has_run_before: AtomicBool,
-    current_child: Mutex<Option<Child>>,
+    process: AdapterProcess,
     launch: AdapterLaunchOptions,
 }
 
@@ -71,7 +71,7 @@ impl ClaudeAcpAdapter {
             project_mcp_config: Mutex::new(r#"{"mcpServers":{}}"#.into()),
             discussion_id,
             has_run_before: AtomicBool::new(false),
-            current_child: Mutex::new(None),
+            process: AdapterProcess::default(),
             launch: AdapterLaunchOptions::default(),
         }
     }
@@ -210,6 +210,7 @@ impl AcpTransport for ClaudeAcpAdapter {
         prompt: &str,
         events: mpsc::Sender<AcpSessionEvent>,
     ) -> Result<(), AcpError> {
+        let cancel = self.process.begin_turn();
         let cwd = self.cwd.lock().await.clone().ok_or_else(|| {
             AcpError::Transport("Claude ACP adapter prompted before initialize".into())
         })?;
@@ -267,6 +268,11 @@ impl AcpTransport for ClaudeAcpAdapter {
             .stdin
             .take()
             .ok_or_else(|| AcpError::Transport("claude stdin unavailable".into()))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| AcpError::Transport("claude stdout unavailable".into()))?;
+        self.process.install(child, &cancel).await?;
         stdin
             .write_all(prompt.as_bytes())
             .await
@@ -276,11 +282,6 @@ impl AcpTransport for ClaudeAcpAdapter {
             .await
             .map_err(|error| AcpError::Transport(format!("close claude prompt stdin: {error}")))?;
         drop(stdin);
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| AcpError::Transport("claude stdout unavailable".into()))?;
-        *self.current_child.lock().await = Some(child);
 
         let mut lines = BufReader::new(stdout).lines();
         let mut failure: Option<String> = None;
@@ -321,18 +322,7 @@ impl AcpTransport for ClaudeAcpAdapter {
             }
         }
 
-        let status = {
-            let mut guard = self.current_child.lock().await;
-            match guard.as_mut() {
-                Some(child) => child
-                    .wait()
-                    .await
-                    .map_err(|error| AcpError::Transport(format!("wait for claude: {error}")))?,
-                // Taken by a concurrent `cancel()`: the turn was interrupted.
-                None => return Err(AcpError::Transport("claude turn was cancelled".into())),
-            }
-        };
-        *self.current_child.lock().await = None;
+        let status = self.process.wait(&cancel).await?;
 
         if let Some(failure) = failure {
             return Err(AcpError::Transport(failure));
@@ -347,21 +337,11 @@ impl AcpTransport for ClaudeAcpAdapter {
     }
 
     async fn cancel(&self, _target: &AcpSessionTarget) -> Result<(), AcpError> {
-        if let Some(mut child) = self.current_child.lock().await.take() {
-            let _ = child.start_kill();
-            tokio::spawn(async move {
-                let _ = child.wait().await;
-            });
-        }
-        Ok(())
+        self.process.cancel().await
     }
 
     async fn shutdown(&self) -> Result<(), AcpError> {
-        if let Some(mut child) = self.current_child.lock().await.take() {
-            let _ = child.start_kill();
-            let _ = child.wait().await;
-        }
-        Ok(())
+        self.process.cancel().await
     }
 }
 
@@ -530,7 +510,11 @@ mod tests {
     #[tokio::test]
     async fn cancel_kills_the_live_subprocess_and_the_turn_reports_cancelled() {
         let dir = tempfile::tempdir().unwrap();
-        let fixture = crate::acp::test_support::write_fixture_script(dir.path(), "sleep 30");
+        let fixture = crate::acp::test_support::write_fixture_script(
+            dir.path(),
+            r#"printf '%s\n' '{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","name":"fixture-ready","id":"fixture-tool","input":{}}}}'
+exec sleep 30"#,
+        );
         let adapter = std::sync::Arc::new(ClaudeAcpAdapter::new_with_program(
             fixture.to_string_lossy(),
             None,
@@ -542,14 +526,26 @@ mod tests {
             .unwrap();
         let target = host.create_session().await.unwrap();
 
-        let (tx, _rx) = mpsc::channel(16);
+        let (tx, mut rx) = mpsc::channel(16);
         let prompt_target = target.clone();
         let prompt_adapter = adapter.clone();
         let handle =
             tokio::spawn(async move { prompt_adapter.prompt(&prompt_target, "hi", tx).await });
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while let Some(event) = rx.recv().await {
+                if matches!(event, AcpSessionEvent::ToolCall { .. }) {
+                    return;
+                }
+            }
+            panic!("fixture exited without its ready event");
+        })
+        .await
+        .expect("fixture startup must be observable");
         adapter.cancel(&target).await.unwrap();
-        let result = handle.await.unwrap();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(10), handle)
+            .await
+            .expect("cancel must stop the owned child")
+            .unwrap();
         assert!(result.is_err(), "a killed turn must not report success");
     }
 

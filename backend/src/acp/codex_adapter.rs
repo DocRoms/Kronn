@@ -32,12 +32,12 @@
 //! narrows the `kronn-internal` server's forwarded env var *names* — never
 //! values — exactly like today's direct-CLI Codex invocation.
 
+use super::adapter_process::AdapterProcess;
 use crate::agents::runner::{AdapterLaunchOptions, SpawnIo};
 use async_trait::async_trait;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::Child;
 use tokio::sync::{mpsc, Mutex};
 
 use super::permission_broker::{AcpAuditEntry, AcpPermissionBroker, AcpSessionScope};
@@ -56,7 +56,7 @@ pub struct CodexAcpAdapter {
     /// resume a thread from a previous Kronn process; otherwise populated
     /// from the first turn's `thread.started` event.
     thread_id: Mutex<Option<String>>,
-    current_child: Mutex<Option<Child>>,
+    process: AdapterProcess,
     /// Forwarded to the subprocess as `KRONN_DISCUSSION_ID` so the
     /// kronn-internal MCP bridge knows which discussion to introspect
     /// (KT-542 review: this was previously dropped on the adapter path).
@@ -80,7 +80,7 @@ impl CodexAcpAdapter {
             reasoning_effort,
             broker: AcpPermissionBroker::scoped(full_access, scope),
             thread_id: Mutex::new(seed_native_thread_id),
-            current_child: Mutex::new(None),
+            process: AdapterProcess::default(),
             discussion_id,
             launch: AdapterLaunchOptions::default(),
         }
@@ -346,6 +346,7 @@ impl AcpTransport for CodexAcpAdapter {
         prompt: &str,
         events: mpsc::Sender<AcpSessionEvent>,
     ) -> Result<(), AcpError> {
+        let cancel = self.process.begin_turn();
         let cwd = self.cwd.lock().await.clone().ok_or_else(|| {
             AcpError::Transport("Codex ACP adapter prompted before initialize".into())
         })?;
@@ -410,6 +411,11 @@ impl AcpTransport for CodexAcpAdapter {
             .stdin
             .take()
             .ok_or_else(|| AcpError::Transport("codex stdin unavailable".into()))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| AcpError::Transport("codex stdout unavailable".into()))?;
+        self.process.install(child, &cancel).await?;
         stdin
             .write_all(prompt.as_bytes())
             .await
@@ -419,11 +425,6 @@ impl AcpTransport for CodexAcpAdapter {
             .await
             .map_err(|error| AcpError::Transport(format!("close codex prompt stdin: {error}")))?;
         drop(stdin);
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| AcpError::Transport("codex stdout unavailable".into()))?;
-        *self.current_child.lock().await = Some(child);
 
         let mut lines = BufReader::new(stdout).lines();
         let mut fatal: Option<String> = None;
@@ -462,17 +463,7 @@ impl AcpTransport for CodexAcpAdapter {
             }
         }
 
-        let status = {
-            let mut guard = self.current_child.lock().await;
-            match guard.as_mut() {
-                Some(child) => child
-                    .wait()
-                    .await
-                    .map_err(|error| AcpError::Transport(format!("wait for codex: {error}")))?,
-                None => return Err(AcpError::Transport("codex turn was cancelled".into())),
-            }
-        };
-        *self.current_child.lock().await = None;
+        let status = self.process.wait(&cancel).await?;
 
         if let Some(message) = fatal {
             return Err(AcpError::Transport(message));
@@ -487,21 +478,11 @@ impl AcpTransport for CodexAcpAdapter {
     }
 
     async fn cancel(&self, _target: &AcpSessionTarget) -> Result<(), AcpError> {
-        if let Some(mut child) = self.current_child.lock().await.take() {
-            let _ = child.start_kill();
-            tokio::spawn(async move {
-                let _ = child.wait().await;
-            });
-        }
-        Ok(())
+        self.process.cancel().await
     }
 
     async fn shutdown(&self) -> Result<(), AcpError> {
-        if let Some(mut child) = self.current_child.lock().await.take() {
-            let _ = child.start_kill();
-            let _ = child.wait().await;
-        }
-        Ok(())
+        self.process.cancel().await
     }
 
     async fn native_session_id(&self, _target: &AcpSessionTarget) -> Option<String> {
@@ -732,7 +713,11 @@ mod tests {
     #[tokio::test]
     async fn cancel_kills_the_live_subprocess_and_the_turn_reports_cancelled() {
         let dir = tempfile::tempdir().unwrap();
-        let fixture = crate::acp::test_support::write_fixture_script(dir.path(), "sleep 30");
+        let fixture = crate::acp::test_support::write_fixture_script(
+            dir.path(),
+            r#"printf '%s\n' '{"type":"item.completed","item":{"type":"command_execution","command":"fixture-ready"}}'
+exec sleep 30"#,
+        );
         let adapter = std::sync::Arc::new(CodexAcpAdapter::new_with_program(
             fixture.to_string_lossy(),
             None,
@@ -745,14 +730,26 @@ mod tests {
             .unwrap();
         let target = host.create_session().await.unwrap();
 
-        let (tx, _rx) = mpsc::channel(16);
+        let (tx, mut rx) = mpsc::channel(16);
         let prompt_target = target.clone();
         let prompt_adapter = adapter.clone();
         let handle =
             tokio::spawn(async move { prompt_adapter.prompt(&prompt_target, "hi", tx).await });
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while let Some(event) = rx.recv().await {
+                if matches!(event, AcpSessionEvent::ToolCall { .. }) {
+                    return;
+                }
+            }
+            panic!("fixture exited without its ready event");
+        })
+        .await
+        .expect("fixture startup must be observable");
         adapter.cancel(&target).await.unwrap();
-        let result = handle.await.unwrap();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(10), handle)
+            .await
+            .expect("cancel must stop the owned child")
+            .unwrap();
         assert!(result.is_err(), "a killed turn must not report success");
     }
 
