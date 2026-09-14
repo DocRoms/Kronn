@@ -1292,6 +1292,10 @@ pub fn revise_note_message(
     message_id: &str,
     content: &str,
 ) -> Result<String> {
+    // The note and its audit trail are one write. A failed audit must not
+    // leave changed content behind, nor consume the discussion sequence.
+    let transaction = conn.unchecked_transaction()?;
+    let conn = &transaction;
     let (previous, channel): (String, String) = conn
         .query_row(
             "SELECT content, channel FROM messages WHERE id = ?1 AND discussion_id = ?2",
@@ -1305,6 +1309,14 @@ pub fn revise_note_message(
     }
 
     let revision = Utc::now().to_rfc3339();
+    let event_sort_order: i64 = conn.query_row(
+        "UPDATE discussions
+         SET next_message_seq = next_message_seq + 1
+         WHERE id = ?1
+         RETURNING next_message_seq - 1",
+        [discussion_id],
+        |row| row.get(0),
+    )?;
     conn.execute(
         "UPDATE messages SET content = ?1 WHERE id = ?2 AND discussion_id = ?3",
         params![content, message_id, discussion_id],
@@ -1314,7 +1326,7 @@ pub fn revise_note_message(
              id, discussion_id, target_message_id, previous_content_hash,
              expected_revision, revision, content, target_agent_json,
              idempotency_key, sort_order, dispatch_job_id, created_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, ?8, 0, NULL, ?6)",
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, ?8, ?9, NULL, ?6)",
         params![
             uuid::Uuid::new_v4().to_string(),
             discussion_id,
@@ -1326,8 +1338,10 @@ pub fn revise_note_message(
             revision,
             content,
             uuid::Uuid::new_v4().to_string(),
+            event_sort_order,
         ],
     )?;
+    transaction.commit()?;
     Ok(revision)
 }
 
