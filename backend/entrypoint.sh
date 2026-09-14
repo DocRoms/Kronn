@@ -195,6 +195,19 @@ if [ "${KRONN_HOST_OS:-}" = "macOS" ]; then
     fi
   fi
 
+  # Same for OpenCode — it runs as a native ACP runtime, and without a Linux
+  # copy the skipped Darwin binary leaves it on the npx fallback.
+  if host_darwin_needs_linux_copy opencode; then
+    echo "[entrypoint] macOS host detected: installing Linux opencode via npm..."
+    if command -v npm >/dev/null 2>&1; then
+      if ! npm install -g opencode-ai 2>/dev/null; then
+        echo "[entrypoint] warning: opencode install failed (OpenCode falls back to npx runtime)."
+      fi
+    else
+      echo "[entrypoint] warning: npm missing, cannot install opencode."
+    fi
+  fi
+
   # Same for Gemini CLI — bug reported 2026-04-15 where macOS users never
   # saw Gemini detected because the host Darwin binary was silently
   # skipped but nothing replaced it inside the container.
