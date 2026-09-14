@@ -1680,6 +1680,77 @@ mod tests {
         );
     }
 
+    fn saved_connection(id: &str, model: &str) -> ExternalApiConnection {
+        let now = chrono::Utc::now();
+        ExternalApiConnection {
+            id: id.into(),
+            display_name: id.into(),
+            mention_alias: id.into(),
+            endpoint: Some(format!("http://{id}.test")),
+            credential_slug: format!("credential-{id}"),
+            origin_preset: ExternalApiConnectionPreset::Other,
+            economy_model: None,
+            default_model: Some(model.into()),
+            reasoning_model: None,
+            created_at: now,
+            updated_at: now,
+            image_model: None,
+            video_model: None,
+            media_endpoint: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn named_step_connection_resolves_the_exact_saved_target() {
+        let db = crate::db::Database::open_in_memory().unwrap();
+        for connection in [
+            saved_connection("connection-a", "model-a"),
+            saved_connection("connection-b", "model-b"),
+        ] {
+            db.with_conn(move |conn| {
+                crate::db::external_api_connections::insert(conn, &connection)
+            })
+            .await
+            .unwrap();
+        }
+        let mut step = make_step("anything");
+        step.agent = AgentType::Custom;
+        step.agent_settings = Some(AgentSettings {
+            model: None,
+            tier: Some(ModelTier::Default),
+            connection_id: Some("connection-b".into()),
+            reasoning_effort: None,
+            max_tokens: None,
+        });
+
+        let resolved = resolve_step_connection(&step, Some(&db))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(resolved.id, "connection-b");
+        assert_eq!(
+            step_model_override(&step, Some(&resolved)).as_deref(),
+            Some("model-b")
+        );
+    }
+
+    #[tokio::test]
+    async fn deleted_named_step_connection_is_an_error_not_default_fallback() {
+        let db = crate::db::Database::open_in_memory().unwrap();
+        let mut step = make_step("anything");
+        step.agent = AgentType::Custom;
+        step.agent_settings = Some(AgentSettings {
+            model: None,
+            tier: Some(ModelTier::Default),
+            connection_id: Some("deleted-connection".into()),
+            reasoning_effort: None,
+            max_tokens: None,
+        });
+
+        let error = resolve_step_connection(&step, Some(&db)).await.unwrap_err();
+        assert!(error.to_string().contains("deleted-connection"), "{error}");
+    }
+
     #[test]
     fn explicit_workflow_model_remains_the_dispatch_and_preflight_model() {
         let mut step = make_step("anything");
