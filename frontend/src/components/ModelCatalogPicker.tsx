@@ -1,5 +1,4 @@
-import { useApi } from '../hooks/useApi';
-import { modelCatalogApi } from '../lib/api';
+import { useModelCatalogSnapshot } from '../hooks/useModelCatalogSnapshot';
 import { modelForAgentTier } from '../lib/constants';
 import { useT } from '../lib/I18nContext';
 import { catalogModelOptions, catalogTierEntry, modelRuntimeTargetId } from '../lib/modelCatalogSelection';
@@ -19,14 +18,14 @@ interface Props {
   disabled?: boolean;
 }
 
-/** Saved catalogue reads only: opening an editor never starts provider discovery. */
+/** CLI refreshes do not select a model or probe an HTTP connection. */
 export function ModelCatalogPicker({
   agent, connectionId, value, onChange, tier = 'default', modelTiers, targetModelTiers,
   reasoningEffort = '', onReasoningChange, disabled = false,
 }: Props) {
   const { t } = useT();
-  const catalog = useApi(() => modelCatalogApi.list(), []);
   const runtime = modelRuntimeTargetId(agent, connectionId);
+  const catalog = useModelCatalogSnapshot(true, [runtime]);
   const view = catalog.data?.targets.find(target => target.runtime_target_id === runtime);
   const target = view && (catalog.error || catalog.loading)
     ? { ...view, stale: true, live_refresh_ok: false } : view;

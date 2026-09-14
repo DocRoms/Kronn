@@ -14,6 +14,7 @@
 //! shared here.
 
 pub mod acp_discovery;
+pub mod claude_discovery;
 pub mod codex_discovery;
 pub mod ollama_discovery;
 
@@ -251,8 +252,7 @@ pub enum DiscoveryOutcome {
     CliMissing(String),
     InvalidCatalog(String),
     ProviderError(String),
-    /// No live discovery path exists for this runtime today (e.g. Claude
-    /// Code before its ACP bridge is installed, or an ACP implementation that
+    /// No live discovery path exists for this runtime (e.g. an ACP implementation that
     /// negotiates successfully but exposes no model catalogue) — resolution
     /// falls through to cache/manual/migrated.
     Unsupported,
@@ -273,10 +273,21 @@ pub fn is_catalog_managed(agent_type: &AgentType) -> bool {
 }
 
 async fn discover(agent_type: &AgentType) -> DiscoveryOutcome {
+    #[cfg(test)]
+    if let Ok(outcome) = TEST_DISCOVERY.try_with(Clone::clone) {
+        let _ = TEST_DISCOVERY_CALLS.try_with(|calls| calls.set(calls.get() + 1));
+        return outcome;
+    }
     match timeout(DISCOVERY_TIMEOUT, discover_inner(agent_type)).await {
         Ok(outcome) => outcome,
         Err(_) => DiscoveryOutcome::Timeout,
     }
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    static TEST_DISCOVERY: DiscoveryOutcome;
+    static TEST_DISCOVERY_CALLS: std::cell::Cell<usize>;
 }
 
 async fn discover_inner(agent_type: &AgentType) -> DiscoveryOutcome {
@@ -287,16 +298,7 @@ async fn discover_inner(agent_type: &AgentType) -> DiscoveryOutcome {
         | AgentType::Kiro
         | AgentType::Vibe => acp_discovery::discover(agent_type).await,
         AgentType::Codex => codex_discovery::discover().await,
-        AgentType::ClaudeCode
-            if crate::acp::resolve_acp_route(agent_type)
-                == crate::acp::AcpProductionRoute::AdaptedAcp =>
-        {
-            acp_discovery::discover_claude_adapter().await
-        }
-        // KT-542 keeps the adapter explicitly opt-in. Without that toggle,
-        // the catalog falls through to manual/migrated rows rather than
-        // silently activating a different execution route.
-        AgentType::ClaudeCode => DiscoveryOutcome::Unsupported,
+        AgentType::ClaudeCode => claude_discovery::discover().await,
         _ => DiscoveryOutcome::Unsupported,
     }
 }
@@ -335,14 +337,26 @@ pub async fn refresh_agent_catalog(
     db: &Database,
     agent_type: AgentType,
 ) -> anyhow::Result<ModelCatalogView> {
+    refresh_if_stale(db, agent_type, true).await
+}
+
+async fn discover_and_reconcile(
+    db: &Database,
+    agent_type: AgentType,
+) -> anyhow::Result<ModelCatalogView> {
     let runtime_target_id = db::agent_runtime_target_id(&agent_type);
     let outcome = discover(&agent_type).await;
     let at = agent_type.clone();
     let target = runtime_target_id.clone();
     match outcome {
         DiscoveryOutcome::Live(models) => {
-            db.with_conn(move |conn| db::reconcile_live(conn, &target, &at, &models))
-                .await?;
+            db.with_conn(move |conn| {
+                let transaction = conn.unchecked_transaction()?;
+                db::reconcile_live(&transaction, &target, &at, &models)?;
+                transaction.commit()?;
+                Ok(())
+            })
+            .await?;
         }
         other => {
             if let Some((reason, detail)) = reason_for(&other) {
@@ -504,9 +518,8 @@ pub async fn refresh_if_stale(
     if !is_catalog_managed(&agent_type) {
         return build_view(db, runtime_target_id, agent_type).await;
     }
-    if force {
-        return refresh_agent_catalog(db, agent_type).await;
-    }
+    let requested_at = Utc::now();
+    let _refresh_guard = db.lock_catalog_refresh(&runtime_target_id).await?;
     let target = runtime_target_id.clone();
     let log = db
         .with_conn(move |conn| db::get_refresh_log(conn, &target))
@@ -514,15 +527,17 @@ pub async fn refresh_if_stale(
     let needs_refresh = match log {
         None => true,
         Some(log) => {
-            Utc::now()
-                .signed_duration_since(log.last_attempt_at)
-                .to_std()
-                .unwrap_or_default()
-                > LIVE_CATALOG_TTL
+            log.last_attempt_at < requested_at
+                && (force
+                    || Utc::now()
+                        .signed_duration_since(log.last_attempt_at)
+                        .to_std()
+                        .unwrap_or_default()
+                        > LIVE_CATALOG_TTL)
         }
     };
     if needs_refresh {
-        refresh_agent_catalog(db, agent_type).await
+        discover_and_reconcile(db, agent_type).await
     } else {
         build_view(db, runtime_target_id, agent_type).await
     }
@@ -717,6 +732,188 @@ mod tests {
         Database::open_in_memory().unwrap()
     }
 
+    fn fable() -> DiscoveredModel {
+        DiscoveredModel {
+            model_id: "claude-fable-5-1[1m]".into(),
+            display_name: "Fable".into(),
+            capabilities: vec!["chat".into()],
+            reasoning_modes: vec!["low".into(), "max".into()],
+            default_reasoning_mode: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn overlapping_forced_refreshes_share_one_attempt_but_an_explicit_later_recheck_runs() {
+        let db = test_db();
+        TEST_DISCOVERY_CALLS
+            .scope(
+                std::cell::Cell::new(0),
+                TEST_DISCOVERY.scope(DiscoveryOutcome::Live(vec![fable()]), async {
+                    let guard = db.lock_catalog_refresh("agent:claude-code").await.unwrap();
+                    let mut left =
+                        std::pin::pin!(refresh_if_stale(&db, AgentType::ClaudeCode, true));
+                    let mut right =
+                        std::pin::pin!(refresh_if_stale(&db, AgentType::ClaudeCode, true));
+                    assert!(futures::poll!(left.as_mut()).is_pending());
+                    assert!(futures::poll!(right.as_mut()).is_pending());
+                    drop(guard);
+                    let (left, right) = tokio::join!(left, right);
+                    assert_eq!(left.unwrap().models[0].model_id, fable().model_id);
+                    assert_eq!(right.unwrap().models[0].model_id, fable().model_id);
+                    assert_eq!(TEST_DISCOVERY_CALLS.with(std::cell::Cell::get), 1);
+                    refresh_if_stale(&db, AgentType::ClaudeCode, false)
+                        .await
+                        .unwrap();
+                    assert_eq!(
+                        TEST_DISCOVERY_CALLS.with(std::cell::Cell::get),
+                        1,
+                        "fresh cache is reused"
+                    );
+                    refresh_if_stale(&db, AgentType::ClaudeCode, true)
+                        .await
+                        .unwrap();
+                    assert_eq!(
+                        TEST_DISCOVERY_CALLS.with(std::cell::Cell::get),
+                        2,
+                        "later force is not a cached promise"
+                    );
+                }),
+            )
+            .await;
+    }
+
+    #[tokio::test]
+    async fn claude_refresh_preserves_manual_tiers_http_namespace_and_last_good_on_failure() {
+        let database = test_db();
+        database
+            .with_conn(|conn| {
+                db::insert_migrated_seed(
+                    conn,
+                    &AgentType::ClaudeCode,
+                    "opus",
+                    "My Opus",
+                    Some(ModelTier::Reasoning),
+                    &["chat".into()],
+                    &[],
+                )?;
+                db::reconcile_live(
+                    conn,
+                    "http:claude-api",
+                    &AgentType::ClaudeCode,
+                    &[DiscoveredModel {
+                        model_id: "claude-fable-5-1".into(),
+                        ..fable()
+                    }],
+                )
+            })
+            .await
+            .unwrap();
+        let live = TEST_DISCOVERY
+            .scope(
+                DiscoveryOutcome::Live(vec![fable()]),
+                refresh_if_stale(&database, AgentType::ClaudeCode, true),
+            )
+            .await
+            .unwrap();
+        assert!(live.live_refresh_ok);
+        assert_eq!(
+            live.models
+                .iter()
+                .find(|model| model.model_id == "opus")
+                .unwrap()
+                .tier_assignment,
+            Some(ModelTier::Reasoning)
+        );
+        assert_eq!(
+            live.models
+                .iter()
+                .find(|model| model.model_id == fable().model_id)
+                .unwrap()
+                .tier_assignment,
+            None
+        );
+        let failed = TEST_DISCOVERY
+            .scope(
+                DiscoveryOutcome::Timeout,
+                refresh_if_stale(&database, AgentType::ClaudeCode, true),
+            )
+            .await
+            .unwrap();
+        assert!(!failed.live_refresh_ok);
+        assert_eq!(
+            failed.last_error_reason,
+            Some(ModelUnavailableReason::Timeout)
+        );
+        assert_eq!(failed.last_live_success_at, live.last_live_success_at);
+        assert_eq!(
+            failed
+                .models
+                .iter()
+                .find(|model| model.model_id == fable().model_id)
+                .unwrap()
+                .availability,
+            ModelAvailability::Available
+        );
+        let cached = TEST_DISCOVERY
+            .scope(
+                DiscoveryOutcome::Live(vec![]),
+                refresh_if_stale(&database, AgentType::ClaudeCode, false),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            cached.last_attempt_at, failed.last_attempt_at,
+            "failed attempts have a retry cooldown"
+        );
+        let absent = TEST_DISCOVERY
+            .scope(
+                DiscoveryOutcome::Live(vec![]),
+                refresh_if_stale(&database, AgentType::ClaudeCode, true),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            absent
+                .models
+                .iter()
+                .find(|model| model.model_id == fable().model_id)
+                .unwrap()
+                .availability,
+            ModelAvailability::Unavailable
+        );
+        assert_eq!(
+            absent
+                .models
+                .iter()
+                .find(|model| model.model_id == "opus")
+                .unwrap()
+                .availability,
+            ModelAvailability::Available
+        );
+        let returned = TEST_DISCOVERY
+            .scope(
+                DiscoveryOutcome::Live(vec![fable()]),
+                refresh_if_stale(&database, AgentType::ClaudeCode, true),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            returned
+                .models
+                .iter()
+                .find(|model| model.model_id == fable().model_id)
+                .unwrap()
+                .availability,
+            ModelAvailability::Available
+        );
+        let http = build_view(&database, "http:claude-api".into(), AgentType::ClaudeCode)
+            .await
+            .unwrap();
+        assert_eq!(http.models.len(), 1);
+        assert_eq!(http.models[0].model_id, "claude-fable-5-1");
+        assert!(http.live_refresh_ok);
+    }
+
     #[test]
     fn is_catalog_managed_covers_exactly_the_dod_runtimes() {
         for agent in [
@@ -864,15 +1061,19 @@ mod tests {
 
         // For an explicitly selected model, preflight must record the bounded
         // discovery decision even when this runtime has no live discovery.
-        let failure = preflight_check(
-            &db,
-            None,
-            AgentType::ClaudeCode,
-            ModelTier::Default,
-            Some("operator-claude-model"),
-            None,
-        )
-        .await;
+        let failure = TEST_DISCOVERY
+            .scope(
+                DiscoveryOutcome::Unsupported,
+                preflight_check(
+                    &db,
+                    None,
+                    AgentType::ClaudeCode,
+                    ModelTier::Default,
+                    Some("operator-claude-model"),
+                    None,
+                ),
+            )
+            .await;
         assert!(
             failure.is_none(),
             "unsupported live discovery keeps fallbacks usable"

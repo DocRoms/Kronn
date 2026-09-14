@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import { ArrowDown, ArrowUp, Plus, RefreshCw, Search, Trash2, X } from 'lucide-react';
 import { modelCatalogApi } from '../../lib/api';
+import { useModelCatalogSnapshot } from '../../hooks/useModelCatalogSnapshot';
 import { useT } from '../../lib/I18nContext';
 import { catalogModelProvenance } from '../../lib/modelCatalogSelection';
 import { SearchableSelect, type SearchableSelectOption } from '../SearchableSelect';
@@ -50,9 +51,14 @@ const blankForm = (snapshot: ModelCatalogSnapshot | null): ManualForm => {
   };
 };
 
-export function ModelCatalogSection({ onCatalogChanged }: { onCatalogChanged?: () => void } = {}) {
+export function ModelCatalogSection({ onCatalogChanged, sharedCatalog }: {
+  onCatalogChanged?: () => void;
+  sharedCatalog?: ReturnType<typeof useModelCatalogSnapshot>;
+} = {}) {
   const { t } = useT();
-  const [snapshot, setSnapshot] = useState<ModelCatalogSnapshot | null>(null);
+  const localCatalog = useModelCatalogSnapshot(!sharedCatalog);
+  const catalog = sharedCatalog ?? localCatalog;
+  const snapshot = catalog.catalog;
   const [form, setForm] = useState<ManualForm | null>(null);
   const [editing, setEditing] = useState<CatalogModelEntry | null>(null);
   const [busy, setBusy] = useState(false);
@@ -67,38 +73,12 @@ export function ModelCatalogSection({ onCatalogChanged }: { onCatalogChanged?: (
   );
   const [paging, setPaging] = useState({ key: '', count: PAGE_SIZE });
 
-  const invalidateSnapshot = (targetId?: string) => {
-    setSnapshot(previous => previous ? {
-      ...previous,
-      targets: previous.targets.map(target => !targetId || target.runtime_target_id === targetId
-        ? { ...target, stale: true, live_refresh_ok: false } : target),
-    } : null);
-  };
+  const invalidateSnapshot = catalog.invalidateSnapshot;
   const load = async () => {
-    try {
-      const value = await modelCatalogApi.list();
-      setSnapshot(value);
-      onCatalogChanged?.();
-      return value;
-    } catch (err) {
-      invalidateSnapshot();
-      throw err;
-    }
+    const value = await catalog.reload();
+    onCatalogChanged?.();
+    return value;
   };
-  // KT-587 — awaited before anything is written, and dropped if the section
-  // unmounted while the catalogue was in flight.
-  useEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      try {
-        const value = await modelCatalogApi.list();
-        if (!cancelled) setSnapshot(value);
-      } catch (err) {
-        if (!cancelled) setError(String(err));
-      }
-    })();
-    return () => { cancelled = true; };
-  }, []);
 
   const models = useMemo(
     () => snapshot?.targets.flatMap(target => target.models) ?? [],
@@ -250,10 +230,15 @@ export function ModelCatalogSection({ onCatalogChanged }: { onCatalogChanged?: (
         <div>
           <h3>{t('modelCatalog.title')}</h3>
           <p className="set-hint">{t('modelCatalog.description')}</p>
+          <p className="set-hint">{t('modelCatalog.accessHint')}</p>
         </div>
       </div>
 
       {error && <p className="set-hint" data-status="error">{error}</p>}
+      {!sharedCatalog && catalog.catalogError && <p className="set-hint" role="alert">
+        {t('modelCatalog.loadError')}{' '}
+        <button type="button" className="set-icon-btn" onClick={catalog.refetch}>{t('modelCatalog.reload')}</button>
+      </p>}
 
       {form && (
         <div className="set-ext-api-form set-model-catalog-form">

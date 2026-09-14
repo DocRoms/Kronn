@@ -91,6 +91,7 @@ pub struct Database {
     /// (`run_notify::notify_boot_interrupted`) — the process that would have
     /// webhooked these failures died with them.
     boot_interrupted: Mutex<Vec<workflows::ReconciledRun>>,
+    catalog_refresh_locks: Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 impl Database {
@@ -112,6 +113,7 @@ impl Database {
             read_conn: None,
             path: PathBuf::from(":memory:"),
             boot_interrupted: Mutex::new(Vec::new()),
+            catalog_refresh_locks: Mutex::new(std::collections::HashMap::new()),
         })
     }
 
@@ -261,6 +263,7 @@ impl Database {
             read_conn,
             path: path.clone(),
             boot_interrupted: Mutex::new(boot_interrupted),
+            catalog_refresh_locks: Mutex::new(std::collections::HashMap::new()),
         })
     }
 
@@ -281,6 +284,20 @@ impl Database {
     /// Get the database file path.
     pub fn path(&self) -> &PathBuf {
         &self.path
+    }
+
+    pub(crate) async fn lock_catalog_refresh(
+        &self,
+        target: &str,
+    ) -> Result<tokio::sync::OwnedMutexGuard<()>> {
+        let lock = self
+            .catalog_refresh_locks
+            .lock()
+            .map_err(|_| anyhow::anyhow!("catalogue refresh lock poisoned"))?
+            .entry(target.to_string())
+            .or_default()
+            .clone();
+        Ok(lock.lock_owned().await)
     }
 
     /// Drain the boot-reconciled Interrupted runs (once). Returns empty on

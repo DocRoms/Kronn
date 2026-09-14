@@ -35,11 +35,8 @@ pub async fn discover(agent_type: &AgentType) -> DiscoveryOutcome {
     discover_with_transport(transport, cwd).await
 }
 
-/// Claude's KT-542 adapter implements the same `AcpTransport` boundary as a
-/// native ACP runtime. Today Claude exposes no machine-readable model option,
-/// so this honestly resolves to `Unsupported` while still exercising the real
-/// adapter contract. If Claude adds config options later, discovery starts
-/// working without another provider-specific path.
+/// Exercise the adapter's ACP options independently of Claude's SDK catalogue.
+/// An adapter without config options returns `Unsupported`, not an empty live catalogue.
 pub async fn discover_claude_adapter() -> DiscoveryOutcome {
     let cwd = std::env::temp_dir().to_string_lossy().into_owned();
     let transport: Arc<dyn AcpTransport> = Arc::new(ClaudeAcpAdapter::new(

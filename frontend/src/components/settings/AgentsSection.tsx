@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, type CSSProperties, type ReactNode } from 'react';
-import { config as configApi, agents as agentsApi, usage as usageApi, nvidia as nvidiaApi, modelCatalogApi } from '../../lib/api';
+import { config as configApi, agents as agentsApi, usage as usageApi, nvidia as nvidiaApi } from '../../lib/api';
 import { catalogModelOptions, modelRuntimeTargetId } from '../../lib/modelCatalogSelection';
 import { userError } from '../../lib/userError';
 import { useAsyncGuard } from '../../hooks/useAsyncGuard';
@@ -11,6 +11,7 @@ import { CompressionSection } from './CompressionSection';
 import { ContextHelp } from '../ContextHelp';
 import { SearchableSelect } from '../SearchableSelect';
 import { useApi } from '../../hooks/useApi';
+import { useModelCatalogSnapshot } from '../../hooks/useModelCatalogSnapshot';
 import type { AgentConfig, AgentDetection, AgentsConfig, AgentType, ModelTier, ModelTiersConfig, UsageReport } from '../../types/generated';
 
 /** Where each agent's config lives, and how many runs it allows by default.
@@ -150,7 +151,7 @@ export function AgentsSection({
   });
   const [tierEditing, setTierEditing] = useState<Record<string, { economy: string; default: string; reasoning: string }>>({});
   const [savingTiers, setSavingTiers] = useState(false);
-  const catalog = useApi(() => modelCatalogApi.list(), []);
+  const catalog = useModelCatalogSnapshot(true, [...expandedAgents].map(agent => modelRuntimeTargetId(agent as AgentType)));
   const saveModelTier = useAsyncGuard(async (agentKey: keyof ModelTiersConfig, field: ModelTier, value: string) => {
     setSavingTiers(true);
     try {
@@ -1667,7 +1668,7 @@ export function AgentsSection({
 
         {/* After the modes: a catalogue is what the modes draw from, not a
             fourth way of reaching a model. */}
-        <ModelCatalogSection onCatalogChanged={catalog.refetch} />
+        <ModelCatalogSection sharedCatalog={catalog} />
 
         {/* Best practices links */}
         <div className="set-best-practices">
