@@ -173,8 +173,11 @@ projection. A catalogue refresh or manual edit reloads the tier options.
 Unavailable models stay visible but disabled; an existing setting absent from
 the snapshot is retained explicitly rather than erased or substituted. Option
 details include provenance, last check, reasoning modes and known cost metadata;
-a stale live result is labelled as cached. No model discovery process is started
-by this snapshot read.
+a stale live result is labelled as cached. The snapshot GET itself remains a
+read; opening a selector additionally refreshes stale CLI targets in the
+background, preserving visible options and configuration. Claude's
+initialization-only SDK catalogue is independent of the ACP execution toggle.
+See [Claude discovery and freshness](../gotchas/claude-catalogue-discovery.md).
 [src: file: frontend/src/components/settings/AgentsSection.tsx:149-168]
 [src: file: frontend/src/components/settings/AgentsSection.tsx:1215-1262]
 [src: file: frontend/src/lib/modelCatalogSelection.ts:33-70]

@@ -588,6 +588,14 @@ async fn start_backend(
         Err(e) => tracing::error!("External API connection backfill failed: {e}"),
     }
 
+    // Match standalone boot: project the durable model/effort catalog before
+    // workflows or HTTP handlers can launch a runtime.
+    if let Err(e) =
+        kronn::core::model_catalog::migrate_hardcoded_catalog_once(&database, &app_config).await
+    {
+        tracing::error!("Model catalog migration failed: {e}");
+    }
+
     // Build state via the shared factory — any new AppState field gets
     // picked up here automatically (see kronn::AppState::new_defaults).
     let config_arc = Arc::new(RwLock::new(app_config));

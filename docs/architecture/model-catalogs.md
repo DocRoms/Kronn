@@ -61,10 +61,16 @@ Discussion dispatch is the shared boundary for ordinary discussions, Quick
 Prompts, comparisons and judges. It checks the exact durable target before
 marking the provider as started. Workflows check every statically reachable
 agent step before the first step and check each step again immediately before
-dispatch. A known unavailable model or a recent target refresh failure returns
+dispatch. A known unavailable model or a blocking target refresh failure returns
 a structured diagnostic and zero agent tokens are consumed. A stale CLI target
 first receives one bounded refresh attempt; the preflight consumes its
 normalized auth/timeout/missing-runtime result.
+For Claude only, a discovery `Timeout` or `ProviderError` does not block an exact
+model still recorded `Available`. The cached provenance and error remain visible;
+this is permission to attempt execution, not proof of account access. Missing CLI,
+authentication failures and unavailable/unknown identities are not covered by
+that exception, and other runtimes keep their existing failure policy.
+[src: file: backend/src/core/model_catalog/mod.rs:653]
 [src: file: backend/src/api/discussions/streaming.rs:2168-2220]
 [src: file: backend/src/workflows/runner.rs:738-858]
 [src: file: backend/src/workflows/steps.rs:220-286]
@@ -76,6 +82,95 @@ manual create/update/delete, including chat/image/video capabilities and
 reasoning modes.
 [src: file: frontend/src/components/AgentSwitchPicker.tsx:1-300]
 [src: file: frontend/src/components/settings/ModelCatalogSection.tsx:1-236]
+
+## Reasoning-effort presets and transmission (KT-646)
+
+`ModelTierConfig` (per-agent Economy/Default/Reasoning model tiers, stored in
+`config.toml` under `[agents.model_tiers]`) carries an optional effort string
+alongside each tier's model (`economy_effort`/`default_effort`/
+`reasoning_effort`), additive and backward compatible: an untouched config
+deserializes every new field to `None`. Without an execution override or a
+preset, no effort flag is sent: the runtime's own default applies, never a
+silently assigned `high`/`max`.
+[src: file: backend/src/models/setup.rs:1]
+
+Resolution is a single precedence, mirrored on `effective_model_flag`:
+`runner::resolve_reasoning_effort` — explicit per-step/per-QP
+`AgentSettings.reasoning_effort` (the execution override) wins outright; else
+the tier's configured preset applies only when the final model equals that
+tier's resolved model; else `None`. This retains a preset when an internal
+caller pre-resolves the same model, but never carries it onto a different
+model pin. The candidate is sent only when that exact available catalog entry
+advertises it in `reasoning_modes`. `runner::agent_supports_reasoning_effort`
+gates the whole precedence to agents with a proven contract: Codex via its
+documented per-run
+`-c model_reasoning_effort=<value>` TOML override
+([config reference](https://learn.chatgpt.com/docs/config-file/config-reference),
+[developer commands](https://learn.chatgpt.com/docs/developer-commands?surface=cli)),
+and Claude Code via its installed `--effort <level>` CLI flag. Direct CLI and
+the optional Claude/Codex ACP adapters carry the same resolved value; other
+ACP and HTTP routes receive no guessed parameter.
+Free-text API/workflow overrides are trimmed, then must match an advertised
+mode exactly, including case (`high` is not `High`). Use the catalog value;
+Kronn does not guess a spelling or substitute another effort level.
+The direct Codex runner still starts a fresh execution on each turn; its ACP
+adapter supports thread resume. Claude supports resume on both routes. Effort
+is transmitted on every supported fresh/resumed invocation; this feature does
+not add resume to the direct Codex runner. Delegated task workers retain their
+isolated direct-CLI route even when adapters are enabled.
+[src: file: backend/src/agents/runner.rs:2746-2850]
+[src: file: backend/src/acp/claude_adapter.rs:200-225]
+[src: file: backend/src/acp/codex_adapter.rs:358-374]
+
+Both standalone and embedded-desktop startup await catalog bootstrap before
+starting workflows or serving requests. Even after the one-time migration is
+already recorded, bootstrap reloads models and their effort modes from the
+durable catalog. Bootstrap failures are logged; an unavailable projection
+does not silently authorize an effort. Discussion preflight may refresh the
+catalog afterward, but the first scheduled workflow does not depend on opening
+Settings first.
+[src: file: backend/src/main.rs:287]
+[src: file: desktop/src-tauri/src/main.rs:591]
+[src: file: backend/src/core/model_catalog/mod.rs:103]
+
+A Quick Prompt's explicit `agent_settings.reasoning_effort` is copied onto a
+hydrated workflow step the same way its `agent_settings.model` already is
+(step wins if it sets its own), so a QP-driven step carries the effort its
+author picked.
+[src: file: backend/src/workflows/quick_prompt_hydrate.rs:1]
+
+Standalone QP launches additionally capture their explicit effort alongside
+the resolved model, agent and tier in `discussion_effort_snapshots` (migration
+176). The template, model settings and source version come from one QP read.
+Creation returns the persisted model, and inserts the discussion and override
+atomically. Resumes read this immutable discussion snapshot, never the current
+QP or a version that may have been removed. Existing discussions are not
+backfilled. A changed model/agent/tier, HTTP connection or per-message tier
+override does not inherit this QP override; the new run's own preset resolution
+still applies. Failure to read the snapshot stops the run explicitly.
+An explicit nonblank QP effort requires a resolved model: if neither the QP,
+tier setting nor catalog assignment provides one, creation fails atomically
+with an actionable `validation` error (choose a model or clear the effort),
+not a database error. This also applies to previously saved QPs whose effort
+was formerly inert; ignoring it silently would claim a setting was applied
+when it was not. QPs with no effort or only whitespace keep the old behavior.
+[src: file: backend/src/db/discussion_effort.rs:1]
+[src: file: backend/src/api/discussions/crud.rs:201]
+[src: file: backend/src/api/discussions/streaming.rs:2535]
+
+These snapshots are local execution state, not a portable QP setting. Exporting
+or importing a QP preserves its editable `agent_settings`, while it does not
+reconstruct historic discussion launch overrides.
+[src: file: backend/src/db/discussion_effort.rs:1]
+
+Settings → Agents exposes an effort selector per tier for Claude and Codex.
+It derives choices from the selected model's catalog entry, retains an invalid saved value only as an
+explained disabled option, and clears an incompatible effort in the same save
+that changes the model. Even without available modes, the control remains
+usable to clear an invalid saved effort. Other runtime cards state that effort
+is unsupported.
+[src: file: frontend/src/components/settings/AgentsSection.tsx:150-205]
+[src: file: frontend/src/components/settings/AgentsSection.tsx:1245-1310]
 
 ## Migration and test invariants
 
@@ -106,8 +201,9 @@ operator-overridable through the same manual-entry path as
 `UpsertManualModelRequest` preserves the existing value (COALESCE) instead
 of clearing it, so an unrelated edit (e.g. a rename) cannot silently wipe an
 auto-detected or previously-confirmed assessment.
-[src: file: backend/src/db/model_catalog.rs (derive_opencode_zen_overlay, reconcile_live)]
+[src: file: backend/src/db/model_catalog.rs:501]
+[src: file: backend/src/db/model_catalog.rs:537]
 [src: file: backend/src/db/sql/164_model_catalog_cost_privacy.sql]
-[src: file: backend/src/models/model_catalog.rs (ModelCostHint)]
+[src: file: backend/src/models/model_catalog.rs:76]
 [src: url: https://opencode.ai/docs/zen/]
 [src: url: https://opencode.ai/zen/v1/models]

@@ -33,6 +33,22 @@ pub async fn detect(State(state): State<AppState>) -> Json<ApiResponse<Vec<Agent
     Json(ApiResponse::ok(detected))
 }
 
+/// POST /api/agents/version-check
+/// Explicitly rechecks official release sources. The shared cache deduplicates
+/// concurrent requests and preserves a prior valid release on failure.
+pub async fn version_check(
+    State(state): State<AppState>,
+) -> Json<ApiResponse<Vec<AgentDetection>>> {
+    crate::core::versions::refresh_now().await;
+    // The agent sweep embeds the release snapshot, so discard its independent
+    // process cache after a completed explicit release check.
+    agents::invalidate_detect_cache();
+    let mut detected = agents::detect_all_cached(false).await;
+    let config = state.config.read().await;
+    agents::apply_configured_status(&mut detected, &config);
+    Json(ApiResponse::ok(detected))
+}
+
 /// POST /api/agents/install
 /// Install a specific agent, and auto-enable it in config
 pub async fn install(

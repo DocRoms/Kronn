@@ -84,13 +84,16 @@ export function catalogModelOptions(
     .map(model => {
       const unavailable = model.availability === 'unavailable';
       const provenance = catalogModelProvenance(model, target);
+      const cliDefault = target?.runtime_target_id === 'agent:claude-code' && model.model_id === 'default';
       return {
         value: model.model_id,
-        label: `${model.display_alias ?? model.display_name}${unavailable ? ` — ${t('modelCatalog.unavailable')}` : ''}`,
+        label: `${model.display_alias ?? model.display_name}${cliDefault ? ` — ${t('modelCatalog.cliDefault')}` : ''}${unavailable ? ` — ${t('modelCatalog.unavailable')}` : ''}`,
         keywords: `${model.model_id} ${model.display_name} ${model.reasoning_modes.join(' ')}`,
         description: [
           model.model_id,
           t(`modelCatalog.provenance.${provenance}`),
+          target?.runtime_target_id === 'agent:claude-code' && ['live', 'cached'].includes(provenance)
+            ? t('modelCatalog.accessUnverified') : '',
           t('modelCatalog.lastChecked', model.last_checked_at),
           model.reasoning_modes.length ? `${t('modelCatalog.reasoningModes')}: ${model.reasoning_modes.join(', ')}` : '',
           unavailable ? model.unavailable_detail || model.unavailable_reason : '',

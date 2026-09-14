@@ -74,6 +74,31 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe('AgentsSection — runtime catalogue and tier preservation (KT-531)', () => {
+  it('reveals Fable after automatic refresh without changing tiers until an explicit choice', async () => {
+    list.mockResolvedValue({ targets: [target([model('sonnet')], { stale: true, live_refresh_ok: false })] });
+    let finish!: (view: ModelCatalogView) => void;
+    refresh.mockReturnValue(new Promise(resolve => { finish = resolve; }));
+    show();
+    const input = await picker();
+    await waitFor(() => expect(refresh).toHaveBeenCalledTimes(1));
+    expect(input).toHaveValue('sonnet');
+    expect(input).not.toBeDisabled();
+    await act(async () => finish(target([model('sonnet'), model('claude-fable-5-1[1m]', {
+      display_name: 'Fable', reasoning_modes: ['low', 'medium', 'high', 'xhigh', 'max'],
+    })])));
+    expect(setTiers).not.toHaveBeenCalled();
+    expect(input).toHaveValue('sonnet');
+    fireEvent.focus(input);
+    const option = await screen.findByRole('option', { name: 'Fable' });
+    expect(option).toHaveTextContent('claude-fable-5-1[1m]');
+    expect(option).toHaveTextContent('modelCatalog.accessUnverified');
+    expect(option).toHaveTextContent('xhigh, max');
+    fireEvent.click(option);
+    await waitFor(() => expect(setTiers).toHaveBeenCalledWith({
+      ...tiers(), claude_code: { ...tiers().claude_code, economy: 'claude-fable-5-1[1m]' },
+    }));
+  });
+
   it('offers new catalogue models, never models from another runtime of the same family', async () => {
     list.mockResolvedValue({ targets: [
       target([model('new-model', { display_alias: 'Nouveau modèle' })]),
@@ -87,6 +112,14 @@ describe('AgentsSection — runtime catalogue and tier preservation (KT-531)', (
     expect(option).toHaveTextContent('high');
     expect(screen.queryByRole('option', { name: 'http-only' })).not.toBeInTheDocument();
     expect(screen.queryByRole('option', { name: 'haiku' })).not.toBeInTheDocument();
+  });
+
+  it('labels the Claude default alias as a changing CLI choice without selecting it', async () => {
+    list.mockResolvedValue({ targets: [target([model('default', { display_name: 'Default' }), model('sonnet')])] });
+    show();
+    fireEvent.focus(await picker());
+    expect(await screen.findByRole('option', { name: 'Default — modelCatalog.cliDefault' })).toBeEnabled();
+    expect(setTiers).not.toHaveBeenCalled();
   });
 
   it('exposes all OpenCode tiers without erasing configured models missing from the catalogue', async () => {
@@ -220,6 +253,93 @@ describe('AgentsSection — runtime catalogue and tier preservation (KT-531)', (
     expect(input).toHaveAttribute('placeholder', 'config.defaultModel (runtime-default)');
   });
 
+  it('saves a discovered effort and clears it when the selected model cannot accept it', async () => {
+    const current = tiers();
+    current.claude_code.economy_effort = 'high';
+    getTiers.mockResolvedValue(current);
+    list.mockResolvedValue({ targets: [target([
+      model('sonnet', { reasoning_modes: ['high'] }),
+      model('haiku', { reasoning_modes: ['low'] }),
+    ])] });
+    show();
+    const effort = await screen.findByLabelText('config.reasoningEffort economy');
+    expect(effort).toHaveValue('high');
+    const input = await picker();
+    fireEvent.focus(input);
+    fireEvent.click(await screen.findByRole('option', { name: 'haiku' }));
+    await waitFor(() => expect(setTiers).toHaveBeenCalledWith({
+      ...current,
+      claude_code: { ...current.claude_code, economy: 'haiku', economy_effort: null },
+    }));
+  });
+
+  it('uses the catalogue that arrived after mount when clearing an incompatible effort', async () => {
+    let resolveCatalog!: (snapshot: ModelCatalogSnapshot) => void;
+    const pending = new Promise<ModelCatalogSnapshot>(resolve => { resolveCatalog = resolve; });
+    list.mockReturnValue(pending);
+    const current = tiers();
+    current.claude_code.economy_effort = 'high';
+    getTiers.mockResolvedValue(current);
+    show();
+    const snapshot = { targets: [target([
+      model('sonnet', { reasoning_modes: ['high'] }),
+      model('haiku', { reasoning_modes: ['low'] }),
+    ])] };
+    // The expanded card can reload the shared snapshot after it arrives.
+    // Keep that server response consistent with the initial delayed response.
+    list.mockResolvedValue(snapshot);
+    await act(async () => resolveCatalog(snapshot));
+    const input = await picker();
+    fireEvent.focus(input);
+    fireEvent.click(await screen.findByRole('option', { name: 'haiku' }));
+    await waitFor(() => expect(setTiers).toHaveBeenCalledWith({
+      ...current,
+      claude_code: { ...current.claude_code, economy: 'haiku', economy_effort: null },
+    }));
+  });
+
+  it('rejects an effort selection when the current catalogue marks its model unavailable', async () => {
+    const current = tiers();
+    current.claude_code.economy_effort = 'high';
+    getTiers.mockResolvedValue(current);
+    list.mockResolvedValue({ targets: [target([
+      model('sonnet', { availability: 'unavailable', reasoning_modes: ['high'] }),
+    ])] });
+    const toast = show();
+    const effort = await screen.findByLabelText('config.reasoningEffort economy');
+    expect(effort).not.toBeDisabled();
+    expect(within(effort).getByRole('option', { name: /high/ })).toBeDisabled();
+    expect(within(effort).getByRole('option', { name: /high.*reasoningEffortUnavailable/ })).toBeInTheDocument();
+    expect(toast).not.toHaveBeenCalledWith('config.saved', 'success');
+  });
+
+  it('persists only a model-advertised effort preset', async () => {
+    show();
+    const effort = await screen.findByLabelText('config.reasoningEffort economy');
+    expect(within(effort).getByRole('option', { name: 'high' })).toBeInTheDocument();
+    fireEvent.change(effort, { target: { value: 'high' } });
+    await waitFor(() => expect(setTiers).toHaveBeenCalledWith({
+      ...tiers(), claude_code: { ...tiers().claude_code, economy_effort: 'high' },
+    }));
+  });
+
+  it.each(['missing', 'unsupported', 'unavailable'] as const)('lets the operator clear an effort when its model is %s', async state => {
+    const current = tiers();
+    current.claude_code.economy_effort = 'high';
+    getTiers.mockResolvedValue(current);
+    list.mockResolvedValue({ targets: [target(state === 'missing' ? [] : [model('sonnet', {
+      availability: state === 'unavailable' ? 'unavailable' : 'available', reasoning_modes: [],
+    })])] });
+    show();
+    const effort = await screen.findByLabelText('config.reasoningEffort economy');
+    expect(effort).toHaveValue('high');
+    expect(effort).toBeEnabled();
+    fireEvent.change(effort, { target: { value: '' } });
+    await waitFor(() => expect(setTiers).toHaveBeenCalledWith({
+      ...current, claude_code: { ...current.claude_code, economy_effort: null },
+    }));
+  });
+
   it.each(['Kiro', 'Vibe'] as const)('offers configured manual models for %s instead of N/A', async agentType => {
     const runtime = `agent:${agentType.toLowerCase()}`;
     list.mockResolvedValue({ targets: [target([
@@ -230,6 +350,7 @@ describe('AgentsSection — runtime catalogue and tier preservation (KT-531)', (
     const option = await screen.findByRole('option', { name: 'manual-model' });
     expect(option).toHaveTextContent('modelCatalog.provenance.manual');
     expect(option).not.toBeDisabled();
-    expect(refresh).not.toHaveBeenCalled();
+    expect(refresh).toHaveBeenCalledWith({ runtime_target_id: runtime, agent_type: agentType, force: false });
+    expect(setTiers).not.toHaveBeenCalled();
   });
 });

@@ -31,6 +31,25 @@ struct AgentOutput {
 /// Optional sender for streaming partial agent output during step execution.
 pub type ProgressSender = tokio::sync::mpsc::Sender<String>;
 
+pub(crate) fn step_model_override(
+    step: &WorkflowStep,
+    connection: Option<&ExternalApiConnection>,
+) -> Option<String> {
+    step.agent_settings
+        .as_ref()
+        .and_then(|settings| settings.model.clone())
+        .or_else(|| {
+            let tier = step
+                .agent_settings
+                .as_ref()
+                .and_then(|settings| settings.tier)
+                .unwrap_or_default();
+            connection.and_then(|connection| {
+                crate::http_transport::connection_tier_model(connection, tier)
+            })
+        })
+}
+
 /// Build the full agent-ready prompt for a step: template render +
 /// `extra_context` append + output-format addendum + triage addendum.
 /// Does NOT append the signal-protocol instructions — those depend on
@@ -222,25 +241,52 @@ pub async fn execute_step(
     let max_attempts = step.retry.as_ref().map(|r| r.max_retries + 1).unwrap_or(1);
     let mut last_error = String::new();
 
+    let resolved_connection = match resolve_step_connection(step, catalog_db).await {
+        Ok(connection) => connection,
+        Err(error) => {
+            return StepOutcome {
+                result: StepResult {
+                    step_name: step.name.clone(),
+                    status: RunStatus::Failed,
+                    output: format!("preflight_failed:{error}"),
+                    tokens_used: 0,
+                    duration_ms: start.elapsed().as_millis() as u64,
+                    started_at: None,
+                    condition_result: None,
+                    envelope_detected: None,
+                    step_kind: Some("preflight_failed".into()),
+                    step_agent: Some(step.agent.clone()),
+                    step_model: None,
+                    step_api_plugin_slug: None,
+                    step_api_endpoint_path: None,
+                    is_rollback: false,
+                    child_run_id: None,
+                    native_tool_calls: Box::default(),
+                },
+                condition_action: None,
+            };
+        }
+    };
+    let runtime_target_id = resolved_connection
+        .as_ref()
+        .map(|connection| crate::db::model_catalog::http_runtime_target_id(&connection.id));
+    let tier = step
+        .agent_settings
+        .as_ref()
+        .and_then(|settings| settings.tier)
+        .unwrap_or_default();
+    let model_override = step_model_override(step, resolved_connection.as_ref());
+
     // Authoritative check immediately before the first possible provider
     // dispatch. Initial workflow-wide validation remains in the runner, but
     // availability can change while earlier steps execute.
     if let Some(database) = catalog_db {
-        let tier = step
-            .agent_settings
-            .as_ref()
-            .and_then(|settings| settings.tier)
-            .unwrap_or_default();
-        let model = step
-            .agent_settings
-            .as_ref()
-            .and_then(|settings| settings.model.as_deref());
         if let Some(failure) = crate::core::model_catalog::preflight_check(
             database,
-            None,
+            runtime_target_id.as_deref(),
             step.agent.clone(),
             tier,
-            model,
+            model_override.as_deref(),
             model_tiers,
         )
         .await
@@ -278,7 +324,9 @@ pub async fn execute_step(
     // accurate but unactionable, since nothing carried WHICH connection the
     // step meant. Discussions and Quick Prompts already resolve this identity;
     // steps now do too (KT-545).
-    let external_http = resolve_step_connection(step, catalog_db, tokens_config).await;
+    let external_http = resolved_connection.as_ref().and_then(|connection| {
+        crate::http_transport::external_http_runtime(connection, tokens_config)
+    });
 
     for attempt in 0..max_attempts {
         if attempt > 0 {
@@ -312,6 +360,7 @@ pub async fn execute_step(
             native_tools.clone(),
             progress_tx.as_ref(),
             external_http.as_ref(),
+            model_override.as_deref(),
         )
         .await
         {
@@ -372,6 +421,23 @@ pub async fn execute_step(
                         );
                         let mut final_validation_error: Option<String> = validation_error.clone();
                         let mut repair_valid = false;
+                        if let Err(error) = preflight_workflow_launch(
+                            catalog_db,
+                            step,
+                            resolved_connection.as_ref(),
+                            model_override.as_deref(),
+                            model_tiers,
+                        )
+                        .await
+                        {
+                            tracing::warn!(
+                                "Step '{}': repair preflight failed: {}",
+                                step.name,
+                                error
+                            );
+                            last_error = error.to_string();
+                            continue;
+                        }
                         let repair_res = run_agent_with_timeout(
                             step,
                             project_path,
@@ -385,6 +451,7 @@ pub async fn execute_step(
                             native_tools.clone(),
                             None,
                             external_http.as_ref(),
+                            model_override.as_deref(),
                         )
                         .await;
                         if let Err(ref e) = repair_res {
@@ -449,6 +516,24 @@ pub async fn execute_step(
                                 "local schema validation failed after repair — escalating to Claude"
                             );
                             let escalated = escalation_step(step);
+                            let escalated_model = step_model_override(&escalated, None);
+                            if let Err(error) = preflight_workflow_launch(
+                                catalog_db,
+                                &escalated,
+                                None,
+                                escalated_model.as_deref(),
+                                model_tiers,
+                            )
+                            .await
+                            {
+                                tracing::warn!(
+                                    target: "kronn::ollama::escalation",
+                                    step = %step.name,
+                                    error = %error,
+                                    "escalation catalog preflight refused dispatch"
+                                );
+                                continue;
+                            }
                             let esc_res = run_agent_with_timeout(
                                 &escalated,
                                 project_path,
@@ -461,7 +546,8 @@ pub async fn execute_step(
                                 ollama_context_overrides,
                                 native_tools.clone(),
                                 None,
-                                external_http.as_ref(),
+                                None,
+                                escalated_model.as_deref(),
                             )
                             .await;
                             if let Err(ref e) = esc_res {
@@ -557,6 +643,9 @@ pub async fn execute_step(
                         native_tools.clone(),
                         progress_tx.as_ref(),
                         external_http.as_ref(),
+                        model_override.as_deref(),
+                        resolved_connection.as_ref(),
+                        catalog_db,
                     ).await {
                         Ok((converged, debate_tokens, debate_tool_calls)) => {
                             total_tokens += debate_tokens;
@@ -816,11 +905,9 @@ fn escalation_step(step: &WorkflowStep) -> WorkflowStep {
 
 /// Resolve the named external HTTP connection a step points at.
 ///
-/// Returns `None` when the step names none — every non-HTTP agent — and also
-/// when the id no longer resolves or now belongs to a different agent type.
-/// Refusing here rather than substituting another connection is deliberate: a
-/// step silently answered by the wrong provider is worse than one that fails
-/// with the runner's own diagnostic.
+/// Returns `Ok(None)` only when the step names no connection. A requested id
+/// that cannot be read, no longer exists, or belongs to another agent is an
+/// error so dispatch cannot fall through to a provider default.
 /// Whether the step's named connection is the reviewer's endpoint too.
 ///
 /// A connection belongs to an agent, not to a role. When the reviewer runs on
@@ -833,44 +920,81 @@ fn reviewer_shares_step_connection(step: &WorkflowStep, reviewer_agent: &AgentTy
     *reviewer_agent == step.agent
 }
 
-async fn resolve_step_connection(
+pub(crate) async fn resolve_step_connection(
     step: &WorkflowStep,
     catalog_db: Option<&crate::db::Database>,
-    tokens_config: &TokensConfig,
-) -> Option<runner::ExternalHttpRuntime> {
+) -> Result<Option<ExternalApiConnection>> {
     let connection_id = step
         .agent_settings
         .as_ref()
-        .and_then(|settings| settings.connection_id.clone())?;
-    let db = catalog_db?;
+        .and_then(|settings| settings.connection_id.clone());
+    let Some(connection_id) = connection_id else {
+        return Ok(None);
+    };
+    let db = catalog_db.ok_or_else(|| {
+        anyhow::anyhow!(
+            "named connection {connection_id} cannot be resolved without the workflow database"
+        )
+    })?;
     let lookup_id = connection_id.clone();
     let connection = db
         .with_read_conn(move |conn| crate::db::external_api_connections::get(conn, &lookup_id))
-        .await
-        .ok()
-        .flatten()?;
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("External API connection {connection_id} was not found"))?;
 
     if crate::db::external_api_connections::target_for_connection(&connection).agent_type
         != step.agent
     {
-        tracing::warn!(
-            step = %step.name,
-            "Step connection {} no longer matches its agent type — running without it",
-            connection_id
+        anyhow::bail!(
+            "External API connection {connection_id} no longer matches agent {:?}",
+            step.agent
         );
-        return None;
     }
 
-    let endpoint = connection.endpoint.clone()?;
-    Some(runner::ExternalHttpRuntime {
-        display_name: connection.display_name.clone(),
-        mention_alias: connection.mention_alias.clone(),
-        endpoint,
-        api_key: tokens_config
-            .active_key_for(&connection.credential_slug)
-            .filter(|key| !key.trim().is_empty())
-            .map(str::to_string),
-    })
+    if connection
+        .endpoint
+        .as_deref()
+        .is_none_or(|endpoint| endpoint.trim().is_empty())
+    {
+        anyhow::bail!("External API connection {connection_id} has no HTTP endpoint");
+    }
+
+    Ok(Some(connection))
+}
+
+async fn preflight_workflow_launch(
+    catalog_db: Option<&crate::db::Database>,
+    step: &WorkflowStep,
+    connection: Option<&ExternalApiConnection>,
+    effective_model: Option<&str>,
+    model_tiers: Option<&crate::models::setup::ModelTiersConfig>,
+) -> Result<()> {
+    let Some(database) = catalog_db else {
+        return Ok(());
+    };
+    let runtime_target_id = connection
+        .map(|connection| crate::db::model_catalog::http_runtime_target_id(&connection.id));
+    let tier = step
+        .agent_settings
+        .as_ref()
+        .and_then(|settings| settings.tier)
+        .unwrap_or_default();
+    if let Some(failure) = crate::core::model_catalog::preflight_check(
+        database,
+        runtime_target_id.as_deref(),
+        step.agent.clone(),
+        tier,
+        effective_model,
+        model_tiers,
+    )
+    .await
+    {
+        anyhow::bail!(
+            "model_catalog_preflight_failed:{}",
+            serde_json::to_string(&failure).unwrap_or_default()
+        );
+    }
+    Ok(())
 }
 
 /// Run an agent with optional stall timeout.
@@ -892,6 +1016,7 @@ async fn run_agent_with_timeout(
     native_tools: Option<Arc<dyn crate::agents::tools::ToolExecutor>>,
     progress_tx: Option<&ProgressSender>,
     external_http: Option<&runner::ExternalHttpRuntime>,
+    effective_model: Option<&str>,
 ) -> Result<AgentOutput> {
     // 30 min default — generous safety net rather than aggressive ceiling.
     // With tool-call streaming (cf. format_tool_input_suffix), an active
@@ -930,10 +1055,15 @@ async fn run_agent_with_timeout(
         ollama_format: ollama_format.as_ref(),
         // Explicit per-step model (from the wizard's model picker) — now
         // actually consumed at run time, not just stamped for display.
-        model_override: step
+        model_override: effective_model,
+        // KT-646 — explicit per-step reasoning effort, from the wizard's
+        // effort picker. Wins over the tier's configured preset; `None`
+        // falls back to that preset, then to the CLI default (see
+        // `runner::effective_reasoning_effort`).
+        reasoning_effort_override: step
             .agent_settings
             .as_ref()
-            .and_then(|s| s.model.as_deref()),
+            .and_then(|s| s.reasoning_effort.as_deref()),
         // The named connection this step points at. `AgentType::Custom` is
         // shared by every OpenAI-compatible connection, so without this the
         // runner refuses the spawn outright.
@@ -1234,6 +1364,9 @@ async fn run_multi_agent_debate(
     // The step's own connection. It applies to the AUTHOR, which runs on the
     // step's agent — never to the reviewer, which runs on its own.
     external_http: Option<&runner::ExternalHttpRuntime>,
+    author_model: Option<&str>,
+    author_connection: Option<&ExternalApiConnection>,
+    catalog_db: Option<&crate::db::Database>,
 ) -> Result<(String, u64, Vec<NativeToolCallLog>)> {
     let max_rounds = cfg.max_rounds.unwrap_or(3).clamp(1, 5);
     let approved = |t: &str| {
@@ -1286,6 +1419,9 @@ async fn run_multi_agent_debate(
         s.on_result = vec![];
         s
     };
+    let reviewer_model = reviewer_shares_the_step_connection
+        .then(|| step_model_override(&reviewer_step, author_connection))
+        .flatten();
 
     for round in 0..max_rounds {
         // ---- reviewer challenges ----
@@ -1294,6 +1430,17 @@ async fn run_multi_agent_debate(
              You are the REVIEWER (round {n}/{max}). Read the relevant project files, then challenge the plan/output above on relevance, completeness, correctness and scope. Be concrete and actionable — do NOT rewrite it yourself. If, and ONLY if, you genuinely judge it ready, end your reply with a line containing exactly [CONSENSUS: APPROVED].",
             debate = cfg.debate_prompt, transcript = transcript, n = round + 1, max = max_rounds
         );
+        let reviewer_connection = reviewer_shares_the_step_connection
+            .then_some(author_connection)
+            .flatten();
+        preflight_workflow_launch(
+            catalog_db,
+            &reviewer_step,
+            reviewer_connection,
+            reviewer_model.as_deref(),
+            model_tiers,
+        )
+        .await?;
         let rev = run_agent_with_timeout(
             &reviewer_step,
             project_path,
@@ -1312,6 +1459,7 @@ async fn run_multi_agent_debate(
             reviewer_shares_the_step_connection
                 .then_some(external_http)
                 .flatten(),
+            reviewer_model.as_deref(),
         )
         .await?;
         tokens += rev.tokens_used;
@@ -1349,6 +1497,14 @@ async fn run_multi_agent_debate(
              You are the PLAN AUTHOR ({author:?}). Address the reviewer's critique above: revise your plan/output accordingly. Re-emit your COMPLETE updated output in the SAME format you used originally. If you have addressed everything and now agree the result is ready, additionally end with a line containing exactly [CONSENSUS: APPROVED].{addendum}",
             transcript = transcript, author = step.agent, addendum = envelope_addendum
         );
+        preflight_workflow_launch(
+            catalog_db,
+            &author_step,
+            author_connection,
+            author_model,
+            model_tiers,
+        )
+        .await?;
         let auth = run_agent_with_timeout(
             &author_step,
             project_path,
@@ -1362,6 +1518,7 @@ async fn run_multi_agent_debate(
             native_tools.clone(),
             progress_tx,
             external_http,
+            author_model,
         )
         .await?;
         tokens += auth.tokens_used;
@@ -1611,6 +1768,142 @@ mod tests {
         );
         assert_eq!(s.tier, Some(crate::models::ModelTier::Reasoning));
         assert_eq!(esc.prompt_template, "summarize {{x}}", "task preserved");
+    }
+
+    #[test]
+    fn workflow_preflight_uses_the_selected_connections_model() {
+        fn connection(id: &str, model: &str) -> ExternalApiConnection {
+            let now = chrono::Utc::now();
+            ExternalApiConnection {
+                id: id.into(),
+                display_name: id.into(),
+                mention_alias: id.into(),
+                endpoint: Some(format!("http://{id}.test")),
+                credential_slug: format!("credential-{id}"),
+                origin_preset: ExternalApiConnectionPreset::Other,
+                economy_model: None,
+                default_model: Some(model.into()),
+                reasoning_model: None,
+                created_at: now,
+                updated_at: now,
+                image_model: None,
+                video_model: None,
+                media_endpoint: None,
+            }
+        }
+
+        let mut step = make_step("anything");
+        step.agent = AgentType::Custom;
+        step.agent_settings = Some(AgentSettings {
+            model: None,
+            tier: Some(ModelTier::Default),
+            connection_id: Some("connection-b".into()),
+            reasoning_effort: None,
+            max_tokens: None,
+        });
+        let connection_a = connection("connection-a", "model-a");
+        let connection_b = connection("connection-b", "model-b");
+
+        assert_eq!(
+            step_model_override(&step, Some(&connection_a)).as_deref(),
+            Some("model-a")
+        );
+        assert_eq!(
+            step_model_override(&step, Some(&connection_b)).as_deref(),
+            Some("model-b")
+        );
+        assert_eq!(
+            crate::db::model_catalog::http_runtime_target_id(&connection_b.id),
+            "http:connection-b",
+            "the selected same-agent connection keeps its own catalog identity"
+        );
+    }
+
+    fn saved_connection(id: &str, model: &str) -> ExternalApiConnection {
+        let now = chrono::Utc::now();
+        ExternalApiConnection {
+            id: id.into(),
+            display_name: id.into(),
+            mention_alias: id.into(),
+            endpoint: Some(format!("http://{id}.test")),
+            credential_slug: format!("credential-{id}"),
+            origin_preset: ExternalApiConnectionPreset::Other,
+            economy_model: None,
+            default_model: Some(model.into()),
+            reasoning_model: None,
+            created_at: now,
+            updated_at: now,
+            image_model: None,
+            video_model: None,
+            media_endpoint: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn named_step_connection_resolves_the_exact_saved_target() {
+        let db = crate::db::Database::open_in_memory().unwrap();
+        for connection in [
+            saved_connection("connection-a", "model-a"),
+            saved_connection("connection-b", "model-b"),
+        ] {
+            db.with_conn(move |conn| {
+                crate::db::external_api_connections::insert(conn, &connection)
+            })
+            .await
+            .unwrap();
+        }
+        let mut step = make_step("anything");
+        step.agent = AgentType::Custom;
+        step.agent_settings = Some(AgentSettings {
+            model: None,
+            tier: Some(ModelTier::Default),
+            connection_id: Some("connection-b".into()),
+            reasoning_effort: None,
+            max_tokens: None,
+        });
+
+        let resolved = resolve_step_connection(&step, Some(&db))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(resolved.id, "connection-b");
+        assert_eq!(
+            step_model_override(&step, Some(&resolved)).as_deref(),
+            Some("model-b")
+        );
+    }
+
+    #[tokio::test]
+    async fn deleted_named_step_connection_is_an_error_not_default_fallback() {
+        let db = crate::db::Database::open_in_memory().unwrap();
+        let mut step = make_step("anything");
+        step.agent = AgentType::Custom;
+        step.agent_settings = Some(AgentSettings {
+            model: None,
+            tier: Some(ModelTier::Default),
+            connection_id: Some("deleted-connection".into()),
+            reasoning_effort: None,
+            max_tokens: None,
+        });
+
+        let error = resolve_step_connection(&step, Some(&db)).await.unwrap_err();
+        assert!(error.to_string().contains("deleted-connection"), "{error}");
+    }
+
+    #[test]
+    fn explicit_workflow_model_remains_the_dispatch_and_preflight_model() {
+        let mut step = make_step("anything");
+        step.agent_settings = Some(AgentSettings {
+            model: Some("expert-model".into()),
+            tier: Some(ModelTier::Default),
+            connection_id: Some("connection-b".into()),
+            reasoning_effort: None,
+            max_tokens: None,
+        });
+        assert_eq!(
+            step_model_override(&step, None).as_deref(),
+            Some("expert-model")
+        );
     }
 
     #[test]
@@ -2310,6 +2603,271 @@ mod http_native_tool_step_tests {
             .map(|frame| format!("data: {frame}\n\n"))
             .collect::<String>()
             + "data: [DONE]\n\n"
+    }
+
+    fn named_connection(id: &str, endpoint: String, model: &str) -> ExternalApiConnection {
+        let now = chrono::Utc::now();
+        ExternalApiConnection {
+            id: id.into(),
+            display_name: id.into(),
+            mention_alias: id.into(),
+            endpoint: Some(endpoint),
+            credential_slug: format!("credential-{id}"),
+            origin_preset: ExternalApiConnectionPreset::Other,
+            economy_model: None,
+            default_model: Some(model.into()),
+            reasoning_model: None,
+            created_at: now,
+            updated_at: now,
+            image_model: None,
+            video_model: None,
+            media_endpoint: None,
+        }
+    }
+
+    fn named_custom_step(connection_id: &str, model: Option<&str>) -> WorkflowStep {
+        WorkflowStep {
+            name: "named-http-step".into(),
+            step_type: StepType::Agent,
+            agent: AgentType::Custom,
+            prompt_template: "Answer from the selected connection".into(),
+            agent_settings: Some(AgentSettings {
+                model: model.map(str::to_string),
+                tier: Some(ModelTier::Default),
+                reasoning_effort: None,
+                max_tokens: None,
+                connection_id: Some(connection_id.into()),
+            }),
+            ..WorkflowStep::default()
+        }
+    }
+
+    async fn insert_connection_and_catalog(
+        db: &crate::db::Database,
+        connection: ExternalApiConnection,
+        capabilities: &[&str],
+    ) {
+        let runtime_target = crate::db::model_catalog::http_runtime_target_id(&connection.id);
+        let model = connection.default_model.clone().unwrap();
+        let capabilities = capabilities
+            .iter()
+            .map(|value| value.to_string())
+            .collect::<Vec<_>>();
+        db.with_conn(move |conn| {
+            crate::db::external_api_connections::insert(conn, &connection)?;
+            crate::db::model_catalog::reconcile_live(
+                conn,
+                &runtime_target,
+                &AgentType::Custom,
+                &[crate::db::model_catalog::DiscoveredModel {
+                    model_id: model.clone(),
+                    display_name: model,
+                    capabilities,
+                    reasoning_modes: Vec::new(),
+                    default_reasoning_mode: None,
+                }],
+            )
+        })
+        .await
+        .unwrap();
+    }
+
+    fn empty_tokens() -> TokensConfig {
+        TokensConfig {
+            anthropic: None,
+            openai: None,
+            google: None,
+            keys: Vec::new(),
+            disabled_overrides: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn incompatible_named_workflow_model_refuses_before_any_provider_request() {
+        let provider_a = MockServer::start().await;
+        let provider_b = MockServer::start().await;
+        let db = crate::db::Database::open_in_memory().unwrap();
+        insert_connection_and_catalog(
+            &db,
+            named_connection("connection-a", provider_a.uri(), "model-a"),
+            &["chat"],
+        )
+        .await;
+        insert_connection_and_catalog(
+            &db,
+            named_connection("connection-b", provider_b.uri(), "model-b"),
+            &["video"],
+        )
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().to_string_lossy();
+
+        let outcome = execute_step(
+            &named_custom_step("connection-b", None),
+            &project,
+            &project,
+            &empty_tokens(),
+            false,
+            &TemplateContext::new(),
+            "",
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(&db),
+        )
+        .await;
+
+        assert_eq!(outcome.result.status, RunStatus::Failed);
+        assert_eq!(
+            outcome.result.step_kind.as_deref(),
+            Some("preflight_failed")
+        );
+        assert!(outcome.result.output.contains("unsupported"));
+        assert!(provider_a.received_requests().await.unwrap().is_empty());
+        assert!(provider_b.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn named_workflow_connection_b_dispatches_its_endpoint_and_model_never_a() {
+        let provider_a = MockServer::start().await;
+        let provider_b = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .and(body_string_contains("\"model\":\"model-b\""))
+            .respond_with(ResponseTemplate::new(200).set_body_string(sse(&[
+                r#"{"choices":[{"index":0,"delta":{"content":"selected B"}}]}"#,
+            ])))
+            .mount(&provider_b)
+            .await;
+        let db = crate::db::Database::open_in_memory().unwrap();
+        insert_connection_and_catalog(
+            &db,
+            named_connection("connection-a", provider_a.uri(), "model-a"),
+            &["chat"],
+        )
+        .await;
+        insert_connection_and_catalog(
+            &db,
+            named_connection("connection-b", provider_b.uri(), "model-b"),
+            &["chat"],
+        )
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().to_string_lossy();
+
+        let outcome = execute_step(
+            &named_custom_step("connection-b", None),
+            &project,
+            &project,
+            &empty_tokens(),
+            false,
+            &TemplateContext::new(),
+            "",
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(&db),
+        )
+        .await;
+
+        assert_eq!(outcome.result.status, RunStatus::Success);
+        assert!(outcome.result.output.contains("selected B"));
+        assert!(provider_a.received_requests().await.unwrap().is_empty());
+        let requests = provider_b.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        assert!(String::from_utf8_lossy(&requests[0].body).contains("\"model\":\"model-b\""));
+    }
+
+    #[tokio::test]
+    async fn deleted_named_workflow_connection_surfaces_refusal_without_fallback() {
+        let fallback = MockServer::start().await;
+        let db = crate::db::Database::open_in_memory().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().to_string_lossy();
+        let endpoints = crate::models::setup::HttpEndpoints {
+            lite_llm: Some(fallback.uri()),
+            nvidia: None,
+        };
+
+        let outcome = execute_step(
+            &named_custom_step("deleted-connection", None),
+            &project,
+            &project,
+            &empty_tokens(),
+            false,
+            &TemplateContext::new(),
+            "",
+            None,
+            None,
+            Some(&endpoints),
+            None,
+            None,
+            Some(&db),
+        )
+        .await;
+
+        assert_eq!(outcome.result.status, RunStatus::Failed);
+        assert_eq!(
+            outcome.result.step_kind.as_deref(),
+            Some("preflight_failed")
+        );
+        assert!(outcome.result.output.contains("deleted-connection"));
+        assert!(fallback.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn named_litellm_without_endpoint_refuses_without_legacy_fallback() {
+        let fallback = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(sse(&[
+                r#"{"choices":[{"index":0,"delta":{"content":"wrong fallback"}}]}"#,
+            ])))
+            .mount(&fallback)
+            .await;
+        let db = crate::db::Database::open_in_memory().unwrap();
+        let mut selected = named_connection("connection-b", fallback.uri(), "model-b");
+        selected.origin_preset = ExternalApiConnectionPreset::LiteLlm;
+        selected.endpoint = Some("   ".into());
+        insert_connection_and_catalog(&db, selected, &["chat"]).await;
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().to_string_lossy();
+        let endpoints = crate::models::setup::HttpEndpoints {
+            lite_llm: Some(fallback.uri()),
+            nvidia: None,
+        };
+
+        let mut step = named_custom_step("connection-b", None);
+        step.agent = AgentType::LiteLlm;
+        let outcome = execute_step(
+            &step,
+            &project,
+            &project,
+            &empty_tokens(),
+            false,
+            &TemplateContext::new(),
+            "",
+            None,
+            None,
+            Some(&endpoints),
+            None,
+            None,
+            Some(&db),
+        )
+        .await;
+
+        assert_eq!(outcome.result.status, RunStatus::Failed);
+        assert_eq!(
+            outcome.result.step_kind.as_deref(),
+            Some("preflight_failed")
+        );
+        assert!(outcome.result.output.contains("connection-b"));
+        assert!(outcome.result.output.contains("endpoint"));
+        assert!(fallback.received_requests().await.unwrap().is_empty());
     }
 
     #[tokio::test]

@@ -7,6 +7,9 @@ the release-facing changelog stays concise and reviewable.
 - [`0.13.0-checklist.md`](0.13.0-checklist.md) tracks qualification in progress,
   including checkpoint-specific evidence and gates that remain open. It is not
   a release approval.
+- [September 14 important-message qualification](0.13.0-simple-important-message-qualification.md)
+  records the simplified authoring form, task navigation, delegation boundaries,
+  upgrade replay and combined local tests, with exact source and exclusions.
 - [`0.12.0-checklist.md`](0.12.0-checklist.md) is the evidence checklist for
   the current 0.12.0 candidate. [`0.11.0-checklist.md`](0.11.0-checklist.md)
   retains the previous candidate's record; both are operational evidence, not

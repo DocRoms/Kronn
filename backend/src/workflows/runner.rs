@@ -11,7 +11,7 @@ use crate::api::agent_tools::KronnToolExecutor;
 use crate::models::*;
 use crate::AppState;
 
-use super::steps::{execute_step, StepOutcome};
+use super::steps::{execute_step, resolve_step_connection, step_model_override, StepOutcome};
 use super::template::TemplateContext;
 use super::workspace::Workspace;
 
@@ -821,21 +821,37 @@ async fn execute_run_with_notify_policy(
                     .as_ref()
                     .and_then(|settings| settings.tier)
                     .unwrap_or_default();
-                let model = step
-                    .agent_settings
-                    .as_ref()
-                    .and_then(|settings| settings.model.as_deref());
+                let connection = match resolve_step_connection(step, Some(&state.db)).await {
+                    Ok(connection) => connection,
+                    Err(error) => {
+                        catalog_failures.push((
+                            step.name.clone(),
+                            serde_json::json!({
+                                "error": "connection_resolution_failed",
+                                "detail": error.to_string(),
+                            }),
+                        ));
+                        continue;
+                    }
+                };
+                let runtime_target_id = connection.as_ref().map(|connection| {
+                    crate::db::model_catalog::http_runtime_target_id(&connection.id)
+                });
+                let model = step_model_override(step, connection.as_ref());
                 if let Some(failure) = crate::core::model_catalog::preflight_check(
                     &state.db,
-                    None,
+                    runtime_target_id.as_deref(),
                     step.agent.clone(),
                     tier,
-                    model,
+                    model.as_deref(),
                     Some(&agents_config.model_tiers),
                 )
                 .await
                 {
-                    catalog_failures.push((step.name.clone(), failure));
+                    catalog_failures.push((
+                        step.name.clone(),
+                        serde_json::to_value(failure).unwrap_or_default(),
+                    ));
                 }
             }
             if !catalog_failures.is_empty() {

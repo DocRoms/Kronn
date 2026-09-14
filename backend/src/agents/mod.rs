@@ -212,6 +212,7 @@ pub(crate) fn host_is_macos() -> bool {
 
 /// Detect all known agents on the system
 pub async fn detect_all() -> Vec<AgentDetection> {
+    crate::core::versions::refresh_if_stale();
     // One-shot env dump at the start of a detection sweep. Critical for
     // diagnosing "why can't macOS see my agents" — the 4 env vars below
     // fully determine the detection logic and a mismatch between
@@ -347,6 +348,7 @@ fn is_remote_provider(def: &AgentDef) -> bool {
 /// Detect a single agent by checking if its binary exists in PATH or host bin dirs.
 /// If no local binary is found but the agent has an npx package, probe runtime availability.
 async fn detect_agent(def: &AgentDef) -> AgentDetection {
+    let release = crate::core::versions::agent_status(&def.agent_type);
     // A remote provider has nothing to detect locally. `installed: true` is the
     // honest answer: the code is not what can be missing — the API key is, and
     // that is surfaced by its own settings card, not by binary detection.
@@ -358,7 +360,10 @@ async fn detect_agent(def: &AgentDef) -> AgentDetection {
             enabled: true,
             path: None,
             version: None,
-            latest_version: None,
+            latest_version: release.latest.clone(),
+            version_checked_at: release.checked_at.clone(),
+            version_check_error: release.error.clone(),
+            version_source_url: release.source_url.clone(),
             origin: def.origin.to_string(),
             install_command: None,
             host_managed: false,
@@ -411,8 +416,10 @@ async fn detect_agent(def: &AgentDef) -> AgentDetection {
             enabled: true,
             path: Some(loc.path),
             version,
-            latest_version: crate::core::versions::latest_known_agent_version(&def.agent_type)
-                .map(|s| s.to_string()),
+            latest_version: release.latest.clone(),
+            version_checked_at: release.checked_at.clone(),
+            version_check_error: release.error.clone(),
+            version_source_url: release.source_url.clone(),
             origin: def.origin.to_string(),
             install_command: Some(def.install_cmd.to_string()),
             host_managed: loc.host_managed,
@@ -434,8 +441,10 @@ async fn detect_agent(def: &AgentDef) -> AgentDetection {
             enabled: true,
             path: None,
             version: None,
-            latest_version: crate::core::versions::latest_known_agent_version(&def.agent_type)
-                .map(|s| s.to_string()),
+            latest_version: release.latest,
+            version_checked_at: release.checked_at,
+            version_check_error: release.error,
+            version_source_url: release.source_url,
             origin: def.origin.to_string(),
             install_command: Some(def.install_cmd.to_string()),
             host_managed: false,

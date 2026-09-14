@@ -614,6 +614,19 @@ pub struct ModelTierConfig {
     pub default: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<String>,
+    /// KT-646 — optional reasoning-effort preset for the `economy` slot.
+    /// `None` means "pass no effort flag, the runtime's own CLI default
+    /// applies" — never a silently assigned `high`/`max`. Only consumed for
+    /// an agent `runner::agent_supports_reasoning_effort` returns true for;
+    /// every other agent ignores it (see `runner::effective_reasoning_effort`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub economy_effort: Option<String>,
+    /// Same as `economy_effort`, paired with the `default` tier slot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_effort: Option<String>,
+    /// Same as `economy_effort`, paired with the `reasoning` tier slot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
 }
 
 /// Global model tier overrides per agent.
@@ -675,6 +688,18 @@ pub struct AgentDetection {
     pub path: Option<String>,
     pub version: Option<String>,
     pub latest_version: Option<String>,
+    /// Time at which the official release source was last checked (RFC 3339).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub version_checked_at: Option<String>,
+    /// Readable reason why the latest version is unknown or stale.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub version_check_error: Option<String>,
+    /// Official release endpoint consulted for this tool.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub version_source_url: Option<String>,
     pub origin: String,
     pub install_command: Option<String>,
     #[serde(default)]

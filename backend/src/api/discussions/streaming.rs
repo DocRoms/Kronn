@@ -2542,6 +2542,39 @@ async fn make_agent_stream_inner(
         Some(&model_tiers_config),
     );
 
+    let qp_reasoning_effort = if tier_override.is_none() && external_connection.is_none() {
+        let did = discussion_id.clone();
+        let agent = agent_type.clone();
+        let model = attempted_model.clone();
+        match state
+            .db
+            .with_read_conn(move |conn| {
+                crate::db::discussion_effort::for_run(
+                    conn,
+                    &did,
+                    &agent,
+                    disc_tier,
+                    model.as_deref(),
+                )
+            })
+            .await
+        {
+            Ok(effort) => effort,
+            Err(error) => {
+                tracing::error!("Unable to read launch-time Quick Prompt effort: {error}");
+                finish_tracked_preflight(&mut completion_tx);
+                let stream: SseStream = Box::pin(futures::stream::once(async move {
+                    Ok::<_, Infallible>(Event::default().event("error").data(
+                        serde_json::json!({"error": "quick_prompt_effort_snapshot_unavailable"}).to_string()
+                    ))
+                }));
+                return Sse::new(prepend_initial_event(stream, initial_event.take()));
+            }
+        }
+    } else {
+        None
+    };
+
     let runtime_target_id = external_connection
         .as_ref()
         .map(|connection| crate::db::model_catalog::http_runtime_target_id(&connection.id));
@@ -2732,6 +2765,7 @@ async fn make_agent_stream_inner(
             http_request_timeout: Some(http_request_timeout),
             cancel_token: Some(cancel_token.clone()),
             model_override: disc_model.as_deref(),
+            reasoning_effort_override: qp_reasoning_effort.as_deref(),
             context_files_prompt: &context_files_prompt,
             // Forward to the agent process env so the kronn-internal MCP
             // bridge knows which discussion to introspect when called.

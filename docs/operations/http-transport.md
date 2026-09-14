@@ -67,13 +67,17 @@ under an unrelated agent.
 
 ## Known limitations
 
-- **Workflow Agent steps cannot target a named Custom connection.**
-  `WorkflowStep`/`AgentSettings` have no `connection_id` field, and the
-  runner never resolves `external_http` for a workflow step — a step whose
-  `agent` is `Custom` fails at dispatch with "external API connection is
-  unavailable." LiteLLM/NVIDIA steps are unaffected (they resolve through
-  the legacy single-slot config, not a named connection). Tracked as tech
-  debt, not fixed in KT-545 — see `docs/inconsistencies-tech-debt.md`.
+- **Preflight remains caller-owned.** Each launch surface must pass the actual
+  runtime target to `model_catalog::preflight_check`. Orchestration and
+  Workflow Agent steps fail closed when their named connection cannot be
+  resolved. Orchestration resolves and checks a fresh connection/model snapshot
+  immediately before each launch. A future
+  centralized guard can make this invariant structural once the agent runner
+  is available for that refactor. [src: file:
+  backend/src/api/discussions/orchestration.rs:60-130] [src: file:
+  backend/src/api/discussions/orchestration.rs:650-1035] [src: file:
+  backend/src/workflows/steps.rs:241-330] [src: file:
+  backend/src/workflows/steps.rs:888-930]
 - **Mid-thread `@mention` autocomplete doesn't suggest connection aliases.**
   The composer's autocomplete only lists built-in agents; typing a
   connection's exact alias (e.g. `@groq`) still dispatches correctly — the

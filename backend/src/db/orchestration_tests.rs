@@ -4871,3 +4871,205 @@ fn requested_changes_publish_a_steering_card_beside_the_findings() {
         1
     );
 }
+
+/// KT-647 — a campaign execution may be parked on a human more than once.
+///
+/// The first version of the gate card keyed its message on `(run, execution,
+/// side)` — the identity of the EXECUTION, not of the OCCURRENCE — and inserted
+/// it with no existence guard. A second escalation therefore re-inserted the
+/// same `messages.id`, the UNIQUE constraint fired inside `transition_execution`'s
+/// savepoint, and the whole transition rolled back: the execution could never
+/// escalate again, so no human was ever asked a second time.
+#[test]
+fn a_campaign_execution_can_be_parked_on_a_human_more_than_once() {
+    let conn = setup();
+    seed_plan_task(&conn, "t-gate-twice", 1311, 0, "active");
+    let run = campaign(&conn, 1, 1);
+    let selection = run.default_worker.clone().unwrap();
+    let mut input = LaunchSingleTaskInput::new("t-gate-twice", DISC);
+    input.project_id = Some("p1".into());
+    input.worker_target_kind = Some(selection.target.kind);
+    input.worker_agent_type = Some(agent_type_to_db(&selection.target.agent_type));
+    let execution = launch_task_in_run(&conn, &run.id, &input, &selection, &backend_actor())
+        .unwrap()
+        .execution;
+
+    // Two real cycles, through the real state machine. `Escalated -> Escalated`
+    // is refused by `can_transition_to`, so a second gate genuinely requires
+    // leaving and coming back — which is exactly the path that used to break.
+    for cycle in 0..2 {
+        assert!(
+            transition_execution(
+                &conn,
+                &execution.id,
+                TaskExecutionStatus::Escalated,
+                &backend_actor(),
+                serde_json::json!({ "cycle": cycle }),
+            )
+            .unwrap(),
+            "escalation {cycle} must commit"
+        );
+        assert_eq!(
+            get_orchestration_run(&conn, &run.id)
+                .unwrap()
+                .unwrap()
+                .control_state,
+            OrchestrationControlState::AwaitingHuman,
+            "escalation {cycle} must park the campaign"
+        );
+        assert!(
+            transition_execution(
+                &conn,
+                &execution.id,
+                TaskExecutionStatus::Working,
+                &backend_actor(),
+                serde_json::json!({ "human_decision": "resume" }),
+            )
+            .unwrap(),
+            "resume {cycle} must commit"
+        );
+        assert_eq!(
+            get_orchestration_run(&conn, &run.id)
+                .unwrap()
+                .unwrap()
+                .control_state,
+            OrchestrationControlState::Running,
+            "resume {cycle} must restart the campaign"
+        );
+    }
+
+    // One card per occurrence, in order: parked, released, parked, released.
+    let cards = crate::db::discussion_important::list(&conn, DISC, None).unwrap();
+    let kinds: Vec<_> = cards.items.iter().map(|item| item.category).collect();
+    assert_eq!(
+        kinds,
+        vec![
+            crate::db::discussion_important::ImportantCategory::HumanActionRequired,
+            crate::db::discussion_important::ImportantCategory::Decision,
+            crate::db::discussion_important::ImportantCategory::HumanActionRequired,
+            crate::db::discussion_important::ImportantCategory::Decision,
+        ],
+        "each gate and each release is its own steering event"
+    );
+
+    // Distinct messages, distinct dedup keys. A shared id is the bug itself.
+    let messages: std::collections::HashSet<&str> = cards
+        .items
+        .iter()
+        .map(|item| item.message_id.as_str())
+        .collect();
+    assert_eq!(messages.len(), 4, "each occurrence owns its own message");
+    let keys: std::collections::HashSet<&str> = cards
+        .items
+        .iter()
+        .map(|item| item.dedup_key.as_str())
+        .collect();
+    assert_eq!(keys.len(), 4, "each occurrence owns its own dedup key");
+
+    // The second gate still owes a human something; the second release does not.
+    assert!(cards.items[2].action_required.required);
+    assert_eq!(
+        cards.items[2].action_required.owner.as_deref(),
+        Some("Humain")
+    );
+    assert!(!cards.items[3].action_required.required);
+}
+
+/// KT-647 — a card may never abort a state transition.
+///
+/// `publish_steering_card` states the rule three functions above the gate:
+/// losing a card is cheaper than aborting a terminal transition. This proves
+/// the gate obeys it. A message carrying the id this gate is about to mint is
+/// planted first — the shape a restart leaves behind when the message survived
+/// and the caller replays — and the escalation must still commit, with no
+/// duplicate message and no duplicate card.
+#[test]
+fn a_replayed_campaign_gate_publishes_nothing_and_breaks_no_transition() {
+    let conn = setup();
+    seed_plan_task(&conn, "t-gate-replay", 1312, 0, "active");
+    let run = campaign(&conn, 1, 1);
+    let selection = run.default_worker.clone().unwrap();
+    let mut input = LaunchSingleTaskInput::new("t-gate-replay", DISC);
+    input.project_id = Some("p1".into());
+    input.worker_target_kind = Some(selection.target.kind);
+    input.worker_agent_type = Some(agent_type_to_db(&selection.target.agent_type));
+    let execution = launch_task_in_run(&conn, &run.id, &input, &selection, &backend_actor())
+        .unwrap()
+        .execution;
+
+    let planted_id = format!("orch-campaign-gate:{}:{}:awaiting:0", run.id, execution.id);
+    let planted = DiscussionMessage {
+        id: planted_id.clone(),
+        role: MessageRole::User,
+        channel: MessageChannel::Main,
+        content: "a gate message that survived a restart".to_string(),
+        agent_type: None,
+        timestamp: Utc::now(),
+        tokens_used: 0,
+        session_tokens_at_message: None,
+        recovered_partial: false,
+        auth_mode: None,
+        model_tier: None,
+        model: None,
+        cost_usd: None,
+        author_pseudo: Some("Orchestrateur".to_string()),
+        author_avatar_email: None,
+        source_msg_id: None,
+        duration_ms: None,
+        lint_report: None,
+        target_agent: None,
+        reply_to_message_id: None,
+        author_cli_ordinal: None,
+    };
+    crate::db::discussions::insert_message_with_targets_and_dispatches_within_tx(
+        &conn,
+        DISC,
+        &planted,
+        &[],
+        &[],
+        None,
+    )
+    .unwrap();
+
+    // The transition must commit. Before the guard, this returned Err and the
+    // savepoint rolled back — the execution could never escalate again.
+    assert!(
+        transition_execution(
+            &conn,
+            &execution.id,
+            TaskExecutionStatus::Escalated,
+            &backend_actor(),
+            serde_json::json!({ "reason": "review budget" }),
+        )
+        .unwrap(),
+        "a duplicate gate message must not abort the escalation"
+    );
+
+    // And the durable state moved, which is the point of not aborting.
+    assert_eq!(
+        get_orchestration_run(&conn, &run.id)
+            .unwrap()
+            .unwrap()
+            .control_state,
+        OrchestrationControlState::AwaitingHuman
+    );
+
+    let copies: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM messages WHERE id = ?1",
+            [&planted_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(copies, 1, "the replay must not double the message");
+
+    // No card: the message this gate would have attached one to was not the one
+    // it minted, so it published nothing rather than attaching to a stranger.
+    assert_eq!(
+        crate::db::discussion_important::list(&conn, DISC, None)
+            .unwrap()
+            .total,
+        0,
+        "a skipped gate publishes no card"
+    );
+}
