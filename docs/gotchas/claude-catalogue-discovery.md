@@ -63,3 +63,11 @@ fixtures and mocked UI APIs; they do not assert an authorized billable call.
 [src: file: backend/src/core/model_catalog/claude_discovery.rs:251]
 [src: file: frontend/src/hooks/__tests__/useModelCatalogSnapshot.test.tsx:1]
 [src: file: frontend/src/components/settings/__tests__/AgentsSection.catalog.test.tsx:1]
+
+Integration tests link the production library: its unit-test discovery override
+does not apply there. A migration fixture that calls launch preflight without
+a refresh log can invoke the installed CLI, whose response may legitimately
+restore a model marked unavailable by the fixture. Migration-only tests seed
+an explicit fresh cached-discovery result and assert its attempt timestamp is
+unchanged; they still verify the exact unavailable model and refusal reason.
+[src: file: backend/tests/model_catalog_migration.rs:10]
