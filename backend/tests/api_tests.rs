@@ -24,6 +24,55 @@ use kronn::models::WsMessage;
 use kronn::{build_router_with_auth, AppState, DEFAULT_MAX_CONCURRENT_AGENTS};
 
 #[tokio::test]
+async fn qp_effort_is_snapshotted_by_discussion_not_mutable_prompt_version() {
+    let state = test_state();
+    state.config.write().await.encryption_secret = Some(kronn::core::crypto::generate_secret());
+    for agent in ["ClaudeCode", "Codex"] {
+        let id = format!("qp-effort-{agent}");
+        let qp: kronn::models::QuickPrompt = serde_json::from_value(serde_json::json!({
+            "id": id, "name": "Effort snapshot", "icon": "", "prompt_template": "test",
+            "variables": [], "agent": agent, "project_id": null, "skill_ids": [],
+            "profile_ids": [], "directive_ids": [], "tier": "default",
+            "agent_settings": {"model": "test-model", "reasoning_effort": "low"},
+            "description": "", "created_at": chrono::Utc::now(), "updated_at": chrono::Utc::now()
+        }))
+        .unwrap();
+        state
+            .db
+            .with_conn(move |conn| kronn::db::quick_prompts::insert_quick_prompt(conn, &qp))
+            .await
+            .unwrap();
+        let (_, result) = post_json(
+            build_router_with_auth(state.clone(), false),
+            "/api/discussions",
+            serde_json::json!({
+                "title": "Snapshot", "agent": agent, "initial_prompt": "test", "tier": "default",
+                "originating_qp_id": id, "no_agent": true
+            }),
+        )
+        .await;
+        assert_eq!(result["success"], true, "{result}");
+        let did = result["data"]["id"].as_str().unwrap().to_owned();
+        assert_eq!(result["data"]["model"], "test-model");
+        let expected_agent = agent.to_owned();
+        state.db.with_conn(move |conn| {
+            let read = |conn: &rusqlite::Connection| -> rusqlite::Result<(String, String, String)> {
+                conn.query_row("SELECT agent, model, effort FROM discussion_effort_snapshots WHERE discussion_id = ?1", [&did], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            };
+            let snapshot = read(conn)?;
+            assert_eq!(snapshot, (expected_agent, "test-model".into(), "low".into()));
+            let mut qp = kronn::db::quick_prompts::get_quick_prompt(conn, &id)?.unwrap();
+            qp.agent_settings.as_mut().unwrap().reasoning_effort = Some("high".into());
+            kronn::db::quick_prompts::update_quick_prompt(conn, &qp)?;
+            assert_eq!(read(conn)?, snapshot, "QP edits must not change a launched discussion");
+            kronn::db::quick_prompts::delete_quick_prompt(conn, &id)?;
+            assert_eq!(read(conn)?, snapshot, "QP deletion must not lose the resume setting");
+            Ok(())
+        }).await.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn cli_release_recheck_returns_agent_metadata_and_distinct_rtk_ccusage_versions() {
     let app = test_app();
     let (status, result) = post_json(

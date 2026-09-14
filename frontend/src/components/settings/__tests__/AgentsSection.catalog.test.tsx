@@ -275,7 +275,8 @@ describe('AgentsSection — runtime catalogue and tier preservation (KT-531)', (
 
   it('uses the catalogue that arrived after mount when clearing an incompatible effort', async () => {
     let resolveCatalog!: (snapshot: ModelCatalogSnapshot) => void;
-    list.mockImplementationOnce(() => new Promise<ModelCatalogSnapshot>(resolve => { resolveCatalog = resolve; }));
+    const pending = new Promise<ModelCatalogSnapshot>(resolve => { resolveCatalog = resolve; });
+    list.mockReturnValue(pending);
     const current = tiers();
     current.claude_code.economy_effort = 'high';
     getTiers.mockResolvedValue(current);
