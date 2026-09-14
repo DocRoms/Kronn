@@ -87,10 +87,10 @@ pub async fn get(
                 crate::db::discussion_sessions::list_sessions(conn, &id, false)?
                     .iter()
                     .map(|session| {
-                        crate::models::MessageTarget::cli(
+                        Ok(crate::models::MessageTarget::cli(
                             crate::db::discussions::parse_agent_type(&session.agent_type)?,
                             session.id,
-                        )
+                        ))
                     })
                     .collect::<rusqlite::Result<Vec<_>>>()?
             } else {
