@@ -50,6 +50,15 @@ the permissive container marker from workers.
 [src: file: backend/src/agents/runner.rs:3333]
 [src: file: backend/tests/adapter_worker_policy.rs:1]
 
+Each adapter permits one active prompt at a time; sequential turns still resume
+the session. The prompt owns a guard across its stdin writes, streaming and
+process wait. Cancellation during startup remains effective when the child is
+registered; abandoning the prompt releases its owned process group. Explicit
+cancellation reaps the child. Cleanup failures are reported through the same
+redacted runner diagnostic as prompt failures, never as a clean success.
+[src: file: backend/src/acp/adapter_process.rs:1]
+[src: file: backend/src/agents/runner.rs:4056]
+
 ## Observability
 
 Claude's SDK model catalogue is discovered independently of these execution
@@ -144,14 +153,15 @@ project path never reuses that identifier.
 
 - **"no verified production ACP command" / adapter never engages:** check the
   exact toggle name (`KRONN_ACP_ADAPTER_CODEX` / `KRONN_ACP_ADAPTER_CLAUDE`,
-  case-sensitive; only `1` or `true`, ignoring case/outer whitespace, enables
-  it) and that it's set in the backend
-  process's environment, not just the shell you're inspecting logs from.
+  case-sensitive). Unset enables the adapter; `1`/`true` also enables it,
+  ignoring case/outer whitespace. Inspect the backend process's environment,
+  not just the shell you're inspecting logs from.
 - **A run using the adapter behaves differently from the direct-CLI path
   (e.g. permission prompts, MCP tool availability):** compare against the
   security model above — the adapters intentionally use `--strict-mcp-config`
   and a broker-derived static permission policy, which can be narrower than
   an ad hoc local `claude`/`codex` invocation.
-- **Rolling back:** unset the toggle. The change takes effect on the next
+- **Rolling back to direct CLI:** set the relevant toggle to `0`. Unsetting it
+  restores the default adapter. The change takes effect on the next
   agent start. The additive `acp_runtime_sessions` table can remain in place;
   direct CLI migration does not read it.

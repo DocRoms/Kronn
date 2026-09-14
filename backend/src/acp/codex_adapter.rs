@@ -26,11 +26,11 @@
 //! (only static `--sandbox`/`--dangerously-bypass-approvals-and-sandbox`
 //! flags), so — exactly like the Claude adapter — permission policy is
 //! computed once per session by [`AcpPermissionBroker::session_policy`].
-//! MCP servers are not inlined into any Kronn-controlled payload: Codex reads
-//! its own already-synced `~/.codex/config.toml` (project-authorized servers,
-//! real credentials, written by the existing MCP sync); the adapter only
-//! narrows the `kronn-internal` server's forwarded env var *names* — never
-//! values — exactly like today's direct-CLI Codex invocation.
+//! MCP is an explicit project-only override reconstructed by the scoped
+//! broker, not the account's global multi-project registry. Credential-bearing
+//! declarations are omitted. The trusted `kronn-internal` bridge forwards only
+//! fixed environment variable names, never credential values in argv/prompt.
+//! Task workers instead reuse the direct worker's narrower launch policy.
 
 use super::adapter_process::AdapterProcess;
 use crate::agents::runner::{AdapterLaunchOptions, SpawnIo};

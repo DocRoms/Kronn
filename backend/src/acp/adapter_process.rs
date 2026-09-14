@@ -179,6 +179,7 @@ impl AdapterProcess {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     fn fixture(dir: &std::path::Path) -> Child {
         crate::agents::runner::try_spawn(
             "sh",
@@ -195,6 +196,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn dropping_a_turn_releases_its_registered_process() {
         let dir = tempfile::tempdir().unwrap();
         let process = AdapterProcess::default();
@@ -236,6 +238,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn cancellation_before_registration_rejects_and_reaps_the_child() {
         let dir = tempfile::tempdir().unwrap();
         let process = AdapterProcess::default();
@@ -250,6 +253,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn cancellation_interrupts_a_wait_that_already_owns_the_child() {
         let dir = tempfile::tempdir().unwrap();
         let process = AdapterProcess::default();

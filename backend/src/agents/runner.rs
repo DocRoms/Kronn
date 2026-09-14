@@ -4033,7 +4033,7 @@ async fn run_acp_session(
         };
         let _ = forwarder.await;
         let persistence_error = persistence_error.lock().unwrap().take();
-        let ok = match (&result, persistence_error.as_ref()) {
+        let mut ok = match (&result, persistence_error.as_ref()) {
             (_, Some(error)) => {
                 let diagnostic = acp_failure_diagnostic("session persistence", error);
                 tracing::error!(agent = %event_agent_label, "{diagnostic}");
@@ -4053,7 +4053,14 @@ async fn run_acp_session(
                 false
             }
         };
-        let _ = host.shutdown().await;
+        if let Err(error) = host.shutdown().await {
+            let diagnostic = acp_failure_diagnostic("shutdown", &error.to_string());
+            tracing::warn!(agent = %event_agent_label, "{diagnostic}");
+            if let Ok(mut capture) = task_stderr.lock() {
+                capture.push(diagnostic);
+            }
+            ok = false;
+        }
         if let Some(mut stdin) = lifeline_stdin.take() {
             let _ = stdin.write_all(if ok { b"0\n" } else { b"1\n" }).await;
             let _ = stdin.shutdown().await;
@@ -9420,14 +9427,13 @@ pub(crate) fn should_skip_home_override(binary: &str, npx_package: Option<&str>)
 
 /// Spawn an agent process. If npx_package is Some, uses npx to run.
 ///
-/// `stdin_payload`: when present, the string is written to the child's stdin
-/// and stdin is then closed (EOF). Used for agents that accept their prompt
-/// via stdin (currently: Claude Code with `--print` and no positional prompt
-/// arg), letting us side-step the kernel's per-argv size cap.
+/// `SpawnIo::Direct(Some(payload))` writes and closes the child's stdin.
+/// `SpawnIo::Adapter` leaves that pipe for the adapter's awaited prompt write
+/// and uses null stderr because adapters consume structured stdout events.
 ///
 /// 9 args: each is genuinely independent — bundling them into a config
-/// struct would just shuffle the verbosity from the call sites
-/// (already only 2) into the struct definition + builder. The
+/// struct would just shuffle the verbosity from the direct and adapter call
+/// sites into the struct definition + builder. The
 /// arguments map 1:1 to the spawn primitives the OS expects (binary,
 /// args, env, cwd, stdin) plus four Kronn-specific feed-throughs
 /// (npx_package, api_key, discussion_id, task-worker capability). Allow-listed rather than
