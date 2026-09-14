@@ -2350,12 +2350,10 @@ async fn orchestrator_return_resume_route_authenticates_and_replays_exact_rotati
     let repo_path = repo.path().to_string_lossy().to_string();
     let task_reference = state.db.with_conn(move |conn| {
         let now = chrono::Utc::now().to_rfc3339();
-        for id in ["return-http-parent", "return-http-child"] {
-            conn.execute(
-                "INSERT INTO discussions(id, title, created_at, updated_at) VALUES (?1, 'return', ?2, ?2)",
-                rusqlite::params![id, now],
-            )?;
-        }
+        conn.execute(
+            "INSERT INTO discussions(id, title, created_at, updated_at) VALUES ('return-http-parent', 'return', ?1, ?1)",
+            [&now],
+        )?;
         conn.execute(
             "INSERT INTO projects(id, name, path, created_at, updated_at) VALUES ('return-http-project', 'return', ?1, ?2, ?2)",
             rusqlite::params![repo_path, now],
@@ -2640,13 +2638,18 @@ async fn orchestrator_return_resume_route_authenticates_and_replays_exact_rotati
     state
         .db
         .with_conn(move |conn| {
-            let (disc_id, session_id): (String, String) = conn.query_row(
-                "SELECT disc_id, session_id FROM discussion_sessions WHERE id=657",
+            let (disc_id, session_id, credential_hash): (String, String, Option<String>) = conn.query_row(
+                "SELECT disc_id, session_id, resume_token_hash FROM discussion_sessions WHERE id=657",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )?;
             assert_eq!(disc_id, "return-http-parent");
             assert_eq!(session_id, "live-after");
+            assert_eq!(credential_hash, Some(format!("{:x}", Sha256::digest(next.as_bytes()))));
+            assert_eq!(
+                kronn::db::disc_source::find_disc_by_source_session(conn, "Codex", "live-before")?.as_deref(),
+                Some("return-http-parent")
+            );
             let traces: i64 = conn.query_row(
                 "SELECT COUNT(*) FROM messages WHERE id LIKE 'orch-return-%:' || ?1 || ':Done'",
                 [&execution_id],
