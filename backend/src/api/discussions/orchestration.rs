@@ -1740,13 +1740,18 @@ mod orchestrate_validation_tests {
     // pure function so we can unit-test the discriminant-based comparison
     // without spinning up `detect_all` (which hits the filesystem and
     // depends on the host having `claude` / `codex` binaries).
-    use super::{checked_launch_connection, primary_connection_id, target_tier};
+    use super::{
+        checked_launch_connection, generate_summary_on_demand, primary_connection_id, target_tier,
+    };
     use crate::models::{
-        AgentType, ExternalApiConnection, ExternalApiConnectionPreset, MessageTarget, ModelTier,
-        OrchestrationParticipant,
+        AgentType, Discussion, DiscussionMessage, ExternalApiConnection,
+        ExternalApiConnectionPreset, MessageChannel, MessageRole, MessageTarget, ModelTier,
+        OrchestrationParticipant, SummaryStrategy, TokensConfig,
     };
     use std::sync::Arc;
     use tokio::sync::RwLock;
+    use wiremock::matchers::{body_string_contains, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn connection(id: &str, model: &str) -> ExternalApiConnection {
         let now = chrono::Utc::now();
@@ -1782,6 +1787,178 @@ mod orchestrate_validation_tests {
             db,
             crate::DEFAULT_MAX_CONCURRENT_AGENTS,
         )
+    }
+
+    fn discussion(connection_id: &str) -> Discussion {
+        let now = chrono::Utc::now();
+        Discussion {
+            id: "orchestration-summary-test".into(),
+            project_id: None,
+            title: "Summary target".into(),
+            agent: AgentType::Custom,
+            connection_id: Some(connection_id.into()),
+            language: "en".into(),
+            participants: vec![AgentType::Custom],
+            messages: vec![DiscussionMessage {
+                id: "message-1".into(),
+                role: MessageRole::User,
+                channel: MessageChannel::Main,
+                content: "Summarize this".into(),
+                agent_type: None,
+                timestamp: now,
+                tokens_used: 0,
+                session_tokens_at_message: None,
+                recovered_partial: false,
+                auth_mode: None,
+                model_tier: None,
+                model: None,
+                cost_usd: None,
+                author_pseudo: None,
+                author_avatar_email: None,
+                source_msg_id: None,
+                duration_ms: None,
+                lint_report: None,
+                target_agent: None,
+                reply_to_message_id: None,
+                author_cli_ordinal: None,
+            }],
+            message_count: 1,
+            non_system_message_count: 1,
+            skill_ids: vec![],
+            profile_ids: vec![],
+            directive_ids: vec![],
+            archived: false,
+            pinned: false,
+            workspace_mode: "Direct".into(),
+            workspace_path: None,
+            worktree_branch: None,
+            tier: ModelTier::Default,
+            model: None,
+            pin_first_message: false,
+            summary_cache: None,
+            summary_up_to_msg_idx: None,
+            summary_strategy: SummaryStrategy::OnDemand,
+            introspection_call_count: 0,
+            shared_id: None,
+            shared_with: vec![],
+            workflow_run_id: None,
+            awaiting_agent: false,
+            agent_running: false,
+            test_mode_restore_branch: None,
+            test_mode_stash_ref: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    async fn set_catalog(
+        state: &crate::AppState,
+        connection_id: &str,
+        model: &str,
+        capabilities: &[&str],
+    ) {
+        let target = crate::db::model_catalog::http_runtime_target_id(connection_id);
+        let model = model.to_string();
+        let capabilities = capabilities
+            .iter()
+            .map(|value| value.to_string())
+            .collect::<Vec<_>>();
+        state
+            .db
+            .with_conn(move |conn| {
+                crate::db::model_catalog::reconcile_live(
+                    conn,
+                    &target,
+                    &AgentType::Custom,
+                    &[crate::db::model_catalog::DiscoveredModel {
+                        model_id: model.clone(),
+                        display_name: model,
+                        capabilities,
+                        reasoning_modes: Vec::new(),
+                        default_reasoning_mode: None,
+                    }],
+                )
+            })
+            .await
+            .unwrap();
+    }
+
+    fn no_tokens() -> TokensConfig {
+        TokensConfig {
+            anthropic: None,
+            openai: None,
+            google: None,
+            keys: Vec::new(),
+            disabled_overrides: Vec::new(),
+        }
+    }
+
+    fn summary_sse(content: &str) -> String {
+        format!(
+            "data: {{\"choices\":[{{\"index\":0,\"delta\":{{\"content\":{}}}}}]}}\n\ndata: [DONE]\n\n",
+            serde_json::to_string(content).unwrap()
+        )
+    }
+
+    #[tokio::test]
+    async fn on_demand_summary_uses_named_b_endpoint_and_model_never_a() {
+        let provider_a = MockServer::start().await;
+        let provider_b = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .and(body_string_contains("\"model\":\"model-b\""))
+            .respond_with(ResponseTemplate::new(200).set_body_string(summary_sse("summary B")))
+            .mount(&provider_b)
+            .await;
+        let mut a = connection("connection-a", "model-a");
+        a.endpoint = Some(provider_a.uri());
+        let mut b = connection("connection-b", "model-b");
+        b.endpoint = Some(provider_b.uri());
+        b.economy_model = Some("model-b".into());
+        let state = state_with_connections(vec![a, b]).await;
+        set_catalog(&state, "connection-b", "model-b", &["chat"]).await;
+
+        let result = generate_summary_on_demand(
+            &state,
+            &discussion("connection-b"),
+            0,
+            1,
+            &no_tokens(),
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.0, "summary B");
+        assert!(provider_a.received_requests().await.unwrap().is_empty());
+        assert_eq!(provider_b.received_requests().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn later_summary_snapshot_refuses_catalog_mutation_before_second_request() {
+        let provider = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(summary_sse("first")))
+            .mount(&provider)
+            .await;
+        let mut selected = connection("connection-b", "model-b");
+        selected.endpoint = Some(provider.uri());
+        selected.economy_model = Some("model-b".into());
+        let state = state_with_connections(vec![selected]).await;
+        set_catalog(&state, "connection-b", "model-b", &["chat"]).await;
+        let disc = discussion("connection-b");
+
+        generate_summary_on_demand(&state, &disc, 0, 1, &no_tokens(), false)
+            .await
+            .unwrap();
+        set_catalog(&state, "connection-b", "model-b", &["video"]).await;
+        let error = generate_summary_on_demand(&state, &disc, 0, 1, &no_tokens(), false)
+            .await
+            .unwrap_err();
+
+        assert!(error.contains("unsupported"), "{error}");
+        assert_eq!(provider.received_requests().await.unwrap().len(), 1);
     }
 
     #[tokio::test]
