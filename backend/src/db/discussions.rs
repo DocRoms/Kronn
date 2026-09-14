@@ -343,7 +343,10 @@ pub fn recover_partial_responses(conn: &Connection) -> Result<Vec<String>> {
         // Restore the checkpoint's provenance (KT-37). Legacy pre-089
         // checkpoints have NULL agent/model → the recovered bubble stays
         // anonymous, exactly as before.
-        let recovered_agent = agent_type_str.as_deref().map(parse_agent_type);
+        let recovered_agent = agent_type_str
+            .as_deref()
+            .map(parse_agent_type)
+            .transpose()?;
         // Use the checkpoint's start time so the recovered message sits
         // BEFORE any later user message. Fall back to now() only if the
         // column is empty (shouldn't happen after migration 032, but
@@ -442,7 +445,8 @@ pub fn get_in_flight_agent_response(
             let checkpoint_agent = row
                 .get::<_, Option<String>>(3)?
                 .as_deref()
-                .map(parse_agent_type);
+                .map(parse_agent_type)
+                .transpose()?;
             let dispatch_id = row.get::<_, Option<String>>(7)?;
             let dispatch = if let Some(id) = dispatch_id {
                 let override_json = row.get::<_, Option<String>>(9)?;
@@ -1829,10 +1833,12 @@ pub fn insert_native_agent_message_with_checkpoint(
                 .collect();
             crate::db::discussion_sessions::resolve_cli_session_mentions(&msg.content, &joined)
                 .into_iter()
-                .filter_map(|pk| {
-                    views.iter().find(|v| v.id == pk).map(|v| {
-                        parse_agent_type(&v.agent_type).map(|agent| MessageTarget::cli(agent, pk))
-                    })
+                .map(|pk| {
+                    let view = views
+                        .iter()
+                        .find(|view| view.id == pk)
+                        .ok_or_else(|| rusqlite::Error::InvalidQuery)?;
+                    parse_agent_type(&view.agent_type).map(|agent| MessageTarget::cli(agent, pk))
                 })
                 .collect::<rusqlite::Result<Vec<_>>>()?
         } else {

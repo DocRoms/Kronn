@@ -133,6 +133,40 @@ mod tests {
     }
 
     #[test]
+    fn persisted_message_target_rejects_unknown_agent_type_and_preserves_custom() {
+        let conn = test_conn();
+        insert_discussion(&conn, &make_discussion("persisted-target-agent-type")).unwrap();
+        insert_message(
+            &conn,
+            "persisted-target-agent-type",
+            &make_message("persisted-target-message", MessageRole::User, None),
+        )
+        .unwrap();
+
+        replace_message_targets(
+            &conn,
+            "persisted-target-message",
+            &[MessageTarget::agent(AgentType::Custom)],
+        )
+        .unwrap();
+        assert_eq!(
+            list_message_targets(&conn, "persisted-target-message").unwrap(),
+            vec![MessageTarget::agent(AgentType::Custom)]
+        );
+
+        conn.execute(
+            "UPDATE message_targets SET agent_type = ?1 WHERE message_id = ?2",
+            params!["sensitive-unknown-agent", "persisted-target-message"],
+        )
+        .unwrap();
+        let error = list_message_targets(&conn, "persisted-target-message")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("unknown persisted agent type"));
+        assert!(!error.contains("sensitive-unknown-agent"));
+    }
+
+    #[test]
     fn list_returns_multiple_ordered_by_updated_at() {
         let conn = test_conn();
         // Insert two discussions; the second one will have a later updated_at
