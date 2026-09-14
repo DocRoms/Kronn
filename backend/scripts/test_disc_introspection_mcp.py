@@ -9627,6 +9627,60 @@ class DurableSessionLinkTests(unittest.TestCase):
         self.assertEqual(found["disc_id"], "d-source-link")
         self.assertIn("refused to choose", found["hint"])
 
+    def test_find_by_session_recovers_a_proven_worker_return_and_keeps_parent_cursor(self):
+        self.mod._set_current_disc_id("d-child")
+        self.mod._set_read_cursor("d-parent", 37)
+        self.mod._write_binding(
+            "d-child", "kr-resume-old", agent_type="Codex",
+            last_read_sort_order=-1, return_disc_id="d-parent",
+            return_read_sort_order=37,
+        )
+
+        def respond(method, path, body=None):
+            if path.startswith("/api/disc/find_by_session"):
+                return {"success": True, "data": {"disc_id": "d-parent"}}
+            if path == "/api/discussions/orchestrator-return-resume":
+                self.assertEqual(body["expected_child_disc_id"], "d-child")
+                return {"success": True, "data": {
+                    "disc_id": "d-parent", "session_pk": 1,
+                    "resume_token": body["next_resume_token"],
+                }}
+            if path == "/api/disc/link":
+                return {"success": True, "data": True}
+            raise AssertionError(f"unexpected call {method} {path}")
+
+        http = mock.MagicMock(side_effect=respond)
+        with mock.patch.object(self.mod, "_durable_session_id", return_value="cli-stable"), \
+             mock.patch.object(self.mod, "_agent_type_for_session", return_value="Codex"), \
+             mock.patch.object(self.mod, "_http", http):
+            found = self.mod.call_disc_find_by_session({})
+
+        self.assertEqual(found["disc_id"], "d-parent")
+        self.assertEqual(self.mod._CURRENT_DISC_ID, "d-parent")
+        self.assertEqual(self.mod._read_cursor("d-parent"), 37)
+        binding = self.mod._read_binding()
+        self.assertEqual(binding["disc_id"], "d-parent")
+        self.assertNotIn("return_disc_id", binding)
+
+    def test_unrelated_runtime_conflict_never_calls_return_recovery(self):
+        self.mod._set_current_disc_id("d-deliberate-third")
+        self.mod._write_binding(
+            "d-deliberate-third", "kr-resume-old", agent_type="Codex",
+            last_read_sort_order=8,
+        )
+        http = mock.MagicMock(return_value={
+            "success": True, "data": {"disc_id": "d-source-owner"},
+        })
+        with mock.patch.object(self.mod, "_durable_session_id", return_value="cli-stable"), \
+             mock.patch.object(self.mod, "_agent_type_for_session", return_value="Codex"), \
+             mock.patch.object(self.mod, "_http", http):
+            found = self.mod.call_disc_find_by_session({})
+        self.assertTrue(found["binding_conflict"])
+        self.assertTrue(all(
+            call.args[1] != "/api/discussions/orchestrator-return-resume"
+            for call in http.call_args_list
+        ))
+
     def test_an_explicit_third_party_lookup_stays_a_pure_read(self):
         reloaded = _load_module()
         reloaded._CURRENT_DISC_ID = None

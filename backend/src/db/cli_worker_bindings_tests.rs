@@ -290,3 +290,81 @@ fn changed_agent_cannot_return_an_unrelated_session() {
     assert_eq!(membership(&conn), CHILD);
     assert_eq!(binding(&conn, "cli-worker").as_deref(), Some(CHILD));
 }
+
+#[test]
+fn authenticated_return_resume_rotates_exact_worker_back_in_origin() {
+    let (conn, exec) = setup(true);
+    let token = "kr-resume-11111111111111111111111111111111";
+    conn.execute(
+        "UPDATE discussion_sessions SET resume_token_hash = ?1 WHERE id = 101",
+        [crate::db::discussion_sessions::sha256_hex(token)],
+    )
+    .unwrap();
+    assert!(cancel(&conn, &exec).unwrap());
+
+    let next = "kr-resume-22222222222222222222222222222222";
+    let resumed = super::resume_after_orchestrator_return(
+        &conn, AGENT, token, "adhoc-reloaded", Some(next), CHILD,
+    )
+    .unwrap();
+    assert_eq!(resumed.disc_id, ORIGIN);
+    assert_eq!(resumed.session_pk, 101);
+    assert_eq!(resumed.resume_token, next);
+    assert_eq!(membership(&conn), ORIGIN);
+
+    let replay = super::resume_after_orchestrator_return(
+        &conn, AGENT, token, "adhoc-response-loss", Some(next), CHILD,
+    )
+    .unwrap();
+    assert_eq!(replay.session_pk, 101);
+    assert_eq!(replay.resume_token, next);
+}
+
+#[test]
+fn authenticated_return_resume_refuses_unproven_or_moved_state_without_mutation() {
+    for case in ["active", "third-room", "closed-source", "wrong-child"] {
+        let (conn, exec) = setup(true);
+        let token = "kr-resume-33333333333333333333333333333333";
+        let hash = crate::db::discussion_sessions::sha256_hex(token);
+        conn.execute(
+            "UPDATE discussion_sessions SET resume_token_hash = ?1 WHERE id = 101",
+            [&hash],
+        )
+        .unwrap();
+        if case != "active" {
+            assert!(cancel(&conn, &exec).unwrap());
+        }
+        if case == "third-room" {
+            crate::db::discussion_sessions::move_session_to_discussion(&conn, 101, THIRD).unwrap();
+        } else if case == "closed-source" {
+            crate::db::disc_source::unbind_from_source(&conn, ORIGIN, Some((AGENT, "cli-worker")))
+                .unwrap();
+        }
+        let expected_child = if case == "wrong-child" { THIRD } else { CHILD };
+        assert!(super::resume_after_orchestrator_return(
+            &conn,
+            AGENT,
+            token,
+            "must-not-win",
+            Some("kr-resume-44444444444444444444444444444444"),
+            expected_child,
+        )
+        .is_err());
+        let hash_after: String = conn
+            .query_row(
+                "SELECT resume_token_hash FROM discussion_sessions WHERE id = 101",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(hash_after, hash, "{case} rotated the credential");
+        let active_id: String = conn
+            .query_row(
+                "SELECT session_id FROM discussion_sessions WHERE id = 101",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(active_id, "adhoc-worker", "{case} mutated membership");
+    }
+}
