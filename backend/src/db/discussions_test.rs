@@ -1514,6 +1514,98 @@ mod tests {
         assert_eq!(after, written_at);
     }
 
+    #[test]
+    fn note_revisions_repeat_across_notes_and_share_the_discussion_sequence() {
+        let conn = test_conn();
+        insert_discussion(&conn, &make_discussion("note-repeat")).unwrap();
+        for id in ["note-a", "note-b"] {
+            let mut note = make_message(id, MessageRole::User, None);
+            note.channel = crate::models::MessageChannel::Note;
+            note.content = "original".into();
+            insert_note_message(&conn, "note-repeat", &note).unwrap();
+        }
+        let mut previous_a = "original".to_string();
+        let mut previous_b = "original".to_string();
+        for (index, id) in ["note-a", "note-a", "note-b", "note-a", "note-b"]
+            .into_iter()
+            .enumerate()
+        {
+            let next = format!("revision-{index}");
+            let previous = if id == "note-a" {
+                &mut previous_a
+            } else {
+                &mut previous_b
+            };
+            let revision = revise_note_message(&conn, "note-repeat", id, &next)
+                .expect("every correction in the same discussion must succeed");
+            let (hash, content, at): (String, String, String) = conn.query_row(
+                "SELECT previous_content_hash, content, revision FROM message_revision_events WHERE target_message_id = ?1 ORDER BY sort_order DESC LIMIT 1",
+                [id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            ).unwrap();
+            assert_eq!(hash, content_hash(previous));
+            assert_eq!(content, next);
+            assert_eq!(at, revision);
+            chrono::DateTime::parse_from_rfc3339(&at).unwrap();
+            *previous = next;
+        }
+        let events: Vec<i64> = conn.prepare("SELECT sort_order FROM message_revision_events WHERE discussion_id = 'note-repeat' ORDER BY sort_order").unwrap()
+            .query_map([], |row| row.get(0)).unwrap().map(Result::unwrap).collect();
+        assert_eq!(events, vec![3, 4, 5, 6, 7]);
+        let turn = make_message("after-edits", MessageRole::User, None);
+        insert_message(&conn, "note-repeat", &turn).unwrap();
+        let sort: i64 = conn
+            .query_row(
+                "SELECT sort_order FROM messages WHERE id = 'after-edits'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(sort, 8);
+        let jobs: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM agent_dispatch_jobs WHERE discussion_id = 'note-repeat'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(jobs, 0, "editing a note must never wake an agent");
+    }
+
+    #[test]
+    fn note_revision_audit_failure_rolls_back_content_and_sequence() {
+        let conn = test_conn();
+        insert_discussion(&conn, &make_discussion("note-atomic")).unwrap();
+        let mut note = make_message("atomic-note", MessageRole::User, None);
+        note.channel = crate::models::MessageChannel::Note;
+        note.content = "keep me".into();
+        insert_note_message(&conn, "note-atomic", &note).unwrap();
+        let before: (String, String, i64) = conn.query_row(
+            "SELECT m.content, m.timestamp, d.next_message_seq FROM messages m JOIN discussions d ON m.discussion_id = d.id WHERE m.id = 'atomic-note'", [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        ).unwrap();
+        conn.execute_batch("CREATE TRIGGER refuse_note_audit BEFORE INSERT ON message_revision_events BEGIN SELECT RAISE(ABORT, 'injected audit failure'); END;").unwrap();
+        let error =
+            revise_note_message(&conn, "note-atomic", "atomic-note", "must roll back").unwrap_err();
+        assert!(error.to_string().contains("injected audit failure"));
+        let after: (String, String, i64) = conn.query_row(
+            "SELECT m.content, m.timestamp, d.next_message_seq FROM messages m JOIN discussions d ON m.discussion_id = d.id WHERE m.id = 'atomic-note'", [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        ).unwrap();
+        assert_eq!(
+            after, before,
+            "an audit failure must leave the note and sequence unchanged"
+        );
+        let count: i64 = conn
+            .query_row("SELECT count(*) FROM message_revision_events", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 0);
+        conn.execute_batch("DROP TRIGGER refuse_note_audit;")
+            .unwrap();
+        revise_note_message(&conn, "note-atomic", "atomic-note", "retry succeeds").unwrap();
+    }
+
     /// The endpoint rewrites notes; pointing it at a conversation turn must not
     /// bypass the rules that turn has.
     #[test]
