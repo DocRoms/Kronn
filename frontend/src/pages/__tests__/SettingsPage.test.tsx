@@ -89,6 +89,7 @@ vi.mock('../../lib/api', () => ({
   },
   agents: {
     detect: vi.fn(),
+    versionCheck: vi.fn().mockResolvedValue([]),
     quotaStates: vi.fn().mockResolvedValue([]),
     rearmQuota: vi.fn().mockResolvedValue(true),
     install: vi.fn(),
@@ -99,6 +100,14 @@ vi.mock('../../lib/api', () => ({
     agentUsage: vi.fn().mockResolvedValue([
       { agent_type: 'ClaudeCode', total_tokens: 5000, message_count: 10, by_project: [] },
     ]),
+  },
+  // Release metadata is fetched even when the RTK binary is absent.
+  rtk: {
+    version: vi.fn().mockResolvedValue({
+      available: false, installed: null, latest_known: null, checked_at: null,
+      check_error: null, update_available: false, update_command: '',
+      ccusage: { installed: null, latest: null, checked_at: null, check_error: null, update_available: false },
+    } satisfies RtkVersionInfo),
   },
   skills: {
     list: vi.fn().mockResolvedValue([
@@ -183,7 +192,7 @@ vi.mock('../../lib/api', () => ({
 import { SettingsPage } from '../SettingsPage';
 import { agents as agentsApi, config as configApi } from '../../lib/api';
 import { dictionaries } from '../../lib/i18n/testing';
-import type { AgentsConfig, AgentDetection } from '../../types/generated';
+import type { AgentsConfig, AgentDetection, RtkVersionInfo } from '../../types/generated';
 import type { ToastFn } from '../../hooks/useToast';
 
 const noop = () => {};

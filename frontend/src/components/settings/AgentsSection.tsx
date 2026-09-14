@@ -730,7 +730,7 @@ export function AgentsSection({
                   <span className="set-origin-badge">{agent.origin}</span>
                   {agent.version && <code className="set-code text-xs">v{agent.version}</code>}
                   {agent.version_check_error && (
-                    <span className="set-origin-badge" title={agent.version_check_error}>{t('config.releaseCheckFailed', agent.version_check_error)}</span>
+                    <span className="set-origin-badge set-agent-release-error" title={agent.version_check_error}>{t('config.releaseCheckFailed', agent.version_check_error)}</span>
                   )}
                   {agent.version_source_url && (
                     <a className="set-origin-badge" href={agent.version_source_url} target="_blank" rel="noreferrer" title={agent.version_checked_at ?? agent.version_source_url}>{t('config.releaseSource')}</a>

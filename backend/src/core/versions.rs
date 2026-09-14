@@ -162,7 +162,7 @@ impl Drop for RefreshLease {
     }
 }
 
-static CACHE: LazyLock<Arc<ReleaseCache>> = LazyLock::new(|| Arc::default());
+static CACHE: LazyLock<Arc<ReleaseCache>> = LazyLock::new(Arc::default);
 fn key_for_agent(agent: &AgentType) -> String {
     format!("agent:{agent:?}")
 }
@@ -409,7 +409,7 @@ fn parse_latest(source: Source, body: &[u8]) -> Option<String> {
             .map(|body| body.info.version),
         Source::GitHub(_) => serde_json::from_slice::<GitHubRelease>(body)
             .ok()
-            .and_then(|body| (!body.prerelease && !body.draft).then(|| body.tag_name)),
+            .and_then(|body| (!body.prerelease && !body.draft).then_some(body.tag_name)),
     }?;
     let version = version.strip_prefix('v').unwrap_or(&version).to_string();
     is_stable_version(&version).then_some(version)
