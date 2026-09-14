@@ -2549,8 +2549,7 @@ mod http_native_tool_step_tests {
         connection: ExternalApiConnection,
         capabilities: &[&str],
     ) {
-        let runtime_target =
-            crate::db::model_catalog::http_runtime_target_id(&connection.id);
+        let runtime_target = crate::db::model_catalog::http_runtime_target_id(&connection.id);
         let model = connection.default_model.clone().unwrap();
         let capabilities = capabilities
             .iter()
@@ -2623,7 +2622,10 @@ mod http_native_tool_step_tests {
         .await;
 
         assert_eq!(outcome.result.status, RunStatus::Failed);
-        assert_eq!(outcome.result.step_kind.as_deref(), Some("preflight_failed"));
+        assert_eq!(
+            outcome.result.step_kind.as_deref(),
+            Some("preflight_failed")
+        );
         assert!(outcome.result.output.contains("unsupported"));
         assert!(provider_a.received_requests().await.unwrap().is_empty());
         assert!(provider_b.received_requests().await.unwrap().is_empty());
@@ -2711,7 +2713,10 @@ mod http_native_tool_step_tests {
         .await;
 
         assert_eq!(outcome.result.status, RunStatus::Failed);
-        assert_eq!(outcome.result.step_kind.as_deref(), Some("preflight_failed"));
+        assert_eq!(
+            outcome.result.step_kind.as_deref(),
+            Some("preflight_failed")
+        );
         assert!(outcome.result.output.contains("deleted-connection"));
         assert!(fallback.received_requests().await.unwrap().is_empty());
     }

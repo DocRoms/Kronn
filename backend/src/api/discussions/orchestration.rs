@@ -87,6 +87,26 @@ async fn checked_launch_connection(
         }
         None => None,
     };
+    if let Some(connection) = connection.as_ref() {
+        let actual_agent =
+            crate::db::external_api_connections::target_for_connection(connection).agent_type;
+        if actual_agent != *agent {
+            return Err(format!(
+                "External API connection {} no longer matches agent {:?}",
+                connection.id, agent
+            ));
+        }
+        if connection
+            .endpoint
+            .as_deref()
+            .is_none_or(|endpoint| endpoint.trim().is_empty())
+        {
+            return Err(format!(
+                "External API connection {} has no HTTP endpoint",
+                connection.id
+            ));
+        }
+    }
     let runtime_target_id = connection
         .as_ref()
         .map(|connection| crate::db::model_catalog::http_runtime_target_id(&connection.id));
@@ -1293,53 +1313,14 @@ pub async fn generate_summary_on_demand(
             }),
         )
     };
-    let connection = match disc.connection_id.as_deref() {
-        Some(connection_id) => {
-            crate::http_transport::validate_connection_target(
-                state,
-                &disc.agent,
-                Some(connection_id),
-            )
-            .await?;
-            let lookup_id = connection_id.to_string();
-            Some(
-                state
-                    .db
-                    .with_read_conn(move |conn| {
-                        crate::db::external_api_connections::get(conn, &lookup_id)
-                    })
-                    .await
-                    .map_err(|error| error.to_string())?
-                    .ok_or_else(|| {
-                        format!("External API connection {connection_id} was not found")
-                    })?,
-            )
-        }
-        None => None,
-    };
-    let runtime_target_id = connection
-        .as_ref()
-        .map(|connection: &ExternalApiConnection| {
-            crate::db::model_catalog::http_runtime_target_id(&connection.id)
-        });
-    let model_override = connection.as_ref().and_then(|connection| {
-        crate::http_transport::connection_tier_model(connection, ModelTier::Economy)
-    });
-    if let Some(failure) = crate::core::model_catalog::preflight_check(
-        &state.db,
-        runtime_target_id.as_deref(),
-        disc.agent.clone(),
+    let (connection, model_override) = checked_launch_connection(
+        state,
+        &disc.agent,
+        disc.connection_id.as_deref(),
         ModelTier::Economy,
-        model_override.as_deref(),
-        Some(&model_tiers),
+        &model_tiers,
     )
-    .await
-    {
-        return Err(format!(
-            "model_catalog_preflight_failed:{}",
-            serde_json::to_string(&failure).unwrap_or_default()
-        ));
-    }
+    .await?;
     let external_http = connection
         .as_ref()
         .and_then(|connection| crate::http_transport::external_http_runtime(connection, tokens));
@@ -1959,6 +1940,31 @@ mod orchestrate_validation_tests {
 
         assert!(error.contains("unsupported"), "{error}");
         assert_eq!(provider.received_requests().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn on_demand_summary_surfaces_mismatched_named_target_without_fallback() {
+        let provider = MockServer::start().await;
+        let mut selected = connection("connection-b", "model-b");
+        selected.endpoint = Some(provider.uri());
+        selected.economy_model = Some("model-b".into());
+        selected.origin_preset = ExternalApiConnectionPreset::LiteLlm;
+        let state = state_with_connections(vec![selected]).await;
+
+        let error = generate_summary_on_demand(
+            &state,
+            &discussion("connection-b"),
+            0,
+            1,
+            &no_tokens(),
+            false,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.contains("connection-b"), "{error}");
+        assert!(error.contains("Custom"), "{error}");
+        assert!(provider.received_requests().await.unwrap().is_empty());
     }
 
     #[tokio::test]
