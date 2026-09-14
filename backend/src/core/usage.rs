@@ -416,6 +416,34 @@ fn resolve_ccusage_program() -> Result<PathBuf, String> {
     Err("ccusage not available. Install it globally, or run `npx ccusage@latest --version`, `pnpm dlx ccusage --version`, or `bunx ccusage --version` once so Kronn can use the local package-runner cache.".to_string())
 }
 
+/// Probe the same ccusage executable resolution path used for usage reports.
+/// This only asks for its installed version; it never downloads or updates a
+/// package-runner cache.
+pub async fn installed_ccusage_version() -> Option<String> {
+    let program = resolve_ccusage_program().ok()?;
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        crate::core::cmd::async_cmd(program)
+            .arg("--version")
+            .output(),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .split_whitespace()
+        .find(|token| {
+            token
+                .trim_start_matches('v')
+                .split('.')
+                .all(|part| part.parse::<u64>().is_ok())
+        })
+        .map(|token| token.trim_start_matches('v').to_string())
+}
+
 fn usage_home_for_command(explicit: Option<OsString>, in_docker: bool) -> Option<OsString> {
     explicit
         .filter(|value| !value.is_empty())

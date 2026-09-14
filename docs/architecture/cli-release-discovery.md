@@ -12,9 +12,11 @@ project's GitHub latest-release endpoint. The snapshot retains a prior valid
 release when a refresh fails, and exposes the source URL, check timestamp, and
 error to agent detection. Tools with no configured verified source remain
 explicitly unknown. [src: file: backend/src/core/versions.rs:27-54]
-[src: file: backend/src/core/versions.rs:190-235]
+[src: file: backend/src/core/versions.rs:225-328]
 
 RTK and ccusage are refreshed through the same snapshot. Discovery performs no
-installation: RTK's upgrade command remains an explicit user action.
+installation: RTK's upgrade command remains an explicit user action. The RTK
+version endpoint separately reports the ccusage executable Kronn resolves for
+usage reporting, its available stable version, check time, and error state.
 [src: file: backend/src/core/versions.rs:15-17]
-[src: file: backend/src/core/versions.rs:52-53]
+[src: file: backend/src/api/rtk.rs:412-486]

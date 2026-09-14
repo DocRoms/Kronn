@@ -41,6 +41,27 @@ impl Source {
     }
 }
 
+fn sources() -> Vec<(String, Source)> {
+    let mut sources: Vec<(String, Source)> = [
+        AgentType::ClaudeCode,
+        AgentType::Codex,
+        AgentType::OpenCode,
+        AgentType::Vibe,
+        AgentType::GeminiCli,
+        AgentType::CopilotCli,
+        AgentType::Ollama,
+        AgentType::LiteLlm,
+    ]
+    .into_iter()
+    .filter_map(|agent| agent_source(&agent).map(|source| (key_for_agent(&agent), source)))
+    .collect();
+    sources.extend([
+        (RTK_KEY.to_string(), RTK_SOURCE),
+        (CCUSAGE_KEY.to_string(), CCUSAGE_SOURCE),
+    ]);
+    sources
+}
+
 fn agent_source(agent: &AgentType) -> Option<Source> {
     match agent {
         AgentType::ClaudeCode => Some(Source::Npm("@anthropic-ai/claude-code")),
@@ -63,9 +84,12 @@ struct Cache {
     values: HashMap<String, ReleaseStatus>,
     refreshed_at: Option<Instant>,
     refreshing: bool,
+    refresh_generation: u64,
 }
 
 static CACHE: LazyLock<Mutex<Cache>> = LazyLock::new(|| Mutex::new(Cache::default()));
+static REFRESH_COMPLETE: LazyLock<tokio::sync::watch::Sender<u64>> =
+    LazyLock::new(|| tokio::sync::watch::channel(0).0);
 fn key_for_agent(agent: &AgentType) -> String {
     format!("agent:{agent:?}")
 }
@@ -112,15 +136,7 @@ pub fn ccusage_status() -> ReleaseStatus {
 pub fn refresh_if_stale() {
     let should_spawn = {
         let Ok(mut cache) = CACHE.lock() else { return };
-        let stale = cache
-            .refreshed_at
-            .is_none_or(|at| at.elapsed() >= CACHE_TTL);
-        if !stale || cache.refreshing {
-            false
-        } else {
-            cache.refreshing = true;
-            true
-        }
+        begin_refresh(&mut cache, false)
     };
     if should_spawn {
         tokio::spawn(async {
@@ -131,82 +147,105 @@ pub fn refresh_if_stale() {
 
 /// Explicit user-triggered recheck. Concurrent callers share the active refresh.
 pub async fn refresh_now() {
-    let should_run = {
+    let mut completed = REFRESH_COMPLETE.subscribe();
+    let (should_run, generation) = {
         let Ok(mut cache) = CACHE.lock() else { return };
-        if cache.refreshing {
-            false
-        } else {
-            cache.refreshing = true;
-            true
-        }
+        (begin_refresh(&mut cache, true), cache.refresh_generation)
     };
     if should_run {
         let _ = refresh().await;
+    } else {
+        while *completed.borrow() == generation {
+            if completed.changed().await.is_err() {
+                return;
+            }
+        }
     }
 }
 
 async fn refresh() -> Result<(), ()> {
     let result = tokio::time::timeout(REFRESH_BUDGET, refresh_all()).await;
-    if result.is_err() {
-        if let Ok(mut cache) = CACHE.lock() {
-            cache.refreshed_at = Some(Instant::now());
-            cache.refreshing = false;
-        }
+    let timed_out = result.is_err();
+    let statuses = match result {
+        Ok(statuses) => statuses,
+        Err(_) => sources()
+            .into_iter()
+            .map(|(key, source)| (key, failed_status(source, "Official source timed out.")))
+            .collect(),
+    };
+    if let Ok(mut cache) = CACHE.lock() {
+        apply_results(&mut cache, statuses);
+        cache.refreshed_at = Some(Instant::now());
+        cache.refreshing = false;
+        cache.refresh_generation += 1;
+        REFRESH_COMPLETE.send_replace(cache.refresh_generation);
     }
-    result.map_err(|_| ())?;
-    Ok(())
+    if timed_out { Err(()) } else { Ok(()) }
 }
 
-async fn refresh_all() {
+fn begin_refresh(cache: &mut Cache, force: bool) -> bool {
+    let stale = cache
+        .refreshed_at
+        .is_none_or(|at| at.elapsed() >= CACHE_TTL);
+    if cache.refreshing || (!force && !stale) {
+        false
+    } else {
+        cache.refreshing = true;
+        true
+    }
+}
+
+fn apply_results(cache: &mut Cache, results: Vec<(String, ReleaseStatus)>) {
+    for (key, status) in results {
+        let previous = cache.values.get(&key).cloned();
+        cache.values.insert(
+            key,
+            match (previous, status.latest.is_none()) {
+                (Some(mut previous), true) => {
+                    previous.error = status.error;
+                    previous.source_url = status.source_url;
+                    previous.checked_at = status.checked_at;
+                    previous
+                }
+                (_, _) => status,
+            },
+        );
+    }
+}
+
+fn failed_status(source: Source, error: &str) -> ReleaseStatus {
+    ReleaseStatus {
+        checked_at: Some(chrono::Utc::now().to_rfc3339()),
+        error: Some(error.to_string()),
+        source_url: Some(source.url()),
+        latest: None,
+    }
+}
+
+async fn refresh_all() -> Vec<(String, ReleaseStatus)> {
     let client = match reqwest::Client::builder()
         .timeout(REQUEST_TIMEOUT)
         .user_agent(concat!("Kronn/", env!("CARGO_PKG_VERSION")))
         .build()
     {
         Ok(client) => client,
-        Err(_) => return,
+        Err(_) => {
+            return sources()
+                .into_iter()
+                .map(|(key, source)| {
+                    (
+                        key,
+                        failed_status(source, "Official source client could not be created."),
+                    )
+                })
+                .collect()
+        }
     };
-    let mut sources: Vec<(String, Source)> = [
-        AgentType::ClaudeCode,
-        AgentType::Codex,
-        AgentType::OpenCode,
-        AgentType::Vibe,
-        AgentType::GeminiCli,
-        AgentType::CopilotCli,
-        AgentType::Ollama,
-        AgentType::LiteLlm,
-    ]
-    .into_iter()
-    .filter_map(|agent| agent_source(&agent).map(|source| (key_for_agent(&agent), source)))
-    .collect();
-    sources.extend([
-        (RTK_KEY.to_string(), RTK_SOURCE),
-        (CCUSAGE_KEY.to_string(), CCUSAGE_SOURCE),
-    ]);
-    let results = futures::future::join_all(sources.into_iter().map(|(key, source)| {
+    futures::future::join_all(sources().into_iter().map(|(key, source)| {
         let client = client.clone();
         async move { (key, fetch_stable(&client, source).await) }
     }))
-    .await;
-    if let Ok(mut cache) = CACHE.lock() {
-        for (key, status) in results {
-            let previous = cache.values.get(&key).cloned();
-            cache.values.insert(
-                key,
-                match (previous, status.latest.is_none()) {
-                    (Some(mut previous), true) => {
-                        previous.error = status.error;
-                        previous.source_url = status.source_url;
-                        previous.checked_at = status.checked_at;
-                        previous
-                    }
-                    (_, _) => status,
-                },
-            );
-        }
-        cache.refreshed_at = Some(Instant::now());
-        cache.refreshing = false;
-    }
+    .await
 }
 
 #[derive(Deserialize)]
@@ -258,25 +297,11 @@ async fn fetch_stable(client: &reqwest::Client, source: Source) -> ReleaseStatus
             }
         }
     };
-    let latest = match source {
-        Source::Npm(_) => response
-            .json::<Npm>()
-            .await
-            .ok()
-            .map(|body| body.dist_tags.latest),
-        Source::Pypi(_) => response
-            .json::<Pypi>()
-            .await
-            .ok()
-            .map(|body| body.info.version),
-        Source::GitHub(_) => response
-            .json::<GitHubRelease>()
-            .await
-            .ok()
-            .and_then(|body| (!body.prerelease && !body.draft).then(|| body.tag_name)),
-    }
-    .map(|version| version.trim_start_matches('v').to_string())
-    .filter(|version| is_stable_version(version));
+    let latest = response
+        .bytes()
+        .await
+        .ok()
+        .and_then(|body| parse_latest(source, &body));
     ReleaseStatus {
         error: latest
             .is_none()
@@ -285,6 +310,22 @@ async fn fetch_stable(client: &reqwest::Client, source: Source) -> ReleaseStatus
         checked_at,
         source_url: Some(source_url),
     }
+}
+
+fn parse_latest(source: Source, body: &[u8]) -> Option<String> {
+    let version = match source {
+        Source::Npm(_) => serde_json::from_slice::<Npm>(body)
+            .ok()
+            .map(|body| body.dist_tags.latest),
+        Source::Pypi(_) => serde_json::from_slice::<Pypi>(body)
+            .ok()
+            .map(|body| body.info.version),
+        Source::GitHub(_) => serde_json::from_slice::<GitHubRelease>(body)
+            .ok()
+            .and_then(|body| (!body.prerelease && !body.draft).then(|| body.tag_name)),
+    }?;
+    let version = version.trim_start_matches('v').to_string();
+    is_stable_version(&version).then_some(version)
 }
 
 fn is_stable_version(version: &str) -> bool {
@@ -344,5 +385,54 @@ mod tests {
     fn unsupported_tools_are_explicitly_unknown() {
         assert!(agent_status(&AgentType::Kiro).latest.is_none());
         assert!(agent_status(&AgentType::Kiro).error.is_some());
+    }
+    #[test]
+    fn official_payloads_select_only_stable_releases() {
+        assert_eq!(
+            parse_latest(Source::Npm("x"), br#"{"dist-tags": {"latest": "2.3.4"}}"#),
+            Some("2.3.4".into())
+        );
+        assert_eq!(
+            parse_latest(Source::Pypi("x"), br#"{"info": {"version": "2.3.4rc1"}}"#),
+            None
+        );
+        assert_eq!(
+            parse_latest(
+                Source::GitHub("x/y"),
+                br#"{"tag_name":"v2.3.4-rc.1","prerelease":true,"draft":false}"#
+            ),
+            None
+        );
+    }
+    #[test]
+    fn failed_refresh_keeps_last_good_release_and_records_error() {
+        let mut cache = Cache::default();
+        cache.values.insert(
+            RTK_KEY.into(),
+            ReleaseStatus {
+                latest: Some("1.2.3".into()),
+                ..ReleaseStatus::default()
+            },
+        );
+        apply_results(
+            &mut cache,
+            vec![(
+                RTK_KEY.into(),
+                failed_status(RTK_SOURCE, "Official source timed out."),
+            )],
+        );
+        let status = &cache.values[RTK_KEY];
+        assert_eq!(status.latest.as_deref(), Some("1.2.3"));
+        assert_eq!(status.error.as_deref(), Some("Official source timed out."));
+    }
+    #[test]
+    fn refresh_start_is_deduplicated_and_respects_ttl() {
+        let mut cache = Cache::default();
+        assert!(begin_refresh(&mut cache, false));
+        assert!(!begin_refresh(&mut cache, true));
+        cache.refreshing = false;
+        cache.refreshed_at = Some(Instant::now());
+        assert!(!begin_refresh(&mut cache, false));
+        assert!(begin_refresh(&mut cache, true));
     }
 }

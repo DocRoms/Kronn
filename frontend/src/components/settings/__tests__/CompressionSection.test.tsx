@@ -61,8 +61,14 @@ describe('CompressionSection', () => {
       available: true,
       installed: '0.37.2',
       latest_known: '0.37.2',
+      checked_at: null,
+      check_error: null,
       update_available: false,
       update_command: 'curl -fsSL https://example.com/install.sh | sh',
+      ccusage: {
+        installed: '20.1.0', latest: '20.1.0', checked_at: '2026-09-14T10:00:00Z',
+        check_error: null, update_available: false,
+      },
     });
   });
 
@@ -210,6 +216,21 @@ describe('CompressionSection', () => {
     await waitFor(() => {
       // formatTokens(42000) = "42k"
       expect(document.body.textContent).toMatch(/config\.rtk\.savings:42k/);
+    });
+  });
+
+  it('separates ccusage installed and available versions, including an unknown available version', async () => {
+    versionMock.mockResolvedValue({
+      available: true, installed: '0.37.2', latest_known: '0.37.2', checked_at: null,
+      check_error: null, update_available: false, update_command: 'install',
+      ccusage: {
+        installed: '20.1.0', latest: null, checked_at: '2026-09-14T10:00:00Z',
+        check_error: 'Official source timed out.', update_available: false,
+      },
+    });
+    render(<CompressionSection agents={[mkAgent({ agent_type: 'ClaudeCode' })]} t={t} />);
+    await waitFor(() => {
+      expect(screen.getByText('config.ccusageVersion:20.1.0,config.versionUnknown')).toBeInTheDocument();
     });
   });
 

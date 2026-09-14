@@ -409,6 +409,19 @@ pub struct RtkVersionInfo {
     /// Copy-pasteable upgrade command (idempotent — RTK install.sh
     /// upgrades in place).
     pub update_command: String,
+    /// ccusage is invoked by Kronn's usage and RTK economics integrations.
+    /// Its installed and available versions remain distinct from RTK's.
+    pub ccusage: CliReleaseInfo,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct CliReleaseInfo {
+    pub installed: Option<String>,
+    pub latest: Option<String>,
+    pub checked_at: Option<String>,
+    pub check_error: Option<String>,
+    pub update_available: bool,
 }
 
 /// GET /api/rtk/version
@@ -419,6 +432,19 @@ pub struct RtkVersionInfo {
 pub async fn version() -> Json<ApiResponse<RtkVersionInfo>> {
     crate::core::versions::refresh_if_stale();
     let release = crate::core::versions::rtk_status();
+    let ccusage_release = crate::core::versions::ccusage_status();
+    let ccusage_installed = crate::core::usage::installed_ccusage_version().await;
+    let ccusage = CliReleaseInfo {
+        update_available: ccusage_installed
+            .as_deref()
+            .zip(ccusage_release.latest.as_deref())
+            .map(|(installed, latest)| crate::core::versions::update_available(installed, latest))
+            .unwrap_or(false),
+        installed: ccusage_installed,
+        latest: ccusage_release.latest,
+        checked_at: ccusage_release.checked_at,
+        check_error: ccusage_release.error,
+    };
     let latest_known = release.latest;
     let update_command = crate::core::versions::RTK_UPDATE_CMD.to_string();
     let empty = RtkVersionInfo {
@@ -429,6 +455,7 @@ pub async fn version() -> Json<ApiResponse<RtkVersionInfo>> {
         check_error: release.error.clone(),
         update_available: false,
         update_command: update_command.clone(),
+        ccusage: ccusage.clone(),
     };
     if !crate::core::rtk_detect::rtk_binary_available() {
         return Json(ApiResponse::ok(empty));
@@ -455,6 +482,7 @@ pub async fn version() -> Json<ApiResponse<RtkVersionInfo>> {
         check_error: release.error,
         update_available,
         update_command,
+        ccusage,
     }))
 }
 

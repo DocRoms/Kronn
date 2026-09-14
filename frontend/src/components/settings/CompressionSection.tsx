@@ -48,6 +48,13 @@ export function CompressionSection({ agents, onActivated, toast, t }: Compressio
     latest: string | null;
     updateAvailable: boolean;
     updateCommand: string;
+    ccusage: {
+      installed: string | null;
+      latest: string | null;
+      checkedAt: string | null;
+      checkError: string | null;
+      updateAvailable: boolean;
+    };
   } | null>(null);
   const [showUpdateModal, setShowUpdateModal] = useState(false);
 
@@ -90,6 +97,13 @@ export function CompressionSection({ agents, onActivated, toast, t }: Compressio
         latest: v.latest_known,
         updateAvailable: v.update_available,
         updateCommand: v.update_command,
+        ccusage: {
+          installed: v.ccusage?.installed ?? null,
+          latest: v.ccusage?.latest ?? null,
+          checkedAt: v.ccusage?.checked_at ?? null,
+          checkError: v.ccusage?.check_error ?? null,
+          updateAvailable: v.ccusage?.update_available ?? false,
+        },
       });
     }).catch(() => {
       if (!cancelled) setVersionInfo(null);
@@ -242,6 +256,12 @@ export function CompressionSection({ agents, onActivated, toast, t }: Compressio
               )}
             </div>
             <p className="set-compression-explainer">{t('config.rtk.explainer')}</p>
+            {visibleVersionInfo?.ccusage && (
+              <p className="set-compression-explainer" title={visibleVersionInfo.ccusage.checkError ?? visibleVersionInfo.ccusage.checkedAt ?? undefined}>
+                {t('config.ccusageVersion', visibleVersionInfo.ccusage.installed ?? t('config.versionUnknown'), visibleVersionInfo.ccusage.latest ?? t('config.versionUnknown'))}
+                {visibleVersionInfo.ccusage.updateAvailable ? ` · ${t('config.updateAvailable')}` : ''}
+              </p>
+            )}
           </div>
         </div>
 

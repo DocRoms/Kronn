@@ -2673,6 +2673,13 @@ export interface RtkVersionInfo {
   check_error: string | null;
   update_available: boolean;
   update_command: string;
+  ccusage: {
+    installed: string | null;
+    latest: string | null;
+    checked_at: string | null;
+    check_error: string | null;
+    update_available: boolean;
+  };
 }
 
 export const rtk = {

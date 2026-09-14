@@ -1111,6 +1111,8 @@ export type CleanupOrphanEnvRequest = { keys: Array<string>, };
 
 export type CleanupOrphanEnvResponse = { configs_updated: number, total_keys_removed: number, };
 
+export type CliReleaseInfo = { installed: string | null, latest: string | null, checked_at: string | null, check_error: string | null, update_available: boolean, };
+
 /**
  * One vendor's counters for one CLI session. A `None` counter is a counter the
  * vendor does not publish — never a zero.
@@ -5449,7 +5451,12 @@ update_available: boolean,
  * Copy-pasteable upgrade command (idempotent — RTK install.sh
  * upgrades in place).
  */
-update_command: string, };
+update_command: string,
+/**
+ * ccusage is invoked by Kronn's usage and RTK economics integrations.
+ * Its installed and available versions remain distinct from RTK's.
+ */
+ccusage: CliReleaseInfo, };
 
 export type RunAgentRequest = {
 /**
