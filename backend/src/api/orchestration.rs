@@ -14506,6 +14506,92 @@ mod tests {
         );
     }
 
+    /// KT-648 — re-keying must land on an identity that is actually FREE.
+    /// Counting the occupied ones is not the same thing: with `base` and
+    /// `base:r2` taken the count is two, and the next obligation aims at
+    /// `base:r2` — the very collision this belt exists to avoid, reproduced
+    /// inside the belt. Gaps are possible, and a third party may hold any
+    /// suffix, so the allocation has to prove the identity is unused.
+    #[tokio::test]
+    async fn re_keying_skips_identities_that_are_already_taken() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (_task_ref, parent, _child, exec_id) = attached_cli_worker(&db, repo.path()).await;
+        seed_cli_session(&db, 102, &parent, "sess-b").await;
+        let head = git_rev(
+            Path::new(&managed_worktree_path(&db, &exec_id).await),
+            "HEAD",
+        );
+
+        // A gap, on purpose: `base` and `base:r2` are taken, `base:r0` and
+        // `base:r1` are not. A counter lands on `base:r2`.
+        let base = format!("orch-review-request:{exec_id}:0");
+        let squatters = vec![base.clone(), format!("{base}:r2")];
+        let squatted = squatters.clone();
+        let squat_parent = parent.clone();
+        db.with_conn(move |conn| {
+            for (index, id) in squatted.iter().enumerate() {
+                let message =
+                    orchestrator_message(id.clone(), format!("someone else's message {index}"));
+                crate::db::discussions::insert_message(conn, &squat_parent, &message)?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        let manifest = clean_manifest_for_execution(&db, &exec_id).await;
+        let delivered = deliver_worker_manifest(&db, &exec_id, "ClaudeCode", "sess-a", &manifest)
+            .await
+            .expect("an occupied identity must not abort the delivery");
+        assert!(matches!(delivered, DeliverOutcome::Delivered { .. }));
+        assert_eq!(
+            exec_of(&db, &exec_id).await.status,
+            TaskExecutionStatus::AwaitingReview
+        );
+
+        // The obligation must be a REAL one: this delivery's head, addressed to
+        // the principal. A message merely existing under a free id proves nothing.
+        let probe_base = base.clone();
+        let probe_squatters = squatters.clone();
+        let (content, targets, untouched): (String, i64, i64) = db
+            .with_conn(move |conn| {
+                let (id, content): (String, String) = conn.query_row(
+                    "SELECT id, content FROM messages
+                     WHERE id LIKE ?1 AND id NOT IN (?2, ?3)",
+                    rusqlite::params![
+                        format!("{probe_base}:r%"),
+                        probe_squatters[0],
+                        probe_squatters[1]
+                    ],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )?;
+                let targets = conn.query_row(
+                    "SELECT COUNT(*) FROM message_targets WHERE message_id = ?1",
+                    rusqlite::params![id],
+                    |row| row.get::<_, i64>(0),
+                )?;
+                let untouched = conn.query_row(
+                    "SELECT COUNT(*) FROM messages
+                     WHERE id IN (?1, ?2) AND content LIKE 'someone else''s message%'",
+                    rusqlite::params![probe_squatters[0], probe_squatters[1]],
+                    |row| row.get::<_, i64>(0),
+                )?;
+                Ok((content, targets, untouched))
+            })
+            .await
+            .unwrap();
+        assert!(
+            content.contains(&head),
+            "the re-keyed obligation must carry THIS delivery's head, not a stale one"
+        );
+        assert_eq!(
+            targets, 1,
+            "the re-keyed obligation stays addressed to the principal"
+        );
+        assert_eq!(untouched, 2, "neither occupant may be rewritten");
+    }
+
     #[tokio::test]
     async fn resumed_validating_checkpoint_does_not_duplicate_a_persisted_validation() {
         let repo = init_repo();
