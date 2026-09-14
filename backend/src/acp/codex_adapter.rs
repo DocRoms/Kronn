@@ -347,6 +347,7 @@ impl AcpTransport for CodexAcpAdapter {
         events: mpsc::Sender<AcpSessionEvent>,
     ) -> Result<(), AcpError> {
         let cancel = self.process.begin_turn();
+        cancel.check_active()?;
         let cwd = self.cwd.lock().await.clone().ok_or_else(|| {
             AcpError::Transport("Codex ACP adapter prompted before initialize".into())
         })?;

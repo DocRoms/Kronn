@@ -55,16 +55,74 @@ impl Drop for OwnedChild {
 struct State {
     child: Option<OwnedChild>,
     cancel: CancellationToken,
+    active: bool,
 }
 
 #[derive(Default)]
 pub(super) struct AdapterProcess(Mutex<State>);
 
+/// The prompt owns this guard across every await, including stdin writes and
+/// event delivery. Dropping a prompt cannot leave its child in a longer-lived
+/// adapter. A rejected overlapping turn never owns or clears the active one.
+pub(super) struct AdapterTurn<'a> {
+    process: &'a AdapterProcess,
+    cancel: CancellationToken,
+    owns_turn: bool,
+}
+
+impl AdapterTurn<'_> {
+    pub(super) fn check_active(&self) -> Result<(), AcpError> {
+        if self.owns_turn {
+            Ok(())
+        } else {
+            Err(AcpError::Transport(
+                "adapter already has an active prompt".into(),
+            ))
+        }
+    }
+}
+
+impl std::ops::Deref for AdapterTurn<'_> {
+    type Target = CancellationToken;
+
+    fn deref(&self) -> &Self::Target {
+        &self.cancel
+    }
+}
+
+impl Drop for AdapterTurn<'_> {
+    fn drop(&mut self) {
+        if self.owns_turn {
+            self.cancel.cancel();
+            let child = {
+                let mut state = self.process.0.lock().unwrap();
+                state.active = false;
+                state.child.take()
+            };
+            drop(child);
+        }
+    }
+}
+
 impl AdapterProcess {
-    pub(super) fn begin_turn(&self) -> CancellationToken {
+    pub(super) fn begin_turn(&self) -> AdapterTurn<'_> {
         let mut state = self.0.lock().unwrap();
+        if state.active {
+            let cancel = CancellationToken::new();
+            cancel.cancel();
+            return AdapterTurn {
+                process: self,
+                cancel,
+                owns_turn: false,
+            };
+        }
+        state.active = true;
         state.cancel = CancellationToken::new();
-        state.cancel.clone()
+        AdapterTurn {
+            process: self,
+            cancel: state.cancel.clone(),
+            owns_turn: true,
+        }
     }
 
     /// A cancel that arrives while resolving/spawning the executable remains
@@ -158,6 +216,8 @@ mod tests {
         let overlap = process.begin_turn();
 
         assert!(overlap.is_cancelled(), "one adapter cannot own two prompts");
+        assert!(overlap.check_active().is_err());
+        assert!(active.check_active().is_ok());
         drop(overlap);
         process.cancel().await.unwrap();
         assert!(

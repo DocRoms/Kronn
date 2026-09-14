@@ -240,6 +240,7 @@ impl AcpTransport for ClaudeAcpAdapter {
         events: mpsc::Sender<AcpSessionEvent>,
     ) -> Result<(), AcpError> {
         let cancel = self.process.begin_turn();
+        cancel.check_active()?;
         let cwd = self.cwd.lock().await.clone().ok_or_else(|| {
             AcpError::Transport("Claude ACP adapter prompted before initialize".into())
         })?;
