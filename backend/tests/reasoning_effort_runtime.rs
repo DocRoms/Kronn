@@ -1,7 +1,11 @@
 //! Real process boundaries, with isolated fake CLIs and no provider requests.
 #![cfg(unix)]
 
-use std::{ffi::OsString, os::unix::fs::PermissionsExt, time::Duration};
+use std::{ffi::OsString, os::unix::fs::PermissionsExt, sync::Arc, time::Duration};
+
+use axum::{body::Body, http::Request};
+use http_body_util::BodyExt;
+use tower::ServiceExt;
 
 use kronn::agents::runner::{start_agent_with_config, AgentStartConfig, TaskWorkerBridgeContext};
 use kronn::db::{model_catalog, Database};
@@ -27,6 +31,86 @@ impl Drop for Environment {
                     None => std::env::remove_var(name),
                 }
             }
+        }
+    }
+}
+
+async fn unresolved_qp_effort_is_an_atomic_configuration_error(db: Arc<Database>) {
+    let mut cfg = kronn::core::config::default_config();
+    cfg.encryption_secret = Some(kronn::core::crypto::generate_secret());
+    let state = kronn::AppState::new_defaults(
+        Arc::new(tokio::sync::RwLock::new(cfg)),
+        db.clone(),
+        kronn::DEFAULT_MAX_CONCURRENT_AGENTS,
+    );
+    let mut created = 0_i64;
+    for agent in ["ClaudeCode", "Codex"] {
+        for (case, effort) in [
+            ("legacy", None),
+            ("blank", Some("  ")),
+            ("explicit", Some("low")),
+        ] {
+            let id = format!("qp-{agent}-{case}");
+            let qp = serde_json::from_value(serde_json::json!({
+                "id": id, "name": "Unresolved effort", "icon": "", "prompt_template": "test",
+                "variables": [], "agent": agent, "project_id": null, "skill_ids": [],
+                "profile_ids": [], "directive_ids": [], "tier": "default",
+                "agent_settings": {"reasoning_effort": effort}, "description": "",
+                "created_at": chrono::Utc::now(), "updated_at": chrono::Utc::now()
+            }))
+            .unwrap();
+            db.with_conn(move |conn| kronn::db::quick_prompts::insert_quick_prompt(conn, &qp))
+                .await
+                .unwrap();
+            let request = Request::builder()
+                .method("POST")
+                .uri("/api/discussions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "title": "Unresolved QP", "agent": agent, "initial_prompt": "test",
+                        "originating_qp_id": id, "tier": "default", "no_agent": true
+                    })
+                    .to_string(),
+                ))
+                .unwrap();
+            let response = kronn::build_router_with_auth(state.clone(), false)
+                .oneshot(request)
+                .await
+                .unwrap();
+            let result: serde_json::Value =
+                serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                    .unwrap();
+            if case == "explicit" {
+                assert_eq!(result["success"], false, "{agent}: {result}");
+                assert_eq!(result["error_code"], "validation", "{agent}: {result}");
+                let error = result["error"].as_str().unwrap();
+                assert!(
+                    error.contains("choose a model or clear the effort"),
+                    "{error}"
+                );
+                assert!(!error.contains("DB error"), "{error}");
+            } else {
+                assert_eq!(result["success"], true, "{agent}: {result}");
+                created += 1;
+            }
+            db.with_read_conn(move |conn| {
+                let discussions: i64 =
+                    conn.query_row("SELECT count(*) FROM discussions", [], |row| row.get(0))?;
+                let snapshots: i64 = conn.query_row(
+                    "SELECT count(*) FROM discussion_effort_snapshots",
+                    [],
+                    |row| row.get(0),
+                )?;
+                assert_eq!(
+                    discussions, created,
+                    "a refused launch must not create a discussion"
+                );
+                assert_eq!(snapshots, 0, "no unresolved or empty-effort snapshot");
+                Ok(())
+            })
+            .await
+            .unwrap();
         }
     }
 }
@@ -70,7 +154,7 @@ esac
             file.to_string_lossy()
         );
     }
-    let db = Database::open_in_memory().unwrap();
+    let db = Arc::new(Database::open_in_memory().unwrap());
     db.with_conn(|conn| {
         for agent in [AgentType::ClaudeCode, AgentType::Codex] {
             model_catalog::reconcile_live(
@@ -102,6 +186,7 @@ esac
     kronn::core::model_catalog::refresh_runtime_cache(&db)
         .await
         .unwrap();
+    unresolved_qp_effort_is_an_atomic_configuration_error(db.clone()).await;
     let base = kronn::core::config::default_config();
     let resume_id = "11111111-1111-4111-8111-111111111111";
     let mut count = 0;
