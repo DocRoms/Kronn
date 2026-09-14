@@ -45,16 +45,27 @@ async fn default_adapters_and_explicit_fallback_keep_worker_spawn_boundaries() {
     }
     let bin = dir.path().join("bin");
     let project = dir.path().join("project");
-    std::fs::write(
-        project.join(".mcp.json"),
-        r#"{"mcpServers":{"kronn-internal":{"command":"false","args":[]}}}"#,
-    )
-    .unwrap();
     let mut env = Environment(Vec::new());
     env.set("PATH", format!("{}:/usr/bin:/bin", bin.display()));
     env.set("KRONN_HOST_HOME", dir.path().join("host"));
     env.set("KRONN_HOST_BIN", dir.path().join("host-bin"));
     env.set("KRONN_DATA_DIR", dir.path().join("data"));
+    env.set(
+        "KRONN_INTROSPECTION_PUBLIC_PATH",
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/scripts/disc-introspection-mcp.py"
+        ),
+    );
+    let mut registry = serde_json::from_value(serde_json::json!({"mcpServers":{}})).unwrap();
+    assert!(kronn::core::mcp_scanner::inject_kronn_internal(
+        &mut registry
+    ));
+    std::fs::write(
+        project.join(".mcp.json"),
+        serde_json::to_string(&registry).unwrap(),
+    )
+    .unwrap();
     // An inherited permissive marker must not weaken a worker's OS sandbox.
     env.set("CLAUDE_CODE_BUBBLEWRAP", "1");
     env.set("KRONN_TASK_WORKER_CONTEXT", "unrelated-parent-context");
@@ -149,6 +160,20 @@ esac
                     adapted == (toggle != Some("0")),
                     "wrong actual dispatch route",
                 );
+                if adapted && agent == AgentType::ClaudeCode {
+                    let registry = args
+                        .windows(2)
+                        .find(|p| p[0] == "--mcp-config")
+                        .and_then(|p| serde_json::from_str::<serde_json::Value>(p[1]).ok());
+                    check(
+                        registry.as_ref().is_some_and(|value| {
+                            value
+                                .pointer("/mcpServers/kronn-internal/command")
+                                .is_some()
+                        }),
+                        "the real generated internal bridge disappeared during authorization",
+                    );
+                }
                 check(
                     observed[1] == "fixture-discussion",
                     "discussion context missing",
