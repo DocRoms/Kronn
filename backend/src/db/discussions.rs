@@ -1837,7 +1837,7 @@ pub fn insert_native_agent_message_with_checkpoint(
                     let view = views
                         .iter()
                         .find(|view| view.id == pk)
-                        .ok_or_else(|| rusqlite::Error::InvalidQuery)?;
+                        .ok_or(rusqlite::Error::InvalidQuery)?;
                     parse_agent_type(&view.agent_type).map(|agent| MessageTarget::cli(agent, pk))
                 })
                 .collect::<rusqlite::Result<Vec<_>>>()?

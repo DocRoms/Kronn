@@ -1378,13 +1378,13 @@ pub async fn wait_for_peer(
                                     .split(',')
                                     .map(|target| {
                                         let mut fields = target.splitn(5, '|');
-                                        let kind = match fields.next().ok_or_else(|| rusqlite::Error::InvalidQuery)? {
+                                        let kind = match fields.next().ok_or(rusqlite::Error::InvalidQuery)? {
                                             "discussion_agent" => MessageTargetKind::DiscussionAgent,
                                             "cli" => MessageTargetKind::Cli,
                                             _ => MessageTargetKind::Agent,
                                         };
                                         let agent_type = crate::db::discussions::parse_agent_type(
-                                            fields.next().ok_or_else(|| rusqlite::Error::InvalidQuery)?,
+                                            fields.next().ok_or(rusqlite::Error::InvalidQuery)?,
                                         )?;
                                         let connection_id = fields
                                             .next()
@@ -1861,14 +1861,13 @@ fn load_awareness_batch(
                         .split(',')
                         .map(|target| {
                             let mut fields = target.splitn(5, '|');
-                            let kind =
-                                match fields.next().ok_or_else(|| rusqlite::Error::InvalidQuery)? {
-                                    "discussion_agent" => MessageTargetKind::DiscussionAgent,
-                                    "cli" => MessageTargetKind::Cli,
-                                    _ => MessageTargetKind::Agent,
-                                };
+                            let kind = match fields.next().ok_or(rusqlite::Error::InvalidQuery)? {
+                                "discussion_agent" => MessageTargetKind::DiscussionAgent,
+                                "cli" => MessageTargetKind::Cli,
+                                _ => MessageTargetKind::Agent,
+                            };
                             let agent_type = crate::db::discussions::parse_agent_type(
-                                fields.next().ok_or_else(|| rusqlite::Error::InvalidQuery)?,
+                                fields.next().ok_or(rusqlite::Error::InvalidQuery)?,
                             )?;
                             let connection_id = fields
                                 .next()

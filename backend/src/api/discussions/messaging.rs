@@ -221,10 +221,10 @@ pub(crate) async fn canonical_targets(
         return Ok(sessions
             .iter()
             .map(|session| {
-                MessageTarget::cli(
+                Ok(MessageTarget::cli(
                     crate::db::discussions::parse_agent_type(&session.agent_type)?,
                     session.id,
-                )
+                ))
             })
             .collect::<rusqlite::Result<Vec<_>>>()
             .map_err(|error| error.to_string())?);
