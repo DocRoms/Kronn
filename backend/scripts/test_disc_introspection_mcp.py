@@ -9665,6 +9665,96 @@ class DurableSessionLinkTests(unittest.TestCase):
         self.assertEqual(binding["disc_id"], "d-parent")
         self.assertNotIn("return_disc_id", binding)
 
+    def test_child_cursor_ack_preserves_orchestrator_return_handoff(self):
+        self.mod._set_current_disc_id("d-child")
+        self.mod._write_binding(
+            "d-child", "kr-resume-old", agent_type="Codex",
+            last_read_sort_order=-1, return_disc_id="d-parent",
+            return_read_sort_order=37,
+        )
+
+        self.mod._commit_read_cursor("d-child", 4)
+
+        binding = self.mod._read_binding()
+        self.assertEqual(binding.get("return_disc_id"), "d-parent")
+        self.assertEqual(binding.get("return_read_sort_order"), 37)
+
+    def test_failed_and_successful_child_reload_preserve_return_handoff(self):
+        self.mod._set_current_disc_id("d-child")
+        self.mod._write_binding(
+            "d-child", "kr-resume-old", agent_type="Codex",
+            last_read_sort_order=4, return_disc_id="d-parent",
+            return_read_sort_order=37,
+        )
+        with mock.patch.object(self.mod, "_http", side_effect=RuntimeError("moved")):
+            self.assertIsNone(self.mod._attempt_resume())
+        self.assertEqual(self.mod._read_binding().get("return_disc_id"), "d-parent")
+
+        def respond(method, path, body=None):
+            if path == "/api/discussions/peer-resume":
+                return {"success": True, "data": {
+                    "disc_id": "d-child", "session_pk": 1,
+                    "resume_token": body["next_resume_token"],
+                }}
+            if path == "/api/disc/link":
+                return {"success": True, "data": True}
+            raise AssertionError(path)
+
+        with mock.patch.object(self.mod, "_http", side_effect=respond):
+            self.assertEqual(self.mod._attempt_resume(), "d-child")
+        binding = self.mod._read_binding()
+        self.assertEqual(binding.get("return_disc_id"), "d-parent")
+        self.assertEqual(binding.get("return_read_sort_order"), 37)
+
+    def test_same_child_reaccept_keeps_original_origin_handoff(self):
+        self.mod._set_current_disc_id("d-child")
+        self.mod._write_binding(
+            "d-child", "kr-resume-old", agent_type="Codex",
+            last_read_sort_order=4, return_disc_id="d-parent",
+            return_read_sort_order=37,
+        )
+        with mock.patch.object(self.mod, "_require_fresh_bridge"), \
+             mock.patch.object(self.mod, "_task_exec_identity", return_value=("Codex", "live")), \
+             mock.patch.object(self.mod, "_durable_session_id", return_value="cli-stable"), \
+             mock.patch.object(self.mod, "_http", return_value={"success": True, "data": {
+                 "child_discussion_id": "d-child", "execution": {"id": "exec-2"},
+             }}):
+            self.mod.call_task_exec_accept_worker_offer({"offer_id": "offer-2"})
+        binding = self.mod._read_binding()
+        self.assertEqual(binding.get("return_disc_id"), "d-parent")
+        self.assertEqual(binding.get("return_read_sort_order"), 37)
+
+    def test_wait_refuses_return_recovery_from_a_deliberate_third_room(self):
+        self.mod._set_current_disc_id("d-third")
+        self.mod._write_binding(
+            "d-child", "kr-resume-old", agent_type="Codex",
+            last_read_sort_order=4, return_disc_id="d-parent",
+            return_read_sort_order=37,
+        )
+        http = mock.MagicMock(side_effect=RuntimeError("third room cannot wait"))
+        with mock.patch.object(self.mod, "_http", http), \
+             mock.patch.object(self.mod, "_maybe_report_telemetry"):
+            with self.assertRaisesRegex(RuntimeError, "third room cannot wait"):
+                self.mod.call_disc_wait_for_peer({"timeout_secs": 1})
+        self.assertFalse(any(
+            call.args[1] == "/api/discussions/orchestrator-return-resume"
+            for call in http.call_args_list if len(call.args) > 1
+        ))
+        self.assertEqual(self.mod._CURRENT_DISC_ID, "d-third")
+
+    def test_wait_delivers_child_batch_before_following_successful_return(self):
+        self.mod._set_current_disc_id("d-child")
+        child = {
+            "timed_out": False,
+            "messages": [{"content": "last child review"}],
+            "latest_sort_order": 9,
+        }
+        with mock.patch.object(self.mod, "_wait_once", return_value=child), \
+             mock.patch.object(self.mod, "_attempt_orchestrator_return_resume", return_value="d-parent"), \
+             mock.patch.object(self.mod, "_maybe_report_telemetry"):
+            result = self.mod.call_disc_wait_for_peer({"timeout_secs": 1})
+        self.assertEqual(result["messages"], child["messages"])
+
     def test_unrelated_runtime_conflict_never_calls_return_recovery(self):
         self.mod._set_current_disc_id("d-deliberate-third")
         self.mod._write_binding(
