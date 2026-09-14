@@ -42,6 +42,12 @@ const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(20);
 static RESOLVED_TIERS: LazyLock<std::sync::RwLock<HashMap<(String, u8), String>>> =
     LazyLock::new(|| std::sync::RwLock::new(HashMap::new()));
 
+/// The runner starts after catalogue preflight, on a synchronous hot path. Keep
+/// the discovered effort modes alongside the tier projection so it can reject a
+/// stale or incompatible preset without inventing a provider-wide effort list.
+static RESOLVED_REASONING_MODES: LazyLock<std::sync::RwLock<HashMap<(String, String), Vec<String>>>> =
+    LazyLock::new(|| std::sync::RwLock::new(HashMap::new()));
+
 fn tier_key(tier: ModelTier) -> u8 {
     match tier {
         ModelTier::Economy => 0,
@@ -58,6 +64,20 @@ pub fn assigned_model_for_agent(agent_type: &AgentType, tier: ModelTier) -> Opti
         .read()
         .ok()
         .and_then(|catalog| catalog.get(&(target, tier_key(tier))).cloned())
+}
+
+/// Returns the modes the durable catalogue discovered for this exact runtime
+/// target and model. `None` means the model is not in the current projection;
+/// callers must not send an effort option in that case.
+pub fn reasoning_modes_for_agent_model(
+    agent_type: &AgentType,
+    model_id: &str,
+) -> Option<Vec<String>> {
+    let target = db::agent_runtime_target_id(agent_type);
+    RESOLVED_REASONING_MODES
+        .read()
+        .ok()
+        .and_then(|catalog| catalog.get(&(target, model_id.to_owned())).cloned())
 }
 
 /// Historical unit-test expectations only, never a runtime resolver fallback.
@@ -81,7 +101,14 @@ pub fn migrated_default(agent_type: &AgentType, tier: ModelTier) -> Option<Strin
 pub async fn refresh_runtime_cache(database: &Database) -> anyhow::Result<()> {
     let entries = database.with_read_conn(db::list_all).await?;
     let mut resolved = HashMap::new();
+    let mut reasoning_modes = HashMap::new();
     for entry in entries {
+        if entry.availability == ModelAvailability::Available {
+            reasoning_modes.insert(
+                (entry.runtime_target_id.clone(), entry.model_id.clone()),
+                entry.reasoning_modes.clone(),
+            );
+        }
         let Some(tier) = entry.tier_assignment else {
             continue;
         };
@@ -92,6 +119,9 @@ pub async fn refresh_runtime_cache(database: &Database) -> anyhow::Result<()> {
     }
     if let Ok(mut catalog) = RESOLVED_TIERS.write() {
         *catalog = resolved;
+    }
+    if let Ok(mut catalog) = RESOLVED_REASONING_MODES.write() {
+        *catalog = reasoning_modes;
     }
     Ok(())
 }

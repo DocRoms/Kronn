@@ -91,20 +91,22 @@ own CLI default applies", never a silently assigned `high`/`max`.
 Resolution is a single precedence, mirrored on `effective_model_flag`:
 `runner::effective_reasoning_effort` — explicit per-step/per-QP
 `AgentSettings.reasoning_effort` (the execution override) wins outright; else
-the tier's configured preset applies; else `None`. When a run also carries an
-explicit `model_override` (an explicit model pin distinct from the tier) with
-no `effort_override` of its own, the tier's preset is deliberately NOT carried
-over — it was calibrated for the tier's own model, not an arbitrary pinned
-one. `runner::agent_supports_reasoning_effort` gates the whole precedence to
-agents with a proven contract: today only Codex, via its documented per-run
+the tier's configured preset applies only when the final model equals that
+tier's resolved model; else `None`. This retains a preset when an internal
+caller pre-resolves the same model, but never carries it onto a different
+model pin. The candidate is sent only when that exact available catalog entry
+advertises it in `reasoning_modes`. `runner::agent_supports_reasoning_effort`
+gates the whole precedence to agents with a proven contract: Codex via its
+documented per-run
 `-c model_reasoning_effort=<value>` TOML override
 ([config reference](https://learn.chatgpt.com/docs/config-file/config-reference),
-[developer commands](https://learn.chatgpt.com/docs/developer-commands?surface=cli)).
-Claude Code's `--print` CLI has no verified reasoning-effort flag/env/SDK
-option, so it is intentionally excluded rather than guessed; every ACP-native
-agent (OpenCode, Gemini CLI, Copilot CLI, Kiro, Vibe) and every HTTP chat
-agent (Ollama/LiteLLM/NVIDIA/Custom) is excluded the same way.
-[src: file: backend/src/agents/runner.rs (agent_supports_reasoning_effort, effective_reasoning_effort, tier_reasoning_effort)]
+[developer commands](https://learn.chatgpt.com/docs/developer-commands?surface=cli)),
+and Claude Code via its installed `--effort <level>` CLI flag. Direct CLI and
+the optional Claude/Codex ACP adapters carry the same resolved value; other
+ACP and HTTP routes receive no guessed parameter.
+[src: file: backend/src/agents/runner.rs:2746-2850]
+[src: file: backend/src/acp/claude_adapter.rs:200-225]
+[src: file: backend/src/acp/codex_adapter.rs:358-374]
 
 A Quick Prompt's explicit `agent_settings.reasoning_effort` is copied onto a
 hydrated workflow step the same way its `agent_settings.model` already is
@@ -112,17 +114,13 @@ hydrated workflow step the same way its `agent_settings.model` already is
 author picked.
 [src: file: backend/src/workflows/quick_prompt_hydrate.rs (hydrate_step_from_quick_prompt)]
 
-Known limitations as of this pass: the Settings → Agents tier editor
-(`AgentsSection.tsx`) does not yet expose the new per-tier effort fields —
-`ModelTierConfig`'s TypeScript binding needs `make typegen` regenerated before
-that UI can be built type-safe. A discussion's own `reasoning_effort` (as
-opposed to a QP/workflow step's) has no persisted column, so a plain
-discussion run only ever sees the tier preset, never a discussion-level
-execution override. `AgentSwitchPicker`'s tier-consistent model resolution
-(orchestration debate rounds, a discussion's own named-connection fallback)
-intentionally leaves the tier preset applying (`model_override` is `None` in
-those paths) since it does not represent an explicit user pin.
-[src: file: frontend/src/components/settings/AgentsSection.tsx]
+Settings → Agents exposes an effort selector per tier for Claude and Codex.
+It derives choices from the selected model's catalog entry, disables it when
+the entry advertises no modes, retains an invalid saved value only as an
+explained disabled option, and clears an incompatible effort in the same save
+that changes the model. Other runtime cards state that effort is unsupported.
+[src: file: frontend/src/components/settings/AgentsSection.tsx:150-205]
+[src: file: frontend/src/components/settings/AgentsSection.tsx:1245-1310]
 
 ## Migration and test invariants
 

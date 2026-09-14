@@ -44,6 +44,7 @@ pub async fn discover_claude_adapter() -> DiscoveryOutcome {
     let cwd = std::env::temp_dir().to_string_lossy().into_owned();
     let transport: Arc<dyn AcpTransport> = Arc::new(ClaudeAcpAdapter::new(
         None,
+        None,
         false,
         None,
         AcpSessionScope::new(None, "model-catalog-discovery"),

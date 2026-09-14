@@ -3903,7 +3903,23 @@ export type ModelTierConfig = { economy?: string | null,
  * applies, preserving backward compatibility for users who never
  * touched the setting.
  */
-default?: string | null, reasoning?: string | null, };
+default?: string | null, reasoning?: string | null,
+/**
+ * KT-646 — optional reasoning-effort preset for the `economy` slot.
+ * `None` means "pass no effort flag, the runtime's own CLI default
+ * applies" — never a silently assigned `high`/`max`. Only consumed for
+ * an agent `runner::agent_supports_reasoning_effort` returns true for;
+ * every other agent ignores it (see `runner::effective_reasoning_effort`).
+ */
+economy_effort?: string | null,
+/**
+ * Same as `economy_effort`, paired with the `default` tier slot.
+ */
+default_effort?: string | null,
+/**
+ * Same as `economy_effort`, paired with the `reasoning` tier slot.
+ */
+reasoning_effort?: string | null, };
 
 /**
  * Global model tier overrides per agent.

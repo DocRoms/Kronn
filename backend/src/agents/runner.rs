@@ -2743,21 +2743,13 @@ pub(crate) fn effective_model_flag(
     }
 }
 
-/// True for an agent whose CLI has a proven, officially documented
-/// reasoning-effort override reachable from this runner. Codex accepts
-/// `-c model_reasoning_effort=<value>` (see
-/// https://learn.chatgpt.com/docs/config-file/config-reference and
-/// https://learn.chatgpt.com/docs/developer-commands?surface=cli). No other
-/// agent this runner spawns has a verified equivalent: Claude Code's `--print`
-/// CLI exposes no reasoning-effort flag, ACP-negotiated agents (OpenCode,
-/// Gemini CLI, Copilot CLI, Kiro, Vibe) resolve their own reasoning-like
-/// session option through `acp_discovery` rather than this precedence, and
-/// every HTTP chat agent (Ollama/LiteLLM/NVIDIA/Custom) has no confirmed
-/// contract either. Sending a guessed parameter to an unproven route is worse
-/// than sending none — this keeps the surface honest until a real contract is
-/// verified for another agent.
+/// True for an agent whose CLI has a verified per-run effort transport.
+/// Codex accepts `-c model_reasoning_effort=<value>` and Claude Code accepts
+/// `--effort <level>`; the catalogue remains authoritative for which values a
+/// particular selected model accepts. Other runtimes must not receive a
+/// guessed parameter.
 pub(crate) fn agent_supports_reasoning_effort(agent_type: &AgentType) -> bool {
-    matches!(agent_type, AgentType::Codex)
+    matches!(agent_type, AgentType::Codex | AgentType::ClaudeCode)
 }
 
 /// Look up the reasoning-effort preset paired with `tier` in `overrides`,
@@ -2799,18 +2791,11 @@ fn tier_reasoning_effort(
 /// `AgentSettings.reasoning_effort` wins outright (blank treated as unset);
 /// otherwise the tier's configured preset applies; `None` means "no flag —
 /// the CLI's own default applies", never a silently assigned `high`/`max`.
-/// Gated by `agent_supports_reasoning_effort` so an unproven route never
-/// receives a guessed parameter.
-///
-/// `model_override` is the same value passed to `effective_model_flag` for
-/// this run. When it is set and no explicit `effort_override` came with it,
-/// the tier's preset is deliberately NOT carried over: the preset was
-/// calibrated for the tier's own configured model, and blindly applying it to
-/// a different explicit model the caller pinned could hand that model an
-/// effort level it never asked for or doesn't support. An operator who wants
-/// a specific effort on a pinned model sets `effort_override` explicitly.
-/// Kept pure + `pub(crate)` so the precedence is unit-tested without spawning
-/// a process.
+/// The chosen model's current catalogue entry must advertise the candidate
+/// mode. A preset is only inherited when the final model is the tier's own
+/// resolved model; this permits call sites that pre-resolve that same model,
+/// while preventing an unrelated internal model pin from carrying an
+/// incompatible effort. Kept `pub(crate)` for argv-boundary regression tests.
 pub(crate) fn effective_reasoning_effort(
     effort_override: Option<&str>,
     model_override: Option<&str>,
@@ -2821,15 +2806,39 @@ pub(crate) fn effective_reasoning_effort(
     if !agent_supports_reasoning_effort(agent_type) {
         return None;
     }
-    if let Some(e) = effort_override {
-        if !e.trim().is_empty() {
-            return Some(e.to_string());
-        }
+    let tier_model = resolve_model_flag(agent_type, tier, model_tiers);
+    let selected_model = effective_model_flag(model_override, agent_type, tier, model_tiers);
+    let candidate = reasoning_effort_candidate(
+        effort_override,
+        selected_model.as_deref(),
+        tier_model.as_deref(),
+        tier_reasoning_effort(agent_type, tier, model_tiers).as_deref(),
+    )?;
+
+    let model = selected_model?;
+    crate::core::model_catalog::reasoning_modes_for_agent_model(agent_type, &model)
+        .filter(|modes| effort_is_advertised(&candidate, modes))
+        .map(|_| candidate)
+}
+
+/// Pure precedence portion of effort resolution. The catalogue validation is
+/// intentionally separate so it cannot be bypassed by an execution override.
+pub(crate) fn reasoning_effort_candidate(
+    effort_override: Option<&str>,
+    selected_model: Option<&str>,
+    tier_model: Option<&str>,
+    tier_preset: Option<&str>,
+) -> Option<String> {
+    if let Some(effort) = effort_override.map(str::trim).filter(|value| !value.is_empty()) {
+        return Some(effort.to_owned());
     }
-    if model_override.map(|m| !m.trim().is_empty()).unwrap_or(false) {
-        return None;
-    }
-    tier_reasoning_effort(agent_type, tier, model_tiers)
+    (selected_model == tier_model)
+        .then(|| tier_preset.map(str::trim).filter(|value| !value.is_empty()).map(str::to_owned))
+        .flatten()
+}
+
+pub(crate) fn effort_is_advertised(candidate: &str, modes: &[String]) -> bool {
+    modes.iter().any(|mode| mode == candidate)
 }
 
 fn missing_ollama_model_error() -> String {
@@ -3283,6 +3292,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                 system_context: &extra_context,
                 project_path: config.project_path,
                 model_flag: model_flag.as_deref(),
+                reasoning_effort: reasoning_effort.as_deref(),
                 parent_cancel: config.cancel_token.as_ref(),
                 discussion_id: config.discussion_id,
                 resume_id: acp_resume_id,
@@ -3314,6 +3324,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                 system_context: &extra_context,
                 project_path: config.project_path,
                 model_flag: model_flag.as_deref(),
+                reasoning_effort: reasoning_effort.as_deref(),
                 parent_cancel: config.cancel_token.as_ref(),
                 discussion_id: config.discussion_id,
                 resume_id: acp_resume_id,
@@ -3325,6 +3336,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                 return run_acp_session(
                     AcpSessionRequest {
                         model_flag: None,
+                        reasoning_effort: None,
                         ..request
                     },
                     transport,
@@ -3583,6 +3595,7 @@ struct AcpSessionRequest<'a> {
     system_context: &'a str,
     project_path: &'a str,
     model_flag: Option<&'a str>,
+    reasoning_effort: Option<&'a str>,
     parent_cancel: Option<&'a tokio_util::sync::CancellationToken>,
     discussion_id: Option<&'a str>,
     resume_id: Option<&'a str>,
@@ -3640,6 +3653,7 @@ async fn start_adapted_acp(
 
     let agent_type = request.agent_type;
     let model = request.model_flag.map(str::to_owned);
+    let reasoning_effort = request.reasoning_effort.map(str::to_owned);
     if let Some(model) = &model {
         tracing::debug!(agent = ?agent_type, model, "ACP adapter model applied via direct CLI flag");
     }
@@ -3652,12 +3666,14 @@ async fn start_adapted_acp(
     let transport: Arc<dyn AcpTransport> = match agent_type {
         AgentType::ClaudeCode => Arc::new(ClaudeAcpAdapter::new(
             model,
+            reasoning_effort,
             full_access,
             discussion_id,
             scope,
         )),
         AgentType::Codex => Arc::new(CodexAcpAdapter::new(
             model,
+            reasoning_effort,
             full_access,
             request.resume_id.map(str::to_owned),
             discussion_id,
@@ -3668,6 +3684,7 @@ async fn start_adapted_acp(
     run_acp_session(
         AcpSessionRequest {
             model_flag: None,
+            reasoning_effort: None,
             ..request
         },
         transport,
@@ -3691,6 +3708,7 @@ async fn run_acp_session(
         system_context,
         project_path,
         model_flag,
+        reasoning_effort: _,
         parent_cancel,
         discussion_id: _,
         resume_id,
@@ -8612,6 +8630,10 @@ fn agent_command_with_task_worker_policy(
                 args.push("--model".into());
                 args.push(model.into());
             }
+            if let Some(effort) = reasoning_effort {
+                args.push("--effort".into());
+                args.push(effort.into());
+            }
             if task_worker {
                 // Ignore user/project settings so a previously configured
                 // allowWrite or excluded command cannot silently widen this
@@ -10204,6 +10226,7 @@ mod acp_resume_tests {
                 system_context: "",
                 project_path: "",
                 model_flag: None,
+                reasoning_effort: None,
                 parent_cancel,
                 discussion_id: None,
                 resume_id,
@@ -10512,6 +10535,7 @@ mod acp_resume_tests {
                     system_context: "",
                     project_path: "",
                     model_flag: None,
+                    reasoning_effort: None,
                     parent_cancel: None,
                     discussion_id: None,
                     resume_id: Some("recorded-session"),

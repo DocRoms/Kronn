@@ -11,7 +11,7 @@ import { CompressionSection } from './CompressionSection';
 import { ContextHelp } from '../ContextHelp';
 import { SearchableSelect } from '../SearchableSelect';
 import { useApi } from '../../hooks/useApi';
-import type { AgentConfig, AgentDetection, AgentsConfig, AgentType, ModelTier, ModelTiersConfig, UsageReport } from '../../types/generated';
+import type { AgentConfig, AgentDetection, AgentsConfig, AgentType, ModelTier, ModelTierConfig, ModelTiersConfig, UsageReport } from '../../types/generated';
 
 /** Where each agent's config lives, and how many runs it allows by default.
  *  `null` = unlimited: a remote endpoint someone else scales is not this
@@ -116,6 +116,7 @@ const AGENT_MODELS_URL: Partial<Record<keyof ModelTiersConfig, string>> = {
 function editableTiers(tiers: ModelTiersConfig) {
   return Object.fromEntries(Object.entries(tiers).map(([key, value]) => [key, {
     economy: value.economy ?? '', default: value.default ?? '', reasoning: value.reasoning ?? '',
+    economy_effort: value.economy_effort ?? '', default_effort: value.default_effort ?? '', reasoning_effort: value.reasoning_effort ?? '',
   }]));
 }
 
@@ -148,7 +149,10 @@ export function AgentsSection({
       return new Set();
     }
   });
-  const [tierEditing, setTierEditing] = useState<Record<string, { economy: string; default: string; reasoning: string }>>({});
+  const [tierEditing, setTierEditing] = useState<Record<string, {
+    economy: string; default: string; reasoning: string;
+    economy_effort: string; default_effort: string; reasoning_effort: string;
+  }>>({});
   const [savingTiers, setSavingTiers] = useState(false);
   const catalog = useApi(() => modelCatalogApi.list(), []);
   const saveModelTier = useAsyncGuard(async (agentKey: keyof ModelTiersConfig, field: ModelTier, value: string) => {
@@ -157,6 +161,43 @@ export function AgentsSection({
       // Other cards edit this same document; never replace it from our mount-time snapshot.
       const current = await configApi.getModelTiers();
       const next: ModelTiersConfig = { ...current, [agentKey]: { ...current[agentKey], [field]: value || null } };
+      // An effort belongs to an exact discovered model, never to a provider
+      // family. If a new known model does not advertise the saved mode, clear
+      // it in the same write rather than presenting an ignored preference.
+      const agent = Object.entries(AGENT_TIER_KEY).find(([, key]) => key === agentKey)?.[0] as AgentType | undefined;
+      const effortField = `${field}_effort` as keyof ModelTierConfig;
+      const selectedModel = value.trim() || (agent
+        ? catalog.data?.targets
+          .find(target => target.runtime_target_id === modelRuntimeTargetId(agent))
+          ?.models.find(model => model.tier_assignment === field)?.model_id
+        : undefined);
+      const selected = agent && selectedModel
+        ? catalog.data?.targets
+          .find(target => target.runtime_target_id === modelRuntimeTargetId(agent))
+          ?.models.find(model => model.model_id === selectedModel)
+        : undefined;
+      const savedEffort = next[agentKey][effortField];
+      if (selected && typeof savedEffort === 'string' && !selected.reasoning_modes.includes(savedEffort)) {
+        next[agentKey] = { ...next[agentKey], [effortField]: null };
+      }
+      await configApi.setModelTiers(next);
+      setTierEditing(editableTiers(next));
+      toast(t('config.saved'), 'success');
+    } catch {
+      toast(t('config.saveError'), 'error');
+    } finally {
+      setSavingTiers(false);
+    }
+  });
+  const saveTierEffort = useAsyncGuard(async (agentKey: keyof ModelTiersConfig, field: ModelTier, value: string) => {
+    setSavingTiers(true);
+    try {
+      const current = await configApi.getModelTiers();
+      const effortField = `${field}_effort` as keyof ModelTierConfig;
+      const next: ModelTiersConfig = {
+        ...current,
+        [agentKey]: { ...current[agentKey], [effortField]: value || null },
+      };
       await configApi.setModelTiers(next);
       setTierEditing(editableTiers(next));
       toast(t('config.saved'), 'success');
@@ -1158,6 +1199,7 @@ export function AgentsSection({
               const modelsUrl = AGENT_MODELS_URL[agentKey];
               const target = catalog.data?.targets.find(view => view.runtime_target_id === modelRuntimeTargetId(agent.agent_type));
               const saveTiers = (field: ModelTier, value: string) => saveModelTier(agentKey, field, value);
+              const supportsEffort = agent.agent_type === 'ClaudeCode' || agent.agent_type === 'Codex';
 
               // KT-337 — a fetched-catalogue provider needs a free-text field, not a
               // dropdown: the catalogue is long, partly uncallable, and a pasted id
@@ -1239,6 +1281,34 @@ export function AgentsSection({
                 );
               };
 
+              const renderEffortSelect = (field: ModelTier) => {
+                if (!supportsEffort) return null;
+                const effortField = `${field}_effort` as 'economy_effort' | 'default_effort' | 'reasoning_effort';
+                const configuredModel = editing[field]
+                  || target?.models.find(model => model.tier_assignment === field)?.model_id;
+                const entry = target?.models.find(model => model.model_id === configuredModel);
+                const modes = entry?.reasoning_modes ?? [];
+                const saved = editing[effortField];
+                const supported = modes.includes(saved);
+                return (
+                  <label className="flex-row gap-2 text-2xs" key={`${field}-effort`}>
+                    <span>{t(`disc.tier.${field}`)} · {t('config.reasoningEffort')}</span>
+                    <select
+                      aria-label={`${t('config.reasoningEffort')} ${field}`}
+                      data-model-tier-effort-agent={agent.agent_type}
+                      data-model-tier-effort={field}
+                      value={saved}
+                      disabled={savingTiers || catalog.loading || modes.length === 0}
+                      onChange={event => void saveTierEffort(agentKey, field, event.target.value)}
+                    >
+                      <option value="">{t('config.defaultModel')}</option>
+                      {saved && !supported && <option value={saved} disabled>{saved} — {t('config.reasoningEffortUnavailable')}</option>}
+                      {modes.map(mode => <option value={mode} key={mode}>{mode}</option>)}
+                    </select>
+                  </label>
+                );
+              };
+
               return (
                 <div className="set-agent-panel set-agent-panel-models">
                   <div className="set-agent-section-title">
@@ -1281,6 +1351,12 @@ export function AgentsSection({
                     {renderSelect('default', '\uD83C\uDFAF', 'rgba(var(--kr-info-rgb), 0.6)')}
                     {renderSelect('reasoning', '\uD83E\uDDE0', 'rgba(var(--kr-warning-amber-rgb), 0.6)')}
                   </div>
+                  {supportsEffort && <div className="flex-row gap-5" data-testid={`agent-tier-efforts-${agent.agent_type}`}>
+                    {renderEffortSelect('economy')}
+                    {renderEffortSelect('default')}
+                    {renderEffortSelect('reasoning')}
+                  </div>}
+                  {!supportsEffort && <p className="set-hint">{t('config.reasoningEffortUnsupported')}</p>}
                 </div>
               );
             })()}

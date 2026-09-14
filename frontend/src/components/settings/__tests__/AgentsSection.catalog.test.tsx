@@ -220,6 +220,36 @@ describe('AgentsSection — runtime catalogue and tier preservation (KT-531)', (
     expect(input).toHaveAttribute('placeholder', 'config.defaultModel (runtime-default)');
   });
 
+  it('saves a discovered effort and clears it when the selected model cannot accept it', async () => {
+    const current = tiers();
+    current.claude_code.economy_effort = 'high';
+    getTiers.mockResolvedValue(current);
+    list.mockResolvedValue({ targets: [target([
+      model('sonnet', { reasoning_modes: ['high'] }),
+      model('haiku', { reasoning_modes: ['low'] }),
+    ])] });
+    show();
+    const effort = await screen.findByLabelText('config.reasoningEffort economy');
+    expect(effort).toHaveValue('high');
+    const input = await picker();
+    fireEvent.focus(input);
+    fireEvent.click(await screen.findByRole('option', { name: 'haiku' }));
+    await waitFor(() => expect(setTiers).toHaveBeenCalledWith({
+      ...current,
+      claude_code: { ...current.claude_code, economy: 'haiku', economy_effort: null },
+    }));
+  });
+
+  it('persists only a model-advertised effort preset', async () => {
+    show();
+    const effort = await screen.findByLabelText('config.reasoningEffort economy');
+    expect(within(effort).getByRole('option', { name: 'high' })).toBeInTheDocument();
+    fireEvent.change(effort, { target: { value: 'high' } });
+    await waitFor(() => expect(setTiers).toHaveBeenCalledWith({
+      ...tiers(), claude_code: { ...tiers().claude_code, economy_effort: 'high' },
+    }));
+  });
+
   it.each(['Kiro', 'Vibe'] as const)('offers configured manual models for %s instead of N/A', async agentType => {
     const runtime = `agent:${agentType.toLowerCase()}`;
     list.mockResolvedValue({ targets: [target([

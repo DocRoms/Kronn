@@ -42,6 +42,7 @@ pub struct ClaudeAcpAdapter {
     program: String,
     cwd: Mutex<Option<PathBuf>>,
     model: Option<String>,
+    reasoning_effort: Option<String>,
     broker: AcpPermissionBroker,
     allowed_tools: Mutex<Vec<String>>,
     project_mcp_config_allowed: AtomicBool,
@@ -53,6 +54,7 @@ pub struct ClaudeAcpAdapter {
 impl ClaudeAcpAdapter {
     pub fn new(
         model: Option<String>,
+        reasoning_effort: Option<String>,
         full_access: bool,
         discussion_id: Option<String>,
         scope: AcpSessionScope,
@@ -61,6 +63,7 @@ impl ClaudeAcpAdapter {
             program: "claude".to_owned(),
             cwd: Mutex::new(None),
             model,
+            reasoning_effort,
             broker: AcpPermissionBroker::scoped(full_access, scope),
             allowed_tools: Mutex::new(Vec::new()),
             project_mcp_config_allowed: AtomicBool::new(false),
@@ -79,7 +82,7 @@ impl ClaudeAcpAdapter {
     ) -> Self {
         Self {
             program: program.into(),
-            ..Self::new(model, full_access, None, AcpSessionScope::new(None, "test"))
+            ..Self::new(model, None, full_access, None, AcpSessionScope::new(None, "test"))
         }
     }
 
@@ -210,6 +213,10 @@ impl AcpTransport for ClaudeAcpAdapter {
         if let Some(model) = &self.model {
             args.push("--model".into());
             args.push(model.clone());
+        }
+        if let Some(effort) = &self.reasoning_effort {
+            args.push("--effort".into());
+            args.push(effort.clone());
         }
         if self.project_mcp_config_allowed.load(Ordering::SeqCst) {
             let mcp_config = Self::mcp_config_path(&cwd).ok_or_else(|| {
@@ -393,6 +400,7 @@ mod tests {
             program: fixture.to_string_lossy().into_owned(),
             ..ClaudeAcpAdapter::new(
                 None,
+                None,
                 false,
                 None,
                 AcpSessionScope::new(Some(dir.path().to_path_buf()), "disc-secret"),
@@ -435,6 +443,28 @@ mod tests {
             .unwrap_or_else(|error| panic!("second prompt failed: {error}"));
         let events = drain(rx).await;
         assert!(events.contains(&AcpSessionEvent::TextDelta("resumed".into())));
+    }
+
+    #[tokio::test]
+    async fn prompt_forwards_resolved_effort_to_the_cli() {
+        let dir = tempfile::tempdir().unwrap();
+        let argv = dir.path().join("argv.txt");
+        let fixture = crate::acp::test_support::write_fixture_script(dir.path(), &format!(
+            "printf '%s\\n' \"$*\" > '{}'\nprintf '%s\\n' '{{\"type\":\"result\",\"subtype\":\"success\"}}'",
+            argv.display(),
+        ));
+        let adapter = ClaudeAcpAdapter {
+            program: fixture.to_string_lossy().into_owned(),
+            ..ClaudeAcpAdapter::new(Some("sonnet".into()), Some("high".into()), false, None,
+                AcpSessionScope::new(Some(dir.path().to_path_buf()), "effort"))
+        };
+        let mut host = AcpHost::new(1, std::sync::Arc::new(adapter));
+        host.negotiate(init_request(&dir.path().to_string_lossy())).await.unwrap();
+        let target = host.create_session().await.unwrap();
+        let (tx, _rx) = mpsc::channel(16);
+        host.prompt(&target, "hello", tx).await.unwrap();
+        let args = std::fs::read_to_string(argv).unwrap();
+        assert!(args.contains("--effort high"), "argv: {args}");
     }
 
     #[tokio::test]
@@ -502,7 +532,7 @@ mod tests {
 
     #[test]
     fn full_access_is_translated_into_a_skip_permissions_flag_and_audited() {
-        let adapter = ClaudeAcpAdapter::new(None, true, None, AcpSessionScope::new(None, "test"));
+        let adapter = ClaudeAcpAdapter::new(None, None, true, None, AcpSessionScope::new(None, "test"));
         assert!(adapter.broker.session_policy().claude_skip_permissions);
         assert!(adapter
             .permission_audit_log()
@@ -537,6 +567,7 @@ mod tests {
         let adapter = std::sync::Arc::new(ClaudeAcpAdapter {
             program: fixture.to_string_lossy().into_owned(),
             ..ClaudeAcpAdapter::new(
+                None,
                 None,
                 false,
                 None,
@@ -589,6 +620,7 @@ mod tests {
         .unwrap();
         let adapter = ClaudeAcpAdapter::new(
             None,
+            None,
             false,
             None,
             AcpSessionScope::new(Some(dir.path().to_path_buf()), "disc-ids"),
@@ -636,6 +668,7 @@ mod tests {
         let adapter = ClaudeAcpAdapter {
             program: fixture.to_string_lossy().into_owned(),
             ..ClaudeAcpAdapter::new(
+                None,
                 None,
                 false,
                 Some("disc-prod".into()),
