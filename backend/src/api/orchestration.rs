@@ -14241,6 +14241,163 @@ mod tests {
         );
     }
 
+    /// KT-648 — an escalation that never produced a REVIEW leaves the attempt
+    /// where it was, so the next delivery rebuilds the review-request id the
+    /// first one already posted. `messages.id` is a primary key, the insert
+    /// sits inside the transaction that commits `Working -> AwaitingReview`,
+    /// and the violation therefore rolls the whole delivery back instead of
+    /// skipping one message: the execution can never hand its work over again.
+    #[tokio::test]
+    async fn a_reassigned_unreviewed_delivery_can_be_delivered_again() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (_parent, _child, exec_id, _head, _path) =
+            delivered_awaiting_review(&db, repo.path()).await;
+        let delivered = exec_of(&db, &exec_id).await;
+        assert_eq!(delivered.status, TaskExecutionStatus::AwaitingReview);
+        let first_attempt = delivered.attempt_no;
+
+        // What `apply_execution_timeout` does when the review clock expires:
+        // escalate and park on a human, writing no `worker_reviews` row.
+        let execution_id = exec_id.clone();
+        db.with_conn(move |conn| {
+            crate::db::orchestration::transition_execution(
+                conn,
+                &execution_id,
+                TaskExecutionStatus::Escalated,
+                &backend_actor(),
+                serde_json::json!({ "timeout_kind": "review_wait" }),
+            )?;
+            conn.execute(
+                "UPDATE task_execution_recovery SET recovery_action = 'await_human', \
+                        review_deadline_at = NULL, pending = 0 WHERE task_execution_id = ?1",
+                rusqlite::params![execution_id],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        // The principal recovers the SAME joined CLI — the one assignment the
+        // reassignment contract lets a child room keep.
+        let execution_id = exec_id.clone();
+        db.with_conn(move |conn| {
+            crate::db::orchestration::reassign_execution_worker(
+                conn,
+                &execution_id,
+                &crate::models::CampaignWorkerSelection {
+                    target: MessageTarget::cli(AgentType::ClaudeCode, 101),
+                    model: None,
+                    profile_id: None,
+                },
+                "the review never came back",
+                &backend_actor(),
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        // `Escalated -> Working`, the documented reassignment path
+        // (`reassign_native_execution` drives it at the API boundary).
+        let execution_id = exec_id.clone();
+        db.with_conn(move |conn| {
+            crate::db::orchestration::transition_execution(
+                conn,
+                &execution_id,
+                TaskExecutionStatus::Working,
+                &backend_actor(),
+                serde_json::json!({ "recovery": "worker_reassigned" }),
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        let manifest = clean_manifest_for_execution(&db, &exec_id).await;
+        let redelivery = deliver_worker_manifest(&db, &exec_id, "ClaudeCode", "sess-a", &manifest)
+            .await
+            .expect("a re-delivery must not abort on a message primary key");
+        assert!(
+            matches!(redelivery, DeliverOutcome::Delivered { .. }),
+            "the recovered worker must be able to hand its work back: {redelivery:?}"
+        );
+        let after = exec_of(&db, &exec_id).await;
+        assert_eq!(
+            after.status,
+            TaskExecutionStatus::AwaitingReview,
+            "a collision rolls the transition back and strands the execution in Working"
+        );
+
+        let execution_id = exec_id.clone();
+        let second_attempt = after.attempt_no;
+        let obligations = db
+            .with_conn(move |conn| {
+                Ok(conn.query_row(
+                    "SELECT COUNT(*) FROM messages WHERE id IN (?1, ?2)",
+                    rusqlite::params![
+                        format!("orch-review-request:{execution_id}:{first_attempt}"),
+                        format!("orch-review-request:{execution_id}:{second_attempt}"),
+                    ],
+                    |row| row.get::<_, i64>(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert_ne!(
+            first_attempt, second_attempt,
+            "a delivered attempt must not be reused: its message identities are already spent"
+        );
+        assert_eq!(
+            obligations, 2,
+            "both review obligations keep distinct durable message ids"
+        );
+    }
+
+    /// KT-648 — the attempt guard asks whether the current attempt was
+    /// REVIEWED, but attempt N owns its delivery and message identities as
+    /// soon as it was DELIVERED. Its own comment already says
+    /// "delivery/review/message"; this pins the code to it.
+    #[tokio::test]
+    async fn reassigning_an_attempt_that_already_delivered_advances_it() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (_parent, _child, exec_id, _head, _path) =
+            delivered_awaiting_review(&db, repo.path()).await;
+        let before = exec_of(&db, &exec_id).await;
+
+        let execution_id = exec_id.clone();
+        let reassigned = db
+            .with_conn(move |conn| {
+                crate::db::orchestration::transition_execution(
+                    conn,
+                    &execution_id,
+                    TaskExecutionStatus::Escalated,
+                    &backend_actor(),
+                    serde_json::json!({ "timeout_kind": "review_wait" }),
+                )?;
+                Ok(crate::db::orchestration::reassign_execution_worker(
+                    conn,
+                    &execution_id,
+                    &crate::models::CampaignWorkerSelection {
+                        target: MessageTarget::cli(AgentType::ClaudeCode, 101),
+                        model: None,
+                        profile_id: None,
+                    },
+                    "the worker session disappeared",
+                    &backend_actor(),
+                )?)
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            reassigned.attempt_no,
+            before.attempt_no + 1,
+            "an attempt that already delivered cannot be reused for the next delivery"
+        );
+    }
+
     #[tokio::test]
     async fn resumed_validating_checkpoint_does_not_duplicate_a_persisted_validation() {
         let repo = init_repo();
