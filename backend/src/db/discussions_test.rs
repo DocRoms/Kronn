@@ -3,7 +3,7 @@ mod tests {
     use crate::db::discussions::*;
     use crate::db::migrations;
     use chrono::Utc;
-    use rusqlite::Connection;
+    use rusqlite::{params, Connection};
     use std::sync::{Arc, Barrier};
     use std::time::Duration;
 
@@ -96,6 +96,40 @@ mod tests {
         assert_eq!(all[0].id, "d1");
         assert_eq!(all[0].title, "Discussion d1");
         assert!(!all[0].archived);
+    }
+
+    #[test]
+    fn persisted_unknown_agent_type_is_rejected_without_exposing_its_value() {
+        let conn = test_conn();
+        let discussion = make_discussion("unknown-agent-type");
+        insert_discussion(&conn, &discussion).unwrap();
+        conn.execute(
+            "UPDATE discussions SET agent = ?1 WHERE id = ?2",
+            params!["sensitive-unknown-agent", discussion.id],
+        )
+        .unwrap();
+
+        let error = get_discussion(&conn, &discussion.id)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("unknown persisted agent type"));
+        assert!(!error.contains("sensitive-unknown-agent"));
+    }
+
+    #[test]
+    fn persisted_custom_agent_type_remains_valid() {
+        let conn = test_conn();
+        let mut discussion = make_discussion("custom-agent-type");
+        discussion.agent = AgentType::Custom;
+        insert_discussion(&conn, &discussion).unwrap();
+
+        assert_eq!(
+            get_discussion(&conn, &discussion.id)
+                .unwrap()
+                .unwrap()
+                .agent,
+            AgentType::Custom
+        );
     }
 
     #[test]
