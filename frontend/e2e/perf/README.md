@@ -52,7 +52,11 @@ make build-backend  # or `cd backend && cargo build`
 #    Kronn-managed entry before re-inserting from the database it was given.
 #    An empty sandbox database therefore STRIPS your own MCP configuration.
 #    That happened on 2026-09-13.
-rm -rf "$SANDBOX"        # the launcher owns only a directory it creates
+#    The launcher owns only a directory it creates, and refuses one it finds.
+#    Do NOT delete this path to make room: it is fixed, it is not ours, and a
+#    published `rm -rf` on a fixed location is how somebody else's work
+#    disappears. If it exists, stop and find out what is holding it.
+[ -e "$SANDBOX" ] && { echo "$SANDBOX already exists — find out what owns it, then remove it yourself"; exit 1; }
 BACKEND_PID=$(scripts/e2e-sandbox-backend.sh "$SANDBOX" "$PORT")
 
 # 3. Stop it BEFORE seeding, and WAIT. `seed.py` writes rows straight into
