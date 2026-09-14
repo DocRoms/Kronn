@@ -203,11 +203,19 @@ pub async fn create(
     Json(mut req): Json<CreateDiscussionRequest>,
 ) -> Json<ApiResponse<Discussion>> {
     let discussion_id = Uuid::new_v4().to_string();
+    let mut launch_qp = None;
     if let Some(qp_id) = req.originating_qp_id.clone() {
         let lookup = qp_id.clone();
-        let qp = match state
+        let (qp, qp_version) = match state
             .db
-            .with_conn(move |conn| crate::db::quick_prompts::get_quick_prompt(conn, &lookup))
+            .with_conn(move |conn| {
+                crate::db::quick_prompts::get_quick_prompt(conn, &lookup)?
+                    .map(|qp| {
+                        crate::db::quick_prompts::current_version_index(conn, &lookup)
+                            .map(|version| (qp, version))
+                    })
+                    .transpose()
+            })
             .await
         {
             Ok(Some(qp)) => qp,
@@ -267,8 +275,9 @@ pub async fn create(
         // Persist only the canonical template. The encrypted snapshot is
         // hydrated into a temporary discussion copy immediately before agent
         // dispatch; API responses and message storage never receive values.
-        req.initial_prompt = qp.prompt_template;
-        req.project_id = req.project_id.or(qp.project_id);
+        req.initial_prompt = qp.prompt_template.clone();
+        req.project_id = req.project_id.or(qp.project_id.clone());
+        launch_qp = Some((qp, qp_version));
     }
     // Input validation
     if req.title.len() > MAX_TITLE_LEN {
@@ -442,20 +451,27 @@ pub async fn create(
     let originating_qp_id = req.originating_qp_id.clone();
     let want_no_agent = req.no_agent;
     let initial_targets = req.initial_targets;
+    let launch_model_tiers = state.config.read().await.agents.model_tiers.clone();
     match state
         .db
         .with_conn(move |conn| {
             // 0.8.10 — a QP-launched discussion inherits the QP's explicit model
             // (agent_settings.model), so a standalone launch runs on the same
             // model the QP is pinned to. Set it before insert; None → tier resolve.
-            if let Some(ref qp_id) = originating_qp_id {
-                if let Ok(Some(qp)) = crate::db::quick_prompts::get_quick_prompt(conn, qp_id) {
-                    if let Some(m) = qp.agent_settings.and_then(|s| s.model) {
-                        disc.model = Some(m);
-                    }
+            if let Some((qp, _)) = &launch_qp {
+                if qp.agent == disc.agent && qp.connection_id == disc.connection_id {
+                    disc.model = qp
+                        .agent_settings
+                        .as_ref()
+                        .and_then(|settings| settings.model.clone());
                 }
             }
+            let tx = conn.unchecked_transaction()?;
+            let conn = &tx;
             crate::db::discussions::insert_discussion(conn, &disc)?;
+            if let Some((qp, _)) = &launch_qp {
+                crate::db::discussion_effort::capture(conn, &disc, qp, &launch_model_tiers)?;
+            }
             crate::db::discussions::insert_message(conn, &disc.id, &msg)?;
             // The card has a foreign key to the discussion through the messages
             // table. Insert the durable owner first, then add the immutable,
@@ -471,20 +487,19 @@ pub async fn create(
             if !initial_targets.is_empty() {
                 crate::db::discussions::replace_message_targets(conn, &msg.id, &initial_targets)?;
             }
-            if let Some(ref qp_id) = originating_qp_id {
-                if let Ok(Some(v)) = crate::db::quick_prompts::current_version_index(conn, qp_id) {
-                    crate::db::discussions::set_originating_qp(conn, &disc.id, qp_id, v)?;
-                }
+            if let Some((qp, Some(version))) = &launch_qp {
+                crate::db::discussions::set_originating_qp(conn, &disc.id, &qp.id, *version)?;
             }
             // F9 — mark the disc human-only so the runner never spawns.
             if want_no_agent {
                 crate::db::discussions::set_disc_no_agent(conn, &disc.id, true)?;
             }
-            Ok(())
+            tx.commit()?;
+            Ok(disc)
         })
         .await
     {
-        Ok(()) => {
+        Ok(discussion) => {
             // If workspace_mode is "Isolated", create a worktree
             if workspace_mode == "Isolated" {
                 if let Some(ref pid) = discussion.project_id {

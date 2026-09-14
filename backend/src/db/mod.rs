@@ -12,6 +12,7 @@ pub mod context_audits;
 pub mod delivery_summaries;
 pub mod disc_source;
 pub mod discussion_actions;
+pub mod discussion_effort;
 pub mod discussion_important;
 pub mod discussion_questions;
 pub mod discussion_sessions;
