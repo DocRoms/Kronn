@@ -2325,7 +2325,30 @@ async fn orchestrator_return_resume_route_authenticates_and_replays_exact_rotati
     let state = test_state();
     let token = "kr-resume-11111111111111111111111111111111";
     let next = "kr-resume-22222222222222222222222222222222";
-    let execution_id = state.db.with_conn(move |conn| {
+    let repo = tempfile::tempdir().unwrap();
+    for args in [
+        vec!["init", "-b", "main"],
+        vec!["config", "user.email", "return@test.invalid"],
+        vec!["config", "user.name", "Return Test"],
+    ] {
+        assert!(std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo.path())
+            .status()
+            .unwrap()
+            .success());
+    }
+    std::fs::write(repo.path().join("README.md"), "return lifecycle\n").unwrap();
+    for args in [vec!["add", "."], vec!["commit", "-m", "initial"]] {
+        assert!(std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo.path())
+            .status()
+            .unwrap()
+            .success());
+    }
+    let repo_path = repo.path().to_string_lossy().to_string();
+    let task_reference = state.db.with_conn(move |conn| {
         let now = chrono::Utc::now().to_rfc3339();
         for id in ["return-http-parent", "return-http-child"] {
             conn.execute(
@@ -2334,61 +2357,149 @@ async fn orchestrator_return_resume_route_authenticates_and_replays_exact_rotati
             )?;
         }
         conn.execute(
+            "INSERT INTO projects(id, name, path, created_at, updated_at) VALUES ('return-http-project', 'return', ?1, ?2, ?2)",
+            rusqlite::params![repo_path, now],
+        )?;
+        conn.execute(
             "INSERT INTO discussion_sessions(id, disc_id, agent_type, session_id, role, status, joined_at, resume_token_hash) \
-             VALUES (657, 'return-http-child', 'Codex', 'live-before', 'peer', 'active', ?1, ?2)",
+             VALUES (657, 'return-http-parent', 'Codex', 'live-before', 'peer', 'active', ?1, ?2)",
             rusqlite::params![now, format!("{:x}", Sha256::digest(token.as_bytes()))],
         )?;
-        conn.execute(
-            "INSERT INTO planning_tasks(id, task_number, title, created_at, updated_at) \
-             VALUES ('return-http-task', 657, 'return route', ?1, ?1)",
-            [&now],
-        )?;
-        let actor = kronn::models::OrchestrationActor {
-            kind: kronn::models::PlanningActorKind::Backend,
-            id: Some("api-test".into()),
-            session_id: None,
-            source_message_id: None,
-        };
-        let execution = kronn::db::orchestration::launch_single_task(
-            conn,
-            &kronn::models::LaunchSingleTaskInput::new(
-                "return-http-task", "return-http-parent",
-            ),
-            &actor,
-        )?.execution;
-        conn.execute(
-            "UPDATE task_executions SET sub_discussion_id='return-http-child', \
-             worker_target_kind='cli', worker_cli_session_id=657, worker_agent_type='Codex', \
-             status='Working' WHERE id=?1",
-            [&execution.id],
-        )?;
-        kronn::db::disc_source::bind_to_source(
-            conn, "return-http-child", "Codex", "cli-return-http",
-        )?;
-        conn.execute(
-            "INSERT INTO task_execution_cli_bindings \
-             (task_execution_id, cli_session_id, source_agent, source_session_id, pinned_at) \
-             VALUES (?1, 657, 'Codex', 'cli-return-http', ?2)",
-            rusqlite::params![execution.id, now],
-        )?;
-        kronn::db::orchestration::transition_execution(
-            conn,
-            &execution.id,
-            kronn::models::TaskExecutionStatus::Cancelled,
-            &actor,
-            serde_json::json!({}),
-        )?;
-        Ok(execution.id)
+        kronn::db::disc_source::bind_to_source(conn, "return-http-parent", "Codex", "live-before")?;
+        let task = kronn::db::planning::create_task(conn, &kronn::models::CreatePlanningTaskRequest {
+            title: "return route".into(),
+            discussion_id: Some("return-http-parent".into()),
+            idempotency_key: None,
+            description: String::new(),
+            status: kronn::models::PlanningTaskStatus::Todo,
+            priority: kronn::models::PlanningTaskPriority::Medium,
+            parent_id: None,
+            project_ids: vec!["return-http-project".into()],
+            tags: vec![],
+            definition_of_done: vec![kronn::models::CreatePlanningDodItem { id: None, sentence: "worker returns".into(), completed: false }],
+            links: vec![],
+            actor: kronn::models::PlanningActor { kind: kronn::models::PlanningActorKind::Backend, id: Some("api-test".into()), session_id: None, source_message_id: None },
+        })?;
+        Ok(task.summary.reference)
     }).await.unwrap();
+
+    let execution = kronn::api::orchestration::provision_single_task_execution(
+        &state.db,
+        kronn::api::orchestration::ProvisionInput {
+            task_reference,
+            parent_discussion_id: "return-http-parent".into(),
+            worker: kronn::models::MessageTarget::cli(kronn::models::AgentType::Codex, 657),
+            base_rev: Some("main".into()),
+            idempotency_key: Some("return-http-cycle".into()),
+        },
+    )
+    .await
+    .unwrap();
+    let child_id = execution.sub_discussion_id.clone().unwrap();
+    let execution_id = execution.id.clone();
+    let offer_id = state
+        .db
+        .with_conn({
+            let execution_id = execution_id.clone();
+            move |conn| {
+                Ok(
+                    kronn::db::worker_offers::get_active_offer_for_attempt(conn, &execution_id, 0)?
+                        .unwrap()
+                        .id,
+                )
+            }
+        })
+        .await
+        .unwrap();
+    let app = build_router_with_auth(state.clone(), false);
+    let (_, accepted) = post_json(
+        app.clone(),
+        "/api/orchestration/accept-offer",
+        serde_json::json!({
+            "offer_id": offer_id, "source_agent": "Codex", "source_session_id": "live-before",
+            "source_binding_session_id": "live-before"
+        }),
+    )
+    .await;
+    assert_eq!(accepted["success"], true, "{accepted}");
+    assert_eq!(accepted["data"]["child_discussion_id"], child_id);
+
+    let (workspace, dod_id) = state
+        .db
+        .with_conn({
+            let execution_id = execution_id.clone();
+            move |conn| {
+                let workspace = kronn::db::discussion_workspaces::get_managed_for_execution(
+                    conn,
+                    &execution_id,
+                )?
+                .unwrap()
+                .canonical_path
+                .unwrap();
+                let execution =
+                    kronn::db::orchestration::get_task_execution(conn, &execution_id)?.unwrap();
+                let task = kronn::db::planning::get_task(conn, &execution.task_id)?.unwrap();
+                Ok((workspace, task.definition_of_done[0].id.clone()))
+            }
+        })
+        .await
+        .unwrap();
+    let head = String::from_utf8(
+        std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&workspace)
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap()
+    .trim()
+    .to_string();
+    let (_, delivered) = post_json(app.clone(), "/api/orchestration/deliver", serde_json::json!({
+        "task_execution_id": execution_id, "source_agent": "Codex", "source_session_id": "live-before",
+        "manifest": {"version":"1","task_ref":"KT-657","head_sha":head,"files_touched":[],"tests":[{"name":"fixture","status":"pass","evidence":"actual lifecycle"}],"dod_status":[{"dod_id":dod_id,"met":true,"evidence":"actual lifecycle"}],"docs":[],"migrations":[],"risks":[],"limitations":[],"summary":"return"}
+    })).await;
+    assert_eq!(delivered["success"], true, "{delivered}");
+    state.db.with_conn(|conn| {
+        conn.execute("INSERT INTO discussion_sessions(id, disc_id, agent_type, session_id, role, status, joined_at) VALUES (658, 'return-http-parent', 'ClaudeCode', 'principal', 'peer', 'active', ?1)", [chrono::Utc::now().to_rfc3339()])?;
+        Ok(())
+    }).await.unwrap();
+    let (_, reviewed) = post_json(app.clone(), "/api/orchestration/review", serde_json::json!({
+        "task_execution_id": execution_id, "source_agent":"ClaudeCode", "source_session_id":"principal",
+        "decision":{"version":"1","task_ref":"KT-657","decision":"approve","reviewed_head_sha":head,"dod_verifications":[{"dod_id":dod_id,"met":true,"evidence":"reviewed actual delivery"}]}
+    })).await;
+    assert_eq!(reviewed["success"], true, "{reviewed}");
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let done = state
+                .db
+                .with_conn({
+                    let id = execution_id.clone();
+                    move |conn| {
+                        Ok(kronn::db::orchestration::get_task_execution(conn, &id)?
+                            .unwrap()
+                            .status
+                            == kronn::models::TaskExecutionStatus::Done)
+                    }
+                })
+                .await
+                .unwrap();
+            if done {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("review integration reaches Done");
 
     let request = serde_json::json!({
         "agent_type": "Codex",
         "session_id": "live-after",
         "resume_token": token,
         "next_resume_token": next,
-        "expected_child_disc_id": "return-http-child"
+        "expected_child_disc_id": child_id
     });
-    let app = build_router_with_auth(state.clone(), false);
     let (status, first) = post_json(
         app.clone(),
         "/api/discussions/orchestrator-return-resume",
@@ -2417,7 +2528,7 @@ async fn orchestrator_return_resume_route_authenticates_and_replays_exact_rotati
             "session_id": "must-not-win",
             "resume_token": token,
             "next_resume_token": "kr-resume-33333333333333333333333333333333",
-            "expected_child_disc_id": "return-http-child"
+            "expected_child_disc_id": child_id
         }),
     )
     .await;
@@ -2434,9 +2545,10 @@ async fn orchestrator_return_resume_route_authenticates_and_replays_exact_rotati
             assert_eq!(disc_id, "return-http-parent");
             assert_eq!(session_id, "live-after");
             let traces: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM messages WHERE id LIKE 'orch-return-%:' || ?1 || ':Cancelled'",
-            [&execution_id], |row| row.get(0),
-        )?;
+                "SELECT COUNT(*) FROM messages WHERE id LIKE 'orch-return-%:' || ?1 || ':Done'",
+                [&execution_id],
+                |row| row.get(0),
+            )?;
             assert_eq!(traces, 2);
             Ok(())
         })
