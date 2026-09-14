@@ -2507,6 +2507,215 @@ mod http_native_tool_step_tests {
             + "data: [DONE]\n\n"
     }
 
+    fn named_connection(id: &str, endpoint: String, model: &str) -> ExternalApiConnection {
+        let now = chrono::Utc::now();
+        ExternalApiConnection {
+            id: id.into(),
+            display_name: id.into(),
+            mention_alias: id.into(),
+            endpoint: Some(endpoint),
+            credential_slug: format!("credential-{id}"),
+            origin_preset: ExternalApiConnectionPreset::Other,
+            economy_model: None,
+            default_model: Some(model.into()),
+            reasoning_model: None,
+            created_at: now,
+            updated_at: now,
+            image_model: None,
+            video_model: None,
+            media_endpoint: None,
+        }
+    }
+
+    fn named_custom_step(connection_id: &str, model: Option<&str>) -> WorkflowStep {
+        WorkflowStep {
+            name: "named-http-step".into(),
+            step_type: StepType::Agent,
+            agent: AgentType::Custom,
+            prompt_template: "Answer from the selected connection".into(),
+            agent_settings: Some(AgentSettings {
+                model: model.map(str::to_string),
+                tier: Some(ModelTier::Default),
+                reasoning_effort: None,
+                max_tokens: None,
+                connection_id: Some(connection_id.into()),
+            }),
+            ..WorkflowStep::default()
+        }
+    }
+
+    async fn insert_connection_and_catalog(
+        db: &crate::db::Database,
+        connection: ExternalApiConnection,
+        capabilities: &[&str],
+    ) {
+        let runtime_target =
+            crate::db::model_catalog::http_runtime_target_id(&connection.id);
+        let model = connection.default_model.clone().unwrap();
+        let capabilities = capabilities
+            .iter()
+            .map(|value| value.to_string())
+            .collect::<Vec<_>>();
+        db.with_conn(move |conn| {
+            crate::db::external_api_connections::insert(conn, &connection)?;
+            crate::db::model_catalog::reconcile_live(
+                conn,
+                &runtime_target,
+                &AgentType::Custom,
+                &[crate::db::model_catalog::DiscoveredModel {
+                    model_id: model.clone(),
+                    display_name: model,
+                    capabilities,
+                    reasoning_modes: Vec::new(),
+                    default_reasoning_mode: None,
+                }],
+            )
+        })
+        .await
+        .unwrap();
+    }
+
+    fn empty_tokens() -> TokensConfig {
+        TokensConfig {
+            anthropic: None,
+            openai: None,
+            google: None,
+            keys: Vec::new(),
+            disabled_overrides: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn incompatible_named_workflow_model_refuses_before_any_provider_request() {
+        let provider_a = MockServer::start().await;
+        let provider_b = MockServer::start().await;
+        let db = crate::db::Database::open_in_memory().unwrap();
+        insert_connection_and_catalog(
+            &db,
+            named_connection("connection-a", provider_a.uri(), "model-a"),
+            &["chat"],
+        )
+        .await;
+        insert_connection_and_catalog(
+            &db,
+            named_connection("connection-b", provider_b.uri(), "model-b"),
+            &["video"],
+        )
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().to_string_lossy();
+
+        let outcome = execute_step(
+            &named_custom_step("connection-b", None),
+            &project,
+            &project,
+            &empty_tokens(),
+            false,
+            &TemplateContext::new(),
+            "",
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(&db),
+        )
+        .await;
+
+        assert_eq!(outcome.result.status, RunStatus::Failed);
+        assert_eq!(outcome.result.step_kind.as_deref(), Some("preflight_failed"));
+        assert!(outcome.result.output.contains("unsupported"));
+        assert!(provider_a.received_requests().await.unwrap().is_empty());
+        assert!(provider_b.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn named_workflow_connection_b_dispatches_its_endpoint_and_model_never_a() {
+        let provider_a = MockServer::start().await;
+        let provider_b = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .and(body_string_contains("\"model\":\"model-b\""))
+            .respond_with(ResponseTemplate::new(200).set_body_string(sse(&[
+                r#"{"choices":[{"index":0,"delta":{"content":"selected B"}}]}"#,
+            ])))
+            .mount(&provider_b)
+            .await;
+        let db = crate::db::Database::open_in_memory().unwrap();
+        insert_connection_and_catalog(
+            &db,
+            named_connection("connection-a", provider_a.uri(), "model-a"),
+            &["chat"],
+        )
+        .await;
+        insert_connection_and_catalog(
+            &db,
+            named_connection("connection-b", provider_b.uri(), "model-b"),
+            &["chat"],
+        )
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().to_string_lossy();
+
+        let outcome = execute_step(
+            &named_custom_step("connection-b", None),
+            &project,
+            &project,
+            &empty_tokens(),
+            false,
+            &TemplateContext::new(),
+            "",
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(&db),
+        )
+        .await;
+
+        assert_eq!(outcome.result.status, RunStatus::Success);
+        assert!(outcome.result.output.contains("selected B"));
+        assert!(provider_a.received_requests().await.unwrap().is_empty());
+        let requests = provider_b.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        assert!(String::from_utf8_lossy(&requests[0].body).contains("\"model\":\"model-b\""));
+    }
+
+    #[tokio::test]
+    async fn deleted_named_workflow_connection_surfaces_refusal_without_fallback() {
+        let fallback = MockServer::start().await;
+        let db = crate::db::Database::open_in_memory().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().to_string_lossy();
+        let endpoints = crate::models::setup::HttpEndpoints {
+            lite_llm: Some(fallback.uri()),
+            nvidia: None,
+        };
+
+        let outcome = execute_step(
+            &named_custom_step("deleted-connection", None),
+            &project,
+            &project,
+            &empty_tokens(),
+            false,
+            &TemplateContext::new(),
+            "",
+            None,
+            None,
+            Some(&endpoints),
+            None,
+            None,
+            Some(&db),
+        )
+        .await;
+
+        assert_eq!(outcome.result.status, RunStatus::Failed);
+        assert_eq!(outcome.result.step_kind.as_deref(), Some("preflight_failed"));
+        assert!(outcome.result.output.contains("deleted-connection"));
+        assert!(fallback.received_requests().await.unwrap().is_empty());
+    }
+
     #[tokio::test]
     async fn litellm_workflow_step_executes_a_native_read_and_consumes_its_result() {
         let server = MockServer::start().await;
