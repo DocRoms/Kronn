@@ -50,6 +50,19 @@ fn target_tier(
         .unwrap_or(fallback)
 }
 
+fn primary_connection_id(
+    discussion_connection_id: Option<&str>,
+    requested_participants: &[OrchestrationParticipant],
+    primary_agent_type: &AgentType,
+) -> Option<String> {
+    discussion_connection_id.map(str::to_string).or_else(|| {
+        requested_participants
+            .iter()
+            .find(|participant| participant.agent_type == *primary_agent_type)
+            .and_then(|participant| participant.connection_id.clone())
+    })
+}
+
 fn tier_label(tier: ModelTier) -> &'static str {
     match tier {
         ModelTier::Economy => "economy",
@@ -180,7 +193,6 @@ pub async fn orchestrate(
             .unwrap_or_default(),
         None => Vec::new(),
     };
-    let primary_tier = target_tier(&primary_agent_type, None, &initial_targets, disc_tier);
     // Use skills from the orchestration request if provided, otherwise fall back to discussion skills
     let orch_skill_ids = if req_skill_ids.is_empty() {
         disc.skill_ids.clone()
@@ -202,10 +214,15 @@ pub async fn orchestrate(
     // own connection (if the discussion's primary agent is itself a named
     // Custom connection) is preserved rather than dropped by the re-append.
     let participants = {
-        let primary_connection_id = requested_participants
-            .iter()
-            .find(|p| p.agent_type == primary_agent_type)
-            .and_then(|p| p.connection_id.clone());
+        // The discussion's sticky connection is the primary agent's durable
+        // target. A debate request cannot be allowed to replace it with a
+        // same-type connection, because that would send summary/synthesis to
+        // a different provider than ordinary discussion replies.
+        let primary_connection_id = primary_connection_id(
+            disc.connection_id.as_deref(),
+            &requested_participants,
+            &primary_agent_type,
+        );
         let mut others: Vec<_> = requested_participants
             .into_iter()
             .filter(|p| p.agent_type != primary_agent_type)
@@ -217,6 +234,15 @@ pub async fn orchestrate(
         others
     };
     let agents: Vec<AgentType> = participants.iter().map(|p| p.agent_type.clone()).collect();
+    let primary_connection_id = participants
+        .last()
+        .and_then(|participant| participant.connection_id.clone());
+    let primary_tier = target_tier(
+        &primary_agent_type,
+        primary_connection_id.as_deref(),
+        &initial_targets,
+        disc_tier,
+    );
 
     // KT-545 DoD #3/#4: refuse a Custom participant with no (or mismatched)
     // connection up front, before spawning any round — the same guard
@@ -240,6 +266,121 @@ pub async fn orchestrate(
             return Sse::new(stream);
         }
     }
+
+    let (
+        tokens,
+        agent_access,
+        model_tiers_config,
+        http_endpoints,
+        global_timeout,
+        local_global_timeout,
+        ollama_context_overrides,
+    ) = {
+        let config = state.config.read().await;
+        let access_map: std::collections::HashMap<String, bool> = agents
+            .iter()
+            .map(|a| (format!("{:?}", a), config.agents.full_access_for(a)))
+            .collect();
+        (
+            config.tokens.clone(),
+            access_map,
+            config.agents.model_tiers.clone(),
+            crate::models::setup::HttpEndpoints::from_agents(&config.agents),
+            configured_agent_global_timeout(config.server.agent_global_timeout_min),
+            configured_agent_global_timeout(config.server.local_agent_global_timeout_min),
+            config.server.ollama_context_overrides.clone(),
+        )
+    };
+
+    // Resolve the exact connection-backed model for every participant before
+    // any orchestration state is written or a process is spawned. The regular
+    // discussion path performs this catalog gate in `make_agent_stream`; this
+    // direct multi-agent path must do the same so a known non-chat or
+    // unavailable HTTP model never reaches an endpoint.
+    let mut primary_connection = None;
+    for participant in &participants {
+        let participant_tier = target_tier(
+            &participant.agent_type,
+            participant.connection_id.as_deref(),
+            &initial_targets,
+            disc_tier,
+        );
+        let connection = match participant.connection_id.as_deref() {
+            Some(connection_id) => {
+                let connection_id = connection_id.to_string();
+                let lookup_id = connection_id.clone();
+                match state
+                    .db
+                    .with_read_conn(move |conn| {
+                        crate::db::external_api_connections::get(conn, &lookup_id)
+                    })
+                    .await
+                {
+                    Ok(Some(connection)) => Some(connection),
+                    Ok(None) => {
+                        let error =
+                            format!("External API connection {connection_id} was not found");
+                        let stream: SseStream = Box::pin(futures::stream::once(async move {
+                            Ok::<_, Infallible>(
+                                Event::default()
+                                    .event("error")
+                                    .data(serde_json::json!({ "error": error }).to_string()),
+                            )
+                        }));
+                        return Sse::new(stream);
+                    }
+                    Err(error) => {
+                        let error = error.to_string();
+                        let stream: SseStream = Box::pin(futures::stream::once(async move {
+                            Ok::<_, Infallible>(
+                                Event::default()
+                                    .event("error")
+                                    .data(serde_json::json!({ "error": error }).to_string()),
+                            )
+                        }));
+                        return Sse::new(stream);
+                    }
+                }
+            }
+            None => None,
+        };
+        let runtime_target_id = connection
+            .as_ref()
+            .map(|connection| crate::db::model_catalog::http_runtime_target_id(&connection.id));
+        let model_override = connection.as_ref().and_then(|connection| {
+            crate::http_transport::connection_tier_model(connection, participant_tier)
+        });
+        if let Some(failure) = crate::core::model_catalog::preflight_check(
+            &state.db,
+            runtime_target_id.as_deref(),
+            participant.agent_type.clone(),
+            participant_tier,
+            model_override.as_deref(),
+            Some(&model_tiers_config),
+        )
+        .await
+        {
+            let payload = serde_json::json!({
+                "error": "model_catalog_preflight_failed",
+                "preflight_failure": failure,
+            });
+            let stream: SseStream = Box::pin(futures::stream::once(async move {
+                Ok::<_, Infallible>(Event::default().event("error").data(payload.to_string()))
+            }));
+            return Sse::new(stream);
+        }
+        if participant.agent_type == primary_agent_type
+            && participant.connection_id == primary_connection_id
+        {
+            primary_connection = connection;
+        }
+    }
+    let primary_external_http = primary_connection
+        .as_ref()
+        .and_then(|connection| crate::http_transport::external_http_runtime(connection, &tokens));
+    let primary_model_override = primary_connection.as_ref().and_then(|connection| {
+        crate::http_transport::connection_tier_model(connection, primary_tier)
+    });
 
     // Validate that every agent in the final list (including the
     // re-injected primary) is actually runnable. The frontend already
@@ -311,30 +452,6 @@ pub async fn orchestrate(
         None
     };
 
-    let (
-        tokens,
-        agent_access,
-        model_tiers_config,
-        http_endpoints,
-        global_timeout,
-        local_global_timeout,
-        ollama_context_overrides,
-    ) = {
-        let config = state.config.read().await;
-        let access_map: std::collections::HashMap<String, bool> = agents
-            .iter()
-            .map(|a| (format!("{:?}", a), config.agents.full_access_for(a)))
-            .collect();
-        (
-            config.tokens.clone(),
-            access_map,
-            config.agents.model_tiers.clone(),
-            crate::models::setup::HttpEndpoints::from_agents(&config.agents),
-            configured_agent_global_timeout(config.server.agent_global_timeout_min),
-            configured_agent_global_timeout(config.server.local_agent_global_timeout_min),
-            config.server.ollama_context_overrides.clone(),
-        )
-    };
     let timeout_for_agent = move |agent: &AgentType| {
         if *agent == AgentType::Ollama {
             local_global_timeout
@@ -493,6 +610,8 @@ pub async fn orchestrate(
                 ollama_context_overrides: Some(&ollama_context_overrides),
                 http_request_timeout: Some(timeout_for_agent(&primary_agent_type)),
                 http_endpoints: Some(&http_endpoints),
+                external_http: primary_external_http.as_ref(),
+                model_override: primary_model_override.as_deref(),
                 // This pass only compresses already-loaded transcript text.
                 // Giving it room tools would permit mutation and recursive
                 // summarisation with no relevance to its bounded job.
@@ -805,6 +924,8 @@ pub async fn orchestrate(
                 ollama_context_overrides: Some(&ollama_context_overrides),
                 http_request_timeout: Some(timeout_for_agent(&primary_agent_type)),
                 http_endpoints: Some(&http_endpoints),
+                external_http: primary_external_http.as_ref(),
+                model_override: primary_model_override.as_deref(),
                 context_files_prompt: &companion_context,
                 discussion_id: Some(&id),
                 acp_session_store: Some(runner::AcpSessionStore::new(state.db.clone(), id.clone())),
@@ -856,10 +977,8 @@ pub async fn orchestrate(
                     // Save synthesis to DB — always runs even if client is gone
                     {
                         // KT-37 — stamp the concrete model the synthesis ran on.
-                        // The synthesis config passes NO model_override either, so
-                        // resolve from the tier alone, matching the runner.
                         let synthesis_model = runner::effective_model_flag(
-                            None,
+                            primary_model_override.as_deref(),
                             &primary_agent_type,
                             primary_tier,
                             Some(&model_tiers_config),
@@ -1091,6 +1210,56 @@ pub async fn generate_summary_on_demand(
             }),
         )
     };
+    let connection = match disc.connection_id.as_deref() {
+        Some(connection_id) => {
+            crate::http_transport::validate_connection_target(
+                state,
+                &disc.agent,
+                Some(connection_id),
+            )
+            .await?;
+            let lookup_id = connection_id.to_string();
+            Some(
+                state
+                    .db
+                    .with_read_conn(move |conn| {
+                        crate::db::external_api_connections::get(conn, &lookup_id)
+                    })
+                    .await
+                    .map_err(|error| error.to_string())?
+                    .ok_or_else(|| {
+                        format!("External API connection {connection_id} was not found")
+                    })?,
+            )
+        }
+        None => None,
+    };
+    let runtime_target_id = connection
+        .as_ref()
+        .map(|connection: &ExternalApiConnection| {
+            crate::db::model_catalog::http_runtime_target_id(&connection.id)
+        });
+    let model_override = connection.as_ref().and_then(|connection| {
+        crate::http_transport::connection_tier_model(connection, ModelTier::Economy)
+    });
+    if let Some(failure) = crate::core::model_catalog::preflight_check(
+        &state.db,
+        runtime_target_id.as_deref(),
+        disc.agent.clone(),
+        ModelTier::Economy,
+        model_override.as_deref(),
+        Some(&model_tiers),
+    )
+    .await
+    {
+        return Err(format!(
+            "model_catalog_preflight_failed:{}",
+            serde_json::to_string(&failure).unwrap_or_default()
+        ));
+    }
+    let external_http = connection
+        .as_ref()
+        .and_then(|connection| crate::http_transport::external_http_runtime(connection, tokens));
     let mut process = runner::start_agent_with_config(runner::AgentStartConfig {
         mcp_context_override: Some(""),
         tier: ModelTier::Economy,
@@ -1098,6 +1267,8 @@ pub async fn generate_summary_on_demand(
         http_request_timeout: Some(http_request_timeout),
         model_tiers: Some(&model_tiers),
         http_endpoints: Some(&http_endpoints),
+        external_http: external_http.as_ref(),
+        model_override: model_override.as_deref(),
         // Same boundary as automatic summarisation: the requested message
         // slice is already in the prompt, so tools add risk but no capability.
         tools: None,
@@ -1486,8 +1657,8 @@ mod orchestrate_validation_tests {
     // pure function so we can unit-test the discriminant-based comparison
     // without spinning up `detect_all` (which hits the filesystem and
     // depends on the host having `claude` / `codex` binaries).
-    use super::target_tier;
-    use crate::models::{AgentType, MessageTarget, ModelTier};
+    use super::{primary_connection_id, target_tier};
+    use crate::models::{AgentType, MessageTarget, ModelTier, OrchestrationParticipant};
 
     fn missing_agents(requested: &[AgentType], usable: &[AgentType]) -> Vec<AgentType> {
         requested
@@ -1591,6 +1762,30 @@ mod orchestrate_validation_tests {
             target_tier(&AgentType::Custom, Some("conn-unknown"), &targets, ModelTier::Default),
             ModelTier::Default,
             "a connection absent from the initial targets must fall back, never borrow another connection's tier"
+        );
+    }
+
+    #[test]
+    fn orchestration_keeps_the_discussions_sticky_primary_connection() {
+        let requested = vec![
+            OrchestrationParticipant {
+                agent_type: AgentType::Codex,
+                connection_id: None,
+            },
+            OrchestrationParticipant {
+                agent_type: AgentType::Custom,
+                connection_id: Some("request-connection".into()),
+            },
+        ];
+
+        assert_eq!(
+            primary_connection_id(
+                Some("discussion-connection"),
+                &requested,
+                &AgentType::Custom
+            ),
+            Some("discussion-connection".into()),
+            "a request cannot redirect the primary Custom agent to another endpoint"
         );
     }
 }

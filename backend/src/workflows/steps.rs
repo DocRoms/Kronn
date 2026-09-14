@@ -31,6 +31,25 @@ struct AgentOutput {
 /// Optional sender for streaming partial agent output during step execution.
 pub type ProgressSender = tokio::sync::mpsc::Sender<String>;
 
+pub(crate) fn step_model_override(
+    step: &WorkflowStep,
+    connection: Option<&ExternalApiConnection>,
+) -> Option<String> {
+    step.agent_settings
+        .as_ref()
+        .and_then(|settings| settings.model.clone())
+        .or_else(|| {
+            let tier = step
+                .agent_settings
+                .as_ref()
+                .and_then(|settings| settings.tier)
+                .unwrap_or_default();
+            connection.and_then(|connection| {
+                crate::http_transport::connection_tier_model(connection, tier)
+            })
+        })
+}
+
 /// Build the full agent-ready prompt for a step: template render +
 /// `extra_context` append + output-format addendum + triage addendum.
 /// Does NOT append the signal-protocol instructions — those depend on
@@ -222,25 +241,27 @@ pub async fn execute_step(
     let max_attempts = step.retry.as_ref().map(|r| r.max_retries + 1).unwrap_or(1);
     let mut last_error = String::new();
 
+    let resolved_connection = resolve_step_connection(step, catalog_db).await;
+    let runtime_target_id = resolved_connection
+        .as_ref()
+        .map(|connection| crate::db::model_catalog::http_runtime_target_id(&connection.id));
+    let tier = step
+        .agent_settings
+        .as_ref()
+        .and_then(|settings| settings.tier)
+        .unwrap_or_default();
+    let model_override = step_model_override(step, resolved_connection.as_ref());
+
     // Authoritative check immediately before the first possible provider
     // dispatch. Initial workflow-wide validation remains in the runner, but
     // availability can change while earlier steps execute.
     if let Some(database) = catalog_db {
-        let tier = step
-            .agent_settings
-            .as_ref()
-            .and_then(|settings| settings.tier)
-            .unwrap_or_default();
-        let model = step
-            .agent_settings
-            .as_ref()
-            .and_then(|settings| settings.model.as_deref());
         if let Some(failure) = crate::core::model_catalog::preflight_check(
             database,
-            None,
+            runtime_target_id.as_deref(),
             step.agent.clone(),
             tier,
-            model,
+            model_override.as_deref(),
             model_tiers,
         )
         .await
@@ -278,7 +299,9 @@ pub async fn execute_step(
     // accurate but unactionable, since nothing carried WHICH connection the
     // step meant. Discussions and Quick Prompts already resolve this identity;
     // steps now do too (KT-545).
-    let external_http = resolve_step_connection(step, catalog_db, tokens_config).await;
+    let external_http = resolved_connection.as_ref().and_then(|connection| {
+        crate::http_transport::external_http_runtime(connection, tokens_config)
+    });
 
     for attempt in 0..max_attempts {
         if attempt > 0 {
@@ -833,11 +856,10 @@ fn reviewer_shares_step_connection(step: &WorkflowStep, reviewer_agent: &AgentTy
     *reviewer_agent == step.agent
 }
 
-async fn resolve_step_connection(
+pub(crate) async fn resolve_step_connection(
     step: &WorkflowStep,
     catalog_db: Option<&crate::db::Database>,
-    tokens_config: &TokensConfig,
-) -> Option<runner::ExternalHttpRuntime> {
+) -> Option<ExternalApiConnection> {
     let connection_id = step
         .agent_settings
         .as_ref()
@@ -861,16 +883,7 @@ async fn resolve_step_connection(
         return None;
     }
 
-    let endpoint = connection.endpoint.clone()?;
-    Some(runner::ExternalHttpRuntime {
-        display_name: connection.display_name.clone(),
-        mention_alias: connection.mention_alias.clone(),
-        endpoint,
-        api_key: tokens_config
-            .active_key_for(&connection.credential_slug)
-            .filter(|key| !key.trim().is_empty())
-            .map(str::to_string),
-    })
+    Some(connection)
 }
 
 /// Run an agent with optional stall timeout.
@@ -930,10 +943,7 @@ async fn run_agent_with_timeout(
         ollama_format: ollama_format.as_ref(),
         // Explicit per-step model (from the wizard's model picker) — now
         // actually consumed at run time, not just stamped for display.
-        model_override: step
-            .agent_settings
-            .as_ref()
-            .and_then(|s| s.model.as_deref()),
+        model_override: model_override.as_deref(),
         // KT-646 — explicit per-step reasoning effort, from the wizard's
         // effort picker. Wins over the tier's configured preset; `None`
         // falls back to that preset, then to the CLI default (see
@@ -1619,6 +1629,71 @@ mod tests {
         );
         assert_eq!(s.tier, Some(crate::models::ModelTier::Reasoning));
         assert_eq!(esc.prompt_template, "summarize {{x}}", "task preserved");
+    }
+
+    #[test]
+    fn workflow_preflight_uses_the_selected_connections_model() {
+        fn connection(id: &str, model: &str) -> ExternalApiConnection {
+            let now = chrono::Utc::now();
+            ExternalApiConnection {
+                id: id.into(),
+                display_name: id.into(),
+                mention_alias: id.into(),
+                endpoint: Some(format!("http://{id}.test")),
+                credential_slug: format!("credential-{id}"),
+                origin_preset: ExternalApiConnectionPreset::Other,
+                economy_model: None,
+                default_model: Some(model.into()),
+                reasoning_model: None,
+                created_at: now,
+                updated_at: now,
+                image_model: None,
+                video_model: None,
+                media_endpoint: None,
+            }
+        }
+
+        let mut step = make_step("anything");
+        step.agent = AgentType::Custom;
+        step.agent_settings = Some(AgentSettings {
+            model: None,
+            tier: Some(ModelTier::Default),
+            connection_id: Some("connection-b".into()),
+            reasoning_effort: None,
+            max_tokens: None,
+        });
+        let connection_a = connection("connection-a", "model-a");
+        let connection_b = connection("connection-b", "model-b");
+
+        assert_eq!(
+            step_model_override(&step, Some(&connection_a)).as_deref(),
+            Some("model-a")
+        );
+        assert_eq!(
+            step_model_override(&step, Some(&connection_b)).as_deref(),
+            Some("model-b")
+        );
+        assert_eq!(
+            crate::db::model_catalog::http_runtime_target_id(&connection_b.id),
+            "http:connection-b",
+            "the selected same-agent connection keeps its own catalog identity"
+        );
+    }
+
+    #[test]
+    fn explicit_workflow_model_remains_the_dispatch_and_preflight_model() {
+        let mut step = make_step("anything");
+        step.agent_settings = Some(AgentSettings {
+            model: Some("expert-model".into()),
+            tier: Some(ModelTier::Default),
+            connection_id: Some("connection-b".into()),
+            reasoning_effort: None,
+            max_tokens: None,
+        });
+        assert_eq!(
+            step_model_override(&step, None).as_deref(),
+            Some("expert-model")
+        );
     }
 
     #[test]

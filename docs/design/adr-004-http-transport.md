@@ -116,12 +116,14 @@ capability gate on one side, tier/connection resolution shared across launch
 surfaces on the other. Nothing in this module talks to a provider directly or
 owns persistence beyond the `discussions.connection_id` column.
 
-Workflow Agent steps are a known, explicit exception: `WorkflowStep`/
-`AgentSettings` have no `connection_id` field, and
-`workflows::steps::run_agent_with_timeout` never resolves `external_http` —
-a step whose `agent` is `Custom` cannot dispatch today. Closing this requires
-threading DB access into a currently pure/no-DB function and is deferred
-rather than rushed into this delivery; see `docs/inconsistencies-tech-debt.md`.
+Orchestration and Workflow Agent steps resolve a named connection before their
+catalog preflight. They pass the resulting `http:<connection-id>` runtime
+target and effective connection model to the guard, then reuse the same
+connection/model for dispatch. The guard remains caller-owned; centralizing it
+at the runner boundary is a possible follow-up once overlapping runner work is
+integrated. [src: file: backend/src/api/discussions/orchestration.rs:235-385]
+[src: file: backend/src/workflows/steps.rs:241-310]
+[src: file: backend/src/workflows/runner.rs:815-850]
 
 ## Sources
 
