@@ -6,6 +6,12 @@ use rusqlite::{params, Connection, OptionalExtension};
 use crate::agents::runner;
 use crate::models::{AgentType, Discussion, ModelTier, ModelTiersConfig, QuickPrompt};
 
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "Cannot apply Quick Prompt effort without a resolved model; choose a model or clear the effort"
+)]
+pub(crate) struct UnresolvedQuickPromptEffort;
+
 pub fn capture(
     conn: &Connection,
     discussion: &Discussion,
@@ -29,14 +35,20 @@ pub fn capture(
         return Ok(());
     };
     let model = runner::effective_model_flag(
-        discussion.model.as_deref(), &discussion.agent, discussion.tier, Some(tiers),
-    ).context("Cannot apply Quick Prompt effort without a resolved model; choose a model or clear the effort")?;
+        discussion.model.as_deref(),
+        &discussion.agent,
+        discussion.tier,
+        Some(tiers),
+    )
+    .ok_or(UnresolvedQuickPromptEffort)?;
     let agent = serde_json::to_value(&discussion.agent)?;
     let tier = serde_json::to_value(discussion.tier)?;
+    let agent = agent.as_str().context("Invalid serialized agent")?;
+    let tier = tier.as_str().context("Invalid serialized tier")?;
     conn.execute(
         "INSERT INTO discussion_effort_snapshots (discussion_id, agent, tier, model, effort)
          VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![discussion.id, agent.as_str(), tier.as_str(), model, effort],
+        params![discussion.id, agent, tier, model, effort],
     )?;
     Ok(())
 }
@@ -51,10 +63,12 @@ pub fn for_run(
 ) -> Result<Option<String>> {
     let agent = serde_json::to_value(agent)?;
     let tier = serde_json::to_value(tier)?;
+    let agent = agent.as_str().context("Invalid serialized agent")?;
+    let tier = tier.as_str().context("Invalid serialized tier")?;
     conn.query_row(
         "SELECT effort FROM discussion_effort_snapshots
          WHERE discussion_id = ?1 AND agent = ?2 AND tier = ?3 AND model = ?4",
-        params![discussion_id, agent.as_str(), tier.as_str(), model],
+        params![discussion_id, agent, tier, model],
         |row| row.get(0),
     )
     .optional()

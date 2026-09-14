@@ -568,6 +568,9 @@ pub async fn create(
 
             Json(ApiResponse::ok(discussion))
         }
+        Err(e) if e.is::<crate::db::discussion_effort::UnresolvedQuickPromptEffort>() => Json(
+            ApiResponse::err_coded(ApiErrorCode::Validation, e.to_string()),
+        ),
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
     }
 }

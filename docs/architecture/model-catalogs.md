@@ -134,6 +134,12 @@ QP or a version that may have been removed. Existing discussions are not
 backfilled. A changed model/agent/tier, HTTP connection or per-message tier
 override does not inherit this QP override; the new run's own preset resolution
 still applies. Failure to read the snapshot stops the run explicitly.
+An explicit nonblank QP effort requires a resolved model: if neither the QP,
+tier setting nor catalog assignment provides one, creation fails atomically
+with an actionable `validation` error (choose a model or clear the effort),
+not a database error. This also applies to previously saved QPs whose effort
+was formerly inert; ignoring it silently would claim a setting was applied
+when it was not. QPs with no effort or only whitespace keep the old behavior.
 [src: file: backend/src/db/discussion_effort.rs:1]
 [src: file: backend/src/api/discussions/crud.rs:201]
 [src: file: backend/src/api/discussions/streaming.rs:2535]
