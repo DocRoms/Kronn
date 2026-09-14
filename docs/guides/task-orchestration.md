@@ -125,6 +125,47 @@ assignment. Reassign the execution explicitly to a native worker to release
 CLI-only containment; this cancels stale pending jobs before enabling the new
 worker. Ordinary rooms retain their existing native-agent toggle.
 
+### Quiet work and useful milestones
+
+Technical progress stays in the execution's child discussion; it is not
+automatically copied into the parent. Factual milestones are distinct: a joined
+CLI can explicitly publish one to the real parent, while a native/HTTP worker
+without that tool asks the principal to relay it. This follows the accepted
+KT-635 brief policy, not a guarantee that every external host CLI obeys it.
+An unreviewed delivery never appears as an accepted report. After approval,
+Kronn derives one fixed-layout report; replay does not produce another.
+[src: file: backend/src/api/orchestration.rs:5494]
+[src: file: backend/src/api/orchestration.rs:15830]
+[src: file: backend/src/api/orchestration.rs:18430]
+
+Native conversational handoffs are a separate opt-in from launching a planning
+task. Their paid/unknown allowance is configurable and shared by the originating
+human turn. Removing that allowance explicitly does not remove structural
+guards: only attached, not-already-scheduled targets can run, delegation depth
+remains bounded and local handoffs retain a fixed ceiling. A typed wake to a
+joined CLI never silently substitutes a native responder.
+[src: file: backend/src/models/setup.rs:236]
+[src: file: backend/src/db/discussions.rs:1584]
+[src: file: backend/src/db/discussions.rs:1660]
+[src: file: backend/src/db/discussions.rs:1728]
+
+### Highlight a message without changing the task
+
+Choose **Important message** above the ordinary composer, enter text and select
+Information, Decision or Blocker. A task link is optional and selects an
+existing task from this discussion's plan; it does not create, edit or complete
+that task. Tasks are managed in the plan, not through this publication form.
+
+The publication key is requested only inside the open form; use the existing
+credential enrolled in Settings. Your normal draft stays independent. Closing
+the form or visiting Settings preserves its text in memory, but reloading the
+browser does not. If an outcome is uncertain, retry reconciles that exact
+attempt before another write. See [important messages](../architecture/important-messages.md#human-form-0130-kt-643)
+for the lifecycle and [publication authority](../architecture/important-message-publication-authority.md)
+for enrollment, recovery and security limits.
+[src: file: frontend/src/components/ImportantMessageForm.tsx:1]
+[src: file: frontend/src/lib/submitImportantMessage.ts:1]
+
 ## Review and integrate
 
 When the worker delivers, the execution enters **Awaiting review**. Inspect the

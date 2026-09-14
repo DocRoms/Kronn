@@ -13,8 +13,16 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Added
 
-- Important messages are objects, not formatting. An agent publishes a
-  `kronn-important` block — a decision, a scope change, a DoD waiver, a blocking
+- **Important message** opens a plain-text form above the ordinary composer:
+  Information, Decision or Blocker, with an optional link to an existing task
+  in this discussion's plan. No JSON to write and no permanent key field in the
+  normal composer. Publishing never creates, edits or completes a task; the
+  card's link opens that task in the plan. The ordinary draft stays independent.
+  Form drafts survive closing and navigation in memory, not a browser reload.
+  An uncertain send keeps its original identity for reconciliation instead of
+  blindly publishing again.
+- Important messages are persisted objects, not formatting. The structured
+  `kronn-important` contract also supports a scope change, a DoD waiver, a blocking
   alert, an action needed from a human, an accepted delivery — and Kronn keeps a
   card the discussion can filter, count and step through, instead of a bold line
   that scrolls away. A worker's delivery report stays a delivery report: when a
@@ -24,9 +32,10 @@ Release notes for 0.9.3 and earlier are available in the
   Settings and a single-use proof bound to the room and to the exact text, so a
   captured request cannot be replayed or aimed somewhere else. A worker
   publishes none while it is working, holding a valid credential or not — it
-  reports through its delivery. **An install publishes no cards until an
-  operator enrols one**, which is deliberate: the message still posts, and the
-  response says what was refused.
+  reports through its delivery. Caller-authored cards require an enrolled
+  credential; without accepted authority the ordinary message still posts and
+  the response explains the refused card. Kronn's own orchestration steering
+  events use their backend authority and do not require a human credential.
 - The publication bootstrap can be rotated, and recovered when it is lost.
   Rotating it from Settings writes the replacement to the operator's private
   file and answers with the path — the secret travels over no wire, and the
