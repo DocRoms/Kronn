@@ -129,6 +129,18 @@ export function AgentsSection({
   usagePanel,
   inDocker = false,
 }: AgentsSectionProps) {
+  const [checkingVersions, setCheckingVersions] = useState(false);
+  const recheckVersions = useAsyncGuard(async () => {
+    setCheckingVersions(true);
+    try {
+      await agentsApi.versionCheck();
+      refetchAgents();
+    } catch {
+      toast(t('config.releaseCheckRequestFailed'), 'error');
+    } finally {
+      setCheckingVersions(false);
+    }
+  });
   const [installing, setInstalling] = useState<string | null>(null);
   const [newKeyInputs, setNewKeyInputs] = useState<Record<string, { name: string; value: string }>>({});
   const [addingKeyFor, setAddingKeyFor] = useState<string | null>(null);
@@ -718,7 +730,7 @@ export function AgentsSection({
                   <span className="set-origin-badge">{agent.origin}</span>
                   {agent.version && <code className="set-code text-xs">v{agent.version}</code>}
                   {agent.version_check_error && (
-                    <span className="set-origin-badge" title={agent.version_check_error}>?</span>
+                    <span className="set-origin-badge" title={agent.version_check_error}>{t('config.releaseCheckFailed', agent.version_check_error)}</span>
                   )}
                   {agent.version_source_url && (
                     <a className="set-origin-badge" href={agent.version_source_url} target="_blank" rel="noreferrer" title={agent.version_checked_at ?? agent.version_source_url}>{t('config.releaseSource')}</a>
@@ -1541,7 +1553,7 @@ export function AgentsSection({
             >
               <FolderSearch size={10} /> {t('config.discoverKeys')}
             </button>
-            <button className="set-icon-btn" onClick={async () => { try { await agentsApi.versionCheck(); } finally { refetchAgents(); } }} title={t('config.refresh')} aria-label={t('config.refresh')}>
+            <button className="set-icon-btn" onClick={() => void recheckVersions()} disabled={checkingVersions} title={t('config.recheckVersions')} aria-label={t('config.recheckVersions')}>
               <RefreshCw size={12} />
             </button>
           </div>

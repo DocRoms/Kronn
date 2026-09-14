@@ -56,6 +56,7 @@ import type {
   RetryAgentDispatchResponse,
   OrchestrationRequest,
   AgentDetection,
+  RtkVersionInfo,
   AgentType,
   Contact,
   NetworkInfo,
@@ -2665,22 +2666,7 @@ export interface RtkSavings {
 
 /** Response shape of `GET /api/rtk/version`. `update_available: true`
  *  drives the "update available" pill in the RTK Settings card. */
-export interface RtkVersionInfo {
-  available: boolean;
-  installed: string | null;
-  latest_known: string | null;
-  checked_at: string | null;
-  check_error: string | null;
-  update_available: boolean;
-  update_command: string;
-  ccusage: {
-    installed: string | null;
-    latest: string | null;
-    checked_at: string | null;
-    check_error: string | null;
-    update_available: boolean;
-  };
-}
+export type { RtkVersionInfo } from '../types/generated';
 
 export const rtk = {
   /** Wire RTK hooks into each supported agent. The backend filters to

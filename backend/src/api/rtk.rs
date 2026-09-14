@@ -430,7 +430,7 @@ pub struct CliReleaseInfo {
 /// this to surface an "update available" pill in the RTK section
 /// without re-implementing semver compare in TypeScript.
 pub async fn version() -> Json<ApiResponse<RtkVersionInfo>> {
-    crate::core::versions::refresh_if_stale();
+    crate::core::versions::refresh_if_stale_and_wait().await;
     let release = crate::core::versions::rtk_status();
     let ccusage_release = crate::core::versions::ccusage_status();
     let ccusage_installed = crate::core::usage::installed_ccusage_version().await;
@@ -460,15 +460,7 @@ pub async fn version() -> Json<ApiResponse<RtkVersionInfo>> {
     if !crate::core::rtk_detect::rtk_binary_available() {
         return Json(ApiResponse::ok(empty));
     }
-    let output = match async_cmd("rtk").arg("--version").output().await {
-        Ok(o) if o.status.success() => o,
-        _ => return Json(ApiResponse::ok(empty)),
-    };
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    // `rtk --version` prints `rtk X.Y.Z` — pull the second whitespace-
-    // separated token. We're tolerant: if the shape ever changes, the
-    // pill silently hides instead of bricking the panel.
-    let installed = stdout.split_whitespace().nth(1).map(|s| s.to_string());
+    let installed = crate::core::versions::installed_version(Path::new("rtk")).await;
     let update_available = installed
         .as_deref()
         .zip(latest_known.as_deref())

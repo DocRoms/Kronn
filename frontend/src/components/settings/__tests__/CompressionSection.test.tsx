@@ -6,16 +6,18 @@
 // missing, API-only agents excluded from the count.
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import { buildApiMock } from '../../../test/apiMock';
 import type { AgentDetection, AgentType } from '../../../types/generated';
 
-const { activateMock, savingsMock, versionMock } = vi.hoisted(() => ({
+const { activateMock, savingsMock, versionMock, versionCheckMock } = vi.hoisted(() => ({
   activateMock: vi.fn(),
   savingsMock: vi.fn(),
   versionMock: vi.fn(),
+  versionCheckMock: vi.fn(),
 }));
 vi.mock('../../../lib/api', () => buildApiMock({
+  agents: { versionCheck: versionCheckMock as never },
   rtk: {
     activate: activateMock as never,
     savings: savingsMock as never,
@@ -54,6 +56,7 @@ describe('CompressionSection', () => {
     savingsMock.mockReset();
     savingsMock.mockResolvedValue({ available: false, total_tokens_saved: 0, ratio_percent: 0, sample_count: 0 });
     versionMock.mockReset();
+    versionCheckMock.mockReset().mockResolvedValue([]);
     // Default: same version installed as latest — keeps the freshness
     // pill hidden in the base render assertions. Tests that explicitly
     // care about the pill flip this on a per-case basis.
@@ -232,6 +235,45 @@ describe('CompressionSection', () => {
     await waitFor(() => {
       expect(screen.getByText('config.ccusageVersion:20.1.0,config.versionUnknown')).toBeInTheDocument();
     });
+  });
+
+  it('shows ccUsage versions even when RTK is not installed', async () => {
+    render(<CompressionSection agents={[mkAgent({ agent_type: 'ClaudeCode', rtk_available: false })]} t={t} />);
+    expect(await screen.findByText('config.ccusageVersion:20.1.0,20.1.0')).toBeInTheDocument();
+    expect(savingsMock).not.toHaveBeenCalled();
+  });
+
+  it('keeps cached versions visible with explicit source errors and attempt dates', async () => {
+    versionMock.mockResolvedValue({
+      available: true, installed: '0.37.2', latest_known: '0.37.3',
+      checked_at: '2026-09-14T10:00:00Z', check_error: 'Official source returned HTTP 429.',
+      update_available: true, update_command: 'install',
+      ccusage: { installed: '20.1.0', latest: '20.1.2', checked_at: '2026-09-14T10:00:00Z',
+        check_error: 'Official source timed out.', update_available: true },
+    });
+    render(<CompressionSection agents={[mkAgent({ agent_type: 'ClaudeCode' })]} t={t} />);
+    expect(await screen.findByText('config.ccusageVersion:20.1.0,20.1.2')).toBeInTheDocument();
+    expect(screen.getByText('config.releaseCheckFailed:Official source timed out.')).toBeInTheDocument();
+    expect(screen.getByText('config.releaseCheckFailed:Official source returned HTTP 429.')).toBeInTheDocument();
+    expect(screen.getAllByText('config.releaseCheckedAt:2026-09-14T10:00:00Z')).toHaveLength(2);
+  });
+
+  it('deduplicates synchronous rechecks and preserves the snapshot after a failed request', async () => {
+    let rejectCheck!: (error: Error) => void;
+    versionCheckMock.mockReturnValue(new Promise((_, reject) => { rejectCheck = reject; }));
+    const toast = vi.fn();
+    render(<CompressionSection agents={[mkAgent({ agent_type: 'ClaudeCode' })]} toast={toast} t={t} />);
+    await screen.findByText('config.ccusageVersion:20.1.0,20.1.0');
+    const button = screen.getByRole('button', { name: 'config.recheckVersions' });
+    act(() => { fireEvent.click(button); fireEvent.click(button); });
+    expect(versionCheckMock).toHaveBeenCalledTimes(1);
+    await act(async () => { rejectCheck(new Error('request unavailable')); });
+    expect(screen.getByText('config.ccusageVersion:20.1.0,20.1.0')).toBeInTheDocument();
+    expect(toast).toHaveBeenCalledWith('config.releaseCheckRequestFailed', 'error');
+    expect(button).not.toBeDisabled();
+    versionCheckMock.mockResolvedValue([]);
+    fireEvent.click(button);
+    await waitFor(() => expect(versionMock).toHaveBeenCalledTimes(2));
   });
 
   it('renders the freshness pill when the backend reports an outdated RTK', async () => {
