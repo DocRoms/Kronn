@@ -2722,6 +2722,57 @@ mod http_native_tool_step_tests {
     }
 
     #[tokio::test]
+    async fn named_litellm_without_endpoint_refuses_without_legacy_fallback() {
+        let fallback = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(sse(&[
+                r#"{"choices":[{"index":0,"delta":{"content":"wrong fallback"}}]}"#,
+            ])))
+            .mount(&fallback)
+            .await;
+        let db = crate::db::Database::open_in_memory().unwrap();
+        let mut selected = named_connection("connection-b", fallback.uri(), "model-b");
+        selected.origin_preset = ExternalApiConnectionPreset::LiteLlm;
+        selected.endpoint = Some("   ".into());
+        insert_connection_and_catalog(&db, selected, &["chat"]).await;
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().to_string_lossy();
+        let endpoints = crate::models::setup::HttpEndpoints {
+            lite_llm: Some(fallback.uri()),
+            nvidia: None,
+        };
+
+        let mut step = named_custom_step("connection-b", None);
+        step.agent = AgentType::LiteLlm;
+        let outcome = execute_step(
+            &step,
+            &project,
+            &project,
+            &empty_tokens(),
+            false,
+            &TemplateContext::new(),
+            "",
+            None,
+            None,
+            Some(&endpoints),
+            None,
+            None,
+            Some(&db),
+        )
+        .await;
+
+        assert_eq!(outcome.result.status, RunStatus::Failed);
+        assert_eq!(
+            outcome.result.step_kind.as_deref(),
+            Some("preflight_failed")
+        );
+        assert!(outcome.result.output.contains("connection-b"));
+        assert!(outcome.result.output.contains("endpoint"));
+        assert!(fallback.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn litellm_workflow_step_executes_a_native_read_and_consumes_its_result() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
