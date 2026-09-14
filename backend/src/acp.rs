@@ -488,10 +488,24 @@ impl DispatcherOwner {
             Ok(Err(error)) => Err(format!("join ACP dispatcher: {error}")),
             Err(_) => {
                 handle.abort();
-                // The cancellation is what we wait for; its `JoinError` is the
-                // expected outcome, not a failure to report.
-                let _ = (&mut *handle).await;
-                Ok(())
+                match (&mut *handle).await {
+                    // Raced to completion between the timeout and the abort.
+                    Ok(()) => Ok(()),
+                    // The cancellation we asked for: expected, so not fatal —
+                    // but never silent, or a drain that had to be killed would
+                    // leave no trace at all.
+                    Err(error) if error.is_cancelled() => {
+                        tracing::warn!(
+                            timeout_secs = DISPATCHER_JOIN_TIMEOUT.as_secs(),
+                            "ACP stdout drain outlived the reaped process and was cancelled"
+                        );
+                        Ok(())
+                    }
+                    // A PANIC is not what we asked for. Report it exactly like
+                    // the nominal join does instead of hiding it behind the
+                    // expected-cancellation policy.
+                    Err(error) => Err(format!("join ACP dispatcher: {error}")),
+                }
             }
         };
         // Observed finished: release it so `Drop` has nothing left to abort.
