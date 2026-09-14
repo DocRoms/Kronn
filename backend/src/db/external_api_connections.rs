@@ -472,6 +472,46 @@ mod tests {
     }
 
     #[test]
+    fn persisted_unknown_preset_is_rejected_without_exposing_its_value() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+        conn.execute_batch("PRAGMA ignore_check_constraints = ON;")
+            .unwrap();
+        conn.execute(
+            "INSERT INTO external_api_connections \
+             (id, display_name, mention_alias, credential_slug, origin_preset) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                "unknown-preset",
+                "Unknown preset",
+                "unknown-preset",
+                "unknown-preset-key",
+                "sensitive-unknown-preset"
+            ],
+        )
+        .unwrap();
+
+        let error = get(&conn, "unknown-preset").unwrap_err().to_string();
+        assert!(error.contains("unknown persisted external connection preset"));
+        assert!(!error.contains("sensitive-unknown-preset"));
+    }
+
+    #[test]
+    fn persisted_other_preset_remains_valid_and_routes_as_custom() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+        let other = connection("other-primary", "other", ExternalApiConnectionPreset::Other);
+        insert(&conn, &other).unwrap();
+
+        let persisted = get(&conn, "other-primary").unwrap().unwrap();
+        assert_eq!(persisted.origin_preset, ExternalApiConnectionPreset::Other);
+        assert_eq!(
+            target_for_connection(&persisted).agent_type,
+            AgentType::Custom
+        );
+    }
+
+    #[test]
     fn dynamic_connection_target_replaces_static_provider_target_without_losing_tier() {
         let connections = vec![connection(
             "nvidia-primary",

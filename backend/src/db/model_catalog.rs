@@ -1135,6 +1135,40 @@ mod tests {
         assert_eq!(picked.model_id, live.model_id);
     }
 
+    #[test]
+    fn persisted_unknown_agent_type_is_rejected_without_exposing_its_value() {
+        let conn = test_conn();
+        create_manual(&conn, &req("unknown-agent-type", None)).unwrap();
+        conn.execute(
+            "UPDATE model_catalog_entries SET agent_type = ?1 WHERE model_id = ?2",
+            params!["sensitive-unknown-agent", "unknown-agent-type"],
+        )
+        .unwrap();
+
+        let error = get(&conn, "http:connection-a", "unknown-agent-type")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("unknown persisted agent type"));
+        assert!(!error.contains("sensitive-unknown-agent"));
+    }
+
+    #[test]
+    fn persisted_custom_agent_type_remains_valid() {
+        let conn = test_conn();
+        let mut request = req("custom-agent-type", None);
+        request.runtime_target_id = "agent:custom".into();
+        request.agent_type = AgentType::Custom;
+        create_manual(&conn, &request).unwrap();
+
+        assert_eq!(
+            get(&conn, "agent:custom", "custom-agent-type")
+                .unwrap()
+                .unwrap()
+                .agent_type,
+            AgentType::Custom
+        );
+    }
+
     fn fixture_entry(model_id: &str) -> CatalogModelEntry {
         let now = Utc::now();
         CatalogModelEntry {
