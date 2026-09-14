@@ -14554,7 +14554,8 @@ mod tests {
         // the principal. A message merely existing under a free id proves nothing.
         let probe_base = base.clone();
         let probe_squatters = squatters.clone();
-        let (content, targets, untouched): (String, i64, i64) = db
+        let probe_parent = parent.clone();
+        let (content, targets, expected_target, untouched): (String, String, String, i64) = db
             .with_conn(move |conn| {
                 let (id, content): (String, String) = conn.query_row(
                     "SELECT id, content FROM messages
@@ -14566,10 +14567,13 @@ mod tests {
                     ],
                     |row| Ok((row.get(0)?, row.get(1)?)),
                 )?;
+                // The EXACT principal target, not a count: a wrong target counts too.
                 let targets = conn.query_row(
-                    "SELECT COUNT(*) FROM message_targets WHERE message_id = ?1",
+                    "SELECT t.target_kind || ':' || t.agent_type
+                     FROM message_targets t WHERE t.message_id = ?1
+                     ORDER BY t.position",
                     rusqlite::params![id],
-                    |row| row.get::<_, i64>(0),
+                    |row| row.get::<_, String>(0),
                 )?;
                 let untouched = conn.query_row(
                     "SELECT COUNT(*) FROM messages
@@ -14577,7 +14581,12 @@ mod tests {
                     rusqlite::params![probe_squatters[0], probe_squatters[1]],
                     |row| row.get::<_, i64>(0),
                 )?;
-                Ok((content, targets, untouched))
+                let expected_target = conn.query_row(
+                    "SELECT 'discussion_agent:' || agent FROM discussions WHERE id = ?1",
+                    rusqlite::params![probe_parent],
+                    |row| row.get::<_, String>(0),
+                )?;
+                Ok((content, targets, expected_target, untouched))
             })
             .await
             .unwrap();
@@ -14586,8 +14595,8 @@ mod tests {
             "the re-keyed obligation must carry THIS delivery's head, not a stale one"
         );
         assert_eq!(
-            targets, 1,
-            "the re-keyed obligation stays addressed to the principal"
+            targets, expected_target,
+            "the re-keyed obligation stays addressed to the principal itself"
         );
         assert_eq!(untouched, 2, "neither occupant may be rewritten");
     }
