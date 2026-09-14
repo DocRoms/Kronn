@@ -36,14 +36,14 @@ async fn discovered_effort_reaches_real_cli_and_adapter_children_including_resum
     let dir = tempfile::tempdir().unwrap();
     let bin = dir.path().join("bin");
     std::fs::create_dir(&bin).unwrap();
-    for name in ["host", "data", "project"] {
+    for name in ["host", "data", "project", "host-bin"] {
         std::fs::create_dir(dir.path().join(name)).unwrap();
     }
     let mut env = Environment(Vec::new());
     env.set("PATH", format!("{}:/usr/bin:/bin", bin.display()));
     env.set("KRONN_HOST_HOME", dir.path().join("host"));
     env.set("KRONN_DATA_DIR", dir.path().join("data"));
-    env.set("KRONN_HOST_BIN", &bin);
+    env.set("KRONN_HOST_BIN", dir.path().join("host-bin"));
     let project = dir.path().join("project");
     std::fs::write(
         project.join(".mcp.json"),

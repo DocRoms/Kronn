@@ -89,13 +89,13 @@ reasoning modes.
 `config.toml` under `[agents.model_tiers]`) carries an optional effort string
 alongside each tier's model (`economy_effort`/`default_effort`/
 `reasoning_effort`), additive and backward compatible: an untouched config
-deserializes every new field to `None`, so no flag is ever sent and existing
-behaviour is unchanged. A `None` effort always means "no flag — the runtime's
-own CLI default applies", never a silently assigned `high`/`max`.
-[src: file: backend/src/models/setup.rs (ModelTierConfig)]
+deserializes every new field to `None`. Without an execution override or a
+preset, no effort flag is sent: the runtime's own default applies, never a
+silently assigned `high`/`max`.
+[src: file: backend/src/models/setup.rs:1]
 
 Resolution is a single precedence, mirrored on `effective_model_flag`:
-`runner::effective_reasoning_effort` — explicit per-step/per-QP
+`runner::resolve_reasoning_effort` — explicit per-step/per-QP
 `AgentSettings.reasoning_effort` (the execution override) wins outright; else
 the tier's configured preset applies only when the final model equals that
 tier's resolved model; else `None`. This retains a preset when an internal
@@ -118,13 +118,32 @@ A Quick Prompt's explicit `agent_settings.reasoning_effort` is copied onto a
 hydrated workflow step the same way its `agent_settings.model` already is
 (step wins if it sets its own), so a QP-driven step carries the effort its
 author picked.
-[src: file: backend/src/workflows/quick_prompt_hydrate.rs (hydrate_step_from_quick_prompt)]
+[src: file: backend/src/workflows/quick_prompt_hydrate.rs:1]
+
+Standalone QP launches additionally capture their explicit effort alongside
+the resolved model, agent and tier in `discussion_effort_snapshots` (migration
+176). The template, model settings and source version come from one QP read.
+Creation returns the persisted model, and inserts the discussion and override
+atomically. Resumes read this immutable discussion snapshot, never the current
+QP or a version that may have been removed. Existing discussions are not
+backfilled. A changed model/agent/tier, HTTP connection or per-message tier
+override does not inherit this QP override; the new run's own preset resolution
+still applies. Failure to read the snapshot stops the run explicitly.
+[src: file: backend/src/db/discussion_effort.rs:1]
+[src: file: backend/src/api/discussions/crud.rs:201]
+[src: file: backend/src/api/discussions/streaming.rs:2535]
+
+These snapshots are local execution state, not a portable QP setting. Exporting
+or importing a QP preserves its editable `agent_settings`, while it does not
+reconstruct historic discussion launch overrides.
+[src: file: backend/src/db/discussion_effort.rs:1]
 
 Settings → Agents exposes an effort selector per tier for Claude and Codex.
-It derives choices from the selected model's catalog entry, disables it when
-the entry advertises no modes, retains an invalid saved value only as an
+It derives choices from the selected model's catalog entry, retains an invalid saved value only as an
 explained disabled option, and clears an incompatible effort in the same save
-that changes the model. Other runtime cards state that effort is unsupported.
+that changes the model. Even without available modes, the control remains
+usable to clear an invalid saved effort. Other runtime cards state that effort
+is unsupported.
 [src: file: frontend/src/components/settings/AgentsSection.tsx:150-205]
 [src: file: frontend/src/components/settings/AgentsSection.tsx:1245-1310]
 

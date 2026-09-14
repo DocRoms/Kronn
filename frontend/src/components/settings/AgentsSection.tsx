@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, type CSSProperties, type ReactNode } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useRef, type CSSProperties, type ReactNode } from 'react';
 import { config as configApi, agents as agentsApi, usage as usageApi, nvidia as nvidiaApi } from '../../lib/api';
 import { catalogModelOptions, modelRuntimeTargetId } from '../../lib/modelCatalogSelection';
 import { userError } from '../../lib/userError';
@@ -172,7 +172,7 @@ export function AgentsSection({
   // snapshot in a ref so a save after its asynchronous load validates against
   // the current snapshot, not the mount-time `undefined` value.
   const catalogRef = useRef(catalog.catalog);
-  catalogRef.current = catalog.catalog;
+  useLayoutEffect(() => { catalogRef.current = catalog.catalog; }, [catalog.catalog]);
   const saveTierPreference = useAsyncGuard(async (
     agentKey: keyof ModelTiersConfig,
     field: ModelTier,
