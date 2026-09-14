@@ -2363,6 +2363,12 @@ pub struct AgentStartConfig<'a> {
     /// supports a `--model` flag (incl. both Ollama paths). `None` = resolve
     /// the model from `tier` as before.
     pub model_override: Option<&'a str>,
+    /// KT-646 — explicit per-step / per-QP reasoning-effort override, from
+    /// `AgentSettings.reasoning_effort`. Wins over the tier's configured
+    /// preset unconditionally (see `effective_reasoning_effort`). `None`
+    /// falls back to the tier preset, then to no flag at all. Ignored for
+    /// every agent `agent_supports_reasoning_effort` returns false for.
+    pub reasoning_effort_override: Option<&'a str>,
     /// KT-405 — persistent per-model context overrides (`ServerConfig`), keyed
     /// by exact model tag. `None` is reserved for callers with no server config
     /// in scope (mainly isolated tests); discussions and workflows pass it.
@@ -2435,6 +2441,7 @@ impl<'a> AgentStartConfig<'a> {
             task_worker_context: None,
             ollama_format: None,
             model_override: None,
+            reasoning_effort_override: None,
             ollama_context_overrides: None,
             http_request_timeout: None,
             cancel_token: None,
@@ -2734,6 +2741,95 @@ pub(crate) fn effective_model_flag(
         Some(m) if !m.trim().is_empty() => Some(m.to_string()),
         _ => resolve_model_flag(agent_type, tier, model_tiers),
     }
+}
+
+/// True for an agent whose CLI has a proven, officially documented
+/// reasoning-effort override reachable from this runner. Codex accepts
+/// `-c model_reasoning_effort=<value>` (see
+/// https://learn.chatgpt.com/docs/config-file/config-reference and
+/// https://learn.chatgpt.com/docs/developer-commands?surface=cli). No other
+/// agent this runner spawns has a verified equivalent: Claude Code's `--print`
+/// CLI exposes no reasoning-effort flag, ACP-negotiated agents (OpenCode,
+/// Gemini CLI, Copilot CLI, Kiro, Vibe) resolve their own reasoning-like
+/// session option through `acp_discovery` rather than this precedence, and
+/// every HTTP chat agent (Ollama/LiteLLM/NVIDIA/Custom) has no confirmed
+/// contract either. Sending a guessed parameter to an unproven route is worse
+/// than sending none — this keeps the surface honest until a real contract is
+/// verified for another agent.
+pub(crate) fn agent_supports_reasoning_effort(agent_type: &AgentType) -> bool {
+    matches!(agent_type, AgentType::Codex)
+}
+
+/// Look up the reasoning-effort preset paired with `tier` in `overrides`,
+/// mirroring `configured_model_flag`'s per-tier match without inventing a
+/// fallback across tiers.
+fn tier_reasoning_effort(
+    agent_type: &AgentType,
+    tier: ModelTier,
+    overrides: Option<&ModelTiersConfig>,
+) -> Option<String> {
+    let cfg = overrides?;
+    let agent_cfg = match agent_type {
+        AgentType::ClaudeCode => &cfg.claude_code,
+        AgentType::Codex => &cfg.codex,
+        AgentType::OpenCode => &cfg.open_code,
+        AgentType::GeminiCli => &cfg.gemini_cli,
+        AgentType::Kiro => &cfg.kiro,
+        AgentType::Vibe => &cfg.vibe,
+        AgentType::CopilotCli => &cfg.copilot_cli,
+        AgentType::Ollama => &cfg.ollama,
+        AgentType::LiteLlm => &cfg.lite_llm,
+        AgentType::Nvidia => &cfg.nvidia,
+        AgentType::Custom => return None,
+    };
+    let effort = match tier {
+        ModelTier::Economy => &agent_cfg.economy_effort,
+        ModelTier::Reasoning => &agent_cfg.reasoning_effort,
+        ModelTier::Default => &agent_cfg.default_effort,
+    };
+    effort
+        .as_ref()
+        .map(|v| v.trim())
+        .filter(|v| !v.is_empty())
+        .map(str::to_string)
+}
+
+/// Resolve the effective reasoning-effort value for a run, mirroring
+/// `effective_model_flag`'s precedence: an explicit per-step / per-QP
+/// `AgentSettings.reasoning_effort` wins outright (blank treated as unset);
+/// otherwise the tier's configured preset applies; `None` means "no flag —
+/// the CLI's own default applies", never a silently assigned `high`/`max`.
+/// Gated by `agent_supports_reasoning_effort` so an unproven route never
+/// receives a guessed parameter.
+///
+/// `model_override` is the same value passed to `effective_model_flag` for
+/// this run. When it is set and no explicit `effort_override` came with it,
+/// the tier's preset is deliberately NOT carried over: the preset was
+/// calibrated for the tier's own configured model, and blindly applying it to
+/// a different explicit model the caller pinned could hand that model an
+/// effort level it never asked for or doesn't support. An operator who wants
+/// a specific effort on a pinned model sets `effort_override` explicitly.
+/// Kept pure + `pub(crate)` so the precedence is unit-tested without spawning
+/// a process.
+pub(crate) fn effective_reasoning_effort(
+    effort_override: Option<&str>,
+    model_override: Option<&str>,
+    agent_type: &AgentType,
+    tier: ModelTier,
+    model_tiers: Option<&ModelTiersConfig>,
+) -> Option<String> {
+    if !agent_supports_reasoning_effort(agent_type) {
+        return None;
+    }
+    if let Some(e) = effort_override {
+        if !e.trim().is_empty() {
+            return Some(e.to_string());
+        }
+    }
+    if model_override.map(|m| !m.trim().is_empty()).unwrap_or(false) {
+        return None;
+    }
+    tier_reasoning_effort(agent_type, tier, model_tiers)
 }
 
 fn missing_ollama_model_error() -> String {
@@ -3140,6 +3236,16 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
         config.tier,
         config.model_tiers,
     );
+    // KT-646 — resolve reasoning effort the same way: explicit override wins,
+    // else the tier's configured preset, else no flag (CLI default). Gated to
+    // agents with a proven contract; every other agent gets `None` here.
+    let reasoning_effort = effective_reasoning_effort(
+        config.reasoning_effort_override,
+        config.model_override,
+        config.agent_type,
+        config.tier,
+        config.model_tiers,
+    );
 
     let task_worker = config.task_worker_context.is_some();
     if task_worker
@@ -3236,6 +3342,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
             config.full_access,
             &extra_context,
             model_flag.as_deref(),
+            reasoning_effort.as_deref(),
             task_worker,
             task_worker.then_some(work_dir.as_path()),
             // A task worker never resumes: its worktree is fresh and its
@@ -8446,6 +8553,7 @@ fn agent_command(
         full_access,
         mcp_context,
         model_flag,
+        None,
         false,
         None,
         None,
@@ -8462,6 +8570,11 @@ fn agent_command_with_task_worker_policy(
     full_access: bool,
     mcp_context: &str,
     model_flag: Option<&str>,
+    // KT-646 — resolved reasoning effort (see `effective_reasoning_effort`).
+    // Only the Codex branch consumes it today: it is the one agent
+    // `agent_supports_reasoning_effort` returns true for, so callers on
+    // every other agent always pass `None` here in practice.
+    reasoning_effort: Option<&str>,
     task_worker: bool,
     task_work_dir: Option<&Path>,
     // The CLI conversation to continue instead of narrating the history again.
@@ -8565,6 +8678,18 @@ fn agent_command_with_task_worker_policy(
             } else {
                 codex_kronn_internal_env_override()
             });
+            // KT-646 — official per-run TOML override for reasoning effort
+            // (https://learn.chatgpt.com/docs/config-file/config-reference,
+            // https://learn.chatgpt.com/docs/developer-commands?surface=cli).
+            // `serde_json::to_string` gives a correctly quoted/escaped TOML
+            // string value, matching how the MCP overrides above are quoted.
+            if let Some(effort) = reasoning_effort {
+                args.push("-c".into());
+                args.push(format!(
+                    "model_reasoning_effort={}",
+                    serde_json::to_string(effort).unwrap_or_else(|_| "\"\"".into())
+                ));
+            }
             // Codex requires a trusted git directory by default.
             // Inside Docker the paths are mapped, so skip the check.
             args.push("--skip-git-repo-check".into());

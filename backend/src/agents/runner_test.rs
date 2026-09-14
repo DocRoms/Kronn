@@ -7117,6 +7117,7 @@ Suite de la réponse.";
                 economy: Some("custom-haiku-3".into()),
                 default: None,
                 reasoning: None,
+                ..Default::default()
             },
             ..Default::default()
         };
@@ -7148,6 +7149,7 @@ Suite de la réponse.";
                 economy: None,
                 default: Some("gemma3:27b".into()),
                 reasoning: None,
+                ..Default::default()
             },
             ..Default::default()
         };
@@ -7179,6 +7181,7 @@ Suite de la réponse.";
                 economy: None,
                 default: Some("qwen3:32b".into()),
                 reasoning: None,
+                ..Default::default()
             },
             ..Default::default()
         };
@@ -7195,6 +7198,7 @@ Suite de la réponse.";
                 economy: Some("qwen3:4b".into()),
                 default: Some("qwen3:32b".into()),
                 reasoning: None,
+                ..Default::default()
             },
             ..Default::default()
         };
@@ -7611,6 +7615,258 @@ Suite de la réponse.";
         assert_eq!(
             effective_model_flag(None, &AgentType::ClaudeCode, ModelTier::Reasoning, None),
             None,
+        );
+    }
+
+    // ─── effective_reasoning_effort: KT-646 precedence + agent gating ─────────
+
+    #[test]
+    fn effective_reasoning_effort_unsupported_agent_never_guesses() {
+        use crate::models::setup::{ModelTierConfig, ModelTiersConfig};
+        use crate::models::ModelTier;
+        // Claude Code has no proven reasoning-effort contract: even a
+        // configured preset must never be forwarded for it.
+        let cfg = ModelTiersConfig {
+            claude_code: ModelTierConfig {
+                reasoning_effort: Some("high".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_eq!(
+            effective_reasoning_effort(
+                Some("high"),
+                None,
+                &AgentType::ClaudeCode,
+                ModelTier::Reasoning,
+                Some(&cfg),
+            ),
+            None,
+        );
+    }
+
+    #[test]
+    fn effective_reasoning_effort_override_wins_over_preset() {
+        use crate::models::setup::{ModelTierConfig, ModelTiersConfig};
+        use crate::models::ModelTier;
+        let cfg = ModelTiersConfig {
+            codex: ModelTierConfig {
+                reasoning_effort: Some("low".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_eq!(
+            effective_reasoning_effort(
+                Some("high"),
+                None,
+                &AgentType::Codex,
+                ModelTier::Reasoning,
+                Some(&cfg),
+            ),
+            Some("high".into()),
+            "an execution-level override must beat the tier preset",
+        );
+    }
+
+    #[test]
+    fn effective_reasoning_effort_blank_override_falls_back_to_preset() {
+        use crate::models::setup::{ModelTierConfig, ModelTiersConfig};
+        use crate::models::ModelTier;
+        let cfg = ModelTiersConfig {
+            codex: ModelTierConfig {
+                reasoning_effort: Some("low".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_eq!(
+            effective_reasoning_effort(
+                Some("   "),
+                None,
+                &AgentType::Codex,
+                ModelTier::Reasoning,
+                Some(&cfg),
+            ),
+            Some("low".into()),
+        );
+    }
+
+    #[test]
+    fn effective_reasoning_effort_unset_preset_means_cli_default() {
+        use crate::models::ModelTier;
+        // No override, no config at all → None (no flag sent, CLI default
+        // applies) — this is the pre-existing/untouched-config behaviour.
+        assert_eq!(
+            effective_reasoning_effort(None, None, &AgentType::Codex, ModelTier::Default, None),
+            None,
+        );
+    }
+
+    #[test]
+    fn effective_reasoning_effort_only_reads_its_own_tier_slot() {
+        use crate::models::setup::{ModelTierConfig, ModelTiersConfig};
+        use crate::models::ModelTier;
+        let cfg = ModelTiersConfig {
+            codex: ModelTierConfig {
+                reasoning_effort: Some("high".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        // Economy's own slot is unset — the Reasoning tier's preset must not
+        // leak across tiers.
+        assert_eq!(
+            effective_reasoning_effort(
+                None,
+                None,
+                &AgentType::Codex,
+                ModelTier::Economy,
+                Some(&cfg)
+            ),
+            None,
+        );
+    }
+
+    #[test]
+    fn effective_reasoning_effort_does_not_carry_preset_onto_an_explicit_model_override() {
+        use crate::models::setup::{ModelTierConfig, ModelTiersConfig};
+        use crate::models::ModelTier;
+        // The Reasoning tier's preset ("high") was calibrated for whatever
+        // model that tier resolves to. A step that pins a DIFFERENT explicit
+        // model, with no effort override of its own, must not silently
+        // inherit it.
+        let cfg = ModelTiersConfig {
+            codex: ModelTierConfig {
+                reasoning_effort: Some("high".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_eq!(
+            effective_reasoning_effort(
+                None,
+                Some("o3-mini"),
+                &AgentType::Codex,
+                ModelTier::Reasoning,
+                Some(&cfg),
+            ),
+            None,
+            "an explicit model pin without its own effort override must not inherit the tier preset",
+        );
+    }
+
+    #[test]
+    fn effective_reasoning_effort_explicit_override_still_applies_alongside_a_model_pin() {
+        use crate::models::setup::{ModelTierConfig, ModelTiersConfig};
+        use crate::models::ModelTier;
+        let cfg = ModelTiersConfig {
+            codex: ModelTierConfig {
+                reasoning_effort: Some("high".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        // An operator who explicitly wants an effort on a pinned model sets
+        // it explicitly; that request still wins.
+        assert_eq!(
+            effective_reasoning_effort(
+                Some("low"),
+                Some("o3-mini"),
+                &AgentType::Codex,
+                ModelTier::Reasoning,
+                Some(&cfg),
+            ),
+            Some("low".into()),
+        );
+    }
+
+    #[test]
+    fn effective_reasoning_effort_blank_model_override_does_not_suppress_preset() {
+        use crate::models::setup::{ModelTierConfig, ModelTiersConfig};
+        use crate::models::ModelTier;
+        // A blank model override is treated as unset by `effective_model_flag`
+        // too — the tier preset must still apply.
+        let cfg = ModelTiersConfig {
+            codex: ModelTierConfig {
+                reasoning_effort: Some("high".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_eq!(
+            effective_reasoning_effort(
+                None,
+                Some("   "),
+                &AgentType::Codex,
+                ModelTier::Reasoning,
+                Some(&cfg),
+            ),
+            Some("high".into()),
+        );
+    }
+
+    // ─── Codex CLI arg construction: reasoning effort transmission ────────────
+
+    #[test]
+    fn codex_command_sends_model_reasoning_effort_override() {
+        let (_, _, args, _, _, _) = agent_command_with_task_worker_policy(
+            &AgentType::Codex,
+            "prompt",
+            false,
+            "",
+            None,
+            Some("high"),
+            false,
+            None,
+            None,
+        );
+        let idx = args
+            .iter()
+            .position(|a| a == "model_reasoning_effort=\"high\"")
+            .expect("Codex args must carry the resolved reasoning effort as a -c TOML override");
+        assert_eq!(args[idx - 1], "-c");
+    }
+
+    #[test]
+    fn codex_command_omits_reasoning_effort_flag_when_unresolved() {
+        let (_, _, args, _, _, _) = agent_command_with_task_worker_policy(
+            &AgentType::Codex,
+            "prompt",
+            false,
+            "",
+            None,
+            None,
+            false,
+            None,
+            None,
+        );
+        assert!(
+            !args.iter().any(|a| a.starts_with("model_reasoning_effort=")),
+            "no resolved effort must mean no override flag, not a guessed one",
+        );
+    }
+
+    #[test]
+    fn claude_code_command_never_receives_a_reasoning_effort_flag() {
+        // Even if a caller mistakenly resolved a value for Claude Code, the
+        // direct-CLI builder has no flag to carry it — this documents the
+        // route's explicit non-support rather than silently dropping it
+        // somewhere unverifiable.
+        let (_, _, args, _, _, _) = agent_command_with_task_worker_policy(
+            &AgentType::ClaudeCode,
+            "prompt",
+            false,
+            "",
+            None,
+            Some("high"),
+            false,
+            None,
+            None,
+        );
+        assert!(
+            !args.iter().any(|a| a.contains("effort")),
+            "Claude Code's direct CLI has no verified reasoning-effort flag",
         );
     }
 

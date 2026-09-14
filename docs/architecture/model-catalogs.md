@@ -77,6 +77,53 @@ reasoning modes.
 [src: file: frontend/src/components/AgentSwitchPicker.tsx:1-300]
 [src: file: frontend/src/components/settings/ModelCatalogSection.tsx:1-236]
 
+## Reasoning-effort presets and transmission (KT-646)
+
+`ModelTierConfig` (per-agent Economy/Default/Reasoning model tiers, stored in
+`config.toml` under `[agents.model_tiers]`) carries an optional effort string
+alongside each tier's model (`economy_effort`/`default_effort`/
+`reasoning_effort`), additive and backward compatible: an untouched config
+deserializes every new field to `None`, so no flag is ever sent and existing
+behaviour is unchanged. A `None` effort always means "no flag — the runtime's
+own CLI default applies", never a silently assigned `high`/`max`.
+[src: file: backend/src/models/setup.rs (ModelTierConfig)]
+
+Resolution is a single precedence, mirrored on `effective_model_flag`:
+`runner::effective_reasoning_effort` — explicit per-step/per-QP
+`AgentSettings.reasoning_effort` (the execution override) wins outright; else
+the tier's configured preset applies; else `None`. When a run also carries an
+explicit `model_override` (an explicit model pin distinct from the tier) with
+no `effort_override` of its own, the tier's preset is deliberately NOT carried
+over — it was calibrated for the tier's own model, not an arbitrary pinned
+one. `runner::agent_supports_reasoning_effort` gates the whole precedence to
+agents with a proven contract: today only Codex, via its documented per-run
+`-c model_reasoning_effort=<value>` TOML override
+([config reference](https://learn.chatgpt.com/docs/config-file/config-reference),
+[developer commands](https://learn.chatgpt.com/docs/developer-commands?surface=cli)).
+Claude Code's `--print` CLI has no verified reasoning-effort flag/env/SDK
+option, so it is intentionally excluded rather than guessed; every ACP-native
+agent (OpenCode, Gemini CLI, Copilot CLI, Kiro, Vibe) and every HTTP chat
+agent (Ollama/LiteLLM/NVIDIA/Custom) is excluded the same way.
+[src: file: backend/src/agents/runner.rs (agent_supports_reasoning_effort, effective_reasoning_effort, tier_reasoning_effort)]
+
+A Quick Prompt's explicit `agent_settings.reasoning_effort` is copied onto a
+hydrated workflow step the same way its `agent_settings.model` already is
+(step wins if it sets its own), so a QP-driven step carries the effort its
+author picked.
+[src: file: backend/src/workflows/quick_prompt_hydrate.rs (hydrate_step_from_quick_prompt)]
+
+Known limitations as of this pass: the Settings → Agents tier editor
+(`AgentsSection.tsx`) does not yet expose the new per-tier effort fields —
+`ModelTierConfig`'s TypeScript binding needs `make typegen` regenerated before
+that UI can be built type-safe. A discussion's own `reasoning_effort` (as
+opposed to a QP/workflow step's) has no persisted column, so a plain
+discussion run only ever sees the tier preset, never a discussion-level
+execution override. `AgentSwitchPicker`'s tier-consistent model resolution
+(orchestration debate rounds, a discussion's own named-connection fallback)
+intentionally leaves the tier preset applying (`model_override` is `None` in
+those paths) since it does not represent an explicit user pin.
+[src: file: frontend/src/components/settings/AgentsSection.tsx]
+
 ## Migration and test invariants
 
 Migration 162 creates both catalog tables and keys the refresh log by

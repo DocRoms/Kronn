@@ -934,6 +934,14 @@ async fn run_agent_with_timeout(
             .agent_settings
             .as_ref()
             .and_then(|s| s.model.as_deref()),
+        // KT-646 — explicit per-step reasoning effort, from the wizard's
+        // effort picker. Wins over the tier's configured preset; `None`
+        // falls back to that preset, then to the CLI default (see
+        // `runner::effective_reasoning_effort`).
+        reasoning_effort_override: step
+            .agent_settings
+            .as_ref()
+            .and_then(|s| s.reasoning_effort.as_deref()),
         // The named connection this step points at. `AgentType::Custom` is
         // shared by every OpenAI-compatible connection, so without this the
         // runner refuses the spawn outright.
