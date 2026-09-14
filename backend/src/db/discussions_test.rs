@@ -1370,18 +1370,29 @@ mod tests {
     }
 
     #[test]
-    fn unknown_agent_type_in_db_becomes_custom() {
+    fn unknown_agent_type_in_db_is_rejected_and_custom_remains_valid() {
         let conn = test_conn();
         conn.execute(
             "INSERT INTO discussions (id, title, agent, language, participants_json, created_at, updated_at)
-             VALUES ('d-unknown', 'test', 'FutureAgent', 'en', '[]', datetime('now'), datetime('now'))",
+             VALUES ('d-unknown', 'test', 'sensitive-unknown-agent', 'en', '[]', datetime('now'), datetime('now'))",
             [],
-        ).unwrap();
-        let loaded = get_discussion(&conn, "d-unknown").unwrap().unwrap();
+        )
+        .unwrap();
+        let error = get_discussion(&conn, "d-unknown").unwrap_err().to_string();
+        assert!(error.contains("unknown persisted agent type"));
+        assert!(!error.contains("sensitive-unknown-agent"));
+
+        conn.execute(
+            "INSERT INTO discussions (id, title, agent, language, participants_json, created_at, updated_at)
+             VALUES ('d-custom', 'test', 'Custom', 'en', '[]', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        let loaded = get_discussion(&conn, "d-custom").unwrap().unwrap();
         assert_eq!(
             loaded.agent,
             AgentType::Custom,
-            "Unknown agent strings should map to Custom"
+            "The explicit Custom identity should remain valid"
         );
     }
 
