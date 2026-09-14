@@ -1026,6 +1026,163 @@ mod tests {
         assert_eq!(events, 1);
     }
 
+    fn remote_note_revision_fixture() -> (Connection, Connection) {
+        let source = test_conn();
+        let mirror = test_conn();
+        let mut note = make_message("shared-note", MessageRole::User, None);
+        note.channel = crate::models::MessageChannel::Note;
+        note.content = "original shared note".into();
+        for conn in [&source, &mirror] {
+            insert_discussion(conn, &make_discussion("shared-note-disc")).unwrap();
+            insert_note_message(conn, "shared-note-disc", &note).unwrap();
+            for (id, role, agent) in [
+                (
+                    "later-agent",
+                    MessageRole::Agent,
+                    Some(AgentType::ClaudeCode),
+                ),
+                ("later-system", MessageRole::System, None),
+                ("later-user", MessageRole::User, None),
+            ] {
+                insert_message(conn, "shared-note-disc", &make_message(id, role, agent)).unwrap();
+            }
+            update_summary_cache(conn, "shared-note-disc", "unchanged main-thread summary", 3)
+                .unwrap();
+        }
+        (source, mirror)
+    }
+
+    fn remote_note_projection(conn: &Connection) -> String {
+        // Own fixture only. Capture the complete message projection as well as
+        // the state a note correction must not consume or invalidate.
+        conn.query_row(
+            "SELECT json_object(
+                'messages', (SELECT json_group_array(json_array(id, content, timestamp, sort_order, channel)) FROM (SELECT * FROM messages ORDER BY sort_order)),
+                'sequence', next_message_seq, 'summary', summary_cache,
+                'message_count', message_count, 'updated_at', updated_at,
+                'awaiting', awaiting_agent, 'running', agent_running,
+                'events', (SELECT COUNT(*) FROM message_revision_events),
+                'tombstones', (SELECT COUNT(*) FROM message_tombstones),
+                'targets', (SELECT COUNT(*) FROM message_targets),
+                'dispatches', (SELECT COUNT(*) FROM agent_dispatch_jobs))
+             FROM discussions WHERE id = 'shared-note-disc'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn remote_note_revisions_preserve_the_conversation_and_written_at() {
+        let (source, mirror) = remote_note_revision_fixture();
+        let before_messages = list_messages(&mirror, "shared-note-disc").unwrap();
+        let written_at: String = mirror
+            .query_row(
+                "SELECT timestamp FROM messages WHERE id = 'shared-note'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let next_sequence: i64 = mirror
+            .query_row(
+                "SELECT next_message_seq FROM discussions WHERE id = 'shared-note-disc'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        for (index, content) in ["first remote correction", "second remote correction"]
+            .into_iter()
+            .enumerate()
+        {
+            revise_note_message(&source, "shared-note-disc", "shared-note", content).unwrap();
+            let event = list_revision_events_after(&source, "shared-note-disc", 0)
+                .unwrap()
+                .pop()
+                .unwrap();
+            // A wire target must never turn a note into a conversation dispatch.
+            let targets = [MessageTarget::agent(AgentType::Codex)];
+            assert!(apply_remote_message_revision_with_targets(&mirror, &event, &targets).unwrap());
+            let after_messages = list_messages(&mirror, "shared-note-disc").unwrap();
+            assert_eq!(
+                serde_json::to_value(&after_messages).unwrap(),
+                serde_json::to_value(&before_messages).unwrap(),
+                "a note revision must preserve all later conversation messages"
+            );
+            let (actual_content, actual_written_at): (String, String) = mirror
+                .query_row(
+                    "SELECT content, timestamp FROM messages WHERE id = 'shared-note'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(actual_content, content);
+            assert_eq!(
+                actual_written_at, written_at,
+                "an edit must not replace the note's written-at date"
+            );
+            assert!(list_message_targets(&mirror, "shared-note")
+                .unwrap()
+                .is_empty());
+            let event_sort: i64 = mirror
+                .query_row(
+                    "SELECT sort_order FROM message_revision_events WHERE id = ?1",
+                    [&event.id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(event_sort, next_sequence + index as i64);
+            let (jobs, tombstones, summary): (i64, i64, String) = mirror.query_row(
+                "SELECT (SELECT COUNT(*) FROM agent_dispatch_jobs), (SELECT COUNT(*) FROM message_tombstones), summary_cache FROM discussions WHERE id = 'shared-note-disc'",
+                [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            ).unwrap();
+            assert_eq!((jobs, tombstones), (0, 0));
+            assert_eq!(summary, "unchanged main-thread summary");
+            let applied = remote_note_projection(&mirror);
+            assert!(
+                !apply_remote_message_revision_with_targets(&mirror, &event, &targets).unwrap()
+            );
+            assert_eq!(
+                remote_note_projection(&mirror),
+                applied,
+                "a duplicate must consume no state"
+            );
+        }
+    }
+
+    #[test]
+    fn remote_note_revision_audit_failure_is_atomic_and_divergence_is_a_noop() {
+        let (source, mirror) = remote_note_revision_fixture();
+        revise_note_message(
+            &source,
+            "shared-note-disc",
+            "shared-note",
+            "remote correction",
+        )
+        .unwrap();
+        let event = list_revision_events_after(&source, "shared-note-disc", 0)
+            .unwrap()
+            .pop()
+            .unwrap();
+        let before = remote_note_projection(&mirror);
+        mirror.execute_batch("CREATE TRIGGER refuse_remote_note_audit BEFORE INSERT ON message_revision_events BEGIN SELECT RAISE(ABORT, 'injected remote audit failure'); END;").unwrap();
+        let error = apply_remote_message_revision(&mirror, &event).unwrap_err();
+        assert!(error.to_string().contains("injected remote audit failure"));
+        assert_eq!(remote_note_projection(&mirror), before);
+        mirror
+            .execute_batch("DROP TRIGGER refuse_remote_note_audit;")
+            .unwrap();
+        let mut divergent = event.clone();
+        divergent.previous_content_hash = content_hash("a different local revision");
+        assert!(!apply_remote_message_revision(&mirror, &divergent).unwrap());
+        assert_eq!(remote_note_projection(&mirror), before);
+        assert!(apply_remote_message_revision(&mirror, &event).unwrap());
+        assert_eq!(
+            list_messages(&mirror, "shared-note-disc").unwrap().len(),
+            3,
+            "retrying the same event must preserve the conversation too"
+        );
+    }
+
     // ═══════════════════════════════════════════════════════════════════════════
     // update_message_tokens
     // ═══════════════════════════════════════════════════════════════════════════
