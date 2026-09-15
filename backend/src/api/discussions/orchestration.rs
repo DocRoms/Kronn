@@ -1749,7 +1749,7 @@ mod orchestrate_validation_tests {
         unavailable_local_participants_with,
     };
     use crate::models::{
-        AgentType, Discussion, DiscussionMessage, ExternalApiConnection,
+        AgentDetection, AgentType, Discussion, DiscussionMessage, ExternalApiConnection,
         ExternalApiConnectionPreset, MessageChannel, MessageRole, MessageTarget, ModelTier,
         OrchestrationParticipant, SummaryStrategy, TokensConfig,
     };
