@@ -153,11 +153,13 @@ Release notes for 0.9.3 and earlier are available in the
   MCP tool, checked/true by default, which is what the providers were already
   doing silently. That silence had a clip refused for audio copyright with
   nothing in the request to explain it. The launcher's durations, resolutions,
-  ratios and audio switch now come from the provider's own catalogue instead of
-  a hard-coded list that offered choices the model rejects, and a video can
-  start from — or end on — an image the discussion already holds, picked in the
-  form or named by an agent through MCP. That image is referenced by id and
-  travels inline: no local path, URL or credential ever leaves Kronn.
+  ratios and audio switch use the provider's own catalogue when it advertises
+  them, instead of a fixed list that offered choices the model rejects; a model
+  that advertises none keeps the previous defaults rather than leaving an empty
+  picker. A video can start from — or end on — an image the discussion already
+  holds, picked in the form or named by an agent through MCP. That image is
+  referenced by id and travels inline: no local path, URL or credential ever
+  leaves Kronn.
   An asset can finally be deleted, from the viewer, in two steps — the control
   removes bytes from disk and sits next to "close", so it arms before it acts,
   the viewer closes rather than silently landing on the neighbouring media, and
@@ -538,7 +540,11 @@ Release notes for 0.9.3 and earlier are available in the
 
 - A prompt's version history no longer outlives the prompt it belongs to.
 - A clip recorded as `text/plain` still plays as a clip.
-- A Quick Prompt batch run stops accepting a per-item prompt that nothing ever read.
+- A Quick Prompt batch item no longer carries a prompt of its own. The field
+  was in the contract and nothing ever read it: each run takes the Quick
+  Prompt's saved template and fills it from the item's variables. Removing it
+  from the contract makes that explicit — a client still sending the field is
+  ignored rather than refused, since the request shape accepts unknown keys.
 - The agent bootstrap (`docs/AGENTS.md`) is back under its context ceiling
   without the ceiling moving. The 716 bytes over were exactly what 0.13.0 had
   added: two verbose rows in the task router and a section holding a single
