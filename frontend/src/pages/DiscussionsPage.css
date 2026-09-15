@@ -4074,7 +4074,12 @@ button.disc-contact-open {
   font-family: var(--kr-font-mono);
   font-size: var(--kr-fs-xs);
   line-height: 1.6;
-  color: var(--kr-text-muted);
+  /* --kr-bg-code stays dark in every theme, including the light one. A token
+     whose name says "muted" is not a light colour there: in the light theme it
+     is a dark slate tuned for white, which rendered these logs at 2.4:1 —
+     unreadable. Code blocks on this same background already use the token that
+     means "text on a dark ground". */
+  color: var(--kr-text-on-dark);
 }
 
 .disc-streaming-log-hint {

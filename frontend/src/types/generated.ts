@@ -1537,6 +1537,13 @@ gate_step?: string | null, };
  */
 export type DecideRunResponse = { run_id: string, new_status: RunStatus, };
 
+export type DeclineDiscussionQuestionRequest = { idempotency_key: string,
+/**
+ * Why it is refused. Optional: a human owes no justification, but the
+ * agent reads it, so an empty refusal still has to be actionable.
+ */
+reason?: string | null, };
+
 export type DeleteManualModelRequest = { runtime_target_id: string, model_id: string, };
 
 /**
@@ -2426,7 +2433,7 @@ export type DiscussionQuestionList = { questions: Array<DiscussionQuestion>, pen
 
 export type DiscussionQuestionOption = { id: string, label: string, description: string | null, };
 
-export type DiscussionQuestionState = "pending" | "answered";
+export type DiscussionQuestionState = "pending" | "answered" | "declined";
 
 /**
  * A row of `discussion_sessions` — one live (or historical)
@@ -6407,7 +6414,24 @@ export type TaskWorkerCatalogueEntry = { worker: MessageTarget, label: string,
  * Model declared by an exact joined CLI. Native targets expose their
  * tier-to-model resolution in `tiers` instead.
  */
-declared_model: string | null, configured: boolean, reachable: boolean, available: boolean, tiers: Array<TaskWorkerTier>, reasons: Array<CampaignTaskReason>, warnings: Array<CampaignTaskReason>, };
+declared_model: string | null, configured: boolean, reachable: boolean, available: boolean, tiers: Array<TaskWorkerTier>,
+/**
+ * Media generation this worker can serve, one entry per configured
+ * modality. Empty when none is configured — an agent must never be told
+ * it can produce a video the request would then refuse.
+ */
+media: Array<TaskWorkerModality>, reasons: Array<CampaignTaskReason>, warnings: Array<CampaignTaskReason>, };
+
+/**
+ * A media generation slot a worker can actually serve.
+ *
+ * Deliberately NOT a `ModelTier`: the connection model says so in its own
+ * comment — making image and video tier variants would let a text step select
+ * "tier Image". They are modalities, and they are listed only when a model is
+ * configured for them, so an empty list means "this worker generates no
+ * media" rather than "nobody looked".
+ */
+export type TaskWorkerModality = { modality: MediaModality, model: string, };
 
 /**
  * Machine-checkable scope for a worker that should not explore the repository.

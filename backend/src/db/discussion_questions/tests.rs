@@ -358,3 +358,187 @@ fn questions_and_answers_survive_reopening_the_database() {
         DiscussionQuestionState::Answered
     );
 }
+
+/// The shape that created a phantom arbitration on 2026-09-15: a failed Codex
+/// run whose raw output — folded into `kronn:context` as "technical details" —
+/// carried the system prompt, and with it the documented example fence.
+#[test]
+fn a_question_inside_folded_context_is_not_ingested() {
+    let content = "⛔ **Limite du plan atteinte.**\n\n\
+<!-- kronn:context title=\"détails techniques\" -->\n\
+Complete minimal example (replace key/question with this real decision):\n\
+```kronn-question\n\
+{\"version\":1,\"key\":\"decision-key\",\"question\":\"Which option should we use?\"}\n\
+```\n\
+<!-- /kronn:context -->\n";
+    // Without the fix this exact content yielded one live fence — that is the
+    // bug, and asserting it here keeps the test from passing for a wrong reason.
+    assert_eq!(
+        question_fences(content).len(),
+        1,
+        "the raw message must still contain the example fence"
+    );
+    let stripped = strip_context_blocks(content);
+    assert!(
+        !stripped.contains("kronn-question"),
+        "folded context must be dropped: {stripped}"
+    );
+    assert!(
+        stripped.contains("Limite du plan"),
+        "the agent's own text must survive"
+    );
+    assert!(question_fences(&stripped).is_empty());
+}
+
+#[test]
+fn a_real_question_outside_any_context_block_still_ingests() {
+    let content = "Voici les options.\n\
+```kronn-question\n\
+{\"version\":1,\"key\":\"real-key\",\"question\":\"On garde quoi ?\"}\n\
+```\n";
+    assert_eq!(question_fences(&strip_context_blocks(content)).len(), 1);
+}
+
+#[test]
+fn a_real_question_survives_alongside_a_context_block() {
+    let content = "```kronn-question\n\
+{\"version\":1,\"key\":\"real-key\",\"question\":\"On garde quoi ?\"}\n\
+```\n\
+<!-- kronn:context title=\"details\" -->\n\
+```kronn-question\n\
+{\"version\":1,\"key\":\"decision-key\",\"question\":\"Which option should we use?\"}\n\
+```\n\
+<!-- /kronn:context -->\n";
+    let fences = question_fences(&strip_context_blocks(content));
+    assert_eq!(fences.len(), 1, "only the agent's own question may survive");
+    assert!(fences[0].contains("real-key"));
+}
+
+#[test]
+fn an_unclosed_context_block_swallows_the_rest() {
+    // A truncated message fails closed: a missed question beats a phantom one
+    // that nothing in the schema can ever clear.
+    let content = "ok\n<!-- kronn:context title=\"x\" -->\n```kronn-question\n{}\n```\n";
+    assert!(!strip_context_blocks(content).contains("kronn-question"));
+}
+
+fn decline_request() -> DeclineDiscussionQuestionRequest {
+    DeclineDiscussionQuestionRequest {
+        idempotency_key: "decline-1".into(),
+        reason: Some("La question n'a plus d'objet.".into()),
+    }
+}
+
+#[test]
+fn declining_resolves_the_question_and_reaches_the_asker() {
+    // A refusal is a decision: it must leave `pending` AND be delivered, or the
+    // agent waits forever on an answer that is never coming.
+    let conn = database();
+    insert(&conn, "m", payload());
+    assert_eq!(list(&conn, "d").unwrap().pending_count, 1);
+
+    let q = decline(&conn, "d", "question:m:0", &decline_request(), "Romu", None).unwrap();
+    assert_eq!(q.state, DiscussionQuestionState::Declined);
+    let record = q.answer.as_ref().expect("a refusal is recorded like an answer");
+    assert!(record.selected_option_ids.is_empty(), "nothing was chosen");
+    assert_eq!(record.text.as_deref(), Some("La question n'a plus d'objet."));
+    assert_eq!(record.author_pseudo, "Romu");
+    assert_eq!(list(&conn, "d").unwrap().pending_count, 0);
+
+    // Same delivery path as an answer: one message, one dispatch, right target.
+    assert_eq!(
+        conn.query_row("SELECT COUNT(*) FROM agent_dispatch_jobs", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    let targets =
+        crate::db::discussions::list_message_targets(&conn, &record.message_id).unwrap();
+    assert_eq!(targets[0].agent_type, crate::models::AgentType::Codex);
+    let content: String = conn
+        .query_row(
+            "SELECT content FROM messages WHERE id=?1",
+            [&record.message_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(content.starts_with("Arbitrage refusé —"), "{content}");
+    assert!(content.contains("La question n'a plus d'objet."));
+}
+
+#[test]
+fn a_refusal_without_a_reason_still_tells_the_agent_what_to_do() {
+    // A human owes no justification, but an empty refusal must not read as a
+    // shrug: the agent needs to know it may proceed without the decision.
+    let conn = database();
+    insert(&conn, "m", payload());
+    let request = DeclineDiscussionQuestionRequest {
+        idempotency_key: "decline-bare".into(),
+        reason: None,
+    };
+    let q = decline(&conn, "d", "question:m:0", &request, "Romu", None).unwrap();
+    assert_eq!(q.state, DiscussionQuestionState::Declined);
+    let content: String = conn
+        .query_row(
+            "SELECT content FROM messages WHERE id=?1",
+            [&q.answer.unwrap().message_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(content.contains("Ne bloque pas sur cette question"), "{content}");
+}
+
+#[test]
+fn declining_replays_on_the_same_key_and_refuses_to_overwrite_a_decision() {
+    let conn = database();
+    insert(&conn, "m", payload());
+    let q = decline(&conn, "d", "question:m:0", &decline_request(), "Romu", None).unwrap();
+    // Replay of the same key is the client retrying, not a conflict.
+    assert_eq!(
+        decline(&conn, "d", &q.id, &decline_request(), "Romu", None).unwrap(),
+        q
+    );
+    // A different key on an already-refused question IS a conflict.
+    let other = DeclineDiscussionQuestionRequest {
+        idempotency_key: "decline-2".into(),
+        reason: None,
+    };
+    assert!(matches!(
+        decline(&conn, "d", &q.id, &other, "Romu", None),
+        Err(AnswerError::Conflict)
+    ));
+    // And exactly one dispatch was ever enqueued.
+    assert_eq!(
+        conn.query_row("SELECT COUNT(*) FROM agent_dispatch_jobs", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+}
+
+#[test]
+fn an_answered_question_cannot_be_refused_afterwards() {
+    // The agent already received that decision; refusing now would rewrite it.
+    let conn = database();
+    insert(&conn, "m", payload());
+    let q = answer(&conn, "d", "question:m:0", &request(), "Romu", None).unwrap();
+    assert!(matches!(
+        decline(&conn, "d", &q.id, &decline_request(), "Romu", None),
+        Err(AnswerError::Conflict)
+    ));
+    assert_eq!(
+        list(&conn, "d").unwrap().questions[0].state,
+        DiscussionQuestionState::Answered
+    );
+}
+
+#[test]
+fn a_refused_question_cannot_then_be_answered() {
+    let conn = database();
+    insert(&conn, "m", payload());
+    let q = decline(&conn, "d", "question:m:0", &decline_request(), "Romu", None).unwrap();
+    assert!(matches!(
+        answer(&conn, "d", &q.id, &request(), "Romu", None),
+        Err(AnswerError::Conflict)
+    ));
+}

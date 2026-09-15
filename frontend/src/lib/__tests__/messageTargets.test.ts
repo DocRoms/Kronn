@@ -298,3 +298,46 @@ describe('typed composer targets', () => {
     ]);
   });
 });
+
+describe('composerMentions with external connections', () => {
+  const target = (alias: string, id = 'conn-1') => ({
+    connectionId: id,
+    label: 'OpenRouter',
+    trigger: `@${alias}`,
+  });
+  const labels = {
+    discussionAgent: 'principal', punctualAgent: 'ponctuel', cli: 'cli', all: 'tous',
+  };
+
+  it('offers a configured external connection in the catalogue', () => {
+    // The regression: AGENT_MENTIONS is a static list of the ten native
+    // providers, so a connection had no way in whatever its alias — typing
+    // "@open" only ever suggested @opencode.
+    const mentions = composerMentions('ClaudeCode', ['ClaudeCode'], [], labels, [target('openrouter')]);
+    const found = mentions.find(m => m.trigger === '@openrouter');
+    expect(found, 'the connection must be mentionable').toBeDefined();
+    expect(found?.type).toBe('Custom');
+    expect(found?.target?.connection_id).toBe('conn-1');
+  });
+
+  it('pins each connection to its own id, so two cannot be confused', () => {
+    const mentions = composerMentions('ClaudeCode', ['ClaudeCode'], [], labels, [
+      target('openrouter', 'conn-1'),
+      target('groq', 'conn-2'),
+    ]);
+    expect(mentions.find(m => m.trigger === '@openrouter')?.target?.connection_id).toBe('conn-1');
+    expect(mentions.find(m => m.trigger === '@groq')?.target?.connection_id).toBe('conn-2');
+  });
+
+  it('keeps native agents and @all untouched', () => {
+    const mentions = composerMentions('ClaudeCode', ['ClaudeCode'], [], labels, [target('openrouter')]);
+    expect(mentions.some(m => m.trigger === '@all')).toBe(true);
+    expect(mentions.some(m => m.trigger === '@claude')).toBe(true);
+  });
+
+  it('adds nothing when no connection is configured', () => {
+    const before = composerMentions('ClaudeCode', ['ClaudeCode'], [], labels);
+    const after = composerMentions('ClaudeCode', ['ClaudeCode'], [], labels, []);
+    expect(after).toEqual(before);
+  });
+});

@@ -669,6 +669,11 @@ const es: TranslationDict = {
   'disc.question.recommended': 'Recomendado',
   'disc.question.freeTextPlaceholder': 'O responde con tus propias palabras…',
   'disc.question.send': 'Responder',
+  'disc.question.decline': 'Rechazar',
+  'disc.question.declineHint': 'Rechazar el arbitraje: se avisa al agente y la pregunta se cierra.',
+  'disc.question.declinedTitle': 'Arbitraje rechazado',
+  'disc.question.declinedBy': 'Rechazado por {0}, el {1}',
+  'disc.question.declinedNoReason': 'Sin motivo indicado.',
   'disc.question.answeredBy': '{0}, el {1}',
   'disc.question.loading': 'Cargando la decisión…',
   'disc.question.missing': 'Decisión no encontrada — la pregunta no se registró',
@@ -4780,7 +4785,7 @@ Termina con [SIGNAL: OK].`,
   'wf.guards.stoppedBy.loopDetection': 'Bucle detectado en step "{0}" ({1} veces)',
 
   // ── Stale-stream watchdog (TD-20260504) ──
-  'discussions.streamRecovered': 'Conexión con el agente perdida — último estado recargado',
+  'discussions.streamRecovered': 'Flujo interrumpido — el agente sigue ejecutándose en el servidor, su respuesta aparecerá aquí',
   'disc.interruptedFragment': 'Respuesta interrumpida — el agente fue cortado; sigue un reintento',
 
   // ── Migration ai/ → docs/ banner ──

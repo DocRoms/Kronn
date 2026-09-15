@@ -32,9 +32,10 @@ diagnostic (`CatalogPreflightFailure`, `reason: "unsupported"`). A model the
 catalog has never seen (never tested, or a hand-typed override) is not
 blocked — only a positive capability mismatch refuses.
 
-This reuses the same `model_catalog::preflight_check` gate every launch
-surface already calls, so the refusal shows the same card everywhere
-(Discussions, Quick Prompts, Workflow steps).
+These launch paths reuse `model_catalog::preflight_check`, but their refusal
+presentation differs. Discussions and Quick Prompts return an API diagnostic;
+workflow execution records a failed preflight result and emits a run error.
+The shared gate does not imply an identical UI card on every surface.
 
 ## The discussion's sticky connection
 

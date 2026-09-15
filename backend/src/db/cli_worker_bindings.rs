@@ -6,6 +6,7 @@ use anyhow::{bail, Result};
 use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension};
 
+use super::discussion_sessions::JoinViaTokenResult;
 use crate::models::{OrchestrationActor, PlanningActorKind};
 
 #[cfg(test)]
@@ -181,4 +182,96 @@ pub(crate) fn return_to_origin(
         super::discussion_sessions::move_session_to_discussion(conn, session_pk, origin)?;
     }
     Ok(())
+}
+
+/// Resume only an exact CLI session whose orchestrator-recorded execution has
+/// already returned it from `expected_child` to its origin. This is separate
+/// from ordinary peer resume so its expected-room refusal stays unchanged.
+pub(crate) fn resume_after_orchestrator_return(
+    conn: &Connection,
+    agent_type: &str,
+    resume_token: &str,
+    new_session_id: &str,
+    next_resume_token: Option<&str>,
+    expected_child: &str,
+) -> Result<JoinViaTokenResult> {
+    let old_hash = super::discussion_sessions::sha256_hex(resume_token);
+    let next_token = next_resume_token.unwrap_or(resume_token).to_string();
+    let next_hash = super::discussion_sessions::sha256_hex(&next_token);
+    let now = Utc::now().to_rfc3339();
+    let tx = conn.unchecked_transaction()?;
+
+    let proof: Option<(i64, String, String, String, String)> = tx
+        .query_row(
+            "SELECT s.id, s.disc_id, s.resume_token_hash, b.source_agent, b.source_session_id
+               FROM discussion_sessions s
+               JOIN task_execution_cli_bindings b ON b.cli_session_id = s.id
+               JOIN task_executions e ON e.id = b.task_execution_id
+              WHERE s.resume_token_hash IN (?1, ?2)
+                AND s.status != 'left'
+                AND s.agent_type = ?3
+                AND b.source_agent = ?3
+                AND e.worker_target_kind = 'cli'
+                AND e.worker_cli_session_id = s.id
+                AND e.worker_agent_type = ?3
+                AND e.sub_discussion_id = ?4
+                AND e.parent_discussion_id = s.disc_id
+                AND e.status IN ('Done', 'Failed', 'Cancelled')
+                AND NOT EXISTS (
+                    SELECT 1 FROM task_execution_cli_bindings newer_b
+                    JOIN task_executions newer_e ON newer_e.id = newer_b.task_execution_id
+                    WHERE newer_b.cli_session_id = s.id
+                      AND newer_e.status NOT IN ('Done', 'Failed', 'Cancelled')
+                )
+                AND EXISTS (SELECT 1 FROM messages m WHERE m.discussion_id = e.sub_discussion_id
+                            AND m.id = 'orch-return-child:' || e.id || ':' || e.status)
+                AND EXISTS (SELECT 1 FROM messages m WHERE m.discussion_id = e.parent_discussion_id
+                            AND m.id = 'orch-return-origin:' || e.id || ':' || e.status)
+              ORDER BY CASE WHEN s.resume_token_hash = ?1 THEN 0 ELSE 1 END
+              LIMIT 1",
+            params![old_hash, next_hash, agent_type, expected_child],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .optional()?;
+    let (session_pk, origin, stored_hash, source_agent, source_session_id) =
+        proof.ok_or_else(|| anyhow::anyhow!("orchestrator return resume refused"))?;
+    if super::disc_source::find_disc_by_source_session(&tx, &source_agent, &source_session_id)?
+        .as_deref()
+        != Some(origin.as_str())
+    {
+        bail!("orchestrator return resume refused");
+    }
+
+    let updated = if stored_hash == old_hash {
+        tx.execute(
+            "UPDATE discussion_sessions SET session_id=?2, last_seen=?3, activity=NULL,
+                    activity_expires_at=NULL, resume_token_hash=?4, resume_rotated_at=?3
+              WHERE id=?1 AND resume_token_hash=?5 AND status!='left' AND disc_id=?6",
+            params![session_pk, new_session_id, now, next_hash, old_hash, origin],
+        )?
+    } else {
+        tx.execute(
+            "UPDATE discussion_sessions SET session_id=?2, last_seen=?3, activity=NULL,
+                    activity_expires_at=NULL
+              WHERE id=?1 AND resume_token_hash=?4 AND status!='left' AND disc_id=?5",
+            params![session_pk, new_session_id, now, next_hash, origin],
+        )?
+    };
+    if updated != 1 {
+        bail!("orchestrator return resume refused");
+    }
+    tx.commit()?;
+    Ok(JoinViaTokenResult {
+        disc_id: origin,
+        session_pk,
+        resume_token: next_token,
+    })
 }

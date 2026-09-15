@@ -80,3 +80,27 @@ export function externalConnectionForDiscussion(
     ? connections.find(connection => connection.id === connectionId) ?? null
     : null;
 }
+
+/** Brand colour for a message written by an external connection.
+ *
+ *  `Custom` is the wire type of EVERY external connection, so AGENT_COLORS
+ *  cannot hold it — it would need one entry per connection the operator
+ *  creates. Left alone, every provider rendered in the same fallback violet
+ *  and two of them were indistinguishable at a glance.
+ *
+ *  The hue is derived from the alias rather than stored: stable for a given
+ *  connection, different between two, and needing no new field. Saturation and
+ *  lightness are fixed so every generated hue stays legible on both themes
+ *  instead of landing wherever the hash fell.
+ *
+ *  Returns null when there is no alias to derive from, so the caller keeps its
+ *  existing fallback rather than inventing a colour from nothing. */
+export function externalAgentColor(alias: string | null | undefined): string | null {
+  const seed = alias?.trim().replace(/^@/, '') ?? '';
+  if (!seed) return null;
+  let hue = 0;
+  for (const char of seed) {
+    hue = (hue * 31 + char.codePointAt(0)!) % 360;
+  }
+  return `hsl(${hue}, 62%, 52%)`;
+}

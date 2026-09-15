@@ -53,7 +53,7 @@ import { triggerDownload } from '../lib/downloadBlob';
 import { consumeDiscussionWorkspaceTarget } from '../lib/discussion-navigation';
 import { buildBatchTriageRows, buildContinuationDraft, type BatchTriageRow } from '../lib/batchTriage';
 import { useT } from '../lib/I18nContext';
-import { AGENT_LABELS, agentColor, agentTextColor, isAgentRestricted as isAgentRestrictedUtil, hasAgentFullAccess, getProjectGroup, isUsable, isBriefingDisc, isBootstrapDisc, isValidationDisc } from '../lib/constants';
+import { AGENT_LABELS, agentColor, agentTextColor, isAgentRestricted as isAgentRestrictedUtil, hasAgentFullAccess, getProjectGroup, isUsable, isRoomAgentDisabled, isBriefingDisc, isBootstrapDisc, isValidationDisc } from '../lib/constants';
 import type { ToastFn } from '../hooks/useToast';
 import {
   ChevronRight, Cpu, Loader2,
@@ -1417,10 +1417,9 @@ export function DiscussionsPage({
     // Human/CLI-only rooms do not require an installed native provider. Use
     // the header's authoritative, room-scoped mode, never another room's
     // previous value or a guessed mode while its request is pending.
-    if (composerNativeMode?.discussionId === activeDiscussion.id
-      && composerNativeMode.disabled === true) return false;
-    const agentDet = agents.find(a => a.agent_type === activeDiscussion.agent);
-    return !agentDet || !isUsable(agentDet);
+    const nativeModeDisabled = composerNativeMode?.discussionId === activeDiscussion.id
+      && composerNativeMode.disabled === true;
+    return isRoomAgentDisabled(activeDiscussion.agent, agents, nativeModeDisabled);
   }, [activeDiscussion, agents, composerNativeMode]);
 
   const activeDiscussionMessages = activeDiscussion?.messages;

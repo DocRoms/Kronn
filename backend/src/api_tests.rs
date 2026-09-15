@@ -511,9 +511,59 @@ mod tests {
             "nothing running initially"
         );
 
+        state
+            .db
+            .with_conn(|conn| {
+                let now = chrono::Utc::now();
+                let disc = crate::models::Discussion {
+                    connection_id: None,
+                    awaiting_agent: false,
+                    agent_running: false,
+                    id: "disc-running-1".into(),
+                    project_id: None,
+                    title: "Running".into(),
+                    agent: crate::models::AgentType::ClaudeCode,
+                    language: "en".into(),
+                    participants: vec![crate::models::AgentType::ClaudeCode],
+                    message_count: 0,
+                    non_system_message_count: 0,
+                    messages: vec![],
+                    skill_ids: vec![],
+                    profile_ids: vec![],
+                    directive_ids: vec![],
+                    archived: false,
+                    pinned: false,
+                    workspace_mode: "Direct".into(),
+                    workspace_path: None,
+                    worktree_branch: None,
+                    tier: crate::models::ModelTier::Default,
+                    model: None,
+                    pin_first_message: false,
+                    summary_cache: None,
+                    summary_up_to_msg_idx: None,
+                    summary_strategy: crate::models::SummaryStrategy::OnDemand,
+                    introspection_call_count: 0,
+                    shared_id: None,
+                    shared_with: vec![],
+                    workflow_run_id: None,
+                    test_mode_restore_branch: None,
+                    test_mode_stash_ref: None,
+                    created_at: now,
+                    updated_at: now,
+                };
+                crate::db::discussions::insert_discussion(conn, &disc)?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
         {
             let _g =
                 crate::CancelGuard::insert(&state.cancel_registry, "disc-running-1".to_string());
+            // A key that resolves to no discussion — a workflow run shares this
+            // registry — must not be reported as a running discussion. Before
+            // the projection it was, and the "N running" badge overcounted.
+            let _w = crate::CancelGuard::insert(&state.cancel_registry, "wf-run-42".to_string());
             let (_s, json) = send(state.clone(), false, get()).await;
             let ids: Vec<&str> = json["data"]
                 .as_array()
