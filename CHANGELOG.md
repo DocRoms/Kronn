@@ -365,6 +365,13 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- A configured external connection could not be mentioned in the composer.
+  Typing `@open` only ever suggested the native OpenCode agent: the mention
+  catalogue was built from a static list of the ten providers that ship with
+  Kronn, plus the joined CLI sessions, and a connection had no way in whatever
+  its alias. Each one is now offered under its own alias and pinned to its
+  connection, so two cannot be taken for one another.
+
 - The list of running discussions reported its own bookkeeping keys instead of
   discussions. A reply registers for cancellation under its dispatch id, not
   the discussion's, so the list missed every durable reply — the ordinary case
