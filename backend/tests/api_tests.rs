@@ -5,6 +5,7 @@
 
 use std::{
     collections::HashMap,
+    fmt::Write as _,
     sync::{Arc, OnceLock},
 };
 
@@ -23,6 +24,15 @@ use tower::ServiceExt;
 use futures::{SinkExt, StreamExt};
 use kronn::models::WsMessage;
 use kronn::{build_router_with_auth, AppState, DEFAULT_MAX_CONCURRENT_AGENTS};
+
+fn sha256_lower_hex(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .fold(String::with_capacity(64), |mut output, byte| {
+            write!(&mut output, "{byte:02x}").expect("writing to a String cannot fail");
+            output
+        })
+}
 
 #[tokio::test]
 async fn qp_effort_is_snapshotted_by_discussion_not_mutable_prompt_version() {
@@ -2361,7 +2371,7 @@ async fn orchestrator_return_resume_route_authenticates_and_replays_exact_rotati
         conn.execute(
             "INSERT INTO discussion_sessions(id, disc_id, agent_type, session_id, role, status, joined_at, resume_token_hash) \
              VALUES (657, 'return-http-parent', 'Codex', 'live-before', 'peer', 'active', ?1, ?2)",
-            rusqlite::params![now, hex::encode(Sha256::digest(token.as_bytes()))],
+            rusqlite::params![now, sha256_lower_hex(token.as_bytes())],
         )?;
         kronn::db::disc_source::bind_to_source(conn, "return-http-parent", "Codex", "stable-binding")?;
         let task = kronn::db::planning::create_task(conn, &kronn::models::CreatePlanningTaskRequest {
@@ -2645,7 +2655,7 @@ async fn orchestrator_return_resume_route_authenticates_and_replays_exact_rotati
             )?;
             assert_eq!(disc_id, "return-http-parent");
             assert_eq!(session_id, "live-after");
-            assert_eq!(credential_hash, Some(hex::encode(Sha256::digest(next.as_bytes()))));
+            assert_eq!(credential_hash, Some(sha256_lower_hex(next.as_bytes())));
             assert_eq!(
                 kronn::db::disc_source::find_disc_by_source_session(conn, "Codex", "stable-binding")?.as_deref(),
                 Some("return-http-parent")
