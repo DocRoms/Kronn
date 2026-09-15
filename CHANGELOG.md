@@ -374,6 +374,15 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- A backend restart could silently cancel the agents that had not spoken yet.
+  Mention several agents on one message and they share a trigger, but they run
+  one at a time: the first to answer posts a message newer than that shared
+  trigger, so the restart recovery — which retires a turn once the room has
+  spoken past it — retired the ones still waiting. They were answering the very
+  same question. A newer message now only retires a turn when it does not come
+  from a job triggered by that same message; a genuine new user turn still
+  retires what preceded it.
+
 - A configured external connection could not be mentioned in the composer.
   Typing `@open` only ever suggested the native OpenCode agent: the mention
   catalogue was built from a static list of the ten providers that ship with

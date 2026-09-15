@@ -675,6 +675,12 @@ pub fn recover_after_restart(conn: &Connection) -> Result<AgentDispatchRestartRe
     // more, posted with the authority of a fresh reply — and someone has to
     // notice and undo it. The fail-closed treatment already applied to
     // interrupted workflow children above is the same judgement.
+    // A sibling's reply is NOT the room speaking past the turn. Mention three
+    // agents on one message and they share a trigger: the first to answer used
+    // to condemn the other two at the next restart, because its reply is
+    // "newer" than their trigger. They were answering the very same question.
+    // So a newer message only retires a turn when it does not come from a job
+    // triggered by that same message.
     let superseded = tx.execute(
         "UPDATE agent_dispatch_jobs
          SET status = 'Cancelled', completed_at = ?1, updated_at = ?1,
@@ -683,8 +689,15 @@ pub fn recover_after_restart(conn: &Connection) -> Result<AgentDispatchRestartRe
          WHERE status = 'Running'
            AND EXISTS (
                SELECT 1 FROM messages newer
+                LEFT JOIN agent_dispatch_jobs sibling
+                       ON sibling.id = newer.agent_dispatch_job_id
                 WHERE newer.discussion_id = agent_dispatch_jobs.discussion_id
                   AND newer.sort_order > agent_dispatch_jobs.trigger_sort_order
+                  AND (
+                        sibling.id IS NULL
+                     OR sibling.trigger_message_id
+                        IS NOT agent_dispatch_jobs.trigger_message_id
+                  )
            )",
         [&now],
     )?;
@@ -1276,6 +1289,138 @@ mod tests {
             )
             .unwrap();
         assert_eq!(awaiting, 0, "the discussion is released, not left waiting");
+    }
+
+
+    /// Mention three agents on one message and they share a trigger. The first
+    /// to answer must not condemn the others at the next restart: its reply is
+    /// newer than their trigger, but it answers the very same question.
+    #[test]
+    fn a_siblings_reply_does_not_retire_the_turn_it_shares() {
+        let connection = connection();
+        let jury = enqueue_default(&connection, "jury", "mention:u1:Custom");
+        let candidate = enqueue_default(&connection, "candidate", "mention:u1:ClaudeCode");
+        assert_eq!(
+            jury.trigger_message_id, candidate.trigger_message_id,
+            "both were mentioned on the same message",
+        );
+        // Only one job runs per discussion at a time, so siblings are served in
+        // turn: the jury runs, answers, and only then does the candidate start.
+        claim(&connection, "jury").unwrap().unwrap();
+        mark_agent_started(&connection, "jury").unwrap();
+        mark_completed(&connection, "jury").unwrap();
+        let now = Utc::now().to_rfc3339();
+        connection
+            .execute(
+                "INSERT INTO messages
+                 (id, discussion_id, role, content, agent_type, timestamp, sort_order,
+                  received_at, agent_dispatch_job_id)
+                 VALUES ('jury-reply', 'd1', 'Agent', 'le jury est en place', 'Custom',
+                         ?1, 2, ?1, 'jury')",
+                [&now],
+            )
+            .unwrap();
+        // The candidate starts after the jury has spoken — and the restart
+        // catches it mid-turn.
+        claim(&connection, "candidate").unwrap().unwrap();
+        mark_agent_started(&connection, "candidate").unwrap();
+
+        let recovery = recover_after_restart(&connection).unwrap();
+
+        assert_eq!(
+            recovery.superseded, 0,
+            "a sibling answering is not the room speaking past the turn",
+        );
+        assert_eq!(recovery.requeued, 1);
+        assert_eq!(
+            get(&connection, "candidate").unwrap().unwrap().status,
+            DispatchStatus::Pending,
+            "the candidate never got to tell its joke",
+        );
+    }
+
+    /// The control: a real new user turn still retires what came before it.
+    #[test]
+    fn a_new_user_turn_still_retires_the_previous_one() {
+        let connection = connection();
+        enqueue_default(&connection, "old-turn", "mention:u1:Custom");
+        claim(&connection, "old-turn").unwrap().unwrap();
+        mark_agent_started(&connection, "old-turn").unwrap();
+        let now = Utc::now().to_rfc3339();
+        connection
+            .execute(
+                "INSERT INTO messages
+                 (id, discussion_id, role, content, timestamp, sort_order, received_at)
+                 VALUES ('u2', 'd1', 'User', 'en fait non, autre chose', ?1, 2, ?1)",
+                [&now],
+            )
+            .unwrap();
+
+        let recovery = recover_after_restart(&connection).unwrap();
+
+        assert_eq!(recovery.superseded, 1, "the question actually changed");
+        assert_eq!(recovery.requeued, 0);
+        assert_eq!(
+            get(&connection, "old-turn")
+                .unwrap()
+                .unwrap()
+                .last_error
+                .as_deref(),
+            Some("superseded_by_newer_turns"),
+        );
+    }
+
+    /// And a reply belonging to an EARLIER turn still retires this one: sharing
+    /// a discussion is not sharing a trigger.
+    #[test]
+    fn a_reply_from_another_turn_still_retires_this_one() {
+        let connection = connection();
+        let now = Utc::now().to_rfc3339();
+        // The stale job belongs to the FIRST turn; `enqueue_for_latest_user`
+        // binds to whatever user message is last, so order matters here.
+        let stale = enqueue_default(&connection, "stale", "mention:u1:Custom");
+        claim(&connection, &stale.id).unwrap().unwrap();
+        mark_agent_started(&connection, &stale.id).unwrap();
+        connection
+            .execute(
+                "INSERT INTO messages
+                 (id, discussion_id, role, content, timestamp, sort_order, received_at)
+                 VALUES ('u-other', 'd1', 'User', 'autre tour', ?1, 5, ?1)",
+                [&now],
+            )
+            .unwrap();
+        let other = enqueue_for_latest_user(
+            &connection,
+            NewLatestUserDispatch {
+                id: "other-turn",
+                discussion_id: "d1",
+                dedupe_key: "mention:u-other:Custom",
+                agent_override: None,
+                chain_prompt_ids: &[],
+                batch_item: None,
+                group_id: None,
+                group_concurrency_limit: None,
+            },
+        )
+        .unwrap();
+        assert_ne!(stale.trigger_message_id, other.trigger_message_id);
+        connection
+            .execute(
+                "INSERT INTO messages
+                 (id, discussion_id, role, content, agent_type, timestamp, sort_order,
+                  received_at, agent_dispatch_job_id)
+                 VALUES ('other-reply', 'd1', 'Agent', 'réponse', 'Custom', ?1, 6, ?1,
+                         'other-turn')",
+                [&now],
+            )
+            .unwrap();
+
+        let recovery = recover_after_restart(&connection).unwrap();
+
+        assert_eq!(
+            recovery.superseded, 1,
+            "a reply to a different trigger is a genuinely newer turn",
+        );
     }
 
     #[test]
