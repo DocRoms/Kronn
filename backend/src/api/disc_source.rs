@@ -541,20 +541,20 @@ pub async fn disc_append(
                         session_pk: v.id,
                     })
                     .collect();
-                Ok(
-                    crate::db::discussion_sessions::resolve_cli_session_mentions(&content, &joined)
-                        .into_iter()
-                        .filter(|pk| Some(*pk) != author)
-                        .filter_map(|pk| {
-                            views.iter().find(|v| v.id == pk).map(|v| {
-                                MessageTarget::cli(
-                                    crate::db::discussions::parse_agent_type(&v.agent_type),
-                                    pk,
-                                )
-                            })
-                        })
-                        .collect::<Vec<_>>(),
-                )
+                crate::db::discussion_sessions::resolve_cli_session_mentions(&content, &joined)
+                    .into_iter()
+                    .filter(|pk| Some(*pk) != author)
+                    .map(|pk| {
+                        let view = views
+                            .iter()
+                            .find(|view| view.id == pk)
+                            .ok_or_else(|| anyhow::anyhow!("resolved CLI session is missing"))?;
+                        Ok(MessageTarget::cli(
+                            crate::db::discussions::parse_agent_type(&view.agent_type)?,
+                            pk,
+                        ))
+                    })
+                    .collect::<anyhow::Result<Vec<_>>>()
             })
             .await
         {

@@ -5,6 +5,7 @@
 
 use std::{
     collections::HashMap,
+    fmt::Write as _,
     sync::{Arc, OnceLock},
 };
 
@@ -16,12 +17,22 @@ use axum::{
 use http_body_util::BodyExt;
 use serde_json::Value;
 use serial_test::serial;
+use sha2::{Digest, Sha256};
 use tokio::sync::RwLock;
 use tower::ServiceExt;
 
 use futures::{SinkExt, StreamExt};
 use kronn::models::WsMessage;
 use kronn::{build_router_with_auth, AppState, DEFAULT_MAX_CONCURRENT_AGENTS};
+
+fn sha256_lower_hex(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .fold(String::with_capacity(64), |mut output, byte| {
+            write!(&mut output, "{byte:02x}").expect("writing to a String cannot fail");
+            output
+        })
+}
 
 #[tokio::test]
 async fn qp_effort_is_snapshotted_by_discussion_not_mutable_prompt_version() {
@@ -2317,6 +2328,350 @@ async fn post_json(app: Router, uri: &str, body: Value) -> (StatusCode, Value) {
         )
     });
     (status, json)
+}
+
+#[tokio::test]
+async fn orchestrator_return_resume_route_authenticates_and_replays_exact_rotation() {
+    let state = test_state();
+    let token = "kr-resume-11111111111111111111111111111111";
+    let next = "kr-resume-22222222222222222222222222222222";
+    let repo = tempfile::tempdir().unwrap();
+    for args in [
+        vec!["init", "-b", "main"],
+        vec!["config", "user.email", "return@test.invalid"],
+        vec!["config", "user.name", "Return Test"],
+    ] {
+        assert!(std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo.path())
+            .status()
+            .unwrap()
+            .success());
+    }
+    std::fs::write(repo.path().join("README.md"), "return lifecycle\n").unwrap();
+    for args in [vec!["add", "."], vec!["commit", "-m", "initial"]] {
+        assert!(std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo.path())
+            .status()
+            .unwrap()
+            .success());
+    }
+    let repo_path = repo.path().to_string_lossy().to_string();
+    let task_reference = state.db.with_conn(move |conn| {
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO discussions(id, title, created_at, updated_at) VALUES ('return-http-parent', 'return', ?1, ?1)",
+            [&now],
+        )?;
+        conn.execute(
+            "INSERT INTO projects(id, name, path, created_at, updated_at) VALUES ('return-http-project', 'return', ?1, ?2, ?2)",
+            rusqlite::params![repo_path, now],
+        )?;
+        conn.execute(
+            "INSERT INTO discussion_sessions(id, disc_id, agent_type, session_id, role, status, joined_at, resume_token_hash) \
+             VALUES (657, 'return-http-parent', 'Codex', 'live-before', 'peer', 'active', ?1, ?2)",
+            rusqlite::params![now, sha256_lower_hex(token.as_bytes())],
+        )?;
+        kronn::db::disc_source::bind_to_source(conn, "return-http-parent", "Codex", "stable-binding")?;
+        let task = kronn::db::planning::create_task(conn, &kronn::models::CreatePlanningTaskRequest {
+            title: "return route".into(),
+            discussion_id: Some("return-http-parent".into()),
+            idempotency_key: None,
+            description: String::new(),
+            status: kronn::models::PlanningTaskStatus::Todo,
+            priority: kronn::models::PlanningTaskPriority::Normal,
+            parent_id: None,
+            project_ids: vec!["return-http-project".into()],
+            tags: vec![],
+            definition_of_done: vec![kronn::models::CreatePlanningDodItem { id: None, sentence: "worker returns".into(), completed: false }],
+            links: vec![],
+            actor: kronn::models::PlanningActor { kind: kronn::models::PlanningActorKind::Backend, id: Some("api-test".into()), session_id: None, source_message_id: None },
+        })?;
+        Ok(task.summary.reference)
+    }).await.unwrap();
+
+    let execution = kronn::api::orchestration::provision_single_task_execution(
+        &state.db,
+        kronn::api::orchestration::ProvisionInput {
+            task_reference: task_reference.clone(),
+            parent_discussion_id: "return-http-parent".into(),
+            worker: kronn::models::MessageTarget::cli(kronn::models::AgentType::Codex, 657),
+            base_rev: Some("main".into()),
+            idempotency_key: Some("return-http-cycle".into()),
+        },
+    )
+    .await
+    .unwrap();
+    let child_id = execution.sub_discussion_id.clone().unwrap();
+    let execution_id = execution.id.clone();
+    let offer_id = state
+        .db
+        .with_conn({
+            let execution_id = execution_id.clone();
+            move |conn| {
+                Ok(
+                    kronn::db::worker_offers::get_active_offer_for_attempt(conn, &execution_id, 0)?
+                        .unwrap()
+                        .id,
+                )
+            }
+        })
+        .await
+        .unwrap();
+    let app = build_router_with_auth(state.clone(), false);
+    let (_, accepted) = post_json(
+        app.clone(),
+        "/api/orchestration/accept-offer",
+        serde_json::json!({
+            "offer_id": offer_id, "source_agent": "Codex", "source_session_id": "live-before",
+            "source_binding_session_id": "stable-binding"
+        }),
+    )
+    .await;
+    assert_eq!(accepted["success"], true, "{accepted}");
+    assert_eq!(accepted["data"]["child_discussion_id"], child_id);
+
+    let (status, brief) = get_json(
+        app.clone(),
+        &format!(
+            "/api/discussions/{child_id}/wait?since_sort_order=-1&timeout_secs=0&exclude_agent_type=Codex&session_id=live-before"
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(brief["success"], true, "{brief}");
+    let brief_cursor = brief["data"]["latest_sort_order"].as_i64().unwrap();
+    assert!(brief["data"]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|message| {
+            message["message_id"]
+                .as_str()
+                .is_some_and(|id| id.starts_with("orch-brief:"))
+        }));
+    let (_, acknowledged) = get_json(
+        app.clone(),
+        &format!(
+            "/api/discussions/{child_id}/wait?since_sort_order={brief_cursor}&timeout_secs=0&exclude_agent_type=Codex&session_id=live-before"
+        ),
+    )
+    .await;
+    assert_eq!(acknowledged["success"], true, "{acknowledged}");
+    assert_eq!(acknowledged["data"]["timed_out"], true);
+
+    let before_refusal = state
+        .db
+        .with_conn(|conn| {
+            Ok(conn.query_row(
+                "SELECT disc_id, session_id, resume_token_hash FROM discussion_sessions WHERE id=657",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?)),
+            )?)
+        })
+        .await
+        .unwrap();
+    for refusal in [
+        serde_json::json!({"agent_type":"Codex","session_id":"must-not-win","resume_token":"kr-resume-ffffffffffffffffffffffffffffffff","expected_child_disc_id":child_id}),
+        serde_json::json!({"agent_type":"ClaudeCode","session_id":"must-not-win","resume_token":token,"expected_child_disc_id":child_id}),
+        serde_json::json!({"agent_type":"Codex","session_id":"must-not-win","resume_token":token,"expected_child_disc_id":child_id}),
+    ] {
+        let (_, refused) = post_json(
+            app.clone(),
+            "/api/discussions/orchestrator-return-resume",
+            refusal,
+        )
+        .await;
+        assert_eq!(refused["success"], false, "{refused}");
+    }
+    let after_refusal = state
+        .db
+        .with_conn(|conn| {
+            Ok(conn.query_row(
+                "SELECT disc_id, session_id, resume_token_hash FROM discussion_sessions WHERE id=657",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?)),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        after_refusal, before_refusal,
+        "refusals must not mutate the session"
+    );
+
+    let (workspace, dod_id) = state
+        .db
+        .with_conn({
+            let execution_id = execution_id.clone();
+            move |conn| {
+                let workspace = kronn::db::discussion_workspaces::get_managed_for_execution(
+                    conn,
+                    &execution_id,
+                )?
+                .unwrap()
+                .canonical_path
+                .unwrap();
+                let execution =
+                    kronn::db::orchestration::get_task_execution(conn, &execution_id)?.unwrap();
+                let task = kronn::db::planning::get_task(conn, &execution.task_id)?.unwrap();
+                Ok((workspace, task.definition_of_done[0].id.clone()))
+            }
+        })
+        .await
+        .unwrap();
+    let head = String::from_utf8(
+        std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&workspace)
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap()
+    .trim()
+    .to_string();
+    let (_, delivered) = post_json(app.clone(), "/api/orchestration/deliver", serde_json::json!({
+        "task_execution_id": execution_id, "source_agent": "Codex", "source_session_id": "live-before",
+        "manifest": {"version":"1","task_ref":task_reference,"head_sha":head,"files_touched":[],"tests":[{"name":"fixture","status":"pass","evidence":"actual lifecycle"}],"dod_status":[{"dod_id":dod_id,"met":true,"evidence":"actual lifecycle"}],"docs":[],"migrations":[],"risks":[],"limitations":[],"summary":"return"}
+    })).await;
+    assert_eq!(delivered["success"], true, "{delivered}");
+    state.db.with_conn(|conn| {
+        conn.execute("INSERT INTO discussion_sessions(id, disc_id, agent_type, session_id, role, status, joined_at) VALUES (658, 'return-http-parent', 'ClaudeCode', 'principal', 'peer', 'active', ?1)", [chrono::Utc::now().to_rfc3339()])?;
+        Ok(())
+    }).await.unwrap();
+    let (_, reviewed) = post_json(app.clone(), "/api/orchestration/review", serde_json::json!({
+        "task_execution_id": execution_id, "source_agent":"ClaudeCode", "source_session_id":"principal",
+        "decision":{"version":"1","task_ref":task_reference,"decision":"approve","reviewed_head_sha":head,"dod_verifications":[{"dod_id":dod_id,"met":true,"evidence":"reviewed actual delivery"}]}
+    })).await;
+    assert_eq!(reviewed["success"], true, "{reviewed}");
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let done = state
+                .db
+                .with_conn({
+                    let id = execution_id.clone();
+                    move |conn| {
+                        Ok(kronn::db::orchestration::get_task_execution(conn, &id)?
+                            .unwrap()
+                            .status
+                            == kronn::models::TaskExecutionStatus::Done)
+                    }
+                })
+                .await
+                .unwrap();
+            if done {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("review integration reaches Done");
+
+    let request = serde_json::json!({
+        "agent_type": "Codex",
+        "session_id": "live-after",
+        "resume_token": token,
+        "next_resume_token": next,
+        "expected_child_disc_id": child_id
+    });
+    let (status, first) = post_json(
+        app.clone(),
+        "/api/discussions/orchestrator-return-resume",
+        request.clone(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(first["success"], true, "{first}");
+    assert_eq!(first["data"]["disc_id"], "return-http-parent");
+    assert_eq!(first["data"]["session_pk"], 657);
+
+    let (_, replay) = post_json(
+        app.clone(),
+        "/api/discussions/orchestrator-return-resume",
+        request,
+    )
+    .await;
+    assert_eq!(replay["success"], true, "lost-response replay: {replay}");
+    assert_eq!(replay["data"]["session_pk"], 657);
+
+    let (_, appended) = post_json(
+        app.clone(),
+        "/api/disc/append",
+        serde_json::json!({
+            "disc_id":"return-http-parent", "session_id":"live-after", "session_credential":next,
+            "messages":[{"source_msg_id":"return-parent-write","role":"Agent","content":"worker is back","agent_type":"Codex"}]
+        }),
+    )
+    .await;
+    assert_eq!(appended["success"], true, "{appended}");
+    assert_eq!(appended["data"]["appended"], 1);
+    let (_, peer_reply) = post_json(
+        app.clone(),
+        "/api/disc/append",
+        serde_json::json!({
+            "disc_id":"return-http-parent",
+            "session_id":"principal",
+            "messages":[{"source_msg_id":"return-parent-read","role":"Agent","content":"parent reply","agent_type":"ClaudeCode","targets":[{"kind":"cli","agent_type":"Codex","cli_session_id":657}]}]
+        }),
+    )
+    .await;
+    assert_eq!(peer_reply["success"], true, "{peer_reply}");
+    assert_eq!(peer_reply["data"]["appended"], 1, "{peer_reply}");
+    let (_, parent_read) = get_json(
+        app.clone(),
+        "/api/discussions/return-http-parent/wait?since_sort_order=-1&timeout_secs=0&exclude_agent_type=Codex&session_id=live-after",
+    )
+    .await;
+    assert_eq!(parent_read["success"], true, "{parent_read}");
+    assert!(parent_read["data"]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|message| message["content"] == "parent reply"
+            && message["addressed_to_caller"] == true));
+
+    let (_, divergent) = post_json(
+        app,
+        "/api/discussions/orchestrator-return-resume",
+        serde_json::json!({
+            "agent_type": "Codex",
+            "session_id": "must-not-win",
+            "resume_token": token,
+            "next_resume_token": "kr-resume-33333333333333333333333333333333",
+            "expected_child_disc_id": child_id
+        }),
+    )
+    .await;
+    assert_eq!(divergent["success"], false, "{divergent}");
+
+    state
+        .db
+        .with_conn(move |conn| {
+            let (disc_id, session_id, credential_hash): (String, String, Option<String>) = conn.query_row(
+                "SELECT disc_id, session_id, resume_token_hash FROM discussion_sessions WHERE id=657",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?;
+            assert_eq!(disc_id, "return-http-parent");
+            assert_eq!(session_id, "live-after");
+            assert_eq!(credential_hash, Some(sha256_lower_hex(next.as_bytes())));
+            assert_eq!(
+                kronn::db::disc_source::find_disc_by_source_session(conn, "Codex", "stable-binding")?.as_deref(),
+                Some("return-http-parent")
+            );
+            let traces: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM messages WHERE id LIKE 'orch-return-%:' || ?1 || ':Done'",
+                [&execution_id],
+                |row| row.get(0),
+            )?;
+            assert_eq!(traces, 2);
+            Ok(())
+        })
+        .await
+        .unwrap();
 }
 
 /// Send a DELETE request and return (status, parsed JSON body).

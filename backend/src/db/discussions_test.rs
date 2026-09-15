@@ -3,7 +3,7 @@ mod tests {
     use crate::db::discussions::*;
     use crate::db::migrations;
     use chrono::Utc;
-    use rusqlite::Connection;
+    use rusqlite::{params, Connection};
     use std::sync::{Arc, Barrier};
     use std::time::Duration;
 
@@ -96,6 +96,74 @@ mod tests {
         assert_eq!(all[0].id, "d1");
         assert_eq!(all[0].title, "Discussion d1");
         assert!(!all[0].archived);
+    }
+
+    #[test]
+    fn persisted_unknown_agent_type_is_rejected_without_exposing_its_value() {
+        let conn = test_conn();
+        let discussion = make_discussion("unknown-agent-type");
+        insert_discussion(&conn, &discussion).unwrap();
+        conn.execute(
+            "UPDATE discussions SET agent = ?1 WHERE id = ?2",
+            params!["sensitive-unknown-agent", discussion.id],
+        )
+        .unwrap();
+
+        let error = get_discussion(&conn, &discussion.id)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("unknown persisted agent type"));
+        assert!(!error.contains("sensitive-unknown-agent"));
+    }
+
+    #[test]
+    fn persisted_custom_agent_type_remains_valid() {
+        let conn = test_conn();
+        let mut discussion = make_discussion("custom-agent-type");
+        discussion.agent = AgentType::Custom;
+        insert_discussion(&conn, &discussion).unwrap();
+
+        assert_eq!(
+            get_discussion(&conn, &discussion.id)
+                .unwrap()
+                .unwrap()
+                .agent,
+            AgentType::Custom
+        );
+    }
+
+    #[test]
+    fn persisted_message_target_rejects_unknown_agent_type_and_preserves_custom() {
+        let conn = test_conn();
+        insert_discussion(&conn, &make_discussion("persisted-target-agent-type")).unwrap();
+        insert_message(
+            &conn,
+            "persisted-target-agent-type",
+            &make_message("persisted-target-message", MessageRole::User, None),
+        )
+        .unwrap();
+
+        replace_message_targets(
+            &conn,
+            "persisted-target-message",
+            &[MessageTarget::agent(AgentType::Custom)],
+        )
+        .unwrap();
+        assert_eq!(
+            list_message_targets(&conn, "persisted-target-message").unwrap(),
+            vec![MessageTarget::agent(AgentType::Custom)]
+        );
+
+        conn.execute(
+            "UPDATE message_targets SET agent_type = ?1 WHERE message_id = ?2",
+            params!["sensitive-unknown-agent", "persisted-target-message"],
+        )
+        .unwrap();
+        let error = list_message_targets(&conn, "persisted-target-message")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("unknown persisted agent type"));
+        assert!(!error.contains("sensitive-unknown-agent"));
     }
 
     #[test]
@@ -1302,18 +1370,29 @@ mod tests {
     }
 
     #[test]
-    fn unknown_agent_type_in_db_becomes_custom() {
+    fn unknown_agent_type_in_db_is_rejected_and_custom_remains_valid() {
         let conn = test_conn();
         conn.execute(
             "INSERT INTO discussions (id, title, agent, language, participants_json, created_at, updated_at)
-             VALUES ('d-unknown', 'test', 'FutureAgent', 'en', '[]', datetime('now'), datetime('now'))",
+             VALUES ('d-unknown', 'test', 'sensitive-unknown-agent', 'en', '[]', datetime('now'), datetime('now'))",
             [],
-        ).unwrap();
-        let loaded = get_discussion(&conn, "d-unknown").unwrap().unwrap();
+        )
+        .unwrap();
+        let error = get_discussion(&conn, "d-unknown").unwrap_err().to_string();
+        assert!(error.contains("unknown persisted agent type"));
+        assert!(!error.contains("sensitive-unknown-agent"));
+
+        conn.execute(
+            "INSERT INTO discussions (id, title, agent, language, participants_json, created_at, updated_at)
+             VALUES ('d-custom', 'test', 'Custom', 'en', '[]', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        let loaded = get_discussion(&conn, "d-custom").unwrap().unwrap();
         assert_eq!(
             loaded.agent,
             AgentType::Custom,
-            "Unknown agent strings should map to Custom"
+            "The explicit Custom identity should remain valid"
         );
     }
 

@@ -347,7 +347,8 @@ pub fn enqueue_retry(
             )
             .optional()?
             .flatten()
-            .map(|value| super::discussions::parse_agent_type(&value)),
+            .map(|value| super::discussions::parse_agent_type(&value))
+            .transpose()?,
     };
     let dedupe_key = format!("retry:{failed_dispatch_id}:{idempotency_key}");
     let existed = conn.query_row(
@@ -1184,6 +1185,40 @@ mod tests {
             enqueue_retry(&connection, "d1", &queued.id, "retry-once", "router-retry").unwrap();
         assert!(!existed);
         assert_eq!(retry.connection_id.as_deref(), Some("router"));
+    }
+
+    #[test]
+    fn retry_refuses_unknown_persisted_system_agent_and_preserves_custom() {
+        let connection = connection();
+        let job = enqueue_default(&connection, "retry-source", "retry-source-key");
+        mark_failed(&connection, &job.id, "temporary refusal").unwrap();
+        let now = Utc::now().to_rfc3339();
+        connection
+            .execute(
+                "INSERT INTO messages
+                 (id, discussion_id, role, content, agent_type, timestamp, sort_order,
+                  received_at, agent_dispatch_job_id)
+                 VALUES ('retry-system', 'd1', 'System', 'failed', ?1, ?2, 2, ?2, ?3)",
+                params!["sensitive-unknown-agent", now, job.id],
+            )
+            .unwrap();
+
+        let error = enqueue_retry(&connection, "d1", &job.id, "retry", "retry-key")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("unknown persisted agent type"));
+        assert!(!error.contains("sensitive-unknown-agent"));
+
+        connection
+            .execute(
+                "UPDATE messages SET agent_type = 'Custom' WHERE id = 'retry-system'",
+                [],
+            )
+            .unwrap();
+        let (retry, existed) =
+            enqueue_retry(&connection, "d1", &job.id, "retry", "retry-key").unwrap();
+        assert!(!existed);
+        assert_eq!(retry.agent_override, Some(AgentType::Custom));
     }
 
     /// The room speaks past a running job, the way an agent's own partial

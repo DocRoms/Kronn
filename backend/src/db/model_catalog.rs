@@ -125,8 +125,8 @@ pub(crate) fn format_agent_type(agent_type: &AgentType) -> &'static str {
     }
 }
 
-pub(crate) fn parse_agent_type(s: &str) -> AgentType {
-    match s {
+pub(crate) fn parse_agent_type(s: &str) -> rusqlite::Result<AgentType> {
+    Ok(match s {
         "ClaudeCode" => AgentType::ClaudeCode,
         "Codex" => AgentType::Codex,
         "OpenCode" => AgentType::OpenCode,
@@ -137,8 +137,15 @@ pub(crate) fn parse_agent_type(s: &str) -> AgentType {
         "Ollama" => AgentType::Ollama,
         "LiteLlm" => AgentType::LiteLlm,
         "Nvidia" => AgentType::Nvidia,
-        _ => AgentType::Custom,
-    }
+        "Custom" => AgentType::Custom,
+        _ => {
+            return Err(rusqlite::Error::FromSqlConversionFailure(
+                0,
+                rusqlite::types::Type::Text,
+                "unknown persisted agent type".into(),
+            ));
+        }
+    })
 }
 
 fn parse_provenance(s: &str) -> ModelProvenance {
@@ -225,7 +232,7 @@ fn row_to_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<CatalogModelEntry> 
     Ok(CatalogModelEntry {
         id: row.get(0)?,
         runtime_target_id: row.get(1)?,
-        agent_type: parse_agent_type(&row.get::<_, String>(2)?),
+        agent_type: parse_agent_type(&row.get::<_, String>(2)?)?,
         model_id: row.get(3)?,
         display_name: row.get(4)?,
         display_alias: row.get(5)?,
@@ -736,7 +743,7 @@ pub fn get_refresh_log(conn: &Connection, runtime_target_id: &str) -> Result<Opt
             |row| {
                 Ok(RefreshLog {
                     runtime_target_id: row.get(0)?,
-                    agent_type: parse_agent_type(&row.get::<_, String>(1)?),
+                    agent_type: parse_agent_type(&row.get::<_, String>(1)?)?,
                     last_live_success_at: row
                         .get::<_, Option<String>>(2)?
                         .map(parse_dt),
@@ -1133,6 +1140,40 @@ mod tests {
         let entries = [migrated, live.clone()];
         let picked = resolve_tier_entry(&entries, ModelTier::Economy).unwrap();
         assert_eq!(picked.model_id, live.model_id);
+    }
+
+    #[test]
+    fn persisted_unknown_agent_type_is_rejected_without_exposing_its_value() {
+        let conn = test_conn();
+        create_manual(&conn, &req("unknown-agent-type", None)).unwrap();
+        conn.execute(
+            "UPDATE model_catalog_entries SET agent_type = ?1 WHERE model_id = ?2",
+            params!["sensitive-unknown-agent", "unknown-agent-type"],
+        )
+        .unwrap();
+
+        let error = get(&conn, "http:connection-a", "unknown-agent-type")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("unknown persisted agent type"));
+        assert!(!error.contains("sensitive-unknown-agent"));
+    }
+
+    #[test]
+    fn persisted_custom_agent_type_remains_valid() {
+        let conn = test_conn();
+        let mut request = req("custom-agent-type", None);
+        request.runtime_target_id = "agent:custom".into();
+        request.agent_type = AgentType::Custom;
+        create_manual(&conn, &request).unwrap();
+
+        assert_eq!(
+            get(&conn, "agent:custom", "custom-agent-type")
+                .unwrap()
+                .unwrap()
+                .agent_type,
+            AgentType::Custom
+        );
     }
 
     fn fixture_entry(model_id: &str) -> CatalogModelEntry {

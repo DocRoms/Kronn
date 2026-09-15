@@ -3295,6 +3295,10 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
     // model output. The ACP host owns initialize/session/prompt/cancel and
     // forwards only normalized text updates to the existing stream consumer.
     let acp_route = crate::acp::resolve_acp_route(config.agent_type);
+    if acp_route == crate::acp::AcpProductionRoute::DirectCliMigration {
+        tracing::info!(agent = ?config.agent_type, task_worker,
+            "Explicit KRONN_ACP_ADAPTER_* override selects direct CLI compatibility; no automatic prompt replay");
+    }
     // The discussion dispatcher proves the cursor, identity and worthwhile
     // delta as one unit. Never reload a durable id here: doing so would pair a
     // rejected full transcript with a resumed native session and duplicate its
@@ -3327,17 +3331,11 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
             }
             return start_native_acp(request, config.full_access).await;
         }
-        // Task workers keep the narrow, isolated worktree policy the direct
-        // CLI builder already applies below (`--setting-sources ""`,
-        // `--ignore-user-config`, the 3-tool allowlist, …); the adapters are
-        // out of scope for that path, so an operator's opt-in toggle never
-        // reaches a task worker. Direct CLI migration remains the explicit,
-        // observable fallback either way.
-        crate::acp::AcpProductionRoute::AdaptedAcp if !task_worker => {
+        crate::acp::AcpProductionRoute::AdaptedAcp => {
             tracing::info!(
                 agent = ?config.agent_type,
-                "KRONN_ACP_ADAPTER_* opt-in active: starting an isolated ACP adapter session \
-                 (unset the variable to fall back to direct CLI migration)"
+                task_worker,
+                "Starting shared ACP adapter session (KRONN_ACP_ADAPTER_*=0 selects direct CLI compatibility)"
             );
             let request = AcpSessionRequest {
                 agent_type: config.agent_type,
@@ -3365,7 +3363,34 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                 )
                 .await;
             }
-            return start_adapted_acp(request, config.full_access).await;
+            let env_key = if *config.agent_type == AgentType::ClaudeCode {
+                "ANTHROPIC_API_KEY"
+            } else {
+                "OPENAI_API_KEY"
+            };
+            let worker_args = if task_worker {
+                if *config.agent_type == AgentType::ClaudeCode {
+                    probe_claude_task_worker_auth(
+                        "claude",
+                        Some("@anthropic-ai/claude-code"),
+                        &work_dir,
+                    )
+                    .await?;
+                }
+                Some(adapter_task_worker_args(
+                    config.agent_type,
+                    &work_dir,
+                    config.project_path,
+                )?)
+            } else {
+                None
+            };
+            let launch = AdapterLaunchOptions {
+                worker_context: config.task_worker_context.cloned(),
+                worker_args,
+                api_key: get_api_key(env_key, config.tokens),
+            };
+            return start_adapted_acp(request, config.full_access && !task_worker, launch).await;
         }
         _ => {}
     }
@@ -3474,7 +3499,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
         &work_dir,
         env_key,
         api_key.as_deref(),
-        stdin_prompt.as_deref(),
+        SpawnIo::Direct(stdin_prompt.as_deref()),
         config.discussion_id,
         config.task_worker_context,
     ) {
@@ -3489,7 +3514,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                     &work_dir,
                     env_key,
                     api_key.as_deref(),
-                    stdin_prompt.as_deref(),
+                    SpawnIo::Direct(stdin_prompt.as_deref()),
                     config.discussion_id,
                     config.task_worker_context,
                 )?
@@ -3607,6 +3632,53 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
 }
 
 /// Common inputs to every ACP session-start path (native and adapted alike).
+/// The adapter owns prompt writes; the direct runner schedules them. Keep
+/// this distinction explicit so sharing spawn policy cannot close ACP stdin
+/// prematurely or leave an unread stderr pipe (adapters historically discard it).
+#[derive(Clone, Copy)]
+pub(crate) enum SpawnIo<'a> {
+    Direct(Option<&'a str>),
+    Adapter,
+}
+
+/// Per-launch secrets remain in process environment, never prompt/argv.
+#[derive(Default)]
+pub(crate) struct AdapterLaunchOptions {
+    pub(crate) worker_context: Option<TaskWorkerBridgeContext>,
+    pub(crate) worker_args: Option<Vec<String>>,
+    pub(crate) api_key: Option<String>,
+}
+
+/// Reuse the authoritative direct worker policy, including its isolated MCP
+/// registry. Only remove its empty prompt: the adapter writes the real prompt
+/// to stdin and adds its own streaming/session protocol flags.
+fn adapter_task_worker_args(
+    agent: &AgentType,
+    work_dir: &Path,
+    project_path: &str,
+) -> Result<Vec<String>, String> {
+    if *agent == AgentType::Codex && codex_task_worker_mcp_override().is_none() {
+        return Err("Codex task worker delivery bridge is unavailable".into());
+    }
+    let (_, _, mut args, _, _, _) = agent_command_with_task_worker_policy(
+        agent,
+        "",
+        false,
+        "",
+        None,
+        None,
+        true,
+        Some(work_dir),
+        None,
+    );
+    if *agent == AgentType::ClaudeCode {
+        let root = crate::core::scanner::resolve_host_path(project_path);
+        insert_claude_mcp_config(&mut args, claude_task_worker_mcp_config(&root)?, true);
+    }
+    args.pop();
+    Ok(args)
+}
+
 /// Bundled into one struct so `start_native_acp`/`start_adapted_acp`/
 /// `run_acp_session` stay under clippy's argument-count lint instead of
 /// growing an ever-longer positional parameter list.
@@ -3653,12 +3725,9 @@ async fn start_native_acp(
     run_acp_session(request, transport).await
 }
 
-/// Codex/Claude via the isolated ACP adapters (`ClaudeAcpAdapter`,
-/// `CodexAcpAdapter`), only reachable when an operator has explicitly
-/// enabled `KRONN_ACP_ADAPTER_CODEX`/`KRONN_ACP_ADAPTER_CLAUDE`
-/// (`crate::acp::resolve_acp_route`). Direct CLI migration remains the
-/// default and the observable fallback (see the caller in
-/// `start_agent_with_config`).
+/// Default Claude/Codex route, with the same launch boundary for delegated
+/// workers. Explicit false environment overrides retain direct compatibility;
+/// adapter prompt failures never automatically switch to the direct runner.
 ///
 /// Unlike native ACP agents, neither CLI has a session-config-options
 /// catalogue or a live permission callback: the model is resolved once here
@@ -3670,6 +3739,7 @@ async fn start_native_acp(
 async fn start_adapted_acp(
     request: AcpSessionRequest<'_>,
     full_access: bool,
+    launch: AdapterLaunchOptions,
 ) -> Result<AgentProcess, String> {
     use crate::acp::{AcpSessionScope, AcpTransport, ClaudeAcpAdapter, CodexAcpAdapter};
 
@@ -3686,21 +3756,21 @@ async fn start_adapted_acp(
     );
     let discussion_id = request.discussion_id.map(str::to_owned);
     let transport: Arc<dyn AcpTransport> = match agent_type {
-        AgentType::ClaudeCode => Arc::new(ClaudeAcpAdapter::new(
-            model,
-            reasoning_effort,
-            full_access,
-            discussion_id,
-            scope,
-        )),
-        AgentType::Codex => Arc::new(CodexAcpAdapter::new(
-            model,
-            reasoning_effort,
-            full_access,
-            request.resume_id.map(str::to_owned),
-            discussion_id,
-            scope,
-        )),
+        AgentType::ClaudeCode => Arc::new(
+            ClaudeAcpAdapter::new(model, reasoning_effort, full_access, discussion_id, scope)
+                .with_launch_options(launch),
+        ),
+        AgentType::Codex => Arc::new(
+            CodexAcpAdapter::new(
+                model,
+                reasoning_effort,
+                full_access,
+                request.resume_id.map(str::to_owned),
+                discussion_id,
+                scope,
+            )
+            .with_launch_options(launch),
+        ),
         other => return Err(format!("{other:?} has no ACP adapter")),
     };
     run_acp_session(
@@ -3963,7 +4033,7 @@ async fn run_acp_session(
         };
         let _ = forwarder.await;
         let persistence_error = persistence_error.lock().unwrap().take();
-        let ok = match (&result, persistence_error.as_ref()) {
+        let mut ok = match (&result, persistence_error.as_ref()) {
             (_, Some(error)) => {
                 let diagnostic = acp_failure_diagnostic("session persistence", error);
                 tracing::error!(agent = %event_agent_label, "{diagnostic}");
@@ -3983,7 +4053,14 @@ async fn run_acp_session(
                 false
             }
         };
-        let _ = host.shutdown().await;
+        if let Err(error) = host.shutdown().await {
+            let diagnostic = acp_failure_diagnostic("shutdown", &error.to_string());
+            tracing::warn!(agent = %event_agent_label, "{diagnostic}");
+            if let Ok(mut capture) = task_stderr.lock() {
+                capture.push(diagnostic);
+            }
+            ok = false;
+        }
         if let Some(mut stdin) = lifeline_stdin.take() {
             let _ = stdin.write_all(if ok { b"0\n" } else { b"1\n" }).await;
             let _ = stdin.shutdown().await;
@@ -9350,30 +9427,33 @@ pub(crate) fn should_skip_home_override(binary: &str, npx_package: Option<&str>)
 
 /// Spawn an agent process. If npx_package is Some, uses npx to run.
 ///
-/// `stdin_payload`: when present, the string is written to the child's stdin
-/// and stdin is then closed (EOF). Used for agents that accept their prompt
-/// via stdin (currently: Claude Code with `--print` and no positional prompt
-/// arg), letting us side-step the kernel's per-argv size cap.
+/// `SpawnIo::Direct(Some(payload))` writes and closes the child's stdin.
+/// `SpawnIo::Adapter` leaves that pipe for the adapter's awaited prompt write
+/// and uses null stderr because adapters consume structured stdout events.
 ///
 /// 9 args: each is genuinely independent — bundling them into a config
-/// struct would just shuffle the verbosity from the call sites
-/// (already only 2) into the struct definition + builder. The
+/// struct would just shuffle the verbosity from the direct and adapter call
+/// sites into the struct definition + builder. The
 /// arguments map 1:1 to the spawn primitives the OS expects (binary,
 /// args, env, cwd, stdin) plus four Kronn-specific feed-throughs
 /// (npx_package, api_key, discussion_id, task-worker capability). Allow-listed rather than
 /// refactored.
 #[allow(clippy::too_many_arguments)]
-fn try_spawn(
+pub(crate) fn try_spawn(
     binary: &str,
     npx_package: Option<&str>,
     args: &[String],
     work_dir: &Path,
     env_key: &str,
     api_key: Option<&str>,
-    stdin_payload: Option<&str>,
+    io: SpawnIo<'_>,
     discussion_id: Option<&str>,
     task_worker_context: Option<&TaskWorkerBridgeContext>,
 ) -> Result<tokio::process::Child, String> {
+    let stdin_payload = match io {
+        SpawnIo::Direct(payload) => payload,
+        SpawnIo::Adapter => None,
+    };
     // Resolve the final command. We also remember whether the resolved binary
     // lives inside WSL (`via_wsl`) so we can pick the right exec strategy
     // below — sending a Linux path to a Windows-native spawn would just fail.
@@ -9430,13 +9510,19 @@ fn try_spawn(
     let mut cmd = async_cmd(&final_cmd);
     cmd.args(&final_args)
         .current_dir(&effective_work_dir)
-        .stdin(if stdin_payload.is_some() {
-            Stdio::piped()
-        } else {
-            Stdio::null()
-        })
+        .stdin(
+            if stdin_payload.is_some() || matches!(io, SpawnIo::Adapter) {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            },
+        )
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(if matches!(io, SpawnIo::Adapter) {
+            Stdio::null()
+        } else {
+            Stdio::piped()
+        })
         // SIGKILL the agent process if its `Child` is dropped before
         // `wait()` returns. This is what makes workflow-run cancellation
         // actually stop in-flight Agent steps: when the runner drops the
@@ -9514,6 +9600,9 @@ fn try_spawn(
         let encoded = serde_json::to_string(context)
             .map_err(|error| format!("Unable to encode task worker context: {error}"))?;
         cmd.env("KRONN_TASK_WORKER_CONTEXT", encoded);
+    } else {
+        // A normal turn must never inherit a caller's worker capability.
+        cmd.env_remove("KRONN_TASK_WORKER_CONTEXT");
     }
 
     let real_home = std::env::var("KRONN_HOST_HOME").ok().filter(|rh| {
@@ -9558,6 +9647,8 @@ fn try_spawn(
     // suppresses 529 overloaded errors causing infinite silent retries.
     if task_worker_context.is_none() {
         cmd.env("CLAUDE_CODE_BUBBLEWRAP", "1");
+    } else {
+        cmd.env_remove("CLAUDE_CODE_BUBBLEWRAP");
     }
     // Hint shell-aware tools to use bash (dash does not support `-l`).
     // Only on Unix — Windows doesn't use SHELL env var.
@@ -10176,6 +10267,7 @@ mod acp_resume_tests {
         resume_outcome: ResumeOutcome,
         prompt_outcome: PromptOutcome,
         native_session_id: Option<String>,
+        shutdown_error: Option<String>,
         created: AtomicUsize,
         resumed: AtomicUsize,
         cancelled: AtomicUsize,
@@ -10271,7 +10363,10 @@ mod acp_resume_tests {
             Ok(())
         }
         async fn shutdown(&self) -> Result<(), AcpError> {
-            Ok(())
+            match &self.shutdown_error {
+                Some(error) => Err(AcpError::Transport(error.clone())),
+                None => Ok(()),
+            }
         }
     }
 
@@ -10284,6 +10379,7 @@ mod acp_resume_tests {
             resume_outcome,
             prompt_outcome,
             native_session_id: None,
+            shutdown_error: None,
             created: AtomicUsize::new(0),
             resumed: AtomicUsize::new(0),
             cancelled: AtomicUsize::new(0),
@@ -10688,6 +10784,7 @@ mod acp_resume_tests {
             resume_outcome: ResumeOutcome::Missing,
             prompt_outcome: PromptOutcome::Complete,
             native_session_id: Some("runtime-session".into()),
+            shutdown_error: None,
             created: AtomicUsize::new(0),
             resumed: AtomicUsize::new(0),
             cancelled: AtomicUsize::new(0),
@@ -10711,6 +10808,28 @@ mod acp_resume_tests {
             .captured_stderr()
             .iter()
             .any(|line| line.contains("ACP session persistence failed")));
+    }
+
+    #[tokio::test]
+    async fn run_acp_session_reports_a_redacted_shutdown_failure_instead_of_success() {
+        let mut transport = transport(ResumeOutcome::Missing, PromptOutcome::Complete);
+        Arc::get_mut(&mut transport).unwrap().shutdown_error =
+            Some("cleanup failed: APP_SECRET=fixture-value".into());
+        let mut process =
+            run_fixture(transport, &AgentType::OpenCode, None, None, None, None).await;
+
+        assert!(collect_output(&mut process).await.contains("first chunk"));
+        assert!(
+            !process.child.wait().await.expect("lifeline").success(),
+            "a completed response with failed process cleanup is not a clean success"
+        );
+        let diagnostics = process.captured_stderr();
+        assert!(diagnostics
+            .iter()
+            .any(|line| line.contains("ACP shutdown failed")));
+        assert!(diagnostics
+            .iter()
+            .all(|line| !line.contains("fixture-value")));
     }
 
     #[test]

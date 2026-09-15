@@ -137,15 +137,22 @@ PATH="${HOME}/.local/bin:${PATH}"
 # must not install agents the user never had — the UI offers an explicit
 # "Install" button for those. Also FALSE once a real in-container Linux copy is
 # on PATH outside the host mounts (idempotent across reboots).
+#
+# The host mounts live under /host-bin in the container. The root is read from
+# KRONN_HOST_BIN_ROOT so the mirror can be exercised by tests outside a
+# container, where /host-bin cannot be created without root. Production never
+# sets it, so the default is the only path that ever runs there.
+HOST_BIN_ROOT="${KRONN_HOST_BIN_ROOT:-/host-bin}"
+
 host_darwin_needs_linux_copy() {
   # A real in-container Linux copy already on PATH (outside the host mounts)?
   case "$(command -v "$1" 2>/dev/null || true)" in
-    ""|/host-bin/* ) : ;;      # absent here, or only the host shadow → keep checking
-    * )              return 1 ;;  # genuine in-container copy → nothing to do
+    ""|"$HOST_BIN_ROOT"/* ) : ;;   # absent here, or only the host shadow → keep checking
+    * )                     return 1 ;;  # genuine in-container copy → nothing to do
   esac
   # Did the user install it on their Mac? = a (possibly dangling) launcher
   # entry under any host-bin mount.
-  for _d in /host-bin/*; do
+  for _d in "$HOST_BIN_ROOT"/*; do
     if [ -e "$_d/$1" ] || [ -L "$_d/$1" ]; then
       return 0
     fi
@@ -185,6 +192,19 @@ if [ "${KRONN_HOST_OS:-}" = "macOS" ]; then
     echo "[entrypoint] macOS host detected: installing Linux codex via npm..."
     if command -v npm >/dev/null 2>&1; then
       npm install -g @openai/codex 2>/dev/null || true
+    fi
+  fi
+
+  # Same for OpenCode — it runs as a native ACP runtime, and without a Linux
+  # copy the skipped Darwin binary leaves it on the npx fallback.
+  if host_darwin_needs_linux_copy opencode; then
+    echo "[entrypoint] macOS host detected: installing Linux opencode via npm..."
+    if command -v npm >/dev/null 2>&1; then
+      if ! npm install -g opencode-ai 2>/dev/null; then
+        echo "[entrypoint] warning: opencode install failed (OpenCode falls back to npx runtime)."
+      fi
+    else
+      echo "[entrypoint] warning: npm missing, cannot install opencode."
     fi
   fi
 
