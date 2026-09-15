@@ -92,11 +92,15 @@ project path never reuses that identifier.
 - **Permissions:** deny-by-default. A live `session/request_permission`
   request (native ACP agents only) is auto-approved without `full_access`
   only for conservative, non-mutating tool-call kinds (`read`, `search`,
-  `think`, `fetch`); everything else is refused. Neither Claude's `--print`
-  mode nor `codex exec` exposes a live permission callback at all, so the
-  adapters compute the same policy once per session and apply it as static
-  flags (`--dangerously-skip-permissions` / `--sandbox=danger-full-access`
-  under `full_access`, the CLI's own restrictive default otherwise).
+  `think`, `fetch`); everything else is refused. Kronn's current Claude/Codex
+  adapters do not implement live permission callbacks. They apply the broker's
+  static session policy through CLI flags: Claude's permission bypass when
+  `full_access` is set; Codex's sandbox override on a fresh non-worker thread.
+  Resumes and workers retain their separately scoped launch rules. This is an
+  implementation limit, not a claim that no vendor interface supports callbacks.
+  [src: file: backend/src/acp/permission_broker.rs:449-469]
+  [src: file: backend/src/acp/claude_adapter.rs:282-284]
+  [src: file: backend/src/acp/codex_adapter.rs:389-396]
   A scoped live request must also match the bound ACP protocol session and
   identify either an authorized MCP server/tool or at least one path wholly
   contained by the canonical project root. Missing/malformed locations and
@@ -126,9 +130,10 @@ project path never reuses that identifier.
 
 ## Known limitations
 
-- **No live permission negotiation for the adapters.** Permission policy is
-  computed once per session, not per tool call, because neither CLI's
-  non-interactive mode offers a live callback.
+- **No live permission negotiation in the current adapters.** Kronn applies
+  a static launch policy instead of consulting its broker for each tool call.
+  The native ACP permission-request path remains separate.
+  [src: file: backend/src/acp/permission_broker.rs:449-469]
 - **No automatic prompt replay.** Adapter failures do not retry the submitted
   prompt through the direct runner. Switching the compatibility override is
   an operator action, not an error-recovery guess.
