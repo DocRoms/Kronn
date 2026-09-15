@@ -476,7 +476,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let argv = dir.path().join("argv.txt");
         let fixture = crate::acp::test_support::write_fixture_script(dir.path(), &format!(
-            "printf '%s\\n' \"$*\" > '{}'\nprintf '%s\\n' '{{\"type\":\"result\",\"subtype\":\"success\"}}'",
+            "printf '%s\\n' \"$*\" > '{}'\ncat >/dev/null\nprintf '%s\\n' '{{\"type\":\"result\",\"subtype\":\"success\"}}'",
             argv.display(),
         ));
         let adapter = ClaudeAcpAdapter {
@@ -610,6 +610,7 @@ exec sleep 30"#,
             dir.path(),
             &format!(
                 r#"printf '%s\n' "$*" > '{}'
+                cat >/dev/null
                 printf '%s\n' '{{"type":"result","subtype":"success","usage":{{"input_tokens":1,"output_tokens":2}}}}'"#,
                 argv_file.display()
             ),
@@ -788,8 +789,7 @@ exec sleep 30"#,
             &format!(
                 r#"printf '%s\n' "$*" > '{}'
                 printf '%s\n' "$KRONN_DISCUSSION_ID" > '{}'
-                IFS= read -r prompt
-                printf '%s' "$prompt" > '{}'
+                cat > '{}'
                 printf '%s\n' '{{"type":"result","subtype":"success","usage":{{"input_tokens":1,"output_tokens":2}}}}'"#,
                 argv_file.display(),
                 discussion_file.display(),
@@ -820,13 +820,14 @@ exec sleep 30"#,
         .await
         .unwrap();
         let target = host.create_session().await.unwrap();
-        let secret_prompt = "prompt-secret-must-use-stdin";
+        let secret_marker = "prompt-secret-must-use-stdin";
+        let secret_prompt = format!("{secret_marker}\nmultiline: é🙂\n").repeat(32_768);
         let (tx, rx) = mpsc::channel(16);
-        host.prompt(&target, secret_prompt, tx).await.unwrap();
+        host.prompt(&target, &secret_prompt, tx).await.unwrap();
         drain(rx).await;
 
         let argv = std::fs::read_to_string(argv_file).unwrap();
-        assert!(!argv.contains(secret_prompt));
+        assert!(!argv.contains(secret_marker));
         assert!(argv.contains("--strict-mcp-config"));
         assert!(argv.contains("--allowedTools"));
         assert!(argv.contains("mcp__project-safe__*"));
