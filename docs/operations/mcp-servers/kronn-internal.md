@@ -148,7 +148,7 @@ Bidirectional gateway between a CLI agent (Claude Code, Codex, Gemini, Kiro, Vib
    the child's cursor.
    `[src: file: backend/scripts/disc-introspection-mcp.py:3521-3580]`
    `[src: file: backend/scripts/disc-introspection-mcp.py:4008-4074]`
-   `[src: file: backend/src/db/cli_worker_bindings.rs:190-279]`
+   `[src: file: backend/src/db/cli_worker_bindings.rs:190-277]`
    `[src: file: backend/scripts/disc-introspection-mcp.py:2603-2635]`
    `[src: file: backend/scripts/disc-introspection-mcp.py:2839-2857]`
    `[src: file: backend/scripts/disc-introspection-mcp.py:3033-3118]`
