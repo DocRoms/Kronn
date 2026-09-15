@@ -365,6 +365,34 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- Launching Kronn on macOS installed a rebuild watcher. `kronn start` runs the
+  backend natively there, because Docker cannot reach the host CLIs or the
+  Keychain — and it inherited the development file watcher with it, so every
+  pull that touched Rust rebuilt and swapped the process, cutting whatever
+  agents were running. Hot reload now belongs to `kronn start-dev` and
+  `make dev`, where someone editing Kronn wants it.
+
+- Testing an external API connection could report HTTP 400 on an endpoint that
+  works. The probe sent a chat completion to the first model the endpoint
+  listed, whichever that was; on a proxy that also serves embeddings or
+  rerankers, that entry answers 400 because it does not do chat. The configured
+  tier models were never sent at all except for two providers. The test now
+  probes the models the operator configured, probes nothing when none are set —
+  an authenticated catalogue already establishes the credential — and names the
+  model that failed, since one model failing and the connection failing are
+  different facts.
+
+- `rustls` moves to 0.23.45, clearing RUSTSEC-2026-0285. The dependency had not
+  changed; the advisory database had.
+
+- The application icons were not derived from the mark they show. At 512 px the
+  shipped icon carried a soft halo and a gradient ground the source does not
+  produce; at 32 px the drift was small enough to go unnoticed. Each icon is
+  regenerated from its own canonical SVG — the desktop family keeps its dark
+  plate, the web family its transparent ground — and a versioned check
+  re-renders all of them, compares the images embedded in the ICO and ICNS
+  containers against a fresh render, and fails on a hand edit.
+
 - Projects > Code listed nothing under folders that came late in the alphabet.
   pnpm's content-addressable store is not a name the hand-written skip list
   knew, and generated files exhausted the walk's budget, so it stopped
