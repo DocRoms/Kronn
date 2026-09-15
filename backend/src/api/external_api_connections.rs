@@ -269,14 +269,45 @@ async fn probe_models(
                         requested_models.len()
                     )
                 });
-            } else if let Some(model) = catalogue.models.first() {
-                if let Some(auth_failure) = probe_auth(endpoint, key, model, None).await {
-                    return auth_failure;
+            } else if !requested_models.is_empty() {
+                for model in requested_models {
+                    if let Some(auth_failure) = probe_auth(endpoint, key, model, None).await {
+                        return auth_failure;
+                    }
                 }
+                catalogue.hint = Some(format!(
+                    "{} configured model(s) answered successfully.",
+                    requested_models.len()
+                ));
             }
+            // No configured model to probe: stop here. `/v1/models` already
+            // answered with this credential, which is what a connection test
+            // has to establish. Probing an arbitrary catalogue entry instead
+            // sent a chat completion to whatever the proxy happened to list
+            // first — an embedding or rerank deployment answers 400, and a
+            // healthy connection was reported broken.
         }
     }
     catalogue
+}
+
+/// Hint shown when a probed model answers a non-2xx status.
+///
+/// The generic arm names the model on purpose: a bare status told the operator
+/// that "the connection" failed, when what failed was one model — and before
+/// the caller was fixed, a model they had never configured.
+fn http_error_hint(status: u16, model: &str, nvidia_catalogue: bool) -> String {
+    match (status, nvidia_catalogue) {
+        (404, true) => format!(
+            "The NVIDIA model {model} is listed publicly but is not accessible to this account. Choose another model or check the account's NVIDIA API permissions."
+        ),
+        (410, true) => format!(
+            "The NVIDIA model {model} has been retired. Choose another model from the catalogue."
+        ),
+        _ => format!(
+            "The endpoint returned HTTP {status} for model {model} while validating the connection."
+        ),
+    }
 }
 
 /// OpenRouter's model catalogue is public, so a successful `/models` response
@@ -393,17 +424,7 @@ async fn probe_auth(
             let models = retained_models
                 .map(|items| items.to_vec())
                 .unwrap_or_default();
-            let hint = match (status, retained_models.is_some()) {
-                (404, true) => format!(
-                    "The NVIDIA model {model} is listed publicly but is not accessible to this account. Choose another model or check the account's NVIDIA API permissions."
-                ),
-                (410, true) => format!(
-                    "The NVIDIA model {model} has been retired. Choose another model from the catalogue."
-                ),
-                _ => format!(
-                    "The endpoint returned HTTP {status} while validating the connection."
-                ),
-            };
+            let hint = http_error_hint(status, model, retained_models.is_some());
             Some(TestConnectionResponse {
                 ok: false,
                 status: "http_error".into(),
@@ -1131,6 +1152,26 @@ pub async fn delete(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn http_error_hint_names_the_model_that_failed() {
+        // The operator has to know WHICH model answered 400 — a LiteLLM proxy
+        // serving embeddings alongside chat returns 400 for the former only.
+        let hint = http_error_hint(400, "text-embedding-3-large", false);
+        assert!(hint.contains("400"), "{hint}");
+        assert!(hint.contains("text-embedding-3-large"), "{hint}");
+    }
+
+    #[test]
+    fn http_error_hint_keeps_the_nvidia_arms_for_nvidia_only() {
+        // 404/410 carry NVIDIA-specific advice, but only when the probe ran
+        // against the retained NVIDIA catalogue.
+        assert!(http_error_hint(404, "m", true).contains("not accessible to this account"));
+        assert!(http_error_hint(410, "m", true).contains("retired"));
+        // Same statuses on any other provider must stay generic and named.
+        assert!(http_error_hint(404, "m", false).contains("HTTP 404 for model m"));
+        assert!(http_error_hint(410, "m", false).contains("HTTP 410 for model m"));
+    }
 
     #[test]
     fn canonicalize_alias_strips_leading_at_and_normalizes() {
