@@ -275,10 +275,11 @@ Release notes for 0.9.3 and earlier are available in the
   from, not a fourth way of reaching a model.
 - A CLI agent's card shows which model each tier will actually run, the way an
   external connection already did — economy, standard, reasoning, with the
-  configured override or the built-in fallback, never a bare "default" that
-  hides what runs. Configuring them stays behind the edit control, which now
-  sits next to delete as an icon pair, so a CLI agent and an API connection
-  offer the same two actions in the same place.
+  override you are editing, else the assignment its runtime catalogue carries,
+  else an explicit default label — three cases in that order, and never a model
+  guessed from a list baked into the frontend. Configuring them stays behind
+  the edit control, which now sits next to delete as an icon pair, so a CLI
+  agent and an API connection offer the same two actions in the same place.
 
 - The agent cards sit in two independent columns. Laid out as a grid, a row
   was as tall as its tallest card, so a short one left a hole beside a tall one
@@ -345,8 +346,11 @@ Release notes for 0.9.3 and earlier are available in the
   simply fails to match and the full prompt goes out, where a numeric cursor
   would have sent the wrong slice; the cursor only advances once the reply is
   stored, so an interrupted turn is replayed rather than skipped; a dead
-  conversation id would fail the turn outright, so the CLI's session store is
-  checked first and a miss means full prompt; and resume never travels without
+  conversation id would fail the turn outright, so a direct Claude CLI turn
+  probes its own `--print --resume` session store first and a miss means full
+  prompt, while the ACP and adapted routes — where that probe would always miss
+  and force a full prompt every time — rely on their checkpoint and a bounded
+  fallback when a resume finds a safe absence; and resume never travels without
   its delta, nor a full prompt with a resume. Task workers never resume — a
   worker opens on a fresh worktree, and a room's history is not its business.
   The figures above are measured on message volume, not end-to-end latency.
