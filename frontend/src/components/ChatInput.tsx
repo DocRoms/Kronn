@@ -66,6 +66,7 @@ import {
   targetsFromComposerText,
 } from '../lib/messageTargets';
 import { findAgentMentionQuery, mentionMatchRank, type AgentMentionQuery } from '../lib/mention-autocomplete';
+import { externalAgentTargets } from '../lib/externalAgentIdentity';
 
 let sttWorker: Worker | null = null;
 function getSttWorker(): Worker {
@@ -620,8 +621,9 @@ export function ChatInput({
         cli: t('disc.targetCli'),
         all: t('disc.targetAll'),
       },
+      externalAgentTargets(externalConnections),
     );
-  }, [discussion, installedAgentsList, cliParticipants, t]);
+  }, [discussion, installedAgentsList, cliParticipants, externalConnections, t]);
   const MENTION_OPTIONS = useMemo(() => {
     if (!discussion) return [];
     const active: typeof AGENT_MENTIONS = [];
