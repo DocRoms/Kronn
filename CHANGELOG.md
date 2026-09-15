@@ -657,6 +657,17 @@ Release notes for 0.9.3 and earlier are available in the
   Proven against a real subprocess observed over a socket, with no PID polling
   and no sleeps.
 
+- An identity Kronn does not recognize is refused instead of quietly becoming
+  a Custom agent. Two database readers turned any unknown `agent_type` into
+  `Custom`, and an unknown connection preset took the same road through
+  `Other`, so corrupt data was routed as a working agent instead of being
+  reported — on every read path that resolves message targets, session rows,
+  the peer import and the model catalogue. Those readers now fail closed, the
+  way the orchestration reader already did. Explicitly stored `Custom` and
+  `Other` keep their established routing, and the error deliberately omits the
+  offending value rather than echoing corrupt data back. The rule is written
+  down in `docs/decisions.md`, where the next reader will look for it.
+
 - OpenCode gets a runnable Linux copy on a macOS host, like the agents it sits
   next to. Its Darwin binary cannot exec inside the Linux container, so Kronn
   skips it — but nothing installed a Linux one in its place, and the agent
