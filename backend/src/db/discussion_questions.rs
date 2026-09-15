@@ -35,6 +35,21 @@ struct QuestionSpec {
 pub enum DiscussionQuestionState {
     Pending,
     Answered,
+    /// The human refused to arbitrate, or the question no longer applies.
+    /// Recorded like an answer — same author, same reason field, same dispatch
+    /// to the asker — because refusing IS a decision the agent must receive.
+    /// Without it, picking an option was the only way to clear a question,
+    /// including one that should never have been asked.
+    Declined,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct DeclineDiscussionQuestionRequest {
+    pub idempotency_key: String,
+    /// Why it is refused. Optional: a human owes no justification, but the
+    /// agent reads it, so an empty refusal still has to be actionable.
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -307,6 +322,7 @@ pub fn list(conn: &Connection, discussion_id: &str) -> Result<DiscussionQuestion
         let state = match state.as_str() {
             "pending" => DiscussionQuestionState::Pending,
             "answered" => DiscussionQuestionState::Answered,
+            "declined" => DiscussionQuestionState::Declined,
             _ => anyhow::bail!("Invalid question state"),
         };
         questions.push(DiscussionQuestion {
@@ -335,6 +351,235 @@ pub fn list(conn: &Connection, discussion_id: &str) -> Result<DiscussionQuestion
         questions,
         pending_count,
     })
+}
+
+/// Publish a human resolution of `question` and route it back to whoever asked.
+///
+/// Shared by answering and refusing: both are decisions the asker must receive,
+/// through the same target resolution (exact CLI session if the question came
+/// from one, otherwise the agent plus its dispatch connection) and the same
+/// dispatch enqueue. Splitting these two paths is how they would drift.
+#[allow(clippy::too_many_arguments)]
+fn publish_human_resolution(
+    conn: &Connection,
+    discussion_id: &str,
+    question: &DiscussionQuestion,
+    message_id: &str,
+    content: String,
+    dedupe_key: &str,
+    now: chrono::DateTime<Utc>,
+    author_pseudo: &str,
+    author_avatar_email: Option<&str>,
+) -> Result<(), AnswerError> {
+    let message = crate::models::DiscussionMessage {
+        id: message_id.to_string(),
+        role: crate::models::MessageRole::User,
+        channel: crate::models::MessageChannel::Main,
+        content,
+        agent_type: None,
+        timestamp: now,
+        tokens_used: 0,
+        auth_mode: None,
+        model_tier: None,
+        cost_usd: None,
+        author_pseudo: Some(author_pseudo.to_string()),
+        author_avatar_email: author_avatar_email.map(str::to_string),
+        source_msg_id: None,
+        duration_ms: None,
+        target_agent: None,
+        reply_to_message_id: Some(question.source_message_id.clone()),
+        recovered_partial: false,
+        session_tokens_at_message: None,
+        author_cli_ordinal: None,
+        model: None,
+        lint_report: None,
+    };
+    let sort_order = super::discussions::insert_message(conn, discussion_id, &message)?;
+    let cli_target = super::discussions::message_cli_author_target(
+        conn,
+        discussion_id,
+        &question.source_message_id,
+    )?;
+    if let Some(target) = cli_target {
+        super::discussions::replace_message_targets(conn, &message.id, &[target])?;
+        return Ok(());
+    }
+    let agent: Option<String> = conn
+        .query_row(
+            "SELECT agent_type FROM messages WHERE id=?1 AND discussion_id=?2",
+            params![question.source_message_id, discussion_id],
+            |r| r.get(0),
+        )
+        .map_err(anyhow::Error::from)?;
+    let Some(agent) = agent else { return Ok(()) };
+    let agent = super::discussions::parse_agent_type(&agent).map_err(anyhow::Error::from)?;
+    let connection_id: Option<String> = conn
+        .query_row(
+            "SELECT COALESCE(j.connection_id, q.requester_connection_id)
+             FROM discussion_questions q JOIN messages m ON m.id=q.source_message_id
+             LEFT JOIN agent_dispatch_jobs j ON j.id=m.agent_dispatch_job_id WHERE q.id=?1",
+            [question.id.as_str()],
+            |r| r.get(0),
+        )
+        .map_err(anyhow::Error::from)?;
+    let mut target = crate::models::MessageTarget::agent(agent.clone());
+    target.connection_id = connection_id.clone();
+    super::discussions::replace_message_targets(conn, &message.id, &[target])?;
+    super::agent_dispatch::enqueue_with_connection(
+        conn,
+        super::agent_dispatch::NewAgentDispatchJob {
+            id: &uuid::Uuid::new_v4().to_string(),
+            discussion_id,
+            trigger_message_id: &message.id,
+            trigger_sort_order: sort_order,
+            dedupe_key,
+            agent_override: Some(&agent),
+            chain_prompt_ids: &[],
+            batch_item: None,
+            group_id: None,
+            group_concurrency_limit: None,
+        },
+        connection_id.as_deref(),
+    )?;
+    Ok(())
+}
+
+
+/// Refuse an arbitration instead of answering it.
+///
+/// Recorded as a resolution, not a deletion: the row keeps its author, its
+/// reason and its timestamp, and the asker receives the refusal through the
+/// same dispatch as an answer. A question the human will not arbitrate is a
+/// decision the agent has to act on — leaving it pending, or deleting it
+/// silently, both leave the agent waiting on something that will never come.
+pub fn decline(
+    conn: &Connection,
+    discussion_id: &str,
+    question_id: &str,
+    request: &DeclineDiscussionQuestionRequest,
+    author_pseudo: &str,
+    author_avatar_email: Option<&str>,
+) -> Result<DiscussionQuestion, AnswerError> {
+    if !nonempty_bounded(&request.idempotency_key, 128) {
+        return Err(AnswerError::Invalid(
+            "A bounded idempotency key is required".into(),
+        ));
+    }
+    conn.execute_batch("SAVEPOINT decline_discussion_question")
+        .map_err(anyhow::Error::from)?;
+    let outcome = decline_inner(
+        conn,
+        discussion_id,
+        question_id,
+        request,
+        author_pseudo,
+        author_avatar_email,
+    );
+    match outcome {
+        Ok(question) => {
+            conn.execute_batch("RELEASE decline_discussion_question")
+                .map_err(anyhow::Error::from)?;
+            Ok(question)
+        }
+        Err(error) => {
+            let _ = conn.execute_batch(
+                "ROLLBACK TO decline_discussion_question; RELEASE decline_discussion_question",
+            );
+            Err(error)
+        }
+    }
+}
+
+fn decline_inner(
+    conn: &Connection,
+    discussion_id: &str,
+    question_id: &str,
+    request: &DeclineDiscussionQuestionRequest,
+    author_pseudo: &str,
+    author_avatar_email: Option<&str>,
+) -> Result<DiscussionQuestion, AnswerError> {
+    let mut question = list(conn, discussion_id)?
+        .questions
+        .into_iter()
+        .find(|q| q.id == question_id)
+        .ok_or(AnswerError::NotFound)?;
+    let reason = request
+        .reason
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(str::to_string);
+    if reason.as_ref().is_some_and(|r| r.chars().count() > 8000) {
+        return Err(AnswerError::Invalid(
+            "A refusal reason is limited to 8000 characters".into(),
+        ));
+    }
+    match question.state {
+        DiscussionQuestionState::Declined => {
+            // Idempotent: the same key refusing an already-refused question is
+            // the client retrying, not a conflict.
+            let key: String = conn
+                .query_row(
+                    "SELECT answer_idempotency_key FROM discussion_questions WHERE id=?1",
+                    [question_id],
+                    |r| r.get(0),
+                )
+                .map_err(anyhow::Error::from)?;
+            if key == request.idempotency_key {
+                return Ok(question);
+            }
+            return Err(AnswerError::Conflict);
+        }
+        // An answered question is decided. Refusing it afterwards would rewrite
+        // a decision the agent already received.
+        DiscussionQuestionState::Answered => return Err(AnswerError::Conflict),
+        DiscussionQuestionState::Pending => {}
+    }
+    let now = Utc::now();
+    let message_id = format!("question-decline:{question_id}");
+    let record = DiscussionQuestionAnswer {
+        selected_option_ids: Vec::new(),
+        text: reason.clone(),
+        author_pseudo: author_pseudo.to_string(),
+        answered_at: now.to_rfc3339(),
+        message_id: message_id.clone(),
+    };
+    let content = format!(
+        "Arbitrage refusé — {}\n\n{}",
+        question.question,
+        reason
+            .as_deref()
+            .unwrap_or("Aucune raison donnée. Ne bloque pas sur cette question : poursuis \
+                        sans elle, ou reformule-la si la décision reste nécessaire.")
+    );
+    publish_human_resolution(
+        conn,
+        discussion_id,
+        &question,
+        &message_id,
+        content,
+        &format!("question-decline:{question_id}"),
+        now,
+        author_pseudo,
+        author_avatar_email,
+    )?;
+    conn.execute(
+        "UPDATE discussion_questions SET state='declined', answer_json=?2, \
+         answer_idempotency_key=?3, updated_at=?4 WHERE id=?1 AND state='pending'",
+        params![
+            question_id,
+            serde_json::to_string(&record).map_err(anyhow::Error::from)?,
+            request.idempotency_key,
+            record.answered_at
+        ],
+    )
+    .map_err(anyhow::Error::from)?;
+    question.state = DiscussionQuestionState::Declined;
+    // Mirror what the row now holds, so a replay that re-reads the database
+    // returns exactly this value.
+    question.updated_at = record.answered_at.clone();
+    question.answer = Some(record);
+    Ok(question)
 }
 
 pub fn answer(
@@ -408,6 +653,11 @@ fn answer_inner(
             "Select valid options or provide a non-empty answer (maximum 8000 characters)".into(),
         ));
     }
+    // A refused question is decided. Answering it afterwards would publish a
+    // second resolution and a second dispatch for one decision.
+    if question.state == DiscussionQuestionState::Declined {
+        return Err(AnswerError::Conflict);
+    }
     if question.state == DiscussionQuestionState::Answered {
         let key: String = conn
             .query_row(
@@ -452,78 +702,17 @@ fn answer_inner(
         },
         text.as_deref().unwrap_or("")
     );
-    let message = crate::models::DiscussionMessage {
-        id: answer.message_id.clone(),
-        role: crate::models::MessageRole::User,
-        channel: crate::models::MessageChannel::Main,
-        content,
-        agent_type: None,
-        timestamp: now,
-        tokens_used: 0,
-        auth_mode: None,
-        model_tier: None,
-        cost_usd: None,
-        author_pseudo: Some(author_pseudo.to_string()),
-        author_avatar_email: author_avatar_email.map(str::to_string),
-        source_msg_id: None,
-        duration_ms: None,
-        target_agent: None,
-        reply_to_message_id: Some(question.source_message_id.clone()),
-        recovered_partial: false,
-        session_tokens_at_message: None,
-        author_cli_ordinal: None,
-        model: None,
-        lint_report: None,
-    };
-    let sort_order = super::discussions::insert_message(conn, discussion_id, &message)?;
-    let cli_target = super::discussions::message_cli_author_target(
+    publish_human_resolution(
         conn,
         discussion_id,
-        &question.source_message_id,
+        &question,
+        &answer.message_id,
+        content,
+        &format!("question-answer:{question_id}"),
+        now,
+        author_pseudo,
+        author_avatar_email,
     )?;
-    if let Some(target) = cli_target {
-        super::discussions::replace_message_targets(conn, &message.id, &[target])?;
-    } else {
-        let agent: Option<String> = conn
-            .query_row(
-                "SELECT agent_type FROM messages WHERE id=?1 AND discussion_id=?2",
-                params![question.source_message_id, discussion_id],
-                |r| r.get(0),
-            )
-            .map_err(anyhow::Error::from)?;
-        if let Some(agent) = agent {
-            let agent =
-                super::discussions::parse_agent_type(&agent).map_err(anyhow::Error::from)?;
-            let connection_id: Option<String> = conn
-                .query_row(
-                    "SELECT COALESCE(j.connection_id, q.requester_connection_id)
-                     FROM discussion_questions q JOIN messages m ON m.id=q.source_message_id
-                     LEFT JOIN agent_dispatch_jobs j ON j.id=m.agent_dispatch_job_id WHERE q.id=?1",
-                    [question_id],
-                    |r| r.get(0),
-                )
-                .map_err(anyhow::Error::from)?;
-            let mut target = crate::models::MessageTarget::agent(agent.clone());
-            target.connection_id = connection_id.clone();
-            super::discussions::replace_message_targets(conn, &message.id, &[target])?;
-            super::agent_dispatch::enqueue_with_connection(
-                conn,
-                super::agent_dispatch::NewAgentDispatchJob {
-                    id: &uuid::Uuid::new_v4().to_string(),
-                    discussion_id,
-                    trigger_message_id: &message.id,
-                    trigger_sort_order: sort_order,
-                    dedupe_key: &format!("question-answer:{question_id}"),
-                    agent_override: Some(&agent),
-                    chain_prompt_ids: &[],
-                    batch_item: None,
-                    group_id: None,
-                    group_concurrency_limit: None,
-                },
-                connection_id.as_deref(),
-            )?;
-        }
-    }
     conn.execute("UPDATE discussion_questions SET state='answered', answer_json=?2, answer_idempotency_key=?3, updated_at=?4 WHERE id=?1 AND state='pending'",
         params![question_id, serde_json::to_string(&answer).map_err(anyhow::Error::from)?, request.idempotency_key, answer.answered_at])
         .map_err(anyhow::Error::from)?;

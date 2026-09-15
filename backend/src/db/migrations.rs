@@ -675,6 +675,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "176_discussion_effort_snapshots",
         include_str!("sql/176_discussion_effort_snapshots.sql"),
     ),
+    (
+        "177_discussion_question_declined",
+        include_str!("sql/177_discussion_question_declined.sql"),
+    ),
 ];
 
 /// Apply one migration inside the caller-owned transaction.

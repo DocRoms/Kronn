@@ -217,3 +217,39 @@
 .disc-question-card[data-state='invalid'] .disc-question-head {
   color: var(--kr-warning);
 }
+
+/* Two actions now sit side by side: answering and refusing. Refusing is
+   deliberately quieter — it is the secondary path, not the discouraged one. */
+.disc-question-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-2);
+  flex-wrap: wrap;
+}
+
+.disc-question-decline {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 5px 12px;
+  border: 1px solid var(--kr-border);
+  border-radius: var(--kr-r-md);
+  background: transparent;
+  color: var(--kr-text-secondary);
+  cursor: pointer;
+}
+
+.disc-question-decline:hover:not(:disabled) {
+  border-color: var(--kr-text-secondary);
+  color: var(--kr-text-primary);
+}
+
+.disc-question-decline:disabled {
+  color: var(--kr-text-ghost);
+  cursor: default;
+}
+
+/* A refused question is resolved, not failed: same calm as an answered one. */
+.disc-question-card[data-state='declined'] {
+  opacity: 0.85;
+}

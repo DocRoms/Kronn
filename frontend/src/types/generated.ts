@@ -1537,6 +1537,13 @@ gate_step?: string | null, };
  */
 export type DecideRunResponse = { run_id: string, new_status: RunStatus, };
 
+export type DeclineDiscussionQuestionRequest = { idempotency_key: string,
+/**
+ * Why it is refused. Optional: a human owes no justification, but the
+ * agent reads it, so an empty refusal still has to be actionable.
+ */
+reason?: string | null, };
+
 export type DeleteManualModelRequest = { runtime_target_id: string, model_id: string, };
 
 /**
@@ -2426,7 +2433,7 @@ export type DiscussionQuestionList = { questions: Array<DiscussionQuestion>, pen
 
 export type DiscussionQuestionOption = { id: string, label: string, description: string | null, };
 
-export type DiscussionQuestionState = "pending" | "answered";
+export type DiscussionQuestionState = "pending" | "answered" | "declined";
 
 /**
  * A row of `discussion_sessions` — one live (or historical)

@@ -1641,6 +1641,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             post(api::discussion_questions::answer),
         )
         .route(
+            "/api/discussions/{id}/questions/{question_id}/decline",
+            post(api::discussion_questions::decline),
+        )
+        .route(
             "/api/discussions/{id}/actions",
             get(api::discussion_actions::list_for_discussion),
         )
