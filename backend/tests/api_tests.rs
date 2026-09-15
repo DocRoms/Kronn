@@ -2361,9 +2361,9 @@ async fn orchestrator_return_resume_route_authenticates_and_replays_exact_rotati
         conn.execute(
             "INSERT INTO discussion_sessions(id, disc_id, agent_type, session_id, role, status, joined_at, resume_token_hash) \
              VALUES (657, 'return-http-parent', 'Codex', 'live-before', 'peer', 'active', ?1, ?2)",
-            rusqlite::params![now, format!("{:x}", Sha256::digest(token.as_bytes()))],
+            rusqlite::params![now, hex::encode(Sha256::digest(token.as_bytes()))],
         )?;
-        kronn::db::disc_source::bind_to_source(conn, "return-http-parent", "Codex", "live-before")?;
+        kronn::db::disc_source::bind_to_source(conn, "return-http-parent", "Codex", "stable-binding")?;
         let task = kronn::db::planning::create_task(conn, &kronn::models::CreatePlanningTaskRequest {
             title: "return route".into(),
             discussion_id: Some("return-http-parent".into()),
@@ -2384,7 +2384,7 @@ async fn orchestrator_return_resume_route_authenticates_and_replays_exact_rotati
     let execution = kronn::api::orchestration::provision_single_task_execution(
         &state.db,
         kronn::api::orchestration::ProvisionInput {
-            task_reference,
+            task_reference: task_reference.clone(),
             parent_discussion_id: "return-http-parent".into(),
             worker: kronn::models::MessageTarget::cli(kronn::models::AgentType::Codex, 657),
             base_rev: Some("main".into()),
@@ -2415,7 +2415,7 @@ async fn orchestrator_return_resume_route_authenticates_and_replays_exact_rotati
         "/api/orchestration/accept-offer",
         serde_json::json!({
             "offer_id": offer_id, "source_agent": "Codex", "source_session_id": "live-before",
-            "source_binding_session_id": "live-before"
+            "source_binding_session_id": "stable-binding"
         }),
     )
     .await;
@@ -2454,11 +2454,11 @@ async fn orchestrator_return_resume_route_authenticates_and_replays_exact_rotati
     let before_refusal = state
         .db
         .with_conn(|conn| {
-            conn.query_row(
+            Ok(conn.query_row(
                 "SELECT disc_id, session_id, resume_token_hash FROM discussion_sessions WHERE id=657",
                 [],
                 |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?)),
-            )
+            )?)
         })
         .await
         .unwrap();
@@ -2478,11 +2478,11 @@ async fn orchestrator_return_resume_route_authenticates_and_replays_exact_rotati
     let after_refusal = state
         .db
         .with_conn(|conn| {
-            conn.query_row(
+            Ok(conn.query_row(
                 "SELECT disc_id, session_id, resume_token_hash FROM discussion_sessions WHERE id=657",
                 [],
                 |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?)),
-            )
+            )?)
         })
         .await
         .unwrap();
@@ -2524,7 +2524,7 @@ async fn orchestrator_return_resume_route_authenticates_and_replays_exact_rotati
     .to_string();
     let (_, delivered) = post_json(app.clone(), "/api/orchestration/deliver", serde_json::json!({
         "task_execution_id": execution_id, "source_agent": "Codex", "source_session_id": "live-before",
-        "manifest": {"version":"1","task_ref":"KT-657","head_sha":head,"files_touched":[],"tests":[{"name":"fixture","status":"pass","evidence":"actual lifecycle"}],"dod_status":[{"dod_id":dod_id,"met":true,"evidence":"actual lifecycle"}],"docs":[],"migrations":[],"risks":[],"limitations":[],"summary":"return"}
+        "manifest": {"version":"1","task_ref":task_reference,"head_sha":head,"files_touched":[],"tests":[{"name":"fixture","status":"pass","evidence":"actual lifecycle"}],"dod_status":[{"dod_id":dod_id,"met":true,"evidence":"actual lifecycle"}],"docs":[],"migrations":[],"risks":[],"limitations":[],"summary":"return"}
     })).await;
     assert_eq!(delivered["success"], true, "{delivered}");
     state.db.with_conn(|conn| {
@@ -2533,7 +2533,7 @@ async fn orchestrator_return_resume_route_authenticates_and_replays_exact_rotati
     }).await.unwrap();
     let (_, reviewed) = post_json(app.clone(), "/api/orchestration/review", serde_json::json!({
         "task_execution_id": execution_id, "source_agent":"ClaudeCode", "source_session_id":"principal",
-        "decision":{"version":"1","task_ref":"KT-657","decision":"approve","reviewed_head_sha":head,"dod_verifications":[{"dod_id":dod_id,"met":true,"evidence":"reviewed actual delivery"}]}
+        "decision":{"version":"1","task_ref":task_reference,"decision":"approve","reviewed_head_sha":head,"dod_verifications":[{"dod_id":dod_id,"met":true,"evidence":"reviewed actual delivery"}]}
     })).await;
     assert_eq!(reviewed["success"], true, "{reviewed}");
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
@@ -2603,7 +2603,7 @@ async fn orchestrator_return_resume_route_authenticates_and_replays_exact_rotati
         "/api/disc/append",
         serde_json::json!({
             "disc_id":"return-http-parent",
-            "messages":[{"source_msg_id":"return-parent-read","role":"User","content":"parent reply"}]
+            "messages":[{"source_msg_id":"return-parent-read","role":"User","content":"parent reply","targets":[{"kind":"cli","agent_type":"Codex","cli_session_id":657}]}]
         }),
     )
     .await;
@@ -2645,9 +2645,9 @@ async fn orchestrator_return_resume_route_authenticates_and_replays_exact_rotati
             )?;
             assert_eq!(disc_id, "return-http-parent");
             assert_eq!(session_id, "live-after");
-            assert_eq!(credential_hash, Some(format!("{:x}", Sha256::digest(next.as_bytes()))));
+            assert_eq!(credential_hash, Some(hex::encode(Sha256::digest(next.as_bytes()))));
             assert_eq!(
-                kronn::db::disc_source::find_disc_by_source_session(conn, "Codex", "live-before")?.as_deref(),
+                kronn::db::disc_source::find_disc_by_source_session(conn, "Codex", "stable-binding")?.as_deref(),
                 Some("return-http-parent")
             );
             let traces: i64 = conn.query_row(

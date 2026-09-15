@@ -378,3 +378,128 @@ fn authenticated_return_resume_refuses_unproven_or_moved_state_without_mutation(
         assert_eq!(active_id, "adhoc-worker", "{case} mutated membership");
     }
 }
+
+#[test]
+fn authenticated_return_resume_requires_both_terminal_return_traces_without_mutation() {
+    for missing_room in [CHILD, ORIGIN] {
+        let (conn, exec) = setup(true);
+        let token = "kr-resume-55555555555555555555555555555555";
+        let hash = crate::db::discussion_sessions::sha256_hex(token);
+        conn.execute(
+            "UPDATE discussion_sessions SET resume_token_hash = ?1 WHERE id = 101",
+            [&hash],
+        )
+        .unwrap();
+        assert!(cancel(&conn, &exec).unwrap());
+        conn.execute(
+            "DELETE FROM messages WHERE discussion_id = ?1 AND id = ?2",
+            params![
+                missing_room,
+                format!(
+                    "orch-return-{}:{exec}:Cancelled",
+                    if missing_room == CHILD {
+                        "child"
+                    } else {
+                        "origin"
+                    }
+                )
+            ],
+        )
+        .unwrap();
+        let before = (
+            membership(&conn),
+            binding(&conn, "cli-worker"),
+            conn.query_row(
+                "SELECT session_id, resume_token_hash FROM discussion_sessions WHERE id = 101",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .unwrap(),
+        );
+
+        assert!(super::resume_after_orchestrator_return(
+            &conn,
+            AGENT,
+            token,
+            "must-not-win",
+            Some("kr-resume-66666666666666666666666666666666"),
+            CHILD,
+        )
+        .is_err());
+        let after = (
+            membership(&conn),
+            binding(&conn, "cli-worker"),
+            conn.query_row(
+                "SELECT session_id, resume_token_hash FROM discussion_sessions WHERE id = 101",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .unwrap(),
+        );
+        assert_eq!(after, before, "missing {missing_room} trace mutated state");
+    }
+}
+
+#[test]
+fn authenticated_return_resume_refuses_a_new_active_assignment_without_mutation() {
+    let (conn, exec) = setup(true);
+    let token = "kr-resume-77777777777777777777777777777777";
+    conn.execute(
+        "UPDATE discussion_sessions SET resume_token_hash = ?1 WHERE id = 101",
+        [crate::db::discussion_sessions::sha256_hex(token)],
+    )
+    .unwrap();
+    assert!(cancel(&conn, &exec).unwrap());
+    conn.execute(
+        "INSERT INTO planning_tasks(id, task_number, title, created_at, updated_at) \
+         VALUES ('t2', 2, 'New assignment', '2026-09-07', '2026-09-07')",
+        [],
+    )
+    .unwrap();
+    let active = crate::db::orchestration::launch_single_task(
+        &conn,
+        &LaunchSingleTaskInput::new("t2", ORIGIN),
+        &actor(),
+    )
+    .unwrap()
+    .execution
+    .id;
+    conn.execute(
+        "UPDATE task_executions SET sub_discussion_id = ?2, worker_target_kind = 'cli', \
+         worker_cli_session_id = 101, worker_agent_type = ?3, status = 'Working' WHERE id = ?1",
+        params![active, CHILD, AGENT],
+    )
+    .unwrap();
+    pin(&conn, &active, 101, AGENT, "cli-worker").unwrap();
+    let before = (
+        membership(&conn),
+        binding(&conn, "cli-worker"),
+        conn.query_row(
+            "SELECT session_id, resume_token_hash FROM discussion_sessions WHERE id = 101",
+            [],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .unwrap(),
+    );
+
+    assert!(super::resume_after_orchestrator_return(
+        &conn,
+        AGENT,
+        token,
+        "must-not-win",
+        Some("kr-resume-88888888888888888888888888888888"),
+        CHILD,
+    )
+    .is_err());
+    let after = (
+        membership(&conn),
+        binding(&conn, "cli-worker"),
+        conn.query_row(
+            "SELECT session_id, resume_token_hash FROM discussion_sessions WHERE id = 101",
+            [],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .unwrap(),
+    );
+    assert_eq!(after, before);
+}
