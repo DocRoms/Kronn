@@ -8186,6 +8186,7 @@ fn build_task_worker_catalogue(
     http_reachability: &[(AgentType, bool)],
     cli_preflight: &[(AgentType, crate::agents::runner::CopilotTaskWorkerPreflight)],
     quota_exhausted: &[(AgentType, bool)],
+    connections: &[crate::models::ExternalApiConnection],
 ) -> crate::models::TaskWorkerCatalogue {
     let mut workers = Vec::new();
     let native_agents = CATALOGUED_PROVIDERS;
@@ -8289,6 +8290,7 @@ fn build_task_worker_catalogue(
             reachable,
             available: enabled && configured && reachable && reasons.is_empty(),
             tiers,
+            media: Vec::new(),
             reasons,
             warnings,
         });
@@ -8317,6 +8319,77 @@ fn build_task_worker_catalogue(
             reachable: true,
             available: reasons.is_empty(),
             tiers: Vec::new(),
+            media: Vec::new(),
+            reasons,
+            warnings: Vec::new(),
+        });
+    }
+
+    // External connections are workers too, and they were in none of the two
+    // loops above: `Custom` has no local binary, so detection never produces it
+    // and every surface derived from detection ignored it. A principal could
+    // therefore not delegate to a configured OpenRouter at all, and its media
+    // models were invisible even though `/api/media/generate` serves them.
+    for connection in connections {
+        let Some(endpoint) = connection.endpoint.as_ref().filter(|e| !e.trim().is_empty()) else {
+            continue;
+        };
+        let _ = endpoint;
+        let mut worker = crate::models::MessageTarget::agent(AgentType::Custom);
+        worker.connection_id = Some(connection.id.clone());
+        worker.tier = Some(crate::models::ModelTier::Default);
+
+        let tiers = [
+            (crate::models::ModelTier::Economy, &connection.economy_model),
+            (crate::models::ModelTier::Default, &connection.default_model),
+            (
+                crate::models::ModelTier::Reasoning,
+                &connection.reasoning_model,
+            ),
+        ]
+        .into_iter()
+        .map(|(tier, model)| crate::models::TaskWorkerTier {
+            tier,
+            resolved_model: model.clone().filter(|m| !m.trim().is_empty()),
+        })
+        .collect::<Vec<_>>();
+
+        // Listed only when configured: an agent must never read that it can
+        // produce a video the generation request would then refuse.
+        let media = [
+            (crate::models::MediaModality::Image, &connection.image_model),
+            (crate::models::MediaModality::Video, &connection.video_model),
+        ]
+        .into_iter()
+        .filter_map(|(modality, model)| {
+            model
+                .as_ref()
+                .map(|m| m.trim())
+                .filter(|m| !m.is_empty())
+                .map(|m| crate::models::TaskWorkerModality {
+                    modality,
+                    model: m.to_string(),
+                })
+        })
+        .collect::<Vec<_>>();
+
+        let has_text_model = tiers.iter().any(|tier| tier.resolved_model.is_some());
+        let mut reasons = Vec::new();
+        if !has_text_model && media.is_empty() {
+            reasons.push(fixed_worker_reason("model_unconfigured"));
+        }
+        workers.push(crate::models::TaskWorkerCatalogueEntry {
+            worker,
+            label: connection.display_name.clone(),
+            declared_model: None,
+            configured: true,
+            // Same meaning as for a native CLI: an address exists and Kronn can
+            // dispatch to it. It is not a claim that it answered — no probe is
+            // run per connection here.
+            reachable: true,
+            available: reasons.is_empty(),
+            tiers,
+            media,
             reasons,
             warnings: Vec::new(),
         });
@@ -8455,6 +8528,11 @@ pub(crate) async fn task_worker_catalogue_for_discussion(
                 .collect::<Result<Vec<_>>>()
         })
         .await?;
+    let connections = state
+        .db
+        .with_read_conn(crate::db::external_api_connections::list)
+        .await
+        .unwrap_or_default();
     let mut detections = crate::agents::detect_all_cached(false).await;
     let config = state.config.read().await.clone();
     crate::agents::apply_configured_status(&mut detections, &config);
@@ -8468,6 +8546,7 @@ pub(crate) async fn task_worker_catalogue_for_discussion(
         &reachability,
         &cli_preflight,
         &quota_state,
+        &connections,
     ))
 }
 
@@ -10011,6 +10090,7 @@ mod tests {
             ],
             &[],
             &[],
+            &[],
         );
 
         for entry in &catalogue.workers {
@@ -10068,6 +10148,131 @@ mod tests {
         }
     }
 
+
+    fn media_connection(image: Option<&str>, video: Option<&str>) -> crate::models::ExternalApiConnection {
+        crate::models::ExternalApiConnection {
+            id: "conn-or".into(),
+            display_name: "OpenRouter".into(),
+            mention_alias: "openrouter".into(),
+            endpoint: Some("https://openrouter.ai/api".into()),
+            credential_slug: "openrouter".into(),
+            origin_preset: crate::models::ExternalApiConnectionPreset::OpenRouter,
+            economy_model: Some("qwen/qwen3.8-max".into()),
+            default_model: None,
+            reasoning_model: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            image_model: image.map(str::to_string),
+            video_model: video.map(str::to_string),
+            media_endpoint: None,
+        }
+    }
+
+    fn catalogue_with(connections: &[crate::models::ExternalApiConnection]) -> crate::models::TaskWorkerCatalogue {
+        build_task_worker_catalogue(
+            &crate::core::config::default_config(),
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            connections,
+        )
+    }
+
+    #[test]
+    fn an_external_connection_is_a_worker_of_the_catalogue() {
+        // Regression: `Custom` has no local binary, so detection produced
+        // nothing for it and a configured OpenRouter was absent from the
+        // catalogue entirely — impossible to delegate to.
+        let catalogue = catalogue_with(&[media_connection(None, None)]);
+        let entry = catalogue
+            .workers
+            .iter()
+            .find(|entry| entry.worker.agent_type == AgentType::Custom)
+            .expect("the connection must be a worker");
+        assert_eq!(entry.label, "OpenRouter");
+        assert_eq!(entry.worker.connection_id.as_deref(), Some("conn-or"));
+        assert!(entry.available, "a connection with a text model is usable");
+        assert_eq!(
+            entry
+                .tiers
+                .iter()
+                .find(|tier| tier.tier == crate::models::ModelTier::Economy)
+                .and_then(|tier| tier.resolved_model.as_deref()),
+            Some("qwen/qwen3.8-max")
+        );
+    }
+
+    #[test]
+    fn media_modalities_are_listed_only_when_configured() {
+        let none = catalogue_with(&[media_connection(None, None)]);
+        let entry = none
+            .workers
+            .iter()
+            .find(|entry| entry.worker.agent_type == AgentType::Custom)
+            .unwrap();
+        assert!(
+            entry.media.is_empty(),
+            "nothing configured must announce nothing"
+        );
+
+        let image_only = catalogue_with(&[media_connection(Some("black-forest-labs/flux"), None)]);
+        let entry = image_only
+            .workers
+            .iter()
+            .find(|entry| entry.worker.agent_type == AgentType::Custom)
+            .unwrap();
+        assert_eq!(entry.media.len(), 1, "one modality configured, one listed");
+        assert_eq!(entry.media[0].modality, crate::models::MediaModality::Image);
+        assert_eq!(entry.media[0].model, "black-forest-labs/flux");
+    }
+
+    #[test]
+    fn both_modalities_are_listed_when_both_are_configured() {
+        let catalogue = catalogue_with(&[media_connection(
+            Some("black-forest-labs/flux"),
+            Some("bytedance/seedance-2.0-mini"),
+        )]);
+        let entry = catalogue
+            .workers
+            .iter()
+            .find(|entry| entry.worker.agent_type == AgentType::Custom)
+            .unwrap();
+        let modalities: Vec<_> = entry.media.iter().map(|m| m.modality).collect();
+        assert_eq!(
+            modalities,
+            vec![
+                crate::models::MediaModality::Image,
+                crate::models::MediaModality::Video
+            ]
+        );
+    }
+
+    #[test]
+    fn a_connection_without_an_endpoint_is_not_a_worker() {
+        let mut connection = media_connection(None, None);
+        connection.endpoint = None;
+        assert!(catalogue_with(&[connection])
+            .workers
+            .iter()
+            .all(|entry| entry.worker.agent_type != AgentType::Custom));
+    }
+
+    #[test]
+    fn a_connection_with_no_model_at_all_says_so_instead_of_looking_usable() {
+        let mut connection = media_connection(None, None);
+        connection.economy_model = None;
+        let catalogue = catalogue_with(&[connection]);
+        let entry = catalogue
+            .workers
+            .iter()
+            .find(|entry| entry.worker.agent_type == AgentType::Custom)
+            .unwrap();
+        assert!(!entry.available);
+        assert!(entry.reasons.iter().any(|r| r.code == "model_unconfigured"));
+    }
+
     #[test]
     fn worker_catalogue_refuses_copilot_until_its_account_preflight_succeeds() {
         let detection = crate::models::AgentDetection {
@@ -10102,6 +10307,7 @@ mod tests {
                 crate::agents::runner::CopilotTaskWorkerPreflight::AuthInvalid,
             )],
             &[],
+            &[],
         );
         let copilot = catalogue
             .workers
@@ -10128,6 +10334,7 @@ mod tests {
                 AgentType::CopilotCli,
                 crate::agents::runner::CopilotTaskWorkerPreflight::TimedOut,
             )],
+            &[],
             &[],
         );
         let copilot = timed_out
@@ -10184,6 +10391,7 @@ mod tests {
             &[],
             &[],
             &[(AgentType::Codex, true)],
+            &[],
         );
         let codex = catalogue
             .workers
@@ -10217,6 +10425,7 @@ mod tests {
             &[],
             &[],
             &[(AgentType::Codex, false)],
+            &[],
         );
         let codex = catalogue
             .workers

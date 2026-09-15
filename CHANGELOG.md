@@ -13,6 +13,15 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Added
 
+- The worker catalogue an agent reads now includes the configured external
+  connections, and says which media each one can generate. A connection has no
+  local binary, so agent detection produced nothing for it and it was absent
+  from the catalogue entirely — an agent could not delegate to a configured
+  OpenRouter, and had no way to learn that image or video generation was
+  available at all. Modalities are listed one per configured model and stay
+  absent otherwise, so an agent is never told it can produce a video that the
+  generation request would then refuse.
+
 - Installed CLI versions are compared with current stable releases from their
   official sources. RTK and ccusage have separate checks and diagnostics;
   checking never installs an update. Cached results and an explicit recheck

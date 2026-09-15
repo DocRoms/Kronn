@@ -1124,6 +1124,20 @@ pub struct TaskWorkerTier {
     pub resolved_model: Option<String>,
 }
 
+/// A media generation slot a worker can actually serve.
+///
+/// Deliberately NOT a `ModelTier`: the connection model says so in its own
+/// comment — making image and video tier variants would let a text step select
+/// "tier Image". They are modalities, and they are listed only when a model is
+/// configured for them, so an empty list means "this worker generates no
+/// media" rather than "nobody looked".
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct TaskWorkerModality {
+    pub modality: crate::models::MediaModality,
+    pub model: String,
+}
+
 /// A worker identity that can be copied verbatim into `task_exec_prepare`.
 ///
 /// `configured` and `reachable` are independent observations. The only strict
@@ -1143,6 +1157,11 @@ pub struct TaskWorkerCatalogueEntry {
     pub available: bool,
     #[serde(default)]
     pub tiers: Vec<TaskWorkerTier>,
+    /// Media generation this worker can serve, one entry per configured
+    /// modality. Empty when none is configured — an agent must never be told
+    /// it can produce a video the request would then refuse.
+    #[serde(default)]
+    pub media: Vec<TaskWorkerModality>,
     #[serde(default)]
     pub reasons: Vec<CampaignTaskReason>,
     #[serde(default)]
