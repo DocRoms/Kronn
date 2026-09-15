@@ -10,12 +10,12 @@
 //!   a process just to learn an id, unlike Codex.
 //! - `--output-format stream-json --include-partial-messages --verbose`
 //!   streams live during a turn.
-//! - `--mcp-config <file> --strict-mcp-config` is used only when the complete
-//!   project file matches the broker-authorized, non-secret server set.
+//! - `--mcp-config <safe-json> --strict-mcp-config` always supplies a frozen
+//!   registry: the exact authorized project set (or none), plus Kronn's own bridge.
 //!   Kronn parses the local project registry to validate that shape, but
 //!   never serializes secret values into argv, prompts, events, client
 //!   payloads, or audit entries; a credential-bearing or mixed file is
-//!   omitted wholesale.
+//!   refused wholesale, without falling back to the global account registry.
 //!
 //! There is no `--permission-prompt-tool` (or equivalent) flag in this CLI
 //! version, so Claude cannot call back into Kronn mid-turn the way a native
@@ -23,12 +23,11 @@
 //! by [`AcpPermissionBroker::session_policy`] and applied as static CLI flags
 //! instead of a live negotiation.
 
+use super::adapter_process::AdapterProcess;
 use async_trait::async_trait;
 use std::path::PathBuf;
-use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::Child;
 use tokio::sync::{mpsc, Mutex};
 
 use super::permission_broker::{AcpAuditEntry, AcpPermissionBroker, AcpSessionScope};
@@ -36,7 +35,9 @@ use super::{
     AcpAgent, AcpCapability, AcpConfigOption, AcpError, AcpInitialize, AcpNegotiatedCapabilities,
     AcpSessionEvent, AcpSessionTarget, AcpTransport,
 };
-use crate::agents::runner::{parse_claude_stream_line, StreamJsonEvent};
+use crate::agents::runner::{
+    parse_claude_stream_line, AdapterLaunchOptions, SpawnIo, StreamJsonEvent,
+};
 
 pub struct ClaudeAcpAdapter {
     program: String,
@@ -45,10 +46,11 @@ pub struct ClaudeAcpAdapter {
     reasoning_effort: Option<String>,
     broker: AcpPermissionBroker,
     allowed_tools: Mutex<Vec<String>>,
-    project_mcp_config_allowed: AtomicBool,
+    project_mcp_config: Mutex<String>,
     discussion_id: Option<String>,
     has_run_before: AtomicBool,
-    current_child: Mutex<Option<Child>>,
+    process: AdapterProcess,
+    launch: AdapterLaunchOptions,
 }
 
 impl ClaudeAcpAdapter {
@@ -66,11 +68,17 @@ impl ClaudeAcpAdapter {
             reasoning_effort,
             broker: AcpPermissionBroker::scoped(full_access, scope),
             allowed_tools: Mutex::new(Vec::new()),
-            project_mcp_config_allowed: AtomicBool::new(false),
+            project_mcp_config: Mutex::new(r#"{"mcpServers":{}}"#.into()),
             discussion_id,
             has_run_before: AtomicBool::new(false),
-            current_child: Mutex::new(None),
+            process: AdapterProcess::default(),
+            launch: AdapterLaunchOptions::default(),
         }
+    }
+
+    pub(crate) fn with_launch_options(mut self, launch: AdapterLaunchOptions) -> Self {
+        self.launch = launch;
+        self
     }
 
     /// Test-only: drive a fixture script instead of the real `claude` binary.
@@ -96,11 +104,6 @@ impl ClaudeAcpAdapter {
     pub fn permission_audit_log(&self) -> Vec<AcpAuditEntry> {
         self.broker.audit_log()
     }
-
-    fn mcp_config_path(cwd: &std::path::Path) -> Option<PathBuf> {
-        let candidate = cwd.join(".mcp.json");
-        candidate.exists().then_some(candidate)
-    }
 }
 
 #[async_trait]
@@ -110,19 +113,57 @@ impl AcpTransport for ClaudeAcpAdapter {
         request: AcpInitialize,
     ) -> Result<AcpNegotiatedCapabilities, AcpError> {
         *self.cwd.lock().await = Some(PathBuf::from(&request.cwd));
-        let servers = self.broker.authorize_mcp_servers(request.mcp_servers);
-        let authorized_ids: std::collections::BTreeSet<_> =
-            servers.iter().map(|server| server.id.as_str()).collect();
-        let config_is_exactly_authorized = crate::core::mcp_scanner::read_mcp_json(&request.cwd)
-            .is_some_and(|file| {
-                file.mcp_servers.len() == authorized_ids.len()
+        let mut servers = self.broker.authorize_mcp_servers(request.mcp_servers);
+        // The runner supplies its internal bridge plus the project registry,
+        // which may contain that same declaration. Authorization is a set.
+        servers.sort_by(|left, right| left.id.cmp(&right.id));
+        servers.dedup_by(|left, right| left.id == right.id);
+        let authorized_file =
+            crate::core::mcp_scanner::read_mcp_json(&request.cwd).filter(|file| {
+                file.mcp_servers.len() == servers.len()
                     && file.mcp_servers.iter().all(|(id, entry)| {
-                        authorized_ids.contains(id.as_str())
+                        servers.iter().any(|server| {
+                            server.id == *id
+                                && entry.command.as_deref() == Some(server.command.as_str())
+                                && entry.args.as_deref().unwrap_or_default() == server.args
+                        }) && entry.url.is_none()
                             && !crate::core::mcp_scanner::mcp_entry_leaks_secret(entry)
                     })
             });
-        self.project_mcp_config_allowed
-            .store(config_is_exactly_authorized, Ordering::SeqCst);
+        // Always supply a strict registry, even when absent/invalid/refused.
+        // Freeze the exact authorized snapshot: passing its path would allow
+        // a replacement between negotiation and CLI startup to widen scope.
+        let mut file = authorized_file.unwrap_or(crate::core::mcp_scanner::McpJsonFile {
+            mcp_servers: Default::default(),
+        });
+        if self.launch.worker_context.is_none() {
+            // This is Kronn's own executable, not a user/project declaration.
+            // Keep room tools available even without a project, just as the
+            // Codex adapter does, without restoring any global MCP registry.
+            let script = crate::agents::runner::disc_introspection_mcp_path().ok_or_else(|| {
+                AcpError::Transport("Claude ACP internal bridge is unavailable".into())
+            })?;
+            let bridge = crate::acp::AcpMcpServer {
+                id: "kronn-internal".into(),
+                command: "python3".into(),
+                args: vec![script.clone()],
+                allowed_tools: Vec::new(),
+            };
+            self.broker.register_trusted_mcp_server(&bridge);
+            servers.retain(|server| server.id != bridge.id);
+            servers.push(bridge);
+            file.mcp_servers.insert(
+                "kronn-internal".into(),
+                crate::core::mcp_scanner::McpServerEntry {
+                    command: Some("python3".into()),
+                    args: Some(vec![script]),
+                    url: None,
+                    env: Default::default(),
+                },
+            );
+        }
+        *self.project_mcp_config.lock().await = serde_json::to_string(&file)
+            .map_err(|_| AcpError::Transport("Cannot serialize scoped Claude MCP config".into()))?;
         let mut allowed_tools = Vec::new();
         for server in servers {
             if server.allowed_tools.is_empty() {
@@ -198,18 +239,22 @@ impl AcpTransport for ClaudeAcpAdapter {
         prompt: &str,
         events: mpsc::Sender<AcpSessionEvent>,
     ) -> Result<(), AcpError> {
+        let cancel = self.process.begin_turn();
+        cancel.check_active()?;
         let cwd = self.cwd.lock().await.clone().ok_or_else(|| {
             AcpError::Transport("Claude ACP adapter prompted before initialize".into())
         })?;
         let resuming = self.has_run_before.swap(true, Ordering::SeqCst);
 
-        let mut args: Vec<String> = vec![
-            "--print".into(),
-            "--output-format".into(),
-            "stream-json".into(),
-            "--verbose".into(),
-            "--include-partial-messages".into(),
-        ];
+        let mut args: Vec<String> = self.launch.worker_args.clone().unwrap_or_else(|| {
+            vec![
+                "--print".into(),
+                "--output-format".into(),
+                "stream-json".into(),
+                "--verbose".into(),
+                "--include-partial-messages".into(),
+            ]
+        });
         args.push(if resuming {
             "--resume".into()
         } else {
@@ -224,39 +269,40 @@ impl AcpTransport for ClaudeAcpAdapter {
             args.push("--effort".into());
             args.push(effort.clone());
         }
-        if self.project_mcp_config_allowed.load(Ordering::SeqCst) {
-            let mcp_config = Self::mcp_config_path(&cwd).ok_or_else(|| {
-                AcpError::Transport("authorized Claude MCP config disappeared".into())
-            })?;
+        if self.launch.worker_context.is_none() {
             args.push("--mcp-config".into());
-            args.push(mcp_config.to_string_lossy().into_owned());
+            args.push(self.project_mcp_config.lock().await.clone());
             args.push("--strict-mcp-config".into());
         }
         let allowed_tools = self.allowed_tools.lock().await.clone();
-        if !allowed_tools.is_empty() {
+        if self.launch.worker_context.is_none() && !allowed_tools.is_empty() {
             args.push("--allowedTools".into());
             args.extend(allowed_tools);
         }
         if self.broker.session_policy().claude_skip_permissions {
             args.push("--dangerously-skip-permissions".into());
         }
-        let mut command = crate::core::cmd::async_cmd(&self.program);
-        command
-            .args(&args)
-            .current_dir(&cwd)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null());
-        if let Some(discussion_id) = self.discussion_id.as_deref() {
-            command.env("KRONN_DISCUSSION_ID", discussion_id);
-        }
-        let mut child = command
-            .spawn()
-            .map_err(|error| AcpError::Transport(format!("spawn claude: {error}")))?;
+        let mut child = crate::agents::runner::try_spawn(
+            &self.program,
+            None,
+            &args,
+            &cwd,
+            "ANTHROPIC_API_KEY",
+            self.launch.api_key.as_deref(),
+            SpawnIo::Adapter,
+            self.discussion_id.as_deref(),
+            self.launch.worker_context.as_ref(),
+        )
+        .map_err(AcpError::Transport)?;
         let mut stdin = child
             .stdin
             .take()
             .ok_or_else(|| AcpError::Transport("claude stdin unavailable".into()))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| AcpError::Transport("claude stdout unavailable".into()))?;
+        self.process.install(child, &cancel).await?;
         stdin
             .write_all(prompt.as_bytes())
             .await
@@ -266,11 +312,6 @@ impl AcpTransport for ClaudeAcpAdapter {
             .await
             .map_err(|error| AcpError::Transport(format!("close claude prompt stdin: {error}")))?;
         drop(stdin);
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| AcpError::Transport("claude stdout unavailable".into()))?;
-        *self.current_child.lock().await = Some(child);
 
         let mut lines = BufReader::new(stdout).lines();
         let mut failure: Option<String> = None;
@@ -311,18 +352,7 @@ impl AcpTransport for ClaudeAcpAdapter {
             }
         }
 
-        let status = {
-            let mut guard = self.current_child.lock().await;
-            match guard.as_mut() {
-                Some(child) => child
-                    .wait()
-                    .await
-                    .map_err(|error| AcpError::Transport(format!("wait for claude: {error}")))?,
-                // Taken by a concurrent `cancel()`: the turn was interrupted.
-                None => return Err(AcpError::Transport("claude turn was cancelled".into())),
-            }
-        };
-        *self.current_child.lock().await = None;
+        let status = self.process.wait(&cancel).await?;
 
         if let Some(failure) = failure {
             return Err(AcpError::Transport(failure));
@@ -337,21 +367,11 @@ impl AcpTransport for ClaudeAcpAdapter {
     }
 
     async fn cancel(&self, _target: &AcpSessionTarget) -> Result<(), AcpError> {
-        if let Some(mut child) = self.current_child.lock().await.take() {
-            let _ = child.start_kill();
-            tokio::spawn(async move {
-                let _ = child.wait().await;
-            });
-        }
-        Ok(())
+        self.process.cancel().await
     }
 
     async fn shutdown(&self) -> Result<(), AcpError> {
-        if let Some(mut child) = self.current_child.lock().await.take() {
-            let _ = child.start_kill();
-            let _ = child.wait().await;
-        }
-        Ok(())
+        self.process.cancel().await
     }
 }
 
@@ -456,7 +476,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let argv = dir.path().join("argv.txt");
         let fixture = crate::acp::test_support::write_fixture_script(dir.path(), &format!(
-            "printf '%s\\n' \"$*\" > '{}'\nprintf '%s\\n' '{{\"type\":\"result\",\"subtype\":\"success\"}}'",
+            "printf '%s\\n' \"$*\" > '{}'\ncat >/dev/null\nprintf '%s\\n' '{{\"type\":\"result\",\"subtype\":\"success\"}}'",
             argv.display(),
         ));
         let adapter = ClaudeAcpAdapter {
@@ -520,7 +540,11 @@ mod tests {
     #[tokio::test]
     async fn cancel_kills_the_live_subprocess_and_the_turn_reports_cancelled() {
         let dir = tempfile::tempdir().unwrap();
-        let fixture = crate::acp::test_support::write_fixture_script(dir.path(), "sleep 30");
+        let fixture = crate::acp::test_support::write_fixture_script(
+            dir.path(),
+            r#"printf '%s\n' '{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","name":"fixture-ready","id":"fixture-tool","input":{}}}}'
+exec sleep 30"#,
+        );
         let adapter = std::sync::Arc::new(ClaudeAcpAdapter::new_with_program(
             fixture.to_string_lossy(),
             None,
@@ -532,14 +556,26 @@ mod tests {
             .unwrap();
         let target = host.create_session().await.unwrap();
 
-        let (tx, _rx) = mpsc::channel(16);
+        let (tx, mut rx) = mpsc::channel(16);
         let prompt_target = target.clone();
         let prompt_adapter = adapter.clone();
         let handle =
             tokio::spawn(async move { prompt_adapter.prompt(&prompt_target, "hi", tx).await });
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while let Some(event) = rx.recv().await {
+                if matches!(event, AcpSessionEvent::ToolCall { .. }) {
+                    return;
+                }
+            }
+            panic!("fixture exited without its ready event");
+        })
+        .await
+        .expect("fixture startup must be observable");
         adapter.cancel(&target).await.unwrap();
-        let result = handle.await.unwrap();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(10), handle)
+            .await
+            .expect("cancel must stop the owned child")
+            .unwrap();
         assert!(result.is_err(), "a killed turn must not report success");
     }
 
@@ -574,6 +610,7 @@ mod tests {
             dir.path(),
             &format!(
                 r#"printf '%s\n' "$*" > '{}'
+                cat >/dev/null
                 printf '%s\n' '{{"type":"result","subtype":"success","usage":{{"input_tokens":1,"output_tokens":2}}}}'"#,
                 argv_file.display()
             ),
@@ -608,8 +645,10 @@ mod tests {
 
         let argv = std::fs::read_to_string(&argv_file).unwrap();
         assert!(
-            !argv.contains("--mcp-config"),
-            "unsafe config leaked: {argv}"
+            argv.contains("--strict-mcp-config")
+                && argv.contains("kronn-internal")
+                && !argv.contains("private-server"),
+            "refused config must not inherit the global registry: {argv}"
         );
         assert!(
             !argv.contains(secret),
@@ -622,6 +661,82 @@ mod tests {
                     .iter()
                     .any(|location| location.contains(secret))
         }));
+    }
+
+    #[tokio::test]
+    async fn rejected_or_changed_registry_never_falls_back_to_global_mcp() {
+        for case in ["absent", "invalid", "mixed", "changed"] {
+            let dir = tempfile::tempdir().unwrap();
+            let config = dir.path().join(".mcp.json");
+            match case {
+                "invalid" => std::fs::write(&config, "not json").unwrap(),
+                "mixed" => std::fs::write(&config, r#"{"mcpServers":{"safe":{"command":"safe-server"},"private":{"command":"private-server","env":{"API_KEY":"fixture-secret"}}}}"#).unwrap(),
+                "changed" => std::fs::write(&config, r#"{"mcpServers":{"safe":{"command":"safe-server"}}}"#).unwrap(),
+                _ => {}
+            }
+            let argv_file = dir.path().join("argv");
+            let fixture = crate::acp::test_support::write_fixture_script(dir.path(), &format!(
+                "printf '%s\\n' \"$@\" > '{}'\ncat >/dev/null\nprintf '%s\\n' '{{\"type\":\"result\",\"subtype\":\"success\"}}'", argv_file.display()
+            ));
+            let adapter = ClaudeAcpAdapter {
+                program: fixture.to_string_lossy().into_owned(),
+                ..ClaudeAcpAdapter::new(
+                    None,
+                    None,
+                    false,
+                    None,
+                    AcpSessionScope::new(Some(dir.path().to_path_buf()), "fixture-discussion"),
+                )
+            };
+            let mut host = AcpHost::new(1, std::sync::Arc::new(adapter));
+            host.negotiate(AcpInitialize {
+                protocol_version: 1,
+                cwd: dir.path().to_string_lossy().into_owned(),
+                mcp_servers: vec![crate::acp::AcpMcpServer {
+                    id: "safe".into(),
+                    command: "safe-server".into(),
+                    args: vec![],
+                    allowed_tools: vec![],
+                }],
+            })
+            .await
+            .unwrap();
+            if case == "changed" {
+                std::fs::write(&config, r#"{"mcpServers":{"private":{"command":"private-server","env":{"API_KEY":"fixture-secret"}}}}"#).unwrap();
+            }
+            let target = host.create_session().await.unwrap();
+            let (tx, rx) = mpsc::channel(16);
+            host.prompt(&target, "fixture prompt", tx).await.unwrap();
+            drain(rx).await;
+            host.shutdown().await.unwrap();
+            let raw = std::fs::read_to_string(argv_file).unwrap();
+            let args: Vec<_> = raw.lines().collect();
+            assert!(
+                args.contains(&"--strict-mcp-config"),
+                "{case}: must disable the global MCP registry"
+            );
+            let selected = args
+                .windows(2)
+                .find(|p| p[0] == "--mcp-config")
+                .expect("explicit scoped registry")[1];
+            let mut value: serde_json::Value = serde_json::from_str(selected)
+                .expect("frozen safe inline config, not a mutable file path");
+            assert_eq!(
+                value.pointer("/mcpServers/kronn-internal/command"),
+                Some(&serde_json::json!("python3"))
+            );
+            value["mcpServers"]
+                .as_object_mut()
+                .unwrap()
+                .remove("kronn-internal");
+            let expected = if case == "changed" {
+                serde_json::json!({"mcpServers":{"safe":{"command":"safe-server"}}})
+            } else {
+                serde_json::json!({"mcpServers":{}})
+            };
+            assert_eq!(value, expected, "{case}");
+            assert!(!raw.contains("fixture-secret"), "{case}");
+        }
     }
 
     #[tokio::test]
@@ -652,7 +767,10 @@ mod tests {
             })
             .await
             .unwrap();
-        assert!(!adapter.project_mcp_config_allowed.load(Ordering::SeqCst));
+        let value: serde_json::Value =
+            serde_json::from_str(&adapter.project_mcp_config.lock().await).unwrap();
+        assert_eq!(value["mcpServers"].as_object().unwrap().len(), 1);
+        assert!(value["mcpServers"].get("kronn-internal").is_some());
     }
 
     #[tokio::test]
@@ -671,8 +789,7 @@ mod tests {
             &format!(
                 r#"printf '%s\n' "$*" > '{}'
                 printf '%s\n' "$KRONN_DISCUSSION_ID" > '{}'
-                IFS= read -r prompt
-                printf '%s' "$prompt" > '{}'
+                cat > '{}'
                 printf '%s\n' '{{"type":"result","subtype":"success","usage":{{"input_tokens":1,"output_tokens":2}}}}'"#,
                 argv_file.display(),
                 discussion_file.display(),
@@ -703,13 +820,14 @@ mod tests {
         .await
         .unwrap();
         let target = host.create_session().await.unwrap();
-        let secret_prompt = "prompt-secret-must-use-stdin";
+        let secret_marker = "prompt-secret-must-use-stdin";
+        let secret_prompt = format!("{secret_marker}\nmultiline: é🙂\n").repeat(32_768);
         let (tx, rx) = mpsc::channel(16);
-        host.prompt(&target, secret_prompt, tx).await.unwrap();
+        host.prompt(&target, &secret_prompt, tx).await.unwrap();
         drain(rx).await;
 
         let argv = std::fs::read_to_string(argv_file).unwrap();
-        assert!(!argv.contains(secret_prompt));
+        assert!(!argv.contains(secret_marker));
         assert!(argv.contains("--strict-mcp-config"));
         assert!(argv.contains("--allowedTools"));
         assert!(argv.contains("mcp__project-safe__*"));

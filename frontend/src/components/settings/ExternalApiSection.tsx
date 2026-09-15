@@ -138,7 +138,9 @@ function toPayload(form: FormState): UpsertExternalApiConnection {
 }
 
 function modelsForProbe(connection: Pick<FormState, 'origin_preset' | 'economy_model' | 'default_model' | 'reasoning_model'>): string[] {
-  if (connection.origin_preset !== 'nvidia' && connection.origin_preset !== 'open_router') return [];
+  // Every preset, not just the two with a public catalogue: probing a model
+  // the operator never configured is what made a working LiteLLM proxy report
+  // HTTP 400 (its first listed model was not a chat deployment).
   return [...new Set([
     connection.economy_model.trim(),
     connection.default_model.trim(),

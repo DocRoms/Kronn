@@ -345,6 +345,14 @@ dev_missing_tools() {
     echo "${missing# }"
 }
 
+# Hot reload belongs to developing Kronn, not to using it. On macOS `kronn
+# start` routes to the native backend because Docker cannot reach the host CLIs
+# or the Keychain — but that user is not editing Rust, and a rebuild swap kills
+# the agents they are running. Explicit `start-dev` keeps the watcher.
+dev_backend_watch_enabled() {
+    [[ "${1:-1}" != "0" ]]
+}
+
 # Pure process pattern shared by native-dev preflight/reaping. Keep it narrow:
 # a bare `watchexec` pattern would kill unrelated watchers owned by the user.
 dev_backend_watcher_pattern() {

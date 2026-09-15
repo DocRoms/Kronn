@@ -3,7 +3,7 @@ mod tests {
     use crate::db::discussions::*;
     use crate::db::migrations;
     use chrono::Utc;
-    use rusqlite::Connection;
+    use rusqlite::{params, Connection};
     use std::sync::{Arc, Barrier};
     use std::time::Duration;
 
@@ -96,6 +96,74 @@ mod tests {
         assert_eq!(all[0].id, "d1");
         assert_eq!(all[0].title, "Discussion d1");
         assert!(!all[0].archived);
+    }
+
+    #[test]
+    fn persisted_unknown_agent_type_is_rejected_without_exposing_its_value() {
+        let conn = test_conn();
+        let discussion = make_discussion("unknown-agent-type");
+        insert_discussion(&conn, &discussion).unwrap();
+        conn.execute(
+            "UPDATE discussions SET agent = ?1 WHERE id = ?2",
+            params!["sensitive-unknown-agent", discussion.id],
+        )
+        .unwrap();
+
+        let error = get_discussion(&conn, &discussion.id)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("unknown persisted agent type"));
+        assert!(!error.contains("sensitive-unknown-agent"));
+    }
+
+    #[test]
+    fn persisted_custom_agent_type_remains_valid() {
+        let conn = test_conn();
+        let mut discussion = make_discussion("custom-agent-type");
+        discussion.agent = AgentType::Custom;
+        insert_discussion(&conn, &discussion).unwrap();
+
+        assert_eq!(
+            get_discussion(&conn, &discussion.id)
+                .unwrap()
+                .unwrap()
+                .agent,
+            AgentType::Custom
+        );
+    }
+
+    #[test]
+    fn persisted_message_target_rejects_unknown_agent_type_and_preserves_custom() {
+        let conn = test_conn();
+        insert_discussion(&conn, &make_discussion("persisted-target-agent-type")).unwrap();
+        insert_message(
+            &conn,
+            "persisted-target-agent-type",
+            &make_message("persisted-target-message", MessageRole::User, None),
+        )
+        .unwrap();
+
+        replace_message_targets(
+            &conn,
+            "persisted-target-message",
+            &[MessageTarget::agent(AgentType::Custom)],
+        )
+        .unwrap();
+        assert_eq!(
+            list_message_targets(&conn, "persisted-target-message").unwrap(),
+            vec![MessageTarget::agent(AgentType::Custom)]
+        );
+
+        conn.execute(
+            "UPDATE message_targets SET agent_type = ?1 WHERE message_id = ?2",
+            params!["sensitive-unknown-agent", "persisted-target-message"],
+        )
+        .unwrap();
+        let error = list_message_targets(&conn, "persisted-target-message")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("unknown persisted agent type"));
+        assert!(!error.contains("sensitive-unknown-agent"));
     }
 
     #[test]
@@ -1302,18 +1370,29 @@ mod tests {
     }
 
     #[test]
-    fn unknown_agent_type_in_db_becomes_custom() {
+    fn unknown_agent_type_in_db_is_rejected_and_custom_remains_valid() {
         let conn = test_conn();
         conn.execute(
             "INSERT INTO discussions (id, title, agent, language, participants_json, created_at, updated_at)
-             VALUES ('d-unknown', 'test', 'FutureAgent', 'en', '[]', datetime('now'), datetime('now'))",
+             VALUES ('d-unknown', 'test', 'sensitive-unknown-agent', 'en', '[]', datetime('now'), datetime('now'))",
             [],
-        ).unwrap();
-        let loaded = get_discussion(&conn, "d-unknown").unwrap().unwrap();
+        )
+        .unwrap();
+        let error = get_discussion(&conn, "d-unknown").unwrap_err().to_string();
+        assert!(error.contains("unknown persisted agent type"));
+        assert!(!error.contains("sensitive-unknown-agent"));
+
+        conn.execute(
+            "INSERT INTO discussions (id, title, agent, language, participants_json, created_at, updated_at)
+             VALUES ('d-custom', 'test', 'Custom', 'en', '[]', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        let loaded = get_discussion(&conn, "d-custom").unwrap().unwrap();
         assert_eq!(
             loaded.agent,
             AgentType::Custom,
-            "Unknown agent strings should map to Custom"
+            "The explicit Custom identity should remain valid"
         );
     }
 
@@ -3949,5 +4028,70 @@ mod tests {
             )
             .unwrap();
         assert!(!msg_exists, "rollback leaves no message");
+    }
+
+    /// The cancel registry is a shared namespace, not a list of discussions.
+    /// Returning its keys verbatim missed every durable reply — the common
+    /// case — because those register under their dispatch id.
+    #[test]
+    fn running_keys_resolve_a_dispatch_id_to_its_discussion() {
+        let conn = test_conn();
+        insert_discussion(&conn, &make_discussion("d1")).unwrap();
+        insert_message(&conn, "d1", &make_message("m1", MessageRole::User, None)).unwrap();
+        conn.execute(
+            "INSERT INTO agent_dispatch_jobs (id, discussion_id, trigger_message_id,
+             trigger_sort_order, dedupe_key, available_at, created_at, updated_at)
+             VALUES ('job-1', 'd1', 'm1', 1, 'dedupe-1', '2026-09-15', '2026-09-15', '2026-09-15')",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            resolve_running_keys(&conn, &["job-1".to_string()]),
+            vec!["d1".to_string()],
+            "a durable reply registers under its dispatch id"
+        );
+    }
+
+    #[test]
+    fn running_keys_keep_a_legacy_discussion_key() {
+        let conn = test_conn();
+        insert_discussion(&conn, &make_discussion("d1")).unwrap();
+        assert_eq!(
+            resolve_running_keys(&conn, &["d1".to_string()]),
+            vec!["d1".to_string()]
+        );
+    }
+
+    #[test]
+    fn running_keys_drop_what_is_not_a_discussion() {
+        // agent jobs and workflow runs share the registry; surfacing them as
+        // discussions is what made the "N running" badge overcount.
+        let conn = test_conn();
+        insert_discussion(&conn, &make_discussion("d1")).unwrap();
+        assert!(resolve_running_keys(
+            &conn,
+            &["agent-job:abc".to_string(), "some-workflow-run".to_string()]
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn running_keys_deduplicate_when_two_keys_share_a_discussion() {
+        // A discussion can hold a legacy key and a dispatch key at once.
+        let conn = test_conn();
+        insert_discussion(&conn, &make_discussion("d1")).unwrap();
+        insert_message(&conn, "d1", &make_message("m1", MessageRole::User, None)).unwrap();
+        conn.execute(
+            "INSERT INTO agent_dispatch_jobs (id, discussion_id, trigger_message_id,
+             trigger_sort_order, dedupe_key, available_at, created_at, updated_at)
+             VALUES ('job-1', 'd1', 'm1', 1, 'dedupe-1', '2026-09-15', '2026-09-15', '2026-09-15')",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            resolve_running_keys(&conn, &["d1".to_string(), "job-1".to_string()]),
+            vec!["d1".to_string()],
+            "one discussion, listed once"
+        );
     }
 }

@@ -669,6 +669,11 @@ const fr: TranslationDict = {
   'disc.question.recommended': 'Recommandé',
   'disc.question.freeTextPlaceholder': 'Ou réponds avec tes propres mots…',
   'disc.question.send': 'Répondre',
+  'disc.question.decline': 'Refuser',
+  'disc.question.declineHint': 'Refuser de trancher : l\'agent est prévenu et la question se ferme.',
+  'disc.question.declinedTitle': 'Arbitrage refusé',
+  'disc.question.declinedBy': 'Refusé par {0}, le {1}',
+  'disc.question.declinedNoReason': 'Aucune raison donnée.',
   'disc.question.answeredBy': '{0}, le {1}',
   'disc.question.loading': 'Chargement de l’arbitrage…',
   'disc.question.missing': 'Arbitrage introuvable — la question n’a pas été enregistrée',
@@ -4793,7 +4798,7 @@ Termine par [SIGNAL: OK].`,
   'wf.guards.stoppedBy.loopDetection': 'Boucle détectée sur le step « {0} » ({1} fois)',
 
   // ── Stale-stream watchdog (TD-20260504) ──
-  'discussions.streamRecovered': 'Connexion perdue avec l\'agent — état le plus récent rechargé',
+  'discussions.streamRecovered': 'Flux interrompu — l\'agent continue côté serveur, sa réponse apparaîtra ici',
   'disc.interruptedFragment': "Réponse interrompue — l'agent a été coupé, une reprise suit",
 
   // ── Migration ai/ → docs/ banner ──

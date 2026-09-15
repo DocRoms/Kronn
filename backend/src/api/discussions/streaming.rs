@@ -755,15 +755,20 @@ fn agent_start_failure_outcome(agent_type: &AgentType, error: &str) -> AgentExec
         || deterministic_nul_byte
     {
         AgentExecutionOutcome::PreflightFailed {
-            diagnostic: if error.starts_with("Copilot task worker cannot start:")
-                || deterministic_nul_byte
-            {
-                // Carries the offending carrier's name, never its value — the
-                // whole point is that the operator can act on it.
-                error.to_string()
-            } else {
-                "agent execution preflight failed".into()
-            },
+            // Keep the reason. It used to be replaced by "agent execution
+            // preflight failed" for everything except Copilot and a NUL byte,
+            // and that sentence tells an operator nothing they can act on: two
+            // agents vanished from a room twenty seconds after being mentioned,
+            // and finding out why took reading the database.
+            //
+            // The generic wording protected nothing either — the sibling
+            // branch below already surfaces this very string as
+            // `RuntimeUnavailable { reason }`. The only thing it withheld was
+            // the diagnosis. Kronn's own pre-spawn checks word these messages
+            // (`Project path not found: …`, `Copilot task worker cannot
+            // start: …`), and the carrier rule still holds: they name what
+            // offends, never its value.
+            diagnostic: error.to_string(),
         }
     } else {
         AgentExecutionOutcome::RuntimeUnavailable {
@@ -1420,6 +1425,17 @@ fn messages_not_yet_seen(
 /// The two travel together on purpose: a delta prompt WITHOUT `--resume` loses
 /// the history, and a full prompt WITH `--resume` states it twice. Every path
 /// that cannot prove both is right returns the full prompt and no id.
+/// Which connection a reply dispatches through: the one its dispatch job
+/// carries, else the discussion's durable sticky target. The job wins so an
+/// explicit one-off target (a mention, a retry against another connection)
+/// is never silently replaced by the room's default.
+pub(crate) fn effective_connection_id<'a>(
+    dispatch: Option<&'a String>,
+    discussion: Option<&'a String>,
+) -> Option<&'a String> {
+    dispatch.or(discussion)
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn resume_with_delta_if_possible(
     store: &runner::AcpSessionStore,
@@ -1594,7 +1610,15 @@ async fn make_agent_stream_inner(
         }
     };
     let agent_type = agent_override.unwrap_or_else(|| disc.agent.clone());
-    let external_connection = if let Some(connection_id) = dispatch_connection_id.as_ref() {
+    // A reply with no dispatch job carries no connection (the non-dispatch
+    // branch above fills it with None). The discussion holds the durable
+    // sticky target for exactly this case (KT-545 DoD #4) — without this
+    // fallback an ordinary reply in a room backed by an external connection
+    // failed with "the selected external API connection is unavailable",
+    // although the connection existed and was recorded on the discussion.
+    let effective_connection_id =
+        effective_connection_id(dispatch_connection_id.as_ref(), disc.connection_id.as_ref());
+    let external_connection = if let Some(connection_id) = effective_connection_id {
         let lookup_id = connection_id.clone();
         match state
             .db
@@ -4927,18 +4951,58 @@ mod agent_lifecycle_tests {
         assert!(out.len() <= 1001 + 80);
     }
 
+
+    #[test]
+    fn a_refused_preflight_says_what_it_refused_on() {
+        // Two agents vanished from a room twenty seconds after being mentioned,
+        // and the only trace was "agent execution preflight failed" — a
+        // sentence nobody can act on. Finding the cause meant reading the
+        // database. Every refusal now carries the reason Kronn already knew.
+        for (agent, error) in [
+            (AgentType::ClaudeCode, "Project path not found: /gone/repo"),
+            (AgentType::OpenCode, "Project path not found: /gone/repo"),
+            (AgentType::Custom, "connection has no endpoint"),
+        ] {
+            let outcome = agent_start_failure_outcome(&agent, error);
+            let AgentExecutionOutcome::PreflightFailed { diagnostic } = outcome else {
+                panic!("{agent:?}: a settled refusal must not be deferred as retryable");
+            };
+            assert_eq!(
+                diagnostic, error,
+                "{agent:?}: the refusal must carry what it refused on",
+            );
+            assert_ne!(diagnostic, "agent execution preflight failed");
+        }
+    }
+
+    #[test]
+    fn a_retryable_outage_is_still_told_apart_from_a_settled_refusal() {
+        // Keeping the reason must not blur the decision that matters: a missing
+        // binary stays deferred, because it can appear between two attempts.
+        assert!(matches!(
+            agent_start_failure_outcome(&AgentType::Codex, "Binary 'codex' not found"),
+            AgentExecutionOutcome::RuntimeUnavailable { .. }
+        ));
+        assert!(matches!(
+            agent_start_failure_outcome(&AgentType::ClaudeCode, "Project path not found: /x"),
+            AgentExecutionOutcome::PreflightFailed { .. }
+        ));
+    }
+
     #[test]
     fn http_agents_surface_runtime_outages_but_cli_runtime_absence_stays_deferred() {
+        // The classification is what changes here — retryable or not — never
+        // whether the operator gets to read why.
         assert_eq!(
             agent_start_failure_outcome(&AgentType::LiteLlm, "LiteLLM unreachable at http://proxy"),
             AgentExecutionOutcome::PreflightFailed {
-                diagnostic: "agent execution preflight failed".into()
+                diagnostic: "LiteLLM unreachable at http://proxy".into()
             }
         );
         assert_eq!(
             agent_start_failure_outcome(&AgentType::Ollama, "Ollama unreachable at localhost"),
             AgentExecutionOutcome::PreflightFailed {
-                diagnostic: "agent execution preflight failed".into()
+                diagnostic: "Ollama unreachable at localhost".into()
             }
         );
         assert_eq!(
@@ -6363,5 +6427,32 @@ mod stream_helpers_tests {
             }
             ToolRecord::Kronn(_) => panic!("Write is native"),
         }
+    }
+}
+
+#[cfg(test)]
+mod connection_fallback_tests {
+    use super::effective_connection_id;
+
+    #[test]
+    fn dispatch_job_wins_over_the_room_default() {
+        // An explicit one-off target must never be replaced by the sticky one.
+        let job = "job-connection".to_string();
+        let sticky = "room-connection".to_string();
+        assert_eq!(effective_connection_id(Some(&job), Some(&sticky)), Some(&job));
+    }
+
+    #[test]
+    fn a_reply_without_a_dispatch_job_uses_the_discussion() {
+        // Regression: such a reply lost the connection and failed with "the
+        // selected external API connection is unavailable", although the
+        // discussion recorded it as its durable target (KT-545 DoD #4).
+        let sticky = "room-connection".to_string();
+        assert_eq!(effective_connection_id(None, Some(&sticky)), Some(&sticky));
+    }
+
+    #[test]
+    fn none_when_neither_side_carries_one() {
+        assert_eq!(effective_connection_id(None, None), None);
     }
 }

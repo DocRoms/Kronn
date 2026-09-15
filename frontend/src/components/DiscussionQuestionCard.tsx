@@ -6,7 +6,7 @@
 // lot it blocks, and records the answer as a durable message so whoever picks
 // the work up later reads the decision rather than asking again.
 import { useRef, useState } from 'react';
-import { AlertOctagon, CheckCircle2, Loader2 } from 'lucide-react';
+import { AlertOctagon, CheckCircle2, Loader2, MinusCircle } from 'lucide-react';
 import { discussions as discussionsApi } from '../lib/api';
 import {
   applyAnsweredQuestion,
@@ -112,6 +112,8 @@ function QuestionBody({
   const inFlight = useRef(false);
 
   const answered = question.state === 'answered' && question.answer !== null;
+  // A refusal resolves the question too: the card must stop offering to decide.
+  const declined = question.state === 'declined';
   const canSend = selected.length > 0 || text.trim().length > 0;
 
   const toggle = (optionId: string) => {
@@ -126,6 +128,28 @@ function QuestionBody({
         ? current.filter(id => id !== optionId)
         : [...current, optionId];
     });
+  };
+
+  const decline = async () => {
+    if (inFlight.current) return;
+    inFlight.current = true;
+    setSending(true);
+    setError('');
+    try {
+      // The free-text field doubles as the reason — the operator has usually
+      // already typed why they will not decide.
+      const updated = await discussionsApi.declineQuestion(discussionId, question.id, {
+        reason: text.trim() || null,
+        idempotency_key: idempotencyKey.current,
+      });
+      applyAnsweredQuestion(discussionId, updated);
+    } catch (cause) {
+      setError(userError(cause));
+      refreshDiscussionQuestions(discussionId);
+    } finally {
+      inFlight.current = false;
+      setSending(false);
+    }
   };
 
   const send = async () => {
@@ -156,13 +180,17 @@ function QuestionBody({
   return (
     <section
       className="disc-question-card"
-      data-state={answered ? 'answered' : 'pending'}
+      data-state={answered ? 'answered' : declined ? 'declined' : 'pending'}
       data-testid={`disc-question-${question.id}`}
     >
       <header className="disc-question-head">
-        {answered ? <CheckCircle2 size={13} /> : <AlertOctagon size={13} />}
+        {answered ? <CheckCircle2 size={13} />
+          : declined ? <MinusCircle size={13} />
+          : <AlertOctagon size={13} />}
         <span className="disc-question-kind">
-          {t(answered ? 'disc.question.answeredTitle' : 'disc.question.pendingTitle')}
+          {t(answered ? 'disc.question.answeredTitle'
+            : declined ? 'disc.question.declinedTitle'
+            : 'disc.question.pendingTitle')}
         </span>
         {question.task_ref && (
           <span className="disc-question-task" data-testid="disc-question-task">
@@ -175,7 +203,7 @@ function QuestionBody({
       {question.context && <p className="disc-question-context">{question.context}</p>}
 
       {question.answer ? (
-        <AnsweredSummary question={question} answer={question.answer} />
+        <AnsweredSummary question={question} answer={question.answer} declined={declined} />
       ) : (
         <>
           {question.options.length > 0 && (
@@ -228,16 +256,30 @@ function QuestionBody({
 
           {error && <p className="disc-question-error" data-testid="disc-question-error">{error}</p>}
 
-          <button
-            type="button"
-            className="disc-question-send"
-            onClick={() => void send()}
-            disabled={!canSend || sending}
-            data-testid="disc-question-send"
-          >
-            {sending ? <Loader2 size={12} className="spin" /> : null}
-            {t('disc.question.send')}
-          </button>
+          <div className="disc-question-actions">
+            <button
+              type="button"
+              className="disc-question-send"
+              onClick={() => void send()}
+              disabled={!canSend || sending}
+              data-testid="disc-question-send"
+            >
+              {sending ? <Loader2 size={12} className="spin" /> : null}
+              {t('disc.question.send')}
+            </button>
+            {/* Refusing needs no selection: not deciding IS the decision, and
+                until now the only way to clear a question was to answer it. */}
+            <button
+              type="button"
+              className="disc-question-decline"
+              onClick={() => void decline()}
+              disabled={sending}
+              title={t('disc.question.declineHint')}
+              data-testid="disc-question-decline"
+            >
+              {t('disc.question.decline')}
+            </button>
+          </div>
         </>
       )}
     </section>
@@ -250,9 +292,11 @@ function QuestionBody({
 function AnsweredSummary({
   question,
   answer,
+  declined,
 }: {
   question: DiscussionQuestion;
   answer: DiscussionQuestionAnswer;
+  declined: boolean;
 }) {
   const { t } = useT();
   const chosen = question.options.filter(option => answer.selected_option_ids.includes(option.id));
@@ -264,9 +308,12 @@ function AnsweredSummary({
         </ul>
       )}
       {answer.text && <p className="disc-question-answer-text">{answer.text}</p>}
+      {declined && !answer.text && (
+        <p className="disc-question-answer-text">{t('disc.question.declinedNoReason')}</p>
+      )}
       <p className="disc-question-answer-meta">
         {t(
-          'disc.question.answeredBy',
+          declined ? 'disc.question.declinedBy' : 'disc.question.answeredBy',
           answer.author_pseudo,
           new Date(answer.answered_at).toLocaleString(),
         )}

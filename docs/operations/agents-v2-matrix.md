@@ -29,13 +29,13 @@ first CLI update would make it a lie. The table says *negotiated* and means it.
 | Copilot CLI | native ACP | `copilot --acp` | no |
 | Kiro | native ACP | `kiro-cli acp` | no |
 | Vibe | native ACP | `vibe-acp` | no |
-| Claude Code | direct CLI | `claude --print …` | `KRONN_ACP_ADAPTER_CLAUDE=1` for the adapter |
-| Codex | direct CLI | `codex exec …` | `KRONN_ACP_ADAPTER_CODEX=1` for the adapter |
+| Claude Code | adapted ACP | `claude --print …` | no; `KRONN_ACP_ADAPTER_CLAUDE=0` selects direct compatibility |
+| Codex | adapted ACP | `codex exec …` | no; `KRONN_ACP_ADAPTER_CODEX=0` selects direct compatibility |
 | Ollama, LiteLLM, NVIDIA, Custom | HTTP provider | no process | no |
 
 Claude and Codex have no ACP mode of their own. Their adapter is Kronn wrapping
 the CLI in the ACP contract — one process per turn either way. Turning the
-toggle on changes the plumbing, not the process model.
+override changes the plumbing, not the process model.
 
 ### Bounded host check — September 8, 2026
 
@@ -140,7 +140,10 @@ the same job.
 - **MCP servers holding a credential are dropped**, whole. A project mixing
   safe and credentialed entries loses the credentialed ones — silently from the
   agent's point of view, since it simply never sees them.
-- **Task workers never take the adapter route**, whatever the toggle says.
+- **Task workers use the same default adapter route**, retaining the direct
+  builder's restrictive worktree/settings/tool policy and a fresh session.
+  An explicit false override selects direct compatibility for that agent.
+  [src: file: backend/tests/adapter_worker_policy.rs:1]
   The direct Copilot worker preflight keeps a four-second deadline and awaits
   process collection on timeout. Its [timeout regression](../gotchas/copilot-preflight-timeout.md)
   uses controlled time and an owned child, not a startup PID-file race.

@@ -87,12 +87,12 @@ pub async fn get(
                 crate::db::discussion_sessions::list_sessions(conn, &id, false)?
                     .iter()
                     .map(|session| {
-                        crate::models::MessageTarget::cli(
-                            crate::db::discussions::parse_agent_type(&session.agent_type),
+                        Ok(crate::models::MessageTarget::cli(
+                            crate::db::discussions::parse_agent_type(&session.agent_type)?,
                             session.id,
-                        )
+                        ))
                     })
-                    .collect()
+                    .collect::<rusqlite::Result<Vec<_>>>()?
             } else {
                 let mut target =
                     crate::models::MessageTarget::discussion_agent(discussion.agent.clone());

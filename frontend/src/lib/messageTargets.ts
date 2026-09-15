@@ -33,6 +33,15 @@ export function composerMentions(
     cli: string;
     all: string;
   },
+  /** Configured external connections, each already reduced to a mention target.
+   *  They carry no local binary and therefore never appear in AGENT_MENTIONS,
+   *  which is a static list of the ten native providers — so without this a
+   *  connection was unmentionable whatever its alias or configuration. */
+  externalTargets: ReadonlyArray<{
+    connectionId: string;
+    label: string;
+    trigger: string;
+  }> = [],
 ): ComposerMention[] {
   const installed = new Set(installedAgentTypes);
   const options: ComposerMention[] = [{
@@ -55,6 +64,22 @@ export function composerMentions(
         agent_type: mention.type,
         cli_session_id: null,
         tier: isPrincipal ? null : 'default',
+      },
+    });
+  }
+
+  for (const external of externalTargets) {
+    options.push({
+      trigger: external.trigger,
+      displayTrigger: external.trigger,
+      label: external.label,
+      type: 'Custom',
+      target: {
+        kind: 'agent',
+        agent_type: 'Custom',
+        cli_session_id: null,
+        tier: 'default',
+        connection_id: external.connectionId,
       },
     });
   }

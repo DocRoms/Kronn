@@ -432,6 +432,27 @@ fn orchestration_tool_catalogue() -> Vec<Value> {
             json!([]),
         ),
         tool(
+            "media_generate",
+            "Generate an image or a video on a configured HTTP connection; returns {job_id, status, model}. The operator's configured modality slot fixes the model — you do not choose it — and a modality with no slot is refused. `agent_list` tells you which connection serves which modality: an entry's `media` lists one modality per configured model, and is empty when none is. Billed: video per second, image per picture. Keep the clip short. The asset lands in the discussion on its own as a context file, so poll `media_job_status` only when you need it inside this very answer.",
+            json!({
+                "connection_id": {"type": "string"},
+                "modality": {"type": "string", "enum": ["image", "video"]},
+                "prompt": {"type": "string"},
+                "duration_secs": {"type": "integer"},
+                "resolution": {"type": "string"},
+                "aspect_ratio": {"type": "string"},
+                "generate_audio": {"type": "boolean"},
+                "idempotency_key": {"type": "string"}
+            }),
+            json!(["connection_id", "modality", "prompt"]),
+        ),
+        tool(
+            "media_job_status",
+            "Read one media generation job by id: status, model and the asset once it is ready. The asset reaches the discussion by itself; call this only when the result is needed within the current answer.",
+            json!({"job_id": {"type": "string"}}),
+            json!(["job_id"]),
+        ),
+        tool(
             "task_exec_prepare",
             "Preflight a Todo task from this principal room. Returns launchable plus stable reasons; creates nothing. Call before launch. Delegate to Ollama only for one atomic unit with explicit scope and principal-owned mechanical validations. Escalate immediately for trust or protocol boundaries, concurrency, migrations, architecture, or cross-cutting parity. The principal reviews the delivered SHA and runs its validations. Allow at most one targeted local rework, then reassign to a stronger worker.",
             json!({
@@ -1230,6 +1251,91 @@ impl KronnToolExecutor {
                             |error| json!({"serialization_error": error.to_string()}),
                         ),
                     ),
+                    Err(error) => fail(call, error.to_string()),
+                }
+            }
+            "media_generate" => {
+                let Some(connection_id) = required_string(call, "connection_id") else {
+                    return fail(call, "missing required field `connection_id`");
+                };
+                let Some(prompt) = required_string(call, "prompt") else {
+                    return fail(call, "missing required field `prompt`");
+                };
+                let modality = match call
+                    .arguments
+                    .get("modality")
+                    .and_then(serde_json::Value::as_str)
+                {
+                    Some("image") => crate::models::MediaModality::Image,
+                    Some("video") => crate::models::MediaModality::Video,
+                    // Named rather than defaulted: generating the wrong modality
+                    // is a billed mistake the operator did not ask for.
+                    other => {
+                        return fail(
+                            call,
+                            format!(
+                                "`modality` must be \"image\" or \"video\", got {}",
+                                other.unwrap_or("nothing")
+                            ),
+                        )
+                    }
+                };
+                let request = crate::api::media::GenerateMediaRequest {
+                    idempotency_key: call
+                        .arguments
+                        .get("idempotency_key")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string),
+                    connection_id,
+                    modality,
+                    prompt,
+                    // The asset belongs to the room the agent is answering in.
+                    discussion_id: Some(discussion_id.clone()),
+                    message_id: None,
+                    duration_secs: call
+                        .arguments
+                        .get("duration_secs")
+                        .and_then(serde_json::Value::as_u64)
+                        .map(|value| value as u32),
+                    resolution: call
+                        .arguments
+                        .get("resolution")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string),
+                    aspect_ratio: call
+                        .arguments
+                        .get("aspect_ratio")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string),
+                    generate_audio: call
+                        .arguments
+                        .get("generate_audio")
+                        .and_then(serde_json::Value::as_bool),
+                    reference_asset_ids: None,
+                    reference_asset_id: None,
+                    reference_mode: None,
+                };
+                let response = crate::api::media::generate(
+                    axum::extract::State(self.state.clone()),
+                    axum::Json(request),
+                )
+                .await;
+                match serde_json::to_value(response.0) {
+                    Ok(value) => ok(call, value),
+                    Err(error) => fail(call, error.to_string()),
+                }
+            }
+            "media_job_status" => {
+                let Some(job_id) = required_string(call, "job_id") else {
+                    return fail(call, "missing required field `job_id`");
+                };
+                let response = crate::api::media::get_job(
+                    axum::extract::State(self.state.clone()),
+                    axum::extract::Path(job_id),
+                )
+                .await;
+                match serde_json::to_value(response.0) {
+                    Ok(value) => ok(call, value),
                     Err(error) => fail(call, error.to_string()),
                 }
             }
@@ -2775,6 +2881,8 @@ mod tests {
             names,
             vec![
                 "agent_list",
+                "media_generate",
+                "media_job_status",
                 "task_exec_prepare",
                 "task_exec_launch",
                 "task_exec_status",

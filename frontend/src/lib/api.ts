@@ -222,6 +222,7 @@ import type {
   ImportantCategory,
   ImportantMessageList,
   AnswerDiscussionQuestionRequest,
+  DeclineDiscussionQuestionRequest,
   ProviderQuotaState,
 } from '../types/generated';
 
@@ -1834,6 +1835,19 @@ export const discussions = {
   ) => api<DiscussionQuestion>(
     'POST',
     `/discussions/${encodeURIComponent(id)}/questions/${encodeURIComponent(questionId)}/answer`,
+    request,
+  ),
+
+  /** Refuse an arbitration instead of answering it. Same idempotency contract:
+   *  a refusal posts a durable message and dispatches to the asker, so a
+   *  repeated click must not record it twice. */
+  declineQuestion: (
+    id: string,
+    questionId: string,
+    request: DeclineDiscussionQuestionRequest,
+  ) => api<DiscussionQuestion>(
+    'POST',
+    `/discussions/${encodeURIComponent(id)}/questions/${encodeURIComponent(questionId)}/decline`,
     request,
   ),
 

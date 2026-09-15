@@ -31,6 +31,7 @@ import '../pages/DiscussionsPage.css';
 import type { DiscussionMessage, AgentType, QuickPrompt, ContextFile, SourceCheck, MessageTarget, DiscussionAction } from '../types/generated';
 import { MessageAttachments } from './MessageAttachments';
 import { AGENT_LABELS, AGENT_MENTIONS, MODEL_TIER_ICONS, USER_MENTION_TRIGGER, agentColor, agentTextColor } from '../lib/constants';
+import { externalAgentColor } from '../lib/externalAgentIdentity';
 import { gravatarUrl } from '../lib/gravatar';
 import {
   splitInjectedContext,
@@ -370,6 +371,12 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
     : AGENT_MENTIONS.find(mention => mention.type === agentType)?.trigger
       ?? AGENT_LABELS[agentType]
       ?? agentType;
+  // Every external connection shares the `Custom` wire type, so the static
+  // colour table cannot tell two of them apart. The alias already reaches this
+  // component for the label; the hue is derived from it rather than stored.
+  const externalAgentBorderColor = agentType === 'Custom'
+    ? externalAgentColor(defaultAgentAlias)
+    : null;
   const agentIdentityLabel = isTourDemo
     ? t('disc.tourDemoKind')
     : msg.source_msg_id
@@ -631,7 +638,7 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
                   : 'error'
         ) : undefined}
         style={msg.role === 'Agent'
-          ? { borderLeftColor: agentColor(agentType, mentionColors) }
+          ? { borderLeftColor: externalAgentBorderColor ?? agentColor(agentType, mentionColors) }
           : undefined}
       >
         <div className="disc-msg-header-row">

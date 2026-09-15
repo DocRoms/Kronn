@@ -6,7 +6,7 @@ import { useToast } from '../hooks/useToast';
 import type { RemoteRepo, RepoSource, DiscoverSourceError, DriftCheckResponse, AuditProgress } from '../types/generated';
 import { useT } from '../lib/I18nContext';
 import { unseenBasis } from '../lib/discussionUiUtils';
-import { detectStaleStreams } from '../lib/stream-watchdog';
+import { detectStaleStreams, abortStaleStreams } from '../lib/stream-watchdog';
 import { useIsMobile } from '../hooks/useMediaQuery';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { isUsable } from '../lib/constants';
@@ -132,6 +132,10 @@ export function Dashboard({ onReset }: DashboardProps) {
   // re-launch" while a workflow was in fact still going. Kept here in the
   // persistent Dashboard shell so the nav badge survives page changes.
   const [runningDiscIds, setRunningDiscIds] = useState<string[]>([]);
+  // Mirrored into a ref so the stale-stream watchdog can read it without
+  // listing it as a dependency: doing so would rebuild its 30 s interval on
+  // every 5 s poll, and the countdown would never complete.
+  const runningDiscIdsRef = useRef<string[]>([]);
   const abortControllers = useRef<Record<string, AbortController>>({});
   // ─── Stale-stream watchdog (TD-20260504) ──────────────────────────────────
   // Tracks the last time we observed activity on a streaming discussion
@@ -287,12 +291,10 @@ export function Dashboard({ onReset }: DashboardProps) {
         lastTickMap: streamingLastTickRef.current,
         sendingStartMap,
         now: Date.now(),
+        serverRunningIds: runningDiscIdsRef.current,
       });
       if (stale.length === 0) return;
-      for (const discId of stale) {
-        cleanupStream(discId);
-        try { abortControllers.current[discId]?.abort(); } catch { /* noop */ }
-      }
+      abortStaleStreams(stale, abortControllers.current, cleanupStream);
       toast(t('discussions.streamRecovered'), 'warning');
       refetchDiscussions();
     }, 30_000);
@@ -311,6 +313,7 @@ export function Dashboard({ onReset }: DashboardProps) {
     const tick = async () => {
       try {
         const ids = await discussionsApi.getRunning();
+        if (!cancelled) runningDiscIdsRef.current = ids;
         if (!cancelled) setRunningDiscIds(prev => {
           // Avoid a re-render when nothing changed.
           if (prev.length === ids.length && prev.every((x, i) => x === ids[i])) return prev;

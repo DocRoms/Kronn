@@ -224,6 +224,53 @@ setup() {
     assert_success
 }
 
+# ─── dev_backend_watch_enabled (who gets a rebuild watcher) ───────────────────
+
+@test "dev_backend_watch_enabled: on by default when nothing is set" {
+    run dev_backend_watch_enabled ""
+    assert_success
+}
+
+@test "dev_backend_watch_enabled: on for an explicit 1" {
+    run dev_backend_watch_enabled 1
+    assert_success
+}
+
+@test "dev_backend_watch_enabled: off for an explicit 0" {
+    run dev_backend_watch_enabled 0
+    assert_failure
+}
+
+@test "dev_backend_watch_enabled: only 0 disables it" {
+    run dev_backend_watch_enabled "no"
+    assert_success
+}
+
+# The supervisor must consult the helper rather than always spawning watchexec:
+# an unconditional spawn is the bug this guards (a rebuild swap kills the
+# agents a `kronn start` user is running).
+@test "dev-backend-supervisor: watchexec is spawned only behind the helper" {
+    local supervisor="${BATS_TEST_DIRNAME}/../../scripts/dev-backend-supervisor.sh"
+    run grep -c "dev_backend_watch_enabled" "$supervisor"
+    assert_success
+    refute_output "0"
+    # No watchexec invocation may sit outside that guard.
+    run bash -c "grep -n 'exec watchexec' '$supervisor' | wc -l | tr -d ' '"
+    assert_output "1"
+}
+
+# `kronn start` on macOS routes to the native backend; it must not arm the
+# watcher. `kronn start-dev` must keep it.
+@test "kronn: the start path disables the watcher, start-dev does not" {
+    local cli="${BATS_TEST_DIRNAME}/../../kronn"
+    run grep -c "KRONN_DEV_BACKEND_WATCH" "$cli"
+    assert_success
+    refute_output "0"
+    # The export sits in the cmd_web branch, immediately before its cmd_start_dev.
+    run bash -c "grep -A1 'KRONN_DEV_BACKEND_WATCH=' '$cli' | grep -c cmd_start_dev"
+    assert_output "1"
+}
+
 # ─── dev_missing_tools (kronn start-dev preflight) ────────────────────────────
 
 @test "dev_missing_tools: empty when cargo+node+pnpm+watchexec all present" {
