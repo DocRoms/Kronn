@@ -172,8 +172,8 @@ Release notes for 0.9.3 and earlier are available in the
   the viewer closes rather than silently landing on the neighbouring media, and
   a server refusal leaves the file exactly where it was.
   An image generation can now be drawn from SEVERAL pictures of the discussion,
-  up to the number each model advertises — from 1 to 16 across the catalogue,
-  so nothing is assumed — and the bubble opens every one of them. Asking for a
+  up to the number each model advertises, rather than an assumed universal
+  limit, and the bubble opens every one of them. Asking for a
   frame on an image, or for several images on one frame, is refused instead of
   being quietly reduced to something else and billed for it.
   A clip's last picture can be kept as a file of the discussion in one click,
@@ -230,11 +230,9 @@ Release notes for 0.9.3 and earlier are available in the
 ### Changed
 
 - Projects > Code fetches one folder when it is opened, instead of the whole
-  repository up front. Opening the tab went from 4.19 s to about 0.10 s on this
-  repository, and the cost no longer grows with it. The 10 000-file ceiling that
-  used to cut the tree — silently, with the missing files indistinguishable from
-  files that do not exist — is gone; what remains bounds a single answer and
-  says so when it is reached.
+  repository up front. The old whole-tree ceiling could silently cut the tree,
+  making omitted files indistinguishable from files that did not exist. The
+  remaining bound applies to a single answer and is reported when reached.
 
 - A `[src: …]` citation reads as a chip rather than as notation. The file's name
   and lines instead of its whole path, a sha cut to seven characters, a URL by
@@ -250,23 +248,19 @@ Release notes for 0.9.3 and earlier are available in the
   browser tab, desktop icon, app header, share card — and the startup screen
   turns it slowly instead of showing a generic spinner.
 
-- The model catalogue is one sorted table instead of ten stacked lists. A real
-  install carries 637 models across ten sources — 502 from a single router — and
-  finding one meant scrolling past the other 636. They are now one alphabetical
-  table, sortable by name or by which source they belong to, invertible, with a
+- The model catalogue is one sorted table instead of separate stacked lists.
+  Models share an alphabetical table, sortable by name or source, invertible, with
   search that matches the exact model id as well as the displayed name, and a
   click on a source narrows to it. The sources keep their re-check control on
   one line each rather than one card each.
-- Adding a model by hand moved to the foot of that block. Measured on a real
-  install: 624 of the 637 models were detected, ten migrated from an older
-  configuration, three cached, and none had ever been added by hand — so it is
-  not the everyday act the header made it look like. It stays, because a target
+- Adding a model by hand moved to the foot of that block, leaving discovery
+  and the existing catalogue first. Manual entry stays, because a target
   whose detection returns nothing has no other way to name a model.
 
 - Settings names the three ways of reaching a model. Config > Agents listed
   seven full-width CLI cards, then Ollama as a special case inside the same
   loop, then the external connections in a framed box of their own — one
-  undifferentiated list, 1 544px of it. There are three framed zones now, CLI /
+  undifferentiated list. There are three framed zones now, CLI /
   Local / External API, built the same way so they read as three of a kind, and
   the model catalogue moved below them: a catalogue is what the modes draw
   from, not a fourth way of reaching a model.
@@ -307,10 +301,9 @@ Release notes for 0.9.3 and earlier are available in the
   now shows an active state, so the strip says which of its buttons put the
   panel on screen.
 - A discussion's title no longer vanishes on a narrow screen. The id pill and
-  the session binding took 230px of the title's own line between them, and the
-  title was the one element allowed to give way, so below 768px it was given
-  none at all. Those two move into the details fold there, and the title keeps
-  the width it needs.
+  the session binding shared its line while the title was allowed to shrink
+  away. Those two move into the details fold on narrow screens, and the title
+  keeps the width it needs.
 - A discussion's header stopped acting on the discussion. Search, export and
   delete joined the panels in the strip that sits above the panel column, so
   the header only describes what the discussion IS — its title, its agent, its
@@ -329,16 +322,12 @@ Release notes for 0.9.3 and earlier are available in the
   panel is open. Each panel already draws its own header, so listing those same
   icons up in the discussion header showed every one of them twice. Clicking
   the panel already open closes it, as the header buttons did.
-- A turn no longer retells the whole discussion. Every message re-narrated the
-  entire history to a brand-new process, so the same transcript was resent at
-  every turn and the cost grew with the room rather than with what was said.
-  Claude Code already holds that conversation, so the turn now resumes it and
-  carries only what the agent has not seen — a bounded delta instead of the
-  whole thread, on a long room the difference is most of the prompt. Five
-  things keep it honest: the delta is everything since the agent's last turn,
-  never just the
-  newest message, because in a room the human or another agent writes in
-  between; the marker is a message id, so a history that was edited or pruned
+- Eligible conversation turns resume with a bounded delta instead of resending
+  the whole thread. A completed checkpoint establishes what the agent has
+  already seen; without that proof, Kronn keeps the full-context fallback.
+  Five things keep it honest: the delta is everything since the agent's last
+  turn, never just the newest message, because the human or another agent writes
+  in between; the marker is a message id, so a history that was edited or pruned
   simply fails to match and the full prompt goes out, where a numeric cursor
   would have sent the wrong slice; the cursor only advances once the reply is
   stored, so an interrupted turn is replayed rather than skipped; a dead
@@ -349,20 +338,16 @@ Release notes for 0.9.3 and earlier are available in the
   fallback when a resume finds a safe absence; and resume never travels without
   its delta, nor a full prompt with a resume. Task workers never resume — a
   worker opens on a fresh worktree, and a room's history is not its business.
-  The figures above are measured on message volume, not end-to-end latency.
 
 - An agent's prompt no longer carries every MCP server's documentation. It
   concatenated all of `docs/operations/mcp-servers/*.md` in full on every spawn
-  — 69 196 bytes on the recorded Kronn benchmark, 45 465 for `kronn-internal.md`
-  alone — whatever the discussion was about. It now carries the server listing,
+  whatever the discussion was about. It now carries the server listing,
   the `mcp__<server>__<tool>` convention, a pointer to `tool_manual` for the
   Kronn tools, and where to read a server's own notes if the agent is going to
-  use it: 907 bytes, 77 times smaller, about 17 000 tokens saved per turn. This
-  costs no latency either way — measured at 4.40 s against 4.44 s bare — so it
-  is a cost fix, not a speed one. Only CLI agents ever received this block, and
-  they have a filesystem: pointing at the file loses nothing and defers the
-  reading to the turn that needs it. Discussions without a project already
-  worked this way, and the two paths now agree.
+  use it. Only CLI agents received this block, and they can read those files:
+  the prompt now points to the documentation instead of embedding it all.
+  Discussions without a project already worked this way, and the two paths now
+  agree.
 
 - Automatic conversation summaries are gone. They fired after every reply past a
   per-agent threshold, and had been dead in practice: the global default was
@@ -382,10 +367,9 @@ Release notes for 0.9.3 and earlier are available in the
 
 - Projects > Code listed nothing under folders that came late in the alphabet.
   pnpm's content-addressable store is not a name the hand-written skip list
-  knew, and it filled the 10 000-file budget on its own, so the walk stopped
+  knew, and generated files exhausted the walk's budget, so it stopped
   before reaching `site/`. Git already knows what is generated: the walk asks it
-  once and does not enter what it ignores, which takes this repository from over
-  10 000 files to 2 088.
+  once and does not enter what it ignores.
 
 - A folder that had not loaded yet was drawn exactly like an empty one. It
   opened onto nothing and its contents turned up seconds later; it now says it
@@ -415,8 +399,8 @@ Release notes for 0.9.3 and earlier are available in the
   guesses that were both wrong. Its private reasoning, which arrives the same
   way, is read and deliberately not shown: it is a scratchpad, and folding it
   into the answer would leak it. The turn's tokens are read from the response
-  too, where ACP puts them, instead of being dropped with it — a reply that
-  cost 7 946 tokens was recorded as costing nothing.
+  too, where ACP puts them, instead of being dropped with it. Missing cost
+  information remains unknown rather than being inferred from those tokens.
 
 - The frontend lint gate is green again, by fixing what it flagged rather than
   by raising its ceiling. The release had added twenty-six warnings to a budget
@@ -530,12 +514,10 @@ Release notes for 0.9.3 and earlier are available in the
   streaming delta precedes. The stream reader skipped every assistant message,
   rightly so for ordinary ones (they repeat what was already streamed, and
   keeping them would print each reply twice), and in doing so discarded the
-  only account of the failure. The turn ended with nothing at all, which is why
-  a room could sit empty for 18 minutes, once for an hour and a half, before
-  someone retried by hand. Errors the CLI writes itself are now read — and only
+  only account of the failure. The turn ended with no visible explanation.
+  Errors the CLI writes itself are now read — and only
   those, identified by two independent markers so a build that stops setting
-  one still surfaces them. Found in real transcripts rather than deduced: the
-  database held five persisted API errors and not a single 529.
+  one still surfaces them.
 
 - An action whose target was deleted can no longer be launched. Preflight runs
   when the proposal is ingested, but the click can come much later — a
@@ -553,10 +535,9 @@ Release notes for 0.9.3 and earlier are available in the
   from the contract makes that explicit — a client still sending the field is
   ignored rather than refused, since the request shape accepts unknown keys.
 - The agent bootstrap (`docs/AGENTS.md`) is back under its context ceiling
-  without the ceiling moving. The 716 bytes over were exactly what 0.13.0 had
-  added: two verbose rows in the task router and a section holding a single
-  pointer. The router now routes and stops explaining — every detail it
-  dropped already lives at the destination it points to — and the sections
+  without the ceiling moving. Verbose task-router rows and pointer-only
+  sections were reduced. The router now routes and stops explaining — every
+  detail it dropped already lives at the destination it points to — and the sections
   that only carried a pointer became rows of that same table. The inventory
   of root redirector files moved to `docs/repo-map.md`, where repository
   structure is documented.
@@ -579,22 +560,15 @@ Release notes for 0.9.3 and earlier are available in the
   purpose without saying so. Those paths now close with an explicit `complete`,
   so the interruption rule stays true and stops firing on finished turns.
 
-- Listing a workflow's runs no longer carries every step's full output. A run's
-  `step_results_json` averages 470 KB, and `output` is all of it — measured at
-  100% of a 3.9 MB row, every other field together under 700 bytes — yet that
-  column travelled through each listing, decoded and re-encoded, to render rows
-  showing only a step's name and status. One workflow's runs answered with
-  237 MB in 8.7 s, and the run detail's fan-out progress asked for the same page
-  every 8 seconds. Outputs are now blanked inside SQLite on the listing paths:
-  9.3 MB → 28 KB for a page of ten, 241 MB → 1.3 MB for the 500-run cap, and
-  14.6 MB → 33 KB for `/api/workflows`, which had been decoding each workflow's
-  last run in full only to keep five fields of it. Opening a run still serves
-  everything.
+- Listing a workflow's runs no longer carries every step's full output just to
+  render its name and status. Outputs are blanked inside SQLite on the listing
+  paths, avoiding repeated decoding and transmission of complete results.
+  `/api/workflows` likewise projects only the last-run fields it uses. Opening
+  an individual run still serves its complete results.
 
 - A discussion turn that fails on a saturated provider is retried instead of
-  stopping silently. Two `529 Overloaded` turns simply ended with nothing shown
-  and nothing relaunched; the user waited 18 minutes once and 1 h 27 the other
-  time before restarting by hand. Saturation now retries with a growing delay,
+  stopping silently. An overloaded turn could end without an explanation or
+  another attempt. Saturation now retries with a growing delay,
   and the last attempt keeps the provider's own message in the room rather than
   going quiet. A hard quota is never retried — it is checked first — and `529`
   is never matched on its own, since those digits appear in ids, token counts
@@ -610,13 +584,12 @@ Release notes for 0.9.3 and earlier are available in the
 - An agent that cannot start because of a NUL byte in its command line now says
   what carries it — an environment variable by name, an argument by the flag it
   follows, the program name, or the working directory — instead of repeating
-  `nul byte found in provided data` every 30 seconds. One report shows the same
-  refusal replayed 282 times without diagnosing anything: the failure is settled
+  `nul byte found in provided data` on repeated attempts. The failure is settled
   before the process runs, so it is now a hard preflight failure, surfaced in
   the discussion. Values are never logged, only their carrier.
 
-- The stream now says when a tool STARTS, not only when it finishes. A single
-  Bash call can run 80 seconds, and for that whole time the interface sat on a
+- The stream now says when a tool STARTS, not only when it finishes. During a
+  long-running Bash call, the interface previously sat on a
   frozen placeholder while Kronn already knew which tool was running.
 
 - A Page's inline Kronn action CTAs (`data-kronn-action`) now work from the
@@ -690,9 +663,8 @@ Release notes for 0.9.3 and earlier are available in the
   actually use: the step could declare one and the check would still judge the
   agent's own catalogue, clearing a model that target refuses and refusing one
   it serves. A step now resolves its named connection once, fails closed when
-  that connection is
-  missing or carries a blank endpoint, and every dispatch it makes — normal,
-  repair, escalation, author and reviewer — checks its own effective model
+  that connection is missing or carries a blank endpoint, and every dispatch
+  it makes — normal, repair, escalation, author and reviewer — checks its own effective model
   against that target's catalogue before sending. A reviewer belonging to a
   different agent no longer inherits the author's connection, while a reviewer
   the step declares as sharing it still does. A refusal surfaces on the stream
