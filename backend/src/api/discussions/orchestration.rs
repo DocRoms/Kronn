@@ -139,6 +139,12 @@ where
     Detect: FnOnce() -> DetectFuture,
     DetectFuture: std::future::Future<Output = Vec<crate::models::AgentDetection>>,
 {
+    if participants
+        .iter()
+        .all(|participant| participant.connection_id.is_some())
+    {
+        return Vec::new();
+    }
     let detections = detect().await;
     let usable: Vec<AgentType> = detections
         .iter()
