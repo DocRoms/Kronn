@@ -2608,16 +2608,18 @@ async fn orchestrator_return_resume_route_authenticates_and_replays_exact_rotati
     .await;
     assert_eq!(appended["success"], true, "{appended}");
     assert_eq!(appended["data"]["appended"], 1);
-    let (_, human) = post_json(
+    let (_, peer_reply) = post_json(
         app.clone(),
         "/api/disc/append",
         serde_json::json!({
             "disc_id":"return-http-parent",
-            "messages":[{"source_msg_id":"return-parent-read","role":"User","content":"parent reply","targets":[{"kind":"cli","agent_type":"Codex","cli_session_id":657}]}]
+            "session_id":"principal",
+            "messages":[{"source_msg_id":"return-parent-read","role":"Agent","content":"parent reply","agent_type":"ClaudeCode","targets":[{"kind":"cli","agent_type":"Codex","cli_session_id":657}]}]
         }),
     )
     .await;
-    assert_eq!(human["success"], true, "{human}");
+    assert_eq!(peer_reply["success"], true, "{peer_reply}");
+    assert_eq!(peer_reply["data"]["appended"], 1, "{peer_reply}");
     let (_, parent_read) = get_json(
         app.clone(),
         "/api/discussions/return-http-parent/wait?since_sort_order=-1&timeout_secs=0&exclude_agent_type=Codex&session_id=live-after",
