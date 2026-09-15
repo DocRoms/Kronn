@@ -365,6 +365,24 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- A stream that went quiet was reported as a lost connection, and the report was
+  wrong. The run lives in a spawned task the client cannot stop: it keeps going
+  and persists its answer. Believing the agent dead, an operator resends and
+  re-bills a whole context while the first reply lands on its own. Three faults
+  stacked up, now fixed together: the watchdog's abort did nothing at all — it
+  fired on a reference the line before had just deleted; the threshold was 5
+  minutes where the backend grants a silent agent 15, so every Codex turn past
+  five minutes tripped it; and the decision was made from local text alone,
+  although the server's own list of running agents was already polled every 5
+  seconds in the same component. The watchdog now asks the server, waits as long
+  as the server does, actually aborts, and says what is true — the stream was
+  interrupted, the agent is still running.
+
+- A refused arbitration had nowhere to go: `pending` and `answered` were the
+  only states, so answering was the only way to clear a question, including one
+  that had become pointless. Refusing is now recorded as a resolution and
+  reaches the asker through the same dispatch as an answer.
+
 - A room backed by a custom external connection could not be replied to at all.
   Its composer was disabled under "this agent is currently disabled or
   uninstalled", so an OpenRouter answer could be read and never answered.
