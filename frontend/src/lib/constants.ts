@@ -302,6 +302,29 @@ export const isUsable = (a: {
   auth_ready?: boolean;
 }) => (a.installed || a.runtime_available) && a.enabled && a.auth_ready !== false;
 
+/** Whether a room's composer must be disabled because its agent is unavailable.
+ *  `nativeModeDisabled` is the header's room-scoped mode: a human/CLI-only room
+ *  needs no installed provider. A `Custom` agent is an external HTTP connection
+ *  with no local binary — it is absent from agent detection by construction, and
+ *  that silence must not be read as "uninstalled". */
+export const isRoomAgentDisabled = (
+  agent: string,
+  agents: Array<{
+    agent_type: string;
+    installed: boolean;
+    runtime_available: boolean;
+    enabled: boolean;
+    auth_ready?: boolean;
+  }>,
+  nativeModeDisabled: boolean,
+): boolean => {
+  if (agents.length === 0) return false;
+  if (nativeModeDisabled) return false;
+  if (agent === 'Custom') return false;
+  const det = agents.find(a => a.agent_type === agent);
+  return !det || !isUsable(det);
+};
+
 /** Check if a discussion title matches the validation audit title */
 export const isValidationDisc = (title: string) => title === 'Validation audit AI';
 
