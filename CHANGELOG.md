@@ -44,9 +44,12 @@ Release notes for 0.9.3 and earlier are available in the
   restart collapses onto the fact it already recorded rather than doubling it.
 - Publishing a card asks who you are. It takes a credential enrolled in
   Settings and a single-use proof bound to the room and to the exact text, so a
-  captured request cannot be replayed or aimed somewhere else. A worker
-  publishes none while it is working, holding a valid credential or not — it
-  reports through its delivery. Caller-authored cards require an enrolled
+  captured request cannot be replayed or aimed somewhere else. A worker reaching
+  the room through the agent bridge publishes none while it is working, whether
+  it holds a valid credential or not — that path authenticates the session and
+  its assignment, and a worker reports through its delivery. The human composer
+  takes another route, proving the grant and the single-use proof without a
+  session. Caller-authored cards require an enrolled
   credential; without accepted authority the ordinary message still posts and
   the response explains the refused card. Kronn's own orchestration steering
   events use their backend authority and do not require a human credential.
@@ -111,11 +114,13 @@ Release notes for 0.9.3 and earlier are available in the
   store existed but nothing called them, so an accepted delivery produced
   nothing at all. Both approval paths publish it — the ordinary one, and a
   replayed approval that repairs a crash between the approval and its message.
-  The record and its message are written in a single transaction, so a retry
-  cannot leave an accepted delivery with no report; a record found without its
-  message gets one, rendered from the stored payload rather than the caller's.
-  A report is produced even when parts of the manifest are unreadable — a
-  degraded report says what is missing, which is more use than no report. The
+  The report and its message are written together, so neither can exist without
+  the other, and a record found without its message gets one, rendered from the
+  stored payload rather than the caller's. Publication is attempted after the
+  approval, which is already durable: a failure is logged and repaired by a
+  later approve replay, not rolled back — an unreadable manifest or a database
+  fault means no report yet, not a corrupted approval. A stored report payload
+  that cannot be read back renders as a diagnostic instead of vanishing. The
   worker's duration counts from its own assignment, so earlier review rounds
   are not charged to its attempt.
 - Workflows, quick prompts, quick APIs and quick execs can be deleted from
@@ -673,6 +678,17 @@ Release notes for 0.9.3 and earlier are available in the
   `Other` keep their established routing, and the error deliberately omits the
   offending value rather than echoing corrupt data back. The rule is written
   down in `docs/decisions.md`, where the next reader will look for it.
+
+- A delegated worker hears its own room again once its task is done. The server
+  already moved the session back to the discussion that delegated the work, but
+  the agent's bridge kept listening to the closed child room — and refused to
+  switch on its own, rightly, since a bridge that changes rooms unprompted is
+  worse than one that stops. It can now recover that single hop, and only that
+  one: the server proves the exact terminal execution, that this session was
+  its worker, and that the orchestrator wrote both return traces, before it
+  hands the session back. A bridge deliberately bound to a third room is still
+  refused, and a quiet wait no longer reports calm from a room the session has
+  left — it follows the return and keeps listening where the work is.
 
 - OpenCode gets a runnable Linux copy on a macOS host, like the agents it sits
   next to. Its Darwin binary cannot exec inside the Linux container, so Kronn
