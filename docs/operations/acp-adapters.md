@@ -137,12 +137,13 @@ project path never reuses that identifier.
   yet. A project mixing safe and credential-bearing entries is therefore
   denied as a whole by Claude's strict config path; Codex/native ACP retain
   only the independently reconstructed safe entries.
-- **An agent reached over ACP reports no spend.** The protocol's `usage`
-  carries token counts and nothing else, the model catalogue records a
-  qualitative hint (free / paid / unknown) rather than a per-token price, and
-  the spend report reads the local logs of Claude, Codex and Gemini only. So an
-  ACP agent's tokens are visible while its cost is not, and it does not appear
-  in the usage breakdown at all. Read that absence as unknown, never as free.
+- **Kronn's normalized ACP usage event retains token counts, not cost.** This
+  is a limit of Kronn's current event mapping, not a claim that the protocol
+  prohibits cost metadata. The separate global spend report reads local
+  Claude, Codex and Gemini logs; it does not derive spend from the ACP event.
+  A missing cost remains unknown, never free. See the
+  [compatibility matrix](agents-v2-matrix.md#known-asymmetries) for the
+  distinction between ACP normalization, token statistics and log collection.
 
 - **`codex exec resume` cannot change the sandbox mode** — verified absent
   from `codex exec resume --help` though present on `codex exec` — so a
