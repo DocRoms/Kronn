@@ -374,6 +374,16 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- A refused agent start said only "agent execution preflight failed". Kronn
+  knew why — a missing project path, an unreachable endpoint, a connection
+  without one — and replaced it with a sentence nobody can act on, for every
+  case but two. Mentioning several agents and watching two of them vanish
+  twenty seconds later left no trace anywhere; finding the cause meant reading
+  the database. Refusals now carry the reason, which the neighbouring
+  retryable-outage path already surfaced anyway. What is settled and what is
+  worth retrying is still told apart — that decision never depended on hiding
+  the diagnosis.
+
 - A backend restart could silently cancel the agents that had not spoken yet.
   Mention several agents on one message and they share a trigger, but they run
   one at a time: the first to answer posts a message newer than that shared
