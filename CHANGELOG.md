@@ -184,33 +184,42 @@ Release notes for 0.9.3 and earlier are available in the
   disabling it removes the queries entirely, not just the badge. Weights are
   served by a bounded batch endpoint — it never scans every discussion.
 
-- Codex and Claude Code can now run through the same create/resume/stream/
-  cancel/close ACP contract as the native ACP agents, via an explicit,
-  off-by-default, per-agent opt-in (`KRONN_ACP_ADAPTER_CODEX` /
-  `KRONN_ACP_ADAPTER_CLAUDE`). Direct CLI migration remains the production
-  default for both; task workers always stay on it regardless of the toggle.
-  A shared, scoped, audited permission broker denies filesystem/terminal
-  requests, unbound sessions, out-of-project paths, and unauthorized MCP
-  server/tools by default. Project MCP servers are never inlined with
-  credentials, prompts travel on stdin, and normal discussions persist the
-  native Claude/Codex conversation id so a backend restart resumes the same
-  CLI session without reusing it across projects. See
+- Codex and Claude Code run through the same create/resume/stream/cancel/
+  close ACP contract as the native ACP agents, and that contract is the normal
+  path rather than an opt-in. The per-agent environment variables
+  (`KRONN_ACP_ADAPTER_CODEX` / `KRONN_ACP_ADAPTER_CLAUDE`) changed meaning
+  accordingly: unset selects the adapter, and returning to the direct CLI now
+  takes an explicit `0` or `false` — a deliberate, observable fallback instead
+  of the default. Task workers take the same route, with the narrow policy the
+  direct builder already applied carried over whole: their own worktree, no
+  inherited user configuration, a short tool allowlist, a fresh session, and no
+  resume of a room's conversation. A shared, scoped, audited permission broker
+  denies filesystem/terminal requests, unbound sessions, out-of-project paths
+  and unauthorized MCP server/tools by default, and a worker never receives the
+  room bridge an ordinary discussion gets. Project MCP servers are never
+  inlined with credentials, prompts travel on stdin, and normal discussions
+  persist the native Claude/Codex conversation id so a backend restart resumes
+  the same CLI session without reusing it across projects. See
   `docs/operations/acp-adapters.md`.
 
 - A dedicated `http_transport` module now owns the seam between LiteLLM,
   NVIDIA and named Custom connections and the shared OpenAI-compatible chat
   codec, kept deliberately separate from the ACP boundary (`docs/design/
   adr-004-http-transport.md`). The OpenAI Chat codec selection is an explicit,
-  single decision point; a model the catalog marks image/video-only is now
-  refused before dispatch with a diagnostic, never sent to the wrong endpoint.
+  single decision point; a model the catalog marks image/video-only is refused
+  before dispatch with a diagnostic rather than sent to the wrong endpoint, on
+  every path that applies the guard. Two do not yet: multi-agent orchestration
+  never calls it, and Workflow Agent steps call it without naming the
+  connection the step will actually use, so the model is judged against the
+  agent's own catalogue instead of that connection's.
   Discussions persist a sticky named connection (`discussions.connection_id`)
   so an ordinary reply with no explicit `@mention` keeps resolving through the
   same connection instead of losing it — previously only the very first
   message of a Custom-connection discussion reliably carried its target.
   Compare's AI judge/prompt-improver launch and multi-agent orchestration
   debates can now address a specific named connection instead of only a bare
-  agent type, with the same connection-mismatch validation Quick Prompts
-  already apply. See `docs/operations/http-transport.md`.
+  agent type. The connection-mismatch validation Quick Prompts apply does not
+  yet cover the orchestration path. See `docs/operations/http-transport.md`.
 
 ### Changed
 
@@ -635,6 +644,30 @@ Release notes for 0.9.3 and earlier are available in the
   late. Every other blocked reason — a session already committed elsewhere,
   or a protected-merge checkpoint — still refuses reassignment and requires
   a human decision, unchanged.
+
+- An ACP agent that fails to start no longer leaves its process running. Nine
+  early returns ended the session without stopping the host it had just
+  spawned; `shutdown` killed without reaping, so the entry stayed in the
+  process table; and the task draining the agent's stdout owned nothing — a
+  dropped join handle detaches instead of cancelling, which left the drain
+  alive after its process was gone. A start failure now terminates the host on
+  every path while preserving the error that caused it, the process is killed
+  and reaped, and the drain is joined under a bound: a panic still surfaces as
+  a panic, and only the cancellation Kronn asked for is treated as ordinary.
+  Proven against a real subprocess observed over a socket, with no PID polling
+  and no sleeps.
+
+- OpenCode gets a runnable Linux copy on a macOS host, like the agents it sits
+  next to. Its Darwin binary cannot exec inside the Linux container, so Kronn
+  skips it — but nothing installed a Linux one in its place, and the agent
+  quietly fell back to the npx runtime, which re-pays a Node cold start on
+  every session. It is now mirrored at container start like Claude, Codex,
+  Gemini and Copilot: only when the user actually has it on their Mac, never
+  reinstalled when a container copy already exists, and a missing or failing
+  npm degrades with a diagnostic instead of stopping the container. The boot
+  mirror also gained its first tests — the mechanism had produced two silent
+  detection bugs before this one, and a parity check now names any agent left
+  skipped without a replacement.
 
 ## [0.12.0] - 2026-08-30
 
