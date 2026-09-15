@@ -1446,6 +1446,12 @@ pub struct AgentProcess {
     /// On Unix, the process group ID of the spawned agent, used to terminate
     /// the entire process tree on cancellation. None on Windows.
     pgid: Option<i32>,
+    /// This transport delivers token fragments, not lines. Set by the ACP
+    /// session core: every ACP agent — native or adapted — emits one
+    /// `TextDelta` per model chunk, forwarded verbatim. Deducing this from the
+    /// agent type is what broke: the type says which CLI runs, not how its
+    /// output is framed.
+    token_fragments: bool,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -1455,13 +1461,15 @@ struct AgentUsage {
 }
 
 impl AgentProcess {
-    /// True when `next_line()` yields RAW token fragments to concatenate as-is
-    /// (Ollama HTTP streams model tokens), not whole lines. Line-based
-    /// consumers must skip their '\n' separator for these — joining tokens
-    /// with newlines shreds the message into one word per line (the
-    /// 2026-07-01 Ollama formatting bug).
+    /// True when `next_line()` yields RAW token fragments to concatenate as-is,
+    /// not whole lines. Line-based consumers must skip their '\n' separator for
+    /// these — joining fragments with newlines shreds the message, one piece per
+    /// line, mid-word (the 2026-07-01 Ollama bug, then every ACP agent).
+    ///
+    /// The transport declares it. The HTTP check remains for the providers that
+    /// stream model tokens without going through the ACP core.
     pub fn raw_token_stream(&self) -> bool {
-        is_http_chat_agent(&self.agent_type)
+        self.token_fragments || is_http_chat_agent(&self.agent_type)
     }
 
     /// Get next output line. For Kiro, strips ANSI codes and filters noise.
@@ -3628,6 +3636,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
         stderr_task: stderr_handle,
         http_cancel: None,
         pgid,
+        token_fragments: false,
     })
 }
 
@@ -4078,6 +4087,7 @@ async fn run_acp_session(
         stderr_task: None,
         http_cancel: Some(cancel),
         pgid: None,
+        token_fragments: true,
     })
 }
 
@@ -8113,6 +8123,7 @@ async fn start_ollama_http(
         stderr_task: None,
         http_cancel: Some(http_cancel),
         pgid: None,
+        token_fragments: false,
     })
 }
 
@@ -10626,6 +10637,28 @@ mod acp_resume_tests {
         assert!(process.child.wait().await.expect("lifeline").success());
         assert_eq!(process.reported_token_usage(), Some(8));
         assert_eq!(transport.created.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn an_acp_session_declares_a_token_fragment_stream() {
+        // ACP delivers one TextDelta per model chunk, forwarded verbatim — the
+        // pieces are sub-word ("Rom", "u"), not lines. A consumer that puts a
+        // '\n' back between them shreds every reply, which is what happened to
+        // OpenCode. The transport must say so rather than let the agent type be
+        // guessed from: this holds for every ACP agent, adapted ones included.
+        for agent in [
+            AgentType::OpenCode,
+            AgentType::ClaudeCode,
+            AgentType::Codex,
+            AgentType::GeminiCli,
+        ] {
+            let transport = transport(ResumeOutcome::Missing, PromptOutcome::Complete);
+            let process = run_fixture(transport, &agent, None, None, None, None).await;
+            assert!(
+                process.raw_token_stream(),
+                "{agent:?}: an ACP session streams token fragments"
+            );
+        }
     }
 
     #[tokio::test]

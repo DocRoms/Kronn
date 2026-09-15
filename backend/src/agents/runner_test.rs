@@ -8568,6 +8568,7 @@ sleep 3600
             stderr_task: None,
             http_cancel: None,
             pgid,
+            token_fragments: false,
         };
 
         // Call the production kill() method
@@ -8644,6 +8645,7 @@ sleep 3600
             stderr_task: None,
             http_cancel: None,
             pgid: None,
+            token_fragments: false,
         };
 
         assert_eq!(process.reported_token_usage(), Some(8));
