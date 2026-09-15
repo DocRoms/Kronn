@@ -13,6 +13,8 @@ set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+# shellcheck source=../lib/ui.sh
+source "$PROJECT_ROOT/lib/ui.sh"
 BACKEND_DIR="${KRONN_DEV_BACKEND_DIR:-$PROJECT_ROOT/backend}"
 # Do not inherit a target directory from another checkout.  Cargo's checked-in
 # configuration resolves this path at the repository root; exporting it here
@@ -122,16 +124,20 @@ fi
 # avoids rebuilding immediately after the explicit initial build above.
 KRONN_DEV_BACKEND_SUPERVISOR_PID=$$
 export KRONN_DEV_BACKEND_SUPERVISOR_PID
-(
-    cd "$BACKEND_DIR"
-    exec watchexec \
-        --postpone \
-        --on-busy-update=restart \
-        --exts rs,toml,lock \
-        --stop-timeout 10s \
-        -- ../scripts/dev-backend-watch-command.sh
-) &
-watcher_pid=$!
+if dev_backend_watch_enabled "${KRONN_DEV_BACKEND_WATCH:-1}"; then
+    (
+        cd "$BACKEND_DIR"
+        exec watchexec \
+            --postpone \
+            --on-busy-update=restart \
+            --exts rs,toml,lock \
+            --stop-timeout 10s \
+            -- ../scripts/dev-backend-watch-command.sh
+    ) &
+    watcher_pid=$!
+else
+    echo "  Hot reload off — the backend stays up until you stop it."
+fi
 
 while true; do
     if (( reload_requested == 1 )); then
@@ -162,7 +168,7 @@ while true; do
         record_failure "${status:-1}"
         exit "${status:-1}"
     fi
-    if ! kill -0 "$watcher_pid" 2>/dev/null; then
+    if [[ -n "$watcher_pid" ]] && ! kill -0 "$watcher_pid" 2>/dev/null; then
         wait "$watcher_pid" 2>/dev/null
         status=$?
         record_failure "${status:-1}"

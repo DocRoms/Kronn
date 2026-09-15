@@ -132,6 +132,10 @@ cmd_web() {
             "Native — backend + UI in one command (recommended: host agents work)" \
             "Docker anyway — web UI + API only (host agents won't run)"
         if [[ "$REPLY" == "1" ]]; then
+            # Native because Docker cannot reach the host CLIs — but this is the
+            # "use Kronn" path, so no rebuild watcher: a swap would kill the
+            # agents this user is about to run. `kronn start-dev` still watches.
+            export KRONN_DEV_BACKEND_WATCH="${KRONN_DEV_BACKEND_WATCH:-0}"
             cmd_start_dev
             return
         elif [[ "$REPLY" != "2" ]]; then
