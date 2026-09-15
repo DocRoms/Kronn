@@ -4785,7 +4785,7 @@ End with [SIGNAL: OK].`,
   'wf.guards.stoppedBy.loopDetection': 'Loop detected on step "{0}" ({1} times)',
 
   // ── Stale-stream watchdog (TD-20260504) ──
-  'discussions.streamRecovered': 'Connection to the agent was lost — latest state reloaded',
+  'discussions.streamRecovered': 'Stream interrupted — the agent is still running server-side, its reply will appear here',
   'disc.interruptedFragment': 'Interrupted reply — the agent was cut off; a retry follows',
 
   // ── Migration ai/ → docs/ banner ──

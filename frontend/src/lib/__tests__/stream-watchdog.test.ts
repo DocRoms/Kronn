@@ -7,7 +7,7 @@ import { describe, it, expect } from 'vitest';
 import { detectStaleStreams, DEFAULT_STREAM_STALE_MS, abortStaleStreams } from '../stream-watchdog';
 
 const NOW = 10_000_000;
-const FIVE_MIN = DEFAULT_STREAM_STALE_MS;
+const THRESHOLD = DEFAULT_STREAM_STALE_MS;
 
 describe('detectStaleStreams', () => {
   it('returns nothing when no spinners are active', () => {
@@ -31,7 +31,7 @@ describe('detectStaleStreams', () => {
   it('flags a discussion whose last chunk is older than the threshold', () => {
     expect(detectStaleStreams({
       sendingMap: { d1: true },
-      lastTickMap: { d1: NOW - FIVE_MIN - 1000 },
+      lastTickMap: { d1: NOW - THRESHOLD - 1000 },
       sendingStartMap: { d1: NOW - 10 * 60_000 },
       now: NOW,
     })).toEqual(['d1']);
@@ -43,7 +43,7 @@ describe('detectStaleStreams', () => {
     expect(detectStaleStreams({
       sendingMap: { d1: true },
       lastTickMap: {},
-      sendingStartMap: { d1: NOW - FIVE_MIN - 1 },
+      sendingStartMap: { d1: NOW - THRESHOLD - 1 },
       now: NOW,
     })).toEqual(['d1']);
   });
@@ -75,12 +75,12 @@ describe('detectStaleStreams', () => {
     expect(detectStaleStreams({
       sendingMap: { d1: true, d2: true, d3: true },
       lastTickMap: {
-        d1: NOW - FIVE_MIN - 5_000, // stale
+        d1: NOW - THRESHOLD - 5_000, // stale
         d2: NOW - 30_000,           // fresh
         // d3: no tick
       },
       sendingStartMap: {
-        d3: NOW - FIVE_MIN - 5_000, // stale via start
+        d3: NOW - THRESHOLD - 5_000, // stale via start
       },
       now: NOW,
     }).sort()).toEqual(['d1', 'd3']);
@@ -142,5 +142,17 @@ describe('abortStaleStreams', () => {
     abortStaleStreams(['bad', 'good'], controllers, id => forgotten.push(id));
     expect(aborted).toEqual(['good']);
     expect(forgotten).toEqual(['bad', 'good']);
+  });
+});
+
+describe('the default threshold against the backend ceiling', () => {
+  it('is not shorter than the 15 minutes the backend grants a silent agent', () => {
+    // backend/src/api/discussions/mod.rs — NON_STREAMING_STALL_TIMEOUT.
+    // A non-streaming agent (Codex `exec`) writes nothing to stdout until the
+    // end, so the server waits 15 minutes before abandoning it. Any frontend
+    // threshold below that declares dead a run the server is still awaiting,
+    // and every Codex turn past five minutes used to get the toast.
+    const BACKEND_STALL_CEILING_MS = 15 * 60 * 1000;
+    expect(DEFAULT_STREAM_STALE_MS).toBeGreaterThanOrEqual(BACKEND_STALL_CEILING_MS);
   });
 });

@@ -4582,7 +4582,7 @@ const zh: TranslationDict = {
   "wf.guards.stoppedBy.timeout": "最大持续时间已达到（{0}秒）",
   "wf.guards.stoppedBy.maxLlmCalls": "AI调用次数过多（{0}次，共{1}次）",
   "wf.guards.stoppedBy.loopDetection": "检测到步骤“{0}”循环（{1}次）",
-  "discussions.streamRecovered": "与代理的连接已断开——最新状态已重新加载",
+  "discussions.streamRecovered": "数据流已中断——该智能体仍在服务端运行，其回复将显示在此处",
   "disc.interruptedFragment": "回复已中断——代理被停止，后续将继续恢复",
   "migration.title": "检测到旧版`ai/`约定",
   "migration.desc": "此项目仍使用`ai/index.md`。请迁移到`docs/AGENTS.md`约定（Kronn 0.7.1+）——`git mv`会保留历史记录，内部引用将被重写。",

@@ -4798,7 +4798,7 @@ Termine par [SIGNAL: OK].`,
   'wf.guards.stoppedBy.loopDetection': 'Boucle détectée sur le step « {0} » ({1} fois)',
 
   // ── Stale-stream watchdog (TD-20260504) ──
-  'discussions.streamRecovered': 'Connexion perdue avec l\'agent — état le plus récent rechargé',
+  'discussions.streamRecovered': 'Flux interrompu — l\'agent continue côté serveur, sa réponse apparaîtra ici',
   'disc.interruptedFragment': "Réponse interrompue — l'agent a été coupé, une reprise suit",
 
   // ── Migration ai/ → docs/ banner ──

@@ -10,10 +10,18 @@
 // us a tiny pure surface to unit-test exhaustively without mounting
 // the React tree.
 
-/** Default: 5 minutes between activity events before we consider a
- *  stream dead. Chosen to be longer than any plausible legit gap
- *  between chunks, even on slow LLMs / contended hosts. */
-export const DEFAULT_STREAM_STALE_MS = 5 * 60 * 1000;
+/** Default: 15 minutes of silence before a stream counts as dead.
+ *
+ *  This mirrors the backend's own ceiling — `NON_STREAMING_STALL_TIMEOUT`
+ *  (backend/src/api/discussions/mod.rs) gives a non-streaming agent, Codex
+ *  `exec` among them, a full 15 minutes of silent stdout before abandoning it.
+ *  The previous 5 minutes meant the UI declared dead, every single time, a run
+ *  the server was still happily waiting on: any Codex turn past five minutes
+ *  got the toast. Two budgets for one run, neither aware of the other.
+ *
+ *  Below the server's own ceiling this threshold can only ever be wrong; at it,
+ *  it fires when the server would give up too. */
+export const DEFAULT_STREAM_STALE_MS = 15 * 60 * 1000;
 
 export interface StaleStreamInputs {
   /** Per-discussion "is the spinner currently spinning?" flag. */
