@@ -365,6 +365,42 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- A room backed by a custom external connection could not be replied to at all.
+  Its composer was disabled under "this agent is currently disabled or
+  uninstalled", so an OpenRouter answer could be read and never answered.
+  `Custom` is an HTTP connection with no local binary, absent from the agent
+  table by construction; binary detection returning nothing about it was read
+  as evidence that it was missing. Detection silence about a remote provider is
+  no longer treated as an answer.
+
+- An ordinary reply in such a room could also fail with "the selected external
+  API connection is unavailable", although the connection existed and the
+  discussion recorded it. A reply that arrives without a dispatch job carried no
+  connection at all; the discussion's own connection — the durable target such a
+  reply is meant to resolve to — was never consulted. It is now the fallback,
+  and an explicitly dispatched connection still wins over it.
+
+- Agent replies arriving over ACP were shredded, with newlines inside words
+  ("Rom", "u"). ACP delivers one fragment per model chunk and forwards it
+  verbatim, but consumers put a line separator back between them, because the
+  decision was made from the agent's type — which says which CLI runs, not how
+  its output is framed. The transport now declares it. This affected every ACP
+  agent, not only the one where the pieces were small enough to make it obvious.
+
+- The live agent-log panel was unreadable in the light theme: 2.4:1, dark text
+  on a dark ground. It paired a background that stays dark in every theme with a
+  text token whose name says "muted" — a role, not a colour, and a dark one
+  under a light theme. It now uses the token that means "text on a dark ground",
+  as code blocks on that same background already did.
+
+- Discussions could show a pending arbitration nobody asked for, reading "Which
+  option should we use?". That is Kronn's own documentation example: when a run
+  fails, the agent's raw output is folded away as technical details, that output
+  includes the system prompt, and the prompt documents the arbitration format
+  with a complete example. Ingestion read the whole message and recorded it —
+  and nothing could clear it, since only a human answer closes an arbitration.
+  Folded technical context is no longer scanned for questions.
+
 - Launching Kronn on macOS installed a rebuild watcher. `kronn start` runs the
   backend natively there, because Docker cannot reach the host CLIs or the
   Keychain — and it inherited the development file watcher with it, so every
