@@ -114,13 +114,15 @@ Release notes for 0.9.3 and earlier are available in the
   store existed but nothing called them, so an accepted delivery produced
   nothing at all. Both approval paths publish it — the ordinary one, and a
   replayed approval that repairs a crash between the approval and its message.
-  The report and its message are written together, so neither can exist without
-  the other, and a record found without its message gets one, rendered from the
-  stored payload rather than the caller's. Publication is attempted after the
-  approval, which is already durable: a failure is logged and repaired by a
-  later approve replay, not rolled back — an unreadable manifest or a database
-  fault means no report yet, not a corrupted approval. A stored report payload
-  that cannot be read back renders as a diagnostic instead of vanishing. The
+  A new report and its message are written together, so one can no longer be
+  created without the other; a record left without its message by an earlier
+  run gets one, rendered from the stored payload rather than the caller's.
+  Publication is attempted after the approval, which is already durable: a
+  failure is logged and can be retried by a later approve replay, not rolled
+  back — an unreadable manifest or a database fault means no report yet, not a
+  corrupted approval, and a manifest that never parses never produces one. A
+  stored report payload that cannot be read back renders as a diagnostic
+  instead of vanishing. The
   worker's duration counts from its own assignment, so earlier review rounds
   are not charged to its attempt.
 - Workflows, quick prompts, quick APIs and quick execs can be deleted from
@@ -163,8 +165,8 @@ Release notes for 0.9.3 and earlier are available in the
   that advertises none keeps the previous defaults rather than leaving an empty
   picker. A video can start from — or end on — an image the discussion already
   holds, picked in the form or named by an agent through MCP. That image is
-  referenced by id and travels inline: no local path, URL or credential ever
-  leaves Kronn.
+  referenced by id and travels inline: no local source path or Kronn asset-fetch
+  URL is sent to the provider.
   An asset can finally be deleted, from the viewer, in two steps — the control
   removes bytes from disk and sits next to "close", so it arms before it acts,
   the viewer closes rather than silently landing on the neighbouring media, and
