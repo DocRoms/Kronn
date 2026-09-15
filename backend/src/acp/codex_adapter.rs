@@ -586,8 +586,10 @@ mod tests {
         assert_eq!(target.agent, AcpAgent::Codex);
         assert!(adapter.native_session_id(&target).await.is_none());
 
+        // Exceed pipe capacity so a fixture that exits before reading fails reliably.
+        let prompt = "large prompt with unicode: é🙂\n".repeat(32_768);
         let (tx, rx) = mpsc::channel(16);
-        host.prompt(&target, "hello", tx)
+        host.prompt(&target, &prompt, tx)
             .await
             .unwrap_or_else(|error| panic!("first prompt failed: {error}"));
         let events = drain(rx).await;
@@ -647,11 +649,12 @@ mod tests {
             .unwrap();
         let target = host.create_session().await.unwrap();
 
+        let prompt = "large prompt with unicode: é🙂\n".repeat(32_768);
         let (tx, _rx) = mpsc::channel(16);
-        host.prompt(&target, "hello", tx).await.unwrap();
+        host.prompt(&target, &prompt, tx).await.unwrap();
 
         let (tx, rx) = mpsc::channel(16);
-        host.prompt(&target, "hello again", tx).await.unwrap();
+        host.prompt(&target, &prompt, tx).await.unwrap();
         let events = drain(rx).await;
         assert!(events.contains(&AcpSessionEvent::TextDelta("resumed".into())));
     }
