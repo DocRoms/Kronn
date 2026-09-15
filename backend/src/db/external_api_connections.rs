@@ -65,13 +65,20 @@ fn preset_name(preset: ExternalApiConnectionPreset) -> &'static str {
     }
 }
 
-fn parse_preset(value: &str) -> ExternalApiConnectionPreset {
-    match value {
+fn parse_preset(value: &str) -> rusqlite::Result<ExternalApiConnectionPreset> {
+    Ok(match value {
         "litellm" => ExternalApiConnectionPreset::LiteLlm,
         "nvidia" => ExternalApiConnectionPreset::Nvidia,
         "open_router" => ExternalApiConnectionPreset::OpenRouter,
-        _ => ExternalApiConnectionPreset::Other,
-    }
+        "other" => ExternalApiConnectionPreset::Other,
+        _ => {
+            return Err(rusqlite::Error::FromSqlConversionFailure(
+                0,
+                rusqlite::types::Type::Text,
+                "unknown persisted external connection preset".into(),
+            ));
+        }
+    })
 }
 
 fn row_to_connection(row: &rusqlite::Row<'_>) -> rusqlite::Result<ExternalApiConnection> {
@@ -81,7 +88,7 @@ fn row_to_connection(row: &rusqlite::Row<'_>) -> rusqlite::Result<ExternalApiCon
         mention_alias: row.get(2)?,
         endpoint: row.get(3)?,
         credential_slug: row.get(4)?,
-        origin_preset: parse_preset(&row.get::<_, String>(5)?),
+        origin_preset: parse_preset(&row.get::<_, String>(5)?)?,
         economy_model: row.get(6)?,
         default_model: row.get(7)?,
         reasoning_model: row.get(8)?,
@@ -468,6 +475,46 @@ mod tests {
         assert_eq!(
             resolve_connection_mentions("Ask @openrouter.", &[persisted]),
             vec![target]
+        );
+    }
+
+    #[test]
+    fn persisted_unknown_preset_is_rejected_without_exposing_its_value() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+        conn.execute_batch("PRAGMA ignore_check_constraints = ON;")
+            .unwrap();
+        conn.execute(
+            "INSERT INTO external_api_connections \
+             (id, display_name, mention_alias, credential_slug, origin_preset) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                "unknown-preset",
+                "Unknown preset",
+                "unknown-preset",
+                "unknown-preset-key",
+                "sensitive-unknown-preset"
+            ],
+        )
+        .unwrap();
+
+        let error = get(&conn, "unknown-preset").unwrap_err().to_string();
+        assert!(error.contains("unknown persisted external connection preset"));
+        assert!(!error.contains("sensitive-unknown-preset"));
+    }
+
+    #[test]
+    fn persisted_other_preset_remains_valid_and_routes_as_custom() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+        let other = connection("other-primary", "other", ExternalApiConnectionPreset::Other);
+        insert(&conn, &other).unwrap();
+
+        let persisted = get(&conn, "other-primary").unwrap().unwrap();
+        assert_eq!(persisted.origin_preset, ExternalApiConnectionPreset::Other);
+        assert_eq!(
+            target_for_connection(&persisted).agent_type,
+            AgentType::Custom
         );
     }
 

@@ -26,18 +26,18 @@
 //! (only static `--sandbox`/`--dangerously-bypass-approvals-and-sandbox`
 //! flags), so — exactly like the Claude adapter — permission policy is
 //! computed once per session by [`AcpPermissionBroker::session_policy`].
-//! MCP servers are not inlined into any Kronn-controlled payload: Codex reads
-//! its own already-synced `~/.codex/config.toml` (project-authorized servers,
-//! real credentials, written by the existing MCP sync); the adapter only
-//! narrows the `kronn-internal` server's forwarded env var *names* — never
-//! values — exactly like today's direct-CLI Codex invocation.
+//! MCP is an explicit project-only override reconstructed by the scoped
+//! broker, not the account's global multi-project registry. Credential-bearing
+//! declarations are omitted. The trusted `kronn-internal` bridge forwards only
+//! fixed environment variable names, never credential values in argv/prompt.
+//! Task workers instead reuse the direct worker's narrower launch policy.
 
+use super::adapter_process::AdapterProcess;
+use crate::agents::runner::{AdapterLaunchOptions, SpawnIo};
 use async_trait::async_trait;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::Child;
 use tokio::sync::{mpsc, Mutex};
 
 use super::permission_broker::{AcpAuditEntry, AcpPermissionBroker, AcpSessionScope};
@@ -56,11 +56,12 @@ pub struct CodexAcpAdapter {
     /// resume a thread from a previous Kronn process; otherwise populated
     /// from the first turn's `thread.started` event.
     thread_id: Mutex<Option<String>>,
-    current_child: Mutex<Option<Child>>,
+    process: AdapterProcess,
     /// Forwarded to the subprocess as `KRONN_DISCUSSION_ID` so the
     /// kronn-internal MCP bridge knows which discussion to introspect
     /// (KT-542 review: this was previously dropped on the adapter path).
     discussion_id: Option<String>,
+    launch: AdapterLaunchOptions,
 }
 
 impl CodexAcpAdapter {
@@ -79,9 +80,15 @@ impl CodexAcpAdapter {
             reasoning_effort,
             broker: AcpPermissionBroker::scoped(full_access, scope),
             thread_id: Mutex::new(seed_native_thread_id),
-            current_child: Mutex::new(None),
+            process: AdapterProcess::default(),
             discussion_id,
+            launch: AdapterLaunchOptions::default(),
         }
+    }
+
+    pub(crate) fn with_launch_options(mut self, launch: AdapterLaunchOptions) -> Self {
+        self.launch = launch;
+        self
     }
 
     /// Test-only: drive a fixture script instead of the real `codex` binary.
@@ -339,26 +346,35 @@ impl AcpTransport for CodexAcpAdapter {
         prompt: &str,
         events: mpsc::Sender<AcpSessionEvent>,
     ) -> Result<(), AcpError> {
+        let cancel = self.process.begin_turn();
+        cancel.check_active()?;
         let cwd = self.cwd.lock().await.clone().ok_or_else(|| {
             AcpError::Transport("Codex ACP adapter prompted before initialize".into())
         })?;
         let known_thread = self.thread_id.lock().await.clone();
 
-        let mut args: Vec<String> = vec!["exec".into()];
+        let mut args: Vec<String> = self
+            .launch
+            .worker_args
+            .clone()
+            .unwrap_or_else(|| vec!["exec".into()]);
         if let Some(thread) = &known_thread {
             args.push("resume".into());
             args.push(thread.clone());
         }
         args.push("--json".into());
-        args.push("--skip-git-repo-check".into());
-        args.push("-c".into());
-        args.push(
-            codex_project_mcp_override(&cwd, &self.broker).ok_or_else(|| {
-                AcpError::Transport(
-                    "Codex ACP adapter cannot build its project-scoped MCP configuration".into(),
-                )
-            })?,
-        );
+        if self.launch.worker_context.is_none() {
+            args.push("--skip-git-repo-check".into());
+            args.push("-c".into());
+            args.push(
+                codex_project_mcp_override(&cwd, &self.broker).ok_or_else(|| {
+                    AcpError::Transport(
+                        "Codex ACP adapter cannot build its project-scoped MCP configuration"
+                            .into(),
+                    )
+                })?,
+            );
+        }
         if let Some(model) = &self.model {
             args.push("--model".into());
             args.push(model.clone());
@@ -373,30 +389,34 @@ impl AcpTransport for CodexAcpAdapter {
         // `--sandbox` is not accepted by `codex exec resume` (verified via
         // `codex exec resume --help`): only the first turn of a thread can
         // set it.
-        if known_thread.is_none() {
+        if known_thread.is_none() && self.launch.worker_context.is_none() {
             if let Some(sandbox) = self.broker.session_policy().codex_sandbox {
                 args.push(format!("--sandbox={sandbox}"));
             }
         }
         args.push("-".into());
 
-        let mut command = crate::core::cmd::async_cmd(&self.program);
-        command
-            .args(&args)
-            .current_dir(&cwd)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null());
-        if let Some(discussion_id) = self.discussion_id.as_deref() {
-            command.env("KRONN_DISCUSSION_ID", discussion_id);
-        }
-        let mut child = command
-            .spawn()
-            .map_err(|error| AcpError::Transport(format!("spawn codex: {error}")))?;
+        let mut child = crate::agents::runner::try_spawn(
+            &self.program,
+            None,
+            &args,
+            &cwd,
+            "OPENAI_API_KEY",
+            self.launch.api_key.as_deref(),
+            SpawnIo::Adapter,
+            self.discussion_id.as_deref(),
+            self.launch.worker_context.as_ref(),
+        )
+        .map_err(AcpError::Transport)?;
         let mut stdin = child
             .stdin
             .take()
             .ok_or_else(|| AcpError::Transport("codex stdin unavailable".into()))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| AcpError::Transport("codex stdout unavailable".into()))?;
+        self.process.install(child, &cancel).await?;
         stdin
             .write_all(prompt.as_bytes())
             .await
@@ -406,11 +426,6 @@ impl AcpTransport for CodexAcpAdapter {
             .await
             .map_err(|error| AcpError::Transport(format!("close codex prompt stdin: {error}")))?;
         drop(stdin);
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| AcpError::Transport("codex stdout unavailable".into()))?;
-        *self.current_child.lock().await = Some(child);
 
         let mut lines = BufReader::new(stdout).lines();
         let mut fatal: Option<String> = None;
@@ -449,17 +464,7 @@ impl AcpTransport for CodexAcpAdapter {
             }
         }
 
-        let status = {
-            let mut guard = self.current_child.lock().await;
-            match guard.as_mut() {
-                Some(child) => child
-                    .wait()
-                    .await
-                    .map_err(|error| AcpError::Transport(format!("wait for codex: {error}")))?,
-                None => return Err(AcpError::Transport("codex turn was cancelled".into())),
-            }
-        };
-        *self.current_child.lock().await = None;
+        let status = self.process.wait(&cancel).await?;
 
         if let Some(message) = fatal {
             return Err(AcpError::Transport(message));
@@ -474,21 +479,11 @@ impl AcpTransport for CodexAcpAdapter {
     }
 
     async fn cancel(&self, _target: &AcpSessionTarget) -> Result<(), AcpError> {
-        if let Some(mut child) = self.current_child.lock().await.take() {
-            let _ = child.start_kill();
-            tokio::spawn(async move {
-                let _ = child.wait().await;
-            });
-        }
-        Ok(())
+        self.process.cancel().await
     }
 
     async fn shutdown(&self) -> Result<(), AcpError> {
-        if let Some(mut child) = self.current_child.lock().await.take() {
-            let _ = child.start_kill();
-            let _ = child.wait().await;
-        }
-        Ok(())
+        self.process.cancel().await
     }
 
     async fn native_session_id(&self, _target: &AcpSessionTarget) -> Option<String> {
@@ -719,7 +714,11 @@ mod tests {
     #[tokio::test]
     async fn cancel_kills_the_live_subprocess_and_the_turn_reports_cancelled() {
         let dir = tempfile::tempdir().unwrap();
-        let fixture = crate::acp::test_support::write_fixture_script(dir.path(), "sleep 30");
+        let fixture = crate::acp::test_support::write_fixture_script(
+            dir.path(),
+            r#"printf '%s\n' '{"type":"item.completed","item":{"type":"command_execution","command":"fixture-ready"}}'
+exec sleep 30"#,
+        );
         let adapter = std::sync::Arc::new(CodexAcpAdapter::new_with_program(
             fixture.to_string_lossy(),
             None,
@@ -732,14 +731,26 @@ mod tests {
             .unwrap();
         let target = host.create_session().await.unwrap();
 
-        let (tx, _rx) = mpsc::channel(16);
+        let (tx, mut rx) = mpsc::channel(16);
         let prompt_target = target.clone();
         let prompt_adapter = adapter.clone();
         let handle =
             tokio::spawn(async move { prompt_adapter.prompt(&prompt_target, "hi", tx).await });
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while let Some(event) = rx.recv().await {
+                if matches!(event, AcpSessionEvent::ToolCall { .. }) {
+                    return;
+                }
+            }
+            panic!("fixture exited without its ready event");
+        })
+        .await
+        .expect("fixture startup must be observable");
         adapter.cancel(&target).await.unwrap();
-        let result = handle.await.unwrap();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(10), handle)
+            .await
+            .expect("cancel must stop the owned child")
+            .unwrap();
         assert!(result.is_err(), "a killed turn must not report success");
     }
 
