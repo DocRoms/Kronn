@@ -132,6 +132,10 @@ export function Dashboard({ onReset }: DashboardProps) {
   // re-launch" while a workflow was in fact still going. Kept here in the
   // persistent Dashboard shell so the nav badge survives page changes.
   const [runningDiscIds, setRunningDiscIds] = useState<string[]>([]);
+  // Mirrored into a ref so the stale-stream watchdog can read it without
+  // listing it as a dependency: doing so would rebuild its 30 s interval on
+  // every 5 s poll, and the countdown would never complete.
+  const runningDiscIdsRef = useRef<string[]>([]);
   const abortControllers = useRef<Record<string, AbortController>>({});
   // ─── Stale-stream watchdog (TD-20260504) ──────────────────────────────────
   // Tracks the last time we observed activity on a streaming discussion
@@ -287,6 +291,7 @@ export function Dashboard({ onReset }: DashboardProps) {
         lastTickMap: streamingLastTickRef.current,
         sendingStartMap,
         now: Date.now(),
+        serverRunningIds: runningDiscIdsRef.current,
       });
       if (stale.length === 0) return;
       abortStaleStreams(stale, abortControllers.current, cleanupStream);
@@ -308,6 +313,7 @@ export function Dashboard({ onReset }: DashboardProps) {
     const tick = async () => {
       try {
         const ids = await discussionsApi.getRunning();
+        if (!cancelled) runningDiscIdsRef.current = ids;
         if (!cancelled) setRunningDiscIds(prev => {
           // Avoid a re-render when nothing changed.
           if (prev.length === ids.length && prev.every((x, i) => x === ids[i])) return prev;

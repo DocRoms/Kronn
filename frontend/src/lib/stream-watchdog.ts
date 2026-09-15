@@ -37,6 +37,13 @@ export interface StaleStreamInputs {
   now: number;
   /** Override threshold (defaults to `DEFAULT_STREAM_STALE_MS`). */
   thresholdMs?: number;
+  /** Discussion ids the SERVER reports as still running, from the
+   *  `getRunning()` poll. Silence is not death: a run spending minutes in tool
+   *  calls emits no text, so the local tick never advances — while the server
+   *  knows perfectly well it is alive. When the server says a run is in flight,
+   *  no local timer may overrule it. Omit when the poll has never answered;
+   *  an empty array then means "the server says nothing is running". */
+  serverRunningIds?: readonly string[];
 }
 
 /** Returns the discussion ids whose stream has gone silent for longer
@@ -51,6 +58,11 @@ export function detectStaleStreams(input: StaleStreamInputs): string[] {
     if (lastTick == null) {
       // Spinner is on but we have no record of when it started —
       // can't decide, leave alone (observability bug, not a stuck UI).
+      continue;
+    }
+    if (input.serverRunningIds?.includes(discId)) {
+      // The server is the authority on whether work is happening. Asking it
+      // costs nothing here — the answer is already polled every 5 s.
       continue;
     }
     if (input.now - lastTick > threshold) {

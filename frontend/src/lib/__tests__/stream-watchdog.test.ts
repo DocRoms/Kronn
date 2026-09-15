@@ -156,3 +156,38 @@ describe('the default threshold against the backend ceiling', () => {
     expect(DEFAULT_STREAM_STALE_MS).toBeGreaterThanOrEqual(BACKEND_STALL_CEILING_MS);
   });
 });
+
+describe('server truth overrules the local timer', () => {
+  const silentForAges = {
+    sendingMap: { d1: true },
+    lastTickMap: { d1: 0 },
+    sendingStartMap: { d1: 0 },
+    now: THRESHOLD * 10,
+  };
+
+  it('spares a run the server reports as still in flight', () => {
+    // The regression this prevents: a run spending minutes in tool calls emits
+    // no text, so the local tick never advances — and it was declared dead
+    // while the server knew it was alive and would persist its answer.
+    expect(detectStaleStreams({ ...silentForAges, serverRunningIds: ['d1'] })).toEqual([]);
+  });
+
+  it('still reaps it when the server does not list it', () => {
+    expect(detectStaleStreams({ ...silentForAges, serverRunningIds: ['other'] })).toEqual(['d1']);
+    expect(detectStaleStreams({ ...silentForAges, serverRunningIds: [] })).toEqual(['d1']);
+  });
+
+  it('behaves as before when the poll has never answered', () => {
+    // `undefined` means "no server opinion yet", which must not be read as
+    // "the server says nothing runs" — otherwise a cold start reaps everything.
+    expect(detectStaleStreams(silentForAges)).toEqual(['d1']);
+  });
+
+  it('does not spare a run that is not even sending', () => {
+    expect(detectStaleStreams({
+      ...silentForAges,
+      sendingMap: { d1: false },
+      serverRunningIds: ['d1'],
+    })).toEqual([]);
+  });
+});
