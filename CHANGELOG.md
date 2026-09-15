@@ -365,6 +365,13 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- The list of running discussions reported its own bookkeeping keys instead of
+  discussions. A reply registers for cancellation under its dispatch id, not
+  the discussion's, so the list missed every durable reply — the ordinary case
+  — while counting workflow runs as discussions, which is what made the "N
+  running" badge overcount. Keys are now resolved to the discussion they belong
+  to, and anything that is not one is left out.
+
 - A stream that went quiet was reported as a lost connection, and the report was
   wrong. The run lives in a spawned task the client cannot stop: it keeps going
   and persists its answer. Believing the agent dead, an operator resends and
