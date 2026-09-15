@@ -131,6 +131,35 @@ async fn checked_launch_connection(
     Ok((connection, model))
 }
 
+async fn unavailable_local_participants_with<Detect, DetectFuture>(
+    participants: &[OrchestrationParticipant],
+    detect: Detect,
+) -> Vec<String>
+where
+    Detect: FnOnce() -> DetectFuture,
+    DetectFuture: std::future::Future<Output = Vec<crate::models::AgentDetection>>,
+{
+    let detections = detect().await;
+    let usable: Vec<AgentType> = detections
+        .iter()
+        .filter(|d| (d.installed || d.runtime_available) && d.enabled)
+        .map(|d| d.agent_type.clone())
+        .collect();
+    participants
+        .iter()
+        // A validated named HTTP connection is itself the runtime. Only
+        // participants without one need a locally runnable agent binary.
+        .filter(|participant| participant.connection_id.is_none())
+        .map(|participant| &participant.agent_type)
+        .filter(|agent| {
+            !usable
+                .iter()
+                .any(|usable| std::mem::discriminant(usable) == std::mem::discriminant(*agent))
+        })
+        .map(|agent| format!("{:?}", agent))
+        .collect()
+}
+
 fn tier_label(tier: ModelTier) -> &'static str {
     match tier {
         ModelTier::Economy => "economy",
@@ -446,26 +475,10 @@ pub async fn orchestrate(
     // mid-debate with a confusing subprocess error instead of a clear
     // up-front message.
     {
-        // AgentType doesn't impl Hash/Eq, so we build a small Vec instead.
-        let detections = crate::agents::detect_all_cached(false).await;
-        let usable: Vec<AgentType> = detections
-            .iter()
-            .filter(|d| (d.installed || d.runtime_available) && d.enabled)
-            .map(|d| d.agent_type.clone())
-            .collect();
-        let missing: Vec<_> = participants
-            .iter()
-            // A validated named HTTP connection is itself the runtime. Only
-            // participants without one need a locally runnable agent binary.
-            .filter(|participant| participant.connection_id.is_none())
-            .map(|participant| &participant.agent_type)
-            .filter(|agent| {
-                !usable
-                    .iter()
-                    .any(|usable| std::mem::discriminant(usable) == std::mem::discriminant(*agent))
-            })
-            .map(|agent| format!("{:?}", agent))
-            .collect();
+        let missing = unavailable_local_participants_with(&participants, || async {
+            crate::agents::detect_all_cached(false).await
+        })
+        .await;
         if !missing.is_empty() {
             let msg = format!(
                 "Agent(s) not installed or disabled: {}. Install or enable them in Config before starting a debate.",
@@ -1727,6 +1740,7 @@ mod orchestrate_validation_tests {
     // depends on the host having `claude` / `codex` binaries).
     use super::{
         checked_launch_connection, generate_summary_on_demand, primary_connection_id, target_tier,
+        unavailable_local_participants_with,
     };
     use crate::models::{
         AgentType, Discussion, DiscussionMessage, ExternalApiConnection,
@@ -1918,6 +1932,94 @@ mod orchestrate_validation_tests {
             "data: {{\"choices\":[{{\"index\":0,\"delta\":{{\"content\":{}}}}}]}}\n\ndata: [DONE]\n\n",
             serde_json::to_string(content).unwrap()
         )
+    }
+
+    fn detection(agent_type: AgentType, installed: bool, enabled: bool) -> AgentDetection {
+        AgentDetection {
+            name: format!("{agent_type:?}"),
+            agent_type,
+            installed,
+            enabled,
+            path: None,
+            version: None,
+            latest_version: None,
+            version_checked_at: None,
+            version_check_error: None,
+            version_source_url: None,
+            origin: "test".into(),
+            install_command: None,
+            host_managed: false,
+            host_label: None,
+            runtime_available: false,
+            auth_ready: None,
+            auth_setup_command: None,
+            rtk_available: false,
+            rtk_hook_configured: false,
+            runtime_warning: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn all_named_http_participants_skip_local_detection_sweep() {
+        let participants = vec![
+            OrchestrationParticipant {
+                agent_type: AgentType::Custom,
+                connection_id: Some("connection-a".into()),
+            },
+            OrchestrationParticipant {
+                agent_type: AgentType::Nvidia,
+                connection_id: Some("connection-b".into()),
+            },
+        ];
+
+        let missing = unavailable_local_participants_with(&participants, || async {
+            panic!("all-HTTP orchestration must not start a local detection sweep")
+        })
+        .await;
+
+        assert!(missing.is_empty());
+    }
+
+    #[tokio::test]
+    async fn mixed_group_detects_and_refuses_absent_local_participant() {
+        let participants = vec![
+            OrchestrationParticipant {
+                agent_type: AgentType::Custom,
+                connection_id: Some("connection-a".into()),
+            },
+            OrchestrationParticipant {
+                agent_type: AgentType::Codex,
+                connection_id: None,
+            },
+        ];
+        let called = std::sync::atomic::AtomicBool::new(false);
+
+        let missing = unavailable_local_participants_with(&participants, || async {
+            called.store(true, std::sync::atomic::Ordering::SeqCst);
+            Vec::new()
+        })
+        .await;
+
+        assert!(called.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(missing, vec!["Codex"]);
+    }
+
+    #[tokio::test]
+    async fn local_group_detects_and_refuses_disabled_participant() {
+        let participants = vec![OrchestrationParticipant {
+            agent_type: AgentType::ClaudeCode,
+            connection_id: None,
+        }];
+        let called = std::sync::atomic::AtomicBool::new(false);
+
+        let missing = unavailable_local_participants_with(&participants, || async {
+            called.store(true, std::sync::atomic::Ordering::SeqCst);
+            vec![detection(AgentType::ClaudeCode, true, false)]
+        })
+        .await;
+
+        assert!(called.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(missing, vec!["ClaudeCode"]);
     }
 
     #[tokio::test]
