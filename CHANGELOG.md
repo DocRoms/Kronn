@@ -330,14 +330,13 @@ Release notes for 0.9.3 and earlier are available in the
   icons up in the discussion header showed every one of them twice. Clicking
   the panel already open closes it, as the header buttons did.
 - A turn no longer retells the whole discussion. Every message re-narrated the
-  entire history to a brand-new process: on the four longest discussions in a
-  real database, 1 288 Claude Code turns sent **436 million characters** where
-  the same turns need **1.9 million** — an average of 338 984 characters per
-  turn against 1 507. Claude Code already holds that conversation, so the turn
-  now resumes it and carries only what the agent has not seen. Counting the
-  preamble that repeats either way, a turn shrinks by a factor of 17 to 97
-  depending on how much context the discussion mounts. Five things keep it
-  honest: the delta is everything since the agent's last turn, never just the
+  entire history to a brand-new process, so the same transcript was resent at
+  every turn and the cost grew with the room rather than with what was said.
+  Claude Code already holds that conversation, so the turn now resumes it and
+  carries only what the agent has not seen — a bounded delta instead of the
+  whole thread, on a long room the difference is most of the prompt. Five
+  things keep it honest: the delta is everything since the agent's last turn,
+  never just the
   newest message, because in a room the human or another agent writes in
   between; the marker is a message id, so a history that was edited or pruned
   simply fails to match and the full prompt goes out, where a numeric cursor
@@ -685,11 +684,13 @@ Release notes for 0.9.3 and earlier are available in the
 - A multi-agent debate can no longer reach a provider without the model check
   every other launch path applies. Orchestration called the runner directly for
   the summary, each participant round and the synthesis, so a model the
-  catalogue does not serve on that connection went out anyway. Workflow Agent
-  steps ran the check but not against the connection the step actually uses:
-  with none named, it resolved the agent's own catalogue instead, clearing a
-  model the connection does not serve and refusing one it does. A step now
-  resolves its named connection once, fails closed when that connection is
+  catalogue positively marks as incompatible for that connection — an
+  image/video-only one aimed at a text launch — went out anyway. Workflow Agent
+  steps ran the check, but the call did not name the connection the step would
+  actually use: the step could declare one and the check would still judge the
+  agent's own catalogue, clearing a model that target refuses and refusing one
+  it serves. A step now resolves its named connection once, fails closed when
+  that connection is
   missing or carries a blank endpoint, and every dispatch it makes — normal,
   repair, escalation, author and reviewer — checks its own effective model
   against that target's catalogue before sending. A reviewer belonging to a
