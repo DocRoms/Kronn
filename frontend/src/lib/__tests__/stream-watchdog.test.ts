@@ -4,7 +4,7 @@
 // only concern is wiring inputs/outputs of this helper).
 
 import { describe, it, expect } from 'vitest';
-import { detectStaleStreams, DEFAULT_STREAM_STALE_MS } from '../stream-watchdog';
+import { detectStaleStreams, DEFAULT_STREAM_STALE_MS, abortStaleStreams } from '../stream-watchdog';
 
 const NOW = 10_000_000;
 const FIVE_MIN = DEFAULT_STREAM_STALE_MS;
@@ -95,5 +95,52 @@ describe('detectStaleStreams', () => {
       sendingStartMap: { d1: NOW - 30 * 60_000 },
       now: NOW,
     })).toEqual([]);
+  });
+});
+
+describe('abortStaleStreams', () => {
+  it('aborts before the caller forgets the controller', () => {
+    // The regression: Dashboard called cleanupStream first, which deletes the
+    // entry from the controller map, so the abort that followed read undefined
+    // and did nothing. The run kept going while the UI said it had died.
+    const order: string[] = [];
+    const controllers: Record<string, { abort: () => void } | undefined> = {
+      d1: { abort: () => order.push('abort') },
+    };
+    const forget = (id: string) => {
+      order.push('forget');
+      delete controllers[id];
+    };
+    abortStaleStreams(['d1'], controllers, forget);
+    expect(order).toEqual(['abort', 'forget']);
+    expect(controllers.d1).toBeUndefined();
+  });
+
+  it('aborts every stale stream, not just the first', () => {
+    const aborted: string[] = [];
+    const controllers: Record<string, { abort: () => void } | undefined> = {
+      a: { abort: () => aborted.push('a') },
+      b: { abort: () => aborted.push('b') },
+    };
+    abortStaleStreams(['a', 'b'], controllers, id => { delete controllers[id]; });
+    expect(aborted).toEqual(['a', 'b']);
+  });
+
+  it('still forgets a discussion whose controller is already gone', () => {
+    const forgotten: string[] = [];
+    abortStaleStreams(['missing'], {}, id => forgotten.push(id));
+    expect(forgotten).toEqual(['missing']);
+  });
+
+  it('a throwing abort does not strand the remaining streams', () => {
+    const aborted: string[] = [];
+    const controllers: Record<string, { abort: () => void } | undefined> = {
+      bad: { abort: () => { throw new Error('already aborted'); } },
+      good: { abort: () => aborted.push('good') },
+    };
+    const forgotten: string[] = [];
+    abortStaleStreams(['bad', 'good'], controllers, id => forgotten.push(id));
+    expect(aborted).toEqual(['good']);
+    expect(forgotten).toEqual(['bad', 'good']);
   });
 });

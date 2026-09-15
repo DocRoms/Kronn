@@ -51,3 +51,25 @@ export function detectStaleStreams(input: StaleStreamInputs): string[] {
   }
   return stale;
 }
+
+/** Stop the stale streams the detector found, then let the caller forget them.
+ *
+ *  The order is the whole point. `cleanupStream` deletes the discussion's entry
+ *  from the abort-controller map, so calling it first left the abort reading
+ *  `undefined`: the watchdog hid the spinner, announced "connection lost", and
+ *  the request kept running. Whatever the server does with an aborted client,
+ *  never asking it is the one case that always wastes the run. */
+export function abortStaleStreams(
+  stale: readonly string[],
+  controllers: Record<string, { abort: () => void } | undefined>,
+  forget: (discId: string) => void,
+): void {
+  for (const discId of stale) {
+    try {
+      controllers[discId]?.abort();
+    } catch {
+      // An already-aborted controller must not stop us forgetting the rest.
+    }
+    forget(discId);
+  }
+}

@@ -6,7 +6,7 @@ import { useToast } from '../hooks/useToast';
 import type { RemoteRepo, RepoSource, DiscoverSourceError, DriftCheckResponse, AuditProgress } from '../types/generated';
 import { useT } from '../lib/I18nContext';
 import { unseenBasis } from '../lib/discussionUiUtils';
-import { detectStaleStreams } from '../lib/stream-watchdog';
+import { detectStaleStreams, abortStaleStreams } from '../lib/stream-watchdog';
 import { useIsMobile } from '../hooks/useMediaQuery';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { isUsable } from '../lib/constants';
@@ -289,10 +289,7 @@ export function Dashboard({ onReset }: DashboardProps) {
         now: Date.now(),
       });
       if (stale.length === 0) return;
-      for (const discId of stale) {
-        cleanupStream(discId);
-        try { abortControllers.current[discId]?.abort(); } catch { /* noop */ }
-      }
+      abortStaleStreams(stale, abortControllers.current, cleanupStream);
       toast(t('discussions.streamRecovered'), 'warning');
       refetchDiscussions();
     }, 30_000);
