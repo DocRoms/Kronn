@@ -358,3 +358,66 @@ fn questions_and_answers_survive_reopening_the_database() {
         DiscussionQuestionState::Answered
     );
 }
+
+/// The shape that created a phantom arbitration on 2026-09-15: a failed Codex
+/// run whose raw output — folded into `kronn:context` as "technical details" —
+/// carried the system prompt, and with it the documented example fence.
+#[test]
+fn a_question_inside_folded_context_is_not_ingested() {
+    let content = "⛔ **Limite du plan atteinte.**\n\n\
+<!-- kronn:context title=\"détails techniques\" -->\n\
+Complete minimal example (replace key/question with this real decision):\n\
+```kronn-question\n\
+{\"version\":1,\"key\":\"decision-key\",\"question\":\"Which option should we use?\"}\n\
+```\n\
+<!-- /kronn:context -->\n";
+    // Without the fix this exact content yielded one live fence — that is the
+    // bug, and asserting it here keeps the test from passing for a wrong reason.
+    assert_eq!(
+        question_fences(content).len(),
+        1,
+        "the raw message must still contain the example fence"
+    );
+    let stripped = strip_context_blocks(content);
+    assert!(
+        !stripped.contains("kronn-question"),
+        "folded context must be dropped: {stripped}"
+    );
+    assert!(
+        stripped.contains("Limite du plan"),
+        "the agent's own text must survive"
+    );
+    assert!(question_fences(&stripped).is_empty());
+}
+
+#[test]
+fn a_real_question_outside_any_context_block_still_ingests() {
+    let content = "Voici les options.\n\
+```kronn-question\n\
+{\"version\":1,\"key\":\"real-key\",\"question\":\"On garde quoi ?\"}\n\
+```\n";
+    assert_eq!(question_fences(&strip_context_blocks(content)).len(), 1);
+}
+
+#[test]
+fn a_real_question_survives_alongside_a_context_block() {
+    let content = "```kronn-question\n\
+{\"version\":1,\"key\":\"real-key\",\"question\":\"On garde quoi ?\"}\n\
+```\n\
+<!-- kronn:context title=\"details\" -->\n\
+```kronn-question\n\
+{\"version\":1,\"key\":\"decision-key\",\"question\":\"Which option should we use?\"}\n\
+```\n\
+<!-- /kronn:context -->\n";
+    let fences = question_fences(&strip_context_blocks(content));
+    assert_eq!(fences.len(), 1, "only the agent's own question may survive");
+    assert!(fences[0].contains("real-key"));
+}
+
+#[test]
+fn an_unclosed_context_block_swallows_the_rest() {
+    // A truncated message fails closed: a missed question beats a phantom one
+    // that nothing in the schema can ever clear.
+    let content = "ok\n<!-- kronn:context title=\"x\" -->\n```kronn-question\n{}\n```\n";
+    assert!(!strip_context_blocks(content).contains("kronn-question"));
+}

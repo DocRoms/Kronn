@@ -176,6 +176,33 @@ fn parse_spec(body: &str) -> Option<QuestionSpec> {
         .then_some(spec)
 }
 
+/// Drop everything inside a `kronn:context` block.
+///
+/// That block holds an agent's RAW output, which Kronn folds away as
+/// "technical details" when a run fails. On a failure the raw output includes
+/// the system prompt — and the system prompt documents the arbitration format
+/// with a complete, valid `kronn-question` example. Ingesting that example
+/// created a real pending arbitration reading "Which option should we use?"
+/// with the example's own `decision-key`, which no human could have meant and
+/// which nothing could close: the table has no path out of `pending` but a
+/// human answer. Technical context is evidence, never an agent's intent.
+pub(crate) fn strip_context_blocks(content: &str) -> String {
+    const OPEN: &str = "<!-- kronn:context";
+    const CLOSE: &str = "<!-- /kronn:context -->";
+    let mut out = String::with_capacity(content.len());
+    let mut rest = content;
+    while let Some(start) = rest.find(OPEN) {
+        out.push_str(&rest[..start]);
+        rest = match rest[start..].find(CLOSE) {
+            Some(end) => &rest[start + end + CLOSE.len()..],
+            // Unclosed block: the remainder is context to the end of the message.
+            None => "",
+        };
+    }
+    out.push_str(rest);
+    out
+}
+
 // Track every fence, including examples, so a nested example never becomes a live question.
 fn question_fences(content: &str) -> Vec<String> {
     let mut result = Vec::new();
@@ -214,6 +241,11 @@ pub fn ingest_message_questions(
     message_id: &str,
     content: &str,
 ) -> Result<()> {
+    if !content.contains("kronn-question") {
+        return Ok(());
+    }
+    // Never ingest from folded technical context — see strip_context_blocks.
+    let content = &strip_context_blocks(content);
     if !content.contains("kronn-question") {
         return Ok(());
     }
