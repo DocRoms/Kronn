@@ -4135,3 +4135,44 @@ pub fn pending_partial_message_id(conn: &Connection, disc_id: &str) -> Result<Op
         .optional()?
         .flatten())
 }
+
+/// Map cancel-registry keys to the discussions they actually belong to.
+///
+/// The registry is a shared namespace, not a list of discussions: a durable
+/// reply registers under its dispatch job id, a legacy stream under the
+/// discussion id, agent jobs under `agent-job:<id>`, workflows under a run id.
+/// Callers asking "which discussions have work in flight" need the projection,
+/// and the durable case — the common one — is precisely the one a naive
+/// `keys()` misses.
+///
+/// Unknown keys are dropped: surfacing a workflow run id as a discussion is
+/// what made the "N running" badge overcount. Order is stable and duplicates
+/// are removed, since two keys can resolve to the same discussion.
+pub fn resolve_running_keys(conn: &Connection, keys: &[String]) -> Vec<String> {
+    let mut resolved: Vec<String> = Vec::with_capacity(keys.len());
+    for key in keys {
+        // A dispatch job carries its discussion; check it first, because a
+        // legacy stream key IS a discussion id and would shadow nothing.
+        let from_job: Option<String> = conn
+            .query_row(
+                "SELECT discussion_id FROM agent_dispatch_jobs WHERE id = ?1",
+                [key],
+                |row| row.get(0),
+            )
+            .ok();
+        let disc = match from_job {
+            Some(id) => Some(id),
+            None => conn
+                .query_row("SELECT id FROM discussions WHERE id = ?1", [key], |row| {
+                    row.get::<_, String>(0)
+                })
+                .ok(),
+        };
+        if let Some(id) = disc {
+            if !resolved.contains(&id) {
+                resolved.push(id);
+            }
+        }
+    }
+    resolved
+}

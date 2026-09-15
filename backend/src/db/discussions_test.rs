@@ -4029,4 +4029,69 @@ mod tests {
             .unwrap();
         assert!(!msg_exists, "rollback leaves no message");
     }
+
+    /// The cancel registry is a shared namespace, not a list of discussions.
+    /// Returning its keys verbatim missed every durable reply — the common
+    /// case — because those register under their dispatch id.
+    #[test]
+    fn running_keys_resolve_a_dispatch_id_to_its_discussion() {
+        let conn = test_conn();
+        insert_discussion(&conn, &make_discussion("d1")).unwrap();
+        insert_message(&conn, "d1", &make_message("m1", MessageRole::User, None)).unwrap();
+        conn.execute(
+            "INSERT INTO agent_dispatch_jobs (id, discussion_id, trigger_message_id,
+             trigger_sort_order, dedupe_key, available_at, created_at, updated_at)
+             VALUES ('job-1', 'd1', 'm1', 1, 'dedupe-1', '2026-09-15', '2026-09-15', '2026-09-15')",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            resolve_running_keys(&conn, &["job-1".to_string()]),
+            vec!["d1".to_string()],
+            "a durable reply registers under its dispatch id"
+        );
+    }
+
+    #[test]
+    fn running_keys_keep_a_legacy_discussion_key() {
+        let conn = test_conn();
+        insert_discussion(&conn, &make_discussion("d1")).unwrap();
+        assert_eq!(
+            resolve_running_keys(&conn, &["d1".to_string()]),
+            vec!["d1".to_string()]
+        );
+    }
+
+    #[test]
+    fn running_keys_drop_what_is_not_a_discussion() {
+        // agent jobs and workflow runs share the registry; surfacing them as
+        // discussions is what made the "N running" badge overcount.
+        let conn = test_conn();
+        insert_discussion(&conn, &make_discussion("d1")).unwrap();
+        assert!(resolve_running_keys(
+            &conn,
+            &["agent-job:abc".to_string(), "some-workflow-run".to_string()]
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn running_keys_deduplicate_when_two_keys_share_a_discussion() {
+        // A discussion can hold a legacy key and a dispatch key at once.
+        let conn = test_conn();
+        insert_discussion(&conn, &make_discussion("d1")).unwrap();
+        insert_message(&conn, "d1", &make_message("m1", MessageRole::User, None)).unwrap();
+        conn.execute(
+            "INSERT INTO agent_dispatch_jobs (id, discussion_id, trigger_message_id,
+             trigger_sort_order, dedupe_key, available_at, created_at, updated_at)
+             VALUES ('job-1', 'd1', 'm1', 1, 'dedupe-1', '2026-09-15', '2026-09-15', '2026-09-15')",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            resolve_running_keys(&conn, &["d1".to_string(), "job-1".to_string()]),
+            vec!["d1".to_string()],
+            "one discussion, listed once"
+        );
+    }
 }
