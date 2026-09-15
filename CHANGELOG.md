@@ -215,20 +215,17 @@ Release notes for 0.9.3 and earlier are available in the
   NVIDIA and named Custom connections and the shared OpenAI-compatible chat
   codec, kept deliberately separate from the ACP boundary (`docs/design/
   adr-004-http-transport.md`). The OpenAI Chat codec selection is an explicit,
-  single decision point; a model the catalog marks image/video-only is refused
-  before dispatch with a diagnostic rather than sent to the wrong endpoint, on
-  every path that applies the guard. Two do not yet: multi-agent orchestration
-  never calls it, and Workflow Agent steps call it without naming the
-  connection the step will actually use, so the model is judged against the
-  agent's own catalogue instead of that connection's.
+  single decision point; models positively identified by the catalogue as
+  image/video-only are refused before text dispatch with a diagnostic.
   Discussions persist a sticky named connection (`discussions.connection_id`)
   so an ordinary reply with no explicit `@mention` keeps resolving through the
   same connection instead of losing it — previously only the very first
   message of a Custom-connection discussion reliably carried its target.
   Compare's AI judge/prompt-improver launch and multi-agent orchestration
   debates can now address a specific named connection instead of only a bare
-  agent type. The connection-mismatch validation Quick Prompts apply does not
-  yet cover the orchestration path. See `docs/operations/http-transport.md`.
+  agent type, and orchestration validates that connection and its model against
+  the catalogue before each launch, as Quick Prompts already did. See
+  `docs/operations/http-transport.md`.
 
 ### Changed
 
@@ -684,6 +681,23 @@ Release notes for 0.9.3 and earlier are available in the
   `Other` keep their established routing, and the error deliberately omits the
   offending value rather than echoing corrupt data back. The rule is written
   down in `docs/decisions.md`, where the next reader will look for it.
+
+- A multi-agent debate can no longer reach a provider without the model check
+  every other launch path applies. Orchestration called the runner directly for
+  the summary, each participant round and the synthesis, so a model the
+  catalogue does not serve on that connection went out anyway. Workflow Agent
+  steps ran the check but not against the connection the step actually uses:
+  with none named, it resolved the agent's own catalogue instead, clearing a
+  model the connection does not serve and refusing one it does. A step now
+  resolves its named connection once, fails closed when that connection is
+  missing or carries a blank endpoint, and every dispatch it makes — normal,
+  repair, escalation, author and reviewer — checks its own effective model
+  against that target's catalogue before sending. A reviewer belonging to a
+  different agent no longer inherits the author's connection, while a reviewer
+  the step declares as sharing it still does. A refusal surfaces on the stream
+  as an error instead of silence. And a debate held entirely between HTTP
+  connections stops sweeping the machine for local CLI agents it will never
+  launch.
 
 - A delegated worker hears its own room again once its task is done. The server
   already moved the session back to the discussion that delegated the work, but
