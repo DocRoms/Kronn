@@ -51,10 +51,29 @@ returns 409. Offline CLI provenance stays exact without spawning a substitute
 native agent. Native answers enqueue one durable dispatch. Every room reader can
 still recover the decision if the requester is no longer present.
 
+A human can also **decline** an arbitration instead of answering it (0.13.0). A
+question is not always a question worth answering: the agent may have asked the
+wrong thing, the lot may have been abandoned, or the decision may have been taken
+elsewhere. Before this, the only ways out were to answer something untrue or to
+leave the card pending forever — and a pending card blocks its lot.
+
+A declined question is a third settled state, not a deletion and not an answer.
+It resolves the card and unblocks the lot; the agent is told the decision was
+declined rather than being handed a choice nobody made. History keeps it: the
+question, who declined it and when all remain readable, because "this was refused"
+is itself an answer to the next agent that considers asking again.
+`declined` was added to the state CHECK constraint by rebuilding the table —
+SQLite cannot extend one in place (migration 175 is the precedent).
+`[src: file: backend/src/db/sql/177_discussion_question_declined.sql:1]`
+
 API contract: `GET /api/discussions/{id}/questions` returns
 `{questions, pending_count}` including answered history;
 `POST /api/discussions/{id}/questions/{question_id}/answer` accepts
-`{selected_option_ids, text?, idempotency_key}` and returns the updated question.
+`{selected_option_ids, text?, idempotency_key}` and returns the updated question;
+`POST /api/discussions/{id}/questions/{question_id}/decline` settles it as
+declined. Answering and declining share one resolution path
+(`publish_human_resolution`), so a declined card produces the same receipt,
+routing and idempotency guarantees as an answered one — they cannot drift apart.
 Discussion list items expose `pending_question_count`, including pagination.
 `[src: file: backend/src/db/discussion_questions.rs:1]`
 `[src: file: backend/src/api/discussion_questions.rs:1]`
@@ -346,7 +365,18 @@ When the worker identity is not already known, call `agent_list()` first and
 copy one returned `worker` object unchanged into `task_exec_prepare`. Native
 HTTP providers are `discussion_agent` targets, punctual host processes are
 `agent` targets, and a joined CLI is an exact `cli` target carrying its durable
-`cli_session_id`. The catalogue reports `configured` and `reachable`
+`cli_session_id`.
+
+Since 0.13.0 the catalogue also lists **every configured external API
+connection**, one entry per connection, with its tiers and a `media` array
+naming the modalities it can generate. A connection has no local binary, so
+agent detection produced nothing for it: an OpenRouter or LiteLLM row an
+operator had configured and could mention in a room was simply absent from the
+catalogue, and no agent could delegate to it or learn that image and video
+generation existed at all. `media` lists one entry per configured model and
+stays absent otherwise, so reading it is enough — an agent is never told about a
+modality the generation request would then refuse.
+[src: file: backend/src/api/orchestration.rs] The catalogue reports `configured` and `reachable`
 independently; its only strict implication is
 `available => configured && reachable`. Availability is deliberately only a
 transport preflight, never a claim about task fit or model quality. Probe

@@ -143,7 +143,14 @@ without a reload.
   `GET /api/media/estimate`.
 * UI: the discussion's **Assets** tab has a launcher (modality, connection,
   prompt, duration / resolution / ratio, soundtrack, estimated price).
-* Agents: MCP `media_generate` and `media_job_status`.
+* Agents: `media_generate` and `media_job_status`, by two independent routes —
+  CLI agents through the `kronn-internal` MCP bridge, HTTP agents through the
+  native orchestration catalogue
+  [src: file: backend/src/api/agent_tools.rs:435-460]. The bridge route came
+  first; the native one closed the half of the fleet that could not reach it.
+* Discovery: an agent reads which modalities are available from the worker
+  catalogue `agent_list` returns — one entry per configured model, absent when
+  nothing is configured, so availability is never asserted on faith.
 * Publication goes through the single point
   `api::shared_runs::publish_media_job` — persisting the run and broadcasting
   it are inseparable, so a 100 s generation is visible while it runs.
