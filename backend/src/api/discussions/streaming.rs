@@ -158,23 +158,24 @@ async fn cli_task_worker_context(
     if runner::is_http_chat_agent(agent_type) {
         return Ok(None);
     }
-    let discussion_id_owned = discussion_id.to_string();
-    let is_task_worker_room = state
-        .db
-        .with_read_conn(move |conn| {
-            Ok(conn.query_row(
-                "SELECT EXISTS(SELECT 1 FROM task_executions \
-                 WHERE sub_discussion_id = ?1 AND worker_target_kind = 'agent')",
-                rusqlite::params![discussion_id_owned],
-                |row| row.get::<_, bool>(0),
-            )?)
-        })
-        .await?;
+    // Whether THIS dispatch is a worker launch, never whether the room happens
+    // to host one. The two were conflated, and the room answered for every turn
+    // taken in it: open the child room of a delegated task, ask the worker a
+    // follow-up question or mention a second agent to review its work, and the
+    // message was stored and then refused — "Unable to verify the agent
+    // execution scope". The room became write-only the moment the worker
+    // launched, for good.
+    //
+    // A dispatch with no execution behind it is simply not a worker launch, so
+    // it gets no delivery capability and runs as the ordinary turn it is. The
+    // five exact-match checks below still apply to a dispatch that IS one.
+    //
+    // Nothing is lost by not failing loudly here: the execution and its
+    // `dispatch_job_id` are committed in one transaction
+    // (`db::orchestration::attach_execution_dispatch` inside the provisioning
+    // `&tx`), so a genuine launch cannot be observed without its lineage. The
+    // guard could only ever fire on a turn that was never a launch.
     let Some(dispatch_job_id) = dispatch_job_id else {
-        anyhow::ensure!(
-            !is_task_worker_room,
-            "task-worker launch is missing its immutable dispatch id"
-        );
         return Ok(None);
     };
     let lineage = state
@@ -190,10 +191,6 @@ async fn cli_task_worker_context(
         })
         .await?;
     let Some((execution, dispatch)) = lineage else {
-        anyhow::ensure!(
-            !is_task_worker_room,
-            "task-worker launch has no matching execution dispatch lineage"
-        );
         return Ok(None);
     };
 
@@ -471,6 +468,20 @@ mod native_http_tools_scope_tests {
         .await
         .expect("HTTP providers do not use the CLI bridge")
         .is_none());
+        // These two used to be errors, and that is what made the child room of
+        // a delegated task write-only: the question asked was whether the ROOM
+        // hosts a worker, so every later turn taken in it — a follow-up to the
+        // worker, a second agent asked to review its work — was refused with
+        // "Unable to verify the agent execution scope".
+        //
+        // A dispatch with no execution behind it is not a launch missing its
+        // lineage; it is an ordinary turn. It gets no delivery capability and
+        // runs as what it is. Nothing is weakened by this: the execution and
+        // its `dispatch_job_id` are committed in one transaction
+        // (`attach_execution_dispatch` inside the provisioning `&tx`), so a
+        // genuine launch cannot be observed without its lineage, and the four
+        // exact-match checks above — foreign room, wrong provider — still
+        // refuse a dispatch that IS one and does not line up.
         assert!(cli_task_worker_context(
             &state,
             "d-worker",
@@ -478,11 +489,13 @@ mod native_http_tools_scope_tests {
             Some("unknown-dispatch"),
         )
         .await
-        .is_err());
+        .expect("an unknown dispatch is an ordinary turn, not a broken launch")
+        .is_none());
         assert!(
             cli_task_worker_context(&state, "d-worker", &AgentType::Codex, None)
                 .await
-                .is_err()
+                .expect("a turn with no dispatch id was never a worker launch")
+                .is_none()
         );
     }
 

@@ -366,6 +366,71 @@ fn completed_native_dispatch_without_delivery_interrupts_the_working_execution()
 }
 
 #[test]
+fn a_follow_up_turn_in_a_worker_room_is_not_a_worker_launch() {
+    // Why the worker-scope guard was wrong: it asked whether the ROOM hosts a
+    // worker, then refused every turn taken in it. Open the child room of a
+    // delegated task, ask the worker a follow-up or mention a second agent to
+    // review its work, and the message was stored and then refused — the room
+    // was write-only from the launch onwards.
+    //
+    // The two dispatches are indistinguishable by room and perfectly
+    // distinguishable by dispatch, which is the whole correction.
+    let conn = setup();
+    let exec_id = launch_and_drive(
+        &conn,
+        "t-follow-up",
+        1101,
+        &[
+            TaskExecutionStatus::Provisioning,
+            TaskExecutionStatus::Working,
+        ],
+    );
+    let enqueue = |message_id: &str, dispatch_id: &str| {
+        conn.execute(
+            "INSERT INTO messages
+             (id, discussion_id, role, content, timestamp, sort_order, received_at)
+             VALUES (?1, ?2, 'User', 'go', ?3,
+                     (SELECT COALESCE(MAX(sort_order), 0) + 1 FROM messages WHERE discussion_id = ?2), ?3)",
+            params![message_id, DISC, chrono::Utc::now().to_rfc3339()],
+        )
+        .unwrap();
+        crate::db::agent_dispatch::enqueue_for_latest_user(
+            &conn,
+            crate::db::agent_dispatch::NewLatestUserDispatch {
+                id: dispatch_id,
+                discussion_id: DISC,
+                dedupe_key: &format!("message:{message_id}"),
+                agent_override: None,
+                chain_prompt_ids: &[],
+                batch_item: None,
+                group_id: None,
+                group_concurrency_limit: None,
+            },
+        )
+        .unwrap();
+    };
+
+    enqueue("m-launch", "dispatch-launch");
+    attach_execution_dispatch(&conn, &exec_id, "dispatch-launch").unwrap();
+    // A human writes in the same room afterwards.
+    enqueue("m-follow-up", "dispatch-follow-up");
+
+    assert!(
+        crate::db::orchestration::get_execution_for_dispatch(&conn, "dispatch-launch")
+            .unwrap()
+            .is_some(),
+        "the launch carries its execution, and keeps its delivery capability"
+    );
+    assert!(
+        crate::db::orchestration::get_execution_for_dispatch(&conn, "dispatch-follow-up")
+            .unwrap()
+            .is_none(),
+        "the follow-up has no execution: it is an ordinary turn, not a launch \
+         missing its lineage, and must run as one"
+    );
+}
+
+#[test]
 fn http_turn_telemetry_replaces_same_dispatch_and_preserves_rework() {
     let conn = setup();
     let exec_id = launch_and_drive(
