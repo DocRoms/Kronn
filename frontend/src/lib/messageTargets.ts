@@ -204,6 +204,10 @@ export interface PendingAgentReply {
   triggerMessageId: string;
   agent: AgentType;
   status: string;
+  /** Why this one was refused, when it was. Kronn writes a reason for every
+   *  refused start; until 0.13.0 nothing carried it out of the database, so a
+   *  sibling that never ran left no trace anywhere a reader could see. */
+  lastError?: string | null;
 }
 
 type DiscussionWithActiveDispatches = Discussion & {
@@ -222,6 +226,7 @@ export function pendingAgentReplies(
       triggerMessageId: dispatch.trigger_message_id,
       agent: dispatch.agent_type,
       status: dispatch.status,
+      lastError: dispatch.last_error ?? null,
     }));
   }
 

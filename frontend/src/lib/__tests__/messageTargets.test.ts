@@ -164,6 +164,29 @@ describe('typed composer targets', () => {
     expect(pendingAgentReplies(discussion).map(reply => reply.agent)).toEqual(['LiteLlm']);
   });
 
+  it('carries the reason a refused sibling never started', () => {
+    // Kronn writes a reason for every refused start. Until 0.13.0 nothing
+    // carried it out of the database and the placeholder simply vanished, so
+    // "two of my three agents did nothing" had no answer short of opening
+    // SQLite.
+    const discussion = {
+      id: 'disc-refused', agent: 'Custom', participants: [], awaiting_agent: false, messages: [],
+      active_agent_dispatches: [
+        {
+          id: 'job-refused', trigger_message_id: 'u-1', agent_type: 'ClaudeCode', status: 'Failed',
+          last_error: 'the selected external API connection no longer matches this agent target',
+        },
+      ],
+    } as unknown as Discussion;
+
+    expect(pendingAgentReplies(discussion)).toEqual([
+      {
+        id: 'job-refused', triggerMessageId: 'u-1', agent: 'ClaudeCode', status: 'Failed',
+        lastError: 'the selected external API connection no longer matches this agent target',
+      },
+    ]);
+  });
+
   it('keeps duplicate agents separate when two turns both have active jobs', () => {
     const discussion = {
       id: 'disc-overlap', agent: 'LiteLlm', participants: ['LiteLlm', 'Ollama'],
@@ -178,8 +201,8 @@ describe('typed composer targets', () => {
     }> };
 
     expect(pendingAgentReplies(discussion)).toEqual([
-      { id: 'job-old', triggerMessageId: 'u-old', agent: 'Ollama', status: 'Running' },
-      { id: 'job-new', triggerMessageId: 'u-new', agent: 'Ollama', status: 'Pending' },
+      { id: 'job-old', triggerMessageId: 'u-old', agent: 'Ollama', status: 'Running', lastError: null },
+      { id: 'job-new', triggerMessageId: 'u-new', agent: 'Ollama', status: 'Pending', lastError: null },
     ]);
   });
 

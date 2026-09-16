@@ -3914,6 +3914,7 @@ suggestion; that would overwrite the real value with a placeholder
   'run.status.cancelled': 'Cancelled',
   'run.status.timeout': 'Timed out',
   'run.open': 'Open run',
+  'disc.agentDidNotStart': 'This agent did not start.',
   'disc.strayTools': 'Tools this reply called — recovered from the message text, which is where an older version of Kronn wrote them.',
   'run.resultTruncated': '… truncated. Open the run to read the full output.',
   'run.media.open': 'Open media',

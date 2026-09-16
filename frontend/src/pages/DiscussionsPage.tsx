@@ -115,16 +115,46 @@ function PendingAgentReplyBubble({
   agent,
   triggerMessageId,
   status,
+  lastError,
   stopping,
   onStop,
 }: {
   agent: AgentType;
   triggerMessageId: string;
   status: string;
+  lastError?: string | null;
   stopping: boolean;
   onStop: () => void;
 }) {
   const { t } = useT();
+  // A refused sibling used to vanish: the placeholder disappeared and the room
+  // showed nothing, while Kronn had written down exactly why. Mention three
+  // agents, watch two of them go, and the only way to learn the cause was to
+  // open the database.
+  if (status === 'Failed') {
+    return (
+      <div
+        className="disc-msg-row"
+        data-role="agent"
+        data-reply-trigger={triggerMessageId}
+        data-testid={`failed-agent-${agent}`}
+      >
+        <div className="disc-msg-bubble" data-role="agent">
+          <div className="disc-msg-agent-label" style={{ color: agentTextColor(agent) }}>
+            <Cpu size={10} /> {AGENT_LABELS[agent] ?? agent}
+          </div>
+          <div className="disc-failed-agent">
+            <AlertTriangle size={11} />
+            <span>{t('disc.agentDidNotStart')}</span>
+          </div>
+          {/* The reason as the backend wrote it. Not translated: it names a
+              connection, a model or a path, and a paraphrase would lose the
+              part that tells you what to change. */}
+          {lastError && <p className="disc-failed-agent-reason">{lastError}</p>}
+        </div>
+      </div>
+    );
+  }
   return (
     <div
       className="disc-msg-row"
@@ -4284,6 +4314,7 @@ export function DiscussionsPage({
                             agent={reply.agent}
                             triggerMessageId={reply.triggerMessageId}
                             status={reply.status}
+                            lastError={reply.lastError}
                             stopping={stoppingDispatchIds.has(reply.id)}
                             onStop={() => { void handleStopDispatch(reply.id); }}
                           />

@@ -3914,6 +3914,7 @@ KRONN:APPLY; eso sobreescribiría el valor real con un placeholder
   'run.status.cancelled': 'Cancelado',
   'run.status.timeout': 'Tiempo agotado',
   'run.open': 'Abrir ejecución',
+  'disc.agentDidNotStart': 'Este agente no se inició.',
   'disc.strayTools': 'Herramientas que usó esta respuesta — recuperadas del texto del mensaje, donde una versión anterior de Kronn las escribía.',
   'run.resultTruncated': '… truncado. Abre la ejecución para leer la salida completa.',
   'run.media.open': 'Abrir el medio',

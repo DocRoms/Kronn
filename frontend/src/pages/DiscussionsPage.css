@@ -8050,3 +8050,22 @@ button.disc-contact-open {
   white-space: pre-wrap;
   word-break: break-word;
 }
+
+/* A sibling that was refused. It used to vanish outright, so the room showed
+   nothing where an agent should have been — and the reason Kronn had written
+   down reached no reader. */
+.disc-failed-agent {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-2);
+  color: var(--kr-warning);
+  font-size: 12px;
+}
+
+.disc-failed-agent-reason {
+  margin: var(--kr-sp-1) 0 0;
+  color: var(--kr-text-muted);
+  font-size: 11px;
+  line-height: 1.45;
+  word-break: break-word;
+}
