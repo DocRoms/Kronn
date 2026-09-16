@@ -75,10 +75,38 @@ fn state_db_str(state: DiscussionActionState) -> &'static str {
 /// closed if the launch was interrupted before a run id was ever published.
 /// Mutates `core` in place and persists the transition; a no-op for any
 /// other state or when nothing actually changed.
+/// Whether a reconciliation may write what it worked out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reconcile {
+    /// Project in memory only. The caller holds the read-only companion
+    /// connection (ADR-001 O2), which refuses writes by its file handle.
+    Projected,
+    /// Persist, because the caller holds the write connection.
+    Persisted,
+}
+
+/// Brings an action's state up to date with the run behind it.
+///
+/// Reconciling and persisting used to be the same act, and `list`/`get` called
+/// it through the read-only connection. Before any CTA had been launched every
+/// row was `proposed`, so this returned early, nothing was written and the
+/// endpoint answered — which is why it looked healthy. From the first launch
+/// onwards each listing attempted the UPDATE and was refused:
+///
+///     Unable to list Page actions: attempt to write a readonly database
+///
+/// The page then stayed broken for everyone, and self-sustainingly so: the
+/// reconciliation that would have moved the state on is exactly what was
+/// refused. Measured on a live instance — a run that succeeded in 2.3 s left
+/// its action stuck `running`, and the page down, for 2 h 39.
+///
+/// The logic stays in one place; only the writing is now the caller's to grant.
+/// A projected read still returns the reconciled truth.
 pub(crate) fn refresh_from_shared_run(
     conn: &Connection,
     table: ActionTable,
     core: &mut ActionCore,
+    mode: Reconcile,
 ) -> Result<()> {
     if !matches!(
         core.state,
@@ -105,14 +133,16 @@ pub(crate) fn refresh_from_shared_run(
         if core.state == DiscussionActionState::Launching && stale {
             let now = Utc::now().to_rfc3339();
             let diagnostic = "The launch was interrupted before Kronn published its run. It was not retried automatically to avoid duplicate side effects.".to_string();
-            conn.execute(
-                &format!(
-                    "UPDATE {} SET state = 'failed', diagnostic = ?2,
-                     finished_at = ?3, updated_at = ?3 WHERE id = ?1 AND state = 'launching'",
-                    table.name()
-                ),
-                params![core.id, diagnostic, now],
-            )?;
+            if mode == Reconcile::Persisted {
+                conn.execute(
+                    &format!(
+                        "UPDATE {} SET state = 'failed', diagnostic = ?2,
+                         finished_at = ?3, updated_at = ?3 WHERE id = ?1 AND state = 'launching'",
+                        table.name()
+                    ),
+                    params![core.id, diagnostic, now],
+                )?;
+            }
             core.state = DiscussionActionState::Failed;
             core.diagnostic = Some(diagnostic);
             core.finished_at = Some(now.clone());
@@ -137,20 +167,22 @@ pub(crate) fn refresh_from_shared_run(
     let now = Utc::now().to_rfc3339();
     let finished_at = (!matches!(next, DiscussionActionState::Running))
         .then(|| run.finished_at.unwrap_or_else(Utc::now).to_rfc3339());
-    conn.execute(
-        &format!(
-            "UPDATE {} SET state = ?2, diagnostic = ?3,
-             finished_at = ?4, updated_at = ?5 WHERE id = ?1",
-            table.name()
-        ),
-        params![
-            core.id,
-            state_db_str(next),
-            run.diagnostic,
-            finished_at,
-            now
-        ],
-    )?;
+    if mode == Reconcile::Persisted {
+        conn.execute(
+            &format!(
+                "UPDATE {} SET state = ?2, diagnostic = ?3,
+                 finished_at = ?4, updated_at = ?5 WHERE id = ?1",
+                table.name()
+            ),
+            params![
+                core.id,
+                state_db_str(next),
+                run.diagnostic,
+                finished_at,
+                now
+            ],
+        )?;
+    }
     core.state = next;
     core.diagnostic = run.diagnostic;
     core.finished_at = finished_at;
