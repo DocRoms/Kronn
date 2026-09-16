@@ -2334,6 +2334,17 @@ TOOLS = [
                     "type": "boolean",
                     "description": "Block until the media is delivered. Default false — see the description.",
                 },
+                "idempotency_key": {
+                    "type": "string",
+                    "description": (
+                        "Reuse the SAME value when you retry a generation you "
+                        "already asked for: it is what stops the asset being "
+                        "bought, and billed, a second time. Omit it and a key is "
+                        "derived from this request, so an identical retry "
+                        "collapses onto the first job rather than paying twice. "
+                        "Pass a new value only for a genuinely separate take."
+                    ),
+                },
             },
             "required": ["connection_id", "modality", "prompt"],
         },
@@ -8233,6 +8244,41 @@ def call_api_call(args):
 
 # ─── 0.8.6 phase 4 — MCP Remote Control (workflow_trigger / workflow_run_status / qp_run) ──
 
+def _derived_media_key(body):
+    """A stable idempotency key for a generation the agent did not key itself.
+
+    Digests the request as sent, so anything the operator would see change in
+    the result is a different job, and an identical retry is the same one.
+
+    Deliberately NOT byte-compatible with the native tool's key: matching two
+    digests across Rust and Python would rest on both serialisers agreeing for
+    ever, and the guarantee that matters is per-caller anyway — an agent must
+    not pay twice for its own retry. Two different agents asking for the same
+    picture are two callers, and each gets its own asset.
+    """
+    digest = hashlib.sha256()
+    digest.update(b"kronn-agent-media-v1\0")
+    for field in (
+        "discussion_id",
+        "connection_id",
+        "modality",
+        "prompt",
+        "duration_secs",
+        "resolution",
+        "aspect_ratio",
+        "generate_audio",
+        "reference_asset_ids",
+        "reference_mode",
+    ):
+        digest.update(b"\0")
+        digest.update(field.encode())
+        digest.update(b"=")
+        # Serialised, not stringified: `null`, `1` and `"1"` must stay
+        # distinguishable — a collision is a generation silently skipped.
+        digest.update(json.dumps(body.get(field), sort_keys=True, separators=(',', ':')).encode())
+    return digest.hexdigest()
+
+
 def call_media_generate(args):
     """Queue an image/video generation, optionally waiting for delivery.
 
@@ -8302,6 +8348,13 @@ def call_media_generate(args):
     if modality == "video":
         audio = args.get("generate_audio")
         body["generate_audio"] = True if audio is None else bool(audio)
+
+    # Derived when the caller gives none. Without a key the server falls back to
+    # a random job id, so two identical asks are two jobs and two charges —
+    # measured on a live instance as the same picture generated twice, six
+    # minutes apart. The safe behaviour has to be the one you get by saying
+    # nothing, because this one costs money.
+    body["idempotency_key"] = args.get("idempotency_key") or _derived_media_key(body)
 
     queued = _unwrap(_http("POST", "/api/media/generate", body))
     if not args.get("wait"):
