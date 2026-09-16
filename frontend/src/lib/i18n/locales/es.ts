@@ -3903,6 +3903,7 @@ KRONN:APPLY; eso sobreescribiría el valor real con un placeholder
   'run.status.cancelled': 'Cancelado',
   'run.status.timeout': 'Tiempo agotado',
   'run.open': 'Abrir ejecución',
+  'run.resultTruncated': '… truncado. Abre la ejecución para leer la salida completa.',
   'run.media.open': 'Abrir el medio',
   'run.details': 'Detalles',
   'run.durationUnavailable': 'Duración no disponible',

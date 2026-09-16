@@ -3903,6 +3903,7 @@ suggestion; that would overwrite the real value with a placeholder
   'run.status.cancelled': 'Cancelled',
   'run.status.timeout': 'Timed out',
   'run.open': 'Open run',
+  'run.resultTruncated': '… truncated. Open the run to read the full output.',
   'run.media.open': 'Open media',
   'run.details': 'Details',
   'run.durationUnavailable': 'Duration unavailable',
