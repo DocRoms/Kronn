@@ -8430,6 +8430,68 @@ async fn external_api_test_route_returns_catalogue_without_returning_the_credent
 }
 
 #[tokio::test]
+async fn external_api_test_route_probes_a_chat_model_not_the_first_one_listed() {
+    // Two constraints that pulled against each other, and both hold.
+    //
+    // Probing whatever the proxy listed first sent a chat completion to an
+    // embedding deployment, which answers 400, and a healthy connection was
+    // reported broken. Fixing that by probing only CONFIGURED models opened a
+    // worse hole: an operator testing a connection before picking tiers has
+    // none, so the chat step was skipped and `/v1/models` alone decided —
+    // and a catalogue can be public while chat needs the key.
+    //
+    // The capability declared by each entry is what reconciles them.
+    use wiremock::matchers::{body_string_contains, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let upstream = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": [
+                {"id": "text-embedding-3"},
+                {"id": "a-chat-model"}
+            ]
+        })))
+        .mount(&upstream)
+        .await;
+    // The embedding deployment answers 400, exactly as a real one would.
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(body_string_contains("text-embedding-3"))
+        .respond_with(ResponseTemplate::new(400).set_body_string("not a chat model"))
+        .mount(&upstream)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(body_string_contains("a-chat-model"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "choices": [{"message": {"role": "assistant", "content": "pong"}}]
+        })))
+        .mount(&upstream)
+        .await;
+
+    let (status, response) = post_json(
+        test_app(),
+        "/api/external-api/connections/test",
+        serde_json::json!({ "endpoint": upstream.uri(), "api_key": "a-valid-key" }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        response["data"]["status"], "success",
+        "the embedding entry listed first must not decide the verdict: {response}"
+    );
+    assert!(
+        response["data"]["hint"]
+            .as_str()
+            .is_some_and(|hint| hint.contains("a-chat-model")),
+        "the hint must name the model that actually answered: {response}"
+    );
+}
+
+#[tokio::test]
 async fn external_api_test_route_public_catalogue_rejects_an_invalid_key() {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};

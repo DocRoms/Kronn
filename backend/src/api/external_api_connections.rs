@@ -279,17 +279,69 @@ async fn probe_models(
                     "{} configured model(s) answered successfully.",
                     requested_models.len()
                 ));
+            } else if !catalogue.catalog.is_empty() {
+                // Nothing configured yet — the common case when an operator
+                // tests a connection before picking tiers. The catalogue alone
+                // cannot answer the question: a proxy may serve `/v1/models`
+                // publicly while chat needs the key, so stopping here reported
+                // an invalid credential as a working connection.
+                //
+                // But probing whatever the proxy listed first sent a chat
+                // completion to an embedding or rerank deployment, which
+                // answers 400, and a healthy connection was reported broken.
+                //
+                // Both are avoided by reading the answer rather than the
+                // catalogue: 401/403 is a verdict on the CREDENTIAL and ends
+                // the probe, while 400/404 is a verdict on the MODEL and says
+                // nothing about the key, so the next entry is tried. A
+                // catalogue that declares its modalities usually puts a chat
+                // model first anyway; this holds when it declares nothing,
+                // which is the common case for an OpenAI-compatible proxy.
+                let mut inconclusive: Option<TestConnectionResponse> = None;
+                let mut answered: Option<String> = None;
+                for entry in catalogue.catalog.iter().take(MAX_FALLBACK_PROBES) {
+                    match probe_auth(endpoint, key, &entry.id, None).await {
+                        None => {
+                            answered = Some(entry.id.clone());
+                            break;
+                        }
+                        // The model is wrong, not the key. Keep the last one to
+                        // report if nothing in the catalogue ever answers.
+                        Some(failure) if failure.status == "http_error" => {
+                            inconclusive = Some(failure);
+                        }
+                        Some(failure) => return failure,
+                    }
+                }
+                match answered {
+                    Some(model) => {
+                        catalogue.hint = Some(format!(
+                            "The credential works: {model} answered. Select the tier models to verify the ones you will use."
+                        ));
+                    }
+                    // Every entry tried refused the request shape. That is not
+                    // an authentication verdict and must not be dressed as one.
+                    // Returned as-is: a failed connection test hands the tier
+                    // selectors no models, so they cannot offer a choice the
+                    // probe was unable to verify.
+                    None => {
+                        if let Some(failure) = inconclusive {
+                            return failure;
+                        }
+                    }
+                }
             }
-            // No configured model to probe: stop here. `/v1/models` already
-            // answered with this credential, which is what a connection test
-            // has to establish. Probing an arbitrary catalogue entry instead
-            // sent a chat completion to whatever the proxy happened to list
-            // first — an embedding or rerank deployment answers 400, and a
-            // healthy connection was reported broken.
         }
     }
     catalogue
 }
+
+/// How many catalogue entries the credential check will try before giving up.
+///
+/// Each is a real round trip, and a connection test the operator is waiting on
+/// must stay bounded. Four is enough to walk past a run of embedding or rerank
+/// deployments without turning the test into a catalogue sweep.
+const MAX_FALLBACK_PROBES: usize = 4;
 
 /// Hint shown when a probed model answers a non-2xx status.
 ///
