@@ -660,6 +660,37 @@ pub(super) enum ToolRecord {
 /// Format a finished tool call into its transcript record. kronn-internal
 /// calls get pretty-printed args (`disc_get_message(4)`) ; native calls get
 /// their raw input truncated to ~120 chars to keep the banner compact.
+/// Moves the tool calls an ACP runtime reported into the transcript's tool
+/// lists.
+///
+/// ACP has no stdout event stream, so its runtime reports each call into the
+/// run's stderr capture, one name per line. Until 0.13.0 it forwarded them on
+/// the channel carrying the reply instead, which glued
+/// `[ClaudeCode tool: ToolSearch]` into the middle of the agent's sentences and
+/// left the group under the message empty — the calls were both in the wrong
+/// place and missing from the right one.
+///
+/// Classified through the same `classify_tool_call` the CLI path uses, so
+/// kronn-internal and agent-native keep splitting visually. ACP reports a name
+/// without arguments, hence the empty input.
+pub(super) fn lift_acp_tool_calls(
+    stderr_lines: &[String],
+    kronn_tool_calls: &mut Vec<String>,
+    native_tool_calls: &mut Vec<String>,
+) {
+    for name in stderr_lines
+        .iter()
+        .filter_map(|line| line.strip_prefix(runner::ACP_TOOL_MARKER))
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    {
+        match classify_tool_call(name, "") {
+            ToolRecord::Kronn(record) => kronn_tool_calls.push(record),
+            ToolRecord::Native(record) => native_tool_calls.push(record),
+        }
+    }
+}
+
 pub(super) fn classify_tool_call(tool: &str, input: &str) -> ToolRecord {
     if let Some(name) = tool.strip_prefix("mcp__kronn-internal__") {
         let pretty_args = pretty_kronn_args(name, input);
@@ -3530,6 +3561,8 @@ async fn make_agent_stream_inner(
                     );
                 }
 
+                lift_acp_tool_calls(&stderr_lines, &mut kronn_tool_calls, &mut native_tool_calls);
+
                 let tokens_used = if stream_json_tokens > 0 {
                     stream_json_tokens
                 } else if let Some(reported) = process.reported_token_usage() {
@@ -4839,7 +4872,7 @@ mod agent_lifecycle_tests {
         agent_start_error_content, agent_start_failure_outcome, auth_required_system_message,
         cap_agent_response, child_run_counts_as_success, configured_agent_global_timeout,
         effective_global_timeout, effective_stall_timeout, finish_tracked_preflight,
-        AgentExecutionOutcome, NON_STREAMING_STALL_TIMEOUT,
+        lift_acp_tool_calls, AgentExecutionOutcome, NON_STREAMING_STALL_TIMEOUT,
     };
     use crate::models::{AgentType, MessageRole};
     use std::time::Duration;
@@ -4995,6 +5028,65 @@ mod agent_lifecycle_tests {
                                                // No panic + still valid UTF-8 (String guarantees it if no panic).
         assert!(out.contains("tronqué"));
         assert!(out.len() <= 1001 + 80);
+    }
+
+    #[test]
+    fn an_acp_tool_call_lands_in_the_group_under_the_reply() {
+        // Reported from a real room: messages read
+        // "Je vais essayer d'accéder à ce lien.[ClaudeCode tool: ToolSearch]
+        // [ClaudeCode tool: WebFetch]Réponse courte : ..." — the calls inside
+        // the sentence, and nothing in the group below where they belong.
+        let stderr = vec![
+            format!("{}ToolSearch", crate::agents::runner::ACP_TOOL_MARKER),
+            format!(
+                "{}mcp__kronn-internal__disc_append",
+                crate::agents::runner::ACP_TOOL_MARKER
+            ),
+            "a plain diagnostic line that is not a tool call".to_string(),
+        ];
+        let mut kronn = Vec::new();
+        let mut native = Vec::new();
+        lift_acp_tool_calls(&stderr, &mut kronn, &mut native);
+
+        assert_eq!(
+            native,
+            vec!["[agent-native: ToolSearch()]".to_string()],
+            "an agent's own tool is native"
+        );
+        assert_eq!(
+            kronn,
+            vec!["[kronn-internal: disc_append()]".to_string()],
+            "and Kronn's own stays in its bucket, as on the CLI path"
+        );
+    }
+
+    #[test]
+    fn what_the_runtime_writes_is_what_the_transcript_reads() {
+        // The two halves live in different files (runner.rs emits, this one
+        // lifts). A silent format drift between them would put the calls
+        // nowhere at all, with nothing failing.
+        let emitted = format!("{}Read", crate::agents::runner::ACP_TOOL_MARKER);
+        let mut kronn = Vec::new();
+        let mut native = Vec::new();
+        lift_acp_tool_calls(&[emitted], &mut kronn, &mut native);
+        assert_eq!(native.len(), 1, "the emitted shape must be recognised");
+    }
+
+    #[test]
+    fn ordinary_stderr_is_never_mistaken_for_a_tool_call() {
+        let mut kronn = Vec::new();
+        let mut native = Vec::new();
+        lift_acp_tool_calls(
+            &[
+                "ACP transport failed: broken pipe".to_string(),
+                String::new(),
+                // The marker with nothing after it is not a call either.
+                crate::agents::runner::ACP_TOOL_MARKER.to_string(),
+            ],
+            &mut kronn,
+            &mut native,
+        );
+        assert!(kronn.is_empty() && native.is_empty());
     }
 
     #[tokio::test]

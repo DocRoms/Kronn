@@ -1308,78 +1308,79 @@ pub(crate) fn measure_db_usage(
     wal_bytes: u64,
 ) -> anyhow::Result<DbUsage> {
     {
-            let page_size: u64 = conn
-                .query_row("PRAGMA page_size", [], |r| r.get::<_, i64>(0))
-                .unwrap_or(4096) as u64;
-            let free_pages: u64 = conn
-                .query_row("PRAGMA freelist_count", [], |r| r.get::<_, i64>(0))
-                .unwrap_or(0) as u64;
+        let page_size: u64 = conn
+            .query_row("PRAGMA page_size", [], |r| r.get::<_, i64>(0))
+            .unwrap_or(4096) as u64;
+        let free_pages: u64 = conn
+            .query_row("PRAGMA freelist_count", [], |r| r.get::<_, i64>(0))
+            .unwrap_or(0) as u64;
 
-            // Every index's owning table, so an index's weight is reported
-            // against the rows that would take it away when deleted.
-            let mut owner: std::collections::HashMap<String, String> =
-                std::collections::HashMap::new();
-            {
-                let mut stmt =
-                    conn.prepare("SELECT name, tbl_name FROM sqlite_master WHERE type = 'index'")?;
-                let rows = stmt.query_map([], |r| {
-                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-                })?;
-                for row in rows {
-                    let (index, table) = row?;
-                    owner.insert(index, table);
+        // Every index's owning table, so an index's weight is reported
+        // against the rows that would take it away when deleted.
+        let mut owner: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        {
+            let mut stmt =
+                conn.prepare("SELECT name, tbl_name FROM sqlite_master WHERE type = 'index'")?;
+            let rows =
+                stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+            for row in rows {
+                let (index, table) = row?;
+                owner.insert(index, table);
+            }
+        }
+
+        // name -> (total bytes, of which index bytes)
+        let mut weight: std::collections::HashMap<String, (u64, u64)> =
+            std::collections::HashMap::new();
+        {
+            let mut stmt =
+                conn.prepare("SELECT name, SUM(pgsize) FROM dbstat('main', 1) GROUP BY name")?;
+            let rows = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1).unwrap_or(0) as u64,
+                ))
+            })?;
+            for row in rows {
+                let (name, bytes) = row?;
+                match owner.get(&name) {
+                    Some(table) => {
+                        let entry = weight.entry(table.clone()).or_insert((0, 0));
+                        entry.0 += bytes;
+                        entry.1 += bytes;
+                    }
+                    None => weight.entry(name).or_insert((0, 0)).0 += bytes,
                 }
             }
+        }
 
-            // name -> (total bytes, of which index bytes)
-            let mut weight: std::collections::HashMap<String, (u64, u64)> =
-                std::collections::HashMap::new();
-            {
-                let mut stmt =
-                    conn.prepare("SELECT name, SUM(pgsize) FROM dbstat('main', 1) GROUP BY name")?;
-                let rows = stmt.query_map([], |r| {
-                    Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1).unwrap_or(0) as u64))
-                })?;
-                for row in rows {
-                    let (name, bytes) = row?;
-                    match owner.get(&name) {
-                        Some(table) => {
-                            let entry = weight.entry(table.clone()).or_insert((0, 0));
-                            entry.0 += bytes;
-                            entry.1 += bytes;
-                        }
-                        None => weight.entry(name).or_insert((0, 0)).0 += bytes,
-                    }
+        let mut tables: Vec<DbTableUsage> = weight
+            .into_iter()
+            .map(|(name, (bytes, index_bytes))| {
+                // COUNT(*) resolves through the smallest index, so this
+                // does not re-read the multi-gigabyte table it measures.
+                let rows = conn
+                    .query_row(&format!("SELECT COUNT(*) FROM \"{}\"", name), [], |r| {
+                        r.get::<_, i64>(0)
+                    })
+                    .unwrap_or(0)
+                    .max(0) as u64;
+                DbTableUsage {
+                    name,
+                    bytes,
+                    index_bytes,
+                    rows,
                 }
-            }
-
-            let mut tables: Vec<DbTableUsage> = weight
-                .into_iter()
-                .map(|(name, (bytes, index_bytes))| {
-                    // COUNT(*) resolves through the smallest index, so this
-                    // does not re-read the multi-gigabyte table it measures.
-                    let rows = conn
-                        .query_row(&format!("SELECT COUNT(*) FROM \"{}\"", name), [], |r| {
-                            r.get::<_, i64>(0)
-                        })
-                        .unwrap_or(0)
-                        .max(0) as u64;
-                    DbTableUsage {
-                        name,
-                        bytes,
-                        index_bytes,
-                        rows,
-                    }
-                })
-                .collect();
-            tables.sort_by(|a, b| b.bytes.cmp(&a.bytes));
-
-            Ok(DbUsage {
-                file_bytes,
-                wal_bytes,
-                free_bytes: free_pages * page_size,
-                tables,
             })
+            .collect();
+        tables.sort_by_key(|table| std::cmp::Reverse(table.bytes));
+
+        Ok(DbUsage {
+            file_bytes,
+            wal_bytes,
+            free_bytes: free_pages * page_size,
+            tables,
+        })
     }
 }
 
@@ -2441,7 +2442,10 @@ mod tests {
         let runs = usage.tables.iter().find(|t| t.name == "runs").unwrap();
 
         assert!(runs.index_bytes > 0, "idx_runs_payload is not free");
-        assert!(runs.bytes > runs.index_bytes, "and it is not the whole table");
+        assert!(
+            runs.bytes > runs.index_bytes,
+            "and it is not the whole table"
+        );
         assert!(
             !usage.tables.iter().any(|t| t.name == "idx_runs_payload"),
             "an index must never appear as a table of its own",

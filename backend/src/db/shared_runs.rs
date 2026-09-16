@@ -396,7 +396,10 @@ mod tests {
         upsert(&conn, &workflow_run_row("run-1", &heavy)).unwrap();
 
         let listed = list(&conn, None, None, None, None, 20, 0).unwrap();
-        let result = listed[0].result.as_ref().expect("the row still has a result");
+        let result = listed[0]
+            .result
+            .as_ref()
+            .expect("the row still has a result");
 
         assert_eq!(result["steps"][0]["output"], "", "the output is dropped");
         assert_eq!(
