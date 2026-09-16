@@ -155,6 +155,33 @@ Aliases are unique without regard to case. If an alias is already owned by
 another connection, create or update fails instead of silently routing to the
 wrong endpoint. [src: file: backend/src/db/external_api_connections.rs:79-100]
 
+### A connection is an agent everywhere, not only in the router (0.13.0)
+
+Routing a connection worked; being treated as an agent did not. The wire type a
+connection carries is `AgentType::Custom`, and `Custom` was missing from the
+frontend's `KNOWN_AGENTS` table — the static list several unrelated surfaces
+each consult to answer "is this a real agent?". One absent entry produced seven
+separate symptoms, none of which looked related:
+
+| Surface | What the operator saw |
+|---|---|
+| Room membership | the connection was treated as a disabled agent and muted |
+| Streaming | "connection lost" on a run that was working |
+| Composer | `@openrouter` never appeared in the mention list |
+| Worker catalogue | no entry, so no delegation |
+| Message header | the generic label instead of the alias |
+| Message colour | no identity colour of its own |
+| Handoff | could not be named as a collaboration target |
+
+They are one fix, not seven. The lesson is in
+[`gotchas/known-agents-static-tables.md`](../gotchas/known-agents-static-tables.md):
+when a surface answers a question about agents from a hand-written table, a new
+agent kind is absent from it by default, and absence reads as *disabled*.
+
+Identity colour is derived from the alias rather than assigned, so a new
+connection has a distinct, stable colour on first use with nothing to configure.
+[src: file: frontend/src/lib/externalAgentIdentity.ts]
+
 ## Upgrade from legacy settings
 
 At startup, Kronn backfills the former single LiteLLM and NVIDIA settings into
@@ -197,6 +224,13 @@ the runtime-resolution guide.
   restricted. A connection is considered usable only when both the catalogue
   and, when a key is supplied, the authenticated chat probe succeed.
   [src: file: backend/src/api/external_api_connections.rs:130-160]
+- **The test failed but the connection works:** fixed in 0.13.0. The probe used
+  to send a model of its own choosing rather than one of the three the operator
+  had configured, so a connection that only serves the models it was set up for
+  failed a test it should have passed. The probe now chats with a configured
+  model, and an HTTP failure is reported with a hint keyed to the status and the
+  model actually tried — not a bare code.
+  [src: file: backend/src/api/external_api_connections.rs]
 - **Wrong model after an endpoint edit:** test again before selecting tiers;
   model choices are tied to the exact tested endpoint and credential state.
   [src: file: frontend/src/components/settings/ExternalApiSection.tsx:362-400]

@@ -71,3 +71,29 @@
   purely the absence of persistence/cancellation, not a spawn bug.
 - The workflow-run layer already has `Interrupted` + boot reconcile and remains
   the pattern to generalize.
+
+## Addendum 2026-09-16 — recovery worked, the supersede rule did not
+
+The 0.9.2 resolution above is accurate for a single dispatch per turn. It was not
+accurate for **siblings**: several agents mentioned on one message share a trigger
+but run one at a time, serialised by the one-Running-per-discussion index.
+
+Recovery drops a job whose turn the room has already moved past — correct in
+itself. But the test for "moved past" was *any message newer than the trigger*, and
+the first sibling's own reply is newer than the trigger it is answering. So after a
+restart the remaining siblings were superseded by their own peer's answer: mention
+three agents, watch two vanish. The reported symptom — "the placeholders disappear
+about twenty seconds later" — is this rule firing, not a crash.
+
+The comparison is now against the trigger message itself: a sibling replying to the
+same trigger is the turn being served, not the room speaking past it.
+
+```sql
+AND (sibling.id IS NULL
+     OR sibling.trigger_message_id IS NOT agent_dispatch_jobs.trigger_message_id)
+```
+[src: file: backend/src/db/agent_dispatch.rs]
+
+Worth recording because the TD read as closed while a whole class of turn — the
+multi-agent room, which is the product's hardest case — was still losing work on
+every restart. "Resolved" described the mechanism, not the coverage.

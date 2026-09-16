@@ -444,7 +444,6 @@ fn publish_human_resolution(
     Ok(())
 }
 
-
 /// Refuse an arbitration instead of answering it.
 ///
 /// Recorded as a resolution, not a deletion: the row keeps its author, its
@@ -547,10 +546,10 @@ fn decline_inner(
     let content = format!(
         "Arbitrage refusé — {}\n\n{}",
         question.question,
-        reason
-            .as_deref()
-            .unwrap_or("Aucune raison donnée. Ne bloque pas sur cette question : poursuis \
-                        sans elle, ou reformule-la si la décision reste nécessaire.")
+        reason.as_deref().unwrap_or(
+            "Aucune raison donnée. Ne bloque pas sur cette question : poursuis \
+                        sans elle, ou reformule-la si la décision reste nécessaire."
+        )
     );
     publish_human_resolution(
         conn,

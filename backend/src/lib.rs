@@ -813,6 +813,7 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             post(api::setup::regenerate_auth_token),
         )
         .route("/api/config/db-info", get(api::setup::db_info))
+        .route("/api/config/db-usage", get(api::setup::db_usage))
         .route("/api/db/backup", post(api::setup::db_backup))
         .route("/api/config/export", get(api::setup::export_data))
         // ── Compact opaque-ID resolution (MCP token economy) ──

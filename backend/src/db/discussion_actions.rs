@@ -641,7 +641,11 @@ const SELECT_ACTION: &str = "SELECT a.id, a.discussion_id, a.source_message_id,
     a.finished_at, a.created_at, a.updated_at, p.name
     FROM discussion_actions a LEFT JOIN projects p ON p.id = a.project_id";
 
-fn refresh_from_shared_run(conn: &Connection, action: &mut DiscussionAction) -> Result<()> {
+fn refresh_from_shared_run(
+    mode: kronn_action_engine::Reconcile,
+    conn: &Connection,
+    action: &mut DiscussionAction,
+) -> Result<()> {
     let mut core = kronn_action_engine::ActionCore {
         id: action.id.clone(),
         state: action.state,
@@ -656,6 +660,7 @@ fn refresh_from_shared_run(conn: &Connection, action: &mut DiscussionAction) -> 
         conn,
         kronn_action_engine::ActionTable::Discussion,
         &mut core,
+        mode,
     )?;
     action.state = core.state;
     action.values = core.values;
@@ -665,7 +670,11 @@ fn refresh_from_shared_run(conn: &Connection, action: &mut DiscussionAction) -> 
     Ok(())
 }
 
-pub fn get(conn: &Connection, id: &str) -> Result<Option<DiscussionAction>> {
+pub fn get(
+    mode: kronn_action_engine::Reconcile,
+    conn: &Connection,
+    id: &str,
+) -> Result<Option<DiscussionAction>> {
     let mut action = conn
         .query_row(
             &format!("{SELECT_ACTION} WHERE a.id = ?1"),
@@ -674,12 +683,13 @@ pub fn get(conn: &Connection, id: &str) -> Result<Option<DiscussionAction>> {
         )
         .optional()?;
     if let Some(action) = action.as_mut() {
-        refresh_from_shared_run(conn, action)?;
+        refresh_from_shared_run(mode, conn, action)?;
     }
     Ok(action)
 }
 
 pub fn list_for_discussion(
+    mode: kronn_action_engine::Reconcile,
     conn: &Connection,
     discussion_id: &str,
 ) -> Result<Vec<DiscussionAction>> {
@@ -691,14 +701,14 @@ pub fn list_for_discussion(
         .collect::<Result<Vec<_>, _>>()?;
     drop(statement);
     for action in &mut actions {
-        refresh_from_shared_run(conn, action)?;
+        refresh_from_shared_run(mode, conn, action)?;
     }
     Ok(actions)
 }
 
 pub fn cancel(conn: &Connection, id: &str) -> Result<Option<DiscussionAction>> {
     kronn_action_engine::cancel(conn, kronn_action_engine::ActionTable::Discussion, id)?;
-    get(conn, id)
+    get(kronn_action_engine::Reconcile::Persisted, conn, id)
 }
 
 pub fn claim_launch(
@@ -707,7 +717,7 @@ pub fn claim_launch(
     supplied: &std::collections::HashMap<String, String>,
 ) -> Result<Option<ClaimLaunchOutcome>> {
     let transaction = conn.unchecked_transaction()?;
-    let Some(mut action) = get(&transaction, id)? else {
+    let Some(mut action) = get(kronn_action_engine::Reconcile::Persisted, &transaction, id)? else {
         transaction.commit()?;
         return Ok(None);
     };
@@ -900,7 +910,9 @@ mod tests {
         ingest_message_actions(&conn, "disc-1", "msg-1", content).unwrap();
         ingest_message_actions(&conn, "disc-1", "msg-1", content).unwrap();
 
-        let actions = list_for_discussion(&conn, "disc-1").unwrap();
+        let actions =
+            list_for_discussion(kronn_action_engine::Reconcile::Persisted, &conn, "disc-1")
+                .unwrap();
         assert_eq!(actions.len(), 1, "re-ingestion must remain idempotent");
         let action = &actions[0];
         assert_eq!(action.id, "action:msg-1:0");
@@ -930,7 +942,9 @@ mod tests {
         insert_message_row(&conn, "msg-all", content);
         ingest_message_actions(&conn, "disc-1", "msg-all", content).unwrap();
 
-        let actions = list_for_discussion(&conn, "disc-1").unwrap();
+        let actions =
+            list_for_discussion(kronn_action_engine::Reconcile::Persisted, &conn, "disc-1")
+                .unwrap();
         assert_eq!(
             actions.iter().map(|action| action.kind).collect::<Vec<_>>(),
             vec![
@@ -954,7 +968,13 @@ mod tests {
         insert_message_row(&conn, "msg-2", content);
         ingest_message_actions(&conn, "disc-1", "msg-2", content).unwrap();
 
-        let action = get(&conn, "action:msg-2:0").unwrap().unwrap();
+        let action = get(
+            kronn_action_engine::Reconcile::Persisted,
+            &conn,
+            "action:msg-2:0",
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(action.state, DiscussionActionState::PreflightFailed);
         assert!(action.diagnostic.unwrap().contains("n’existe plus"));
     }
@@ -981,7 +1001,14 @@ mod tests {
         };
         assert!(error.to_string().contains("service"), "got: {error}");
         assert_eq!(
-            get(&conn, "action:msg-missing:0").unwrap().unwrap().state,
+            get(
+                kronn_action_engine::Reconcile::Persisted,
+                &conn,
+                "action:msg-missing:0"
+            )
+            .unwrap()
+            .unwrap()
+            .state,
             DiscussionActionState::Proposed,
             "a refused launch must leave the proposal claimable once completed"
         );
@@ -1019,7 +1046,13 @@ mod tests {
         )
         .unwrap();
 
-        let finished = get(&conn, "action:msg-done:0").unwrap().unwrap();
+        let finished = get(
+            kronn_action_engine::Reconcile::Persisted,
+            &conn,
+            "action:msg-done:0",
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(finished.state, DiscussionActionState::Succeeded);
         assert_eq!(finished.deep_link.as_deref(), Some("/discussions/disc-1"));
         assert!(
@@ -1058,7 +1091,13 @@ mod tests {
         insert_message_row(&conn, "msg-cross", content);
         ingest_message_actions(&conn, "disc-1", "msg-cross", content).unwrap();
 
-        let action = get(&conn, "action:msg-cross:0").unwrap().unwrap();
+        let action = get(
+            kronn_action_engine::Reconcile::Persisted,
+            &conn,
+            "action:msg-cross:0",
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(action.state, DiscussionActionState::Proposed);
         assert_eq!(action.diagnostic, None);
         // The project it will run in is recorded, so the card can say so.
@@ -1087,7 +1126,13 @@ mod tests {
 ```"#;
         insert_message_row(&conn, "msg-gone", content);
         ingest_message_actions(&conn, "disc-1", "msg-gone", content).unwrap();
-        let proposed = get(&conn, "action:msg-gone:0").unwrap().unwrap();
+        let proposed = get(
+            kronn_action_engine::Reconcile::Persisted,
+            &conn,
+            "action:msg-gone:0",
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(proposed.state, DiscussionActionState::Proposed);
 
         conn.execute("DELETE FROM quick_execs WHERE id = 'qe-1'", [])
@@ -1100,7 +1145,13 @@ mod tests {
             !matches!(outcome, Some(ClaimLaunchOutcome::Claimed { .. })),
             "a deleted target must not be launchable — the click would run against nothing"
         );
-        let reloaded = get(&conn, "action:msg-gone:0").unwrap().unwrap();
+        let reloaded = get(
+            kronn_action_engine::Reconcile::Persisted,
+            &conn,
+            "action:msg-gone:0",
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(reloaded.state, DiscussionActionState::PreflightFailed);
     }
 
@@ -1130,7 +1181,13 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(matches!(second, ClaimLaunchOutcome::Existing(_)));
-        let reloaded = get(&conn, "action:msg-3:0").unwrap().unwrap();
+        let reloaded = get(
+            kronn_action_engine::Reconcile::Persisted,
+            &conn,
+            "action:msg-3:0",
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(reloaded.state, DiscussionActionState::Launching);
         assert!(
             reloaded.values[0].value.is_none(),
@@ -1178,7 +1235,13 @@ mod tests {
         insert_message_row(&conn, "msg-env", content);
         ingest_message_actions(&conn, "disc-1", "msg-env", content).unwrap();
 
-        let proposed = get(&conn, "action:msg-env:0").unwrap().unwrap();
+        let proposed = get(
+            kronn_action_engine::Reconcile::Persisted,
+            &conn,
+            "action:msg-env:0",
+        )
+        .unwrap()
+        .unwrap();
         assert!(proposed.values[0].allow_manual_override);
         assert_eq!(
             proposed.values[0].provenance,
@@ -1261,7 +1324,13 @@ mod tests {
         insert_message_row(&conn, "msg-bad-json", content);
         ingest_message_actions(&conn, "disc-1", "msg-bad-json", content).unwrap();
 
-        let action = get(&conn, "action:msg-bad-json:0").unwrap().unwrap();
+        let action = get(
+            kronn_action_engine::Reconcile::Persisted,
+            &conn,
+            "action:msg-bad-json:0",
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(action.state, DiscussionActionState::PreflightFailed);
         assert_eq!(action.kind, DiscussionActionKind::Invalid);
         assert!(action.diagnostic.unwrap().contains("JSON invalide"));
@@ -1276,7 +1345,13 @@ mod tests {
         insert_message_row(&conn, "msg-empty-target", content);
         ingest_message_actions(&conn, "disc-1", "msg-empty-target", content).unwrap();
 
-        let action = get(&conn, "action:msg-empty-target:0").unwrap().unwrap();
+        let action = get(
+            kronn_action_engine::Reconcile::Persisted,
+            &conn,
+            "action:msg-empty-target:0",
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(action.state, DiscussionActionState::PreflightFailed);
         assert_eq!(action.kind, DiscussionActionKind::Workflow);
         assert!(action.diagnostic.unwrap().contains("aucune cible"));
@@ -1292,7 +1367,13 @@ mod tests {
         insert_message_row(&conn, "msg-dynbind", content);
         ingest_message_actions(&conn, "disc-1", "msg-dynbind", content).unwrap();
 
-        let action = get(&conn, "action:msg-dynbind:0").unwrap().unwrap();
+        let action = get(
+            kronn_action_engine::Reconcile::Persisted,
+            &conn,
+            "action:msg-dynbind:0",
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(
             action.state,
             DiscussionActionState::PreflightFailed,
@@ -1310,7 +1391,9 @@ mod tests {
         insert_message_row(&conn, "msg-legacy", content);
         ingest_message_actions(&conn, "disc-1", "msg-legacy", content).unwrap();
 
-        let actions = list_for_discussion(&conn, "disc-1").unwrap();
+        let actions =
+            list_for_discussion(kronn_action_engine::Reconcile::Persisted, &conn, "disc-1")
+                .unwrap();
         assert_eq!(
             actions.len(),
             1,
@@ -1339,7 +1422,13 @@ mod tests {
         )
         .unwrap();
 
-        let action = get(&conn, "action:msg-stale:0").unwrap().unwrap();
+        let action = get(
+            kronn_action_engine::Reconcile::Persisted,
+            &conn,
+            "action:msg-stale:0",
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(action.state, DiscussionActionState::Failed);
         assert!(action
             .diagnostic

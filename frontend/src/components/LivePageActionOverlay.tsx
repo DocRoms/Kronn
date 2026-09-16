@@ -20,7 +20,12 @@ export function LivePageActionOverlay({ active, action, onChanged, onOpenDiscuss
       className="live-page-action-overlay"
       style={{
         top: Math.max(8, active.anchor.top + active.anchor.height + 6),
-        left: Math.max(8, active.anchor.left),
+        // The anchor is a preference, not a position: the stylesheet clamps it
+        // so a CTA near the right edge slides the card left instead of
+        // narrowing it. Setting `left` directly here is what crushed the card,
+        // because it co-constrained the box with the `right` that used to sit
+        // in the CSS.
+        ['--kr-action-anchor-left' as string]: `${Math.max(8, active.anchor.left)}px`,
       }}
     >
       <LivePageActionCard

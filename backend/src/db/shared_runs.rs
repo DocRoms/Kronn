@@ -129,6 +129,29 @@ pub fn get(conn: &Connection, id: &str) -> Result<Option<SharedRun>> {
     )?;
     Ok(s.query_row([id], row).optional()?)
 }
+/// Blanks every step's `output` inside SQLite, leaving `progress` and each
+/// step's name, status and timings intact.
+///
+/// A listed card shows progress and a step count; the outputs it never renders
+/// were the entire weight of the row — measured on the live instance at 2 620 MB
+/// across 2 554 workflow rows, against 41 MB for every message ever sent. A list
+/// of 20 runs therefore shipped tens of megabytes to the browser, which then
+/// `JSON.stringify`-ed them into a `<pre>`.
+///
+/// Emptied rather than removed, for the same reason as the workflow_runs
+/// projection it mirrors: `StepResult::output` has no serde default, so a
+/// missing key fails the whole decode.
+///
+/// Only `$.steps` is touched, and only when it is an array — the other kinds
+/// (quick prompt, quick API, media) carry a small, differently shaped result
+/// that a list does render.
+const RESULT_WITHOUT_STEP_OUTPUTS: &str = "CASE \
+    WHEN json_valid(result_json) AND json_type(result_json, '$.steps') = 'array' \
+    THEN json_set(result_json, '$.steps', \
+        (SELECT json_group_array(json_set(value, '$.output', '')) \
+         FROM json_each(result_json, '$.steps'))) \
+    ELSE result_json END";
+
 pub fn list(
     conn: &Connection,
     kind_filter: Option<&str>,
@@ -138,13 +161,13 @@ pub fn list(
     limit: u32,
     offset: u32,
 ) -> Result<Vec<SharedRun>> {
-    let mut statement = conn.prepare(
-        "SELECT id,kind,source_id,project_id,discussion_id,status,started_at,finished_at,duration_ms,result_json,diagnostic,created_at,updated_at
+    let mut statement = conn.prepare(&format!(
+        "SELECT id,kind,source_id,project_id,discussion_id,status,started_at,finished_at,duration_ms,{RESULT_WITHOUT_STEP_OUTPUTS},diagnostic,created_at,updated_at
          FROM shared_runs
          WHERE (?1 IS NULL OR kind=?1) AND (?2 IS NULL OR source_id=?2)
            AND (?3 IS NULL OR project_id=?3) AND (?4 IS NULL OR discussion_id=?4)
-         ORDER BY created_at DESC LIMIT ?5 OFFSET ?6",
-    )?;
+         ORDER BY created_at DESC LIMIT ?5 OFFSET ?6"
+    ))?;
     let rows = statement.query_map(
         params![
             kind_filter,
@@ -157,6 +180,23 @@ pub fn list(
         row,
     )?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+/// Serialises step results with every `output` blanked.
+///
+/// Blanked, not removed: `StepResult::output` has no serde default, so a
+/// missing key fails the whole `Vec<StepResult>` decode on the way back.
+fn steps_without_outputs(steps: &[crate::models::StepResult]) -> Vec<serde_json::Value> {
+    steps
+        .iter()
+        .map(|step| {
+            let mut value = serde_json::to_value(step).unwrap_or(serde_json::Value::Null);
+            if let Some(object) = value.as_object_mut() {
+                object.insert("output".into(), serde_json::Value::String(String::new()));
+            }
+            value
+        })
+        .collect()
 }
 
 pub fn sync_workflow(conn: &Connection, run: &crate::models::WorkflowRun) -> Result<()> {
@@ -218,13 +258,18 @@ pub fn sync_workflow(conn: &Connection, run: &crate::models::WorkflowRun) -> Res
         started_at: Some(run.started_at),
         finished_at: run.finished_at,
         duration_ms,
+        // Steps without their outputs. The card renders progress and step
+        // names; the output belongs to the run itself, which this row already
+        // points at through `href` — storing it a second time duplicated
+        // `workflow_runs.step_results_json` byte for byte and was, on its own,
+        // 2 620 MB of a 7 200 MB database.
         result: Some(serde_json::json!({
             "progress": {
                 "completed": completed,
                 "total": run.step_results.len(),
                 "current_label": current,
             },
-            "steps": run.step_results,
+            "steps": steps_without_outputs(&run.step_results),
         })),
         diagnostic: None,
         created_at: run.started_at,
@@ -303,6 +348,153 @@ pub fn sync_media(conn: &Connection, job: &crate::db::media_jobs::MediaJob) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn runs_conn() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE discussions(id TEXT PRIMARY KEY); CREATE TABLE projects(id TEXT PRIMARY KEY);")
+            .unwrap();
+        conn.execute_batch(include_str!("sql/155_shared_runs.sql"))
+            .unwrap();
+        conn
+    }
+
+    fn workflow_run_row(id: &str, output: &str) -> SharedRun {
+        let now = Utc::now();
+        SharedRun {
+            id: id.into(),
+            kind: SharedRunKind::Workflow,
+            source_id: "wf-1".into(),
+            project_id: None,
+            discussion_id: None,
+            status: SharedRunStatus::Success,
+            started_at: Some(now),
+            finished_at: Some(now),
+            duration_ms: Some(1),
+            result: Some(serde_json::json!({
+                "progress": {"completed": 1, "total": 1, "current_label": null},
+                "steps": [{
+                    "step_name": "Collect",
+                    "status": "Success",
+                    "output": output,
+                    "tokens_used": 12,
+                    "duration_ms": 34,
+                }],
+            })),
+            diagnostic: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    #[test]
+    fn a_listed_run_carries_its_progress_but_not_its_step_outputs() {
+        // 2 620 MB of a 7 200 MB live database was step output that a listed
+        // card never renders — and the browser JSON.stringify-ed it into a
+        // <pre>, twenty rows at a time.
+        let conn = runs_conn();
+        let heavy = "x".repeat(50_000);
+        upsert(&conn, &workflow_run_row("run-1", &heavy)).unwrap();
+
+        let listed = list(&conn, None, None, None, None, 20, 0).unwrap();
+        let result = listed[0]
+            .result
+            .as_ref()
+            .expect("the row still has a result");
+
+        assert_eq!(result["steps"][0]["output"], "", "the output is dropped");
+        assert_eq!(
+            result["steps"][0]["step_name"], "Collect",
+            "the step keeps the identity a card renders"
+        );
+        assert_eq!(result["steps"][0]["duration_ms"], 34, "and its timings");
+        assert_eq!(result["progress"]["total"], 1, "progress is untouched");
+        assert!(
+            !serde_json::to_string(result).unwrap().contains(&heavy),
+            "no listed row may still carry the payload"
+        );
+    }
+
+    #[test]
+    fn opening_one_run_still_returns_what_the_row_holds() {
+        // Only the LIST is projected. `get` is the detail path and must not
+        // silently hand back a narrowed row.
+        let conn = runs_conn();
+        upsert(&conn, &workflow_run_row("run-1", "the whole output")).unwrap();
+
+        let opened = get(&conn, "run-1").unwrap().unwrap();
+        assert_eq!(
+            opened.result.unwrap()["steps"][0]["output"],
+            "the whole output"
+        );
+    }
+
+    #[test]
+    fn a_listed_run_of_another_kind_keeps_its_result_whole() {
+        // Quick prompt / quick API / media results are small and ARE rendered
+        // in the list. The projection must only recognise the workflow shape.
+        let conn = runs_conn();
+        let mut row = workflow_run_row("run-1", "unused");
+        row.kind = SharedRunKind::QuickApi;
+        row.result = Some(serde_json::json!({"status": 200, "body": "the answer"}));
+        upsert(&conn, &row).unwrap();
+
+        let listed = list(&conn, None, None, None, None, 20, 0).unwrap();
+        assert_eq!(listed[0].result.as_ref().unwrap()["body"], "the answer");
+    }
+
+    #[test]
+    fn step_outputs_are_emptied_never_removed() {
+        // `StepResult::output` has no serde default: a missing key fails the
+        // whole Vec<StepResult> decode, and the step counters a listing needs
+        // would come back empty.
+        let steps: Vec<crate::models::StepResult> = serde_json::from_value(serde_json::json!([{
+            "step_name": "Collect",
+            "status": "Success",
+            "output": "a very long transcript",
+            "tokens_used": 5,
+            "duration_ms": 6,
+        }]))
+        .expect("fixture decodes");
+        let blanked = steps_without_outputs(&steps);
+        assert_eq!(blanked[0]["output"], "", "emptied");
+        assert!(
+            blanked[0].get("output").is_some(),
+            "the key must still be present or the decode fails"
+        );
+        let round_tripped: Vec<crate::models::StepResult> =
+            serde_json::from_value(serde_json::Value::Array(blanked)).expect("still decodes");
+        assert_eq!(round_tripped[0].step_name, "Collect");
+        assert_eq!(round_tripped[0].duration_ms, 6);
+    }
+
+    #[test]
+    fn the_migration_reclaims_duplicates_and_spares_the_only_copy() {
+        // A run whose workflow was deleted loses its workflow_runs row to
+        // CASCADE. For those, this table holds the only surviving output, so
+        // the migration must leave them whole.
+        let conn = runs_conn();
+        conn.execute_batch("CREATE TABLE workflow_runs(id TEXT PRIMARY KEY);")
+            .unwrap();
+        upsert(&conn, &workflow_run_row("twinned", "duplicated elsewhere")).unwrap();
+        upsert(&conn, &workflow_run_row("orphan", "the only copy")).unwrap();
+        conn.execute("INSERT INTO workflow_runs(id) VALUES ('twinned')", [])
+            .unwrap();
+
+        conn.execute_batch(include_str!("sql/178_shared_run_step_outputs.sql"))
+            .unwrap();
+
+        assert_eq!(
+            get(&conn, "twinned").unwrap().unwrap().result.unwrap()["steps"][0]["output"],
+            "",
+            "a duplicate is reclaimed"
+        );
+        assert_eq!(
+            get(&conn, "orphan").unwrap().unwrap().result.unwrap()["steps"][0]["output"],
+            "the only copy",
+            "the only surviving copy is never destroyed"
+        );
+    }
+
     #[test]
     fn round_trips_measured_run_without_inventing_progress() {
         let conn = Connection::open_in_memory().unwrap();

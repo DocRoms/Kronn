@@ -74,8 +74,7 @@ import {
   composerMentions,
   messagesInConversationOrder,
   pendingAgentReplies,
-  targetsFromComposerText,
-} from '../lib/messageTargets';
+  targetsFromComposerText, draftBelongsToTurn } from '../lib/messageTargets';
 import { externalConnectionForDiscussion } from '../lib/externalAgentIdentity';
 
 type LoadedDiscussion = Discussion
@@ -115,16 +114,46 @@ function PendingAgentReplyBubble({
   agent,
   triggerMessageId,
   status,
+  lastError,
   stopping,
   onStop,
 }: {
   agent: AgentType;
   triggerMessageId: string;
   status: string;
+  lastError?: string | null;
   stopping: boolean;
   onStop: () => void;
 }) {
   const { t } = useT();
+  // A refused sibling used to vanish: the placeholder disappeared and the room
+  // showed nothing, while Kronn had written down exactly why. Mention three
+  // agents, watch two of them go, and the only way to learn the cause was to
+  // open the database.
+  if (status === 'Failed') {
+    return (
+      <div
+        className="disc-msg-row"
+        data-role="agent"
+        data-reply-trigger={triggerMessageId}
+        data-testid={`failed-agent-${agent}`}
+      >
+        <div className="disc-msg-bubble" data-role="agent">
+          <div className="disc-msg-agent-label" style={{ color: agentTextColor(agent) }}>
+            <Cpu size={10} /> {AGENT_LABELS[agent] ?? agent}
+          </div>
+          <div className="disc-failed-agent">
+            <AlertTriangle size={11} />
+            <span>{t('disc.agentDidNotStart')}</span>
+          </div>
+          {/* The reason as the backend wrote it. Not translated: it names a
+              connection, a model or a path, and a paraphrase would lose the
+              part that tells you what to change. */}
+          {lastError && <p className="disc-failed-agent-reason">{lastError}</p>}
+        </div>
+      </div>
+    );
+  }
   return (
     <div
       className="disc-msg-row"
@@ -1463,7 +1492,28 @@ export function DiscussionsPage({
     }];
   }, [activeDiscussion, interruptedStream, sending, streamingTargetMap, streamingTurnMap]);
   const streamingText = activeDiscussionId ? (streamingMap[activeDiscussionId] ?? '') : '';
-  const resilientStreamingText = [streamingText, interruptedStream?.text, durablePartial?.content]
+  // The turn that is streaming right now, when one is.
+  const liveTurnId = activeDiscussionId ? streamingTurnMap[activeDiscussionId] : undefined;
+  /** A recovered draft only speaks for the turn it belongs to.
+   *
+   *  Both fallbacks are keyed by discussion alone, so the PREVIOUS turn's
+   *  finished text stayed a candidate — and since the longest wins, it beat the
+   *  new turn's first deltas: the room showed the last answer as the new one's
+   *  placeholder, then swapped to the real text once it grew past it. Reported
+   *  as "a second message, duplicated — well, not quite".
+   *
+   *  With no live turn there is nothing to mismatch, and the fallbacks do their
+   *  actual job: restoring a draft after a reload or a dropped stream. */
+  const forTurn = (text: string | undefined, turnId: string | undefined | null) =>
+    draftBelongsToTurn(liveTurnId, turnId) ? text : undefined;
+  const resilientStreamingText = [
+    streamingText,
+    forTurn(interruptedStream?.text, interruptedStream?.triggerMessageId),
+    forTurn(
+      durablePartial?.content,
+      durablePartial?.dispatch?.trigger_message_id ?? durablePartial?.trigger_message_id,
+    ),
+  ]
     .filter((value): value is string => !!value)
     .reduce((longest, value) => value.length > longest.length ? value : longest, '');
   const recoveryDispatchId = durablePartial?.dispatch?.id;
@@ -4284,6 +4334,7 @@ export function DiscussionsPage({
                             agent={reply.agent}
                             triggerMessageId={reply.triggerMessageId}
                             status={reply.status}
+                            lastError={reply.lastError}
                             stopping={stoppingDispatchIds.has(reply.id)}
                             onStop={() => { void handleStopDispatch(reply.id); }}
                           />

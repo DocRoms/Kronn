@@ -26,6 +26,43 @@ pub struct DbInfo {
     pub custom_directive_count: u32,
 }
 
+/// Where the database's weight actually sits, one entry per table.
+///
+/// Counts answer "how much is in here"; they do not answer "what should I
+/// purge". A table of 34 678 messages weighing 41 MB and a table of 2 554
+/// workflow runs weighing 2 620 MB are indistinguishable by row count, and the
+/// second is the one worth acting on.
+#[derive(Debug, Serialize, TS)]
+#[ts(export)]
+pub struct DbTableUsage {
+    pub name: String,
+    /// The table's own b-tree plus every index on it — what dropping the rows
+    /// would actually give back.
+    pub bytes: u64,
+    /// Of `bytes`, the part held by indexes rather than the rows themselves.
+    pub index_bytes: u64,
+    pub rows: u64,
+}
+
+/// The weight breakdown the Settings page charts.
+#[derive(Debug, Serialize, TS)]
+#[ts(export)]
+pub struct DbUsage {
+    /// The `.db` file on disk.
+    pub file_bytes: u64,
+    /// The write-ahead log beside it. Counted apart because it is not durable
+    /// weight — a checkpoint reclaims it — and reporting it inside the total
+    /// would make a freshly checkpointed database look like it shrank.
+    pub wal_bytes: u64,
+    /// Pages the file still holds but no longer uses. This is what a VACUUM
+    /// returns to the filesystem, and it is why a purge can leave the file the
+    /// same size.
+    pub free_bytes: u64,
+    /// Every table, biggest first. The list is short enough to send whole;
+    /// folding the tail is the chart's decision, not the measurement's.
+    pub tables: Vec<DbTableUsage>,
+}
+
 /// Current export schema version. Bump when a new table/field is added to
 /// `DbExport` so import can WARN when restoring an older backup (whose missing
 /// tables must NOT wipe newer data — see `do_import_db`'s selective clear).

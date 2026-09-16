@@ -445,6 +445,42 @@ pub struct AcpJsonRpcTransport {
 /// blocking shutdown on that is worse than abandoning the drain.
 const DISPATCHER_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Budget for a control request — `initialize`, `session/new`, `session/cancel`.
+/// These are local handshakes; a runtime that has not answered in half a minute
+/// is not going to.
+const CONTROL_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Backstop for a prompt turn.
+///
+/// `session/prompt` is not a handshake: it is the agent reading, thinking,
+/// calling its tools and writing an answer. It shared the 30 s control budget
+/// until 0.13.0, so every ACP turn longer than half a minute died with
+/// "ACP request timed out: session/prompt" — while the CLI path grants the same
+/// work fifteen minutes of silence and up to the operator's configured global
+/// timeout.
+///
+/// This is only a backstop, and it is derived from the ceiling the operator's
+/// own setting is clamped to rather than picked — so it can never be tighter
+/// than what they configured, and it follows that ceiling if it ever moves.
+/// The real limits live in the streaming layer, which owns the configured
+/// stall and global timeouts and kills the process when either fires; this one
+/// exists only so a runtime that answers nothing at all cannot wedge the
+/// dispatcher forever.
+///
+/// The margin is what keeps the two from racing: at exactly the ceiling, a run
+/// hitting its configured global timeout could lose the race and be reported
+/// as an ACP protocol timeout instead of the operator's own limit.
+const PROMPT_REQUEST_TIMEOUT: Duration =
+    Duration::from_secs((crate::models::MAX_AGENT_GLOBAL_TIMEOUT_MIN as u64 + 10) * 60);
+
+fn request_timeout(method: &str) -> Duration {
+    if method == "session/prompt" {
+        PROMPT_REQUEST_TIMEOUT
+    } else {
+        CONTROL_REQUEST_TIMEOUT
+    }
+}
+
 /// Owns the stdout dispatcher and cancels it when dropped. A bare `JoinHandle`
 /// only DETACHES on drop, so without this every path that does not reach an
 /// explicit join would leave the drain running: a `shutdown` future cancelled
@@ -708,7 +744,7 @@ impl AcpJsonRpcTransport {
             self.pending.lock().await.remove(&id);
             return Err(error);
         }
-        timeout(Duration::from_secs(30), receiver)
+        timeout(request_timeout(method), receiver)
             .await
             .map_err(|_| AcpError::Timeout(method.to_owned()))?
             .map_err(|_| {
@@ -2079,6 +2115,34 @@ mod tests {
             .find(|entry| entry.method == "fs/read_text_file")
             .expect("the fs/read_text_file decision must be audited");
         assert_eq!(audited.verdict, AcpPermissionVerdict::Deny);
+    }
+
+    #[test]
+    fn a_prompt_turn_is_not_held_to_the_handshake_budget() {
+        // Every ACP request shared one 30 s timeout, `session/prompt` included.
+        // A prompt turn is the agent reading, thinking, calling its tools and
+        // writing an answer — so any turn longer than half a minute died with
+        // "ACP request timed out: session/prompt", while the CLI path grants
+        // the same work fifteen minutes of silence and up to two hours overall.
+        assert_eq!(request_timeout("initialize"), CONTROL_REQUEST_TIMEOUT);
+        assert_eq!(request_timeout("session/new"), CONTROL_REQUEST_TIMEOUT);
+        assert_eq!(request_timeout("session/cancel"), CONTROL_REQUEST_TIMEOUT);
+
+        assert_eq!(request_timeout("session/prompt"), PROMPT_REQUEST_TIMEOUT);
+
+        // Coordinated with the operator's own setting, not picked: the backstop
+        // must sit above the ceiling their configured global timeout is clamped
+        // to, or it silently overrides what they set — and it must follow that
+        // ceiling if it ever moves.
+        let configurable_ceiling =
+            Duration::from_secs(u64::from(crate::models::MAX_AGENT_GLOBAL_TIMEOUT_MIN) * 60);
+        assert!(
+            PROMPT_REQUEST_TIMEOUT > configurable_ceiling,
+            "backstop {PROMPT_REQUEST_TIMEOUT:?} must exceed the configurable \
+             ceiling {configurable_ceiling:?}"
+        );
+        // And not by so much that a wedged runtime is held forever.
+        assert!(PROMPT_REQUEST_TIMEOUT < configurable_ceiling * 2);
     }
 
     #[test]

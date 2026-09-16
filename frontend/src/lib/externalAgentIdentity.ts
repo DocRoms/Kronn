@@ -100,7 +100,7 @@ export function externalAgentColor(alias: string | null | undefined): string | n
   if (!seed) return null;
   let hue = 0;
   for (const char of seed) {
-    hue = (hue * 31 + char.codePointAt(0)!) % 360;
+    hue = (hue * 31 + (char.codePointAt(0) ?? 0)) % 360;
   }
   return `hsl(${hue}, 62%, 52%)`;
 }

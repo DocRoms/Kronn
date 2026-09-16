@@ -13,6 +13,18 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Added
 
+- An agent can ask to be called back when a generation settles, instead of
+  polling for it. Without it, chaining an image into a video cost a full agent
+  turn per step — which is what a room waking up for no apparent reason was.
+  It fires on failure too: an agent told only about successes waits for ever on
+  a clip the provider refused.
+
+- Settings shows where the database's weight actually sits, one bar per table.
+  Row counts mislead badly: one instance held 34 678 messages in 41 MB and
+  2 554 workflow runs in 2 620 MB, so ranking by count pointed at the wrong
+  thing entirely. Measured on demand — never on page load, since reading the
+  b-trees costs about a second on a large database.
+
 - The worker catalogue an agent reads now includes the configured external
   connections, and says which media each one can generate. A connection has no
   local binary, so agent detection produced nothing for it and it was absent
@@ -374,6 +386,73 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- A room with two thousand messages froze on open. Neither the data nor the
+  query was the cost — two megabytes in total, answered in under ten
+  milliseconds — it was parsing every message's markdown up front. Messages now
+  start as text and become markdown as they approach the viewport or the
+  browser goes idle. Every message stays mounted, so search, Cmd+F and every
+  jump to a message are untouched.
+
+- Replies written by an ACP agent carried their own tool calls inside the prose
+  — one held ninety-three of them — because the transport forwarded a call on
+  the channel carrying the reply. They now reach the tool group under the
+  message, and the replies already written are repaired when displayed.
+
+- Listing runs shipped every step's full output to the browser, two hundred
+  rows at a time. On one instance that was 2 620 MB of a 7 200 MB database,
+  duplicated from the runs themselves; a migration reclaims it.
+
+
+
+- Mention three agents on one message and two of them would answer nothing at
+  all. Three separate causes, each hiding the next. A room backed by an external
+  connection put that connection on every dispatch in it, including siblings
+  explicitly targeting a native CLI, which were then refused for not being the
+  agent it serves — an inherited connection that does not match is absent, not
+  wrong. A refused start wrote its reason to the job and the room had no way to
+  read it: the list of a discussion's agents excluded anything that had failed,
+  so the placeholder vanished and nothing replaced it. And ACP held a whole
+  prompt turn to the thirty seconds meant for a handshake, while the CLI path
+  grants the same work minutes to hours. A refused agent now stays visible and
+  says why, in the words the backend wrote.
+
+- An agent was told it could generate images and videos, called the tool, and
+  was answered "unknown tool". The tool was declared in the catalogue and
+  implemented in its dispatcher; the router between them still listed only the
+  two older names. The router now asks the catalogue instead of repeating it, so
+  a tool cannot be declared without being reachable.
+
+- The same picture could be bought twice. Media generation keyed jobs by a
+  caller-supplied idempotency key and fell back to a random id, so an agent
+  retrying after a wake paid again — and the field was declared with no
+  description, so no agent could know that reusing it was the point. The key is
+  now derived from the request when none is given, on both transports.
+
+- A Live Page became unusable after its first CTA: listing its actions
+  reconciled them against their runs, and reconciling meant writing, on the
+  read-only connection the endpoint holds. It looked healthy until the first
+  launch, then failed for everyone and could not recover — the reconciliation
+  that would have moved the state on is exactly what was refused. Reads now
+  project the reconciled state without persisting it.
+
+- The child room of a delegated task stopped accepting messages once its worker
+  launched. Asking the worker a follow-up, or a second agent for a review, was
+  refused because the ROOM hosts a worker — a question about the room deciding
+  for a dispatch that was never a launch.
+
+- A durable wake that could not validate was retried every ten seconds
+  indefinitely, with the reason written only to a row nothing displays. It is
+  logged, and the loop ends after thirty attempts on an explicit escalation.
+
+- An action card opened by a CTA at the end of a row was a few dozen pixels
+  wide. Its width was the space between two offsets, so it shrank as the click
+  moved right — measured at 42px, and 0 on a narrow shell. The card now keeps
+  its width and slides left when there is no room.
+
+- Two dependency overrides were pinning the versions an advisory had just
+  named, so the mechanism meant to fix that class of problem had become its
+  cause.
+
 - A refused agent start said only "agent execution preflight failed". Kronn
   knew why — a missing project path, an unreachable endpoint, a connection
   without one — and replaced it with a sentence nobody can act on, for every
@@ -382,7 +461,11 @@ Release notes for 0.9.3 and earlier are available in the
   the database. Refusals now carry the reason, which the neighbouring
   retryable-outage path already surfaced anyway. What is settled and what is
   worth retrying is still told apart — that decision never depended on hiding
-  the diagnosis.
+  the diagnosis. Two places produced that sentence, and the second is the one a
+  room goes through: it settles a tracked run, so its text is what lands in the
+  job's last error and in the room. Its fifteen conditions — each of which had
+  just established something precise — all reported the same nine words. Each
+  now reports what it found.
 
 - A backend restart could silently cancel the agents that had not spoken yet.
   Mention several agents on one message and they share a trigger, but they run

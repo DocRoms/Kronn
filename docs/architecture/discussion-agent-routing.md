@@ -103,6 +103,7 @@ New and migrated sessions start both cursors at the room's current tip.
 | User sends while a response is streaming | The UI queue merges pending text into one later human turn and unions explicit targets in queue order, deduplicated. |
 | Several local targets | Every job commits with the human message. The first is claimed for the active SSE stream; later jobs remain Pending and drain sequentially. |
 | Backend restart after acceptance | Running jobs return to the durable queue and Pending jobs remain present; the per-message/per-target dedupe key prevents duplicate obligations. |
+| A sibling answers first, then a restart | The recovered job is kept. Recovery supersedes a job whose turn the room has moved past, and a sibling's reply to the **same** trigger is not the room moving on — it is the turn being served. Comparing against the trigger message, rather than against any newer message, is what tells those apart. |
 | HTTP retry with the same `client_message_id` | The existing human message is returned as a duplicate and no additional target job is created. |
 | Edit/resend while a response is active | Rejected with `DispatchInProgress`; the current obligation is not mutated underneath a runner. |
 | Successful edit/resend | Replaces the message's target list atomically with the content revision and creates at most one new durable job per absent listed target. |
@@ -180,6 +181,30 @@ the native principal: this is how an invited CLI hands work back to the
 discussion's normal agent. Peer-to-peer exchanges that must exclude that
 principal use a structured target; autonomous rooms use no-agent mode.
 [src: file: backend/src/api/disc_source.rs:345-383]
+
+## When a start is refused
+
+A dispatch that never reaches the agent is settled as a refused preflight, and the
+reason it was refused is persisted on the job (`agent_dispatch_jobs.last_error`) and
+shown in the room. That is recent: until 0.13.0 both code paths that settle a refusal
+reported the same nine words, "agent execution preflight failed", for every condition
+but two — a missing project path, an endpoint that no longer resolves, a connection
+that no longer matches the target, a model the catalogue refuses. Kronn knew which one
+and replaced it with a sentence nobody can act on. Mentioning three agents and watching
+two disappear twenty seconds later left no trace anywhere; the cause could only be read
+out of the database.
+
+Two distinctions the reason must not blur, and does not:
+
+- **Refused is not unavailable.** A settled refusal and a retryable outage
+  (`RuntimeUnavailable`) remain different outcomes with different handling. Carrying the
+  diagnosis never depended on merging them.
+- **The tracked path is the one a room goes through.** It settles a durable dispatch
+  job, so its text is what lands in `last_error` and in the transcript. A fix applied to
+  the untracked path alone changes nothing a room user sees — which is exactly how the
+  second producer of the generic string survived the first fix. `strings` on the built
+  binary, not a source grep, is what proved a second one existed.
+[src: file: backend/src/api/discussions/streaming.rs]
 
 ## Persistence and interruption
 

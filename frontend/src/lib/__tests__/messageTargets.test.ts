@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  draftBelongsToTurn,
   composerMentions,
   messagesInConversationOrder,
   nativeDiscussionTargets,
@@ -164,6 +165,48 @@ describe('typed composer targets', () => {
     expect(pendingAgentReplies(discussion).map(reply => reply.agent)).toEqual(['LiteLlm']);
   });
 
+  it('never lets the previous turn stand in for the one now streaming', () => {
+    // The streaming bubble shows the longest of three texts, two of which are
+    // keyed by discussion rather than by turn. The previous turn's finished
+    // answer therefore stayed a candidate and, being the longest, was shown as
+    // the new turn's placeholder until the new text grew past it — reported as
+    // "a second message, duplicated, well not quite".
+    expect(draftBelongsToTurn('turn-2', 'turn-1')).toBe(false);
+    expect(draftBelongsToTurn('turn-2', 'turn-2')).toBe(true);
+
+    // With no live turn there is nothing to mismatch, and this is exactly what
+    // the fallbacks are for: restoring a draft after a reload or a dropped
+    // stream, when the live stream has nothing to offer.
+    expect(draftBelongsToTurn(undefined, 'turn-1')).toBe(true);
+    // And a draft whose turn is unknown is kept rather than silently dropped:
+    // losing a recovered answer is worse than showing it a moment early.
+    expect(draftBelongsToTurn('turn-2', undefined)).toBe(true);
+    expect(draftBelongsToTurn('turn-2', null)).toBe(true);
+  });
+
+  it('carries the reason a refused sibling never started', () => {
+    // Kronn writes a reason for every refused start. Until 0.13.0 nothing
+    // carried it out of the database and the placeholder simply vanished, so
+    // "two of my three agents did nothing" had no answer short of opening
+    // SQLite.
+    const discussion = {
+      id: 'disc-refused', agent: 'Custom', participants: [], awaiting_agent: false, messages: [],
+      active_agent_dispatches: [
+        {
+          id: 'job-refused', trigger_message_id: 'u-1', agent_type: 'ClaudeCode', status: 'Failed',
+          last_error: 'the selected external API connection no longer matches this agent target',
+        },
+      ],
+    } as unknown as Discussion;
+
+    expect(pendingAgentReplies(discussion)).toEqual([
+      {
+        id: 'job-refused', triggerMessageId: 'u-1', agent: 'ClaudeCode', status: 'Failed',
+        lastError: 'the selected external API connection no longer matches this agent target',
+      },
+    ]);
+  });
+
   it('keeps duplicate agents separate when two turns both have active jobs', () => {
     const discussion = {
       id: 'disc-overlap', agent: 'LiteLlm', participants: ['LiteLlm', 'Ollama'],
@@ -178,8 +221,8 @@ describe('typed composer targets', () => {
     }> };
 
     expect(pendingAgentReplies(discussion)).toEqual([
-      { id: 'job-old', triggerMessageId: 'u-old', agent: 'Ollama', status: 'Running' },
-      { id: 'job-new', triggerMessageId: 'u-new', agent: 'Ollama', status: 'Pending' },
+      { id: 'job-old', triggerMessageId: 'u-old', agent: 'Ollama', status: 'Running', lastError: null },
+      { id: 'job-new', triggerMessageId: 'u-new', agent: 'Ollama', status: 'Pending', lastError: null },
     ]);
   });
 
