@@ -63,6 +63,7 @@ import type {
   DetectedIp,
   TokenUsageSummary,
   DbInfo,
+  DbUsage,
   SetAgentAccessRequest,
   SetAgentMentionColorRequest,
   AgentsConfig,
@@ -724,6 +725,9 @@ export const config = {
   getModelTiers: () => api<ModelTiersConfig>('GET', '/config/model-tiers'),
   setModelTiers: (tiers: ModelTiersConfig) => api<void>('POST', '/config/model-tiers', tiers),
   dbInfo: () => api<DbInfo>('GET', '/config/db-info'),
+  /** Where the database's weight sits, one entry per table. Measured with
+   *  `dbstat` on demand — never on page load, since it reads the b-trees. */
+  dbUsage: () => api<DbUsage>('GET', '/config/db-usage'),
   /** SQLite online-backup snapshot. Backend writes to
    *  `<data_dir>/backups/kronn-YYYYMMDD-HHMMSS.db`. Returns the
    *  resulting path so the Settings UI can toast it. */

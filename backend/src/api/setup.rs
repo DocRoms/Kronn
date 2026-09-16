@@ -1272,6 +1272,117 @@ pub async fn db_info(State(state): State<AppState>) -> Json<ApiResponse<DbInfo>>
     }
 }
 
+/// GET /api/config/db-usage
+///
+/// Where the weight is, so an operator can see what to purge instead of
+/// guessing from row counts. Counts and weight disagree badly in practice: one
+/// instance held 34 678 messages in 41 MB and 2 554 workflow runs in 2 620 MB.
+///
+/// Measured with `dbstat` in its aggregate form — one row per b-tree instead of
+/// one per page. Timed at 1.07 s on a 7.2 GB database; the per-page form walks
+/// every page and is not worth the accuracy here.
+pub async fn db_usage(State(state): State<AppState>) -> Json<ApiResponse<DbUsage>> {
+    let db_path = state.db.path().to_path_buf();
+    let file_bytes = std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0);
+    // The WAL is a sibling file. Counted apart: a checkpoint reclaims it, so
+    // folding it into the total would make a checkpoint look like a purge.
+    let wal_bytes = std::fs::metadata(format!("{}-wal", db_path.display()))
+        .map(|m| m.len())
+        .unwrap_or(0);
+
+    match state
+        .db
+        .with_conn(move |conn| measure_db_usage(conn, file_bytes, wal_bytes))
+        .await
+    {
+        Ok(usage) => Json(ApiResponse::ok(usage)),
+        Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
+    }
+}
+
+/// The measurement behind `db_usage`, separated from the handler so it can be
+/// exercised against a real SQLite file rather than mocked.
+pub(crate) fn measure_db_usage(
+    conn: &rusqlite::Connection,
+    file_bytes: u64,
+    wal_bytes: u64,
+) -> anyhow::Result<DbUsage> {
+    {
+            let page_size: u64 = conn
+                .query_row("PRAGMA page_size", [], |r| r.get::<_, i64>(0))
+                .unwrap_or(4096) as u64;
+            let free_pages: u64 = conn
+                .query_row("PRAGMA freelist_count", [], |r| r.get::<_, i64>(0))
+                .unwrap_or(0) as u64;
+
+            // Every index's owning table, so an index's weight is reported
+            // against the rows that would take it away when deleted.
+            let mut owner: std::collections::HashMap<String, String> =
+                std::collections::HashMap::new();
+            {
+                let mut stmt =
+                    conn.prepare("SELECT name, tbl_name FROM sqlite_master WHERE type = 'index'")?;
+                let rows = stmt.query_map([], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                })?;
+                for row in rows {
+                    let (index, table) = row?;
+                    owner.insert(index, table);
+                }
+            }
+
+            // name -> (total bytes, of which index bytes)
+            let mut weight: std::collections::HashMap<String, (u64, u64)> =
+                std::collections::HashMap::new();
+            {
+                let mut stmt =
+                    conn.prepare("SELECT name, SUM(pgsize) FROM dbstat('main', 1) GROUP BY name")?;
+                let rows = stmt.query_map([], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1).unwrap_or(0) as u64))
+                })?;
+                for row in rows {
+                    let (name, bytes) = row?;
+                    match owner.get(&name) {
+                        Some(table) => {
+                            let entry = weight.entry(table.clone()).or_insert((0, 0));
+                            entry.0 += bytes;
+                            entry.1 += bytes;
+                        }
+                        None => weight.entry(name).or_insert((0, 0)).0 += bytes,
+                    }
+                }
+            }
+
+            let mut tables: Vec<DbTableUsage> = weight
+                .into_iter()
+                .map(|(name, (bytes, index_bytes))| {
+                    // COUNT(*) resolves through the smallest index, so this
+                    // does not re-read the multi-gigabyte table it measures.
+                    let rows = conn
+                        .query_row(&format!("SELECT COUNT(*) FROM \"{}\"", name), [], |r| {
+                            r.get::<_, i64>(0)
+                        })
+                        .unwrap_or(0)
+                        .max(0) as u64;
+                    DbTableUsage {
+                        name,
+                        bytes,
+                        index_bytes,
+                        rows,
+                    }
+                })
+                .collect();
+            tables.sort_by(|a, b| b.bytes.cmp(&a.bytes));
+
+            Ok(DbUsage {
+                file_bytes,
+                wal_bytes,
+                free_bytes: free_pages * page_size,
+                tables,
+            })
+    }
+}
+
 /// Result of a `POST /api/db/backup` call. The frontend surfaces the
 /// `backup_path` so the user can copy it (or the absolute `.bak` ref
 /// if they want to script around it).
@@ -2269,6 +2380,100 @@ mod tests {
     use super::*;
     use crate::core::config;
     use serial_test::serial;
+
+    // ─── db-usage: where the weight actually is ──────────────────────────
+
+    fn weighted_db() -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE runs(id INTEGER PRIMARY KEY, payload TEXT);
+             CREATE INDEX idx_runs_payload ON runs(payload);
+             CREATE TABLE notes(id INTEGER PRIMARY KEY, body TEXT);",
+        )
+        .unwrap();
+        // Few rows, much weight — against many rows, little weight. This is the
+        // exact shape a row count cannot see, and the reason the chart exists.
+        for i in 0..40 {
+            conn.execute(
+                "INSERT INTO runs(id, payload) VALUES (?1, ?2)",
+                rusqlite::params![i, "x".repeat(20_000)],
+            )
+            .unwrap();
+        }
+        for i in 0..4_000 {
+            conn.execute(
+                "INSERT INTO notes(id, body) VALUES (?1, ?2)",
+                rusqlite::params![i, "short"],
+            )
+            .unwrap();
+        }
+        conn
+    }
+
+    #[test]
+    fn usage_ranks_by_weight_not_by_row_count() {
+        let usage = measure_db_usage(&weighted_db(), 123, 45).unwrap();
+
+        let first = &usage.tables[0];
+        assert_eq!(first.name, "runs", "the heaviest table leads");
+        assert_eq!(first.rows, 40);
+
+        let notes = usage
+            .tables
+            .iter()
+            .find(|t| t.name == "notes")
+            .expect("every table is reported");
+        assert_eq!(notes.rows, 4_000);
+        assert!(
+            first.bytes > notes.bytes,
+            "40 fat rows ({} B) must outrank 4 000 thin ones ({} B) — ranking by \
+             count is precisely the mistake this endpoint exists to correct",
+            first.bytes,
+            notes.bytes,
+        );
+    }
+
+    #[test]
+    fn an_index_weighs_against_the_table_it_indexes() {
+        // An index is reclaimed by deleting the rows, so its weight belongs to
+        // them. Reported apart as well, so a fat index is still visible as one.
+        let usage = measure_db_usage(&weighted_db(), 0, 0).unwrap();
+        let runs = usage.tables.iter().find(|t| t.name == "runs").unwrap();
+
+        assert!(runs.index_bytes > 0, "idx_runs_payload is not free");
+        assert!(runs.bytes > runs.index_bytes, "and it is not the whole table");
+        assert!(
+            !usage.tables.iter().any(|t| t.name == "idx_runs_payload"),
+            "an index must never appear as a table of its own",
+        );
+    }
+
+    #[test]
+    fn file_and_wal_are_reported_apart() {
+        // A checkpoint empties the WAL without anything being purged. Folding
+        // it into the total would read as a database that shrank on its own.
+        let usage = measure_db_usage(&weighted_db(), 7_000, 140).unwrap();
+        assert_eq!(usage.file_bytes, 7_000);
+        assert_eq!(usage.wal_bytes, 140);
+    }
+
+    #[test]
+    fn freed_pages_are_reported_so_a_purge_that_frees_nothing_is_visible() {
+        // Deleting rows returns pages to the freelist, not to the filesystem.
+        // Without this an operator purges, sees the same file size, and
+        // concludes the purge did nothing.
+        let conn = weighted_db();
+        assert_eq!(
+            measure_db_usage(&conn, 0, 0).unwrap().free_bytes,
+            0,
+            "nothing is free before the delete",
+        );
+        conn.execute("DELETE FROM runs", []).unwrap();
+        assert!(
+            measure_db_usage(&conn, 0, 0).unwrap().free_bytes > 0,
+            "the pages a delete frees must be visible",
+        );
+    }
 
     // ─── extract_zip decompressed caps (passe D: zip bomb) ────────────────
 

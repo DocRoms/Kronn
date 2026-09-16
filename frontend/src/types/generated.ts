@@ -1517,6 +1517,51 @@ learning_rejections: Array<LearningRejection>, };
 export type DbInfo = { size_bytes: number, project_count: number, discussion_count: number, message_count: number, mcp_count: number, workflow_count: number, workflow_run_count: number, custom_skill_count: number, custom_profile_count: number, custom_directive_count: number, };
 
 /**
+ * Where the database's weight actually sits, one entry per table.
+ *
+ * Counts answer "how much is in here"; they do not answer "what should I
+ * purge". A table of 34 678 messages weighing 41 MB and a table of 2 554
+ * workflow runs weighing 2 620 MB are indistinguishable by row count, and the
+ * second is the one worth acting on.
+ */
+export type DbTableUsage = { name: string,
+/**
+ * The table's own b-tree plus every index on it — what dropping the rows
+ * would actually give back.
+ */
+bytes: number,
+/**
+ * Of `bytes`, the part held by indexes rather than the rows themselves.
+ */
+index_bytes: number, rows: number, };
+
+/**
+ * The weight breakdown the Settings page charts.
+ */
+export type DbUsage = {
+/**
+ * The `.db` file on disk.
+ */
+file_bytes: number,
+/**
+ * The write-ahead log beside it. Counted apart because it is not durable
+ * weight — a checkpoint reclaims it — and reporting it inside the total
+ * would make a freshly checkpointed database look like it shrank.
+ */
+wal_bytes: number,
+/**
+ * Pages the file still holds but no longer uses. This is what a VACUUM
+ * returns to the filesystem, and it is why a purge can leave the file the
+ * same size.
+ */
+free_bytes: number,
+/**
+ * Every table, biggest first. The list is short enough to send whole;
+ * folding the tail is the chart's decision, not the measurement's.
+ */
+tables: Array<DbTableUsage>, };
+
+/**
  * 0.7.0 Phase 4 — payload for `POST /api/workflows/:id/runs/:run_id/decide`.
  *
  * `decision` is one of `"approve" | "request_changes" | "reject"`.
