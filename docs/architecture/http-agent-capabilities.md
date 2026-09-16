@@ -36,6 +36,37 @@ The workspace catalogue, eight tools [src: file: backend/src/api/agent_workspace
 Plus Kronn's internal catalogue — plan and task tools, `qa_list`/`qa_run`, and `api_call`
 against configured REST plugins [src: file: backend/src/api/agent_tools.rs].
 
+And, since 0.13.0, media generation: `media_generate` and `media_job_status`
+[src: file: backend/src/api/agent_tools.rs:435-460]. These sit in the orchestration
+catalogue, so an HTTP agent replying in a discussion has them, and a bounded worker keeps
+them — they are deliberately absent from the principal-only list a worker room strips
+[src: file: backend/src/api/agent_tools.rs:676-700]. A Workflow Agent step does not: the
+workflow branch returns before the orchestration tools are added.
+
+Until then only CLI agents could generate an image or a video, because the tools were
+declared in the MCP bridge and an HTTP agent structurally cannot reach it. The capability
+existed and was announced to CLI agents by `kronn_intro`; the HTTP half of the fleet was
+told about a feature it had no way to invoke.
+
+## The one capability that spends money
+
+`media_generate` is different in kind from every other tool above, and the difference is
+worth stating rather than discovering: **it bills**. A `read_file` that goes wrong costs
+nothing; a video generation that goes wrong costs what the provider charges for it.
+
+The bounds that make that acceptable are not in the tool, they are around it:
+
+- The modality is **required**, never defaulted. An agent that omits it is refused rather
+  than silently billed for the wrong kind of asset.
+- The discussion is taken from the room the agent is speaking in, not from an argument. An
+  agent cannot direct a generation — or its cost — at a room it is not in.
+- A job is claimed once (`media_jobs` reuses the `agent_resume_jobs` claim), so a retried
+  tool call does not buy the asset twice
+  [src: file: docs/architecture/media-generation.md:74].
+- An agent only learns a modality exists when a connection has a model configured for it —
+  the worker catalogue lists modalities one per configured model and stays silent otherwise.
+  An agent is never told it can produce a video that the request would then refuse.
+
 Every one of these is bounded, and the bounds are part of the contract, not an
 implementation detail:
 
@@ -94,6 +125,10 @@ Ask which side of *execution* it falls on.
 - Reading anything already inside the workspace, or one public URL: **in scope**, subject to
   the existing bounds.
 - Producing or editing files in the workspace: **in scope** since 2026-08-18.
+- Generating an image or a video on a configured connection: **in scope** since 0.13.0, with
+  the cost bounds above. This is the exception to "they may not execute anything" and it is
+  narrow on purpose — Kronn owns the request, the room and the claim; the agent supplies a
+  prompt and a modality it was told exists.
 - Running a command, mutating git, reaching a private address, touching a path outside the
   workspace, or talking to an MCP server: **out of scope.** These are not
   missing features; granting one would mean building a second agent runtime beside the CLI

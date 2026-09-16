@@ -8113,3 +8113,53 @@
 .automation-resource-row .disc-item[data-multi-selected='true'] {
   background: var(--kr-bg-hover);
 }
+
+/* An automation that is working, told on the card itself.
+   Kronn already knew which runs were active, but only inside a popover you
+   had to open — so the sidebar answered "something is running" and never
+   "which one".
+
+   Around the icon, never instead of it. Replacing the icon with a spinner
+   would hide the one thing that identifies the card, which is exactly what
+   the ring is there to tell you. It is also why the ring is a separate
+   layer: the icon may be a circle, a bolt or a letter, and none of those
+   read as rotating on their own. */
+.automation-resource-icon[data-running] {
+  position: relative;
+  color: var(--kr-accent);
+}
+
+.automation-resource-icon[data-running]::after {
+  content: '';
+  position: absolute;
+  inset: -3px;
+  border: 2px solid transparent;
+  border-top-color: var(--kr-accent);
+  border-radius: 50%;
+  animation: spin 0.9s linear infinite;
+}
+
+/* The state matters, the motion does not. Under reduced motion the ring
+   stays — closed and still — rather than disappearing: removing it would
+   take away the information along with the animation. */
+@media (prefers-reduced-motion: reduce) {
+  .automation-resource-icon[data-running]::after {
+    animation: none;
+    border-color: var(--kr-accent);
+    opacity: 0.55;
+  }
+}
+
+/* The icon is aria-hidden, so the running state needs its own text for a
+   screen reader — the ring alone announces nothing. */
+.automation-resource-running-label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}

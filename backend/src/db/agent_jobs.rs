@@ -282,14 +282,40 @@ pub fn recover_after_restart(conn: &Connection) -> Result<u64> {
     Ok(changed as u64)
 }
 
+/// Releases after how many failures before the job is given up on.
+///
+/// The release is right — most of what fails here is transient, and 10 s apart
+/// gives a busy backend room to recover. What was missing is an end: a job that
+/// can never validate was re-attempted 8 640 times a day, silently.
+///
+/// Thirty is five minutes of patience, comfortably past any transient, and far
+/// short of for ever.
+const MAX_RELEASE_ATTEMPTS: i64 = 30;
+
 pub fn release_after_error(conn: &Connection, id: &str, error: &str) -> Result<bool> {
     let available = Utc::now() + chrono::Duration::seconds(10);
+    // One statement so the count and the decision cannot disagree: reading the
+    // attempts and then writing the status would let two releases both see the
+    // last tolerated value and both release again.
     Ok(conn.execute(
         "UPDATE agent_resume_jobs
-         SET status = 'Pending', started_at = NULL, scheduled_at = ?2,
+         SET release_attempts = release_attempts + 1,
+             status = CASE WHEN release_attempts + 1 >= ?5
+                           THEN 'Escalated' ELSE 'Pending' END,
+             failure_kind = CASE WHEN release_attempts + 1 >= ?5
+                                 THEN 'dispatch_stalled' ELSE failure_kind END,
+             completed_at = CASE WHEN release_attempts + 1 >= ?5
+                                 THEN ?4 ELSE completed_at END,
+             started_at = NULL, scheduled_at = ?2,
              last_error = ?3, updated_at = ?4
          WHERE id = ?1 AND status = 'Running'",
-        params![id, available.to_rfc3339(), error, Utc::now().to_rfc3339()],
+        params![
+            id,
+            available.to_rfc3339(),
+            error,
+            Utc::now().to_rfc3339(),
+            MAX_RELEASE_ATTEMPTS
+        ],
     )? > 0)
 }
 
@@ -403,6 +429,64 @@ mod tests {
             )
             .unwrap();
         connection
+    }
+
+    #[test]
+    fn a_job_that_can_never_validate_is_given_up_on_instead_of_retried_for_ever() {
+        // The release is right — most of what fails here is transient. What was
+        // missing is an end: a job that can never validate came back Pending
+        // every 10 s, 8 640 times a day, with the room silent and nothing in
+        // the log.
+        let conn = connection();
+        let spec = command_spec();
+        let job = create_command(&conn, "job-1", "dedupe-1", &spec);
+
+        // Marked Running directly rather than through `claim`: a release pushes
+        // `scheduled_at` ten seconds out, so claiming would need the clock to
+        // move, and the counting is what is under test here.
+        let mark_running = |conn: &Connection| {
+            conn.execute(
+                "UPDATE agent_resume_jobs SET status = 'Running' WHERE id = 'job-1'",
+                [],
+            )
+            .unwrap();
+        };
+
+        for attempt in 1..MAX_RELEASE_ATTEMPTS {
+            mark_running(&conn);
+            assert!(release_after_error(&conn, &job.view.id, "still broken").unwrap());
+            let status: String = conn
+                .query_row(
+                    "SELECT status FROM agent_resume_jobs WHERE id = ?1",
+                    ["job-1"],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                status, "Pending",
+                "attempt {attempt} is still worth a retry"
+            );
+        }
+
+        mark_running(&conn);
+        release_after_error(&conn, &job.view.id, "still broken").unwrap();
+
+        let (status, kind, error): (String, Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT status, failure_kind, last_error FROM agent_resume_jobs WHERE id = ?1",
+                ["job-1"],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "Escalated", "the loop ends");
+        assert_eq!(kind.as_deref(), Some("dispatch_stalled"));
+        // And the reason it gave up survives, or the escalation is as opaque as
+        // the loop it replaced.
+        assert_eq!(error.as_deref(), Some("still broken"));
+
+        // Settled means settled: a release on a job no longer Running does
+        // nothing, so the runner cannot resurrect it.
+        assert!(!release_after_error(&conn, &job.view.id, "again").unwrap());
     }
 
     fn command_spec() -> QuickExecSpec {

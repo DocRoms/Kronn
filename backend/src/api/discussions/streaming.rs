@@ -158,23 +158,24 @@ async fn cli_task_worker_context(
     if runner::is_http_chat_agent(agent_type) {
         return Ok(None);
     }
-    let discussion_id_owned = discussion_id.to_string();
-    let is_task_worker_room = state
-        .db
-        .with_read_conn(move |conn| {
-            Ok(conn.query_row(
-                "SELECT EXISTS(SELECT 1 FROM task_executions \
-                 WHERE sub_discussion_id = ?1 AND worker_target_kind = 'agent')",
-                rusqlite::params![discussion_id_owned],
-                |row| row.get::<_, bool>(0),
-            )?)
-        })
-        .await?;
+    // Whether THIS dispatch is a worker launch, never whether the room happens
+    // to host one. The two were conflated, and the room answered for every turn
+    // taken in it: open the child room of a delegated task, ask the worker a
+    // follow-up question or mention a second agent to review its work, and the
+    // message was stored and then refused — "Unable to verify the agent
+    // execution scope". The room became write-only the moment the worker
+    // launched, for good.
+    //
+    // A dispatch with no execution behind it is simply not a worker launch, so
+    // it gets no delivery capability and runs as the ordinary turn it is. The
+    // five exact-match checks below still apply to a dispatch that IS one.
+    //
+    // Nothing is lost by not failing loudly here: the execution and its
+    // `dispatch_job_id` are committed in one transaction
+    // (`db::orchestration::attach_execution_dispatch` inside the provisioning
+    // `&tx`), so a genuine launch cannot be observed without its lineage. The
+    // guard could only ever fire on a turn that was never a launch.
     let Some(dispatch_job_id) = dispatch_job_id else {
-        anyhow::ensure!(
-            !is_task_worker_room,
-            "task-worker launch is missing its immutable dispatch id"
-        );
         return Ok(None);
     };
     let lineage = state
@@ -190,10 +191,6 @@ async fn cli_task_worker_context(
         })
         .await?;
     let Some((execution, dispatch)) = lineage else {
-        anyhow::ensure!(
-            !is_task_worker_room,
-            "task-worker launch has no matching execution dispatch lineage"
-        );
         return Ok(None);
     };
 
@@ -471,6 +468,20 @@ mod native_http_tools_scope_tests {
         .await
         .expect("HTTP providers do not use the CLI bridge")
         .is_none());
+        // These two used to be errors, and that is what made the child room of
+        // a delegated task write-only: the question asked was whether the ROOM
+        // hosts a worker, so every later turn taken in it — a follow-up to the
+        // worker, a second agent asked to review its work — was refused with
+        // "Unable to verify the agent execution scope".
+        //
+        // A dispatch with no execution behind it is not a launch missing its
+        // lineage; it is an ordinary turn. It gets no delivery capability and
+        // runs as what it is. Nothing is weakened by this: the execution and
+        // its `dispatch_job_id` are committed in one transaction
+        // (`attach_execution_dispatch` inside the provisioning `&tx`), so a
+        // genuine launch cannot be observed without its lineage, and the four
+        // exact-match checks above — foreign room, wrong provider — still
+        // refuse a dispatch that IS one and does not line up.
         assert!(cli_task_worker_context(
             &state,
             "d-worker",
@@ -478,11 +489,13 @@ mod native_http_tools_scope_tests {
             Some("unknown-dispatch"),
         )
         .await
-        .is_err());
+        .expect("an unknown dispatch is an ordinary turn, not a broken launch")
+        .is_none());
         assert!(
             cli_task_worker_context(&state, "d-worker", &AgentType::Codex, None)
                 .await
-                .is_err()
+                .expect("a turn with no dispatch id was never a worker launch")
+                .is_none()
         );
     }
 
@@ -660,6 +673,37 @@ pub(super) enum ToolRecord {
 /// Format a finished tool call into its transcript record. kronn-internal
 /// calls get pretty-printed args (`disc_get_message(4)`) ; native calls get
 /// their raw input truncated to ~120 chars to keep the banner compact.
+/// Moves the tool calls an ACP runtime reported into the transcript's tool
+/// lists.
+///
+/// ACP has no stdout event stream, so its runtime reports each call into the
+/// run's stderr capture, one name per line. Until 0.13.0 it forwarded them on
+/// the channel carrying the reply instead, which glued
+/// `[ClaudeCode tool: ToolSearch]` into the middle of the agent's sentences and
+/// left the group under the message empty — the calls were both in the wrong
+/// place and missing from the right one.
+///
+/// Classified through the same `classify_tool_call` the CLI path uses, so
+/// kronn-internal and agent-native keep splitting visually. ACP reports a name
+/// without arguments, hence the empty input.
+pub(super) fn lift_acp_tool_calls(
+    stderr_lines: &[String],
+    kronn_tool_calls: &mut Vec<String>,
+    native_tool_calls: &mut Vec<String>,
+) {
+    for name in stderr_lines
+        .iter()
+        .filter_map(|line| line.strip_prefix(runner::ACP_TOOL_MARKER))
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    {
+        match classify_tool_call(name, "") {
+            ToolRecord::Kronn(record) => kronn_tool_calls.push(record),
+            ToolRecord::Native(record) => native_tool_calls.push(record),
+        }
+    }
+}
+
 pub(super) fn classify_tool_call(tool: &str, input: &str) -> ToolRecord {
     if let Some(name) = tool.strip_prefix("mcp__kronn-internal__") {
         let pretty_args = pretty_kronn_args(name, input);
@@ -892,12 +936,19 @@ fn agent_start_error_content(
     Some(format!("[kronn:agent-error]\n{payload}"))
 }
 
+/// Settle a tracked run that never reached the agent, saying why.
+///
+/// The reason used to be hard-coded to "agent execution preflight failed",
+/// which is how a refusal reached `agent_dispatch_jobs.last_error` carrying
+/// nothing an operator could act on — 76 rows of it in one instance. Each
+/// caller names the condition it just detected instead.
 fn finish_tracked_preflight(
     completion_tx: &mut Option<tokio::sync::oneshot::Sender<AgentExecutionOutcome>>,
+    diagnostic: &str,
 ) {
     if let Some(sender) = completion_tx.take() {
         let _ = sender.send(AgentExecutionOutcome::PreflightFailed {
-            diagnostic: "agent execution preflight failed".into(),
+            diagnostic: diagnostic.to_string(),
         });
     }
 }
@@ -1429,6 +1480,32 @@ fn messages_not_yet_seen(
 /// carries, else the discussion's durable sticky target. The job wins so an
 /// explicit one-off target (a mention, a retry against another connection)
 /// is never silently replaced by the room's default.
+/// What a connection whose target does not match the agent being started means.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConnectionMismatch {
+    /// The job itself named this connection. A job that names a connection
+    /// serving another agent is inconsistent, and starting it anyway would run
+    /// the turn on something the caller did not ask for.
+    Refuse,
+    /// The connection was only inherited from the room. The room's sticky
+    /// connection describes the room's EXTERNAL agent (KT-545); a sibling
+    /// explicitly targeting a native CLI is not that agent, so the room's
+    /// connection says nothing about it — absent, not wrong.
+    ///
+    /// Treating it as wrong refused the start of every native agent mentioned
+    /// alongside an external one: mention @openrouter, @claudecode and
+    /// @opencode on one message and only OpenRouter ever ran.
+    Ignore,
+}
+
+pub(crate) fn connection_mismatch(inherited: bool) -> ConnectionMismatch {
+    if inherited {
+        ConnectionMismatch::Ignore
+    } else {
+        ConnectionMismatch::Refuse
+    }
+}
+
 pub(crate) fn effective_connection_id<'a>(
     dispatch: Option<&'a String>,
     discussion: Option<&'a String>,
@@ -1584,7 +1661,7 @@ async fn make_agent_stream_inner(
         .flatten();
 
     if disc.is_none() {
-        finish_tracked_preflight(&mut completion_tx);
+        finish_tracked_preflight(&mut completion_tx, "discussion not found");
         let stream: SseStream = Box::pin(futures::stream::once(async {
             Ok::<_, Infallible>(
                 Event::default()
@@ -1598,7 +1675,7 @@ async fn make_agent_stream_inner(
     let disc = match disc {
         Some(d) => d,
         None => {
-            finish_tracked_preflight(&mut completion_tx);
+            finish_tracked_preflight(&mut completion_tx, "discussion not found");
             let stream: SseStream = Box::pin(futures::stream::once(async {
                 Ok::<_, Infallible>(
                     Event::default()
@@ -1616,6 +1693,10 @@ async fn make_agent_stream_inner(
     // fallback an ordinary reply in a room backed by an external connection
     // failed with "the selected external API connection is unavailable",
     // although the connection existed and was recorded on the discussion.
+    // Whether the connection below was chosen for THIS dispatch or merely
+    // inherited from the room. The two must not be treated alike on a mismatch:
+    // see the `Ok(Some(_)) if inherited_connection` arm.
+    let inherited_connection = dispatch_connection_id.is_none();
     let effective_connection_id =
         effective_connection_id(dispatch_connection_id.as_ref(), disc.connection_id.as_ref());
     let external_connection = if let Some(connection_id) = effective_connection_id {
@@ -1632,8 +1713,25 @@ async fn make_agent_stream_inner(
             {
                 Some(connection)
             }
+            // The room's sticky connection describes the room's EXTERNAL agent
+            // (KT-545). A sibling explicitly targeting a native CLI is not that
+            // agent, and the room's connection says nothing about it — so it is
+            // simply absent here, not wrong.
+            //
+            // Treating it as wrong refused the start of every native agent
+            // mentioned alongside an external one: mention @openrouter,
+            // @claudecode and @opencode on one message and only OpenRouter ever
+            // ran, the other two vanishing with no visible reason.
+            Ok(Some(_))
+                if connection_mismatch(inherited_connection) == ConnectionMismatch::Ignore =>
+            {
+                None
+            }
             Ok(Some(_)) => {
-                finish_tracked_preflight(&mut completion_tx);
+                finish_tracked_preflight(
+                    &mut completion_tx,
+                    "the selected external API connection no longer matches this agent target",
+                );
                 let stream: SseStream = Box::pin(futures::stream::once(async move {
                     Ok::<_, Infallible>(Event::default().event("error").data(
                         serde_json::json!({
@@ -1645,7 +1743,10 @@ async fn make_agent_stream_inner(
                 return Sse::new(prepend_initial_event(stream, initial_event.take()));
             }
             _ => {
-                finish_tracked_preflight(&mut completion_tx);
+                finish_tracked_preflight(
+                    &mut completion_tx,
+                    "the selected external API connection no longer exists",
+                );
                 let stream: SseStream = Box::pin(futures::stream::once(async move {
                     Ok::<_, Infallible>(Event::default().event("error").data(
                         serde_json::json!({
@@ -1694,7 +1795,10 @@ async fn make_agent_stream_inner(
                     .data(serde_json::json!({ "error": safe_error }).to_string()),
             )
         }));
-        finish_tracked_preflight(&mut completion_tx);
+        finish_tracked_preflight(
+            &mut completion_tx,
+            "agent authentication preflight refused the start",
+        );
         return Sse::new(prepend_initial_event(stream, initial_event.take()));
     }
     let disc_tier = tier_override.unwrap_or(disc.tier);
@@ -1738,7 +1842,10 @@ async fn make_agent_stream_inner(
                 agent = ?agent_type,
                 "Unable to resolve native HTTP tool scope: {error}"
             );
-            finish_tracked_preflight(&mut completion_tx);
+            finish_tracked_preflight(
+                &mut completion_tx,
+                "unable to resolve the native HTTP tool scope",
+            );
             let stream: SseStream = Box::pin(futures::stream::once(async move {
                 Ok::<_, Infallible>(
                     Event::default().event("error").data(
@@ -1767,7 +1874,10 @@ async fn make_agent_stream_inner(
                 agent = ?agent_type,
                 "Unable to resolve CLI task-worker delivery scope: {error}"
             );
-            finish_tracked_preflight(&mut completion_tx);
+            finish_tracked_preflight(
+                &mut completion_tx,
+                "unable to resolve the CLI task-worker delivery scope",
+            );
             let stream: SseStream = Box::pin(futures::stream::once(async move {
                 Ok::<_, Infallible>(
                     Event::default().event("error").data(
@@ -1895,7 +2005,10 @@ async fn make_agent_stream_inner(
                                 .data(serde_json::json!({ "error": err_msg }).to_string()),
                         )
                     }));
-                    finish_tracked_preflight(&mut completion_tx);
+                    finish_tracked_preflight(
+                        &mut completion_tx,
+                        "agent start refused before reaching the provider",
+                    );
                     return Sse::new(prepend_initial_event(stream, initial_event.take()));
                 }
             }
@@ -1978,7 +2091,10 @@ async fn make_agent_stream_inner(
                                 .data(serde_json::json!({ "error": safe_error }).to_string()),
                         )
                     }));
-                    finish_tracked_preflight(&mut completion_tx);
+                    finish_tracked_preflight(
+                        &mut completion_tx,
+                        "agent start refused before reaching the provider",
+                    );
                     return Sse::new(prepend_initial_event(stream, initial_event.take()));
                 }
                 Some((root, targets))
@@ -2033,7 +2149,10 @@ async fn make_agent_stream_inner(
                             .data(serde_json::json!({ "error": safe_error }).to_string()),
                     )
                 }));
-                finish_tracked_preflight(&mut completion_tx);
+                finish_tracked_preflight(
+                    &mut completion_tx,
+                    "agent start refused before reaching the provider",
+                );
                 return Sse::new(prepend_initial_event(stream, initial_event.take()));
             }
         }
@@ -2481,7 +2600,10 @@ async fn make_agent_stream_inner(
         let secret = match state.config.read().await.encryption_secret.clone() {
             Some(secret) => secret,
             None => {
-                finish_tracked_preflight(&mut completion_tx);
+                finish_tracked_preflight(
+                    &mut completion_tx,
+                    "Quick Prompt variable snapshot key unavailable",
+                );
                 let stream: SseStream = Box::pin(futures::stream::once(async {
                     Ok::<_, Infallible>(Event::default().event("error").data(
                         serde_json::json!({"error": "Quick Prompt variable snapshot key unavailable"}).to_string(),
@@ -2493,7 +2615,10 @@ async fn make_agent_stream_inner(
         let key = match crate::core::crypto::parse_secret(&secret) {
             Ok(key) => key,
             Err(_) => {
-                finish_tracked_preflight(&mut completion_tx);
+                finish_tracked_preflight(
+                    &mut completion_tx,
+                    "Quick Prompt variable snapshot key unavailable",
+                );
                 let stream: SseStream = Box::pin(futures::stream::once(async {
                     Ok::<_, Infallible>(Event::default().event("error").data(
                         serde_json::json!({"error": "Quick Prompt variable snapshot key unavailable"}).to_string(),
@@ -2516,7 +2641,10 @@ async fn make_agent_stream_inner(
                 // A QP dispatch may never fall through with placeholders: it
                 // would turn a failed preflight or expired snapshot into an
                 // agent side effect with incomplete input.
-                finish_tracked_preflight(&mut completion_tx);
+                finish_tracked_preflight(
+                    &mut completion_tx,
+                    "Quick Prompt variable snapshot unavailable or expired",
+                );
                 let stream: SseStream = Box::pin(futures::stream::once(async {
                     Ok::<_, Infallible>(Event::default().event("error").data(
                         serde_json::json!({"error": "Quick Prompt variable snapshot unavailable or expired"}).to_string(),
@@ -2586,7 +2714,10 @@ async fn make_agent_stream_inner(
             Ok(effort) => effort,
             Err(error) => {
                 tracing::error!("Unable to read launch-time Quick Prompt effort: {error}");
-                finish_tracked_preflight(&mut completion_tx);
+                finish_tracked_preflight(
+                    &mut completion_tx,
+                    "unable to read the launch-time Quick Prompt effort",
+                );
                 let stream: SseStream = Box::pin(futures::stream::once(async move {
                     Ok::<_, Infallible>(Event::default().event("error").data(
                         serde_json::json!({"error": "quick_prompt_effort_snapshot_unavailable"}).to_string()
@@ -2616,7 +2747,10 @@ async fn make_agent_stream_inner(
             "error": "model_catalog_preflight_failed",
             "preflight_failure": failure,
         });
-        finish_tracked_preflight(&mut completion_tx);
+        finish_tracked_preflight(
+            &mut completion_tx,
+            "model catalogue preflight refused this model",
+        );
         let stream: SseStream = Box::pin(futures::stream::once(async move {
             Ok::<_, Infallible>(Event::default().event("error").data(payload.to_string()))
         }));
@@ -3483,6 +3617,8 @@ async fn make_agent_stream_inner(
                             .cloned(),
                     );
                 }
+
+                lift_acp_tool_calls(&stderr_lines, &mut kronn_tool_calls, &mut native_tool_calls);
 
                 let tokens_used = if stream_json_tokens > 0 {
                     stream_json_tokens
@@ -4792,7 +4928,8 @@ mod agent_lifecycle_tests {
     use super::{
         agent_start_error_content, agent_start_failure_outcome, auth_required_system_message,
         cap_agent_response, child_run_counts_as_success, configured_agent_global_timeout,
-        effective_global_timeout, effective_stall_timeout, AgentExecutionOutcome,
+        connection_mismatch, effective_global_timeout, effective_stall_timeout,
+        finish_tracked_preflight, lift_acp_tool_calls, AgentExecutionOutcome, ConnectionMismatch,
         NON_STREAMING_STALL_TIMEOUT,
     };
     use crate::models::{AgentType, MessageRole};
@@ -4951,6 +5088,128 @@ mod agent_lifecycle_tests {
         assert!(out.len() <= 1001 + 80);
     }
 
+    #[test]
+    fn a_rooms_connection_never_refuses_a_native_sibling() {
+        // Reported twice from real rooms: three agents mentioned, three
+        // placeholders, then only the external one ever answers. The database
+        // said why the moment the refusal carried its reason —
+        // "the selected external API connection no longer matches this agent
+        // target" on every ClaudeCode and OpenCode job in the room.
+        //
+        // The room was backed by OpenRouter, so its sticky connection serves
+        // AgentType::Custom. A sibling targeting a native CLI inherited it and
+        // was refused for not being the agent the connection serves.
+        assert_eq!(
+            connection_mismatch(true),
+            ConnectionMismatch::Ignore,
+            "a connection inherited from the room says nothing about a native target"
+        );
+        assert_eq!(
+            connection_mismatch(false),
+            ConnectionMismatch::Refuse,
+            "but a job that NAMES a connection serving another agent is inconsistent \
+             and must not be started on something the caller did not ask for"
+        );
+    }
+
+    #[test]
+    fn an_acp_tool_call_lands_in_the_group_under_the_reply() {
+        // Reported from a real room: messages read
+        // "Je vais essayer d'accéder à ce lien.[ClaudeCode tool: ToolSearch]
+        // [ClaudeCode tool: WebFetch]Réponse courte : ..." — the calls inside
+        // the sentence, and nothing in the group below where they belong.
+        let stderr = vec![
+            format!("{}ToolSearch", crate::agents::runner::ACP_TOOL_MARKER),
+            format!(
+                "{}mcp__kronn-internal__disc_append",
+                crate::agents::runner::ACP_TOOL_MARKER
+            ),
+            "a plain diagnostic line that is not a tool call".to_string(),
+        ];
+        let mut kronn = Vec::new();
+        let mut native = Vec::new();
+        lift_acp_tool_calls(&stderr, &mut kronn, &mut native);
+
+        assert_eq!(
+            native,
+            vec!["[agent-native: ToolSearch()]".to_string()],
+            "an agent's own tool is native"
+        );
+        assert_eq!(
+            kronn,
+            vec!["[kronn-internal: disc_append()]".to_string()],
+            "and Kronn's own stays in its bucket, as on the CLI path"
+        );
+    }
+
+    #[test]
+    fn what_the_runtime_writes_is_what_the_transcript_reads() {
+        // The two halves live in different files (runner.rs emits, this one
+        // lifts). A silent format drift between them would put the calls
+        // nowhere at all, with nothing failing.
+        let emitted = format!("{}Read", crate::agents::runner::ACP_TOOL_MARKER);
+        let mut kronn = Vec::new();
+        let mut native = Vec::new();
+        lift_acp_tool_calls(&[emitted], &mut kronn, &mut native);
+        assert_eq!(native.len(), 1, "the emitted shape must be recognised");
+    }
+
+    #[test]
+    fn ordinary_stderr_is_never_mistaken_for_a_tool_call() {
+        let mut kronn = Vec::new();
+        let mut native = Vec::new();
+        lift_acp_tool_calls(
+            &[
+                "ACP transport failed: broken pipe".to_string(),
+                String::new(),
+                // The marker with nothing after it is not a call either.
+                crate::agents::runner::ACP_TOOL_MARKER.to_string(),
+            ],
+            &mut kronn,
+            &mut native,
+        );
+        assert!(kronn.is_empty() && native.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_tracked_preflight_reports_the_condition_it_detected() {
+        // The second path into `PreflightFailed`. It hard-coded "agent
+        // execution preflight failed" for all fifteen of its call sites, so a
+        // refusal reached agent_dispatch_jobs.last_error carrying nothing —
+        // 76 such rows in one instance, none of them diagnosable.
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let mut slot = Some(tx);
+        finish_tracked_preflight(
+            &mut slot,
+            "the selected external API connection no longer exists",
+        );
+        assert!(slot.is_none(), "the sender is consumed exactly once");
+        let outcome = rx.await.expect("the tracked run must be settled");
+        let AgentExecutionOutcome::PreflightFailed { diagnostic } = outcome else {
+            panic!("a refused preflight must not be reported as anything else");
+        };
+        assert_eq!(
+            diagnostic,
+            "the selected external API connection no longer exists"
+        );
+        assert_ne!(diagnostic, "agent execution preflight failed");
+    }
+
+    #[tokio::test]
+    async fn finishing_a_preflight_twice_settles_it_once() {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let mut slot = Some(tx);
+        finish_tracked_preflight(&mut slot, "discussion not found");
+        // A second call must be a no-op rather than a panic on a taken sender.
+        finish_tracked_preflight(&mut slot, "something else entirely");
+        let AgentExecutionOutcome::PreflightFailed { diagnostic } = rx.await.unwrap() else {
+            panic!("unexpected outcome");
+        };
+        assert_eq!(
+            diagnostic, "discussion not found",
+            "the first reason stands"
+        );
+    }
 
     #[test]
     fn a_refused_preflight_says_what_it_refused_on() {
@@ -6439,7 +6698,10 @@ mod connection_fallback_tests {
         // An explicit one-off target must never be replaced by the sticky one.
         let job = "job-connection".to_string();
         let sticky = "room-connection".to_string();
-        assert_eq!(effective_connection_id(Some(&job), Some(&sticky)), Some(&job));
+        assert_eq!(
+            effective_connection_id(Some(&job), Some(&sticky)),
+            Some(&job)
+        );
     }
 
     #[test]

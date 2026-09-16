@@ -152,6 +152,45 @@ pub fn insert(conn: &Connection, job: NewMediaJob<'_>, now: DateTime<Utc>) -> Re
     Ok(())
 }
 
+/// Records who to wake once this generation settles.
+///
+/// Kept out of `MediaJob` on purpose: it is an instruction about the caller,
+/// not a property of the asset, and it must never travel into the provider
+/// request alongside the generation parameters.
+pub fn set_wake_request(conn: &Connection, job_id: &str, payload: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE media_jobs SET wake_agent_json = ?2 WHERE id = ?1",
+        rusqlite::params![job_id, payload],
+    )?;
+    Ok(())
+}
+
+/// Claims the wake, so exactly one caller fires it.
+///
+/// `publish_media_job` runs on every state change and can run twice for one
+/// settle (a republish, a restart mid-publish). Reading the column and then
+/// clearing it would wake the agent once per run; only the caller whose UPDATE
+/// actually cleared the column owns the wake.
+pub fn take_wake_request(conn: &Connection, job_id: &str) -> Result<Option<String>> {
+    let payload: Option<String> = conn
+        .query_row(
+            "SELECT wake_agent_json FROM media_jobs WHERE id = ?1",
+            [job_id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .flatten();
+    let Some(payload) = payload else {
+        return Ok(None);
+    };
+    let cleared = conn.execute(
+        "UPDATE media_jobs SET wake_agent_json = NULL
+          WHERE id = ?1 AND wake_agent_json IS NOT NULL",
+        [job_id],
+    )?;
+    Ok((cleared == 1).then_some(payload))
+}
+
 pub fn get(conn: &Connection, id: &str) -> Result<Option<MediaJob>> {
     let sql = format!("SELECT {COLUMNS} FROM media_jobs WHERE id = ?1");
     Ok(conn.query_row(&sql, params![id], row_to_job).optional()?)
@@ -384,9 +423,12 @@ mod tests {
         conn
     }
 
+    const MIGRATION_179: &str = include_str!("sql/179_media_job_wake.sql");
+
     fn db() -> Connection {
         let conn = db_at_155();
         conn.execute_batch(MIGRATION_157).unwrap();
+        conn.execute_batch(MIGRATION_179).unwrap();
         conn
     }
 
@@ -418,6 +460,50 @@ mod tests {
             at,
         )
         .unwrap();
+    }
+
+    #[test]
+    fn a_wake_is_claimed_once_however_often_the_job_is_published() {
+        // `publish_media_job` runs on every state change and can run twice for
+        // one settle — a republish, a restart mid-publish. Reading the column
+        // and then clearing it would wake the agent once per run, so the claim
+        // has to be the read.
+        let conn = db();
+        add(&conn, "job-1", now());
+        set_wake_request(&conn, "job-1", r#"{"agent_type":"ClaudeCode"}"#).unwrap();
+
+        let first = take_wake_request(&conn, "job-1").unwrap();
+        let second = take_wake_request(&conn, "job-1").unwrap();
+
+        assert_eq!(first.as_deref(), Some(r#"{"agent_type":"ClaudeCode"}"#));
+        assert_eq!(second, None, "one generation wakes its agent once");
+    }
+
+    #[test]
+    fn a_generation_nobody_asked_about_wakes_nobody() {
+        // The opt-in is the whole contract: an agent that did not ask must not
+        // be given a turn it has nothing to do with.
+        let conn = db();
+        add(&conn, "job-1", now());
+        assert_eq!(take_wake_request(&conn, "job-1").unwrap(), None);
+    }
+
+    #[test]
+    fn every_settled_state_counts_as_settled() {
+        // An agent told only about successes waits for ever on a clip the
+        // provider refused — which is the shape of the incident this feature
+        // exists to end, not one to reproduce inside it.
+        for status in [
+            MediaJobStatus::Completed,
+            MediaJobStatus::Failed,
+            MediaJobStatus::Cancelled,
+            MediaJobStatus::TimedOut,
+        ] {
+            assert!(status.is_terminal(), "{status:?} is settled");
+        }
+        for status in [MediaJobStatus::Pending, MediaJobStatus::Running] {
+            assert!(!status.is_terminal(), "{status:?} is still moving");
+        }
     }
 
     #[test]

@@ -3798,6 +3798,11 @@ async fn start_adapted_acp(
 /// the project MCP registry, create the session, apply a resolved model when
 /// the transport actually offers a matching config option, then stream one
 /// prompt turn into the existing text-based `AgentProcess` lifecycle.
+/// Marks a tool call reported by an ACP runtime inside the run's stderr
+/// capture. ACP has no stdout event stream to carry it, and the reply channel
+/// is text; this is the third channel both other transports already use.
+pub const ACP_TOOL_MARKER: &str = "[acp-tool] ";
+
 async fn run_acp_session(
     request: AcpSessionRequest<'_>,
     transport: Arc<dyn crate::acp::AcpTransport>,
@@ -3985,7 +3990,7 @@ async fn run_acp_session(
         // arrive, so the UI streams live during the prompt turn instead of
         // receiving one batch after the response.
         let (event_tx, mut event_rx) = mpsc::channel::<AcpSessionEvent>(256);
-        let forward_label = event_agent_label.clone();
+        let forwarder_stderr = task_stderr.clone();
         let persistence_error = Arc::new(Mutex::new(None::<String>));
         let forwarder_error = persistence_error.clone();
         let event_store = session_store.clone();
@@ -3998,12 +4003,20 @@ async fn run_acp_session(
                         }
                     }
                     AcpSessionEvent::ToolCall { name } => {
-                        if tx
-                            .send(format!("[{forward_label} tool: {name}]"))
-                            .await
-                            .is_err()
-                        {
-                            break;
+                        // A tool call is not text. Forwarding it on `tx` — the
+                        // channel carrying the reply itself — glued
+                        // "[ClaudeCode tool: ToolSearch]" into the middle of the
+                        // agent's sentences and left the tool group at the
+                        // bottom of the message empty, so the run looked like it
+                        // had called nothing.
+                        //
+                        // The stderr capture is where the other transports
+                        // already report calls: it is streamed to the client
+                        // live every 500 ms and lifted into the transcript's
+                        // tool list on completion, which is exactly the two
+                        // places this belongs.
+                        if let Ok(mut capture) = forwarder_stderr.lock() {
+                            capture.push(format!("{ACP_TOOL_MARKER}{name}"));
                         }
                     }
                     AcpSessionEvent::Usage {
@@ -10630,13 +10643,24 @@ mod acp_resume_tests {
         )
         .await;
 
-        assert_eq!(
-            collect_output(&mut process).await,
-            "first chunk[OpenCode tool: read_file]"
-        );
+        // The reply channel carries the reply, and nothing else. This used to
+        // read "first chunk[OpenCode tool: read_file]" — the call welded into
+        // the prose, which is what a room then displayed, with the tool group
+        // under the message left empty.
+        assert_eq!(collect_output(&mut process).await, "first chunk");
         assert!(process.child.wait().await.expect("lifeline").success());
         assert_eq!(process.reported_token_usage(), Some(8));
         assert_eq!(transport.created.load(Ordering::SeqCst), 1);
+
+        // The call is not dropped — it goes to the channel the transcript lifts
+        // it from, in the shape `lift_acp_tool_calls` reads.
+        let captured = process.captured_stderr();
+        assert!(
+            captured
+                .iter()
+                .any(|line| line == &format!("{ACP_TOOL_MARKER}read_file")),
+            "the tool call must reach the stderr capture; got {captured:?}",
+        );
     }
 
     #[tokio::test]

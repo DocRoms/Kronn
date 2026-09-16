@@ -33,6 +33,8 @@ key: a receipt or missing card is not arbitration. While pending, do not execute
 delegate or complete the affected lot; use `disc_wait_for_peer`. Independent
 work may continue. After restart/handoff, read the durable answer by stable key
 before resuming. Never answer for humans or treat a recommended choice as consent.
+A human may also **decline**: settled, not pending. Never re-ask by republishing
+the key.
 See
 [`operations/mcp-servers/kronn-internal.md`](operations/mcp-servers/kronn-internal.md#human-arbitration-cards).
 `[src: file: backend/src/db/discussion_questions.rs:1]`

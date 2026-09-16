@@ -153,7 +153,22 @@ pub fn list_active_for_discussion(
         "SELECT id, trigger_message_id, agent_override_json, status, attempts, last_error,
                 connection_id, progress_phase
          FROM agent_dispatch_jobs
-         WHERE discussion_id = ?1 AND status IN ('Pending', 'Running')
+         WHERE discussion_id = ?1
+           AND (status IN ('Pending', 'Running')
+                -- A refused sibling used to be dropped here, so its placeholder
+                -- simply vanished and the room showed nothing at all. The
+                -- reason was written to `last_error` and could never reach a
+                -- reader: the only way to learn why two of three agents did
+                -- nothing was to query SQLite.
+                --
+                -- Only the turn in progress: a failure belongs beside the
+                -- message it was refused on, and resurrecting every past one
+                -- would bury the room in old news.
+                OR (status = 'Failed'
+                    AND trigger_sort_order = (
+                        SELECT MAX(trigger_sort_order)
+                          FROM agent_dispatch_jobs
+                         WHERE discussion_id = ?1)))
          ORDER BY trigger_sort_order ASC, created_at ASC",
     )?;
     let rows = stmt.query_map([discussion_id], |row| {
@@ -1290,7 +1305,6 @@ mod tests {
             .unwrap();
         assert_eq!(awaiting, 0, "the discussion is released, not left waiting");
     }
-
 
     /// Mention three agents on one message and they share a trigger. The first
     /// to answer must not condemn the others at the next restart: its reply is

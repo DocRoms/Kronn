@@ -35,14 +35,27 @@ function measuredDuration(model: RunStatusCardModel, now: number): number | null
   return isActive(model.status) ? Math.max(0, now - start) : null;
 }
 
-function resultText(result: unknown): string | null {
+/** What a card will put in the DOM before it stops. A card is a summary and
+ *  links to the run for the rest, so there is no size at which dumping more
+ *  helps — and an unbounded dump is how a workflow result of several megabytes
+ *  froze the tab: pretty-printed, twenty cards at a time. */
+const MAX_RESULT_CHARS = 20_000;
+
+function resultText(result: unknown): { text: string; truncated: boolean } | null {
   if (result == null) return null;
-  if (typeof result === 'string') return result;
-  try {
-    return JSON.stringify(result, null, 2);
-  } catch {
-    return null;
+  let text: string;
+  if (typeof result === 'string') {
+    text = result;
+  } else {
+    try {
+      text = JSON.stringify(result, null, 2);
+    } catch {
+      return null;
+    }
   }
+  return text.length > MAX_RESULT_CHARS
+    ? { text: text.slice(0, MAX_RESULT_CHARS), truncated: true }
+    : { text, truncated: false };
 }
 
 export function RunStatusCard({ model: initialModel, runId, compact = false, hideRunLink = false }: {
@@ -168,10 +181,16 @@ export function RunStatusCard({ model: initialModel, runId, compact = false, hid
           {result && (foldResult ? (
             <details className="run-status-card-fold" data-testid="run-status-card-result-fold">
               <summary>{t('run.details')}</summary>
-              <pre className="run-status-card-result">{result}</pre>
+              <pre className="run-status-card-result">
+                {result.text}
+                {result.truncated && `\n${t('run.resultTruncated')}`}
+              </pre>
             </details>
           ) : (
-            <pre className="run-status-card-result">{result}</pre>
+            <pre className="run-status-card-result">
+              {result.text}
+              {result.truncated && `\n${t('run.resultTruncated')}`}
+            </pre>
           ))}
           {/* Last child, aligned right: the price of a generation is what the
               eye looks for once the media is there, not a detail in the header. */}

@@ -70,3 +70,12 @@ export function groupRunsByParent(runs: WorkflowRun[]): RunGroup[] {
   }
   return groups;
 }
+
+/** Whether this automation is working right now.
+ *
+ *  `Pending` counts: a run that is claimed but not yet streaming is already
+ *  the operator's answer to "which one is going?", and excluding it would
+ *  leave the card blank for exactly the seconds they are looking. */
+export function isWorkflowRunning(lastRunStatus: string | null | undefined): boolean {
+  return lastRunStatus === 'Running' || lastRunStatus === 'Pending';
+}

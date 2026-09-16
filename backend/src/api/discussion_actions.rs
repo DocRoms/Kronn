@@ -17,7 +17,11 @@ pub async fn list_for_discussion(
     let result = state
         .db
         .with_conn(move |conn| {
-            crate::db::discussion_actions::list_for_discussion(conn, &discussion_id)
+            crate::db::discussion_actions::list_for_discussion(
+                crate::db::kronn_action_engine::Reconcile::Projected,
+                conn,
+                &discussion_id,
+            )
         })
         .await;
     match result {
@@ -32,7 +36,13 @@ pub async fn get(
 ) -> Json<ApiResponse<crate::db::discussion_actions::DiscussionAction>> {
     let result = state
         .db
-        .with_conn(move |conn| crate::db::discussion_actions::get(conn, &action_id))
+        .with_conn(move |conn| {
+            crate::db::discussion_actions::get(
+                crate::db::kronn_action_engine::Reconcile::Persisted,
+                conn,
+                &action_id,
+            )
+        })
         .await;
     match result {
         Ok(Some(action)) => Json(ApiResponse::ok(action)),

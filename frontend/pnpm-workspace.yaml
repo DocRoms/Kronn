@@ -25,7 +25,10 @@
 #   otherwise). Drop each entry once the direct upstream dep picks it
 #   up. Each floor is the first release that fixes every advisory reported
 #   for that transitive dependency by `pnpm audit`; floors were last refreshed
-#   on 2026-08-10. Major
+#   on 2026-09-16, when pnpm audit reported sharp (GHSA-rgj7-g3m4-5g8c, high,
+#   libheif) and adm-zip (GHSA-vwc7-r8mq-g2x9, moderate, extraction follows
+#   destination symlinks) — both held at the vulnerable version BY these very
+#   pins, which is the failure mode to watch for here. Major
 #   overrides (`adm-zip`, `brace-expansion`, `sharp`) are covered by the full
 #   frontend test/build gate because their parents have not released patched
 #   constraints yet.
@@ -40,10 +43,10 @@ minimumReleaseAgeExclude:
   - dompurify@3.4.13
   - nanoid@3.3.18
 overrides:
-  adm-zip: '0.6.0'
+  adm-zip: '0.6.1'
   postcss: '8.5.23'
   flatted: '>=3.4.2'
   brace-expansion: '5.0.9'
   dompurify: '3.4.13'
   protobufjs: '7.6.5'
-  sharp: '0.35.0'
+  sharp: '0.35.4'

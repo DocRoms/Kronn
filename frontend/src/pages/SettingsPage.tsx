@@ -67,6 +67,7 @@ import { PublicationCredentialsSection } from '../components/settings/Publicatio
 import { ContinualLearningSection } from '../components/settings/ContinualLearningSection';
 import { ProfilesSection } from '../components/settings/ProfilesSection';
 import { UsageSection } from '../components/settings/UsageSection';
+import { DbUsageChart } from '../components/settings/DbUsageChart';
 import { ContextHelp } from '../components/ContextHelp';
 import { DebugSection } from '../components/settings/DebugSection';
 import { UserContextEditor } from '../components/UserContextEditor';
@@ -1851,6 +1852,8 @@ export function SettingsPage({
               ))}
             </div>
           )}
+
+          <DbUsageChart />
 
           <label className="set-db-retention">
             <span className="set-form-label">{t('config.executionVariableRetention')}</span>

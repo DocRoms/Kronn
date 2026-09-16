@@ -468,7 +468,11 @@ fn map_action(row: &rusqlite::Row<'_>) -> rusqlite::Result<LivePageAction> {
     })
 }
 
-fn refresh_from_shared_run(conn: &Connection, action: &mut LivePageAction) -> Result<()> {
+fn refresh_from_shared_run(
+    mode: kronn_action_engine::Reconcile,
+    conn: &Connection,
+    action: &mut LivePageAction,
+) -> Result<()> {
     let mut core = kronn_action_engine::ActionCore {
         id: action.id.clone(),
         state: action.state,
@@ -479,7 +483,7 @@ fn refresh_from_shared_run(conn: &Connection, action: &mut LivePageAction) -> Re
         finished_at: action.finished_at.clone(),
         updated_at: action.updated_at.clone(),
     };
-    kronn_action_engine::refresh_from_shared_run(conn, ActionTable::LivePage, &mut core)?;
+    kronn_action_engine::refresh_from_shared_run(conn, ActionTable::LivePage, &mut core, mode)?;
     action.state = core.state;
     action.values = core.values;
     action.diagnostic = core.diagnostic;
@@ -488,7 +492,11 @@ fn refresh_from_shared_run(conn: &Connection, action: &mut LivePageAction) -> Re
     Ok(())
 }
 
-pub fn get(conn: &Connection, id: &str) -> Result<Option<LivePageAction>> {
+pub fn get(
+    mode: kronn_action_engine::Reconcile,
+    conn: &Connection,
+    id: &str,
+) -> Result<Option<LivePageAction>> {
     let mut action = conn
         .query_row(
             &format!("{SELECT_LIVE_PAGE_ACTION} WHERE a.id = ?1"),
@@ -497,12 +505,16 @@ pub fn get(conn: &Connection, id: &str) -> Result<Option<LivePageAction>> {
         )
         .optional()?;
     if let Some(action) = action.as_mut() {
-        refresh_from_shared_run(conn, action)?;
+        refresh_from_shared_run(mode, conn, action)?;
     }
     Ok(action)
 }
 
-pub fn list_for_live_page(conn: &Connection, live_page_id: &str) -> Result<Vec<LivePageAction>> {
+pub fn list_for_live_page(
+    mode: kronn_action_engine::Reconcile,
+    conn: &Connection,
+    live_page_id: &str,
+) -> Result<Vec<LivePageAction>> {
     let mut statement = conn.prepare(&format!(
         "{SELECT_LIVE_PAGE_ACTION} WHERE a.live_page_id = ?1 ORDER BY a.created_at, a.action_ref"
     ))?;
@@ -511,14 +523,14 @@ pub fn list_for_live_page(conn: &Connection, live_page_id: &str) -> Result<Vec<L
         .collect::<Result<Vec<_>, _>>()?;
     drop(statement);
     for action in &mut actions {
-        refresh_from_shared_run(conn, action)?;
+        refresh_from_shared_run(mode, conn, action)?;
     }
     Ok(actions)
 }
 
 pub fn cancel(conn: &Connection, id: &str) -> Result<Option<LivePageAction>> {
     kronn_action_engine::cancel(conn, ActionTable::LivePage, id)?;
-    get(conn, id)
+    get(kronn_action_engine::Reconcile::Persisted, conn, id)
 }
 
 /// Resolve one `dynamic_binding` `source_ref` against real, current Page or
@@ -649,7 +661,7 @@ pub fn claim_launch(
     bindings: &HashMap<String, String>,
 ) -> Result<Option<LivePageActionClaimOutcome>> {
     let transaction = conn.unchecked_transaction()?;
-    let Some(mut action) = get(&transaction, id)? else {
+    let Some(mut action) = get(kronn_action_engine::Reconcile::Persisted, &transaction, id)? else {
         transaction.commit()?;
         return Ok(None);
     };
@@ -778,6 +790,85 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         crate::db::migrations::run(&conn).unwrap();
         conn
+    }
+
+    /// Reproduces the outage exactly: a real read-only handle, not a pragma.
+    #[test]
+    fn listing_a_launched_action_never_writes_and_still_tells_the_truth() {
+        // "Unable to list Page actions: attempt to write a readonly database".
+        // Before any CTA was launched every row was `proposed`, the
+        // reconciliation returned early, nothing was written and the endpoint
+        // answered — which is why it looked healthy. From the first launch the
+        // listing attempted an UPDATE on the read-only companion and the whole
+        // page fell over, for everyone, self-sustainingly: the reconciliation
+        // that would have moved the state on is exactly what was refused.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("kronn.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            crate::db::migrations::run(&conn).unwrap();
+            insert_page(&conn, "page-1", "rev-1", "<p>x</p>");
+            let now = Utc::now().to_rfc3339();
+            conn.execute(
+                "INSERT INTO shared_runs (id, kind, source_id, status, created_at, updated_at)
+                 VALUES ('run-1', 'quick_prompt', 'qp-1', 'success', ?1, ?1)",
+                params![now],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO live_page_actions (
+                     id, live_page_id, live_page_revision_id, action_ref, kind,
+                     target_id, target_name, project_id, state, values_json,
+                     shared_run_id, launched_at, created_at, updated_at
+                 ) VALUES ('act-1','page-1','rev-1','cta-1','quick_prompt',
+                           'qp-1','Framer',NULL,'running','[]','run-1',?1,?1,?1)",
+                params![now],
+            )
+            .unwrap();
+        }
+
+        // The companion connection as production opens it (ADR-001 O2): the
+        // guarantee is in the file handle, not in a pragma a closure could flip.
+        let read_only = Connection::open_with_flags(
+            &path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+        )
+        .unwrap();
+
+        let actions = list_for_live_page(
+            kronn_action_engine::Reconcile::Projected,
+            &read_only,
+            "page-1",
+        )
+        .expect("a listing must never need to write");
+        assert_eq!(actions.len(), 1);
+        // Projected, not merely unwritten: the reader still sees the truth, or
+        // the page would show a run that finished long ago as still running.
+        assert_eq!(actions[0].state, DiscussionActionState::Succeeded);
+
+        // The row itself is untouched — this connection cannot write, and the
+        // projection did not pretend otherwise.
+        let stored: String = read_only
+            .query_row(
+                "SELECT state FROM live_page_actions WHERE id = 'act-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, "running");
+
+        // And the guard that broke the page is real: asking the same read-only
+        // connection to persist still fails. The fix is the caller's choice,
+        // not a weakened connection.
+        assert!(
+            list_for_live_page(
+                kronn_action_engine::Reconcile::Persisted,
+                &read_only,
+                "page-1"
+            )
+            .is_err(),
+            "a read-only connection must still refuse a write"
+        );
     }
 
     fn insert_page(conn: &Connection, page_id: &str, revision_id: &str, html: &str) {
@@ -991,7 +1082,8 @@ mod tests {
         ingest_page_actions(&conn, "page-1", "rev-1", &html).unwrap();
         ingest_page_actions(&conn, "page-1", "rev-1", &html).unwrap();
 
-        let actions = list_for_live_page(&conn, "page-1").unwrap();
+        let actions =
+            list_for_live_page(kronn_action_engine::Reconcile::Persisted, &conn, "page-1").unwrap();
         assert_eq!(actions.len(), 1, "re-ingestion must remain idempotent");
         let action = &actions[0];
         assert_eq!(action.id, "page-action:page-1:collect-logs");
@@ -1021,7 +1113,9 @@ mod tests {
         // secondary sort by `action_ref` is what makes the order below
         // deterministic (document position isn't tracked for Page blocks the
         // way `fence_index` tracks it for discussion fences).
-        let actions = list_for_live_page(&conn, "page-all").unwrap();
+        let actions =
+            list_for_live_page(kronn_action_engine::Reconcile::Persisted, &conn, "page-all")
+                .unwrap();
         assert_eq!(
             actions.iter().map(|action| action.kind).collect::<Vec<_>>(),
             vec![
@@ -1043,7 +1137,13 @@ mod tests {
         insert_page(&conn, "page-2", "rev-1", &html);
         ingest_page_actions(&conn, "page-2", "rev-1", &html).unwrap();
 
-        let action = get(&conn, "page-action:page-2:missing").unwrap().unwrap();
+        let action = get(
+            kronn_action_engine::Reconcile::Persisted,
+            &conn,
+            "page-action:page-2:missing",
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(action.state, DiscussionActionState::PreflightFailed);
         assert!(action.diagnostic.unwrap().contains("n’existe plus"));
     }
@@ -1075,9 +1175,13 @@ mod tests {
         .unwrap();
         ingest_page_actions(&conn, "page-project", "rev-project", &html).unwrap();
 
-        let action = get(&conn, "page-action:page-project:cross-project")
-            .unwrap()
-            .unwrap();
+        let action = get(
+            kronn_action_engine::Reconcile::Persisted,
+            &conn,
+            "page-action:page-project:cross-project",
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(action.state, DiscussionActionState::Proposed);
         assert_eq!(action.diagnostic, None);
         assert_eq!(action.project_id.as_deref(), Some("project-other"));
@@ -1127,9 +1231,13 @@ mod tests {
         .unwrap()
         .unwrap();
         assert!(matches!(second, LivePageActionClaimOutcome::Existing(_)));
-        let reloaded = get(&conn, "page-action:page-3:collect-logs")
-            .unwrap()
-            .unwrap();
+        let reloaded = get(
+            kronn_action_engine::Reconcile::Persisted,
+            &conn,
+            "page-action:page-3:collect-logs",
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(reloaded.state, DiscussionActionState::Launching);
     }
 
@@ -1144,9 +1252,13 @@ mod tests {
         insert_page(&conn, "page-suggested", "rev-suggested", &html);
         ingest_page_actions(&conn, "page-suggested", "rev-suggested", &html).unwrap();
 
-        let proposed = get(&conn, "page-action:page-suggested:suggested")
-            .unwrap()
-            .unwrap();
+        let proposed = get(
+            kronn_action_engine::Reconcile::Persisted,
+            &conn,
+            "page-action:page-suggested:suggested",
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(proposed.values[0].value.as_deref(), Some("api"));
         assert_eq!(
             proposed.values[0].provenance,
@@ -1210,7 +1322,13 @@ mod tests {
         insert_page(&conn, "page-env", "rev-1", &html);
         ingest_page_actions(&conn, "page-env", "rev-1", &html).unwrap();
 
-        let proposed = get(&conn, "page-action:page-env:push").unwrap().unwrap();
+        let proposed = get(
+            kronn_action_engine::Reconcile::Persisted,
+            &conn,
+            "page-action:page-env:push",
+        )
+        .unwrap()
+        .unwrap();
         assert!(proposed.values[0].allow_manual_override);
         assert_eq!(
             proposed.values[0].provenance,
@@ -1288,7 +1406,13 @@ mod tests {
         insert_page(&conn, "page-bad", "rev-1", html);
         ingest_page_actions(&conn, "page-bad", "rev-1", html).unwrap();
 
-        let action = get(&conn, "page-action:page-bad:bad").unwrap().unwrap();
+        let action = get(
+            kronn_action_engine::Reconcile::Persisted,
+            &conn,
+            "page-action:page-bad:bad",
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(action.state, DiscussionActionState::PreflightFailed);
         assert_eq!(action.kind, DiscussionActionKind::Invalid);
         assert!(action.diagnostic.unwrap().contains("JSON invalide"));
@@ -1301,7 +1425,13 @@ mod tests {
         insert_page(&conn, "page-empty", "rev-1", &html);
         ingest_page_actions(&conn, "page-empty", "rev-1", &html).unwrap();
 
-        let action = get(&conn, "page-action:page-empty:empty").unwrap().unwrap();
+        let action = get(
+            kronn_action_engine::Reconcile::Persisted,
+            &conn,
+            "page-action:page-empty:empty",
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(action.state, DiscussionActionState::PreflightFailed);
         assert!(action.diagnostic.unwrap().contains("aucune cible"));
     }
@@ -1333,9 +1463,13 @@ mod tests {
         )
         .unwrap();
 
-        let action = get(&conn, "page-action:page-stale:collect-logs")
-            .unwrap()
-            .unwrap();
+        let action = get(
+            kronn_action_engine::Reconcile::Persisted,
+            &conn,
+            "page-action:page-stale:collect-logs",
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(action.state, DiscussionActionState::Failed);
         assert!(action
             .diagnostic
@@ -1361,9 +1495,13 @@ mod tests {
         );
         ingest_page_actions(&conn, "page-kpi", "rev-1", &html).unwrap();
 
-        let proposed = get(&conn, "page-action:page-kpi:show-kpi")
-            .unwrap()
-            .unwrap();
+        let proposed = get(
+            kronn_action_engine::Reconcile::Persisted,
+            &conn,
+            "page-action:page-kpi:show-kpi",
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(
             proposed.values[0].provenance,
             DiscussionActionValueProvenance::DynamicBinding
@@ -1545,7 +1683,12 @@ mod tests {
         republish_revision(&conn, "page-refresh", "rev-2", &html_v2);
         ingest_page_actions(&conn, "page-refresh", "rev-2", &html_v2).unwrap();
 
-        let actions = list_for_live_page(&conn, "page-refresh").unwrap();
+        let actions = list_for_live_page(
+            kronn_action_engine::Reconcile::Persisted,
+            &conn,
+            "page-refresh",
+        )
+        .unwrap();
         assert_eq!(
             actions.len(),
             1,
@@ -1572,9 +1715,13 @@ mod tests {
             "<p>The CTA was removed.</p>",
         );
 
-        let action = get(&conn, "page-action:page-removed:removed")
-            .unwrap()
-            .unwrap();
+        let action = get(
+            kronn_action_engine::Reconcile::Persisted,
+            &conn,
+            "page-action:page-removed:removed",
+        )
+        .unwrap()
+        .unwrap();
         assert!(action.stale_source);
         assert_eq!(action.state, DiscussionActionState::Proposed);
         let error = match claim_launch(
@@ -1588,7 +1735,10 @@ mod tests {
         };
         assert!(error.to_string().contains("no longer present"));
         assert_eq!(
-            get(&conn, &action.id).unwrap().unwrap().state,
+            get(kronn_action_engine::Reconcile::Persisted, &conn, &action.id)
+                .unwrap()
+                .unwrap()
+                .state,
             DiscussionActionState::Proposed,
             "a rejected stale launch must not claim the old proposal"
         );
@@ -1605,7 +1755,13 @@ mod tests {
         let html = action_block("gone", r#"{"kind":"quick_exec","target_id":"qe-1"}"#);
         insert_page(&conn, "page-gone", "rev-1", &html);
         ingest_page_actions(&conn, "page-gone", "rev-1", &html).unwrap();
-        let proposed = get(&conn, "page-action:page-gone:gone").unwrap().unwrap();
+        let proposed = get(
+            kronn_action_engine::Reconcile::Persisted,
+            &conn,
+            "page-action:page-gone:gone",
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(proposed.state, DiscussionActionState::Proposed);
 
         conn.execute("DELETE FROM quick_execs WHERE id = 'qe-1'", [])
@@ -1622,7 +1778,13 @@ mod tests {
             !matches!(outcome, Some(LivePageActionClaimOutcome::Claimed { .. })),
             "a deleted target must not be launchable from a page either"
         );
-        let reloaded = get(&conn, &proposed.id).unwrap().unwrap();
+        let reloaded = get(
+            kronn_action_engine::Reconcile::Persisted,
+            &conn,
+            &proposed.id,
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(reloaded.state, DiscussionActionState::PreflightFailed);
         assert!(reloaded
             .diagnostic
@@ -1663,7 +1825,13 @@ mod tests {
         republish_revision(&conn, "page-frozen", "rev-2", html_v2);
         ingest_page_actions(&conn, "page-frozen", "rev-2", html_v2).unwrap();
 
-        let action = get(&conn, "page-action:page-frozen:cta").unwrap().unwrap();
+        let action = get(
+            kronn_action_engine::Reconcile::Persisted,
+            &conn,
+            "page-action:page-frozen:cta",
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(
             action.state,
             DiscussionActionState::Succeeded,
@@ -1689,12 +1857,29 @@ mod tests {
         insert_page(&conn, "page-multi", "rev-1", &html);
         ingest_page_actions(&conn, "page-multi", "rev-1", &html).unwrap();
 
-        let actions = list_for_live_page(&conn, "page-multi").unwrap();
+        let actions = list_for_live_page(
+            kronn_action_engine::Reconcile::Persisted,
+            &conn,
+            "page-multi",
+        )
+        .unwrap();
         assert_eq!(actions.len(), 2);
 
         cancel(&conn, "page-action:page-multi:cta-a").unwrap();
-        let a = get(&conn, "page-action:page-multi:cta-a").unwrap().unwrap();
-        let b = get(&conn, "page-action:page-multi:cta-b").unwrap().unwrap();
+        let a = get(
+            kronn_action_engine::Reconcile::Persisted,
+            &conn,
+            "page-action:page-multi:cta-a",
+        )
+        .unwrap()
+        .unwrap();
+        let b = get(
+            kronn_action_engine::Reconcile::Persisted,
+            &conn,
+            "page-action:page-multi:cta-b",
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(a.state, DiscussionActionState::Cancelled);
         assert_eq!(
             b.state,
@@ -1726,7 +1911,9 @@ mod tests {
 
         complete_quick_prompt(&conn, action_id, "page-trace", "disc-page-result").unwrap();
 
-        let action = get(&conn, action_id).unwrap().unwrap();
+        let action = get(kronn_action_engine::Reconcile::Persisted, &conn, action_id)
+            .unwrap()
+            .unwrap();
         assert_eq!(action.state, DiscussionActionState::Succeeded);
         assert_eq!(
             action.result_discussion_id.as_deref(),

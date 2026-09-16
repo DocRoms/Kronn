@@ -205,6 +205,28 @@ describe('RunStatusCard', () => {
     expect(vi.mocked(runsApi.get).mock.calls.length).toBe(callsBefore + 1);
   });
 
+  it('stops rendering a huge result instead of putting megabytes in the DOM', async () => {
+    // A workflow result reached several megabytes on the live instance, and the
+    // card pretty-printed all of it into a <pre>, twenty cards to a discussion.
+    // The card is a summary and links to the run for the rest, so there is no
+    // size at which dumping more helps.
+    const huge = 'y'.repeat(200_000);
+    vi.mocked(runsApi.get).mockResolvedValue(
+      sharedRun({ id: 'huge-1', kind: 'workflow', result: { steps: [{ output: huge }] } }),
+    );
+
+    render(<RunStatusCard runId="huge-1" />);
+    act(() => { MockIntersectionObserver.instances[0].setIntersecting(true); });
+    await waitFor(() => expect(runsApi.get).toHaveBeenCalledWith('huge-1'));
+
+    const rendered = await screen.findByText(/y{100}/);
+    expect(rendered.textContent!.length).toBeLessThan(25_000);
+    expect(rendered.textContent).toContain('run.resultTruncated');
+    // The guard itself must be measured: a fixture that never got big would
+    // pass this test while proving nothing.
+    expect(huge.length).toBeGreaterThan(25_000);
+  });
+
   it('hydrates a media run on its own event and shows the produced geometry, not a progress bar', async () => {
     // KT-540: media reuses this card and this socket. The scoping is shared by
     // every kind, so what matters here is that a media run behaves like the

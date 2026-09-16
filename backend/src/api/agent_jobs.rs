@@ -485,6 +485,11 @@ async fn run_job(state: AppState, id: String) {
 }
 
 async fn release_job(state: &AppState, id: &str, error: &str) {
+    // The reason is in hand here and used to go only into the row. A job that
+    // cannot validate is retried every 10 seconds — 8 640 times a day — while
+    // the room stays silent, `kronn` logs nothing, and no screen lists resume
+    // jobs. One line is the difference between a mystery and a grep.
+    tracing::warn!(job_id = %id, "agent resume job released: {error}");
     let id = id.to_string();
     let error = error.to_string();
     if let Err(db_error) = state

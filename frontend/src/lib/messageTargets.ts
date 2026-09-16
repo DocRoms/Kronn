@@ -199,11 +199,35 @@ export function nativeDiscussionTargets(
     }));
 }
 
+/** Whether a recovered draft may stand in for the turn now streaming.
+ *
+ *  The streaming bubble picks the longest of three texts: the live stream, an
+ *  interrupted stream's buffer, and the discussion's durable checkpoint. The
+ *  last two are keyed by DISCUSSION, not by turn, so the previous turn's
+ *  finished answer stayed a candidate — and being longest, it beat the new
+ *  turn's first deltas. The room showed the last answer as the new one's
+ *  placeholder until the new text grew past it.
+ *
+ *  With no live turn there is nothing to mismatch, and a draft of unknown turn
+ *  is kept: that is the case these fallbacks exist for — restoring work after a
+ *  reload or a dropped stream, when the live stream has nothing to offer. */
+export function draftBelongsToTurn(
+  liveTurnId: string | undefined,
+  draftTurnId: string | undefined | null,
+): boolean {
+  if (!liveTurnId || !draftTurnId) return true;
+  return draftTurnId === liveTurnId;
+}
+
 export interface PendingAgentReply {
   id: string;
   triggerMessageId: string;
   agent: AgentType;
   status: string;
+  /** Why this one was refused, when it was. Kronn writes a reason for every
+   *  refused start; until 0.13.0 nothing carried it out of the database, so a
+   *  sibling that never ran left no trace anywhere a reader could see. */
+  lastError?: string | null;
 }
 
 type DiscussionWithActiveDispatches = Discussion & {
@@ -222,6 +246,7 @@ export function pendingAgentReplies(
       triggerMessageId: dispatch.trigger_message_id,
       agent: dispatch.agent_type,
       status: dispatch.status,
+      lastError: dispatch.last_error ?? null,
     }));
   }
 

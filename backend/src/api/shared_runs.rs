@@ -70,7 +70,84 @@ pub async fn publish_media_job(state: &AppState, job_id: &str) -> anyhow::Result
                 });
         }
     }
+    // The generation has settled, so anyone who asked to be told now is.
+    if job.status.is_terminal() {
+        if let Err(error) = wake_media_requester(state, &job).await {
+            // The asset is published either way; only the notification failed.
+            // Logged rather than propagated: losing the wake must not also lose
+            // the run that did complete.
+            tracing::warn!(job = %job.id, "media wake could not be scheduled: {error}");
+        }
+    }
+
     published
+}
+
+/// Wakes the agent that asked to be called back when this generation settled.
+///
+/// An agent used to get a job id and nothing else: to act on the result — feed
+/// the picture into a clip, or simply report it — it had to poll and then
+/// schedule its own wake, a full turn per step. Measured on a live room: one
+/// image cost three turns of waiting.
+///
+/// Fires on failure too. An agent told only about successes waits for ever on a
+/// generation the provider refused.
+async fn wake_media_requester(
+    state: &AppState,
+    job: &crate::db::media_jobs::MediaJob,
+) -> anyhow::Result<()> {
+    let Some(discussion_id) = job.discussion_id.clone() else {
+        return Ok(());
+    };
+    let job_id = job.id.clone();
+    // Claimed, not read: `publish_media_job` runs on every state change and can
+    // run twice for one settle.
+    let Some(payload) = state
+        .db
+        .with_conn(move |conn| crate::db::media_jobs::take_wake_request(conn, &job_id))
+        .await?
+    else {
+        return Ok(());
+    };
+
+    let parsed: serde_json::Value = serde_json::from_str(&payload)?;
+    let agent_type: crate::models::AgentType =
+        serde_json::from_value(parsed["agent_type"].clone())?;
+    let source_dispatch_job_id = parsed["source_dispatch_job_id"]
+        .as_str()
+        .map(str::to_string);
+
+    let outcome = match job.status {
+        MediaJobStatus::Completed => "is ready",
+        _ => "did not complete",
+    };
+    let reason = format!(
+        "The {} generation you asked to be called back on {outcome} (job {}).          Read it with media_job_status before acting.",
+        job.modality.as_str(),
+        job.id,
+    );
+
+    crate::api::agent_jobs::schedule_wake(
+        state,
+        crate::api::agent_jobs::NativeAgentJobCaller {
+            discussion_id: &discussion_id,
+            agent_type: &agent_type,
+            source_dispatch_job_id: source_dispatch_job_id.as_deref(),
+            workspace_root: None,
+        },
+        crate::models::ScheduleAgentWakeRequest {
+            // The soonest the scheduler accepts: the thing being waited on has
+            // already happened.
+            delay_seconds: 1,
+            reason,
+            // The job id, so a republish cannot enqueue a second wake for one
+            // generation even if the claim above were ever bypassed.
+            dedupe_key: format!("media-wake:{}", job.id),
+            task_execution_id: None,
+        },
+    )
+    .await?;
+    Ok(())
 }
 
 /// Scoping the run listing by project/discussion is only meaningful when the

@@ -6952,3 +6952,53 @@
   border-color: var(--kr-border-strong);
   color: var(--kr-text-primary);
 }
+
+/* ─── Database weight chart ──────────────────────────────────────────────
+   Row counts and weight disagree: one instance held 34 678 messages in
+   41 MB and 2 554 workflow runs in 2 620 MB. The chart exists so the
+   second is the one you see first. */
+.set-db-usage {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-sp-2);
+  margin-bottom: var(--kr-sp-4);
+}
+
+.set-db-usage-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.set-db-usage-table td {
+  padding: var(--kr-sp-1) 0;
+  vertical-align: middle;
+}
+
+.set-db-usage-table td:first-child {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-2);
+}
+
+/* Tabular figures so sizes line up on the decimal point and can be compared
+   down the column rather than read one by one. */
+.set-db-usage-num {
+  text-align: right;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  padding-left: var(--kr-sp-3);
+}
+
+.set-db-usage-footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--kr-sp-3);
+  color: var(--kr-text-muted);
+  font-size: 0.85em;
+}
+
+.set-db-usage-error {
+  color: var(--kr-danger);
+  font-size: 0.85em;
+}

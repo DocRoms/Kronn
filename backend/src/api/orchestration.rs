@@ -8331,7 +8331,11 @@ fn build_task_worker_catalogue(
     // therefore not delegate to a configured OpenRouter at all, and its media
     // models were invisible even though `/api/media/generate` serves them.
     for connection in connections {
-        let Some(endpoint) = connection.endpoint.as_ref().filter(|e| !e.trim().is_empty()) else {
+        let Some(endpoint) = connection
+            .endpoint
+            .as_ref()
+            .filter(|e| !e.trim().is_empty())
+        else {
             continue;
         };
         let _ = endpoint;
@@ -10148,8 +10152,10 @@ mod tests {
         }
     }
 
-
-    fn media_connection(image: Option<&str>, video: Option<&str>) -> crate::models::ExternalApiConnection {
+    fn media_connection(
+        image: Option<&str>,
+        video: Option<&str>,
+    ) -> crate::models::ExternalApiConnection {
         crate::models::ExternalApiConnection {
             id: "conn-or".into(),
             display_name: "OpenRouter".into(),
@@ -10168,7 +10174,9 @@ mod tests {
         }
     }
 
-    fn catalogue_with(connections: &[crate::models::ExternalApiConnection]) -> crate::models::TaskWorkerCatalogue {
+    fn catalogue_with(
+        connections: &[crate::models::ExternalApiConnection],
+    ) -> crate::models::TaskWorkerCatalogue {
         build_task_worker_catalogue(
             &crate::core::config::default_config(),
             &[],

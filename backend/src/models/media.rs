@@ -51,6 +51,18 @@ pub enum MediaJobStatus {
 }
 
 impl MediaJobStatus {
+    /// Whether this generation has stopped moving — settled, one way or another.
+    ///
+    /// Named rather than matched at each site: a caller that lists only the
+    /// happy endings leaves an agent waiting for ever on a clip the provider
+    /// refused, and that mistake is invisible until someone is stuck.
+    pub fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::Completed | Self::Failed | Self::Cancelled | Self::TimedOut
+        )
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Pending => "pending",
