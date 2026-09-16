@@ -3927,6 +3927,7 @@ suggestion KRONN:APPLY ; cela écraserait la vraie valeur par un placeholder
   'run.status.cancelled': 'Annulé',
   'run.status.timeout': 'Délai dépassé',
   'run.open': 'Ouvrir le run',
+  'disc.strayTools': 'Outils appelés par cette réponse — récupérés dans le texte du message, où une version plus ancienne de Kronn les écrivait.',
   'run.resultTruncated': '… tronqué. Ouvrez le run pour lire la sortie complète.',
   'run.media.open': 'Ouvrir le média',
   'run.details': 'Détails',

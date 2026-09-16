@@ -3821,6 +3821,7 @@ const zh: TranslationDict = {
   "run.status.cancelled": "已取消",
   "run.status.timeout": "超时",
   "run.open": "打开运行",
+  "disc.strayTools": "此回复调用的工具 —— 从消息正文中恢复，旧版 Kronn 曾把它们写在那里。",
   "run.resultTruncated": "… 已截断。打开运行以查看完整输出。",
   "run.media.open": "打开媒体",
   "run.details": "详情",

@@ -1,3 +1,5 @@
+import { stripAcpToolMarkers } from '../lib/acpToolMarkers';
+import { queueMarkdownUpgrade } from '../lib/markdownUpgradeQueue';
 import {
   createContext,
   useContext,
@@ -45,7 +47,7 @@ import {
   Cpu, AlertTriangle, Zap, Loader2, Pause, Play,
   Key, Settings, Send, Pencil, RotateCcw, Check, Copy, Clock, ShieldCheck,
   ChevronRight, ListTodo, User, Users, Trash2, Workflow,
-  Reply, Eye, EyeOff,
+  Reply, Eye, EyeOff, Wrench,
 } from 'lucide-react';
 
 // Hoisted regexes (avoid creating new RegExp objects per message per render)
@@ -356,9 +358,23 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
   const rawVisibleContent = isUser
     ? stripAgentHandoff(msg.content)
     : modelError?.summary ?? msg.content;
-  const visibleContent = msg.role === 'Agent'
+  const fencedContent = msg.role === 'Agent'
     ? stripKronnActionFences(rawVisibleContent)
     : rawVisibleContent;
+  // Replies written between 2026-08-31 and 0.13.0 carry their own tool calls
+  // inside the prose — one held 93 of them. The backend no longer produces
+  // that, but those messages are already written, and they are unreadable for
+  // anyone who does not know what `[ClaudeCode tool: ToolSearch]` means.
+  //
+  // Stripped here rather than further down so every consumer gets the clean
+  // text: copying a reply must not copy the markers, and text-to-speech must
+  // not read them aloud.
+  const stripped = useMemo(
+    () => (msg.role === 'Agent' ? stripAcpToolMarkers(fencedContent) : null),
+    [msg.role, fencedContent],
+  );
+  const strayToolList = stripped && stripped.tools.length > 0 ? stripped.tools : null;
+  const visibleContent = stripped && strayToolList ? stripped.content : fencedContent;
   const retryDispatchId = modelError?.retry_dispatch_id ?? null;
   const errorAgentType = msg.agent_type ?? defaultAgent;
   const agentType = msg.agent_type ?? defaultAgent;
@@ -1114,6 +1130,19 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
             onOpenDiscussion={onOpenActionDiscussion}
           />
         ))}
+        {strayToolList && (
+          // Recovered from the prose, not from a tool record: these calls were
+          // never persisted as such, so this is all that is known about them —
+          // the names, in order. New replies get the real tool group instead.
+          <div className="disc-stray-tools" title={t('disc.strayTools')}>
+            <Wrench size={9} />
+            {strayToolList.map((tool, index) => (
+              <span key={`${tool.name}-${index}`} className="disc-stray-tool">
+                {tool.name}{tool.count > 1 ? ` ×${tool.count}` : ''}
+              </span>
+            ))}
+          </div>
+        )}
         {msg.role === 'Agent' && (
           <button
             className="disc-tts-btn"
@@ -1862,15 +1891,61 @@ export const MarkdownContent = memo(({
     discussionId, sourceMessageId, sources, proposalFenceLines, questionFenceLines,
   }), [discussionId, sourceMessageId, sources, proposalFenceLines, questionFenceLines]);
 
+  // Parsing every message up front is what made a 2 170-message room freeze on
+  // open. Start as text, upgrade to markdown as soon as the message is near the
+  // viewport or the browser is idle — whichever comes first. Never the reverse:
+  // once rendered a message stays rendered, so nothing reflows under a reader.
+  //
+  // Deferral requires BOTH observers; without them (jsdom, an old engine) the
+  // markdown renders immediately, because degrading the page is never the
+  // safer default.
+  const canDefer =
+    typeof IntersectionObserver === 'function' && typeof requestIdleCallback === 'function';
+  const [rendered, setRendered] = useState(!canDefer);
+  const hostRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (rendered) return;
+    const host = hostRef.current;
+    const upgrade = () => setRendered(true);
+
+    // Generous margin: a message should finish parsing before it is scrolled
+    // into view, not while it is being read.
+    const observer = new IntersectionObserver(
+      entries => {
+        if (entries.some(entry => entry.isIntersecting)) upgrade();
+      },
+      { rootMargin: '1200px 0px' },
+    );
+    if (host) observer.observe(host);
+    const cancelIdle = queueMarkdownUpgrade(upgrade);
+
+    return () => {
+      observer.disconnect();
+      cancelIdle();
+    };
+  }, [rendered]);
+
   // Guard against multi-MB messages crashing the tab — see MAX_MARKDOWN_CHARS.
   // Placed AFTER all hooks (the useMemo above) to satisfy rules-of-hooks.
   if (content.length > MAX_MARKDOWN_CHARS) {
     return <LargeMessageFallback content={content} />;
   }
 
+  if (!rendered) {
+    // The text itself, not a skeleton: in-room search scans the DOM, Cmd+F
+    // reads it, and a placeholder holding no text would make both miss a
+    // message that is right there.
+    return (
+      <div className="disc-md disc-md-deferred" ref={hostRef}>
+        {content}
+      </div>
+    );
+  }
+
   return (
     <MarkdownRenderContext.Provider value={renderContext}>
-      <div className="disc-md">
+      <div className="disc-md" ref={hostRef}>
         <ReactMarkdown
           remarkPlugins={agentMentions ? mentionRemarkPluginsList : remarkPluginsList}
           components={discussionMdComponents}

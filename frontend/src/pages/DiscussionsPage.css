@@ -8022,3 +8022,31 @@ button.disc-contact-open {
   color: var(--kr-error);
   font-size: var(--kr-fs-xs);
 }
+
+/* Tool calls recovered from the prose of a reply written before 0.13.0 —
+   see stripAcpToolMarkers. Deliberately quieter than the real tool group:
+   only the names survived, so it must not look like the full record. */
+.disc-stray-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--kr-sp-1);
+  margin-top: var(--kr-sp-2);
+  color: var(--kr-text-dim);
+  font-size: 10px;
+}
+
+.disc-stray-tool {
+  padding: 1px 6px;
+  border: 1px solid var(--kr-border-subtle);
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+/* A message whose markdown has not been parsed yet — see markdownUpgradeQueue.
+   It holds the real text (search and Cmd+F depend on that), laid out close
+   enough to the rendered result that the upgrade does not jump. */
+.disc-md-deferred {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
