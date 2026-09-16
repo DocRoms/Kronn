@@ -505,6 +505,10 @@ fn orchestration_tool_catalogue() -> Vec<Value> {
                     "items": {"type": "string"},
                     "description": "Context file ids of pictures the generation starts from — typically an image you just generated in this room. A video can be driven by one; an image can be varied from one."
                 },
+                "wake_when_ready": {
+                    "type": "boolean",
+                    "description": "Wake this room when the generation settles, success or failure, instead of you polling for it. Use it when the result drives your next step — feeding the image into a video, or reporting what came back. Without it the asset still arrives in the room on its own; you simply are not told."
+                },
                 "reference_mode": {
                     "type": "string",
                     "enum": ["first_frame", "last_frame", "reference"],
@@ -1430,6 +1434,47 @@ impl KronnToolExecutor {
                     axum::Json(request),
                 )
                 .await;
+
+                // Recorded AFTER the job exists, and only when asked. Writing it
+                // into the generation request would carry caller identity into
+                // the body sent to the provider.
+                if call
+                    .arguments
+                    .get("wake_when_ready")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false)
+                {
+                    if let Some(job_id) =
+                        response.0.data.as_ref().map(|queued| queued.job_id.clone())
+                    {
+                        let payload = serde_json::json!({
+                            "agent_type": actor_type,
+                            "source_dispatch_job_id": self.source_dispatch_job_id,
+                        })
+                        .to_string();
+                        let job = job_id.clone();
+                        if let Err(error) = self
+                            .state
+                            .db
+                            .with_conn(move |conn| {
+                                crate::db::media_jobs::set_wake_request(conn, &job, &payload)
+                            })
+                            .await
+                        {
+                            // The generation is already queued and billed. Say
+                            // the wake was not armed rather than let the agent
+                            // wait for a call that will never come.
+                            return fail(
+                                call,
+                                format!(
+                                    "the generation started ({job_id}) but the wake could not be \
+                                     armed: {error}. Poll media_job_status instead."
+                                ),
+                            );
+                        }
+                    }
+                }
+
                 match serde_json::to_value(response.0) {
                     Ok(value) => ok(call, value),
                     Err(error) => fail(call, error.to_string()),
@@ -3048,6 +3093,38 @@ mod tests {
         assert!(
             description.contains("retry") && description.contains("billed"),
             "an agent cannot reuse a key whose purpose it was never told: {description}"
+        );
+    }
+
+    #[test]
+    fn an_agent_can_ask_to_be_called_back_when_the_media_settles() {
+        // Without this an agent had to poll `media_job_status` and then
+        // schedule its own wake to act on a result — measured on a live room as
+        // three agent turns spent waiting for one image.
+        let tool = orchestration_tool_catalogue()
+            .into_iter()
+            .find(|tool| tool["function"]["name"] == "media_generate")
+            .expect("declared");
+        let properties = &tool["function"]["parameters"]["properties"];
+
+        assert_eq!(properties["wake_when_ready"]["type"], "boolean");
+        // Opt-in, never required: a generation nobody is waiting on must not
+        // hand its room an extra turn.
+        let required: Vec<&str> = tool["function"]["parameters"]["required"]
+            .as_array()
+            .expect("required list")
+            .iter()
+            .filter_map(|value| value.as_str())
+            .collect();
+        assert!(!required.contains(&"wake_when_ready"));
+
+        let description = properties["wake_when_ready"]["description"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(
+            description.contains("failure"),
+            "an agent told only about successes waits for ever on a refused \
+             generation: {description}"
         );
     }
 

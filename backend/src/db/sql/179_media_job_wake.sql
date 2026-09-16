@@ -1,0 +1,11 @@
+-- Who to wake when a media generation settles.
+--
+-- An agent that asks for a picture gets a job id back and nothing else: the
+-- asset arrives in the room later, on its own. To act on it — to feed the
+-- image into a video, or simply to report the result — the agent had to poll
+-- `media_job_status` and then schedule its own wake, spending a full turn per
+-- step. Measured on a live room: one image cost three agent turns of waiting.
+--
+-- Nullable because it is opt-in, and cleared when the wake is scheduled so a
+-- republished job cannot wake the same agent twice.
+ALTER TABLE media_jobs ADD COLUMN wake_agent_json TEXT;

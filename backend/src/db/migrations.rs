@@ -683,6 +683,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "178_shared_run_step_outputs",
         include_str!("sql/178_shared_run_step_outputs.sql"),
     ),
+    (
+        "179_media_job_wake",
+        include_str!("sql/179_media_job_wake.sql"),
+    ),
 ];
 
 /// Apply one migration inside the caller-owned transaction.
