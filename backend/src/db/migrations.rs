@@ -687,6 +687,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "179_media_job_wake",
         include_str!("sql/179_media_job_wake.sql"),
     ),
+    (
+        "180_agent_resume_release_attempts",
+        include_str!("sql/180_agent_resume_release_attempts.sql"),
+    ),
 ];
 
 /// Apply one migration inside the caller-owned transaction.
