@@ -1467,6 +1467,32 @@ fn messages_not_yet_seen(
 /// carries, else the discussion's durable sticky target. The job wins so an
 /// explicit one-off target (a mention, a retry against another connection)
 /// is never silently replaced by the room's default.
+/// What a connection whose target does not match the agent being started means.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConnectionMismatch {
+    /// The job itself named this connection. A job that names a connection
+    /// serving another agent is inconsistent, and starting it anyway would run
+    /// the turn on something the caller did not ask for.
+    Refuse,
+    /// The connection was only inherited from the room. The room's sticky
+    /// connection describes the room's EXTERNAL agent (KT-545); a sibling
+    /// explicitly targeting a native CLI is not that agent, so the room's
+    /// connection says nothing about it — absent, not wrong.
+    ///
+    /// Treating it as wrong refused the start of every native agent mentioned
+    /// alongside an external one: mention @openrouter, @claudecode and
+    /// @opencode on one message and only OpenRouter ever ran.
+    Ignore,
+}
+
+pub(crate) fn connection_mismatch(inherited: bool) -> ConnectionMismatch {
+    if inherited {
+        ConnectionMismatch::Ignore
+    } else {
+        ConnectionMismatch::Refuse
+    }
+}
+
 pub(crate) fn effective_connection_id<'a>(
     dispatch: Option<&'a String>,
     discussion: Option<&'a String>,
@@ -1654,6 +1680,10 @@ async fn make_agent_stream_inner(
     // fallback an ordinary reply in a room backed by an external connection
     // failed with "the selected external API connection is unavailable",
     // although the connection existed and was recorded on the discussion.
+    // Whether the connection below was chosen for THIS dispatch or merely
+    // inherited from the room. The two must not be treated alike on a mismatch:
+    // see the `Ok(Some(_)) if inherited_connection` arm.
+    let inherited_connection = dispatch_connection_id.is_none();
     let effective_connection_id =
         effective_connection_id(dispatch_connection_id.as_ref(), disc.connection_id.as_ref());
     let external_connection = if let Some(connection_id) = effective_connection_id {
@@ -1669,6 +1699,20 @@ async fn make_agent_stream_inner(
                     == agent_type =>
             {
                 Some(connection)
+            }
+            // The room's sticky connection describes the room's EXTERNAL agent
+            // (KT-545). A sibling explicitly targeting a native CLI is not that
+            // agent, and the room's connection says nothing about it — so it is
+            // simply absent here, not wrong.
+            //
+            // Treating it as wrong refused the start of every native agent
+            // mentioned alongside an external one: mention @openrouter,
+            // @claudecode and @opencode on one message and only OpenRouter ever
+            // ran, the other two vanishing with no visible reason.
+            Ok(Some(_))
+                if connection_mismatch(inherited_connection) == ConnectionMismatch::Ignore =>
+            {
+                None
             }
             Ok(Some(_)) => {
                 finish_tracked_preflight(
@@ -4871,8 +4915,9 @@ mod agent_lifecycle_tests {
     use super::{
         agent_start_error_content, agent_start_failure_outcome, auth_required_system_message,
         cap_agent_response, child_run_counts_as_success, configured_agent_global_timeout,
-        effective_global_timeout, effective_stall_timeout, finish_tracked_preflight,
-        lift_acp_tool_calls, AgentExecutionOutcome, NON_STREAMING_STALL_TIMEOUT,
+        connection_mismatch, effective_global_timeout, effective_stall_timeout,
+        finish_tracked_preflight, lift_acp_tool_calls, AgentExecutionOutcome, ConnectionMismatch,
+        NON_STREAMING_STALL_TIMEOUT,
     };
     use crate::models::{AgentType, MessageRole};
     use std::time::Duration;
@@ -5028,6 +5073,30 @@ mod agent_lifecycle_tests {
                                                // No panic + still valid UTF-8 (String guarantees it if no panic).
         assert!(out.contains("tronqué"));
         assert!(out.len() <= 1001 + 80);
+    }
+
+    #[test]
+    fn a_rooms_connection_never_refuses_a_native_sibling() {
+        // Reported twice from real rooms: three agents mentioned, three
+        // placeholders, then only the external one ever answers. The database
+        // said why the moment the refusal carried its reason —
+        // "the selected external API connection no longer matches this agent
+        // target" on every ClaudeCode and OpenCode job in the room.
+        //
+        // The room was backed by OpenRouter, so its sticky connection serves
+        // AgentType::Custom. A sibling targeting a native CLI inherited it and
+        // was refused for not being the agent the connection serves.
+        assert_eq!(
+            connection_mismatch(true),
+            ConnectionMismatch::Ignore,
+            "a connection inherited from the room says nothing about a native target"
+        );
+        assert_eq!(
+            connection_mismatch(false),
+            ConnectionMismatch::Refuse,
+            "but a job that NAMES a connection serving another agent is inconsistent \
+             and must not be started on something the caller did not ask for"
+        );
     }
 
     #[test]
