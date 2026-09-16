@@ -397,6 +397,53 @@ pub fn tool_catalogue() -> Vec<Value> {
 /// Derived from the catalogue itself so a tool cannot be declared without being
 /// routable. Declaring one and forgetting this step is invisible: the model is
 /// told it has the tool, calls it, and is answered "unknown tool".
+/// A stable idempotency key for a media generation the agent did not key
+/// itself.
+///
+/// The server keys a job by whatever it is handed and falls back to a random
+/// id, so an agent retrying the same generation creates a second job and pays
+/// for the asset twice. Deriving the key from the request makes the retry
+/// collapse onto the first job instead — the safe behaviour has to be the one
+/// you get by saying nothing, because this one costs money.
+///
+/// The discussion is in the digest so two rooms asking for the same picture
+/// still get their own asset; the tool arguments are, so changing anything the
+/// operator would see in the result is a different job.
+fn derived_media_idempotency_key(discussion_id: &str, arguments: &Value) -> String {
+    use sha2::{Digest, Sha256};
+
+    let mut digest = Sha256::new();
+    digest.update(b"kronn-agent-media-v1\0");
+    digest.update(discussion_id.as_bytes());
+    for field in [
+        "connection_id",
+        "modality",
+        "prompt",
+        "duration_secs",
+        "resolution",
+        "aspect_ratio",
+        "generate_audio",
+        "reference_asset_ids",
+        "reference_mode",
+    ] {
+        digest.update(b"\0");
+        digest.update(field.as_bytes());
+        digest.update(b"=");
+        // Serialised rather than stringified so `null`, `"1"` and `1` stay
+        // distinguishable — a collision here is a generation silently skipped.
+        digest.update(
+            serde_json::to_string(arguments.get(field).unwrap_or(&Value::Null))
+                .unwrap_or_default()
+                .as_bytes(),
+        );
+    }
+    digest
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
 pub(crate) fn is_orchestration_tool(name: &str) -> bool {
     orchestration_tool_catalogue()
         .iter()
@@ -463,7 +510,10 @@ fn orchestration_tool_catalogue() -> Vec<Value> {
                     "enum": ["first_frame", "last_frame", "reference"],
                     "description": "What the referenced picture is to a video: the exact opening frame, the exact closing frame, or a visual the model draws from. Defaults to first_frame for a video."
                 },
-                "idempotency_key": {"type": "string"}
+                "idempotency_key": {
+                    "type": "string",
+                    "description": "Reuse the SAME value when you retry a generation you already asked for: it is what stops the asset being bought, and billed, a second time. Omit it and Kronn derives one from this request, so an identical retry collapses onto the first job rather than paying twice. Pass a new value only when you genuinely want another, separate take."
+                }
             }),
             json!(["connection_id", "modality", "prompt"]),
         ),
@@ -1307,11 +1357,23 @@ impl KronnToolExecutor {
                     }
                 };
                 let request = crate::api::media::GenerateMediaRequest {
-                    idempotency_key: call
-                        .arguments
-                        .get("idempotency_key")
-                        .and_then(serde_json::Value::as_str)
-                        .map(str::to_string),
+                    // Derived from the request when the agent gives none.
+                    // Without this the server falls back to a random id, so two
+                    // identical asks are two jobs and two charges — which is
+                    // what a wake-and-retry loop produced: the same picture
+                    // generated twice, six minutes apart, billed twice.
+                    //
+                    // An agent that wants a genuinely different take says so by
+                    // passing its own key, or by changing the prompt.
+                    idempotency_key: Some(
+                        call.arguments
+                            .get("idempotency_key")
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_string)
+                            .unwrap_or_else(|| {
+                                derived_media_idempotency_key(&discussion_id, &call.arguments)
+                            }),
+                    ),
                     connection_id,
                     modality,
                     prompt,
@@ -2916,6 +2978,77 @@ mod tests {
                 "{agent:?} must be told it has the plan/task tools, or it will not call them"
             );
         }
+    }
+
+    #[test]
+    fn an_identical_generation_is_not_bought_twice() {
+        // Measured on a real room: the same prompt generated twice, six minutes
+        // apart, $0.067 each. The agent DID pass an idempotency key — a
+        // different one each attempt, because the schema declared the field
+        // with no description at all and it had no way to know that reusing it
+        // is the whole point.
+        //
+        // Describing it is necessary but not sufficient: the safe behaviour has
+        // to be what you get by saying nothing, because this one costs money.
+        let args = serde_json::json!({
+            "connection_id": "conn-1",
+            "modality": "image",
+            "prompt": "a golden robot bowing on stage",
+        });
+
+        let first = derived_media_idempotency_key("disc-1", &args);
+        let retry = derived_media_idempotency_key("disc-1", &args);
+        assert_eq!(
+            first, retry,
+            "a retry of the same ask must collapse onto it"
+        );
+
+        // Anything the operator would see change in the result is a new job.
+        for (field, value) in [
+            (
+                "prompt",
+                serde_json::json!("a silver robot bowing on stage"),
+            ),
+            ("modality", serde_json::json!("video")),
+            ("connection_id", serde_json::json!("conn-2")),
+            ("aspect_ratio", serde_json::json!("16:9")),
+        ] {
+            let mut different = args.clone();
+            different[field] = value;
+            assert_ne!(
+                first,
+                derived_media_idempotency_key("disc-1", &different),
+                "changing `{field}` must not reuse the previous asset"
+            );
+        }
+
+        // And two rooms asking for the same picture each get their own.
+        assert_ne!(first, derived_media_idempotency_key("disc-2", &args));
+
+        // `null`, `1` and `"1"` must not collide — a collision here is a
+        // generation silently skipped, which reads as the feature being broken.
+        let mut as_number = args.clone();
+        as_number["duration_secs"] = serde_json::json!(1);
+        let mut as_string = args.clone();
+        as_string["duration_secs"] = serde_json::json!("1");
+        assert_ne!(
+            derived_media_idempotency_key("disc-1", &as_number),
+            derived_media_idempotency_key("disc-1", &as_string),
+        );
+    }
+
+    #[test]
+    fn the_media_tool_explains_what_the_idempotency_key_is_for() {
+        let tool = orchestration_tool_catalogue()
+            .into_iter()
+            .find(|tool| tool["function"]["name"] == "media_generate")
+            .expect("declared");
+        let key = &tool["function"]["parameters"]["properties"]["idempotency_key"];
+        let description = key["description"].as_str().unwrap_or_default();
+        assert!(
+            description.contains("retry") && description.contains("billed"),
+            "an agent cannot reuse a key whose purpose it was never told: {description}"
+        );
     }
 
     #[test]
