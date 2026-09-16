@@ -91,9 +91,8 @@ pub enum Reconcile {
 /// it through the read-only connection. Before any CTA had been launched every
 /// row was `proposed`, so this returned early, nothing was written and the
 /// endpoint answered — which is why it looked healthy. From the first launch
-/// onwards each listing attempted the UPDATE and was refused:
-///
-///     Unable to list Page actions: attempt to write a readonly database
+/// onwards each listing attempted the UPDATE and was refused with
+/// `Unable to list Page actions: attempt to write a readonly database`.
 ///
 /// The page then stayed broken for everyone, and self-sustainingly so: the
 /// reconciliation that would have moved the state on is exactly what was

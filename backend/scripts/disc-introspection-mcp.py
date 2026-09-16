@@ -2334,17 +2334,6 @@ TOOLS = [
                     "type": "boolean",
                     "description": "Block until the media is delivered. Default false — see the description.",
                 },
-                "idempotency_key": {
-                    "type": "string",
-                    "description": (
-                        "Reuse the SAME value when you retry a generation you "
-                        "already asked for: it is what stops the asset being "
-                        "bought, and billed, a second time. Omit it and a key is "
-                        "derived from this request, so an identical retry "
-                        "collapses onto the first job rather than paying twice. "
-                        "Pass a new value only for a genuinely separate take."
-                    ),
-                },
             },
             "required": ["connection_id", "modality", "prompt"],
         },
@@ -8349,11 +8338,13 @@ def call_media_generate(args):
         audio = args.get("generate_audio")
         body["generate_audio"] = True if audio is None else bool(audio)
 
-    # Derived when the caller gives none. Without a key the server falls back to
-    # a random job id, so two identical asks are two jobs and two charges —
-    # measured on a live instance as the same picture generated twice, six
-    # minutes apart. The safe behaviour has to be the one you get by saying
-    # nothing, because this one costs money.
+    # Always derived, and deliberately NOT offered in the schema. Without a key
+    # the server falls back to a random job id, so two identical asks are two
+    # jobs and two charges — measured on a live instance as the same picture
+    # generated twice, six minutes apart. Deriving it here protects every agent
+    # without spending catalogue bytes on a field none of them needs to set: an
+    # agent that wants a different picture changes the prompt, which changes the
+    # key. `args` is still honoured for a caller that passes one anyway.
     body["idempotency_key"] = args.get("idempotency_key") or _derived_media_key(body)
 
     queued = _unwrap(_http("POST", "/api/media/generate", body))
