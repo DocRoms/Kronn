@@ -10643,13 +10643,24 @@ mod acp_resume_tests {
         )
         .await;
 
-        assert_eq!(
-            collect_output(&mut process).await,
-            "first chunk[OpenCode tool: read_file]"
-        );
+        // The reply channel carries the reply, and nothing else. This used to
+        // read "first chunk[OpenCode tool: read_file]" — the call welded into
+        // the prose, which is what a room then displayed, with the tool group
+        // under the message left empty.
+        assert_eq!(collect_output(&mut process).await, "first chunk");
         assert!(process.child.wait().await.expect("lifeline").success());
         assert_eq!(process.reported_token_usage(), Some(8));
         assert_eq!(transport.created.load(Ordering::SeqCst), 1);
+
+        // The call is not dropped — it goes to the channel the transcript lifts
+        // it from, in the shape `lift_acp_tool_calls` reads.
+        let captured = process.captured_stderr();
+        assert!(
+            captured
+                .iter()
+                .any(|line| line == &format!("{ACP_TOOL_MARKER}read_file")),
+            "the tool call must reach the stderr capture; got {captured:?}",
+        );
     }
 
     #[tokio::test]
