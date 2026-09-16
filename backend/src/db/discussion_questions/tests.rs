@@ -439,9 +439,15 @@ fn declining_resolves_the_question_and_reaches_the_asker() {
 
     let q = decline(&conn, "d", "question:m:0", &decline_request(), "Romu", None).unwrap();
     assert_eq!(q.state, DiscussionQuestionState::Declined);
-    let record = q.answer.as_ref().expect("a refusal is recorded like an answer");
+    let record = q
+        .answer
+        .as_ref()
+        .expect("a refusal is recorded like an answer");
     assert!(record.selected_option_ids.is_empty(), "nothing was chosen");
-    assert_eq!(record.text.as_deref(), Some("La question n'a plus d'objet."));
+    assert_eq!(
+        record.text.as_deref(),
+        Some("La question n'a plus d'objet.")
+    );
     assert_eq!(record.author_pseudo, "Romu");
     assert_eq!(list(&conn, "d").unwrap().pending_count, 0);
 
@@ -452,8 +458,7 @@ fn declining_resolves_the_question_and_reaches_the_asker() {
             .unwrap(),
         1
     );
-    let targets =
-        crate::db::discussions::list_message_targets(&conn, &record.message_id).unwrap();
+    let targets = crate::db::discussions::list_message_targets(&conn, &record.message_id).unwrap();
     assert_eq!(targets[0].agent_type, crate::models::AgentType::Codex);
     let content: String = conn
         .query_row(
@@ -485,7 +490,10 @@ fn a_refusal_without_a_reason_still_tells_the_agent_what_to_do() {
             |r| r.get(0),
         )
         .unwrap();
-    assert!(content.contains("Ne bloque pas sur cette question"), "{content}");
+    assert!(
+        content.contains("Ne bloque pas sur cette question"),
+        "{content}"
+    );
 }
 
 #[test]

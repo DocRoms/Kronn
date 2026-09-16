@@ -382,7 +382,11 @@ Release notes for 0.9.3 and earlier are available in the
   the database. Refusals now carry the reason, which the neighbouring
   retryable-outage path already surfaced anyway. What is settled and what is
   worth retrying is still told apart — that decision never depended on hiding
-  the diagnosis.
+  the diagnosis. Two places produced that sentence, and the second is the one a
+  room goes through: it settles a tracked run, so its text is what lands in the
+  job's last error and in the room. Its fifteen conditions — each of which had
+  just established something precise — all reported the same nine words. Each
+  now reports what it found.
 
 - A backend restart could silently cancel the agents that had not spoken yet.
   Mention several agents on one message and they share a trigger, but they run

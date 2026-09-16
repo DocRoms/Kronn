@@ -1291,7 +1291,6 @@ mod tests {
         assert_eq!(awaiting, 0, "the discussion is released, not left waiting");
     }
 
-
     /// Mention three agents on one message and they share a trigger. The first
     /// to answer must not condemn the others at the next restart: its reply is
     /// newer than their trigger, but it answers the very same question.

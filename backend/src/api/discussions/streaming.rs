@@ -892,12 +892,19 @@ fn agent_start_error_content(
     Some(format!("[kronn:agent-error]\n{payload}"))
 }
 
+/// Settle a tracked run that never reached the agent, saying why.
+///
+/// The reason used to be hard-coded to "agent execution preflight failed",
+/// which is how a refusal reached `agent_dispatch_jobs.last_error` carrying
+/// nothing an operator could act on — 76 rows of it in one instance. Each
+/// caller names the condition it just detected instead.
 fn finish_tracked_preflight(
     completion_tx: &mut Option<tokio::sync::oneshot::Sender<AgentExecutionOutcome>>,
+    diagnostic: &str,
 ) {
     if let Some(sender) = completion_tx.take() {
         let _ = sender.send(AgentExecutionOutcome::PreflightFailed {
-            diagnostic: "agent execution preflight failed".into(),
+            diagnostic: diagnostic.to_string(),
         });
     }
 }
@@ -1584,7 +1591,7 @@ async fn make_agent_stream_inner(
         .flatten();
 
     if disc.is_none() {
-        finish_tracked_preflight(&mut completion_tx);
+        finish_tracked_preflight(&mut completion_tx, "discussion not found");
         let stream: SseStream = Box::pin(futures::stream::once(async {
             Ok::<_, Infallible>(
                 Event::default()
@@ -1598,7 +1605,7 @@ async fn make_agent_stream_inner(
     let disc = match disc {
         Some(d) => d,
         None => {
-            finish_tracked_preflight(&mut completion_tx);
+            finish_tracked_preflight(&mut completion_tx, "discussion not found");
             let stream: SseStream = Box::pin(futures::stream::once(async {
                 Ok::<_, Infallible>(
                     Event::default()
@@ -1633,7 +1640,10 @@ async fn make_agent_stream_inner(
                 Some(connection)
             }
             Ok(Some(_)) => {
-                finish_tracked_preflight(&mut completion_tx);
+                finish_tracked_preflight(
+                    &mut completion_tx,
+                    "the selected external API connection no longer matches this agent target",
+                );
                 let stream: SseStream = Box::pin(futures::stream::once(async move {
                     Ok::<_, Infallible>(Event::default().event("error").data(
                         serde_json::json!({
@@ -1645,7 +1655,10 @@ async fn make_agent_stream_inner(
                 return Sse::new(prepend_initial_event(stream, initial_event.take()));
             }
             _ => {
-                finish_tracked_preflight(&mut completion_tx);
+                finish_tracked_preflight(
+                    &mut completion_tx,
+                    "the selected external API connection no longer exists",
+                );
                 let stream: SseStream = Box::pin(futures::stream::once(async move {
                     Ok::<_, Infallible>(Event::default().event("error").data(
                         serde_json::json!({
@@ -1694,7 +1707,10 @@ async fn make_agent_stream_inner(
                     .data(serde_json::json!({ "error": safe_error }).to_string()),
             )
         }));
-        finish_tracked_preflight(&mut completion_tx);
+        finish_tracked_preflight(
+            &mut completion_tx,
+            "agent authentication preflight refused the start",
+        );
         return Sse::new(prepend_initial_event(stream, initial_event.take()));
     }
     let disc_tier = tier_override.unwrap_or(disc.tier);
@@ -1738,7 +1754,10 @@ async fn make_agent_stream_inner(
                 agent = ?agent_type,
                 "Unable to resolve native HTTP tool scope: {error}"
             );
-            finish_tracked_preflight(&mut completion_tx);
+            finish_tracked_preflight(
+                &mut completion_tx,
+                "unable to resolve the native HTTP tool scope",
+            );
             let stream: SseStream = Box::pin(futures::stream::once(async move {
                 Ok::<_, Infallible>(
                     Event::default().event("error").data(
@@ -1767,7 +1786,10 @@ async fn make_agent_stream_inner(
                 agent = ?agent_type,
                 "Unable to resolve CLI task-worker delivery scope: {error}"
             );
-            finish_tracked_preflight(&mut completion_tx);
+            finish_tracked_preflight(
+                &mut completion_tx,
+                "unable to resolve the CLI task-worker delivery scope",
+            );
             let stream: SseStream = Box::pin(futures::stream::once(async move {
                 Ok::<_, Infallible>(
                     Event::default().event("error").data(
@@ -1895,7 +1917,10 @@ async fn make_agent_stream_inner(
                                 .data(serde_json::json!({ "error": err_msg }).to_string()),
                         )
                     }));
-                    finish_tracked_preflight(&mut completion_tx);
+                    finish_tracked_preflight(
+                        &mut completion_tx,
+                        "agent start refused before reaching the provider",
+                    );
                     return Sse::new(prepend_initial_event(stream, initial_event.take()));
                 }
             }
@@ -1978,7 +2003,10 @@ async fn make_agent_stream_inner(
                                 .data(serde_json::json!({ "error": safe_error }).to_string()),
                         )
                     }));
-                    finish_tracked_preflight(&mut completion_tx);
+                    finish_tracked_preflight(
+                        &mut completion_tx,
+                        "agent start refused before reaching the provider",
+                    );
                     return Sse::new(prepend_initial_event(stream, initial_event.take()));
                 }
                 Some((root, targets))
@@ -2033,7 +2061,10 @@ async fn make_agent_stream_inner(
                             .data(serde_json::json!({ "error": safe_error }).to_string()),
                     )
                 }));
-                finish_tracked_preflight(&mut completion_tx);
+                finish_tracked_preflight(
+                    &mut completion_tx,
+                    "agent start refused before reaching the provider",
+                );
                 return Sse::new(prepend_initial_event(stream, initial_event.take()));
             }
         }
@@ -2481,7 +2512,10 @@ async fn make_agent_stream_inner(
         let secret = match state.config.read().await.encryption_secret.clone() {
             Some(secret) => secret,
             None => {
-                finish_tracked_preflight(&mut completion_tx);
+                finish_tracked_preflight(
+                    &mut completion_tx,
+                    "Quick Prompt variable snapshot key unavailable",
+                );
                 let stream: SseStream = Box::pin(futures::stream::once(async {
                     Ok::<_, Infallible>(Event::default().event("error").data(
                         serde_json::json!({"error": "Quick Prompt variable snapshot key unavailable"}).to_string(),
@@ -2493,7 +2527,10 @@ async fn make_agent_stream_inner(
         let key = match crate::core::crypto::parse_secret(&secret) {
             Ok(key) => key,
             Err(_) => {
-                finish_tracked_preflight(&mut completion_tx);
+                finish_tracked_preflight(
+                    &mut completion_tx,
+                    "Quick Prompt variable snapshot key unavailable",
+                );
                 let stream: SseStream = Box::pin(futures::stream::once(async {
                     Ok::<_, Infallible>(Event::default().event("error").data(
                         serde_json::json!({"error": "Quick Prompt variable snapshot key unavailable"}).to_string(),
@@ -2516,7 +2553,10 @@ async fn make_agent_stream_inner(
                 // A QP dispatch may never fall through with placeholders: it
                 // would turn a failed preflight or expired snapshot into an
                 // agent side effect with incomplete input.
-                finish_tracked_preflight(&mut completion_tx);
+                finish_tracked_preflight(
+                    &mut completion_tx,
+                    "Quick Prompt variable snapshot unavailable or expired",
+                );
                 let stream: SseStream = Box::pin(futures::stream::once(async {
                     Ok::<_, Infallible>(Event::default().event("error").data(
                         serde_json::json!({"error": "Quick Prompt variable snapshot unavailable or expired"}).to_string(),
@@ -2586,7 +2626,10 @@ async fn make_agent_stream_inner(
             Ok(effort) => effort,
             Err(error) => {
                 tracing::error!("Unable to read launch-time Quick Prompt effort: {error}");
-                finish_tracked_preflight(&mut completion_tx);
+                finish_tracked_preflight(
+                    &mut completion_tx,
+                    "unable to read the launch-time Quick Prompt effort",
+                );
                 let stream: SseStream = Box::pin(futures::stream::once(async move {
                     Ok::<_, Infallible>(Event::default().event("error").data(
                         serde_json::json!({"error": "quick_prompt_effort_snapshot_unavailable"}).to_string()
@@ -2616,7 +2659,10 @@ async fn make_agent_stream_inner(
             "error": "model_catalog_preflight_failed",
             "preflight_failure": failure,
         });
-        finish_tracked_preflight(&mut completion_tx);
+        finish_tracked_preflight(
+            &mut completion_tx,
+            "model catalogue preflight refused this model",
+        );
         let stream: SseStream = Box::pin(futures::stream::once(async move {
             Ok::<_, Infallible>(Event::default().event("error").data(payload.to_string()))
         }));
@@ -4792,8 +4838,8 @@ mod agent_lifecycle_tests {
     use super::{
         agent_start_error_content, agent_start_failure_outcome, auth_required_system_message,
         cap_agent_response, child_run_counts_as_success, configured_agent_global_timeout,
-        effective_global_timeout, effective_stall_timeout, AgentExecutionOutcome,
-        NON_STREAMING_STALL_TIMEOUT,
+        effective_global_timeout, effective_stall_timeout, finish_tracked_preflight,
+        AgentExecutionOutcome, NON_STREAMING_STALL_TIMEOUT,
     };
     use crate::models::{AgentType, MessageRole};
     use std::time::Duration;
@@ -4951,6 +4997,45 @@ mod agent_lifecycle_tests {
         assert!(out.len() <= 1001 + 80);
     }
 
+    #[tokio::test]
+    async fn a_tracked_preflight_reports_the_condition_it_detected() {
+        // The second path into `PreflightFailed`. It hard-coded "agent
+        // execution preflight failed" for all fifteen of its call sites, so a
+        // refusal reached agent_dispatch_jobs.last_error carrying nothing —
+        // 76 such rows in one instance, none of them diagnosable.
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let mut slot = Some(tx);
+        finish_tracked_preflight(
+            &mut slot,
+            "the selected external API connection no longer exists",
+        );
+        assert!(slot.is_none(), "the sender is consumed exactly once");
+        let outcome = rx.await.expect("the tracked run must be settled");
+        let AgentExecutionOutcome::PreflightFailed { diagnostic } = outcome else {
+            panic!("a refused preflight must not be reported as anything else");
+        };
+        assert_eq!(
+            diagnostic,
+            "the selected external API connection no longer exists"
+        );
+        assert_ne!(diagnostic, "agent execution preflight failed");
+    }
+
+    #[tokio::test]
+    async fn finishing_a_preflight_twice_settles_it_once() {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let mut slot = Some(tx);
+        finish_tracked_preflight(&mut slot, "discussion not found");
+        // A second call must be a no-op rather than a panic on a taken sender.
+        finish_tracked_preflight(&mut slot, "something else entirely");
+        let AgentExecutionOutcome::PreflightFailed { diagnostic } = rx.await.unwrap() else {
+            panic!("unexpected outcome");
+        };
+        assert_eq!(
+            diagnostic, "discussion not found",
+            "the first reason stands"
+        );
+    }
 
     #[test]
     fn a_refused_preflight_says_what_it_refused_on() {
@@ -6439,7 +6524,10 @@ mod connection_fallback_tests {
         // An explicit one-off target must never be replaced by the sticky one.
         let job = "job-connection".to_string();
         let sticky = "room-connection".to_string();
-        assert_eq!(effective_connection_id(Some(&job), Some(&sticky)), Some(&job));
+        assert_eq!(
+            effective_connection_id(Some(&job), Some(&sticky)),
+            Some(&job)
+        );
     }
 
     #[test]
