@@ -392,6 +392,17 @@ pub fn tool_catalogue() -> Vec<Value> {
 /// intentionally separate from the general catalogue: workflow Agent steps have no
 /// principal/worker room identity, and every schema omits caller ids because Kronn
 /// derives them from the trusted executor.
+/// Whether this name belongs to the orchestration catalogue.
+///
+/// Derived from the catalogue itself so a tool cannot be declared without being
+/// routable. Declaring one and forgetting this step is invisible: the model is
+/// told it has the tool, calls it, and is answered "unknown tool".
+pub(crate) fn is_orchestration_tool(name: &str) -> bool {
+    orchestration_tool_catalogue()
+        .iter()
+        .any(|tool| tool["function"]["name"] == name)
+}
+
 fn orchestration_tool_catalogue() -> Vec<Value> {
     let tool = |name: &str, description: &str, properties: Value, required: Value| {
         json!({
@@ -433,7 +444,7 @@ fn orchestration_tool_catalogue() -> Vec<Value> {
         ),
         tool(
             "media_generate",
-            "Generate an image or a video on a configured HTTP connection; returns {job_id, status, model}. The operator's configured modality slot fixes the model — you do not choose it — and a modality with no slot is refused. `agent_list` tells you which connection serves which modality: an entry's `media` lists one modality per configured model, and is empty when none is. Billed: video per second, image per picture. Keep the clip short. The asset lands in the discussion on its own as a context file, so poll `media_job_status` only when you need it inside this very answer.",
+            "Generate an image or a video on a configured HTTP connection; returns {job_id, status, model}. The operator's configured modality slot fixes the model — you do not choose it — and a modality with no slot is refused. `agent_list` tells you which connection serves which modality: an entry's `media` lists one modality per configured model, and is empty when none is. A video can start from a picture: pass the context file id of an image from this room in `reference_asset_ids` — generate the image first, then feed it in. Billed: video per second, image per picture. Keep the clip short. The asset lands in the discussion on its own as a context file, so poll `media_job_status` only when you need it inside this very answer.",
             json!({
                 "connection_id": {"type": "string"},
                 "modality": {"type": "string", "enum": ["image", "video"]},
@@ -442,6 +453,16 @@ fn orchestration_tool_catalogue() -> Vec<Value> {
                 "resolution": {"type": "string"},
                 "aspect_ratio": {"type": "string"},
                 "generate_audio": {"type": "boolean"},
+                "reference_asset_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Context file ids of pictures the generation starts from — typically an image you just generated in this room. A video can be driven by one; an image can be varied from one."
+                },
+                "reference_mode": {
+                    "type": "string",
+                    "enum": ["first_frame", "last_frame", "reference"],
+                    "description": "What the referenced picture is to a video: the exact opening frame, the exact closing frame, or a visual the model draws from. Defaults to first_frame for a video."
+                },
                 "idempotency_key": {"type": "string"}
             }),
             json!(["connection_id", "modality", "prompt"]),
@@ -838,7 +859,12 @@ impl ToolExecutor for KronnToolExecutor {
         if crate::api::agent_workspace_tools::TOOL_NAMES.contains(&call.name.as_str()) {
             return self.execute_workspace_tool(call).await;
         }
-        if call.name == "agent_list" || call.name.starts_with("task_exec_") {
+        // Routed by asking the catalogue, not by re-listing its names here.
+        // The media tools were declared in that catalogue and implemented in
+        // that dispatcher, and this line — the one step between them — still
+        // said `agent_list` and `task_exec_*`. An agent saw `media_generate`,
+        // called it, and fell through to "unknown tool".
+        if is_orchestration_tool(&call.name) {
             return self.execute_orchestration_tool(call).await;
         }
         if matches!(
@@ -1311,9 +1337,31 @@ impl KronnToolExecutor {
                         .arguments
                         .get("generate_audio")
                         .and_then(serde_json::Value::as_bool),
-                    reference_asset_ids: None,
+                    // Hardcoded to None until 0.13.0, which is why an agent
+                    // could generate an image and a video but never join them.
+                    reference_asset_ids: call
+                        .arguments
+                        .get("reference_asset_ids")
+                        .and_then(serde_json::Value::as_array)
+                        .map(|ids| {
+                            ids.iter()
+                                .filter_map(serde_json::Value::as_str)
+                                .map(str::to_string)
+                                .collect()
+                        }),
                     reference_asset_id: None,
-                    reference_mode: None,
+                    reference_mode: match call
+                        .arguments
+                        .get("reference_mode")
+                        .and_then(serde_json::Value::as_str)
+                    {
+                        Some("first_frame") => Some(crate::models::MediaReferenceMode::FirstFrame),
+                        Some("last_frame") => Some(crate::models::MediaReferenceMode::LastFrame),
+                        Some("reference") => Some(crate::models::MediaReferenceMode::Reference),
+                        // Left to the server's own default rather than guessed
+                        // here, so the agent path and the UI agree.
+                        _ => None,
+                    },
                 };
                 let response = crate::api::media::generate(
                     axum::extract::State(self.state.clone()),
@@ -2866,6 +2914,64 @@ mod tests {
             assert!(
                 crate::api::disc_prompts::agent_has_native_planning(&agent),
                 "{agent:?} must be told it has the plan/task tools, or it will not call them"
+            );
+        }
+    }
+
+    #[test]
+    fn an_agent_can_drive_a_video_from_a_picture_it_generated() {
+        // The API has carried reference images since KT-551, and the UI form
+        // offers them. The agent-facing tool hardcoded `reference_asset_ids:
+        // None`, so an agent could generate an image and generate a video but
+        // never join the two — with nothing in the declaration to suggest the
+        // capability existed.
+        let tool = orchestration_tool_catalogue()
+            .into_iter()
+            .find(|tool| tool["function"]["name"] == "media_generate")
+            .expect("media_generate is declared");
+        let properties = &tool["function"]["parameters"]["properties"];
+
+        assert_eq!(
+            properties["reference_asset_ids"]["type"], "array",
+            "an agent must be able to pass the picture the clip starts from"
+        );
+        assert_eq!(properties["reference_asset_ids"]["items"]["type"], "string");
+
+        // Declared is not enough — it has to be discoverable. A parameter an
+        // agent never reads about is a parameter it never uses.
+        let description = tool["function"]["description"]
+            .as_str()
+            .expect("description");
+        assert!(
+            description.contains("reference_asset_ids"),
+            "the description must say a video can start from a picture: {description}"
+        );
+
+        // The mode is offered, never invented: a clip that opens on the picture
+        // and one that closes on it are different clips, and both are billed.
+        let modes = properties["reference_mode"]["enum"]
+            .as_array()
+            .expect("the reference mode is an enum");
+        assert_eq!(modes.len(), 3, "first_frame, last_frame, reference");
+    }
+
+    #[test]
+    fn every_declared_orchestration_tool_is_actually_routed() {
+        // The defect this pins shipped twice over: `media_generate` and
+        // `media_job_status` were declared in the catalogue and implemented in
+        // the orchestration dispatcher, while the router between them still
+        // listed only `agent_list` and `task_exec_*`. An agent was told it had
+        // the tool, called it, and was answered "unknown tool" — twice, on a
+        // real room, with both models correctly configured.
+        //
+        // Nothing failed at compile time and nothing failed in any test: the
+        // two halves were each correct on their own.
+        for tool in orchestration_tool_catalogue() {
+            let name = tool["function"]["name"].as_str().expect("declared name");
+            assert!(
+                is_orchestration_tool(name),
+                "`{name}` is declared to agents but the router will not send it \
+                 to the orchestration dispatcher",
             );
         }
     }
