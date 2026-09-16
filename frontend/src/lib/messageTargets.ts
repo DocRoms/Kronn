@@ -199,6 +199,26 @@ export function nativeDiscussionTargets(
     }));
 }
 
+/** Whether a recovered draft may stand in for the turn now streaming.
+ *
+ *  The streaming bubble picks the longest of three texts: the live stream, an
+ *  interrupted stream's buffer, and the discussion's durable checkpoint. The
+ *  last two are keyed by DISCUSSION, not by turn, so the previous turn's
+ *  finished answer stayed a candidate — and being longest, it beat the new
+ *  turn's first deltas. The room showed the last answer as the new one's
+ *  placeholder until the new text grew past it.
+ *
+ *  With no live turn there is nothing to mismatch, and a draft of unknown turn
+ *  is kept: that is the case these fallbacks exist for — restoring work after a
+ *  reload or a dropped stream, when the live stream has nothing to offer. */
+export function draftBelongsToTurn(
+  liveTurnId: string | undefined,
+  draftTurnId: string | undefined | null,
+): boolean {
+  if (!liveTurnId || !draftTurnId) return true;
+  return draftTurnId === liveTurnId;
+}
+
 export interface PendingAgentReply {
   id: string;
   triggerMessageId: string;

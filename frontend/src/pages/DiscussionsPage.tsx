@@ -74,8 +74,7 @@ import {
   composerMentions,
   messagesInConversationOrder,
   pendingAgentReplies,
-  targetsFromComposerText,
-} from '../lib/messageTargets';
+  targetsFromComposerText, draftBelongsToTurn } from '../lib/messageTargets';
 import { externalConnectionForDiscussion } from '../lib/externalAgentIdentity';
 
 type LoadedDiscussion = Discussion
@@ -1493,7 +1492,28 @@ export function DiscussionsPage({
     }];
   }, [activeDiscussion, interruptedStream, sending, streamingTargetMap, streamingTurnMap]);
   const streamingText = activeDiscussionId ? (streamingMap[activeDiscussionId] ?? '') : '';
-  const resilientStreamingText = [streamingText, interruptedStream?.text, durablePartial?.content]
+  // The turn that is streaming right now, when one is.
+  const liveTurnId = activeDiscussionId ? streamingTurnMap[activeDiscussionId] : undefined;
+  /** A recovered draft only speaks for the turn it belongs to.
+   *
+   *  Both fallbacks are keyed by discussion alone, so the PREVIOUS turn's
+   *  finished text stayed a candidate — and since the longest wins, it beat the
+   *  new turn's first deltas: the room showed the last answer as the new one's
+   *  placeholder, then swapped to the real text once it grew past it. Reported
+   *  as "a second message, duplicated — well, not quite".
+   *
+   *  With no live turn there is nothing to mismatch, and the fallbacks do their
+   *  actual job: restoring a draft after a reload or a dropped stream. */
+  const forTurn = (text: string | undefined, turnId: string | undefined | null) =>
+    draftBelongsToTurn(liveTurnId, turnId) ? text : undefined;
+  const resilientStreamingText = [
+    streamingText,
+    forTurn(interruptedStream?.text, interruptedStream?.triggerMessageId),
+    forTurn(
+      durablePartial?.content,
+      durablePartial?.dispatch?.trigger_message_id ?? durablePartial?.trigger_message_id,
+    ),
+  ]
     .filter((value): value is string => !!value)
     .reduce((longest, value) => value.length > longest.length ? value : longest, '');
   const recoveryDispatchId = durablePartial?.dispatch?.id;
