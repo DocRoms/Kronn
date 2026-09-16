@@ -2,6 +2,7 @@ import { Fragment, useState, useRef, useMemo, useEffect, useCallback } from 'rea
 import { appendLiveBuffer } from '../lib/workflowUiUtils';
 import { useIsMobile } from '../hooks/useMediaQuery';
 import { useT } from '../lib/I18nContext';
+import { isWorkflowRunning } from '../lib/runFilters';
 import { workflows as workflowsApi, discussions as discussionsApi, quickPrompts as quickPromptsApi, quickApis as quickApisApi, quickExecs as quickExecsApi, mcps as mcpsApi, skills as skillsApi, profiles as profilesApi, directives as directivesApi, externalApi as externalApiConnections } from '../lib/api';
 import type { ExternalApiConnectionView } from '../lib/api';
 import { userError } from '../lib/userError';
@@ -116,6 +117,10 @@ interface AutomationResourceRowProps {
   name: string;
   meta: string;
   icon: string;
+  /** Draws the working ring around the icon. Around it, never instead of it:
+   *  replacing the icon would hide which automation is running — the one thing
+   *  the ring exists to tell you. */
+  running?: boolean;
   active: boolean;
   pinned: boolean;
   openLabel: string;
@@ -136,6 +141,7 @@ function AutomationResourceRow({
   name,
   meta,
   icon,
+  running,
   active,
   pinned,
   openLabel,
@@ -167,7 +173,12 @@ function AutomationResourceRow({
           onClick={rowProps?.onClick ?? onOpen}
           aria-label={openLabel}
         >
-          <span className="automation-resource-icon" aria-hidden="true">{icon}</span>
+          <span
+            className="automation-resource-icon"
+            data-running={running || undefined}
+            aria-hidden="true"
+          >{icon}</span>
+          {running && <span className="automation-resource-running-label">{t('wf.rowRunning')}</span>}
           <span className="disc-item-content">
             <span className="disc-item-title">
               <span className="disc-item-title-text">{name}</span>
@@ -2102,6 +2113,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                   name={workflow.name}
                   meta={`${t('wf.tabWorkflows')} · ${TRIGGER_LABELS[workflow.trigger_type] ?? workflow.trigger_type}`}
                   icon={workflow.enabled ? '⚡' : '○'}
+                  running={isWorkflowRunning(workflow.last_run?.status)}
                   active={tab === 'workflows' && selectedId === workflow.id}
                   pinned={workflow.pinned}
                   openLabel={t('automation.openResource', workflow.name)}
@@ -2195,6 +2207,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                 name={workflow.name}
                 meta={`${TRIGGER_LABELS[workflow.trigger_type] ?? workflow.trigger_type} · ${workflow.step_count} step${workflow.step_count > 1 ? 's' : ''}`}
                 icon={workflow.enabled ? '⚡' : '○'}
+                running={isWorkflowRunning(workflow.last_run?.status)}
                 active={tab === 'workflows' && selectedId === workflow.id}
                 pinned={workflow.pinned}
                 openLabel={t('automation.openResource', workflow.name)}

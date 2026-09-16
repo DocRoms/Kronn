@@ -3502,6 +3502,7 @@ const fr: TranslationDict = {
   'wf.emptyHint': 'Créez un workflow pour automatiser vos tâches',
   'audit.finishedToast': "Audit terminé — {0} : docs à jour, discussion de validation créée",
   'audit.finishedWarnToast': "Audit terminé avec avertissements — {0} (étape(s) {1}) : validation non lancée, reprise possible depuis la card",
+  'wf.rowRunning': 'En cours',
   'wf.pin': 'Ajouter aux favoris',
   'wf.unpin': 'Retirer des favoris',
   'wf.active': 'Actif',

@@ -3440,6 +3440,7 @@ const zh: TranslationDict = {
   "wf.emptyHint": "创建工作流以自动化您的任务",
   "audit.finishedToast": "审核完成 — {0}：文档已更新，验证讨论已创建",
   "audit.finishedWarnToast": "审核完成但有警告 — {0}（步骤 {1}）：验证已跳过，可在卡片上恢复",
+  "wf.rowRunning": "运行中",
   "wf.pin": "添加到收藏",
   "wf.unpin": "从收藏移除",
   "wf.active": "启用",
