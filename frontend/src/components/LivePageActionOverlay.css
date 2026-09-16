@@ -1,13 +1,35 @@
+/* The card is positioned at the click point, but its WIDTH must not depend on
+   where that click landed.
+
+   It used to: `left` was set inline and `right: 8px` here, with no `width`. An
+   absolutely positioned box with both offsets fixed and no width takes exactly
+   the space between them — so a CTA at the end of a row opened a card a few
+   dozen pixels wide, while the same CTA on the left opened a normal one.
+   `max-width` is a ceiling and never a floor, so it could not help.
+
+   Fixed without measuring anything in JS: percentages in `left` and `width`
+   resolve against the containing block, so CSS can do the arithmetic itself.
+   `width` is decided first and independently of the anchor; `left` is then
+   clamped so the box always fits. When the anchor sits too far right, the card
+   slides left instead of being crushed.
+
+   `clamp()` is safe at every size: when the container is narrower than the card
+   plus its gutters the upper bound falls below the lower one, and clamp then
+   returns the lower — 8px, the full-width mobile layout, which is why the
+   `!important` media query this replaced is no longer needed. */
 .live-page-action-overlay {
+  --kr-action-card-width: min(720px, calc(100% - 16px));
+
   position: absolute;
   z-index: 4;
-  right: 8px;
-  max-width: 720px;
+  width: var(--kr-action-card-width);
+  left: clamp(
+    8px,
+    var(--kr-action-anchor-left, 8px),
+    calc(100% - var(--kr-action-card-width) - 8px)
+  );
   max-height: calc(100% - 16px);
   overflow: auto;
 }
-.live-page-action-overlay .discussion-action-card { margin-top: 0; }
 
-@media (max-width: 720px) {
-  .live-page-action-overlay { right: 8px; left: 8px !important; width: auto; }
-}
+.live-page-action-overlay .discussion-action-card { margin-top: 0; }

@@ -27,7 +27,7 @@ function usage(overrides: Record<string, unknown> = {}) {
     free_bytes: 0,
     tables: [
       { name: 'workflow_runs', bytes: 4_540 * MB, index_bytes: 2 * MB, rows: 7_122 },
-      { name: 'shared_runs', bytes: 2_620 * MB, index_bytes: 1 * MB, rows: 2_554 },
+      { name: 'shared_runs', bytes: 2_620 * MB, index_bytes: MB, rows: 2_554 },
       { name: 'messages', bytes: 41 * MB, index_bytes: 4 * MB, rows: 34_678 },
     ],
     ...overrides,
