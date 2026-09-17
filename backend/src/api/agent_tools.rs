@@ -202,12 +202,28 @@ pub fn tool_catalogue() -> Vec<Value> {
         json!({
             "type": "function",
             "function": {
+                "name": "qe_list",
+                "description": "List saved Quick Execs — the commands this instance can run \
+                                for you. Pass one's id to agent_job_start; there is no other \
+                                way to learn it.",
+                "parameters": { "type": "object", "properties": {}, "required": [] },
+            },
+        }),
+        json!({
+            "type": "function",
+            "function": {
                 "name": "qa_run",
                 "description": "Execute a saved Quick API by id and return its result.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "quick_api_id": { "type": "string", "description": "id from qa_list" },
+                        "variables": {
+                            "type": "object",
+                            "additionalProperties": { "type": "string" },
+                            "description": "Values for the Quick API's variables, keyed by the \
+                                            names qa_list reports in required_variables.",
+                        },
                     },
                     "required": ["quick_api_id"],
                 },
@@ -637,7 +653,7 @@ fn agent_resume_tool_catalogue() -> Vec<Value> {
             "agent_job_start",
             "Start a backend-owned saved Quick Exec that survives this turn. Completion re-dispatches you exactly once with the durable job/result ids.",
             json!({
-                "quick_exec_id": {"type": "string", "description": "A user-saved shell-free Quick Exec id."},
+                "quick_exec_id": {"type": "string", "description": "id from qe_list."},
                 "variables": {"type": "object", "additionalProperties": {"type": "string"}},
                 "reason": {"type": "string"},
                 "dedupe_key": {"type": "string", "description": "Stable logical key; reuse it on retry."},
@@ -771,6 +787,9 @@ fn worker_room_catalogue(catalogue: Vec<Value>) -> Vec<Value> {
         // prevented; spawning work behind the principal's back makes the
         // attempt and its review evidence impossible to reason about.
         "agent_job_start",
+        // Its catalogue goes with it: offering the list without the only tool
+        // that consumes it is precisely the wrong turn this filter removes.
+        "qe_list",
         "agent_schedule_wake",
         "agent_resume_status",
         "agent_resume_cancel",
@@ -980,6 +999,16 @@ impl ToolExecutor for KronnToolExecutor {
                         }
                         Err(e) => fail(call, format!("could not serialise result: {e}")),
                     },
+                    _ => fail(call, res.error.unwrap_or_else(|| "call failed".into())),
+                }
+            }
+            "qe_list" => {
+                let Json(res) = crate::api::quick_execs::list(State(self.state.clone())).await;
+                match (res.success, res.data) {
+                    (true, Some(items)) => {
+                        let project_id = self.effective_project_id().await;
+                        ok(call, compact_quick_execs(&items, project_id.as_deref()))
+                    }
                     _ => fail(call, res.error.unwrap_or_else(|| "call failed".into())),
                 }
             }
@@ -2852,6 +2881,40 @@ fn quick_api_is_in_scope(quick_api: &crate::models::QuickApi, project_id: Option
     }
 }
 
+/// The Quick Execs this discussion could actually start, compacted.
+///
+/// Filtered on exactly the rule `start_background_job` enforces: an id shown
+/// here and refused there would be worse than not listing it. The command is
+/// carried because a Quick Exec is often saved without a description, and its
+/// name alone does not say what running it would do.
+fn compact_quick_execs(items: &[crate::models::QuickExec], project_id: Option<&str>) -> Value {
+    let list: Vec<Value> = items
+        .iter()
+        .filter(|quick| match project_id {
+            Some(project_id) => quick
+                .project_id
+                .as_deref()
+                .is_none_or(|id| id == project_id),
+            None => quick.project_id.is_none(),
+        })
+        .map(|quick| {
+            json!({
+                "id": quick.id,
+                "name": quick.name,
+                "does": brief(&json!(quick.description), 140),
+                "command": brief(&json!(quick.command), 120),
+                "required_variables": quick
+                    .variables
+                    .iter()
+                    .filter(|variable| variable.required)
+                    .map(|variable| variable.name.clone())
+                    .collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+    json!({ "quick_execs": list })
+}
+
 fn compact_quick_apis(items: &Value, project_id: Option<&str>) -> Value {
     let list: Vec<Value> = items
         .as_array()
@@ -3439,6 +3502,7 @@ mod tests {
             "mcp_list",
             "api_endpoints",
             "qa_list",
+            "qe_list",
             "qa_run",
             "api_call",
             "plan_get",
@@ -3576,6 +3640,82 @@ mod tests {
             .filter_map(|qa| qa["id"].as_str())
             .collect();
         assert_eq!(general_ids, vec!["global"]);
+    }
+
+    fn saved_exec(id: &str, project_id: Option<&str>) -> crate::models::QuickExec {
+        crate::models::QuickExec {
+            id: id.to_string(),
+            name: id.to_uppercase(),
+            icon: "terminal".into(),
+            description: String::new(),
+            project_id: project_id.map(str::to_string),
+            command: "aws".into(),
+            args: vec!["logs".into()],
+            timeout_secs: 60,
+            output_format: crate::models::CollectQuickExecOutputFormat::Text,
+            variables: Vec::new(),
+            pinned: false,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        }
+    }
+
+    #[test]
+    fn a_listed_quick_exec_is_one_the_room_could_actually_start() {
+        // An HTTP agent could start a Quick Exec and had no tool to discover
+        // one: `agent_job_start` asked for an id nothing on its surface could
+        // produce. Listing is the fix, and it must filter on exactly the rule
+        // `start_background_job` enforces — an id shown here and refused there
+        // would be worse than no listing at all.
+        let saved = [
+            saved_exec("global", None),
+            saved_exec("a", Some("project-a")),
+            saved_exec("b", Some("project-b")),
+        ];
+        let scoped = compact_quick_execs(&saved, Some("project-a"));
+        let ids: Vec<&str> = scoped["quick_execs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|quick| quick["id"].as_str())
+            .collect();
+        assert_eq!(ids, vec!["global", "a"]);
+
+        let general = compact_quick_execs(&saved, None);
+        let general_ids: Vec<&str> = general["quick_execs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|quick| quick["id"].as_str())
+            .collect();
+        assert_eq!(general_ids, vec!["global"]);
+    }
+
+    #[test]
+    fn a_worker_is_offered_neither_the_job_nor_its_catalogue() {
+        let worker = worker_room_catalogue(tool_catalogue());
+        let names: Vec<&str> = worker
+            .iter()
+            .filter_map(|tool| tool["function"]["name"].as_str())
+            .collect();
+        assert!(
+            !names.contains(&"qe_list"),
+            "listing what only agent_job_start consumes, without it, is the wrong turn"
+        );
+    }
+
+    #[test]
+    fn qa_run_declares_the_variables_its_handler_reads() {
+        // The handler read `variables` all along; the declaration hid them, so
+        // any Quick API with a required variable was unusable by an HTTP agent.
+        let qa_run = tool_catalogue()
+            .into_iter()
+            .find(|tool| tool["function"]["name"] == "qa_run")
+            .expect("qa_run");
+        assert_eq!(
+            qa_run["function"]["parameters"]["properties"]["variables"]["type"],
+            "object"
+        );
     }
 
     #[test]
