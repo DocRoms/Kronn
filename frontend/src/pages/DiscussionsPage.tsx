@@ -5245,33 +5245,6 @@ export function DiscussionsPage({
                 "même message dans toutes les discussions" bug on 2026-04-15.
                 Remount is cheap here and also gives us a clean reset of
                 mention popover / emoji popover / voice mode / draft hydration. */}
-            {/* KT-619 — the human's own publication authority, held for as
-                long as this page is open and stored nowhere. */}
-            <ImportantMessageForm
-              key={`important:${activeDiscussion.id}`}
-              discussionId={activeDiscussion.id}
-              grant={publicationGrant}
-              onGrantChange={value => {
-                cancelQueuedPreparation();
-                setPublicationGrant(value);
-              }}
-              onPublish={async submission => {
-                const outcome = await submitImportantMessage(submission);
-                if (outcome === 'confirmed' || outcome === 'text-only' || outcome === 'uncertain') {
-                  refreshImportantMessages(submission.discussionId);
-                  refetchDiscussions();
-                  reloadDiscussion(submission.discussionId);
-                }
-                return outcome;
-              }}
-              onOpenSettings={() => onNavigate('settings')}
-              tasks={[
-                ...(discussionPlanRoom === activeDiscussion.id && discussionPlan?.discussion_id === activeDiscussion.id && discussionPlan.primary_objective ? [discussionPlan.primary_objective] : []),
-                ...(discussionPlanRoom === activeDiscussion.id && discussionPlan?.discussion_id === activeDiscussion.id ? discussionPlan.active.map(relation => relation.task) : []),
-                ...(discussionPlanRoom === activeDiscussion.id && discussionPlan?.discussion_id === activeDiscussion.id ? discussionPlan.later.map(relation => relation.task) : []),
-              ].filter((task, index, all) => all.findIndex(candidate => candidate.reference === task.reference) === index)}
-              t={t}
-            />
             <ChatInput
               key={activeDiscussion.id}
               discussion={activeDiscussion}
@@ -5318,6 +5291,34 @@ export function DiscussionsPage({
               modelTiers={agentAccess?.model_tiers}
               externalConnections={externalConnections}
               toast={toast}
+              t={t}
+            />
+
+            {/* KT-619 — the human's own publication authority, held for as
+                long as this page is open and stored nowhere. */}
+            <ImportantMessageForm
+              key={`important:${activeDiscussion.id}`}
+              discussionId={activeDiscussion.id}
+              grant={publicationGrant}
+              onGrantChange={value => {
+                cancelQueuedPreparation();
+                setPublicationGrant(value);
+              }}
+              onPublish={async submission => {
+                const outcome = await submitImportantMessage(submission);
+                if (outcome === 'confirmed' || outcome === 'text-only' || outcome === 'uncertain') {
+                  refreshImportantMessages(submission.discussionId);
+                  refetchDiscussions();
+                  reloadDiscussion(submission.discussionId);
+                }
+                return outcome;
+              }}
+              onOpenSettings={() => onNavigate('settings')}
+              tasks={[
+                ...(discussionPlanRoom === activeDiscussion.id && discussionPlan?.discussion_id === activeDiscussion.id && discussionPlan.primary_objective ? [discussionPlan.primary_objective] : []),
+                ...(discussionPlanRoom === activeDiscussion.id && discussionPlan?.discussion_id === activeDiscussion.id ? discussionPlan.active.map(relation => relation.task) : []),
+                ...(discussionPlanRoom === activeDiscussion.id && discussionPlan?.discussion_id === activeDiscussion.id ? discussionPlan.later.map(relation => relation.task) : []),
+              ].filter((task, index, all) => all.findIndex(candidate => candidate.reference === task.reference) === index)}
               t={t}
             />
 

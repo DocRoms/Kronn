@@ -180,7 +180,7 @@ TOOLS = [
     {
         "name": "disc_get_message",
         "description": (
-            "Read a message by `idx` (0-based, -1 = last) or `message_id` "
+            "Read a message by EXACTLY ONE of `idx` (0-based, -1 = last) or `message_id` "
             "(MSG-xxxxxxxx / full UUID). `before`/`after` add at most 10 neighbours "
             "each. Reply using `reply_to_message_id` and the exact CLI `reply_target`, "
             "never guess its session from the provider."
@@ -211,10 +211,11 @@ TOOLS = [
                     "description": "Number of following messages to return."
                 }
             },
-            "oneOf": [
-                {"required": ["idx"], "not": {"required": ["message_id"]}},
-                {"required": ["message_id"], "not": {"required": ["idx"]}}
-            ],
+            # "exactly one of idx / message_id" was a top-level `oneOf`. The
+            # OpenAI wire refuses that keyword and refuses the whole request
+            # with it, so it cannot survive a port to the native surface. The
+            # rule is already the first sentence of the description, and the
+            # handler enforces it.
         },
     },
     {
@@ -2672,7 +2673,7 @@ TOOLS = [
                 "mode": {
                     "type": "string",
                     "enum": ["full", "partial"],
-                    "description": "full = whole pipeline + validation discussion; partial = selected steps only (a fully-successful partial ALSO creates a validation discussion scoped to the refreshed sections and gets its own audit_runs row).",
+                    "description": "full = whole pipeline + validation discussion; partial = selected steps only and REQUIRES `steps` (a fully-successful partial ALSO creates a validation discussion scoped to the refreshed sections and gets its own audit_runs row).",
                 },
                 "steps": {
                     "type": "array",
@@ -2695,16 +2696,17 @@ TOOLS = [
                     "description": "Agent that runs the audit steps (default: this bridge's agent type).",
                 },
             },
+            # "partial ⇒ steps required" was expressed here as a top-level
+            # `allOf`/`if`/`then`, so schema-aware MCP clients could validate it
+            # rather than discover it through a RuntimeError. It cost more than
+            # it bought: the OpenAI function-calling wire refuses a top-level
+            # `allOf` outright — and refuses the WHOLE request, not the one
+            # tool — so every LiteLLM, OpenRouter and NVIDIA agent would have
+            # been answered HTTP 400 the moment this declaration reached them.
+            # The rule is unchanged and stated twice where it is read: in
+            # `mode`, and in `steps`, which already carried it. The handler
+            # enforces it either way.
             "required": ["project_id", "mode"],
-            # partial ⇒ steps required — the contract states what the
-            # implementation enforces (schema-aware MCP clients validate
-            # client-side instead of discovering it via a RuntimeError).
-            "allOf": [
-                {
-                    "if": {"properties": {"mode": {"const": "partial"}}},
-                    "then": {"required": ["steps"]},
-                }
-            ],
         },
     },
     {

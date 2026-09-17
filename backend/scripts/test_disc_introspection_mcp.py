@@ -1813,7 +1813,12 @@ class CallDiscGetMessageTests(unittest.TestCase):
     def test_catalog_exposes_either_selector_and_bounded_window(self):
         tool = next(item for item in self.mod.TOOLS if item["name"] == "disc_get_message")
         schema = tool["inputSchema"]
-        self.assertIn("oneOf", schema)
+        # "exactly one of idx / message_id" used to be a top-level `oneOf`. The
+        # OpenAI function-calling wire refuses that keyword and refuses the
+        # whole request with it, so the rule moved into the description, where
+        # a model actually reads it. The handler enforces it either way — the
+        # tests below call it with both and with neither.
+        self.assertIn("EXACTLY ONE", tool["description"])
         self.assertEqual(schema["properties"]["before"]["maximum"], 10)
         self.assertEqual(schema["properties"]["after"]["maximum"], 10)
         self.assertIn("message_id", schema["properties"])
@@ -11407,6 +11412,39 @@ class MediaGenerateReferenceTests(unittest.TestCase):
         self.assertIn("reference_mode", described)
         # An agent must know the ceiling is the model's, not a constant.
         self.assertIn("advertises", described)
+
+
+class OpenAiWireSchemaTests(unittest.TestCase):
+    """Every declaration must survive the OpenAI function-calling wire.
+
+    Not hypothetical: `audit_launch` carried a top-level `allOf` encoding
+    "partial implies steps". MCP accepts it. The OpenAI wire refuses it and
+    refuses the WHOLE request — one bad declaration answered HTTP 400 to
+    every tool in the call, so a LiteLLM or OpenRouter agent handed this
+    catalogue could not make a single call. Measured against gpt-5.1 through
+    LiteLLM on 2026-09-17.
+    """
+
+    FORBIDDEN = {"oneOf", "anyOf", "allOf", "enum", "const", "not"}
+
+    def setUp(self):
+        self.mod = _load_module()
+
+    def test_no_declaration_uses_a_keyword_the_openai_wire_rejects(self):
+        for tool in self.mod.TOOLS:
+            schema = tool.get("inputSchema") or {}
+            with self.subTest(tool=tool["name"]):
+                self.assertEqual(
+                    schema.get("type"), "object",
+                    f"{tool['name']}: the wire requires a top-level object schema",
+                )
+                offending = self.FORBIDDEN & set(schema)
+                self.assertFalse(
+                    offending,
+                    f"{tool['name']}: {sorted(offending)} at the top level is refused by the "
+                    "OpenAI wire, and it refuses the whole request — express the rule in the "
+                    "field descriptions instead",
+                )
 
 
 if __name__ == "__main__":
