@@ -49,7 +49,9 @@ BRIDGE = "backend/scripts/disc-introspection-mcp.py"
 # approved them explicitly. This does not reopen the rule above — the next
 # addition pays for itself or moves to a manual, as this one almost entirely
 # did.
-CATALOGUE_MAX_BYTES = 86_831
+# KT-670: `audit_launch` dropped a top-level `allOf` the OpenAI wire refuses.
+# Ceiling lowered by what it weighed.
+CATALOGUE_MAX_BYTES = 86_636
 
 # Per-declaration ceiling. The five heaviest tools were 29% of the catalogue for
 # 6% of the tools; their descriptions had grown into manuals. A per-tool cap is
