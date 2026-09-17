@@ -9,7 +9,7 @@ Release notes for 0.9.3 and earlier are available in the
 
 ---
 
-## [Unreleased]
+## [0.13.0] - 2026-09-17
 
 ### Added
 

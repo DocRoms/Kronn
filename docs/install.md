@@ -27,15 +27,16 @@ For other distros, see the [official Docker docs](https://docs.docker.com/engine
 ### 2. Run Kronn
 
 ```bash
-git clone --branch 0.12.0 --depth 1 https://github.com/DocRoms/Kronn.git   # latest stable release
+git clone --branch 0.13.0 --depth 1 https://github.com/DocRoms/Kronn.git   # latest stable release
 cd kronn
 ./kronn start
 # Open http://localhost:3140
 ```
 
-This installs the 0.12.0 release with unified collection sidebars, named
-LiteLLM/NVIDIA/OpenRouter connections and project-level Docker controls. See
-the [0.12.0 release notes](../CHANGELOG.md) for the complete scope.
+This installs the 0.13.0 release: image and video generation on HTTP
+connections, local and HTTP agents that reach the saved automations, and
+multi-agent rooms that survive a restart. See the
+[0.13.0 release notes](../CHANGELOG.md) for the complete scope.
 
 ---
 
@@ -171,7 +172,7 @@ sudo apt-get install -y nodejs
 ```bash
 # Clone inside WSL (not on /mnt/c/ — performance is much better on the Linux filesystem)
 cd ~
-git clone --branch 0.12.0 --depth 1 https://github.com/DocRoms/Kronn.git   # latest stable release
+git clone --branch 0.13.0 --depth 1 https://github.com/DocRoms/Kronn.git   # latest stable release
 cd kronn
 ./kronn start
 # Open http://localhost:3140 in your Windows browser
