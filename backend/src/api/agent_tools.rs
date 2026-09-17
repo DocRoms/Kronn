@@ -3493,6 +3493,20 @@ mod tests {
         );
     }
 
+    /// Not a test: dumps the real principal catalogue for the local tool-cliff
+    /// measurement. Ignored so it never runs in CI.
+    #[test]
+    #[ignore]
+    fn dump_principal_catalogue() {
+        let mut catalogue = tool_catalogue();
+        catalogue.extend(workspace_tool_catalogue());
+        catalogue.extend(orchestration_tool_catalogue());
+        catalogue.extend(agent_resume_tool_catalogue());
+        let out = std::env::var("KRONN_CATALOGUE_DUMP").expect("KRONN_CATALOGUE_DUMP");
+        std::fs::write(&out, serde_json::to_string_pretty(&catalogue).unwrap()).unwrap();
+        eprintln!("wrote {} tools to {out}", catalogue.len());
+    }
+
     #[test]
     fn catalogue_shape_is_what_both_providers_expect() {
         // Ollama and OpenAI both read `type: function` + `function.parameters`

@@ -4937,6 +4937,22 @@ pub(crate) fn clamp_ollama_tool_results(body: &mut serde_json::Value, ctx_cap: u
     const MIN_KEPT: usize = 512;
     let budget =
         (ctx_cap.saturating_sub(REPLY_HEADROOM_TOKENS) as usize).saturating_mul(BYTES_PER_TOKEN);
+    // The declarations ride in the same window as the messages, and the loop
+    // below only ever measures `messages`. Left out of the budget, this promised
+    // the whole window to a history that has to share it — and the bigger the
+    // catalogue, the bigger the lie: a principal in a workspace room carries
+    // ~32 KB of dense JSON here, worth a third of a 32K slot. Nothing failed
+    // loudly; Ollama truncates from the front, so the system context and the
+    // brief went first and the model answered fluently from a decapitated
+    // history. The forward estimate has always counted them
+    // (`estimated_chat_history_tokens`); only this backward one did not.
+    let declared_bytes = body
+        .get("tools")
+        .map_or(0, |declarations| declarations.to_string().len());
+    // No artificial floor: the loop only ever trims tool results, never the
+    // system or user turn, and returns on its own once nothing is left to cut.
+    // Trimming hard is the correct answer to a large catalogue, not a hazard.
+    let budget = budget.saturating_sub(declared_bytes);
 
     // Keep the untouched collection once. Every trimming pass can then rebuild
     // valid JSON from it instead of reparsing a previous diagnostic suffix.
