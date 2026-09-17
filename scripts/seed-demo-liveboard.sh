@@ -82,18 +82,25 @@ echo "▸ Quick APIs…"
   \"description\":\"Température, vent et code météo pour Lyon, en direct.\",
   \"api_plugin_slug\":\"$METEO_SLUG\",\"api_config_id\":\"$METEO_CFG\",
   \"api_endpoint_path\":\"/v1/forecast\",\"api_method\":\"GET\",
-  \"api_query\":{\"latitude\":\"45.76\",\"longitude\":\"4.84\",\"current\":\"temperature_2m,weather_code,wind_speed_10m\",\"timezone\":\"Europe/Paris\"},
+  \"api_query\":{\"latitude\":\"45.76\",\"longitude\":\"4.84\",\"current\":\"temperature_2m,weather_code,wind_speed_10m\",\"hourly\":\"temperature_2m,weather_code,precipitation_probability\",\"forecast_hours\":\"12\",\"timezone\":\"Europe/Paris\"},
   \"variables\":[]
 }" "Météo — Lyon maintenant" >/dev/null
 
-[ -n "$RSS_CFG" ] && post /quick-apis "{
-  \"name\":\"Euronews — derniers articles\",\"icon\":\"📰\",
-  \"description\":\"Les publications les plus récentes du flux RSS français.\",
-  \"api_plugin_slug\":\"$RSS_SLUG\",\"api_config_id\":\"$RSS_CFG\",
-  \"api_endpoint_path\":\"/v1/api.json\",\"api_method\":\"GET\",
-  \"api_query\":{\"rss_url\":\"https://fr.euronews.com/rss\"},
-  \"variables\":[]
-}" "Euronews — derniers articles" >/dev/null
+feed_qa() {  # feed_qa <nom> <icone> <url rss>
+  [ -n "$RSS_CFG" ] || return 0
+  post /quick-apis "{
+    \"name\":\"$1\",\"icon\":\"$2\",
+    \"description\":\"Les publications les plus recentes de ce flux.\",
+    \"api_plugin_slug\":\"$RSS_SLUG\",\"api_config_id\":\"$RSS_CFG\",
+    \"api_endpoint_path\":\"/v1/api.json\",\"api_method\":\"GET\",
+    \"api_query\":{\"rss_url\":\"$3\"},
+    \"variables\":[]
+  }" "$1" >/dev/null
+}
+
+feed_qa "Euronews — derniers articles" "📰" "https://fr.euronews.com/rss"
+feed_qa "Le Monde — à la une" "🗞" "https://www.lemonde.fr/rss/une.xml"
+feed_qa "The Guardian — international" "🌍" "https://www.theguardian.com/international/rss"
 
 cat <<'EOF'
 

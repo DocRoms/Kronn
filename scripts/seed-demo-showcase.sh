@@ -192,6 +192,41 @@ if [ -n "$CONNECTION_ID" ]; then
 fi
 
 # ── A Quick Prompt worth comparing ─────────────────────────────────────
+# ── Ollama tiers, from what is actually pulled ─────────────────────────
+# The default tiers name models this machine may never have pulled, and the
+# failure is a flat `404 … may not support tool calling` from a workflow step —
+# a message about tools for what is really a missing model. Read the installed
+# list and bind the tiers to it, so the sandbox works on whatever the host has.
+echo
+echo "▸ Paliers Ollama…"
+OLLAMA_TAGS=$(curl -fsS --max-time 6 http://127.0.0.1:11434/api/tags 2>/dev/null || true)
+if [ -n "$OLLAMA_TAGS" ]; then
+  TIERS=$(printf '%s' "$OLLAMA_TAGS" | python3 -c '
+import json, sys
+names = [m["name"] for m in (json.load(sys.stdin).get("models") or [])]
+if not names:
+    sys.exit(1)
+# Smallest first: a one-sentence synthesis does not need the largest model,
+# and the economy tier is what a demo should exercise.
+names.sort(key=len)
+eco, default = names[0], names[min(1, len(names) - 1)]
+reasoning = names[-1]
+print(json.dumps({"economy": eco, "default": default, "reasoning": reasoning}))
+' 2>/dev/null || true)
+  if [ -n "$TIERS" ]; then
+    curl -fsS -X POST -H "Content-Type: application/json" -d "{
+      \"claude_code\":{},\"codex\":{},\"open_code\":{},\"gemini_cli\":{},\"kiro\":{},
+      \"vibe\":{},\"copilot_cli\":{},\"ollama\":$TIERS,
+      \"lite_llm\":{\"economy\":\"gpt-4.1-mini\",\"default\":\"claude-sonnet-4-6\",\"reasoning\":\"gpt-5.1\"},
+      \"nvidia\":{\"default\":\"meta/llama-3.3-70b-instruct\"}
+    }" "$API/config/model-tiers" >/dev/null 2>&1 \
+      && echo "  ✓ paliers liés aux modèles installés" \
+      || echo "  ✗ paliers non appliqués" >&2
+  fi
+else
+  echo "  · Ollama injoignable, paliers laissés par défaut"
+fi
+
 echo
 echo "▸ Quick Prompt de comparaison…"
 post /quick-prompts '{
