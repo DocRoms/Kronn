@@ -232,6 +232,171 @@ pub fn tool_catalogue() -> Vec<Value> {
         json!({
             "type": "function",
             "function": {
+                "name": "qe_run",
+                "description": "Run a saved Quick Exec now and return its output. \
+                                Shell-free: the saved argv runs directly, bounded to \
+                                its project. For a long one, prefer agent_job_start, \
+                                which survives this turn.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "quick_exec_id": { "type": "string", "description": "id from qe_list" },
+                        "variables": {
+                            "type": "object",
+                            "additionalProperties": { "type": "string" },
+                            "description": "Values for the names qe_list reports in required_variables.",
+                        },
+                    },
+                    "required": ["quick_exec_id"],
+                },
+            },
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "qa_create_draft",
+                "description": "Save a new Quick API so this call can be replayed and \
+                                audited instead of hand-built each time. Kronn injects \
+                                the credentials; you never pass one. Shape and examples: \
+                                tool_manual({tool: \"qa_create_draft\"}).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string" },
+                        "description": { "type": "string" },
+                        "api_plugin_slug": { "type": "string", "description": "slug from mcp_list" },
+                        "api_config_id": { "type": "string", "description": "config id from mcp_list" },
+                        "api_endpoint_path": { "type": "string", "description": "path from api_endpoints" },
+                        "api_method": { "type": "string", "description": "Defaults to GET." },
+                        "api_query": { "type": "object", "additionalProperties": { "type": "string" } },
+                        "api_path_params": { "type": "object", "additionalProperties": { "type": "string" } },
+                        "api_body": { "type": "object" },
+                        "project_id": { "type": "string", "description": "Omit to make it general." },
+                        "variables": {
+                            "type": "array",
+                            "items": { "type": "object" },
+                            "description": "Each: {name, label, placeholder, required}. `label` and `placeholder` are what a human sees in the launcher, and both are required.",
+                        },
+                    },
+                    "required": ["name", "api_plugin_slug", "api_config_id", "api_endpoint_path"],
+                },
+            },
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "qa_update",
+                "description": "Change a saved Quick API. Send only the fields you are \
+                                changing; Kronn keeps the rest of the stored definition \
+                                as it is.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "quick_api_id": { "type": "string", "description": "id from qa_list" },
+                        "name": { "type": "string" },
+                        "description": { "type": "string" },
+                        "api_plugin_slug": { "type": "string" },
+                        "api_config_id": { "type": "string" },
+                        "api_endpoint_path": { "type": "string" },
+                        "api_method": { "type": "string" },
+                        "api_query": { "type": "object", "additionalProperties": { "type": "string" } },
+                        "api_path_params": { "type": "object", "additionalProperties": { "type": "string" } },
+                        "api_body": { "type": "object" },
+                        "project_id": { "type": "string" },
+                        "variables": {
+                            "type": "array",
+                            "items": { "type": "object" },
+                            "description": "Each: {name, label, placeholder, required}. `label` and `placeholder` are what a human sees in the launcher, and both are required.",
+                        },
+                    },
+                    "required": ["quick_api_id"],
+                },
+            },
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "qe_create_draft",
+                "description": "Save a new Quick Exec: one command, its argv, its \
+                                timeout. No shell — no pipes, no redirection, no \
+                                globbing. Shape and the argv rules: \
+                                tool_manual({tool: \"qe_create_draft\"}).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string" },
+                        "description": { "type": "string" },
+                        "command": { "type": "string", "description": "The binary alone, no arguments." },
+                        "args": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "One element per argument. `{{var}}` is substituted.",
+                        },
+                        "timeout_secs": { "type": "integer" },
+                        "output_format": {
+                            "type": "string",
+                            "enum": ["text", "json", "csv", "lines"],
+                            "description": "How the output is parsed for a caller.",
+                        },
+                        "project_id": { "type": "string", "description": "Omit to make it general." },
+                        "variables": {
+                            "type": "array",
+                            "items": { "type": "object" },
+                            "description": "Each: {name, label, placeholder, required}. `label` and `placeholder` are what a human sees in the launcher, and both are required.",
+                        },
+                    },
+                    "required": ["name", "command"],
+                },
+            },
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "qe_update",
+                "description": "Change a saved Quick Exec. Send only the fields you are \
+                                changing; Kronn keeps the rest of the stored definition \
+                                as it is. The argv rules are the same as qe_create_draft.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "quick_exec_id": { "type": "string", "description": "id from qe_list" },
+                        "name": { "type": "string" },
+                        "description": { "type": "string" },
+                        "command": { "type": "string" },
+                        "args": { "type": "array", "items": { "type": "string" } },
+                        "timeout_secs": { "type": "integer" },
+                        "output_format": { "type": "string", "enum": ["text", "json", "csv", "lines"] },
+                        "project_id": { "type": "string" },
+                        "variables": {
+                            "type": "array",
+                            "items": { "type": "object" },
+                            "description": "Each: {name, label, placeholder, required}. `label` and `placeholder` are what a human sees in the launcher, and both are required.",
+                        },
+                    },
+                    "required": ["quick_exec_id"],
+                },
+            },
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "tool_manual",
+                "description": "Read one tool's full contract: argument shapes, examples \
+                                and the mistakes worth avoiding. Call it before authoring \
+                                anything whose description points here. Without `tool`, \
+                                lists which tools have one.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "tool": { "type": "string", "description": "Tool name, or omit to list." },
+                    },
+                    "required": [],
+                },
+            },
+        }),
+        json!({
+            "type": "function",
+            "function": {
                 "name": "api_call",
                 "description": "Call a Kronn-configured API. Credentials are injected by \
                                 Kronn server-side and never exposed. Use mcp_list first to \
@@ -790,6 +955,19 @@ fn worker_room_catalogue(catalogue: Vec<Value>) -> Vec<Value> {
         // Its catalogue goes with it: offering the list without the only tool
         // that consumes it is precisely the wrong turn this filter removes.
         "qe_list",
+        // And running one directly is the same capability by another route. A
+        // worker has one task and is already briefed; choosing among the saved
+        // commands of a project it is visiting is not part of that contract.
+        // `qe_run` without `qe_list` would also be exactly the runnable-but-
+        // undiscoverable shape this pair was just fixed for.
+        "qe_run",
+        // Authoring automations is a principal capability outright: a worker
+        // that leaves a new Quick API behind has changed the instance, which
+        // is not something its delivery can be reviewed against.
+        "qa_create_draft",
+        "qa_update",
+        "qe_create_draft",
+        "qe_update",
         "agent_schedule_wake",
         "agent_resume_status",
         "agent_resume_cancel",
@@ -1001,6 +1179,149 @@ impl ToolExecutor for KronnToolExecutor {
                     },
                     _ => fail(call, res.error.unwrap_or_else(|| "call failed".into())),
                 }
+            }
+            "tool_manual" => ok(call, tool_manual(call.arguments["tool"].as_str())),
+            "qe_run" => {
+                let Some(id) = call.arguments["quick_exec_id"].as_str() else {
+                    return fail(call, "missing required field `quick_exec_id`");
+                };
+                // Scoped exactly like agent_job_start, and for the same reason:
+                // a Quick Exec belongs to a project, and a room of another one
+                // must not be able to start it by naming its id.
+                let project_id = self.effective_project_id().await;
+                let lookup = id.to_string();
+                let saved = self
+                    .state
+                    .db
+                    .with_conn(move |conn| crate::db::quick_execs::get_quick_exec(conn, &lookup))
+                    .await
+                    .ok()
+                    .flatten();
+                let Some(saved) = saved.filter(|saved| match project_id.as_deref() {
+                    Some(project_id) => saved
+                        .project_id
+                        .as_deref()
+                        .is_none_or(|id| id == project_id),
+                    None => saved.project_id.is_none(),
+                }) else {
+                    return fail(
+                        call,
+                        "Quick Exec is not available in this discussion's scope — call qe_list again",
+                    );
+                };
+                let request = crate::models::RunQuickExecRequest {
+                    variables: call.arguments["variables"]
+                        .as_object()
+                        .map(|values| {
+                            values
+                                .iter()
+                                .map(|(name, value)| (name.clone(), as_plain_string(value)))
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                    launch: None,
+                };
+                let Json(res) = crate::api::quick_execs::run(
+                    State(self.state.clone()),
+                    Path(saved.id.clone()),
+                    Json(request),
+                )
+                .await;
+                unwrap_api(call, res.success, res.data, res.error)
+            }
+            "qa_create_draft" => {
+                let request = match serde_json::from_value::<
+                    crate::models::CreateQuickApiRequest,
+                >(call.arguments.clone())
+                {
+                    Ok(request) => request,
+                    Err(error) => return fail(call, format!("invalid Quick API: {error}")),
+                };
+                let Json(res) =
+                    crate::api::quick_apis::create(State(self.state.clone()), Json(request)).await;
+                unwrap_api(call, res.success, res.data, res.error)
+            }
+            "qa_update" => {
+                let Some(id) = call.arguments["quick_api_id"].as_str() else {
+                    return fail(call, "missing required field `quick_api_id`");
+                };
+                let lookup = id.to_string();
+                let existing = self
+                    .state
+                    .db
+                    .with_conn(move |conn| crate::db::quick_apis::get_quick_api(conn, &lookup))
+                    .await
+                    .ok()
+                    .flatten();
+                let project_id = self.effective_project_id().await;
+                let Some(existing) =
+                    existing.filter(|qa| quick_api_is_in_scope(qa, project_id.as_deref()))
+                else {
+                    return fail(
+                        call,
+                        "Quick API is not available in this discussion's scope — call qa_list again",
+                    );
+                };
+                let merged = match merged_definition(&existing, &call.arguments) {
+                    Ok(merged) => merged,
+                    Err(error) => return fail(call, format!("invalid Quick API: {error}")),
+                };
+                let Json(res) = crate::api::quick_apis::update(
+                    State(self.state.clone()),
+                    Path(existing.id.clone()),
+                    Json(merged),
+                )
+                .await;
+                unwrap_api(call, res.success, res.data, res.error)
+            }
+            "qe_create_draft" => {
+                let request = match serde_json::from_value::<
+                    crate::models::CreateQuickExecRequest,
+                >(call.arguments.clone())
+                {
+                    Ok(request) => request,
+                    Err(error) => return fail(call, format!("invalid Quick Exec: {error}")),
+                };
+                let Json(res) =
+                    crate::api::quick_execs::create(State(self.state.clone()), Json(request)).await;
+                unwrap_api(call, res.success, res.data, res.error)
+            }
+            "qe_update" => {
+                let Some(id) = call.arguments["quick_exec_id"].as_str() else {
+                    return fail(call, "missing required field `quick_exec_id`");
+                };
+                let lookup = id.to_string();
+                let existing = self
+                    .state
+                    .db
+                    .with_conn(move |conn| crate::db::quick_execs::get_quick_exec(conn, &lookup))
+                    .await
+                    .ok()
+                    .flatten();
+                let project_id = self.effective_project_id().await;
+                let Some(existing) = existing.filter(|saved| match project_id.as_deref() {
+                    Some(project_id) => saved
+                        .project_id
+                        .as_deref()
+                        .is_none_or(|id| id == project_id),
+                    None => saved.project_id.is_none(),
+                }) else {
+                    return fail(
+                        call,
+                        "Quick Exec is not available in this discussion's scope — call qe_list again",
+                    );
+                };
+                let merged = match merged_definition(&existing, &call.arguments) {
+                    Ok(merged) => merged,
+                    Err(error) => return fail(call, format!("invalid Quick Exec: {error}")),
+                };
+                let Json(res) = crate::api::quick_execs::update(
+                    State(self.state.clone()),
+                    Path(existing.id.clone()),
+                    Json(merged),
+                )
+                .await;
+                unwrap_api(call, res.success, res.data, res.error)
             }
             "qe_list" => {
                 let Json(res) = crate::api::quick_execs::list(State(self.state.clone())).await;
@@ -2871,6 +3192,93 @@ fn compact_endpoints(overview: &Value, slug: &str) -> Option<Value> {
 
 /// Quick APIs, minus the machinery. `variables`, extraction specs and
 /// timestamps account for most of the raw payload and none of the decision.
+/// Overlay what the caller named onto the definition already stored.
+///
+/// The HTTP handler behind an update is a full replacement, and the agent has
+/// no way to read back a full definition — `qa_list` returns a compact view by
+/// design, since it is paid on every turn. Requiring the whole object would be
+/// the same defect as an id no tool can produce: declared, and unsatisfiable.
+///
+/// So the agent names only what changes. Serialising the stored record and
+/// overlaying the call's own keys keeps one source of truth for the shape —
+/// there is no second list of fields here to fall out of step with the model.
+fn merged_definition<T: serde::Serialize, R: serde::de::DeserializeOwned>(
+    existing: &T,
+    arguments: &Value,
+) -> Result<R, String> {
+    let mut base = serde_json::to_value(existing).map_err(|error| error.to_string())?;
+    let (Some(base_fields), Some(named)) = (base.as_object_mut(), arguments.as_object()) else {
+        return Err("definition is not an object".to_string());
+    };
+    for (field, value) in named {
+        // The id addresses the record; it is not part of its definition, and
+        // letting one through would rename what the update is pointing at.
+        if field.ends_with("_id") && field != "project_id" {
+            continue;
+        }
+        base_fields.insert(field.clone(), value.clone());
+    }
+    serde_json::from_value(base).map_err(|error| error.to_string())
+}
+
+/// What the declarations deliberately leave out.
+///
+/// The catalogue is re-sent on every turn, so a description that explains an
+/// argument shape is paid on every message of every room. The bridge solved
+/// this with `tool_manual` and so does this surface: the declaration carries
+/// the contract, the manual carries the detail, and only an agent that is
+/// about to author something pays for it.
+fn tool_manual(name: Option<&str>) -> Value {
+    const MANUALS: &[(&str, &str)] = &[
+        (
+            "qa_create_draft",
+            "A Quick API is a saved, replayable call through a configured plugin.              Kronn injects the credential server-side at run time — never put a key,              a token or an Authorization header in the definition.\n\n             Discovery order: `mcp_list` gives `api_plugin_slug` and `api_config_id`;              `api_endpoints` gives the exact `api_endpoint_path` for that plugin. Both              must come from those calls; a guessed path is a 404 at run time, not a              validation error here.\n\n             Variables are `{{name}}` placeholders anywhere in the path, query, headers              or body. Declare each one as `{\"name\": \"service_id\", \"label\":              \"Service\", \"placeholder\": \"abc123\", \"required\": true}`; `label`              and `placeholder` are what a human sees in the launcher, so write them for              a human. A variable used but not declared fails the launch.\n\n             `project_id` scopes it: set it and only that project's rooms see it, omit it              and every room does. A draft is saved disabled-safe — it runs only when              someone calls `qa_run` with it.",
+        ),
+        (
+            "qe_create_draft",
+            "A Quick Exec is one saved command. There is NO shell: `command` is the              binary alone and every argument is its own element of `args`. A pipe, a              redirection, a `&&`, a glob or a `$VAR` written inside a string reaches the              binary as literal text — it is not interpreted, and that is the point.\n\n             So `aws logs tail /my/group --since 1h` is              `command: \"aws\"`, `args: [\"logs\", \"tail\", \"/my/group\",              \"--since\", \"1h\"]`. Never `command: \"aws logs tail ...\"`.\n\n             `{{var}}` is substituted inside an element before execution, so              `args: [\"logs\", \"tail\", \"{{group}}\"]` with a declared `group`              variable is the way to parameterise it. Substitution happens per element,              which is what stops a value containing a space from becoming two arguments.\n\n             `output_format` decides what a caller gets back: `json` parsed as-is, `csv`              as an array of objects, `lines` as an array, `text` as a string. Pick the              one the command actually produces — a mismatch is returned as an error, not              silently coerced.\n\n             `timeout_secs` is a ceiling, not a hint: the process is killed at it. The              working directory is the project's, and a Quick Exec scoped to a project              cannot be started from a room belonging to another one.",
+        ),
+        (
+            "qe_run",
+            "Runs the saved argv now and returns its output, parsed per the Quick Exec's              `output_format`. The room must belong to the same project as the Quick Exec,              or to none — the refusal names which.\n\n             This blocks until the command finishes or its timeout kills it. For anything              slow, `agent_job_start` takes the same id, survives the end of your turn and              wakes the room once with the result — which is cheaper than holding a turn              open and is the only option if the command outlives the request.",
+        ),
+        (
+            "qa_update",
+            "Name only what changes. Kronn reads the stored definition and overlays your \
+             fields onto it, so an omitted field keeps its current value rather than being \
+             cleared — `qa_list` returns a compact view and could never have handed you the \
+             whole object to send back.\n\n\
+             A field you DO send replaces its value outright: sending `variables` replaces \
+             the whole list, it does not append to it.\n\n\
+             The id keeps its run history, so an edit that changes what the call does makes \
+             the older runs misleading rather than wrong. When the intent changes, a new \
+             draft is more honest than an update.",
+        ),
+        (
+            "qe_update",
+            "Name only what changes; Kronn overlays your fields onto the stored definition \
+             and keeps the rest. A field you do send replaces its value outright — sending \
+             `args` replaces the whole argv, it does not append to it.\n\n\
+             The argv rules are the same as for `qe_create_draft`: no shell, one element \
+             per argument.",
+        ),
+    ];
+
+    match name.map(str::trim).filter(|name| !name.is_empty()) {
+        None => json!({
+            "available": MANUALS.iter().map(|(name, _)| *name).collect::<Vec<_>>(),
+            "hint": "Pass `tool` to read one. Only tools whose description points here have one; for every other tool the description IS the whole contract.",
+        }),
+        Some(wanted) => match MANUALS.iter().find(|(name, _)| *name == wanted) {
+            Some((name, manual)) => json!({ "tool": name, "manual": manual }),
+            None => json!({
+                "error": format!("no manual for `{wanted}`"),
+                "available": MANUALS.iter().map(|(name, _)| *name).collect::<Vec<_>>(),
+            }),
+        },
+    }
+}
+
 fn quick_api_is_in_scope(quick_api: &crate::models::QuickApi, project_id: Option<&str>) -> bool {
     match project_id {
         Some(project_id) => quick_api
@@ -3518,6 +3926,12 @@ mod tests {
             "qa_list",
             "qe_list",
             "qa_run",
+            "qe_run",
+            "qa_create_draft",
+            "qa_update",
+            "qe_create_draft",
+            "qe_update",
+            "tool_manual",
             "api_call",
             "plan_get",
             "task_list",
@@ -3716,6 +4130,107 @@ mod tests {
             !names.contains(&"qe_list"),
             "listing what only agent_job_start consumes, without it, is the wrong turn"
         );
+    }
+
+    #[test]
+    fn authoring_an_automation_is_a_principal_capability() {
+        // A worker has one task and is already briefed. Leaving a new Quick API
+        // behind changes the instance, which its delivery cannot be reviewed
+        // against — and picking among a visited project's saved commands is not
+        // part of its contract either.
+        let worker: Vec<String> = worker_room_catalogue(tool_catalogue())
+            .iter()
+            .filter_map(|tool| tool["function"]["name"].as_str().map(str::to_string))
+            .collect();
+        let has = |name: &str| worker.iter().any(|tool| tool == name);
+        for withheld in ["qe_list", "qe_run", "qa_create_draft", "qa_update",
+                         "qe_create_draft", "qe_update"] {
+            assert!(!has(withheld), "{withheld} reached a worker");
+        }
+        // Consuming one still works: a worker may read and run a saved API call.
+        assert!(has("qa_list") && has("qa_run"));
+    }
+
+    #[test]
+    fn an_update_names_only_what_changes() {
+        // Found by running the real loop: `qa_update` demanded the plugin slug,
+        // config id and endpoint path, and `qa_list` — compact by design, since
+        // it is paid on every turn — returns none of them. The model could not
+        // satisfy it and fell back to hand-built calls. Declared and
+        // unsatisfiable is the same defect as an id no tool can produce.
+        let stored = crate::models::QuickExec {
+            id: "qe-1".into(),
+            name: "AWS logs".into(),
+            icon: "⌘".into(),
+            description: "tail a log group".into(),
+            project_id: Some("project-a".into()),
+            command: "aws".into(),
+            args: vec!["logs".into(), "tail".into()],
+            timeout_secs: 30,
+            output_format: crate::models::CollectQuickExecOutputFormat::Text,
+            variables: Vec::new(),
+            pinned: true,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+
+        let merged: crate::models::CreateQuickExecRequest = merged_definition(
+            &stored,
+            &json!({ "quick_exec_id": "qe-1", "timeout_secs": 60 }),
+        )
+        .expect("a lone changed field is enough");
+        assert_eq!(merged.timeout_secs, Some(60), "what was named changes");
+        assert_eq!(merged.command, "aws", "what was not named is kept");
+        assert_eq!(merged.args, vec!["logs".to_string(), "tail".to_string()]);
+        assert_eq!(merged.project_id.as_deref(), Some("project-a"));
+
+        // A named field replaces outright — it never appends.
+        let merged: crate::models::CreateQuickExecRequest =
+            merged_definition(&stored, &json!({ "args": ["logs", "get"] })).expect("merge");
+        assert_eq!(merged.args, vec!["logs".to_string(), "get".to_string()]);
+
+        // The id addresses the record and is not part of its definition:
+        // letting one through would rename what the update points at.
+        let merged: crate::models::CreateQuickExecRequest =
+            merged_definition(&stored, &json!({ "id": "somebody-elses", "name": "renamed" }))
+                .expect("merge");
+        assert_eq!(merged.name, "renamed");
+    }
+
+    #[test]
+    fn the_manual_answers_only_for_tools_that_point_at_it() {
+        // The catalogue is re-sent every turn, so the contract stays in the
+        // declaration and the detail moves here — paid only by an agent that
+        // is about to author something.
+        let listed = tool_manual(None);
+        let available = listed["available"].as_array().expect("available");
+        assert!(!available.is_empty());
+
+        let page = tool_manual(Some("qe_create_draft"));
+        let text = page["manual"].as_str().expect("manual text");
+        assert!(text.contains("NO shell"), "the argv rule is the whole point");
+        assert!(text.contains("aws"), "and it shows the shape, not just the rule");
+
+        assert!(tool_manual(Some("task_list"))["error"].is_string(),
+                "a tool whose description is its whole contract has no page");
+        assert_eq!(tool_manual(Some("  "))["available"], listed["available"],
+                   "a blank name lists rather than erroring");
+    }
+
+    #[test]
+    fn every_manual_page_belongs_to_a_declared_tool() {
+        // A page for a tool nobody can call is documentation of a capability
+        // that does not exist — the exact shape that taught models to
+        // hallucinate calls (tools.rs).
+        let declared: Vec<String> = tool_catalogue()
+            .iter()
+            .filter_map(|tool| tool["function"]["name"].as_str().map(str::to_string))
+            .collect();
+        for page in tool_manual(None)["available"].as_array().unwrap() {
+            let name = page.as_str().unwrap();
+            assert!(declared.iter().any(|tool| tool == name),
+                    "manual page `{name}` has no declared tool");
+        }
     }
 
     #[test]

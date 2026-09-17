@@ -34,6 +34,23 @@ Release notes for 0.9.3 and earlier are available in the
   absent otherwise, so an agent is never told it can produce a video that the
   generation request would then refuse.
 
+- HTTP agents author and run automations like CLI agents do: `qe_run`,
+  `qa_create_draft`, `qa_update`, `qe_create_draft`, `qe_update`, alongside the
+  `qe_list` that was missing. An agent could already start a saved Quick Exec
+  through `agent_job_start` and had no tool that could tell it one existed.
+  Authoring stays out of worker rooms, where a task is already briefed.
+
+  An update names only what changes: Kronn reads the stored definition and
+  overlays the call onto it. Demanding the whole object would have been the same
+  defect as an id no tool can produce — `qa_list` returns a compact view by
+  design, since it is paid on every turn, and could never have supplied one.
+
+- A `tool_manual` on the native surface, the one the MCP bridge has had. The
+  native catalogue is re-sent on every turn, so a description that explains an
+  argument shape is paid on every message of every room; the declaration now
+  carries the contract and the manual carries the detail. The five new tools
+  cost 4 546 B rather than the 12 913 B their bridge equivalents weigh.
+
 - Each media slot in that catalogue now carries what the provider advertises —
   supported durations, resolutions, aspect ratios, frame positions — read from
   the same catalogue the launcher shows. An agent asking for a 15 s clip on a
