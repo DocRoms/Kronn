@@ -547,6 +547,8 @@ const en: TranslationDict = {
   'settings.credentials.authorityLabel': 'Admin secret or human credential',
   'settings.credentials.authorityPlaceholder': 'kr-admin-… or kr-human-…',
   'settings.credentials.authorityHint': 'Never stored. Reloading this page asks again — a secret that survives a reload is a secret sitting somewhere.',
+  'settings.credentials.lockedLead': 'Publishing an important card takes an identity. Unlock to see and manage the enrolled credentials.',
+  'settings.credentials.recoverySummary': 'Lost the admin secret?',
   'settings.credentials.unlock': 'Unlock',
   'settings.credentials.refused': 'That authority was refused.',
   'settings.credentials.newLabel': 'Name',

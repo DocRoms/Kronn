@@ -546,6 +546,8 @@ const zh: TranslationDict = {
   "settings.credentials.authorityLabel": "管理员密钥或 human 凭据",
   "settings.credentials.authorityPlaceholder": "kr-admin-… 或 kr-human-…",
   "settings.credentials.authorityHint": "从不保存。重新加载本页会再次询问——能在重新加载后存活的密钥，就是被放在了某个地方的密钥。",
+  "settings.credentials.lockedLead": "发布重要卡片需要身份。解锁以查看和管理已登记的凭据。",
+  "settings.credentials.recoverySummary": "丢失管理员密钥？",
   "settings.credentials.unlock": "解锁",
   "settings.credentials.refused": "该权限被拒绝。",
   "settings.credentials.newLabel": "名称",

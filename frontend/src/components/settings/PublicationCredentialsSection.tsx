@@ -6,9 +6,10 @@
 // point — a secret that survives a reload is a secret sitting somewhere.
 
 import { useCallback, useRef, useState } from 'react';
-import { KeyRound, RotateCw, ShieldOff, Copy, Check } from 'lucide-react';
+import { KeyRound, Lock, RotateCw, ShieldOff, Copy, Check } from 'lucide-react';
 import { publicationCredentials as api } from '../../lib/api';
 import type { GrantRole, HumanCredential } from '../../types/generated';
+import './PublicationCredentials.css';
 import type { ToastFn } from '../../hooks/useToast';
 import '../../pages/SettingsPage.css';
 
@@ -181,27 +182,42 @@ export function PublicationCredentialsSection({ toast, t }: Props) {
       )}
 
       {credentials === null ? (
-        <form onSubmit={unlock} className="settings-row">
-          <label htmlFor="credentials-authority">
-            {t('settings.credentials.authorityLabel')}
-          </label>
-          <input
-            id="credentials-authority"
-            type="password"
-            autoComplete="off"
-            value={authority}
-            onChange={(event) => setAuthority(event.target.value)}
-            placeholder={t('settings.credentials.authorityPlaceholder')}
-          />
-          <button type="submit" disabled={busy || !authority.trim()}>
-            {t('settings.credentials.unlock')}
-          </button>
-          <p className="settings-hint">{t('settings.credentials.authorityHint')}</p>
+        // Locked, this is ONE thing to do, and it was reading as four: a
+        // label, a field, a button and two paragraphs of prose with equal
+        // weight, one of them a recovery procedure almost nobody needs. The
+        // block now frames itself, the field carries its own one-line note,
+        // and the way out of a lost secret waits behind a disclosure.
+        <div className="settings-callout settings-locked">
+          <p className="settings-locked-lead">
+            <Lock size={15} aria-hidden="true" /> {t('settings.credentials.lockedLead')}
+          </p>
+          <form onSubmit={unlock} className="settings-row">
+            <label htmlFor="credentials-authority">
+              {t('settings.credentials.authorityLabel')}
+            </label>
+            <input
+              id="credentials-authority"
+              type="password"
+              autoComplete="off"
+              value={authority}
+              onChange={(event) => setAuthority(event.target.value)}
+              placeholder={t('settings.credentials.authorityPlaceholder')}
+            />
+            <button type="submit" disabled={busy || !authority.trim()}>
+              {t('settings.credentials.unlock')}
+            </button>
+            <p className="settings-hint">{t('settings.credentials.authorityHint')}</p>
+          </form>
           {/* The operator who cannot get past this form is exactly the one no
               button here can help: the way back is a file in the private
-              directory, so the screen says so instead of leaving them stuck. */}
-          <p className="settings-hint">{t('settings.credentials.recoveryHint')}</p>
-        </form>
+              directory, so the screen says so instead of leaving them stuck —
+              but it says it on demand, not over the shoulder of everyone who
+              simply has their secret to hand. */}
+          <details className="settings-locked-recovery">
+            <summary>{t('settings.credentials.recoverySummary')}</summary>
+            <p className="settings-hint">{t('settings.credentials.recoveryHint')}</p>
+          </details>
+        </div>
       ) : (
         <>
           <form onSubmit={enrol} className="settings-row">

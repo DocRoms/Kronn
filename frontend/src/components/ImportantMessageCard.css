@@ -215,25 +215,43 @@
 
 /* Collapsed by default: most messages are not steering events, and a field
    asking for a secret should not sit open above every reply. */
+/* Closed, this is one affordance under the composer — not a panel. A bordered
+ * full-width strip ABOVE the input read as an unexplained banner: it occupied
+ * the place a reader looks for the message they are writing, and named itself
+ * only in small print. The border and the background belong to the form, which
+ * is a panel; the trigger belongs to the composer's own row of buttons and is
+ * styled like them. */
 .disc-important-publish {
-  margin: 0 0 var(--kr-sp-2);
-  border: 1px solid var(--kr-border-subtle);
-  border-radius: var(--kr-r-md);
-  background: var(--kr-bg-subtle);
+  margin: var(--kr-sp-1) 0 0;
   font-size: var(--kr-fs-sm);
 }
 
 .disc-important-trigger {
-  display: flex;
+  display: inline-flex;
   align-items: center;
   gap: var(--kr-sp-2);
-  width: 100%;
-  padding: var(--kr-sp-2) var(--kr-sp-3);
+  padding: 6px 9px;
   border: 0;
+  border-radius: var(--kr-r-md);
   background: transparent;
-  color: var(--kr-text-secondary);
+  color: var(--kr-text-dim);
   cursor: pointer;
   text-align: left;
+  transition: color 0.15s, background 0.15s;
+}
+
+.disc-important-trigger:hover,
+.disc-important-trigger[aria-expanded="true"] {
+  color: var(--kr-text-primary);
+  background: var(--kr-bg-subtle);
+}
+
+/* Touch: the same 44 px hitbox the composer's own buttons take. */
+@media (pointer: coarse) {
+  .disc-important-trigger {
+    min-height: 44px;
+    padding: 10px 12px;
+  }
 }
 
 .disc-important-trigger:focus-visible,
@@ -259,12 +277,18 @@
   outline-offset: 2px;
 }
 
+/* Open, it is a panel and says so — the border and ground the closed state
+ * dropped. */
 .disc-important-publish-body {
+  margin-top: var(--kr-sp-1);
+  border: 1px solid var(--kr-border-subtle);
+  border-radius: var(--kr-r-md);
+  background: var(--kr-bg-subtle);
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: var(--kr-sp-2);
-  padding: 0 var(--kr-sp-3) var(--kr-sp-3);
+  padding: var(--kr-sp-3);
 }
 
 .disc-important-publish-body > label {

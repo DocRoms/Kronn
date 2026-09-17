@@ -547,6 +547,8 @@ const es: TranslationDict = {
   'settings.credentials.authorityLabel': 'Secreto de administrador o credencial humana',
   'settings.credentials.authorityPlaceholder': 'kr-admin-… o kr-human-…',
   'settings.credentials.authorityHint': 'Nunca se guarda. Al recargar esta página se vuelve a pedir: un secreto que sobrevive a una recarga es un secreto guardado en algún sitio.',
+  'settings.credentials.lockedLead': 'Publicar una tarjeta importante requiere una identidad. Desbloquea para ver y gestionar las credenciales inscritas.',
+  'settings.credentials.recoverySummary': '¿Perdiste el secreto de administración?',
   'settings.credentials.unlock': 'Desbloquear',
   'settings.credentials.refused': 'Esa autoridad fue rechazada.',
   'settings.credentials.newLabel': 'Nombre',
