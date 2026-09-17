@@ -547,6 +547,8 @@ const fr: TranslationDict = {
   'settings.credentials.authorityLabel': 'Secret admin ou identifiant humain',
   'settings.credentials.authorityPlaceholder': 'kr-admin-… ou kr-human-…',
   'settings.credentials.authorityHint': 'Jamais conservé. Recharger cette page le redemande — un secret qui survit à un rechargement est un secret posé quelque part.',
+  'settings.credentials.lockedLead': 'Publier une carte importante demande une identité. Déverrouillez pour voir et gérer les identifiants enrôlés.',
+  'settings.credentials.recoverySummary': 'Secret admin perdu ?',
   'settings.credentials.unlock': 'Déverrouiller',
   'settings.credentials.refused': 'Cette autorité a été refusée.',
   'settings.credentials.newLabel': 'Nom',

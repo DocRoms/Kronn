@@ -3914,6 +3914,42 @@ mod tests {
     }
 
     #[test]
+    fn no_declaration_uses_a_keyword_the_openai_wire_rejects() {
+        // Measured against gpt-5.1 through LiteLLM on 2026-09-17: a top-level
+        // `allOf` on ONE declaration answered HTTP 400 to the WHOLE request,
+        // so the agent could not make a single call — not a degraded tool, a
+        // dead surface. `enum` is fine on a property and refused at the root.
+        //
+        // Every HTTP provider Kronn ships reaches its models this way, so this
+        // is the one shape rule the native catalogue cannot drift on.
+        const REFUSED_AT_ROOT: [&str; 6] = ["oneOf", "anyOf", "allOf", "enum", "const", "not"];
+        let surfaces = [
+            ("discussion", tool_catalogue()),
+            ("orchestration", orchestration_tool_catalogue()),
+            ("resume", agent_resume_tool_catalogue()),
+            ("workspace", workspace_tool_catalogue()),
+        ];
+        for (surface, catalogue) in surfaces {
+            for tool in catalogue {
+                let name = tool["function"]["name"].as_str().unwrap_or("?");
+                let parameters = &tool["function"]["parameters"];
+                assert_eq!(
+                    parameters["type"], "object",
+                    "{surface}/{name}: the wire requires a top-level object schema"
+                );
+                for keyword in REFUSED_AT_ROOT {
+                    assert!(
+                        parameters.get(keyword).is_none(),
+                        "{surface}/{name}: `{keyword}` at the top level is refused by the \
+                         OpenAI wire, and it refuses the whole request — say the rule in the \
+                         field descriptions instead"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn catalogue_shape_is_what_both_providers_expect() {
         // Ollama and OpenAI both read `type: function` + `function.parameters`
         // as a JSON Schema object; a malformed entry is silently ignored by the
