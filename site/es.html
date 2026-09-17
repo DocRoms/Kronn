@@ -442,6 +442,7 @@
       margin-top: 28px;
     }
     .gallery-card {
+      position: relative;
       margin: 0;
       border: 1.5px solid var(--electric);
       background: var(--bg-card-hi);
@@ -450,7 +451,24 @@
     }
     .gallery-card a { display: block; line-height: 0; }
     .gallery-card img { width: 100%; height: auto; display: block; transition: filter 0.15s; }
+    .gallery-card video { width: 100%; height: auto; display: block; background: #0b0816; }
     .gallery-card a:hover img { filter: brightness(1.08); }
+    /* Une vignette animée ressemble à une capture fixe tant qu'on ne l'a pas regardée. */
+    .gallery-badge {
+      position: absolute;
+      top: 10px;
+      right: 10px;
+      padding: 3px 8px;
+      border: 1px solid var(--electric);
+      border-radius: 3px;
+      background: rgba(10, 8, 20, 0.82);
+      color: var(--lila);
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      line-height: 1.6;
+      pointer-events: none;
+    }
     .gallery-card figcaption { padding: 10px 14px; font-size: 13px; line-height: 1.45; color: var(--text-dim); }
     .gallery-card figcaption strong { color: var(--lila); }
     @media (max-width: 760px) { .gallery-grid { grid-template-columns: 1fr; } }
@@ -1618,7 +1636,7 @@
       </figure>
       <figure class="gallery-card">
         <a href="screenshots/KronnDocumentationView.jpg" target="_blank" rel="noopener">
-          <img src="screenshots/KronnDocumentationView.jpg" width="1600" height="1000" loading="lazy" alt="Vista de Documentación de Kronn: doc generada por la auditoría (arquitectura, deuda técnica) renderizada en el viewer" />
+          <img src="screenshots/KronnDocumentationView.jpg" width="1600" height="1000" loading="lazy" alt="Pestaña Docs de un proyecto: el árbol de archivos a la izquierda, el markdown a la derecha y el botón «Hablar de este archivo»" />
         </a>
         <figcaption><strong>La doc del proyecto, legible</strong> · el árbol a la izquierda, el markdown a la derecha y «Hablar de este archivo»</figcaption>
       </figure>
@@ -1630,9 +1648,9 @@
       </figure>
       <figure class="gallery-card">
         <a href="screenshots/kronn_multi-ai_discussion.png" target="_blank" rel="noopener">
-          <img src="screenshots/kronn_multi-ai_discussion.png" width="1600" height="1000" loading="lazy" alt="Discusión multiagente: varios CLIs en la misma room de Kronn" />
+          <img src="screenshots/kronn_multi-ai_discussion.png" width="1600" height="1000" loading="lazy" alt="Una misma pregunta a tres agentes en la misma discusión: Claude Code, Codex y un modelo OpenRouter responden por turnos, cada uno con su color" />
         </a>
-        <figcaption><strong>Discusión multiagente</strong> · varios CLIs en la misma room</figcaption>
+        <figcaption><strong>Discusión multiagente</strong> · tres agentes, una pregunta, tres ángulos — en la misma room</figcaption>
       </figure>
       <figure class="gallery-card">
         <a href="screenshots/kronn-media-room.png" target="_blank" rel="noopener">
@@ -1647,27 +1665,33 @@
         <figcaption><strong>Encadenar planos</strong> · la última imagen de un clip es la primera del siguiente</figcaption>
       </figure>
       <figure class="gallery-card">
-        <a href="screenshots/kronn-media-chain.gif" target="_blank" rel="noopener">
-          <img src="screenshots/kronn-media-chain.gif" width="760" height="475" loading="lazy" alt="Animación que muestra el encadenamiento completo de imagen a vídeo en una discusión de Kronn" />
-        </a>
-        <figcaption><strong>La cadena, en movimiento</strong> · de la imagen al clip, y del clip al siguiente</figcaption>
+        <video width="800" height="460" autoplay muted loop playsinline
+               preload="metadata" aria-label="La imagen generada, luego el clip que produjo y su último fotograma: el que inicia el plano siguiente">
+          <source src="screenshots/kronn-media-chain.mp4" type="video/mp4" />
+          <source src="screenshots/kronn-media-chain.webm" type="video/webm" />
+        </video>
+        <span class="gallery-badge" aria-hidden="true">▶ VÍDEO</span>
+        <figcaption><strong>El plano, en movimiento</strong> · la imagen de partida, los cuatro segundos y el fotograma que se guarda para lo que sigue</figcaption>
       </figure>
       <figure class="gallery-card">
         <a href="screenshots/kronn-quick-prompts.png" target="_blank" rel="noopener">
-          <img src="screenshots/kronn-quick-prompts.png" width="1440" height="960" loading="lazy" alt="Biblioteca de Quick Prompts reutilizables y versionados" />
+          <img src="screenshots/kronn-quick-prompts.png" width="1600" height="1000" loading="lazy" alt="Editor de un Quick Prompt: su agente, su variable obligatoria, su prompt y el contador de ejecuciones, tokens y duración" />
         </a>
         <figcaption><strong>Quick Prompts</strong> · reutilizables, versionados, medidos</figcaption>
       </figure>
       <figure class="gallery-card">
         <a href="screenshots/kronn-qp-launch.png" target="_blank" rel="noopener">
-          <img src="screenshots/kronn-qp-launch.png" width="1440" height="960" loading="lazy" alt="Compare-agents: el mismo prompt lanzado en varios CLIs en paralelo" />
+          <img src="screenshots/kronn-qp-launch.png" width="1600" height="1000" loading="lazy" alt="Barra de lanzamiento de un Quick Prompt en comparación: el texto a traducir está escrito y cinco agentes están marcados" />
         </a>
-        <figcaption><strong>Compare-agents</strong> · el mismo prompt en N CLIs</figcaption>
+        <figcaption><strong>Elegir los contendientes</strong> · marcar los agentes, rellenar la variable, lanzar una sola vez</figcaption>
       </figure>
       <figure class="gallery-card">
-        <a href="screenshots/kronn-comparaison-flux.gif" target="_blank" rel="noopener">
-          <img src="screenshots/kronn-comparaison-flux.gif" width="1100" height="688" loading="lazy" alt="Selección de tres discusiones en la lista, luego la vista de comparación y el veredicto del juez IA" />
-        </a>
+        <video width="1280" height="800" autoplay muted loop playsinline
+               preload="metadata" aria-label="Selección de tres discusiones en la lista, luego la vista de comparación y el veredicto del juez IA">
+          <source src="screenshots/kronn-comparaison-flux.mp4" type="video/mp4" />
+          <source src="screenshots/kronn-comparaison-flux.webm" type="video/webm" />
+        </video>
+        <span class="gallery-badge" aria-hidden="true">▶ VÍDEO</span>
         <figcaption><strong>Seleccionar y comparar</strong> · tres discusiones, una sola vista, sin copiar y pegar</figcaption>
       </figure>
       <figure class="gallery-card">
@@ -1696,32 +1720,41 @@
       </figure>
       <figure class="gallery-card">
         <a href="screenshots/workflows.png" target="_blank" rel="noopener">
-          <img src="screenshots/workflows.png" width="1600" height="1000" loading="lazy" alt="Página de Automatización: orquestación basada en pasos (workflows multi-paso)" />
+          <img src="screenshots/workflows.png" width="1600" height="1000" loading="lazy" alt="Detalle de un workflow: el mapa de ramas a la izquierda y a la derecha sus diez pasos con su tipo: exec, llamada API, agente, puerta humana, notificación" />
         </a>
-        <figcaption><strong>Automatización</strong> · orquestación basada en pasos</figcaption>
+        <figcaption><strong>Un workflow legible de un vistazo</strong> · diez pasos tipados, el mapa de ramas, los bucles punteados</figcaption>
       </figure>
       <figure class="gallery-card">
         <a href="screenshots/KronnCaptureAutoPilot.png" target="_blank" rel="noopener">
-          <img src="screenshots/KronnCaptureAutoPilot.png" width="1600" height="1000" loading="lazy" alt="Automatización: selector de modelo en 1 clic — 7 agentes (Claude Code, Codex, Gemini CLI, Kiro, GitHub Copilot, Ollama, LiteLLM) × Eco / Estándar / Avanzado, por paso, con el branch map en color" />
+          <img src="screenshots/KronnCaptureAutoPilot.png" width="1600" height="1000" loading="lazy" alt="El selector abierto en el paso «review» de un workflow: diez agentes, cada uno con sus tres niveles, sobre el mapa de ramas" />
         </a>
         <figcaption><strong>Selector de modelo en 1 clic</strong> · 10 agentes × Eco / Estándar / Avanzado, en cualquier paso</figcaption>
       </figure>
       <figure class="gallery-card">
-        <a href="screenshots/kronn-step-agent-swap.gif" target="_blank" rel="noopener">
-          <img src="screenshots/kronn-step-agent-swap.gif" width="1100" height="688" loading="lazy" alt="Cambio del agente de un paso de workflow: se abre el selector y el paso pasa de Claude Code a un modelo Ollama local" />
-        </a>
+        <video width="1280" height="800" autoplay muted loop playsinline
+               preload="metadata" aria-label="Cambio del agente de un paso de workflow: se abre el selector y el paso pasa de Claude Code a un modelo Ollama local">
+          <source src="screenshots/kronn-step-agent-swap.mp4" type="video/mp4" />
+          <source src="screenshots/kronn-step-agent-swap.webm" type="video/webm" />
+        </video>
+        <span class="gallery-badge" aria-hidden="true">▶ VÍDEO</span>
         <figcaption><strong>Claude Code, luego Ollama, en un clic</strong> · el paso no cambia; solo cambia el modelo que lo ejecuta</figcaption>
       </figure>
       <figure class="gallery-card">
-        <a href="screenshots/kronn-agent-workflow.gif" target="_blank" rel="noopener">
-          <img src="screenshots/kronn-agent-workflow.gif" width="1100" height="688" loading="lazy" alt="Un agente Claude Code crea un workflow de varios pasos desde la discusión, con sus llamadas API y su paso de agente" />
-        </a>
+        <video width="1280" height="800" autoplay muted loop playsinline
+               preload="metadata" aria-label="Un agente Claude Code crea un workflow de varios pasos desde la discusión, con sus llamadas API y su paso de agente">
+          <source src="screenshots/kronn-agent-workflow.mp4" type="video/mp4" />
+          <source src="screenshots/kronn-agent-workflow.webm" type="video/webm" />
+        </video>
+        <span class="gallery-badge" aria-hidden="true">▶ VÍDEO</span>
         <figcaption><strong>Un agente construye el workflow</strong> · describes la cadena, él coloca los pasos y las ramas</figcaption>
       </figure>
       <figure class="gallery-card">
-        <a href="screenshots/kronn-page-vivante.gif" target="_blank" rel="noopener">
-          <img src="screenshots/kronn-page-vivante.gif" width="1100" height="688" loading="lazy" alt="Se lanza un workflow: los pasos se ponen en verde uno a uno y la página publicada muestra el tiempo y los titulares del día" />
-        </a>
+        <video width="1280" height="800" autoplay muted loop playsinline
+               preload="metadata" aria-label="Se lanza un workflow: los pasos se ponen en verde uno a uno y la página publicada muestra el tiempo y los titulares del día">
+          <source src="screenshots/kronn-page-vivante.mp4" type="video/mp4" />
+          <source src="screenshots/kronn-page-vivante.webm" type="video/webm" />
+        </video>
+        <span class="gallery-badge" aria-hidden="true">▶ VÍDEO</span>
         <figcaption><strong>Del workflow a la página, en directo</strong> · cuatro pasos, cuatro fuentes públicas, una página que se reescribe</figcaption>
       </figure>
       <figure class="gallery-card">
@@ -1738,7 +1771,7 @@
       </figure>
       <figure class="gallery-card">
         <a href="screenshots/mcps.png" target="_blank" rel="noopener">
-          <img src="screenshots/mcps.png" width="1600" height="1000" loading="lazy" alt="Página de Plugins: 20 plugins visibles, 19 configurados, 55+ en el registro (MCP y API), o cualquier API" />
+          <img src="screenshots/mcps.png" width="1600" height="1000" loading="lazy" alt="Detalle del plugin GitHub: sus dos interfaces MCP y API determinista, la preferida, su credencial oculta y su alcance por proyecto" />
         </a>
         <figcaption><strong>Plugins MCP &amp; API</strong> · 24 configurados · 59 en el registro · o cualquier API tuya</figcaption>
       </figure>
@@ -2110,6 +2143,22 @@
 </div>
 
   <script>
+  // Five looping videos on one page is five decoders running for nothing. Each one
+  // plays while it is on screen and stops when it leaves; `muted` keeps autoplay
+  // allowed, and a browser that defers autoplay still gets a play() on entry.
+  (function () {
+    var videos = Array.prototype.slice.call(document.querySelectorAll('.gallery-card video'));
+    if (!videos.length || !('IntersectionObserver' in window)) return;
+    var io = new IntersectionObserver(function (entries) {
+      entries.forEach(function (entry) {
+        var v = entry.target;
+        if (entry.isIntersecting) { var p = v.play(); if (p && p.catch) p.catch(function () {}); }
+        else if (!v.paused) { v.pause(); }
+      });
+    }, { rootMargin: '150px 0px' });
+    videos.forEach(function (v) { io.observe(v); });
+  })();
+
   // Native gallery lightbox / carousel — progressive enhancement over the <a> links.
   (function () {
     var links = Array.prototype.slice.call(document.querySelectorAll('.gallery-card a'));
