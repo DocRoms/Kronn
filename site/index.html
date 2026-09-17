@@ -1659,32 +1659,44 @@
     <p class="section-intro">Le concept c'est bien. Voilà à quoi ça ressemble vraiment.</p>
     <div class="gallery-grid">
       <figure class="gallery-card">
-        <a href="screenshots/kronn_dashboard.png" target="_blank" rel="noopener">
-          <img src="screenshots/kronn_dashboard.png" width="1440" height="960" loading="lazy" alt="Dashboard Kronn : liste des projets, statut d'audit, accès rapide" />
+        <a href="screenshots/kronn-projets.png" target="_blank" rel="noopener">
+          <img src="screenshots/kronn-projets.png" width="1600" height="1000" loading="lazy" alt="Détail d'un projet Kronn : état de l'audit, instructions des agents, dépendances à mettre à jour, onglets Docs, Code, Docker et Git" />
         </a>
-        <figcaption><strong>Dashboard</strong> · tes projets, statut d'audit, accès rapide</figcaption>
+        <figcaption><strong>Vos projets, audités</strong> · santé documentaire, dépendances à jour, Docker, Git — sur une seule surface</figcaption>
+      </figure>
+      <figure class="gallery-card">
+        <a href="screenshots/KronnDocumentationView.jpg" target="_blank" rel="noopener">
+          <img src="screenshots/KronnDocumentationView.jpg" width="1600" height="1000" loading="lazy" alt="Vue Documentation de Kronn : doc générée par l'audit (archi, tech-debt) rendue dans le viewer" />
+        </a>
+        <figcaption><strong>La doc du projet, lisible</strong> · l'arbre à gauche, le markdown rendu à droite, et « Discuter de ce fichier »</figcaption>
+      </figure>
+      <figure class="gallery-card">
+        <a href="screenshots/kronn-planification.png" target="_blank" rel="noopener">
+          <img src="screenshots/kronn-planification.png" width="1600" height="1000" loading="lazy" alt="Planification : tâches groupées par projet avec leur statut, et le détail d'une tâche montrant sa Définition de Fini et ses liens" />
+        </a>
+        <figcaption><strong>Un backlog qui sert vraiment</strong> · priorités, blocages, et une Définition de Fini par tâche</figcaption>
       </figure>
       <figure class="gallery-card">
         <a href="screenshots/kronn_multi-ai_discussion.png" target="_blank" rel="noopener">
-          <img src="screenshots/kronn_multi-ai_discussion.png" width="1440" height="960" loading="lazy" alt="Discussion multi-agent : plusieurs CLIs dans la même room Kronn" />
+          <img src="screenshots/kronn_multi-ai_discussion.png" width="1600" height="1000" loading="lazy" alt="Discussion multi-agent : plusieurs CLIs dans la même room Kronn" />
         </a>
         <figcaption><strong>Discussion multi-agent</strong> · plusieurs CLIs dans la même room</figcaption>
       </figure>
       <figure class="gallery-card">
         <a href="screenshots/kronn-media-room.png" target="_blank" rel="noopener">
-          <img src="screenshots/kronn-media-room.png" width="1440" height="960" loading="lazy" alt="Une vidéo générée apparaît dans la discussion avec sa durée, sa définition, son coût réel et la mention qu'elle démarre sur une image de la room" />
+          <img src="screenshots/kronn-media-room.png" width="1600" height="1000" loading="lazy" alt="Une vidéo générée apparaît dans la discussion avec sa durée, sa définition, son coût réel et la mention qu'elle démarre sur une image de la room" />
         </a>
         <figcaption><strong>Génération dans la conversation</strong> · un clip produit dans la room, son coût affiché, sa source indiquée</figcaption>
       </figure>
       <figure class="gallery-card">
         <a href="screenshots/kronn-frame-extraite.png" target="_blank" rel="noopener">
-          <img src="screenshots/kronn-frame-extraite.png" width="1440" height="960" loading="lazy" alt="Image extraite d'une vidéo, portant sa provenance et un lien vers le clip dont elle vient" />
+          <img src="screenshots/kronn-frame-extraite.png" width="1600" height="1000" loading="lazy" alt="Image extraite d'une vidéo, portant sa provenance et un lien vers le clip dont elle vient" />
         </a>
         <figcaption><strong>Enchaîner les plans</strong> · la dernière image d'un clip devient l'image de départ du suivant</figcaption>
       </figure>
       <figure class="gallery-card">
         <a href="screenshots/kronn-media-chain.gif" target="_blank" rel="noopener">
-          <img src="screenshots/kronn-media-chain.gif" width="1440" height="960" loading="lazy" alt="Animation montrant l'enchaînement complet d'une génération d'image vers une vidéo dans une discussion Kronn" />
+          <img src="screenshots/kronn-media-chain.gif" width="760" height="475" loading="lazy" alt="Animation montrant l'enchaînement complet d'une génération d'image vers une vidéo dans une discussion Kronn" />
         </a>
         <figcaption><strong>La chaîne, en mouvement</strong> · de l'image au clip, puis du clip au clip suivant</figcaption>
       </figure>
@@ -1701,48 +1713,96 @@
         <figcaption><strong>Compare-agents</strong> · le même prompt sur N CLIs</figcaption>
       </figure>
       <figure class="gallery-card">
+        <a href="screenshots/kronn-comparaison-flux.gif" target="_blank" rel="noopener">
+          <img src="screenshots/kronn-comparaison-flux.gif" width="1100" height="688" loading="lazy" alt="Sélection de trois discussions dans la liste, puis ouverture de la vue de comparaison et du verdict du juge IA" />
+        </a>
+        <figcaption><strong>Sélectionner, puis comparer</strong> · trois discussions, une seule vue, aucun copier-coller</figcaption>
+      </figure>
+      <figure class="gallery-card">
+        <a href="screenshots/kronn-comparaison.png" target="_blank" rel="noopener">
+          <img src="screenshots/kronn-comparaison.png" width="1600" height="1000" loading="lazy" alt="Comparaison côte à côte de trois agents sur la même traduction : tableau ISO par langue, avis de chaque modèle, durée et tokens consommés" />
+        </a>
+        <figcaption><strong>Le même prompt, plusieurs modèles</strong> · traduire en 5 langues : le tableau, l'avis, la durée et les tokens de chacun</figcaption>
+      </figure>
+      <figure class="gallery-card">
+        <a href="screenshots/kronn-comparaison-juge.png" target="_blank" rel="noopener">
+          <img src="screenshots/kronn-comparaison-juge.png" width="1600" height="1000" loading="lazy" alt="Panneau de classement : note IA avec son niveau de confiance, note humaine en étoiles, curseur de pondération, et le détail du verdict" />
+        </a>
+        <figcaption><strong>Un juge IA, et le vôtre</strong> · note IA, note humaine, pondération — et le juge annonce qu'il est juge et partie</figcaption>
+      </figure>
+      <figure class="gallery-card">
+        <a href="screenshots/kronn-automatisations.png" target="_blank" rel="noopener">
+          <img src="screenshots/kronn-automatisations.png" width="1600" height="1000" loading="lazy" alt="Bibliothèque d'automatisation : workflows, Quick APIs, Quick Prompts et Quick Execs, chacun avec son agent et ses actions" />
+        </a>
+        <figcaption><strong>La bibliothèque d'automatisations</strong> · workflows, appels API et prompts réutilisables, au même endroit</figcaption>
+      </figure>
+      <figure class="gallery-card">
         <a href="screenshots/kronn-selecteur-agent.png" target="_blank" rel="noopener">
-          <img src="screenshots/kronn-selecteur-agent.png" width="1440" height="960" loading="lazy" alt="Sélecteur d'agent ouvert : dix agents, chacun avec trois paliers et son état — détecté, à configurer, ou absent du catalogue" />
+          <img src="screenshots/kronn-selecteur-agent.png" width="1600" height="1000" loading="lazy" alt="Sélecteur d'agent ouvert : dix agents, chacun avec trois paliers et son état — détecté, à configurer, ou absent du catalogue" />
         </a>
         <figcaption><strong>Le modèle en un clic</strong> · 10 agents × 3 paliers, avec leur état réel de détection</figcaption>
       </figure>
       <figure class="gallery-card">
         <a href="screenshots/workflows.png" target="_blank" rel="noopener">
-          <img src="screenshots/workflows.png" width="1440" height="960" loading="lazy" alt="Page Automatisation : orchestration step-based (workflows multi-étapes)" />
+          <img src="screenshots/workflows.png" width="1600" height="1000" loading="lazy" alt="Page Automatisation : orchestration step-based (workflows multi-étapes)" />
         </a>
         <figcaption><strong>Automatisation</strong> · orchestration step-based</figcaption>
       </figure>
       <figure class="gallery-card">
         <a href="screenshots/KronnCaptureAutoPilot.png" target="_blank" rel="noopener">
-          <img src="screenshots/KronnCaptureAutoPilot.png" width="1440" height="960" loading="lazy" alt="Automatisation : sélecteur de modèle en 1 clic — 7 agents (Claude Code, Codex, Gemini CLI, Kiro, GitHub Copilot, Ollama, LiteLLM) × Éco / Standard / Avancé, par step, avec la branch map colorée" />
+          <img src="screenshots/KronnCaptureAutoPilot.png" width="1600" height="1000" loading="lazy" alt="Automatisation : sélecteur de modèle en 1 clic — 7 agents (Claude Code, Codex, Gemini CLI, Kiro, GitHub Copilot, Ollama, LiteLLM) × Éco / Standard / Avancé, par step, avec la branch map colorée" />
         </a>
-        <figcaption><strong>Choix du modèle en 1 clic</strong> · 7 agents × Éco / Standard / Avancé, par step</figcaption>
+        <figcaption><strong>Choix du modèle en 1 clic</strong> · 10 agents × Éco / Standard / Avancé, sur n'importe quel step</figcaption>
+      </figure>
+      <figure class="gallery-card">
+        <a href="screenshots/kronn-step-agent-swap.gif" target="_blank" rel="noopener">
+          <img src="screenshots/kronn-step-agent-swap.gif" width="1100" height="688" loading="lazy" alt="Changement de l'agent d'une étape de workflow : le sélecteur s'ouvre et l'étape passe de Claude Code à un modèle Ollama local" />
+        </a>
+        <figcaption><strong>Claude Code, puis Ollama, en un clic</strong> · l'étape ne change pas ; seul le modèle qui l'exécute change</figcaption>
+      </figure>
+      <figure class="gallery-card">
+        <a href="screenshots/kronn-agent-workflow.gif" target="_blank" rel="noopener">
+          <img src="screenshots/kronn-agent-workflow.gif" width="1100" height="688" loading="lazy" alt="Un agent Claude Code crée un workflow multi-étapes depuis la discussion, avec ses appels API et son étape agent" />
+        </a>
+        <figcaption><strong>Un agent construit le workflow</strong> · tu décris la chaîne, il pose les étapes et les branchements</figcaption>
+      </figure>
+      <figure class="gallery-card">
+        <a href="screenshots/kronn-page-vivante.gif" target="_blank" rel="noopener">
+          <img src="screenshots/kronn-page-vivante.gif" width="1100" height="688" loading="lazy" alt="Lancement d'un workflow : les étapes passent au vert une à une, puis la page publiée affiche la météo et les dépêches du jour" />
+        </a>
+        <figcaption><strong>Du workflow à la page, en direct</strong> · quatre étapes, quatre sources publiques, une page qui se réécrit</figcaption>
       </figure>
       <figure class="gallery-card">
         <a href="screenshots/kronn-live-page.png" target="_blank" rel="noopener">
-          <img src="screenshots/kronn-live-page.png" width="1440" height="960" loading="lazy" alt="Page vivante : prévisions heure par heure pour Lyon, et les dernières dépêches d'Euronews, Le Monde et The Guardian avec le logo de chaque source" />
+          <img src="screenshots/kronn-live-page.png" width="1600" height="1000" loading="lazy" alt="Page vivante : prévisions heure par heure pour Lyon, et les dernières dépêches d'Euronews, Le Monde et The Guardian avec le logo de chaque source" />
         </a>
         <figcaption><strong>Live Page alimentée par un workflow</strong> · météo horaire et trois rédactions, publiées automatiquement</figcaption>
       </figure>
       <figure class="gallery-card">
         <a href="screenshots/kronn-connexions-media.png" target="_blank" rel="noopener">
-          <img src="screenshots/kronn-connexions-media.png" width="1440" height="960" loading="lazy" alt="Configuration des connexions API externes : chaque fournisseur a son alias, ses paliers Éco / Standard / Avancé, et ses modèles de génération d'images et de vidéos" />
+          <img src="screenshots/kronn-connexions-media.png" width="1600" height="1000" loading="lazy" alt="Configuration des connexions API externes : chaque fournisseur a son alias, ses paliers Éco / Standard / Avancé, et ses modèles de génération d'images et de vidéos" />
         </a>
         <figcaption><strong>Connexions nommées</strong> · LiteLLM, NVIDIA, OpenRouter — trois paliers chacun, et les slots image et vidéo</figcaption>
       </figure>
       <figure class="gallery-card">
         <a href="screenshots/mcps.png" target="_blank" rel="noopener">
-          <img src="screenshots/mcps.png" width="1440" height="960" loading="lazy" alt="Page Plugins : 20 plugins visibles dont 19 configurés, 55+ au registre (MCP et API), ou n'importe quelle API" />
+          <img src="screenshots/mcps.png" width="1600" height="1000" loading="lazy" alt="Page Plugins : 20 plugins visibles dont 19 configurés, 55+ au registre (MCP et API), ou n'importe quelle API" />
         </a>
-        <figcaption><strong>Plugins MCP &amp; API</strong> · 19 configurés · 55+ au registre</figcaption>
+        <figcaption><strong>Plugins MCP &amp; API</strong> · 24 configurés · 59 au registre · ou n'importe quelle API</figcaption>
       </figure>
       <figure class="gallery-card">
-        <a href="screenshots/KronnDocumentationView.jpg" target="_blank" rel="noopener">
-          <img src="screenshots/KronnDocumentationView.jpg" width="1440" height="960" loading="lazy" alt="Vue Documentation de Kronn : doc générée par l'audit (archi, tech-debt) rendue dans le viewer" />
+        <a href="screenshots/kronn-agents-cli.png" target="_blank" rel="noopener">
+          <img src="screenshots/kronn-agents-cli.png" width="1600" height="1000" loading="lazy" alt="Configuration des agents : sept CLIs détectés avec leur version, et pour chacun le modèle associé aux niveaux Éco, Standard et Avancé" />
         </a>
-        <figcaption><strong>Audit IA</strong> · toute la doc + tech-debt générées (Yep, Kronn lui-même n'a pas beaucoup de dette tech ;))</figcaption>
+        <figcaption><strong>Tous tes agents, détectés</strong> · version, authentification et modèle Éco / Standard / Avancé pour chacun</figcaption>
       </figure>
-</div>
+      <figure class="gallery-card">
+        <a href="screenshots/kronn-base-donnees.png" target="_blank" rel="noopener">
+          <img src="screenshots/kronn-base-donnees.png" width="1600" height="1000" loading="lazy" alt="Section base de données : répartition du poids table par table, avec le nombre de lignes et la part de chacune" />
+        </a>
+        <figcaption><strong>Savoir où va le poids</strong> · une barre par table, mesurée à la demande</figcaption>
+      </figure>
+    </div>
   </section>
 
   <!-- MANIFESTO pull-quote -->
