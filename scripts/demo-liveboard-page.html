@@ -1,0 +1,65 @@
+<!doctype html><meta charset="utf-8"><title>Lyon &amp; Euronews</title>
+<style>
+ body{font-family:ui-sans-serif,system-ui,-apple-system,sans-serif;background:#0f1115;color:#e8eaed;margin:0;padding:44px}
+ h1{font-size:26px;margin:0 0 4px;letter-spacing:-.01em}
+ .sub{color:#9aa0a6;font-size:13px;margin-bottom:26px}
+ .synth{background:#12261c;border:1px solid #1f4634;border-radius:12px;padding:18px 20px;margin-bottom:22px;font-size:15px;line-height:1.55}
+ .cards{display:flex;gap:16px;flex-wrap:wrap;align-items:flex-start}
+ .card{background:#171a1f;border:1px solid #262a31;border-radius:12px;padding:20px;flex:1 1 300px}
+ .lbl{color:#9aa0a6;font-size:11px;text-transform:uppercase;letter-spacing:.08em;margin-bottom:10px}
+ .t{font-size:46px;font-weight:600;line-height:1}
+ .u{font-size:18px;color:#9aa0a6;margin-left:4px}
+ .wind{color:#9aa0a6;font-size:13px;margin-top:6px}
+ ol{margin:0;padding-left:20px;line-height:1.65;font-size:13.5px}
+ li{margin-bottom:7px}
+ .empty{color:#5f6368;font-style:italic}
+</style>
+<h1>Lyon &amp; Euronews</h1>
+<div class="sub" id="stamp">…</div>
+<div class="synth" id="synth"><span class="empty">pas encore publiée</span></div>
+<div class="cards">
+  <div class="card"><div class="lbl">Météo · Lyon</div><div id="meteo"><span class="empty">pas encore publiée</span></div></div>
+  <div class="card" style="flex:2 1 460px"><div class="lbl">À la une · Euronews</div><div id="news"><span class="empty">pas encore publiée</span></div></div>
+</div>
+<script>
+ // Kronn exposes the published datasets read-only on `window.KronnPageData`.
+ // Everything below is a pure read: the page never fetches, it renders what
+ // the last workflow publication put there.
+ // `KronnPageData` is defined as a lazy getter by the sandbox host, so it is
+ // not populated at parse time. Render once it answers, and give up quietly
+ // rather than spin: an empty page is honest, a frozen one is not.
+ function read(){ return window.KronnPageData || null; }
+ function ready(k){
+   var tries = 0;
+   (function poll(){
+     var d = read();
+     if (d && d.datasets && Object.keys(d.datasets).length) return k(d);
+     if (++tries > 40) return;
+     setTimeout(poll, 50);
+   })();
+ }
+ ready(function(K){
+ var D = K.datasets || {};
+ var page = K.page || {};
+ function cur(n){ return D[n] && D[n].current; }
+
+ var m = cur('meteo');
+ if (m && m.temperature_2m != null) {
+   document.getElementById('meteo').innerHTML =
+     '<div class="t">' + m.temperature_2m + '<span class="u">°C</span></div>' +
+     '<div class="wind">vent ' + (m.wind_speed_10m ?? '—') + ' km/h · relevé ' + (m.time || '') + '</div>';
+ }
+ var a = cur('articles');
+ if (Array.isArray(a) && a.length) {
+   document.getElementById('news').innerHTML =
+     '<ol>' + a.slice(0,6).map(function(x){
+       return '<li>' + String(x.title || x).replace(/[<>]/g,'') + '</li>';
+     }).join('') + '</ol>';
+ }
+ var s = cur('synthese');
+ if (s) document.getElementById('synth').textContent = typeof s === 'string' ? s : JSON.stringify(s);
+
+ document.getElementById('stamp').textContent =
+   'Publié par le workflow · révision de données r' + (page.data_revision ?? '?');
+ });
+</script>
