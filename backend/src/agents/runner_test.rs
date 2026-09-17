@@ -819,6 +819,43 @@ mod tests {
     }
 
     #[test]
+    fn a_catalogue_is_estimated_at_what_the_tokenizer_actually_charges() {
+        // Measured, not assumed: three catalogue sizes across qwen3.8:27b-mlx
+        // and gemma4:12b-mlx came back at 3.78-3.96 bytes per token marginal.
+        // Charging declarations the prose ratio of 3.0 overstated a full 83 KB
+        // catalogue by 31 % and refused a run whose real prompt was 21 962
+        // tokens against a 32 768 ceiling.
+        let mut body = serde_json::json!({ "messages": [] });
+        let empty = estimated_chat_history_tokens(&body);
+
+        let catalogue_bytes = 83_284usize;
+        body["tools"] = serde_json::json!([{
+            "type": "function",
+            "function": {
+                "name": "x",
+                // Padded to the measured size of a full native catalogue.
+                "description": "d".repeat(catalogue_bytes - 120),
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }]);
+        let declared = estimated_chat_history_tokens(&body) - empty;
+
+        // The real measurement for this catalogue was 21 962 tokens. The
+        // estimate must sit above it — it is a budget, not a prediction — and
+        // below the prose ratio that refused the run.
+        assert!(
+            (21_962..83_284 / 3).contains(&(declared as usize)),
+            "declaration estimate {declared} must be conservative without being the old 3.0"
+        );
+
+        // And the whole request must fit the ceiling that used to refuse it.
+        assert!(
+            estimated_chat_history_tokens(&body) + WORKER_FINALIZATION_REPLY_HEADROOM < 32_768,
+            "a full catalogue must be admissible at the MLX ceiling"
+        );
+    }
+
+    #[test]
     fn the_declared_catalogue_is_charged_to_the_window_it_actually_occupies() {
         // Found by an audit of the deferred-tool design, and true before it:
         // the trimmer measured only `messages` while `tools` rides in the same

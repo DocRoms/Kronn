@@ -246,14 +246,33 @@ fn worker_exploration_boundary(
     }
 }
 
+/// Bytes per token for a tool catalogue, which is NOT the ratio prose uses.
+///
+/// Declarations are repetitive schema JSON — the same keys, types and phrasing
+/// over and over — so they tokenise LIGHTER than prose, not heavier. Measured
+/// against what Ollama actually billed, over three catalogue sizes and two
+/// model families: 3.78 and 3.96 B/token marginal (qwen3.8:27b-mlx,
+/// gemma4:12b-mlx). Budgeted at 3.5, between the measurement and the prose
+/// ratio, so a tokenizer that behaves worse than both still has room.
+///
+/// Charging them at the prose 3.0 overstated a full catalogue by ~31 %, which
+/// is not academic: it refused an 83 KB catalogue as needing 34 065 tokens
+/// against a 32 768 ceiling, when the real prompt came back at 21 962.
+const CATALOGUE_BYTES_PER_TOKEN: u64 = 7;
+const CATALOGUE_BYTES_PER_TOKEN_SCALE: u64 = 2;
+
 fn estimated_chat_history_tokens(body: &serde_json::Value) -> u64 {
-    let mut wire_bytes = body["messages"].to_string().len() as u64;
+    let wire_bytes = body["messages"].to_string().len() as u64;
+    let mut estimate = (wire_bytes / 3) + 2048;
     for field in ["tools", "format"] {
         if let Some(value) = body.get(field) {
-            wire_bytes = wire_bytes.saturating_add(value.to_string().len() as u64);
+            let bytes = value.to_string().len() as u64;
+            estimate = estimate.saturating_add(
+                bytes.saturating_mul(CATALOGUE_BYTES_PER_TOKEN_SCALE) / CATALOGUE_BYTES_PER_TOKEN,
+            );
         }
     }
-    (wire_bytes / 3) + 2048
+    estimate
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
