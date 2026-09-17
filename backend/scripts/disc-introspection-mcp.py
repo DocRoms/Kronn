@@ -2263,13 +2263,13 @@ TOOLS = [
         "name": "media_generate",
         "description": (
             "Generate an image/video on a configured HTTP connection; returns "
-            "`{job_id, status, model}`. The human's configured modality slot fixes "
-            "the model; a missing slot is refused with setup guidance. "
-            "Billed operation: video per second, image per picture; audio "
-            "(on unless `generate_audio: false`) adds cost. Use the shortest useful clip. "
-            "Keep `wait: false` (default): the asset arrives in the discussion "
-            "automatically as a context file for all agents. Use `true` only if "
-            "needed in your current answer."
+            "`{job_id, status, model}`. The configured slot fixes the model; a "
+            "missing one is refused with setup guidance. Billed: video per "
+            "second, image per picture; audio (on unless `generate_audio: "
+            "false`) adds cost. Use the shortest useful clip. Keep `wait: "
+            "false` (default): the asset arrives in the discussion as a context "
+            "file for all agents. Use `true` only if needed in this answer. "
+            "Envelope, chaining and cost: tool_manual."
         ),
         "inputSchema": {
             "type": "object",
@@ -2290,13 +2290,13 @@ TOOLS = [
                 },
                 "duration_secs": {
                     "type": "integer",
-                    "description": "Video only, server-capped.",
+                    "description": "Video only; from `agent_list` capabilities.",
                 },
                 "resolution": {
                     "type": "string",
-                    "description": "What the model's catalogue lists.",
+                    "description": "Same source, per model.",
                 },
-                "aspect_ratio": {"type": "string", "description": "Same, per model."},
+                "aspect_ratio": {"type": "string", "description": "Same."},
                 "generate_audio": {
                     "type": "boolean",
                     "description": (
@@ -2311,10 +2311,11 @@ TOOLS = [
                     "items": {"type": "string"},
                     "description": (
                         "Ids of images ALREADY IN THIS DISCUSSION to generate "
-                        "from — never paths or URLs. Order matters: providers "
-                        "weigh references by position. A video takes one; an "
-                        "image takes as many as the model advertises (1-16). "
-                        "Needs `reference_mode`."
+                        "from — never paths or URLs, order matters, as many as "
+                        "the model advertises. Needs `reference_mode`. One may "
+                        "be an earlier clip's last image — that is how clips "
+                        "are chained; Kronn cannot cut it, the human keeps it "
+                        "from the Assets carousel."
                     ),
                 },
                 "reference_asset_id": {
@@ -2327,7 +2328,7 @@ TOOLS = [
                     "description": (
                         "Use of those images. A first/last frame is video-only "
                         "and takes ONE picture; `reference` is what an image "
-                        "uses. Only what the model advertises is accepted."
+                        "uses."
                     ),
                 },
                 "wait": {
@@ -9666,7 +9667,14 @@ TOOL_MANUALS = {
         "backend phrases and never contain keys, endpoints, hostnames or raw upstream errors. "
         "Provider probes run in parallel under a short global bound. After choosing an "
         "available identity, call `task_exec_prepare` and obey its task-specific refusal "
-        "codes before `task_exec_launch`."
+        "codes before `task_exec_launch`.\n\n"
+        "An entry also carries `media`: one item per configured generation slot, with the "
+        "`model` and the `capabilities` its provider advertises (`durations_secs`, "
+        "`resolutions`, `aspect_ratios`, `frame_positions`, `max_input_references`, "
+        "`generate_audio`). Those lists are what `media_generate` accepts — take the "
+        "duration, resolution and ratio from them rather than from habit. A null "
+        "`capabilities` means the catalogue could not be read, not that anything goes; an "
+        "empty `media` means this worker generates nothing."
     ),
     "task_exec_prepare": (
         "**One durable lifecycle, two roles.** A principal starts by reading the room plan, "
@@ -10005,6 +10013,36 @@ TOOL_MANUALS["workflow_trigger"] = (
     "Discovery first: `workflow_list` gives the `workflow_id`. The workflow must be enabled — a disabled draft is refused with a clear error.\n\n`next_check` has the form `{wait_seconds, reason, confidence}`. The first wait is always at least 30s, a sanity check that the run actually started. `confidence: baseline` means the average duration is reliable; `confidence: no_baseline` means this workflow has never run, so check every 60s.\n\nWhen the workflow declares manual launch variables, pass them as `variables: {name: value, …}`. Required ones must be non-empty — the same validation the UI form applies."
 )
 TOOL_MANUALS["task_exec_launch"] = TOOL_MANUALS["task_exec_prepare"]
+TOOL_MANUALS["media_generate"] = (
+    "Parameters come from the model, not from habit. `agent_list` returns one "
+    "entry per configured media slot, each carrying the `capabilities` the "
+    "provider advertises: `durations_secs`, `resolutions`, `aspect_ratios`, "
+    "`frame_positions`, `max_input_references`, `generate_audio`. Take the "
+    "duration, resolution and ratio from those lists. A value the list "
+    "excludes is refused here, with the list, before the provider is called — "
+    "a null `capabilities` means the catalogue could not be read, so keep your "
+    "defaults rather than inventing one.\n\n"
+    "References. Order matters: providers weigh reference images by position. "
+    "A video takes one picture; an image takes as many as "
+    "`max_input_references` advertises. `reference_mode` says what the picture "
+    "IS to the generation: `first_frame` and `last_frame` pin the clip's exact "
+    "opening or closing image (video only, one picture), `reference` is a "
+    "visual the model draws from.\n\n"
+    "Chaining clips. A reference picture may be an earlier clip's LAST IMAGE: "
+    "pass its context file id with `reference_mode: \"first_frame\"` and the "
+    "new clip starts exactly where the previous one ended — that is how a "
+    "sequence of videos is built. Kronn cannot produce that image itself: "
+    "these clips are H.264 High profile and the decoder available server-side "
+    "reads nine frames out of ninety-seven, so an extractor would hand back a "
+    "sharp, wrong picture (KT-550). The viewer decodes them without trouble, "
+    "so ask the human to open the clip in the discussion's Assets carousel and "
+    "keep its last image; what they keep lands in the room as an ordinary "
+    "context file. Not to be confused with `reference_mode: \"last_frame\"`, "
+    "which asks the NEW clip to end on the picture you supply.\n\n"
+    "Cost. Video is billed per second and image per picture, audio included "
+    "unless `generate_audio: false`. Nothing here is free to retry: reuse the "
+    "same `idempotency_key` for a retry of a generation you already asked for."
+)
 
 
 def call_tool_manual(args):

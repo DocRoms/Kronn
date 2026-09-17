@@ -150,7 +150,10 @@ without a reload.
   first; the native one closed the half of the fleet that could not reach it.
 * Discovery: an agent reads which modalities are available from the worker
   catalogue `agent_list` returns — one entry per configured model, absent when
-  nothing is configured, so availability is never asserted on faith.
+  nothing is configured, so availability is never asserted on faith. Each entry
+  carries the same envelope the launcher reads (`capabilities`: durations,
+  resolutions, ratios, frame positions), so an agent picks a duration the model
+  named instead of discovering the list from a refusal.
 * Publication goes through the single point
   `api::shared_runs::publish_media_job` — persisting the run and broadcasting
   it are inseparable, so a 100 s generation is visible while it runs.
@@ -186,10 +189,48 @@ field means "do not offer it". A provider with no media catalogue at all
 (NVIDIA serves none) leaves the launcher on its configured fallbacks rather
 than emptying it. Answers are cached in memory for ten minutes.
 
+A value the envelope explicitly excludes is refused at `/api/media/generate`,
+with the list, before the provider is called — the same rule the reference-mode
+preflight already applied, extended to duration, resolution and ratio. Silence
+is never a refusal: an unreadable catalogue or a field the provider never
+advertises leaves the submission to decide. Resolutions and ratios are compared
+trimmed and case-insensitively, so a caller is never refused over `720P`.
+
+The same read serves both surfaces. `agent_list` sweeps every configured media
+slot concurrently under one 8 s window and attaches what came back
+[src: file: backend/src/api/orchestration.rs:8547-8588]; the catalogue builder
+itself stays pure and is handed the result, like the reachability and quota
+preflights beside it. An envelope is attached only when the model it was read
+for is still the configured one — a connection whose model changed between the
+sweep and the build gets silence, never the previous model's durations. A
+timeout or an unreadable catalogue leaves `capabilities` null rather than an
+empty envelope, whose empty lists would read as "this model supports nothing".
+
 Deliberately NOT stored in `model_catalog_entries` (KT-531): that table is a
 catalogue of AGENT models, with provenance and tier assignment. These envelopes
 are per provider model and volatile — a max duration changes without notice —
 and persisting them would make a stale row authoritative over the provider.
+
+## Chaining a clip into the next one
+
+A reference is always a picture, so continuing a clip means passing that clip's
+last image. Kronn cannot produce it: the clips these providers return are H.264
+High profile, and the pure-Rust decoder available server-side reads nine frames
+out of ninety-seven before failing — an extractor written without that check
+would return the ninth frame as "the last image", sharp and wrong (KT-550,
+spike kept in `.kronn/research/kt550-frame-spike/`). ffmpeg is on neither the
+machine nor the repo.
+
+The browser decodes them without trouble, so KT-556 puts the extraction in the
+viewer: the reader keeps the last image from the Assets carousel and it lands in
+the room as an ordinary context file. An agent cannot do this on its own, so
+every surface that could mislead it now says who to ask — the `media_generate`
+declarations on both routes, the `tool_manual({tool: "media_generate"})` page,
+and the refusal returned when a clip id is passed as a reference.
+
+Not to be confused with `reference_mode: "last_frame"`, which is a generation
+constraint — the new clip must END on the picture supplied — and not an
+extraction.
 
 ## Generating from images already in the room
 

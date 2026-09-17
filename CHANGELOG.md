@@ -9,7 +9,7 @@ Release notes for 0.9.3 and earlier are available in the
 
 ---
 
-## [Unreleased]
+## [0.13.0] - 2026-09-17
 
 ### Added
 
@@ -33,6 +33,41 @@ Release notes for 0.9.3 and earlier are available in the
   available at all. Modalities are listed one per configured model and stay
   absent otherwise, so an agent is never told it can produce a video that the
   generation request would then refuse.
+
+- HTTP agents author and run automations like CLI agents do: `qe_run`,
+  `qa_create_draft`, `qa_update`, `qe_create_draft`, `qe_update`, alongside the
+  `qe_list` that was missing. An agent could already start a saved Quick Exec
+  through `agent_job_start` and had no tool that could tell it one existed.
+  Authoring stays out of worker rooms, where a task is already briefed.
+
+  An update names only what changes: Kronn reads the stored definition and
+  overlays the call onto it. Demanding the whole object would have been the same
+  defect as an id no tool can produce — `qa_list` returns a compact view by
+  design, since it is paid on every turn, and could never have supplied one.
+
+- A `tool_manual` on the native surface, the one the MCP bridge has had. The
+  native catalogue is re-sent on every turn, so a description that explains an
+  argument shape is paid on every message of every room; the declaration now
+  carries the contract and the manual carries the detail. The five new tools
+  cost 4 546 B rather than the 12 913 B their bridge equivalents weigh.
+
+- Each media slot in that catalogue now carries what the provider advertises —
+  supported durations, resolutions, aspect ratios, frame positions — read from
+  the same catalogue the launcher shows. An agent asking for a 15 s clip on a
+  model that tops out at 12 s learned the list only from the refusal, one turn
+  and one provider round-trip later. An unreadable catalogue leaves the envelope
+  unstated rather than empty: empty lists would read as "supports nothing".
+
+- A duration, resolution or ratio the model's catalogue excludes is now refused
+  by Kronn, with the list, instead of by the provider a round-trip later. Only
+  an explicit list refuses — a field the provider never advertises, or a
+  catalogue that could not be read, still leaves the submission to decide.
+
+- Agents are told how to chain clips: a reference picture may be an earlier
+  clip's last image, and since Kronn cannot cut that image out server-side
+  (KT-550), the surfaces now say to ask the reader to keep it from the Assets
+  carousel. Passing a clip id as a reference used to answer "not an image",
+  which named the mistake without naming the way through it.
 
 - Installed CLI versions are compared with current stable releases from their
   official sources. RTK and ccusage have separate checks and diagnostics;

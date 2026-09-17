@@ -114,9 +114,29 @@ So the boundary today is **not** "HTTP agents cannot write". It is:
 > history. They may not **execute** anything — no shell, no mutating git — and therefore
 > cannot verify their own work.
 
+One trap in that sentence, worth naming because the catalogue says otherwise: `git_commit`
+IS declared to a discussion agent, and its handler refuses every caller that is not the
+active native worker in its managed task worktree
+`[src: file: backend/src/api/agent_tools.rs:2656-2702]`. So an ordinary `@ollama` in a room
+sees the tool and is turned away by it. The refusal is correct; the declaration is the part
+that misleads, and it is kept declared only because a worker room is built by narrowing the
+same catalogue.
+
 Recording the move matters because the earlier wording still circulates in task descriptions
 written before that date. Where a document says "implementation stays with CLI agents", read
 it as "execution and verification stay with CLI agents".
+
+It moved a second time on **2026-09-17**, for the automations. An HTTP agent could already
+start a saved Quick Exec through `agent_job_start`, and had no tool that could tell it one
+existed; it can now list them, run one synchronously, and author Quick APIs and Quick Execs
+the way a CLI agent does. `qe_run` is execution, and it is deliberately the same narrow
+shape as media generation: the human saved the command, Kronn owns the argv, there is no
+shell, and the project scope is the one `start_background_job` already enforces. The agent
+chooses which saved command to run — never what it does.
+
+None of it reaches a worker. A worker has one task and is already briefed; authoring an
+automation would change the instance in a way its delivery cannot be reviewed against, and
+choosing among a visited project's saved commands is not part of its contract (KT-398).
 
 ## Judging a future request
 
@@ -125,6 +145,8 @@ Ask which side of *execution* it falls on.
 - Reading anything already inside the workspace, or one public URL: **in scope**, subject to
   the existing bounds.
 - Producing or editing files in the workspace: **in scope** since 2026-08-18.
+- Running a Quick Exec the human already saved: **in scope** since 0.13.0. It is execution,
+  but of an argv Kronn owns, with no shell and inside the project that saved it.
 - Generating an image or a video on a configured connection: **in scope** since 0.13.0, with
   the cost bounds above. This is the exception to "they may not execute anything" and it is
   narrow on purpose — Kronn owns the request, the room and the claim; the agent supplies a

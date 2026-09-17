@@ -23,38 +23,44 @@
 
 **Prompts plus petits, code déterministe quand c'est possible : moins d'hallucinations, facture tokens divisée, écoconception par conception.**
 
-> **Statut : 0.12.0 (version actuelle).** Fonctionnel mais pré-1.0. Les versions mineures peuvent introduire des breaking changes ; les patch versions sont safe.
+> **Statut : 0.13.0 (version actuelle).** Fonctionnel mais pré-1.0. Les versions mineures peuvent introduire des breaking changes ; les patch versions sont safe.
 > **Licence : AGPL-3.0.** Utiliser Kronn localement pour développer *ton propre* produit ne déclenche pas le copyleft ; il ne s'applique que si tu redistribues une version modifiée à d'autres. Voir [Notes sur la licence](#notes-sur-la-licence-agpl-3-0).
 
-## Nouveautés de la 0.12.0
+## Nouveautés de la 0.13.0
 
-- **Une même logique de collection partout :** Projets, Discussions,
-  Planification, Automatisation, Pages et Plugins partagent désormais la même
-  sidebar compacte, la recherche, les filtres, le tri, les favoris, les actions
-  de ligne et les raccourcis clavier.
-- **Connexions API externes nommées :** gère LiteLLM, NVIDIA, OpenRouter et d’autres
-  endpoints compatibles OpenAI depuis une seule zone de configuration, teste
-  leurs identifiants, associe leurs modèles aux niveaux Économie / Par défaut /
-  Raisonnement et appelle chaque connexion par son propre alias en discussion.
-- **Des détails projet qui utilisent tout l’espace :** Audit, Docs et Code sont
-  des onglets directs en pleine hauteur, avec le sélecteur d’agent actuel, une
-  santé documentaire plus claire et l’historique d’audit sans blocs imbriqués.
-- **Le contrôle Docker au niveau du projet :** inspecte les services Compose,
-  ports, hosts publiés et logs, démarre ou arrête la stack, ouvre les hosts
-  joignables et filtre les projets dont l’environnement tourne.
-- **Mosaïques de Pages :** sélectionne plusieurs Pages et ouvre-les ensemble
-  dans une vue externe à deux, trois ou plusieurs tuiles responsives.
-- **Un travail délégué plus observable :** la progression native des workers et
-  les contrôles documentaires déterministes rendent explicites les files,
-  l’activité fournisseur et la validation des audits sans inventer de télémétrie.
+- **Génération d’images et de vidéos sur les connexions HTTP :** LiteLLM, NVIDIA
+  et OpenRouter génèrent depuis une discussion ou depuis le carrousel d’assets,
+  avec le coût affiché avant le clic. Les agents lisent ce que chaque modèle
+  annonce réellement — durées, résolutions, ratios — au lieu de découvrir ses
+  limites par un refus, et peuvent enchaîner la dernière image d’un clip dans le
+  clip suivant.
+- **Les agents HTTP atteignent les automatisations :** un agent Ollama ou LiteLLM
+  liste les Quick Execs sauvegardés, en lance un, et écrit des Quick APIs et des
+  Quick Execs comme un agent CLI. Les identifiants restent côté serveur ;
+  l’écriture reste hors des rooms worker.
+- **Messages importants et cartes de décision publiées :** un formulaire en texte
+  brut au-dessus du composer produit un objet structuré et persisté — pas de la
+  mise en forme — et un agent peut poser une décision à un humain puis s’arrêter,
+  la question survivant comme son propre enregistrement.
+- **Des rooms multi-agents qui tiennent :** mentionne trois agents et trois
+  répondent ; un redémarrage du backend n’annule plus en silence ceux qui
+  n’avaient pas encore parlé ; la room enfant d’un worker délégué continue
+  d’accepter des messages une fois sa tâche terminée.
+- **Une base dont on voit le poids :** la configuration montre où sont réellement
+  les octets, une barre par table, mesuré à la demande. Les discussions
+  rapportent leur propre poids, séparé par ce qu’un nettoyage récupérerait.
+- **Un markdown qui se répare :** les marqueurs d’outils n’atterrissent plus au
+  milieu d’un message, les réponses ACP ne sont plus découpées en plein mot, et
+  une longue conversation se met à niveau progressivement au lieu de figer la
+  room à l’ouverture.
 
-Voir les [notes complètes de la version 0.12.0](CHANGELOG.md), le
+Voir les [notes complètes de la version 0.13.0](CHANGELOG.md), le
 [guide des connexions API externes](docs/operations/external-api-connections.md)
 et le [guide de délégation des tâches](docs/guides/task-orchestration.md).
 
 ## Sommaire
 
-- [Nouveautés de la 0.12.0](#nouveautés-de-la-0120)
+- [Nouveautés de la 0.13.0](#nouveautés-de-la-0130)
 - [Le pitch en 60 secondes](#le-pitch-en-60-secondes)
 - [L'approche Kronn : de l'ingénierie, pas de l'incantation](#lapproche-kronn--de-lingénierie-pas-de-lincantation)
 - [Démarrage rapide](#démarrage-rapide)
@@ -118,7 +124,7 @@ Télécharge l'installeur pour ton OS depuis [Releases](https://github.com/DocRo
 Requiert Docker + Docker Compose. Sur Windows, WSL2 (Docker Engine dans WSL fonctionne, Docker Desktop optionnel).
 
 ```bash
-git clone --branch 0.12.0 --depth 1 https://github.com/DocRoms/Kronn.git   # dernière release stable
+git clone --branch 0.13.0 --depth 1 https://github.com/DocRoms/Kronn.git   # dernière release stable
 cd Kronn
 ./kronn start
 # → http://localhost:3140

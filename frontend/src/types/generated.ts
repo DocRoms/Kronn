@@ -6476,7 +6476,14 @@ media: Array<TaskWorkerModality>, reasons: Array<CampaignTaskReason>, warnings: 
  * configured for them, so an empty list means "this worker generates no
  * media" rather than "nobody looked".
  */
-export type TaskWorkerModality = { modality: MediaModality, model: string, };
+export type TaskWorkerModality = { modality: MediaModality, model: string,
+/**
+ * What the provider advertises for this model — the same envelope the
+ * launcher reads. `None` means no catalogue could be read, which is not
+ * "unconstrained": an agent must then keep its own defaults rather than
+ * invent a duration the generation would be billed for and refuse.
+ */
+capabilities: MediaModelCapabilities | null, };
 
 /**
  * Machine-checkable scope for a worker that should not explore the repository.

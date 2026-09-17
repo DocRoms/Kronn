@@ -1136,6 +1136,11 @@ pub struct TaskWorkerTier {
 pub struct TaskWorkerModality {
     pub modality: crate::models::MediaModality,
     pub model: String,
+    /// What the provider advertises for this model — the same envelope the
+    /// launcher reads. `None` means no catalogue could be read, which is not
+    /// "unconstrained": an agent must then keep its own defaults rather than
+    /// invent a duration the generation would be billed for and refuse.
+    pub capabilities: Option<crate::agents::media_capabilities::MediaModelCapabilities>,
 }
 
 /// A worker identity that can be copied verbatim into `task_exec_prepare`.
