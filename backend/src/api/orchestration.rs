@@ -8582,22 +8582,24 @@ async fn bounded_media_capabilities(
 
     // One window per slot rather than one for the sweep: a single provider
     // holding its connection open must cost its own entry, not everyone's.
-    futures::future::join_all(wanted.into_iter().map(
-        |(connection, modality, model)| async move {
-            let capabilities = tokio::time::timeout(
-                std::time::Duration::from_secs(8),
-                crate::api::media::advertised_capabilities(state, connection, &model, modality),
-            )
-            .await
-            .ok()??;
-            Some(MediaCapabilityEntry {
-                connection_id: connection.id.clone(),
-                modality,
-                model,
-                capabilities,
-            })
-        },
-    ))
+    futures::future::join_all(
+        wanted
+            .into_iter()
+            .map(|(connection, modality, model)| async move {
+                let capabilities = tokio::time::timeout(
+                    std::time::Duration::from_secs(8),
+                    crate::api::media::advertised_capabilities(state, connection, &model, modality),
+                )
+                .await
+                .ok()??;
+                Some(MediaCapabilityEntry {
+                    connection_id: connection.id.clone(),
+                    modality,
+                    model,
+                    capabilities,
+                })
+            }),
+    )
     .await
     .into_iter()
     .flatten()
@@ -10351,7 +10353,9 @@ mod tests {
                 durations_secs: vec![4, 5, 6],
                 resolutions: vec!["720p".into()],
                 aspect_ratios: vec!["16:9".into()],
-                frame_positions: vec![crate::agents::media_capabilities::MediaFramePosition::FirstFrame],
+                frame_positions: vec![
+                    crate::agents::media_capabilities::MediaFramePosition::FirstFrame,
+                ],
                 max_input_references: Some(1),
                 generate_audio: None,
             },
@@ -10406,7 +10410,8 @@ mod tests {
     fn an_unreadable_catalogue_leaves_the_envelope_unstated() {
         // Degrading to `None` rather than to an empty envelope: empty lists
         // would read as "this model supports no duration at all".
-        let catalogue = catalogue_with(&[media_connection(None, Some("bytedance/seedance-2.0-mini"))]);
+        let catalogue =
+            catalogue_with(&[media_connection(None, Some("bytedance/seedance-2.0-mini"))]);
         let entry = catalogue
             .workers
             .iter()

@@ -889,10 +889,13 @@ mod tests {
             // the prompt-derived value the builder leaves would make the budget
             // zero and both arms trim to the floor, hiding what is measured.
             body["options"]["num_ctx"] = serde_json::json!(8192);
-            body["messages"].as_array_mut().unwrap().push(serde_json::json!({
-                "role": "tool", "tool_call_id": "big", "name": "read_file",
-                "content": result.clone(),
-            }));
+            body["messages"]
+                .as_array_mut()
+                .unwrap()
+                .push(serde_json::json!({
+                    "role": "tool", "tool_call_id": "big", "name": "read_file",
+                    "content": result.clone(),
+                }));
         }
 
         clamp_ollama_tool_results(&mut without, 8192);
@@ -928,16 +931,21 @@ mod tests {
                 "parameters": {"type": "object", "properties": {}},
             },
         }]);
-        body["messages"].as_array_mut().unwrap().push(serde_json::json!({
-            "role": "tool", "tool_call_id": "big", "name": "read_file",
-            "content": "r".repeat(50_000),
-        }));
+        body["messages"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "role": "tool", "tool_call_id": "big", "name": "read_file",
+                "content": "r".repeat(50_000),
+            }));
 
         clamp_ollama_tool_results(&mut body, 8192);
 
         let messages = body["messages"].as_array().unwrap();
         assert!(
-            messages.iter().any(|m| m["role"] == "user" && m["content"] == "the question"),
+            messages
+                .iter()
+                .any(|m| m["role"] == "user" && m["content"] == "the question"),
             "the user turn survives whatever the catalogue costs"
         );
         assert!(

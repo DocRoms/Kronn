@@ -1230,10 +1230,9 @@ impl ToolExecutor for KronnToolExecutor {
                 unwrap_api(call, res.success, res.data, res.error)
             }
             "qa_create_draft" => {
-                let request = match serde_json::from_value::<
-                    crate::models::CreateQuickApiRequest,
-                >(call.arguments.clone())
-                {
+                let request = match serde_json::from_value::<crate::models::CreateQuickApiRequest>(
+                    call.arguments.clone(),
+                ) {
                     Ok(request) => request,
                     Err(error) => return fail(call, format!("invalid Quick API: {error}")),
                 };
@@ -1275,10 +1274,9 @@ impl ToolExecutor for KronnToolExecutor {
                 unwrap_api(call, res.success, res.data, res.error)
             }
             "qe_create_draft" => {
-                let request = match serde_json::from_value::<
-                    crate::models::CreateQuickExecRequest,
-                >(call.arguments.clone())
-                {
+                let request = match serde_json::from_value::<crate::models::CreateQuickExecRequest>(
+                    call.arguments.clone(),
+                ) {
                     Ok(request) => request,
                     Err(error) => return fail(call, format!("invalid Quick Exec: {error}")),
                 };
@@ -4143,8 +4141,14 @@ mod tests {
             .filter_map(|tool| tool["function"]["name"].as_str().map(str::to_string))
             .collect();
         let has = |name: &str| worker.iter().any(|tool| tool == name);
-        for withheld in ["qe_list", "qe_run", "qa_create_draft", "qa_update",
-                         "qe_create_draft", "qe_update"] {
+        for withheld in [
+            "qe_list",
+            "qe_run",
+            "qa_create_draft",
+            "qa_update",
+            "qe_create_draft",
+            "qe_update",
+        ] {
             assert!(!has(withheld), "{withheld} reached a worker");
         }
         // Consuming one still works: a worker may read and run a saved API call.
@@ -4191,9 +4195,11 @@ mod tests {
 
         // The id addresses the record and is not part of its definition:
         // letting one through would rename what the update points at.
-        let merged: crate::models::CreateQuickExecRequest =
-            merged_definition(&stored, &json!({ "id": "somebody-elses", "name": "renamed" }))
-                .expect("merge");
+        let merged: crate::models::CreateQuickExecRequest = merged_definition(
+            &stored,
+            &json!({ "id": "somebody-elses", "name": "renamed" }),
+        )
+        .expect("merge");
         assert_eq!(merged.name, "renamed");
     }
 
@@ -4208,13 +4214,24 @@ mod tests {
 
         let page = tool_manual(Some("qe_create_draft"));
         let text = page["manual"].as_str().expect("manual text");
-        assert!(text.contains("NO shell"), "the argv rule is the whole point");
-        assert!(text.contains("aws"), "and it shows the shape, not just the rule");
+        assert!(
+            text.contains("NO shell"),
+            "the argv rule is the whole point"
+        );
+        assert!(
+            text.contains("aws"),
+            "and it shows the shape, not just the rule"
+        );
 
-        assert!(tool_manual(Some("task_list"))["error"].is_string(),
-                "a tool whose description is its whole contract has no page");
-        assert_eq!(tool_manual(Some("  "))["available"], listed["available"],
-                   "a blank name lists rather than erroring");
+        assert!(
+            tool_manual(Some("task_list"))["error"].is_string(),
+            "a tool whose description is its whole contract has no page"
+        );
+        assert_eq!(
+            tool_manual(Some("  "))["available"],
+            listed["available"],
+            "a blank name lists rather than erroring"
+        );
     }
 
     #[test]
@@ -4228,8 +4245,10 @@ mod tests {
             .collect();
         for page in tool_manual(None)["available"].as_array().unwrap() {
             let name = page.as_str().unwrap();
-            assert!(declared.iter().any(|tool| tool == name),
-                    "manual page `{name}` has no declared tool");
+            assert!(
+                declared.iter().any(|tool| tool == name),
+                "manual page `{name}` has no declared tool"
+            );
         }
     }
 

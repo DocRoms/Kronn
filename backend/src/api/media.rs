@@ -1006,8 +1006,11 @@ mod tests {
         );
     }
 
-
-    fn advertised(durations: &[u32], resolutions: &[&str], ratios: &[&str]) -> crate::agents::media_capabilities::MediaModelCapabilities {
+    fn advertised(
+        durations: &[u32],
+        resolutions: &[&str],
+        ratios: &[&str],
+    ) -> crate::agents::media_capabilities::MediaModelCapabilities {
         crate::agents::media_capabilities::MediaModelCapabilities {
             model: "bytedance/seedance-2.0-mini".into(),
             modality: MediaModality::Video,
@@ -1033,26 +1036,32 @@ mod tests {
         )
         .expect("an excluded duration is refused");
         assert!(refusal.contains("15s"), "{refusal}");
-        assert!(refusal.contains("4, 5, 6, 7, 8, 9, 10, 11, 12"), "{refusal}");
+        assert!(
+            refusal.contains("4, 5, 6, 7, 8, 9, 10, 11, 12"),
+            "{refusal}"
+        );
     }
 
     #[test]
     fn a_duration_the_catalogue_lists_passes() {
-        assert!(unadvertised_param(
-            "m",
-            &advertised(&[4, 5, 6], &[], &[]),
-            Some(6),
-            None,
-            None,
-        )
-        .is_none());
+        assert!(
+            unadvertised_param("m", &advertised(&[4, 5, 6], &[], &[]), Some(6), None, None,)
+                .is_none()
+        );
     }
 
     #[test]
     fn an_unadvertised_field_never_refuses() {
         // Silence is not a refusal: a provider that names no duration leaves
         // the submission to decide, exactly like the reference-mode preflight.
-        assert!(unadvertised_param("m", &advertised(&[], &[], &[]), Some(15), Some("4k"), Some("21:9")).is_none());
+        assert!(unadvertised_param(
+            "m",
+            &advertised(&[], &[], &[]),
+            Some(15),
+            Some("4k"),
+            Some("21:9")
+        )
+        .is_none());
     }
 
     #[test]
