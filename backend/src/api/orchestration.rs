@@ -8176,6 +8176,19 @@ fn fixed_worker_reason(code: &str) -> crate::models::CampaignTaskReason {
     preparation_reason(code, detail)
 }
 
+/// Everything the pure build needs that had to be observed first.
+///
+/// Grouped rather than passed one by one: each field is a bounded async
+/// preflight the caller runs before building, and the list only grows. Empty
+/// slices are the honest default — "nobody looked", never "the answer is no".
+#[derive(Default)]
+struct WorkerPreflight<'a> {
+    http_reachability: &'a [(AgentType, bool)],
+    cli: &'a [(AgentType, crate::agents::runner::CopilotTaskWorkerPreflight)],
+    quota_exhausted: &'a [(AgentType, bool)],
+    media_capabilities: &'a [MediaCapabilityEntry],
+}
+
 fn build_task_worker_catalogue(
     config: &crate::models::AppConfig,
     detections: &[crate::models::AgentDetection],
@@ -8183,10 +8196,8 @@ fn build_task_worker_catalogue(
         crate::db::discussion_sessions::DiscussionSession,
         Option<String>,
     )],
-    http_reachability: &[(AgentType, bool)],
-    cli_preflight: &[(AgentType, crate::agents::runner::CopilotTaskWorkerPreflight)],
-    quota_exhausted: &[(AgentType, bool)],
     connections: &[crate::models::ExternalApiConnection],
+    preflight: &WorkerPreflight<'_>,
 ) -> crate::models::TaskWorkerCatalogue {
     let mut workers = Vec::new();
     let native_agents = CATALOGUED_PROVIDERS;
@@ -8206,7 +8217,8 @@ fn build_task_worker_catalogue(
             detection.and_then(|item| item.auth_ready).unwrap_or(true)
         };
         let reachable = if http {
-            http_reachability
+            preflight
+                .http_reachability
                 .iter()
                 .find(|(kind, _)| kind == &agent)
                 .is_some_and(|(_, value)| *value)
@@ -8253,7 +8265,8 @@ fn build_task_worker_catalogue(
             reasons.push(fixed_worker_reason("endpoint_unreachable"));
         }
         if agent == AgentType::CopilotCli {
-            if let Some(status) = cli_preflight
+            if let Some(status) = preflight
+                .cli
                 .iter()
                 .find(|(kind, _)| kind == &agent)
                 .map(|(_, status)| *status)
@@ -8263,7 +8276,8 @@ fn build_task_worker_catalogue(
                 }
             }
         }
-        if quota_exhausted
+        if preflight
+            .quota_exhausted
             .iter()
             .find(|(kind, _)| kind == &agent)
             .is_some_and(|(_, exhausted)| *exhausted)
@@ -8373,6 +8387,18 @@ fn build_task_worker_catalogue(
                 .map(|m| crate::models::TaskWorkerModality {
                     modality,
                     model: m.to_string(),
+                    // Carried, never re-derived: the agent reads exactly what
+                    // the launcher shows. An envelope missing here means the
+                    // catalogue could not be read, not that anything goes.
+                    capabilities: preflight
+                        .media_capabilities
+                        .iter()
+                        .find(|entry| {
+                            entry.connection_id == connection.id
+                                && entry.modality == modality
+                                && entry.model == m
+                        })
+                        .map(|entry| entry.capabilities.clone()),
                 })
         })
         .collect::<Vec<_>>();
@@ -8513,6 +8539,71 @@ async fn bounded_provider_quota_state(state: &AppState) -> Vec<(AgentType, bool)
         .unwrap_or_default()
 }
 
+/// One connection's advertised envelope for one modality.
+///
+/// Kept beside the catalogue rather than inside it so the builder stays pure:
+/// reading a provider catalogue is a network call, and the two other bounded
+/// preflights above are already the shape this follows.
+pub(crate) struct MediaCapabilityEntry {
+    pub connection_id: String,
+    pub modality: crate::models::MediaModality,
+    pub model: String,
+    pub capabilities: crate::agents::media_capabilities::MediaModelCapabilities,
+}
+
+/// What each configured media model advertises, read exactly like the launcher.
+///
+/// An agent that cannot see the supported durations discovers them by being
+/// refused — a wasted turn, and on some providers a billed one. Every failure
+/// degrades to "not listed": a slow or unreachable catalogue must never hold
+/// `agent_list` open. The slots are read concurrently and the ten-minute cache
+/// is shared with the launcher, so a warm sweep costs nothing at all.
+async fn bounded_media_capabilities(
+    state: &AppState,
+    connections: &[crate::models::ExternalApiConnection],
+) -> Vec<MediaCapabilityEntry> {
+    let wanted = connections
+        .iter()
+        .flat_map(|connection| {
+            [
+                crate::models::MediaModality::Image,
+                crate::models::MediaModality::Video,
+            ]
+            .into_iter()
+            .filter_map(move |modality| {
+                crate::api::media::configured_media_model(connection, modality)
+                    .map(|model| (connection, modality, model))
+            })
+        })
+        .collect::<Vec<_>>();
+    if wanted.is_empty() {
+        return Vec::new();
+    }
+
+    // One window per slot rather than one for the sweep: a single provider
+    // holding its connection open must cost its own entry, not everyone's.
+    futures::future::join_all(wanted.into_iter().map(
+        |(connection, modality, model)| async move {
+            let capabilities = tokio::time::timeout(
+                std::time::Duration::from_secs(8),
+                crate::api::media::advertised_capabilities(state, connection, &model, modality),
+            )
+            .await
+            .ok()??;
+            Some(MediaCapabilityEntry {
+                connection_id: connection.id.clone(),
+                modality,
+                model,
+                capabilities,
+            })
+        },
+    ))
+    .await
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
 pub(crate) async fn task_worker_catalogue_for_discussion(
     state: &AppState,
     parent_discussion_id: &str,
@@ -8543,14 +8634,18 @@ pub(crate) async fn task_worker_catalogue_for_discussion(
     let reachability = bounded_http_worker_reachability(state).await;
     let cli_preflight = bounded_cli_worker_preflight(&detections).await;
     let quota_state = bounded_provider_quota_state(state).await;
+    let media_capabilities = bounded_media_capabilities(state, &connections).await;
     Ok(build_task_worker_catalogue(
         &config,
         &detections,
         &joined,
-        &reachability,
-        &cli_preflight,
-        &quota_state,
         &connections,
+        &WorkerPreflight {
+            http_reachability: &reachability,
+            cli: &cli_preflight,
+            quota_exhausted: &quota_state,
+            media_capabilities: &media_capabilities,
+        },
     ))
 }
 
@@ -10087,14 +10182,15 @@ mod tests {
             &config,
             &detections,
             &joined,
-            &[
-                (AgentType::Ollama, true),
-                (AgentType::LiteLlm, false),
-                (AgentType::Nvidia, false),
-            ],
             &[],
-            &[],
-            &[],
+            &WorkerPreflight {
+                http_reachability: &[
+                    (AgentType::Ollama, true),
+                    (AgentType::LiteLlm, false),
+                    (AgentType::Nvidia, false),
+                ],
+                ..Default::default()
+            },
         );
 
         for entry in &catalogue.workers {
@@ -10177,14 +10273,22 @@ mod tests {
     fn catalogue_with(
         connections: &[crate::models::ExternalApiConnection],
     ) -> crate::models::TaskWorkerCatalogue {
+        catalogue_with_capabilities(connections, &[])
+    }
+
+    fn catalogue_with_capabilities(
+        connections: &[crate::models::ExternalApiConnection],
+        media_capabilities: &[MediaCapabilityEntry],
+    ) -> crate::models::TaskWorkerCatalogue {
         build_task_worker_catalogue(
             &crate::core::config::default_config(),
             &[],
             &[],
-            &[],
-            &[],
-            &[],
             connections,
+            &WorkerPreflight {
+                media_capabilities,
+                ..Default::default()
+            },
         )
     }
 
@@ -10234,6 +10338,81 @@ mod tests {
         assert_eq!(entry.media.len(), 1, "one modality configured, one listed");
         assert_eq!(entry.media[0].modality, crate::models::MediaModality::Image);
         assert_eq!(entry.media[0].model, "black-forest-labs/flux");
+    }
+
+    fn video_envelope(model: &str) -> MediaCapabilityEntry {
+        MediaCapabilityEntry {
+            connection_id: "conn-or".into(),
+            modality: crate::models::MediaModality::Video,
+            model: model.into(),
+            capabilities: crate::agents::media_capabilities::MediaModelCapabilities {
+                model: model.into(),
+                modality: crate::models::MediaModality::Video,
+                durations_secs: vec![4, 5, 6],
+                resolutions: vec!["720p".into()],
+                aspect_ratios: vec!["16:9".into()],
+                frame_positions: vec![crate::agents::media_capabilities::MediaFramePosition::FirstFrame],
+                max_input_references: Some(1),
+                generate_audio: None,
+            },
+        }
+    }
+
+    #[test]
+    fn a_listed_modality_carries_the_advertised_envelope() {
+        // Regression: an agent asked for a 15 s clip and learned the supported
+        // durations only from the provider's refusal — a turn spent, and on
+        // some providers a billed attempt. The launcher had the list all along.
+        let catalogue = catalogue_with_capabilities(
+            &[media_connection(None, Some("bytedance/seedance-2.0-mini"))],
+            &[video_envelope("bytedance/seedance-2.0-mini")],
+        );
+        let entry = catalogue
+            .workers
+            .iter()
+            .find(|entry| entry.worker.agent_type == AgentType::Custom)
+            .unwrap();
+        let envelope = entry.media[0]
+            .capabilities
+            .as_ref()
+            .expect("the advertised envelope reaches the agent");
+        assert_eq!(envelope.durations_secs, vec![4, 5, 6]);
+        assert_eq!(envelope.resolutions, vec!["720p".to_string()]);
+        assert_eq!(envelope.aspect_ratios, vec!["16:9".to_string()]);
+    }
+
+    #[test]
+    fn an_envelope_read_for_another_model_is_not_attached() {
+        // The connection's model can change between the sweep and the build.
+        // Silence is the only honest answer: attaching the old envelope would
+        // advertise durations the new model never named.
+        let catalogue = catalogue_with_capabilities(
+            &[media_connection(None, Some("bytedance/seedance-2.0-pro"))],
+            &[video_envelope("bytedance/seedance-2.0-mini")],
+        );
+        let entry = catalogue
+            .workers
+            .iter()
+            .find(|entry| entry.worker.agent_type == AgentType::Custom)
+            .unwrap();
+        assert_eq!(entry.media[0].model, "bytedance/seedance-2.0-pro");
+        assert!(
+            entry.media[0].capabilities.is_none(),
+            "a stale envelope must not be presented as this model's"
+        );
+    }
+
+    #[test]
+    fn an_unreadable_catalogue_leaves_the_envelope_unstated() {
+        // Degrading to `None` rather than to an empty envelope: empty lists
+        // would read as "this model supports no duration at all".
+        let catalogue = catalogue_with(&[media_connection(None, Some("bytedance/seedance-2.0-mini"))]);
+        let entry = catalogue
+            .workers
+            .iter()
+            .find(|entry| entry.worker.agent_type == AgentType::Custom)
+            .unwrap();
+        assert!(entry.media[0].capabilities.is_none());
     }
 
     #[test]
@@ -10310,12 +10489,13 @@ mod tests {
             std::slice::from_ref(&detection),
             &[],
             &[],
-            &[(
-                AgentType::CopilotCli,
-                crate::agents::runner::CopilotTaskWorkerPreflight::AuthInvalid,
-            )],
-            &[],
-            &[],
+            &WorkerPreflight {
+                cli: &[(
+                    AgentType::CopilotCli,
+                    crate::agents::runner::CopilotTaskWorkerPreflight::AuthInvalid,
+                )],
+                ..Default::default()
+            },
         );
         let copilot = catalogue
             .workers
@@ -10338,12 +10518,13 @@ mod tests {
             &[detection],
             &[],
             &[],
-            &[(
-                AgentType::CopilotCli,
-                crate::agents::runner::CopilotTaskWorkerPreflight::TimedOut,
-            )],
-            &[],
-            &[],
+            &WorkerPreflight {
+                cli: &[(
+                    AgentType::CopilotCli,
+                    crate::agents::runner::CopilotTaskWorkerPreflight::TimedOut,
+                )],
+                ..Default::default()
+            },
         );
         let copilot = timed_out
             .workers
@@ -10397,9 +10578,10 @@ mod tests {
             &detections,
             &[],
             &[],
-            &[],
-            &[(AgentType::Codex, true)],
-            &[],
+            &WorkerPreflight {
+                quota_exhausted: &[(AgentType::Codex, true)],
+                ..Default::default()
+            },
         );
         let codex = catalogue
             .workers
@@ -10431,9 +10613,10 @@ mod tests {
             &detections,
             &[],
             &[],
-            &[],
-            &[(AgentType::Codex, false)],
-            &[],
+            &WorkerPreflight {
+                quota_exhausted: &[(AgentType::Codex, false)],
+                ..Default::default()
+            },
         );
         let codex = catalogue
             .workers

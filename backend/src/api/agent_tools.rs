@@ -491,7 +491,7 @@ fn orchestration_tool_catalogue() -> Vec<Value> {
         ),
         tool(
             "media_generate",
-            "Generate an image or a video on a configured HTTP connection; returns {job_id, status, model}. The operator's configured modality slot fixes the model — you do not choose it — and a modality with no slot is refused. `agent_list` tells you which connection serves which modality: an entry's `media` lists one modality per configured model, and is empty when none is. A video can start from a picture: pass the context file id of an image from this room in `reference_asset_ids` — generate the image first, then feed it in. Billed: video per second, image per picture. Keep the clip short. The asset lands in the discussion on its own as a context file, so poll `media_job_status` only when you need it inside this very answer.",
+            "Generate an image or a video on a configured HTTP connection; returns {job_id, status, model}. The configured slot fixes the model — you do not choose it; a modality with no slot is refused. `agent_list`'s `media` lists one entry per configured modality, with the `capabilities` advertised: take duration, resolution and ratio from there, never from habit. A video can start from a picture: pass the context file id of an image from this room in `reference_asset_ids` — generate the image first, then feed it in. Billed: video per second, image per picture. Keep the clip short. The asset lands in the discussion on its own as a context file, so poll `media_job_status` only when you need it inside this very answer.",
             json!({
                 "connection_id": {"type": "string"},
                 "modality": {"type": "string", "enum": ["image", "video"]},
@@ -503,7 +503,7 @@ fn orchestration_tool_catalogue() -> Vec<Value> {
                 "reference_asset_ids": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Context file ids of pictures the generation starts from — typically an image you just generated in this room. A video can be driven by one; an image can be varied from one."
+                    "description": "Context file ids of pictures the generation starts from — typically an image you just generated in this room. A video can be driven by one; an image can be varied from one. That picture may also be the LAST IMAGE OF AN EARLIER CLIP: that is how several videos are chained into one continuous sequence. Kronn cannot cut that image out of a clip itself — ask the human to open the clip in the discussion's Assets carousel and keep its last image, which arrives here as an ordinary context file you then pass in this list."
                 },
                 "wake_when_ready": {
                     "type": "boolean",

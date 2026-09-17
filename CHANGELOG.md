@@ -34,6 +34,24 @@ Release notes for 0.9.3 and earlier are available in the
   absent otherwise, so an agent is never told it can produce a video that the
   generation request would then refuse.
 
+- Each media slot in that catalogue now carries what the provider advertises —
+  supported durations, resolutions, aspect ratios, frame positions — read from
+  the same catalogue the launcher shows. An agent asking for a 15 s clip on a
+  model that tops out at 12 s learned the list only from the refusal, one turn
+  and one provider round-trip later. An unreadable catalogue leaves the envelope
+  unstated rather than empty: empty lists would read as "supports nothing".
+
+- A duration, resolution or ratio the model's catalogue excludes is now refused
+  by Kronn, with the list, instead of by the provider a round-trip later. Only
+  an explicit list refuses — a field the provider never advertises, or a
+  catalogue that could not be read, still leaves the submission to decide.
+
+- Agents are told how to chain clips: a reference picture may be an earlier
+  clip's last image, and since Kronn cannot cut that image out server-side
+  (KT-550), the surfaces now say to ask the reader to keep it from the Assets
+  carousel. Passing a clip id as a reference used to answer "not an image",
+  which named the mistake without naming the way through it.
+
 - Installed CLI versions are compared with current stable releases from their
   official sources. RTK and ccusage have separate checks and diagnostics;
   checking never installs an update. Cached results and an explicit recheck

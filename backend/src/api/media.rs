@@ -177,6 +177,14 @@ pub async fn generate(
         Err(message) => return Json(ApiResponse::err(message)),
     };
 
+    // Same rule, applied to the numbers: a value the model's own catalogue
+    // lists without is refused here, with the list, rather than at the
+    // provider. An agent asking for a 15 s clip on a model that stops at 12 s
+    // spent a whole turn learning what Kronn already knew.
+    if let Err(message) = refuse_unadvertised_params(&state, &connection, &model, &req).await {
+        return Json(ApiResponse::err(message));
+    }
+
     // Every non-DB validation has passed. From here on, the discussion (when
     // one has to be created), its anchor message and the job itself are
     // written in ONE transaction: a rejected request or a mid-write DB failure
@@ -997,6 +1005,124 @@ mod tests {
             "validation errors must not leave jobs behind"
         );
     }
+
+
+    fn advertised(durations: &[u32], resolutions: &[&str], ratios: &[&str]) -> crate::agents::media_capabilities::MediaModelCapabilities {
+        crate::agents::media_capabilities::MediaModelCapabilities {
+            model: "bytedance/seedance-2.0-mini".into(),
+            modality: MediaModality::Video,
+            durations_secs: durations.to_vec(),
+            resolutions: resolutions.iter().map(|value| value.to_string()).collect(),
+            aspect_ratios: ratios.iter().map(|value| value.to_string()).collect(),
+            frame_positions: Vec::new(),
+            max_input_references: None,
+            generate_audio: None,
+        }
+    }
+
+    #[test]
+    fn a_duration_the_catalogue_excludes_is_refused_with_the_list() {
+        // The observed defect: 15 s passed Kronn's own ceiling, the provider
+        // refused it, and the agent learned the list from that refusal.
+        let refusal = unadvertised_param(
+            "bytedance/seedance-2.0-mini",
+            &advertised(&[4, 5, 6, 7, 8, 9, 10, 11, 12], &[], &[]),
+            Some(15),
+            None,
+            None,
+        )
+        .expect("an excluded duration is refused");
+        assert!(refusal.contains("15s"), "{refusal}");
+        assert!(refusal.contains("4, 5, 6, 7, 8, 9, 10, 11, 12"), "{refusal}");
+    }
+
+    #[test]
+    fn a_duration_the_catalogue_lists_passes() {
+        assert!(unadvertised_param(
+            "m",
+            &advertised(&[4, 5, 6], &[], &[]),
+            Some(6),
+            None,
+            None,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn an_unadvertised_field_never_refuses() {
+        // Silence is not a refusal: a provider that names no duration leaves
+        // the submission to decide, exactly like the reference-mode preflight.
+        assert!(unadvertised_param("m", &advertised(&[], &[], &[]), Some(15), Some("4k"), Some("21:9")).is_none());
+    }
+
+    #[test]
+    fn spelling_is_not_a_constraint() {
+        // ` 720P ` is the same answer as `720p`; refusing it would be this
+        // gate inventing a rule the provider does not have.
+        assert!(unadvertised_param(
+            "m",
+            &advertised(&[], &["480p", "720p"], &[]),
+            None,
+            Some(" 720P "),
+            None,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn a_resolution_and_a_ratio_the_catalogue_excludes_are_refused() {
+        let refusal = unadvertised_param(
+            "m",
+            &advertised(&[], &["480p", "720p"], &[]),
+            None,
+            Some("1080p"),
+            None,
+        )
+        .expect("an excluded resolution is refused");
+        assert!(refusal.contains("resolution '1080p'"), "{refusal}");
+        assert!(refusal.contains("480p, 720p"), "{refusal}");
+
+        let refusal = unadvertised_param(
+            "m",
+            &advertised(&[], &[], &["16:9", "1:1"]),
+            None,
+            None,
+            Some("21:9"),
+        )
+        .expect("an excluded ratio is refused");
+        assert!(refusal.contains("aspect ratio '21:9'"), "{refusal}");
+    }
+
+    #[test]
+    fn the_configured_slot_decides_which_model_is_read() {
+        let mut connection = crate::models::ExternalApiConnection {
+            id: "conn".into(),
+            display_name: "OpenRouter".into(),
+            mention_alias: "openrouter".into(),
+            endpoint: Some("https://openrouter.ai/api".into()),
+            credential_slug: "openrouter".into(),
+            origin_preset: crate::models::ExternalApiConnectionPreset::OpenRouter,
+            economy_model: None,
+            default_model: None,
+            reasoning_model: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            image_model: Some("  black-forest-labs/flux  ".into()),
+            video_model: Some("   ".into()),
+            media_endpoint: None,
+        };
+        assert_eq!(
+            configured_media_model(&connection, MediaModality::Image).as_deref(),
+            Some("black-forest-labs/flux"),
+            "the stored value is trimmed, not passed through"
+        );
+        assert!(
+            configured_media_model(&connection, MediaModality::Video).is_none(),
+            "whitespace is not a configured model"
+        );
+        connection.image_model = None;
+        assert!(configured_media_model(&connection, MediaModality::Image).is_none());
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -1078,11 +1204,7 @@ pub async fn model_capabilities(
         Err(e) => return Json(ApiResponse::err(format!("failed to read connection: {e}"))),
     };
 
-    let configured = match query.modality {
-        MediaModality::Image => connection.image_model.clone(),
-        MediaModality::Video => connection.video_model.clone(),
-    };
-    let Some(model) = configured.filter(|model| !model.trim().is_empty()) else {
+    let Some(model) = configured_media_model(&connection, query.modality) else {
         return Json(ApiResponse::err(format!(
             "connection '{}' has no {} model configured",
             connection.display_name,
@@ -1090,13 +1212,43 @@ pub async fn model_capabilities(
         )));
     };
 
+    let capabilities = advertised_capabilities(&state, &connection, &model, query.modality).await;
+    Json(ApiResponse::ok(MediaModelCapabilitiesResponse {
+        model,
+        capabilities,
+    }))
+}
+
+/// The model this connection would actually use for one modality, or `None`
+/// when none is configured — which is a different answer from "configured but
+/// advertising nothing".
+pub(crate) fn configured_media_model(
+    connection: &crate::models::ExternalApiConnection,
+    modality: MediaModality,
+) -> Option<String> {
+    match modality {
+        MediaModality::Image => connection.image_model.as_ref(),
+        MediaModality::Video => connection.video_model.as_ref(),
+    }
+    .map(|model| model.trim().to_string())
+    .filter(|model| !model.is_empty())
+}
+
+/// What the provider advertises for `model`, cache first.
+///
+/// Shared with the worker catalogue rather than re-derived there: an agent must
+/// read the exact envelope the launcher shows, and a second derivation would
+/// eventually be a second answer.
+pub(crate) async fn advertised_capabilities(
+    state: &AppState,
+    connection: &crate::models::ExternalApiConnection,
+    model: &str,
+    modality: MediaModality,
+) -> Option<crate::agents::media_capabilities::MediaModelCapabilities> {
     let now = Utc::now();
-    let cache_key = format!("{}::{}::{}", connection.id, query.modality.as_str(), model);
+    let cache_key = format!("{}::{}::{}", connection.id, modality.as_str(), model);
     if let Some(capabilities) = cached_capabilities(&cache_key, now) {
-        return Json(ApiResponse::ok(MediaModelCapabilitiesResponse {
-            model,
-            capabilities,
-        }));
+        return capabilities;
     }
 
     let base = connection
@@ -1105,19 +1257,10 @@ pub async fn model_capabilities(
         .filter(|value| !value.trim().is_empty())
         .or_else(|| connection.endpoint.clone())
         .unwrap_or_default();
-    let capabilities = fetch_model_capabilities(
-        &state,
-        &base,
-        &connection.credential_slug,
-        &model,
-        query.modality,
-    )
-    .await;
+    let capabilities =
+        fetch_model_capabilities(state, &base, &connection.credential_slug, model, modality).await;
     store_capabilities(cache_key, now, capabilities.clone());
-    Json(ApiResponse::ok(MediaModelCapabilitiesResponse {
-        model,
-        capabilities,
-    }))
+    capabilities
 }
 
 /// Fetches one catalogue and reads the configured model out of it.
@@ -1161,6 +1304,85 @@ async fn fetch_model_capabilities(
     }
     let body: serde_json::Value = response.json().await.ok()?;
     crate::agents::media_capabilities::capabilities_for(&body, model, modality)
+}
+
+/// Refuses a value the model's own catalogue lists without.
+///
+/// Deliberately narrow, exactly like the reference-mode preflight below:
+/// silence is never a refusal. An unreadable catalogue, or a field the provider
+/// never advertises, leaves the submission to the provider — it stays the
+/// authority on its own models. Only an explicit list that excludes the value
+/// refuses, and the refusal carries that list so the caller can retry once.
+async fn refuse_unadvertised_params(
+    state: &AppState,
+    connection: &crate::models::ExternalApiConnection,
+    model: &str,
+    req: &GenerateMediaRequest,
+) -> Result<(), String> {
+    let Some(capabilities) = advertised_capabilities(state, connection, model, req.modality).await
+    else {
+        return Ok(());
+    };
+    match unadvertised_param(
+        model,
+        &capabilities,
+        req.duration_secs,
+        req.resolution.as_deref(),
+        req.aspect_ratio.as_deref(),
+    ) {
+        Some(refusal) => Err(refusal),
+        None => Ok(()),
+    }
+}
+
+/// The refusal sentence, or `None` when nothing the caller named is excluded.
+fn unadvertised_param(
+    model: &str,
+    capabilities: &crate::agents::media_capabilities::MediaModelCapabilities,
+    duration_secs: Option<u32>,
+    resolution: Option<&str>,
+    aspect_ratio: Option<&str>,
+) -> Option<String> {
+    if let Some(duration) = duration_secs {
+        if !capabilities.durations_secs.is_empty()
+            && !capabilities.durations_secs.contains(&duration)
+        {
+            return Some(format!(
+                "model '{model}' does not accept a {duration}s clip — it advertises: {}",
+                capabilities
+                    .durations_secs
+                    .iter()
+                    .map(u32::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+    }
+
+    // Compared loosely on purpose: `720P` and ` 720p ` are the same answer, and
+    // refusing a caller over its spelling would be this gate inventing a
+    // constraint the provider does not have.
+    for (label, asked, advertised) in [
+        ("resolution", resolution, &capabilities.resolutions),
+        ("aspect ratio", aspect_ratio, &capabilities.aspect_ratios),
+    ] {
+        let Some(asked) = asked.map(str::trim).filter(|value| !value.is_empty()) else {
+            continue;
+        };
+        if advertised.is_empty()
+            || advertised
+                .iter()
+                .any(|value| value.trim().eq_ignore_ascii_case(asked))
+        {
+            continue;
+        }
+        return Some(format!(
+            "model '{model}' does not accept the {label} '{asked}' — it advertises: {}",
+            advertised.join(", ")
+        ));
+    }
+
+    None
 }
 
 /// Validates the requested source image and returns what the job should store.
@@ -1264,6 +1486,21 @@ async fn resolve_references(
             );
         }
         if !file.mime_type.starts_with("image/") {
+            // A caller handing over a clip is trying to continue it, and the
+            // refusal is the one place that reaches it at that exact moment.
+            // Kronn cannot cut the frame itself — these clips are H.264 High
+            // and the decoder available here reads nine frames of ninety-seven
+            // (KT-550) — but the viewer can, so the refusal names who to ask.
+            if file.mime_type.starts_with("video/") {
+                return Err(
+                    "a reference is a picture, and this asset is a clip. To chain this clip into \
+                     the next one, its LAST IMAGE is what goes here — ask the human to open the \
+                     clip in the discussion's Assets carousel and keep that image; Kronn cannot \
+                     cut it out server-side. What they keep lands in this room as an ordinary \
+                     context file whose id you pass in `reference_asset_ids`."
+                        .to_string(),
+                );
+            }
             return Err(format!(
                 "the reference asset is not an image ({})",
                 file.mime_type
