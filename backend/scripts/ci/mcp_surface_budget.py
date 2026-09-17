@@ -39,7 +39,17 @@ BRIDGE = "backend/scripts/disc-introspection-mcp.py"
 # to make a build pass.
 # KT-546: compact media guidance retains the billing/slot/wait contract and
 # removes stale numeric examples. Pin the smaller measured payload, no slack.
-CATALOGUE_MAX_BYTES = 86_824
+# KT-663 — the one deliberate raise, and it is +7 B over the 86 824 it started
+# from. `media_generate` now says where its values come from (`agent_list`
+# capabilities) and that a reference picture may be an earlier clip's last
+# image. Nearly all of it was paid for inside the same declaration, and the
+# envelope, reference-ordering and cost detail moved to `tool_manual({tool:
+# "media_generate"})`, which this budget does not measure. The remaining seven
+# bytes buy a capability agents had no way to learn about; the operator
+# approved them explicitly. This does not reopen the rule above — the next
+# addition pays for itself or moves to a manual, as this one almost entirely
+# did.
+CATALOGUE_MAX_BYTES = 86_831
 
 # Per-declaration ceiling. The five heaviest tools were 29% of the catalogue for
 # 6% of the tools; their descriptions had grown into manuals. A per-tool cap is

@@ -23,37 +23,40 @@
 
 **Smaller prompts, more code where code is enough: fewer hallucinations, lower token bill, eco-design by default.**
 
-> **Status: 0.12.0 (current release).** Functional but pre-1.0. Breaking changes happen between minor versions; patch versions are safe.
+> **Status: 0.13.0 (current release).** Functional but pre-1.0. Breaking changes happen between minor versions; patch versions are safe.
 > **License: AGPL-3.0.** Using Kronn locally to build *your own* product is fine; the copyleft only kicks in if you distribute a modified Kronn to others. See [License notes](#license-notes-agpl-3-0).
 
-## What's new in 0.12.0
+## What's new in 0.13.0
 
-- **One collection language everywhere:** Projects, Discussions, Planning,
-  Automation, Pages and Plugins now share the same compact sidebar structure,
-  search, filters, sorting, favorites, row actions and keyboard behavior.
-- **Named external API connections:** manage LiteLLM, NVIDIA, OpenRouter and other
-  OpenAI-compatible endpoints from one Settings zone, test their credentials,
-  map their models to Economy / Default / Reasoning and address each connection
-  by its own discussion alias.
-- **Project details that use the available space:** Audit, Docs and Code are
-  direct full-height tabs, with a current agent selector, clearer documentation
-  health and audit history instead of nested, oversized disclosure blocks.
-- **Docker controls where the project lives:** inspect Compose services, ports,
-  published hosts and logs, start or stop the stack, open reachable hosts and
-  filter the project list to running environments.
-- **Live Page mosaics:** select several Pages and open them together in a
-  standalone two-, three- or responsive multi-tile layout.
-- **More observable delegated work:** native worker progress and deterministic
-  documentation checks make queues, provider activity and audit validation
-  explicit without pretending unavailable telemetry is free or stalled work.
+- **Image and video generation on HTTP connections:** LiteLLM, NVIDIA and
+  OpenRouter generate media from a discussion or from the assets carousel, with
+  the cost shown before the click. Agents read what each model actually
+  advertises — durations, resolutions, ratios — instead of discovering its
+  limits from a refusal, and can chain a clip's last image into the next clip.
+- **HTTP agents reach the automations:** an Ollama or LiteLLM agent lists saved
+  Quick Execs, runs one, and authors Quick APIs and Quick Execs the way a CLI
+  agent does. Credentials stay server-side; authoring stays out of worker rooms.
+- **Important messages and published decision cards:** a plain-text form above
+  the composer produces a persisted, structured object — not formatting — and an
+  agent can put a decision to a human and stop, with the question surviving as
+  its own record.
+- **Multi-agent rooms that survive:** mention three agents and three answer; a
+  backend restart no longer silently cancels the ones that had not spoken; a
+  delegated worker's child room keeps accepting messages after its task ends.
+- **A database you can see the weight of:** Settings charts where the bytes
+  actually sit, one bar per table, measured on demand. Discussions report their
+  own storage split by what a cleanup would reclaim.
+- **Markdown that repairs itself:** tool markers no longer land in the middle of
+  a message, ACP replies are no longer shredded mid-word, and a long transcript
+  upgrades progressively instead of freezing the room on open.
 
-See the complete [0.12.0 release notes](CHANGELOG.md), the
+See the complete [0.13.0 release notes](CHANGELOG.md), the
 [external API connection guide](docs/operations/external-api-connections.md)
 and the [task delegation guide](docs/guides/task-orchestration.md).
 
 ## Contents
 
-- [What's new in 0.12.0](#whats-new-in-0120)
+- [What's new in 0.13.0](#whats-new-in-0130)
 - [60-second pitch](#60-second-pitch)
 - [The Kronn way: engineering, not prompting](#the-kronn-way-engineering-not-prompting)
 - [Quick start](#quick-start)
@@ -114,7 +117,7 @@ Download the installer for your OS from [Releases](https://github.com/DocRoms/Kr
 ### From source: one command
 
 ```bash
-git clone --branch 0.12.0 --depth 1 https://github.com/DocRoms/Kronn.git   # latest stable release
+git clone --branch 0.13.0 --depth 1 https://github.com/DocRoms/Kronn.git   # latest stable release
 cd Kronn
 ./kronn start        # guided setup & launch (Docker)
 ```
@@ -145,7 +148,7 @@ app, Docker deployment and a bare `make run-backend` do not require it.
 Requires Docker + Docker Compose. On Windows, WSL2 (Docker Engine inside WSL works, Docker Desktop optional).
 
 ```bash
-git clone --branch 0.12.0 --depth 1 https://github.com/DocRoms/Kronn.git   # latest stable release
+git clone --branch 0.13.0 --depth 1 https://github.com/DocRoms/Kronn.git   # latest stable release
 cd Kronn
 ./kronn start
 # → http://localhost:3140
