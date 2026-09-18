@@ -18,11 +18,7 @@ pub async fn list_for_live_page(
     let result = state
         .db
         .with_read_conn(move |conn| {
-            crate::db::live_page_actions::list_for_live_page(
-                crate::db::kronn_action_engine::Reconcile::Projected,
-                conn,
-                &page_id,
-            )
+            crate::db::live_page_actions::list_for_live_page(conn, &page_id)
         })
         .await;
     match result {

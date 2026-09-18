@@ -9,6 +9,19 @@ Release notes for 0.9.3 and earlier are available in the
 
 ---
 
+## [0.13.1] - 2026-09-18
+
+### Fixed
+
+- A Live Page button now launches the row it sits on. A page listing tickets
+  draws one button per row from a single action block, and the first click
+  consumed that block for every row: each later click, on any ticket, showed the
+  first ticket's success and ran nothing. The block is now an offer that is
+  never used up, and each click is its own launch. A row still running is not
+  launched twice, a finished run no longer disarms its button, and a button
+  without a row binding can be relaunched. Launches recorded before the upgrade
+  are kept.
+
 ## [0.13.0] - 2026-09-17
 
 ### Added

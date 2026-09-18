@@ -24,14 +24,18 @@ use super::discussion_actions::{
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum ActionTable {
     Discussion,
-    LivePage,
+    /// KT-678 — a Page's declaration row is an offer and never carries
+    /// execution state; the state machine below only ever runs against one of
+    /// its launches. A discussion keeps both roles on one row because a fence
+    /// is posted once, in one message, and carries one intention.
+    LivePageLaunch,
 }
 
 impl ActionTable {
     fn name(self) -> &'static str {
         match self {
             Self::Discussion => "discussion_actions",
-            Self::LivePage => "live_page_actions",
+            Self::LivePageLaunch => "live_page_action_launches",
         }
     }
 }
@@ -59,7 +63,7 @@ pub struct ActionCompletion {
     pub diagnostic: Option<String>,
 }
 
-fn state_db_str(state: DiscussionActionState) -> &'static str {
+pub(crate) fn state_db_str(state: DiscussionActionState) -> &'static str {
     match state {
         DiscussionActionState::Proposed => "proposed",
         DiscussionActionState::Launching => "launching",

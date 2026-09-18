@@ -6,7 +6,7 @@ import './LivePageActionOverlay.css';
 export interface LivePageActionOverlayProps {
   active: LivePageActiveActionState | null;
   action: LivePageAction | null;
-  onChanged: (action: LivePageAction) => void;
+  onChanged: (action: LivePageAction, activation: number) => void;
   onOpenDiscussion: (discussionId: string) => void;
 }
 
@@ -28,11 +28,13 @@ export function LivePageActionOverlay({ active, action, onChanged, onOpenDiscuss
         ['--kr-action-anchor-left' as string]: `${Math.max(8, active.anchor.left)}px`,
       }}
     >
+      {/* One card per click. Keyed on the activation alone, so the card
+          survives its own id changing from the offer to its launch. */}
       <LivePageActionCard
-        key={`${action.id}:${active.activation}`}
+        key={active.activation}
         action={action}
         bindings={active.bindings}
-        onChanged={onChanged}
+        onChanged={changed => onChanged(changed, active.activation)}
         onOpenDiscussion={onOpenDiscussion}
       />
     </div>

@@ -171,10 +171,22 @@ supplies only the selector; Kronn rereads the current dataset value server-side.
 Project environment and Kronn context references use the common execution
 variable resolver and are never copied into Page HTML or the action row.
 
-The durable `(page_id, action_ref)` identity survives refreshes. Proposed
-actions follow a republished definition, while launched actions stay attached
-to the exact source revision and become explicitly stale when the Page moves
-on. Active and terminal execution rendering delegates to the common
+An action block is a template, not a single proposal: a Page instantiates it
+once per dataset row, so one `action_ref` can draw forty buttons. The model
+keeps the offer and the act apart. The declaration, identified by
+`(page_id, action_ref)`, holds the target and the value contract, follows every
+republished definition and never carries execution state; a launch is a row of
+its own in `live_page_action_launches`, identified by the binding it was
+clicked on (the sorted row selectors, empty for an unbound CTA). The
+idempotency guard applies to that binding: clicking a row whose launch is still
+running shows that run, clicking any other row launches it, and a finished
+launch never disarms the button. A launch freezes the revision, target and
+values it ran against, so it stays true history and becomes explicitly stale
+when the Page moves on. The API keeps speaking one `LivePageAction`: the
+declaration before a click, the declaration joined to its launch afterwards,
+with `id` naming the launch so a card follows its own run.
+`[src: file: backend/src/db/live_page_actions.rs]`
+Active and terminal execution rendering delegates to the common
 `RunStatusCard` contract used by Discussions. A Quick Prompt result records
 both the action's result-discussion anchor and the existing Page-to-discussion
 relationship in one transaction, so either side remains traceable after a
@@ -184,7 +196,9 @@ The embedded Page viewer, the standalone tab and every mosaic tile share one
 `useLivePageActions` hook and the same `LivePageActionCard` rendering, so the
 load → validate → activate → mutate lifecycle is identical everywhere: each
 surface loads its own action list, fails closed on an `action_ref` absent from
-that list, and (for mosaic) keeps one tile's action state fully isolated from
+that list, keeps a launch on the card of the click that started it (never on
+the shared offer, and never on a later click's card if the answer arrives
+late), and (for mosaic) keeps one tile's action state fully isolated from
 its siblings — a valid or fail-closed click in one tile never affects another,
 even when two tiles share the same `action_ref` string for different Pages.
 `[src: file: frontend/src/hooks/useLivePageActions.ts]`

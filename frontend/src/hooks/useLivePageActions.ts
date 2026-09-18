@@ -8,6 +8,9 @@ export interface LivePageActiveActionState {
   actionRef: string;
   bindings: Record<string, string>;
   anchor: { left: number; top: number; width: number; height: number };
+  /** What this click turned into once launched or declined — its own launch,
+   * never written back over the offer the other buttons still draw from. */
+  card?: LivePageAction;
 }
 
 export interface UseLivePageActionsResult {
@@ -15,7 +18,7 @@ export interface UseLivePageActionsResult {
   activeAction: LivePageActiveActionState | null;
   selectedAction: LivePageAction | null;
   handleIntent: (intent: LivePageActionIntent) => void;
-  handleChanged: (action: LivePageAction) => void;
+  handleChanged: (action: LivePageAction, activation: number) => void;
   reload: (pageId: string | null) => Promise<void>;
 }
 
@@ -26,6 +29,11 @@ export interface UseLivePageActionsResult {
  * everywhere. Validation reads a ref mirror, not the `actions` state, because
  * the sandbox bridge relay is connected once per iframe load and would
  * otherwise close over a stale snapshot.
+ *
+ * `actions` are the Page's offers and are never mutated by a click: one block
+ * draws a button per dataset row, so the result of one row's launch belongs to
+ * that click's card alone. Writing it into the list is what made every other
+ * row reopen on the first row's result.
  */
 export function useLivePageActions(onUnavailable: () => void): UseLivePageActionsResult {
   const [actions, setActions] = useState<LivePageAction[]>([]);
@@ -52,16 +60,19 @@ export function useLivePageActions(onUnavailable: () => void): UseLivePageAction
     setActiveAction({ ...intent, activation: activationRef.current });
   }, []);
 
-  const handleChanged = useCallback((changed: LivePageAction) => {
-    setActions(current => {
-      const next = current.map(action => action.id === changed.id ? changed : action);
-      actionsRef.current = next;
-      return next;
-    });
+  // Keyed on the activation, not the block: a launch that answers after the
+  // user has already clicked another row of the same block must not land on
+  // that row's card.
+  const handleChanged = useCallback((changed: LivePageAction, activation: number) => {
+    setActiveAction(current => current && current.activation === activation
+      ? { ...current, card: changed }
+      : current);
   }, []);
 
   const selectedAction = activeAction
-    ? actions.find(action => action.action_ref === activeAction.actionRef) ?? null
+    ? activeAction.card
+      ?? actions.find(action => action.action_ref === activeAction.actionRef)
+      ?? null
     : null;
 
   return { actions, activeAction, selectedAction, handleIntent, handleChanged, reload };
