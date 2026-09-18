@@ -5,6 +5,7 @@ import {
   buildSandboxDocument,
   createLivePageOpenLinkRelay,
   runtimeData,
+  postLivePageActionStates,
 } from '../lib/live-page-sandbox';
 import type { LivePageMosaicLayout } from '../lib/live-page-navigation';
 import { openStandaloneDiscussion } from '../lib/live-page-navigation';
@@ -31,6 +32,9 @@ function MosaicLivePageFrame({ pageId }: { pageId: string }) {
   const {
     activeAction: pageActiveAction,
     selectedAction: pageSelectedAction,
+    selectedOffer: pageSelectedOffer,
+    launches: pageLaunches,
+    close: closePageAction,
     handleIntent: handlePageActionIntent,
     handleChanged: handlePageActionChanged,
     reload: reloadPageActions,
@@ -78,6 +82,16 @@ function MosaicLivePageFrame({ pageId }: { pageId: string }) {
     };
   }, [bridgeChannel, handlePageActionIntent]);
   useEffect(() => { publishToFrame(); }, [publishToFrame]);
+  // Each button shows how its row's last run went, and keeps up while it runs.
+  const publishActionStates = useCallback(() => {
+    const target = iframeRef.current?.contentWindow ?? null;
+    if (target) postLivePageActionStates(target, bridgeChannel, pageLaunches);
+  }, [bridgeChannel, pageLaunches]);
+  useEffect(() => { publishActionStates(); }, [publishActionStates]);
+  const publishAllToFrame = useCallback(() => {
+    publishToFrame();
+    publishActionStates();
+  }, [publishActionStates, publishToFrame]);
 
   if (error) {
     return <section className="standalone-live-page-mosaic-state" role="alert">{t('pages.standaloneLoadError', error)}</section>;
@@ -98,12 +112,14 @@ function MosaicLivePageFrame({ pageId }: { pageId: string }) {
         title={detail.title}
         sandbox="allow-scripts"
         srcDoc={sandboxDocument}
-        onLoad={publishToFrame}
+        onLoad={publishAllToFrame}
         data-testid="standalone-live-page-mosaic-frame"
       />
       <LivePageActionOverlay
         active={pageActiveAction}
         action={pageSelectedAction}
+        offer={pageSelectedOffer}
+        onClose={closePageAction}
         onChanged={handlePageActionChanged}
         onOpenDiscussion={openStandaloneDiscussion}
       />

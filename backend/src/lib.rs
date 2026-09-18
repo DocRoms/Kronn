@@ -682,6 +682,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             get(api::live_page_actions::list_for_live_page),
         )
         .route(
+            "/api/pages/{id}/action-launches",
+            get(api::live_page_actions::latest_launches_for_live_page),
+        )
+        .route(
             "/api/live-page-actions/{id}",
             get(api::live_page_actions::get),
         )

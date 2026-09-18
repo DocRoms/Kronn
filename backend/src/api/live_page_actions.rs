@@ -30,6 +30,31 @@ pub async fn list_for_live_page(
     }
 }
 
+/// The latest launch of each row, read on the companion connection: the Page
+/// draws its buttons' state from it, and it is polled while any row runs.
+pub async fn latest_launches_for_live_page(
+    State(state): State<AppState>,
+    Path(page_id): Path<String>,
+) -> Json<ApiResponse<Vec<LivePageAction>>> {
+    let result = state
+        .db
+        .with_read_conn(move |conn| {
+            crate::db::live_page_actions::latest_launches_for_live_page(
+                crate::db::kronn_action_engine::Reconcile::Projected,
+                conn,
+                &page_id,
+            )
+        })
+        .await;
+    match result {
+        Ok(launches) => Json(ApiResponse::ok(launches)),
+        Err(error) => Json(ApiResponse::err_coded(
+            ApiErrorCode::Internal,
+            format!("Unable to list Page action launches: {error}"),
+        )),
+    }
+}
+
 pub async fn get(
     State(state): State<AppState>,
     Path(action_id): Path<String>,

@@ -3,14 +3,10 @@ import { pages as pagesApi } from '../lib/api';
 import type { LivePageAction } from '../types/generated';
 import { KronnActionCard, type KronnActionOperations } from './DiscussionActionCard';
 
-const operations: KronnActionOperations<LivePageAction> = {
-  get: actionId => pagesApi.getAction(actionId),
-  cancel: actionId => pagesApi.cancelAction(actionId),
-  launch: (actionId, request) => pagesApi.launchAction(actionId, request),
-};
-
 export interface LivePageActionCardProps {
   action: LivePageAction;
+  /** The offer this card was opened from, to launch the same row again. */
+  offer?: LivePageAction | null;
   bindings?: Record<string, string>;
   onChanged: (action: LivePageAction) => void;
   onOpenDiscussion: (discussionId: string) => void;
@@ -18,6 +14,7 @@ export interface LivePageActionCardProps {
 
 export function LivePageActionCard({
   action,
+  offer,
   bindings,
   onChanged,
   onOpenDiscussion,
@@ -29,6 +26,12 @@ export function LivePageActionCard({
     () => Object.fromEntries(Object.entries(bindings ?? {}).sort(([left], [right]) => left.localeCompare(right))),
     [bindings],
   );
+  const operations = useMemo<KronnActionOperations<LivePageAction>>(() => ({
+    get: actionId => pagesApi.getAction(actionId),
+    cancel: actionId => pagesApi.cancelAction(actionId),
+    launch: (actionId, request) => pagesApi.launchAction(actionId, request),
+    ...(offer ? { relaunch: () => Promise.resolve(offer) } : {}),
+  }), [offer]);
   return (
     <KronnActionCard
       action={action}

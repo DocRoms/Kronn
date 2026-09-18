@@ -3,6 +3,8 @@ import {
   buildSandboxDocument,
   createLivePageOpenLinkRelay,
   LIVE_PAGE_CSP,
+  liveActionBindingKey,
+  postLivePageActionStates,
   requestRenderedPageHtml,
   runtimeData,
 } from '../live-page-sandbox';
@@ -224,6 +226,66 @@ describe('Live Page sandbox', () => {
       760,
     );
     frame.remove();
+  });
+
+  it('spells a row exactly as the backend stores a launch binding', () => {
+    // Sorted `name=selector` pairs joined by U+001F, whatever the key order.
+    expect(liveActionBindingKey({ b: '2', a: '1' })).toBe(['a=1', 'b=2'].join(String.fromCharCode(0x1f)));
+    expect(liveActionBindingKey({})).toBe('');
+  });
+
+  it('marks each button with its own row state, including rows rendered later', async () => {
+    // Runs the real bridge against this document. It pins `KronnPageData` and
+    // `window.open` for good, as it must in a Page; `window` is its only use of
+    // that name, so a throwaway one keeps the pins off the test environment.
+    const script = buildSandboxDocument('<main></main>', 'chan-states').match(/<script>([\s\S]*?)<\/script>/)?.[1];
+    new Function('window', script!)({});
+    document.body.innerHTML = `
+      <button data-kronn-action="frame" data-kronn-bindings='{"ticket":"EW-1"}'>EW-1</button>
+      <button data-kronn-action="frame" data-kronn-bindings='{"ticket":"EW-2"}'>EW-2</button>
+      <button data-kronn-action="frame" data-kronn-bindings='{"ticket":"EW-3"}'>EW-3</button>`;
+    const post = (channel: string, states: unknown[]) => window.dispatchEvent(new MessageEvent('message', {
+      data: { type: 'kronn:page-action-states', version: 1, channel_id: channel, states },
+    }));
+    const button = (ticket: string) => document.querySelector(`[data-kronn-bindings*="${ticket}"]`)!;
+
+    post('chan-states', [
+      { action_ref: 'frame', binding_key: 'ticket=EW-1', state: 'running' },
+      { action_ref: 'frame', binding_key: 'ticket=EW-2', state: 'succeeded' },
+    ]);
+    expect(button('EW-1').getAttribute('data-kronn-action-state')).toBe('running');
+    expect(button('EW-1').getAttribute('aria-busy')).toBe('true');
+    expect(button('EW-2').getAttribute('data-kronn-action-state')).toBe('succeeded');
+    expect(button('EW-2').hasAttribute('aria-busy')).toBe(false);
+    expect(button('EW-3').hasAttribute('data-kronn-action-state')).toBe(false);
+
+    // Pages draw their rows from data, often after the states arrived: a row
+    // that appears later is marked without any new message.
+    post('chan-states', [{ action_ref: 'frame', binding_key: 'ticket=EW-9', state: 'failed' }]);
+    expect(button('EW-1').hasAttribute('data-kronn-action-state')).toBe(false);
+    document.body.insertAdjacentHTML('beforeend',
+      `<button data-kronn-action="frame" data-kronn-bindings='{"ticket":"EW-9"}'>EW-9</button>`);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(button('EW-9').getAttribute('data-kronn-action-state')).toBe('failed');
+
+    // Another channel cannot mark this Page's buttons.
+    post('someone-else', [{ action_ref: 'frame', binding_key: 'ticket=EW-3', state: 'succeeded' }]);
+    expect(button('EW-3').hasAttribute('data-kronn-action-state')).toBe(false);
+  });
+
+  it('posts the launch states the iframe expects', () => {
+    const target = { postMessage: vi.fn() } as unknown as Window;
+    postLivePageActionStates(target, 'chan-1', [
+      { action_ref: 'frame', binding_key: 'ticket=EW-1', state: 'running' },
+      { action_ref: 'refresh', binding_key: null, state: 'succeeded' },
+    ]);
+    expect(target.postMessage).toHaveBeenCalledWith({
+      type: 'kronn:page-action-states', version: 1, channel_id: 'chan-1',
+      states: [
+        { action_ref: 'frame', binding_key: 'ticket=EW-1', state: 'running' },
+        { action_ref: 'refresh', binding_key: '', state: 'succeeded' },
+      ],
+    }, '*');
   });
 
   it('exposes time-series points without JSON stringification', () => {

@@ -16,6 +16,7 @@ import {
   createLivePageOpenLinkRelay,
   requestRenderedPageHtml,
   runtimeData,
+  postLivePageActionStates,
 } from '../lib/live-page-sandbox';
 import { formatRelativeTime } from '../lib/relativeTime';
 import { CopyIdPill } from '../components/CopyIdPill';
@@ -184,6 +185,9 @@ export function PagesPage({
   const {
     activeAction: pageActiveAction,
     selectedAction: pageSelectedAction,
+    selectedOffer: pageSelectedOffer,
+    launches: pageLaunches,
+    close: closePageAction,
     handleIntent: handlePageActionIntent,
     handleChanged: handlePageActionChanged,
     reload: reloadPageActions,
@@ -627,6 +631,16 @@ export function PagesPage({
     };
   }, [bridgeChannel, handlePageActionIntent]);
   useEffect(() => { publishToFrame(); }, [publishToFrame]);
+  // Each button shows how its row's last run went, and keeps up while it runs.
+  const publishActionStates = useCallback(() => {
+    const target = iframeRef.current?.contentWindow ?? null;
+    if (target) postLivePageActionStates(target, bridgeChannel, pageLaunches);
+  }, [bridgeChannel, pageLaunches]);
+  useEffect(() => { publishActionStates(); }, [publishActionStates]);
+  const publishAllToFrame = useCallback(() => {
+    publishToFrame();
+    publishActionStates();
+  }, [publishActionStates, publishToFrame]);
 
   return (
     <div className="live-pages" data-testid="live-pages-page">
@@ -1174,12 +1188,14 @@ export function PagesPage({
                   title={detail.title}
                   sandbox="allow-scripts"
                   srcDoc={document}
-                  onLoad={publishToFrame}
+                  onLoad={publishAllToFrame}
                   data-testid="live-page-frame"
                 />
                 <LivePageActionOverlay
                   active={pageActiveAction}
                   action={pageSelectedAction}
+                  offer={pageSelectedOffer}
+                  onClose={closePageAction}
                   onChanged={handlePageActionChanged}
                   onOpenDiscussion={discussionId => onNavigateDiscussion?.(discussionId)}
                 />

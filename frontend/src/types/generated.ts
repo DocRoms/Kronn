@@ -3481,6 +3481,15 @@ pinned: boolean,
  */
 archived: boolean, };
 
+/**
+ * One Page action as the API speaks it: a declaration, plus the launch it
+ * produced when there is one.
+ *
+ * `id` is the handle for *this* card, not for the block: the declaration's id
+ * before a click, that launch's id afterwards. A card therefore polls its own
+ * launch instead of the last one anybody happened to start — which is what
+ * made 39 buttons report the first ticket's success (KT-678).
+ */
 export type LivePageAction = { id: string, live_page_id: string, live_page_revision_id: string, action_ref: string, kind: DiscussionActionKind, target_id: string, target_name: string, project_id: string | null,
 /**
  * KT-582 — the target's project, by name, for the same reason as the
@@ -3494,7 +3503,13 @@ project_name: string | null, state: DiscussionActionState, values: Array<Discuss
  * the human sees an explicit explanation instead of silently trusting
  * values that may no longer reflect the currently displayed Page.
  */
-stale_source: boolean, };
+stale_source: boolean,
+/**
+ * The row a launch was clicked on — sorted `name=selector` pairs joined by
+ * U+001F, empty for an unbound CTA. `None` on a declaration, which belongs
+ * to every row at once.
+ */
+binding_key: string | null, };
 
 export type LivePageDataset = { id: string, page_id: string, name: string, kind: LivePageDatasetKind, current: any, schema: any, max_points: number, max_age_days: number | null, updated_at: string, };
 

@@ -81,6 +81,10 @@ pub struct LivePageAction {
     /// the human sees an explicit explanation instead of silently trusting
     /// values that may no longer reflect the currently displayed Page.
     pub stale_source: bool,
+    /// The row a launch was clicked on — sorted `name=selector` pairs joined by
+    /// U+001F, empty for an unbound CTA. `None` on a declaration, which belongs
+    /// to every row at once.
+    pub binding_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -436,7 +440,7 @@ const SELECT_DECLARATION: &str = "SELECT a.id, a.live_page_id, a.live_page_revis
     a.action_ref, a.kind, a.target_id, a.target_name, a.project_id, a.state, a.values_json,
     NULL, NULL, NULL, a.diagnostic, NULL, NULL, a.created_at, a.updated_at,
     (a.live_page_revision_id != p.current_revision_id) AS stale_source,
-    proj.name
+    proj.name, NULL
     -- LEFT for the project: one deleted after the proposal must still return
     -- the card, with no name rather than no card.
     FROM live_page_actions a JOIN live_pages p ON p.id = a.live_page_id
@@ -452,7 +456,7 @@ const SELECT_LAUNCH: &str = "SELECT l.id, a.live_page_id, l.live_page_revision_i
     l.shared_run_id, l.result_discussion_id, l.deep_link, l.diagnostic, l.launched_at,
     l.finished_at, l.created_at, l.updated_at,
     (l.live_page_revision_id != p.current_revision_id) AS stale_source,
-    proj.name
+    proj.name, l.binding_key
     FROM live_page_action_launches l
     JOIN live_page_actions a ON a.id = l.action_id
     JOIN live_pages p ON p.id = a.live_page_id
@@ -501,6 +505,7 @@ fn map_action(row: &rusqlite::Row<'_>) -> rusqlite::Result<LivePageAction> {
         updated_at: row.get(17)?,
         stale_source: row.get(18)?,
         project_name: row.get(19)?,
+        binding_key: row.get(20)?,
     })
 }
 
@@ -586,6 +591,39 @@ pub fn list_for_live_page(conn: &Connection, live_page_id: &str) -> Result<Vec<L
         .query_map([live_page_id], map_action)?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(actions)
+}
+
+/// The latest launch of every row that has run, so a Page can show each
+/// button's state and reopen the run behind it. One entry per binding, which
+/// bounds the answer by the rows on the page rather than by its history. A
+/// decline is not a run and never marks a button.
+pub fn latest_launches_for_live_page(
+    mode: kronn_action_engine::Reconcile,
+    conn: &Connection,
+    live_page_id: &str,
+) -> Result<Vec<LivePageAction>> {
+    let mut statement = conn.prepare(&format!(
+        "{SELECT_LAUNCH} WHERE l.id IN (
+             SELECT id FROM (
+                 SELECT l2.id, ROW_NUMBER() OVER (
+                     PARTITION BY l2.action_id, l2.binding_key
+                     ORDER BY l2.created_at DESC, l2.id DESC
+                 ) AS position
+                 FROM live_page_action_launches l2
+                 JOIN live_page_actions a2 ON a2.id = l2.action_id
+                 WHERE a2.live_page_id = ?1 AND l2.state NOT IN ('proposed', 'cancelled')
+             ) WHERE position = 1
+         )
+         ORDER BY a.action_ref, l.binding_key"
+    ))?;
+    let mut launches = statement
+        .query_map([live_page_id], map_action)?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(statement);
+    for launch in &mut launches {
+        refresh_from_shared_run(mode, conn, launch)?;
+    }
+    Ok(launches)
 }
 
 /// Declining an offer is an act like launching it, and just as much a
@@ -922,6 +960,7 @@ pub fn claim_launch(
         target_still_exists,
     )?;
     action.id = launch_id;
+    action.binding_key = Some(binding_key);
     action.created_at = now;
     action.state = core.state;
     action.values = core.values;
@@ -1883,6 +1922,91 @@ mod tests {
             offers[0].state,
             DiscussionActionState::Proposed,
             "every button stays armed, however many rows have run"
+        );
+    }
+
+    #[test]
+    fn the_page_reads_one_latest_launch_per_row_and_never_a_decline() {
+        let conn = connection();
+        insert_target(&conn);
+        let html = action_block(
+            "frame",
+            r#"{"kind":"quick_exec","target_id":"qe-1","values":[{"name":"service","provenance":"dynamic_binding","source_ref":"<page.dataset.tickets.find(key).key>"}]}"#,
+        );
+        insert_page(&conn, "page-states", "rev-1", &html);
+        insert_dataset(
+            &conn,
+            "page-states",
+            "tickets",
+            "collection",
+            r#"[{"key":"EW-1"},{"key":"EW-2"}]"#,
+        );
+        ingest_page_actions(&conn, "page-states", "rev-1", &html).unwrap();
+        let click = |ticket: &str| {
+            let Some(LivePageActionClaimOutcome::Claimed { action, .. }) = claim_launch(
+                &conn,
+                "page-action:page-states:frame",
+                &HashMap::new(),
+                &HashMap::from([("service".into(), ticket.into())]),
+            )
+            .unwrap() else {
+                panic!("expected a fresh claim for {ticket}");
+            };
+            action
+        };
+        let finish = |id: &str| {
+            complete(
+                &conn,
+                id,
+                kronn_action_engine::ActionCompletion {
+                    state: DiscussionActionState::Failed,
+                    shared_run_id: None,
+                    result_discussion_id: None,
+                    deep_link: None,
+                    diagnostic: Some("boom".into()),
+                },
+            )
+            .unwrap();
+        };
+
+        let first_try = click("EW-1");
+        assert_eq!(first_try.binding_key.as_deref(), Some("service=EW-1"));
+        finish(&first_try.id);
+        let second_try = click("EW-1");
+        let other_row = click("EW-2");
+        cancel(&conn, "page-action:page-states:frame").unwrap();
+
+        let latest = latest_launches_for_live_page(
+            kronn_action_engine::Reconcile::Persisted,
+            &conn,
+            "page-states",
+        )
+        .unwrap();
+        let seen: Vec<(Option<&str>, &str, DiscussionActionState)> = latest
+            .iter()
+            .map(|launch| {
+                (
+                    launch.binding_key.as_deref(),
+                    launch.id.as_str(),
+                    launch.state,
+                )
+            })
+            .collect();
+        assert_eq!(
+            seen,
+            vec![
+                (
+                    Some("service=EW-1"),
+                    second_try.id.as_str(),
+                    DiscussionActionState::Launching
+                ),
+                (
+                    Some("service=EW-2"),
+                    other_row.id.as_str(),
+                    DiscussionActionState::Launching
+                ),
+            ],
+            "one entry per row, the newest one, and the decline is not a run"
         );
     }
 

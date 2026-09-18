@@ -357,6 +357,11 @@ declared `values` contract as a Discussion `kronn-action`. A Page-only
 only the row selector keyed by variable name. Never place a resolved value or
 secret in Page HTML. The sandbox proposes an intention only; Kronn renders the
 native preflight card and the human launches it explicitly.
+One block serves every row: give each row's button its own
+`data-kronn-bindings` and each click is launched for that row alone. Kronn
+marks each button with `data-kronn-action-state` (`launching`, `running`,
+`succeeded`, `failed`, `preflight_failed`) and a default indicator; style that
+attribute rather than tracking launches in Page scripts.
 
 Canonical Page pipeline:
 
