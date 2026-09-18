@@ -509,7 +509,7 @@ fn map_action(row: &rusqlite::Row<'_>) -> rusqlite::Result<LivePageAction> {
     })
 }
 
-fn refresh_from_shared_run(
+fn reconcile(
     mode: kronn_action_engine::Reconcile,
     conn: &Connection,
     action: &mut LivePageAction,
@@ -519,17 +519,13 @@ fn refresh_from_shared_run(
         state: action.state,
         values: std::mem::take(&mut action.values),
         shared_run_id: action.shared_run_id.clone(),
+        result_discussion_id: action.result_discussion_id.clone(),
         diagnostic: action.diagnostic.clone(),
         launched_at: action.launched_at.clone(),
         finished_at: action.finished_at.clone(),
         updated_at: action.updated_at.clone(),
     };
-    kronn_action_engine::refresh_from_shared_run(
-        conn,
-        ActionTable::LivePageLaunch,
-        &mut core,
-        mode,
-    )?;
+    kronn_action_engine::reconcile(conn, ActionTable::LivePageLaunch, &mut core, mode)?;
     action.state = core.state;
     action.values = core.values;
     action.diagnostic = core.diagnostic;
@@ -551,7 +547,7 @@ fn launch_by_id(
         )
         .optional()?;
     if let Some(action) = action.as_mut() {
-        refresh_from_shared_run(mode, conn, action)?;
+        reconcile(mode, conn, action)?;
     }
     Ok(action)
 }
@@ -621,7 +617,7 @@ pub fn latest_launches_for_live_page(
         .collect::<Result<Vec<_>, _>>()?;
     drop(statement);
     for launch in &mut launches {
-        refresh_from_shared_run(mode, conn, launch)?;
+        reconcile(mode, conn, launch)?;
     }
     Ok(launches)
 }
@@ -724,7 +720,7 @@ fn in_flight_launch(
     let Some(mut candidate) = candidate else {
         return Ok(None);
     };
-    refresh_from_shared_run(
+    reconcile(
         kronn_action_engine::Reconcile::Persisted,
         conn,
         &mut candidate,
@@ -944,6 +940,7 @@ pub fn claim_launch(
         state: DiscussionActionState::Proposed,
         values: std::mem::take(&mut action.values),
         shared_run_id: None,
+        result_discussion_id: None,
         diagnostic: None,
         launched_at: None,
         finished_at: None,
@@ -982,7 +979,8 @@ pub fn complete(
     kronn_action_engine::complete(conn, ActionTable::LivePageLaunch, id, completion)
 }
 
-/// Complete a Page-authored QP and register its result discussion atomically.
+/// Record a Page-authored QP's result discussion and register it on the Page,
+/// atomically. The launch stays `running`: it succeeds when the agent answers.
 /// This is the durable reverse edge for the action's own
 /// `result_discussion_id`: Page history and discussion-origin lookups cannot
 /// disagree after a crash between two separate commits.
@@ -1003,7 +1001,8 @@ pub fn complete_quick_prompt(
         &transaction,
         id,
         kronn_action_engine::ActionCompletion {
-            state: DiscussionActionState::Succeeded,
+            // The discussion exists; the answer does not yet.
+            state: DiscussionActionState::Running,
             shared_run_id: None,
             result_discussion_id: Some(discussion_id.to_string()),
             deep_link: Some(format!("discussion:{discussion_id}")),
@@ -2460,15 +2459,52 @@ mod tests {
         .unwrap();
 
         complete_quick_prompt(&conn, action_id, "page-trace", "disc-page-result").unwrap();
+        let state = || {
+            get(kronn_action_engine::Reconcile::Persisted, &conn, action_id)
+                .unwrap()
+                .unwrap()
+        };
 
-        let action = get(kronn_action_engine::Reconcile::Persisted, &conn, action_id)
-            .unwrap()
-            .unwrap();
-        assert_eq!(action.state, DiscussionActionState::Succeeded);
+        // The discussion exists; the answer does not yet.
+        let action = state();
+        assert_eq!(action.state, DiscussionActionState::Running);
         assert_eq!(
             action.result_discussion_id.as_deref(),
             Some("disc-page-result")
         );
+        insert_agent_turn(
+            &conn,
+            "turn-1",
+            "disc-page-result",
+            "Pending",
+            None,
+            "2026-09-18T10:00:00+00:00",
+        );
+        assert_eq!(state().state, DiscussionActionState::Running);
+
+        conn.execute(
+            "UPDATE agent_dispatch_jobs SET status = 'Completed',
+             completed_at = '2026-09-18T10:05:00+00:00' WHERE id = 'turn-1'",
+            [],
+        )
+        .unwrap();
+        let answered = state();
+        assert_eq!(answered.state, DiscussionActionState::Succeeded);
+        assert_eq!(
+            answered.finished_at.as_deref(),
+            Some("2026-09-18T10:05:00+00:00")
+        );
+
+        // A follow-up the human asks in that discussion is not this launch.
+        insert_agent_turn(
+            &conn,
+            "turn-2",
+            "disc-page-result",
+            "Pending",
+            None,
+            "2026-09-18T11:00:00+00:00",
+        );
+        assert_eq!(state().state, DiscussionActionState::Succeeded);
         let link: (String, String) = conn
             .query_row(
                 "SELECT page_id, relation FROM live_page_discussion_links WHERE discussion_id = 'disc-page-result'",
@@ -2477,6 +2513,110 @@ mod tests {
             )
             .unwrap();
         assert_eq!(link, ("page-trace".into(), "attached".into()));
+    }
+
+    fn insert_agent_turn(
+        conn: &Connection,
+        id: &str,
+        discussion_id: &str,
+        status: &str,
+        last_error: Option<&str>,
+        created_at: &str,
+    ) {
+        // Each turn answers a message of its own, as a real dispatch does.
+        conn.execute(
+            "INSERT INTO messages (id, discussion_id, role, content, timestamp, sort_order)
+             VALUES (?1, ?2, 'User', 'Frame this ticket', ?3,
+                     (SELECT COALESCE(MAX(sort_order), 0) + 1 FROM messages WHERE discussion_id = ?2))",
+            params![id, discussion_id, created_at],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO agent_dispatch_jobs (
+                 id, discussion_id, trigger_message_id, trigger_sort_order, dedupe_key,
+                 status, last_error, available_at, created_at, updated_at
+             ) VALUES (?1, ?2, ?1, 1, ?1, ?3, ?4, ?5, ?5, ?5)",
+            params![id, discussion_id, status, last_error, created_at],
+        )
+        .unwrap();
+    }
+
+    fn launched_quick_prompt(conn: &Connection, page_id: &str) -> String {
+        insert_all_target_kinds(conn);
+        let html = action_block("frame", r#"{"kind":"quick_prompt","target_id":"qp-1"}"#);
+        insert_page(conn, page_id, &format!("rev-{page_id}"), &html);
+        ingest_page_actions(conn, page_id, &format!("rev-{page_id}"), &html).unwrap();
+        let Some(LivePageActionClaimOutcome::Claimed { action, .. }) = claim_launch(
+            conn,
+            &format!("page-action:{page_id}:frame"),
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .unwrap() else {
+            panic!("expected a fresh claim");
+        };
+        let now = Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO discussions (id, title, agent, language, participants_json, created_at, updated_at)
+             VALUES (?1, 'Result', 'ClaudeCode', 'fr', '[]', ?2, ?2)",
+            params![format!("disc-{page_id}"), now],
+        )
+        .unwrap();
+        complete_quick_prompt(conn, &action.id, page_id, &format!("disc-{page_id}")).unwrap();
+        action.id
+    }
+
+    #[test]
+    fn a_quick_prompt_launch_fails_with_its_agent_and_says_why() {
+        let conn = connection();
+        let launch = launched_quick_prompt(&conn, "page-qp-fail");
+        insert_agent_turn(
+            &conn,
+            "turn-fail",
+            "disc-page-qp-fail",
+            "Failed",
+            Some("provider refused"),
+            "2026-09-18T10:00:00+00:00",
+        );
+
+        // The companion connection projects the verdict without writing it.
+        let projected = get(kronn_action_engine::Reconcile::Projected, &conn, &launch)
+            .unwrap()
+            .unwrap();
+        assert_eq!(projected.state, DiscussionActionState::Failed);
+        let stored: String = conn
+            .query_row(
+                "SELECT state FROM live_page_action_launches WHERE id = ?1",
+                [&launch],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, "running");
+
+        let failed = get(kronn_action_engine::Reconcile::Persisted, &conn, &launch)
+            .unwrap()
+            .unwrap();
+        assert_eq!(failed.state, DiscussionActionState::Failed);
+        assert_eq!(failed.diagnostic.as_deref(), Some("provider refused"));
+        assert!(failed.finished_at.is_some());
+    }
+
+    #[test]
+    fn a_quick_prompt_launch_whose_discussion_is_gone_does_not_run_for_ever() {
+        let conn = connection();
+        let launch = launched_quick_prompt(&conn, "page-qp-gone");
+        // What `ON DELETE SET NULL` leaves behind when the discussion goes.
+        conn.execute(
+            "UPDATE live_page_action_launches SET result_discussion_id = NULL WHERE id = ?1",
+            [&launch],
+        )
+        .unwrap();
+
+        let settled = get(kronn_action_engine::Reconcile::Persisted, &conn, &launch)
+            .unwrap()
+            .unwrap();
+        assert_eq!(settled.state, DiscussionActionState::Failed);
+        assert!(settled.diagnostic.unwrap().contains("n’existe plus"));
     }
 
     #[test]

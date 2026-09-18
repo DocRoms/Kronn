@@ -5,6 +5,7 @@ import { formatDurationCompact } from '../lib/kronnToolParser';
 import { runsApi } from '../lib/api';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { mediaRunDetails } from '../lib/mediaRunResult';
+import { flatEntries, quickApiPreview } from '../lib/runResultPreview';
 import {
   sharedRunStatusCardModel,
   type RunStatusCardModel,
@@ -145,6 +146,18 @@ export function RunStatusCard({ model: initialModel, runId, compact = false, hid
   }, [model?.startedAt, ticking, visible]);
 
   const steps = useMemo(() => workflowSteps(model?.result), [model?.result]);
+  // A Quick API reads as its summary and first rows, a Quick Exec's flat JSON
+  // output as key → value; the raw payload stays one fold away.
+  const runKind = model?.kind;
+  const runResult = model?.result;
+  const apiPreview = useMemo(
+    () => runKind === 'quick_api' ? quickApiPreview(runResult) : null,
+    [runKind, runResult],
+  );
+  const execEntries = useMemo(
+    () => runKind === 'quick_exec' ? flatEntries(runResult) : null,
+    [runKind, runResult],
+  );
   const result = useMemo(() => steps ? null : resultText(model?.result), [model?.result, steps]);
 
   if (!model) return <section ref={rootRef} className="run-status-card" data-testid="run-status-card"><span>{t('run.freshness.unavailable')}</span></section>;
@@ -166,7 +179,7 @@ export function RunStatusCard({ model: initialModel, runId, compact = false, hid
   // Media runs publish a full JSON projection the reader rarely needs; it is
   // folded away for them only, so workflow and quick-prompt cards keep the
   // rendering they have today.
-  const foldResult = model.kind === 'media';
+  const foldResult = model.kind === 'media' || apiPreview != null || execEntries != null;
 
   return (
     <section ref={rootRef} className="run-status-card" data-status={model.status} data-kind={model.kind} data-testid="run-status-card">
@@ -229,6 +242,67 @@ export function RunStatusCard({ model: initialModel, runId, compact = false, hid
                 );
               })}
             </ol>
+          )}
+          {apiPreview && (
+            <div className="run-status-card-preview" data-testid="run-status-card-api-preview">
+              {(apiPreview.summary || apiPreview.status) && (
+                <p className="run-status-card-summary" title={apiPreview.summary ?? undefined}>
+                  {apiPreview.status && <span className="run-status-card-summary-status">{apiPreview.status}</span>}
+                  {apiPreview.summary}
+                </p>
+              )}
+              {apiPreview.table && (
+                <div className="run-status-card-table-wrap">
+                  <table className="run-status-card-table">
+                    <caption>
+                      {apiPreview.table.label ? `${apiPreview.table.label} · ` : ''}
+                      {t('run.preview.items', apiPreview.table.total)}
+                    </caption>
+                    <thead>
+                      <tr>{apiPreview.table.columns.map(column => <th key={column} scope="col">{column}</th>)}</tr>
+                    </thead>
+                    <tbody>
+                      {apiPreview.table.rows.map((row, index) => (
+                        <tr key={index}>
+                          {row.map((value, column) => <td key={column} title={value}>{value}</td>)}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  {apiPreview.table.total > apiPreview.table.rows.length && (
+                    <p className="run-status-card-more">
+                      {t('run.preview.more', apiPreview.table.total - apiPreview.table.rows.length)}
+                    </p>
+                  )}
+                </div>
+              )}
+              {apiPreview.list && (
+                <>
+                  <ul className="run-status-card-list">
+                    {apiPreview.list.items.map((item, index) => <li key={index}>{item}</li>)}
+                  </ul>
+                  {apiPreview.list.total > apiPreview.list.items.length && (
+                    <p className="run-status-card-more">
+                      {t('run.preview.more', apiPreview.list.total - apiPreview.list.items.length)}
+                    </p>
+                  )}
+                </>
+              )}
+              {apiPreview.entries && (
+                <dl className="run-status-card-entries">
+                  {apiPreview.entries.map(([key, value]) => (
+                    <div key={key}><dt>{key}</dt><dd>{value}</dd></div>
+                  ))}
+                </dl>
+              )}
+            </div>
+          )}
+          {execEntries && (
+            <dl className="run-status-card-entries" data-testid="run-status-card-exec-output">
+              {execEntries.map(([key, value]) => (
+                <div key={key}><dt>{key}</dt><dd>{value}</dd></div>
+              ))}
+            </dl>
           )}
           {result && (foldResult ? (
             <details className="run-status-card-fold" data-testid="run-status-card-result-fold">

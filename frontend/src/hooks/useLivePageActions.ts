@@ -1,7 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { pages as pagesApi } from '../lib/api';
 import type { LivePageAction } from '../types/generated';
-import { liveActionBindingKey, type LivePageActionIntent } from '../lib/live-page-sandbox';
+import {
+  liveActionBindingKey,
+  postLivePageActionStates,
+  type LivePageActionIntent,
+} from '../lib/live-page-sandbox';
 
 export interface LivePageActiveActionState {
   activation: number;
@@ -163,4 +167,26 @@ export function useLivePageActions(onUnavailable: () => void): UseLivePageAction
     actions, launches, activeAction, selectedAction, selectedOffer,
     handleIntent, handleChanged, close, reload,
   };
+}
+
+/**
+ * Keeps a Page's iframe told how each of its buttons' rows went: on every
+ * change, and again with the Page's data whenever the frame (re)loads, since a
+ * fresh document has forgotten everything. Returns that frame's `onLoad`.
+ */
+export function useActionStatesInFrame(
+  iframeRef: { readonly current: HTMLIFrameElement | null },
+  channelId: string,
+  launches: LivePageAction[],
+  publishPageData: () => void,
+): () => void {
+  const publishStates = useCallback(() => {
+    const target = iframeRef.current?.contentWindow ?? null;
+    if (target) postLivePageActionStates(target, channelId, launches);
+  }, [channelId, iframeRef, launches]);
+  useEffect(() => { publishStates(); }, [publishStates]);
+  return useCallback(() => {
+    publishPageData();
+    publishStates();
+  }, [publishPageData, publishStates]);
 }

@@ -5,11 +5,10 @@ import {
   buildSandboxDocument,
   createLivePageOpenLinkRelay,
   runtimeData,
-  postLivePageActionStates,
 } from '../lib/live-page-sandbox';
 import type { LivePageMosaicLayout } from '../lib/live-page-navigation';
 import { openStandaloneDiscussion } from '../lib/live-page-navigation';
-import { useLivePageActions } from '../hooks/useLivePageActions';
+import { useActionStatesInFrame, useLivePageActions } from '../hooks/useLivePageActions';
 import { LivePageActionOverlay } from '../components/LivePageActionOverlay';
 import { useT } from '../lib/I18nContext';
 import { userError } from '../lib/userError';
@@ -83,15 +82,7 @@ function MosaicLivePageFrame({ pageId }: { pageId: string }) {
   }, [bridgeChannel, handlePageActionIntent]);
   useEffect(() => { publishToFrame(); }, [publishToFrame]);
   // Each button shows how its row's last run went, and keeps up while it runs.
-  const publishActionStates = useCallback(() => {
-    const target = iframeRef.current?.contentWindow ?? null;
-    if (target) postLivePageActionStates(target, bridgeChannel, pageLaunches);
-  }, [bridgeChannel, pageLaunches]);
-  useEffect(() => { publishActionStates(); }, [publishActionStates]);
-  const publishAllToFrame = useCallback(() => {
-    publishToFrame();
-    publishActionStates();
-  }, [publishActionStates, publishToFrame]);
+  const publishAllToFrame = useActionStatesInFrame(iframeRef, bridgeChannel, pageLaunches, publishToFrame);
 
   if (error) {
     return <section className="standalone-live-page-mosaic-state" role="alert">{t('pages.standaloneLoadError', error)}</section>;

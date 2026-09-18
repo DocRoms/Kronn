@@ -11,11 +11,12 @@
  * the standalone page's shared `useLivePageActions` hook picks up and
  * renders as a native `LivePageActionCard` OUTSIDE the iframe.
  *
- * The target is a Quick Prompt: launching one synchronously creates its
- * result discussion (`qp_run` in `backend/src/api/mcp_remote.rs`) before
- * only asynchronously waking the background agent dispatcher — so this
- * reaches a real `succeeded` terminal state fast, without needing (or
- * costing tokens on) an installed agent CLI.
+ * The target is a Quick Prompt: launching one creates its result discussion
+ * (`qp_run` in `backend/src/api/mcp_remote.rs`) and queues the agent's turn.
+ * The launch follows that turn to its end: `succeeded` once an agent has
+ * answered, `failed` when none can — which is what an isolated E2E backend,
+ * with no agent installed, reports within a second. Either way the result
+ * discussion exists and must be reachable from the card.
  *
  * The terminal "open discussion" button exercises
  * `openStandaloneDiscussion` (`frontend/src/lib/live-page-navigation.ts`):
@@ -61,7 +62,7 @@ test.describe('Live Page inline action — launch and secure discussion deep lin
     const card = page.locator('[data-testid^="live-page-action-"]');
     await expect(card).toBeVisible();
     await card.locator('.discussion-action-card__launch').click();
-    await expect(card).toHaveAttribute('data-state', 'succeeded', { timeout: 10_000 });
+    await expect(card).toHaveAttribute('data-state', /^(succeeded|failed)$/, { timeout: 10_000 });
 
     const popupPromise = page.waitForEvent('popup');
     // The result discussion is reached from the card's outcome, which names it.

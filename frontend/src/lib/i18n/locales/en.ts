@@ -3932,6 +3932,8 @@ suggestion; that would overwrite the real value with a placeholder
   'run.resultTruncated': '… truncated. Open the run to read the full output.',
   'run.media.open': 'Open media',
   'run.details': 'Details',
+  'run.preview.items': '{0} items',
+  'run.preview.more': '+{0} more',
   'run.durationUnavailable': 'Duration unavailable',
   'run.progress': '{0} of {1} steps',
   'run.freshness.live': 'Live',

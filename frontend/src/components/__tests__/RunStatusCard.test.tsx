@@ -138,6 +138,43 @@ describe('RunStatusCard', () => {
     expect(screen.queryByText(/"steps"/)).not.toBeInTheDocument();
   });
 
+  it('reads a Quick API result as its summary and first rows, the raw payload folded', () => {
+    render(
+      <RunStatusCard
+        model={{
+          id: 'run-qa',
+          kind: 'quick_api',
+          status: 'success',
+          result: {
+            status: 'OK',
+            summary: 'POST https://api.github.com/graphql → 7 items',
+            data: Array.from({ length: 7 }, (_, index) => ({ number: index + 1, title: `PR ${index + 1}` })),
+          },
+        }}
+      />,
+    );
+
+    const preview = screen.getByTestId('run-status-card-api-preview');
+    expect(within(preview).getByText('POST https://api.github.com/graphql → 7 items')).toBeInTheDocument();
+    expect(within(preview).getAllByRole('row')).toHaveLength(6); // header + 5
+    expect(within(preview).getByText('PR 1')).toBeInTheDocument();
+    expect(within(preview).queryByText('PR 6')).not.toBeInTheDocument();
+    // The whole payload is still there, folded rather than printed first.
+    expect(screen.getByTestId('run-status-card-result-fold')).not.toHaveAttribute('open');
+  });
+
+  it("reads a Quick Exec's flat JSON output as key → value", () => {
+    render(
+      <RunStatusCard
+        model={{ id: 'run-qe', kind: 'quick_exec', status: 'success', result: { python: '3.14.7', ok: true } }}
+      />,
+    );
+    const output = screen.getByTestId('run-status-card-exec-output');
+    expect(within(output).getByText('python')).toBeInTheDocument();
+    expect(within(output).getByText('3.14.7')).toBeInTheDocument();
+    expect(screen.getByTestId('run-status-card-result-fold')).toBeInTheDocument();
+  });
+
   it('makes unavailable duration and diagnostics explicit for a failed direct run', () => {
     render(
       <RunStatusCard

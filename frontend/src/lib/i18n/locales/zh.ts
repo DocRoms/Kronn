@@ -3839,6 +3839,8 @@ const zh: TranslationDict = {
   "run.resultTruncated": "… 已截断。打开运行以查看完整输出。",
   "run.media.open": "打开媒体",
   "run.details": "详情",
+  "run.preview.items": "{0} 项",
+  "run.preview.more": "还有 {0} 项",
   "run.durationUnavailable": "持续时间不可用",
   "run.progress": "{0}/{1} 步",
   "run.freshness.live": "实时",

@@ -853,6 +853,13 @@ cursor still advances past those hidden turns.
   and also works from an unbound host CLI for a standalone Page. Pass
   `datasets: []` for standalone HTML or seed `initial` values for a mock-backed
   Page. `page_get` returns both Workflow and Discussion links.
+- Put buttons on a Page that launch a real QP, QA, QE or Workflow for each data
+  row. `tool_manual({tool: "page_create"})` and
+  `tool_manual({tool: "page_update_html"})` carry the contract: one inert
+  `application/kronn-action` block per action, one `data-kronn-bindings`
+  selector per row, `data-kronn-action-state` on each button for its row's live
+  state, and a native card that opens on the row's latest run and what it
+  produced. Keep a block's reference stable across revisions.
 
 ## Related
 

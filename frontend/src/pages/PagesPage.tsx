@@ -16,7 +16,6 @@ import {
   createLivePageOpenLinkRelay,
   requestRenderedPageHtml,
   runtimeData,
-  postLivePageActionStates,
 } from '../lib/live-page-sandbox';
 import { formatRelativeTime } from '../lib/relativeTime';
 import { CopyIdPill } from '../components/CopyIdPill';
@@ -30,7 +29,7 @@ import { CollectionShell, CollectionSidebarCollapseButton } from '../components/
 import { HtmlCodeEditor, HtmlRevisionDiff } from '../components/HtmlCodeEditor';
 import { useT } from '../lib/I18nContext';
 import { useAsyncGuard } from '../hooks/useAsyncGuard';
-import { useLivePageActions } from '../hooks/useLivePageActions';
+import { useActionStatesInFrame, useLivePageActions } from '../hooks/useLivePageActions';
 import { userError } from '../lib/userError';
 import {
   livePageMosaicLayouts,
@@ -632,15 +631,7 @@ export function PagesPage({
   }, [bridgeChannel, handlePageActionIntent]);
   useEffect(() => { publishToFrame(); }, [publishToFrame]);
   // Each button shows how its row's last run went, and keeps up while it runs.
-  const publishActionStates = useCallback(() => {
-    const target = iframeRef.current?.contentWindow ?? null;
-    if (target) postLivePageActionStates(target, bridgeChannel, pageLaunches);
-  }, [bridgeChannel, pageLaunches]);
-  useEffect(() => { publishActionStates(); }, [publishActionStates]);
-  const publishAllToFrame = useCallback(() => {
-    publishToFrame();
-    publishActionStates();
-  }, [publishActionStates, publishToFrame]);
+  const publishAllToFrame = useActionStatesInFrame(iframeRef, bridgeChannel, pageLaunches, publishToFrame);
 
   return (
     <div className="live-pages" data-testid="live-pages-page">

@@ -29,7 +29,7 @@ impl DispatchStatus {
         }
     }
 
-    fn parse(value: &str) -> Result<Self> {
+    pub(crate) fn parse(value: &str) -> Result<Self> {
         match value {
             "Pending" => Ok(Self::Pending),
             "Running" => Ok(Self::Running),

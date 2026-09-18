@@ -25,7 +25,7 @@ pub enum RunOutcomeAgentStatus {
     /// Queued or running: the answer is still to come.
     Working,
     Answered,
-    /// Failed, or interrupted before it could answer.
+    /// The agent's turn failed; `diagnostic` says why.
     Failed,
     /// Stopped on purpose; whatever it said before still shows.
     Cancelled,
@@ -99,10 +99,15 @@ fn describe(conn: &Connection, discussion: Discussion) -> Result<RunOutcomeDiscu
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()?;
-    let agent_status = match dispatch.as_ref().map(|(status, _)| status.as_str()) {
-        Some("Pending" | "Running") => RunOutcomeAgentStatus::Working,
-        Some("Failed" | "Interrupted") => RunOutcomeAgentStatus::Failed,
-        Some("Cancelled") => RunOutcomeAgentStatus::Cancelled,
+    use crate::db::agent_dispatch::DispatchStatus;
+    let latest = dispatch
+        .as_ref()
+        .map(|(status, _)| DispatchStatus::parse(status))
+        .transpose()?;
+    let agent_status = match latest {
+        Some(DispatchStatus::Pending | DispatchStatus::Running) => RunOutcomeAgentStatus::Working,
+        Some(DispatchStatus::Failed) => RunOutcomeAgentStatus::Failed,
+        Some(DispatchStatus::Cancelled) => RunOutcomeAgentStatus::Cancelled,
         _ if answer.is_some() => RunOutcomeAgentStatus::Answered,
         _ => RunOutcomeAgentStatus::Idle,
     };

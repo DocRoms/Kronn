@@ -3945,6 +3945,8 @@ suggestion KRONN:APPLY ; cela écraserait la vraie valeur par un placeholder
   'run.resultTruncated': '… tronqué. Ouvrez le run pour lire la sortie complète.',
   'run.media.open': 'Ouvrir le média',
   'run.details': 'Détails',
+  'run.preview.items': '{0} éléments',
+  'run.preview.more': '+{0} de plus',
   'run.durationUnavailable': 'Durée indisponible',
   'run.progress': '{0} étape(s) sur {1}',
   'run.freshness.live': 'En direct',

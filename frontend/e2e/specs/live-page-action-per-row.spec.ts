@@ -9,29 +9,33 @@
  * spec drives the two together through the real sandboxed iframe, because the
  * failure needed both halves to agree on the wrong row.
  *
- * The target is a Quick Prompt, which reaches `succeeded` synchronously
- * without an installed agent CLI (see live-page-inline-action-launch.spec.ts).
+ * The target is a Quick Exec that echoes the ticket it received: it succeeds
+ * without an agent, and its output proves in the browser that each row ran
+ * with its own value.
  */
 
 import { test, expect } from '../fixtures/kronn-fixture';
 
 test.describe('Live Page inline action — each row is its own launch', () => {
   test('a second ticket launches its own run instead of replaying the first one', async ({ page }) => {
-    const qpResponse = await page.request.post('/api/quick-prompts', {
+    const qeResponse = await page.request.post('/api/quick-execs', {
       data: {
         name: `E2E frame per row ${Date.now()}`,
-        prompt_template: 'Frame ticket {{ticket}}.',
+        command: 'echo',
+        args: ['{"ticket":"{{ticket}}"}'],
+        timeout_secs: 10,
+        output_format: 'json',
         variables: [{ name: 'ticket', label: 'Ticket', placeholder: '' }],
       },
     });
-    expect(qpResponse.ok()).toBe(true);
-    const targetId = ((await qpResponse.json()) as { data: { id: string } }).data.id;
+    expect(qeResponse.ok()).toBe(true);
+    const targetId = ((await qeResponse.json()) as { data: { id: string } }).data.id;
 
     const button = (ticket: string) =>
       `<button data-kronn-action="frame" data-kronn-bindings='{"ticket":"${ticket}"}'>Framer ${ticket}</button>`;
     const html = button('EW-7706') + button('EW-7704')
       + '<script type="application/kronn-action" data-action-id="frame">'
-      + `{"kind":"quick_prompt","target_id":"${targetId}","values":[{"name":"ticket","provenance":"dynamic_binding","source_ref":"<page.dataset.tickets.find(key).key>"}]}`
+      + `{"kind":"quick_exec","target_id":"${targetId}","values":[{"name":"ticket","provenance":"dynamic_binding","source_ref":"<page.dataset.tickets.find(key).key>"}]}`
       + '</script>';
     const pageResponse = await page.request.post('/api/pages', {
       data: {
@@ -46,6 +50,7 @@ test.describe('Live Page inline action — each row is its own launch', () => {
     await page.goto(`/#page/${pageId}`);
     const frame = page.frameLocator('[data-testid="standalone-live-page-frame"]');
     const card = page.locator('[data-testid^="live-page-action-"]');
+    const output = page.getByTestId('run-status-card-exec-output');
 
     const launchRow = async (ticket: string) => {
       await frame.locator(`button:has-text("Framer ${ticket}")`).click();
@@ -57,19 +62,16 @@ test.describe('Live Page inline action — each row is its own launch', () => {
       await card.locator('.discussion-action-card__launch').click();
       const body = (await (await launched).json()) as { data: { id: string } };
       await expect(card).toHaveAttribute('data-state', 'succeeded', { timeout: 10_000 });
+      // The run received this row's value, not the first row's.
+      await expect(output).toContainText(ticket);
       const settled = await page.request.get(`/api/live-page-actions/${body.data.id}`);
-      return ((await settled.json()) as { data: { id: string; result_discussion_id: string } }).data;
+      return ((await settled.json()) as { data: { id: string; shared_run_id: string } }).data;
     };
 
     const first = await launchRow('EW-7706');
     const second = await launchRow('EW-7704');
-
-    // Two launches, two runs. Which ticket each one received is not readable
-    // here by design: a Quick Prompt keeps its template in the transcript and
-    // its values in the encrypted variable snapshot. The backend test
-    // `each_row_of_a_listed_action_launches_its_own_run` pins the value per row.
     expect(second.id).not.toBe(first.id);
-    expect(second.result_discussion_id).not.toBe(first.result_discussion_id);
+    expect(second.shared_run_id).not.toBe(first.shared_run_id);
 
     // Each button in the Page shows how its own row went.
     for (const ticket of ['EW-7706', 'EW-7704']) {
@@ -80,11 +82,11 @@ test.describe('Live Page inline action — each row is its own launch', () => {
     await frame.locator('button:has-text("Framer EW-7704")').click();
     await expect(card).toHaveCount(0);
 
-    // A row that has run reopens on what happened, with the way to run it again.
+    // A row that has run reopens on what happened — its own run — with the
+    // way to run it again.
     await frame.locator('button:has-text("Framer EW-7706")').click();
     await expect(card).toHaveAttribute('data-state', 'succeeded');
-    await expect(page.getByTestId('run-outcome-item')).toBeVisible();
-    await expect(page.getByTestId('action-card-relaunch')).toBeVisible();
+    await expect(output).toContainText('EW-7706');
     await page.getByTestId('action-card-relaunch').click();
     await expect(card).toHaveAttribute('data-state', 'proposed');
   });

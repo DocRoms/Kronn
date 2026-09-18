@@ -641,7 +641,7 @@ const SELECT_ACTION: &str = "SELECT a.id, a.discussion_id, a.source_message_id,
     a.finished_at, a.created_at, a.updated_at, p.name
     FROM discussion_actions a LEFT JOIN projects p ON p.id = a.project_id";
 
-fn refresh_from_shared_run(
+fn reconcile(
     mode: kronn_action_engine::Reconcile,
     conn: &Connection,
     action: &mut DiscussionAction,
@@ -651,12 +651,13 @@ fn refresh_from_shared_run(
         state: action.state,
         values: std::mem::take(&mut action.values),
         shared_run_id: action.shared_run_id.clone(),
+        result_discussion_id: action.result_discussion_id.clone(),
         diagnostic: action.diagnostic.clone(),
         launched_at: action.launched_at.clone(),
         finished_at: action.finished_at.clone(),
         updated_at: action.updated_at.clone(),
     };
-    kronn_action_engine::refresh_from_shared_run(
+    kronn_action_engine::reconcile(
         conn,
         kronn_action_engine::ActionTable::Discussion,
         &mut core,
@@ -683,7 +684,7 @@ pub fn get(
         )
         .optional()?;
     if let Some(action) = action.as_mut() {
-        refresh_from_shared_run(mode, conn, action)?;
+        reconcile(mode, conn, action)?;
     }
     Ok(action)
 }
@@ -701,7 +702,7 @@ pub fn list_for_discussion(
         .collect::<Result<Vec<_>, _>>()?;
     drop(statement);
     for action in &mut actions {
-        refresh_from_shared_run(mode, conn, action)?;
+        reconcile(mode, conn, action)?;
     }
     Ok(actions)
 }
@@ -730,6 +731,7 @@ pub fn claim_launch(
         state: action.state,
         values: std::mem::take(&mut action.values),
         shared_run_id: action.shared_run_id.clone(),
+        result_discussion_id: action.result_discussion_id.clone(),
         diagnostic: action.diagnostic.clone(),
         launched_at: action.launched_at.clone(),
         finished_at: action.finished_at.clone(),
@@ -1059,6 +1061,75 @@ mod tests {
             finished.finished_at.is_some(),
             "a terminal state must be dated, or nothing can order the timeline"
         );
+    }
+
+    #[test]
+    fn a_quick_prompt_proposal_succeeds_when_its_agent_answers_not_before() {
+        // Same engine as a Page button: "done" used to mean "discussion
+        // created", while the agent was still reading.
+        let conn = connection();
+        insert_all_target_kinds(&conn);
+        let content = r#"```kronn-action
+{"kind":"quick_prompt","target_id":"qp-1"}
+```"#;
+        insert_message_row(&conn, "msg-qp", content);
+        ingest_message_actions(&conn, "disc-1", "msg-qp", content).unwrap();
+        claim_launch(&conn, "action:msg-qp:0", &std::collections::HashMap::new())
+            .unwrap()
+            .unwrap();
+        let now = Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO discussions (id, title, created_at, updated_at) VALUES ('disc-qp', 'QP', ?1, ?1)",
+            [&now],
+        )
+        .unwrap();
+        complete(
+            &conn,
+            "action:msg-qp:0",
+            ActionCompletion {
+                state: DiscussionActionState::Running,
+                shared_run_id: None,
+                result_discussion_id: Some("disc-qp".into()),
+                deep_link: Some("discussion:disc-qp".into()),
+                diagnostic: None,
+            },
+        )
+        .unwrap();
+        let state = || {
+            get(
+                kronn_action_engine::Reconcile::Persisted,
+                &conn,
+                "action:msg-qp:0",
+            )
+            .unwrap()
+            .unwrap()
+        };
+        assert_eq!(state().state, DiscussionActionState::Running);
+
+        conn.execute(
+            "INSERT INTO messages (id, discussion_id, role, channel, content, timestamp, sort_order)
+             VALUES ('ask', 'disc-qp', 'User', 'main', 'Frame it', ?1, 1)",
+            [&now],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO agent_dispatch_jobs (
+                 id, discussion_id, trigger_message_id, trigger_sort_order, dedupe_key,
+                 status, available_at, created_at, updated_at
+             ) VALUES ('turn', 'disc-qp', 'ask', 1, 'turn', 'Running', ?1, ?1, ?1)",
+            [&now],
+        )
+        .unwrap();
+        assert_eq!(state().state, DiscussionActionState::Running);
+
+        conn.execute(
+            "UPDATE agent_dispatch_jobs SET status = 'Completed', completed_at = ?1 WHERE id = 'turn'",
+            [&now],
+        )
+        .unwrap();
+        let answered = state();
+        assert_eq!(answered.state, DiscussionActionState::Succeeded);
+        assert_eq!(answered.finished_at.as_deref(), Some(now.as_str()));
     }
 
     #[test]
