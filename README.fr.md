@@ -26,6 +26,25 @@
 > **Statut : 0.13.1 (version actuelle).** Fonctionnel mais pré-1.0. Les versions mineures peuvent introduire des breaking changes ; les patch versions sont safe.
 > **Licence : AGPL-3.0.** Utiliser Kronn localement pour développer *ton propre* produit ne déclenche pas le copyleft ; il ne s'applique que si tu redistribues une version modifiée à d'autres. Voir [Notes sur la licence](#notes-sur-la-licence-agpl-3-0).
 
+## Nouveautés de la 0.13.1
+
+- **Des boutons de Page vivante qui lancent leur propre ligne :** une Page qui
+  liste des tickets peut placer un bouton sur chaque ligne à partir d’un seul
+  bloc d’action. Chaque clic tourne pour sa ligne, le bouton indique comment
+  s’est passé le run de cette ligne, et un nouveau clic ouvre ce que le run a
+  produit (ses étapes, les discussions qu’il a ouvertes, la réponse de
+  l’agent) avec de quoi le relancer. Avant, le premier clic consommait le bloc
+  pour toutes les lignes, et les clics suivants rejouaient son résultat sans
+  rien lancer.
+- **Des cartes d’action qui disent vrai et lisent leur résultat :** un Quick
+  Prompt est terminé quand son agent a répondu, pas quand sa discussion a été
+  créée. Un Quick API montre sa ligne de résumé et ses premières lignes, un
+  Quick Exec sa sortie, un workflow ses étapes, au lieu de JSON brut.
+  Discussions et Pages partagent la même carte.
+
+Voir les [notes de la version 0.13.1](CHANGELOG.md) et
+[l’architecture des Pages](docs/architecture/live-pages.md).
+
 ## Nouveautés de la 0.13.0
 
 - **Génération d’images et de vidéos sur les connexions HTTP :** LiteLLM, NVIDIA
@@ -60,6 +79,7 @@ et le [guide de délégation des tâches](docs/guides/task-orchestration.md).
 
 ## Sommaire
 
+- [Nouveautés de la 0.13.1](#nouveautés-de-la-0131)
 - [Nouveautés de la 0.13.0](#nouveautés-de-la-0130)
 - [Le pitch en 60 secondes](#le-pitch-en-60-secondes)
 - [L'approche Kronn : de l'ingénierie, pas de l'incantation](#lapproche-kronn--de-lingénierie-pas-de-lincantation)
@@ -210,7 +230,10 @@ Une **Page vivante** est un rapport HTML partagé et versionné, pas un backend 
 monitoring. Son document sandboxé peut rendre du Markdown, des tableaux et des
 graphiques pendant qu'un workflow ne met à jour que ses datasets JSON persistés.
 Une Page peut aussi démarrer seule ou avec des données mockées, puis être liée à
-des workflows et discussions plus tard.
+des workflows et discussions plus tard. Un bouton de Page peut lancer un Quick
+Prompt, un Quick API, un Quick Exec ou un workflow pour chaque ligne de ses
+données, affiche l’état en direct de cette ligne et ouvre une carte qui dit ce
+que le run a produit.
 
 <p align="center">
   <img src="docs/screenshots/kronn-workflow-wizard.png" alt="Constructeur de workflow avancé, le wizard en 5 étapes (Infos, Trigger, Steps, Config, Résumé) sur l'onglet Steps ; un step typé Agent avec son sélecteur de modèle et le lien vers un Quick Prompt réutilisable. Basé sur des formulaires, aucun DSL à apprendre." />

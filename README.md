@@ -26,6 +26,24 @@
 > **Status: 0.13.1 (current release).** Functional but pre-1.0. Breaking changes happen between minor versions; patch versions are safe.
 > **License: AGPL-3.0.** Using Kronn locally to build *your own* product is fine; the copyleft only kicks in if you distribute a modified Kronn to others. See [License notes](#license-notes-agpl-3-0).
 
+## What's new in 0.13.1
+
+- **Live Page buttons that launch their own row:** a Page listing tickets can
+  put a button on every row from a single action block. Each click runs for its
+  own row, the button shows how that row's run went, and clicking it again
+  opens what the run produced (its steps, the discussions it opened, the
+  agent's answer) with a way to launch it again. Before this, the first click
+  used up the block for every row, and later clicks replayed its result while
+  nothing ran.
+- **Action cards that tell the truth and read their result:** a Quick Prompt is
+  done when its agent has answered, not when its discussion was created. A
+  Quick API shows its summary line and first rows, a Quick Exec its output, a
+  workflow its steps, instead of raw JSON. Discussions and Pages share the
+  same card.
+
+See the [0.13.1 release notes](CHANGELOG.md) and the
+[Live Pages architecture](docs/architecture/live-pages.md).
+
 ## What's new in 0.13.0
 
 - **Image and video generation on HTTP connections:** LiteLLM, NVIDIA and
@@ -56,6 +74,7 @@ and the [task delegation guide](docs/guides/task-orchestration.md).
 
 ## Contents
 
+- [What's new in 0.13.1](#whats-new-in-0131)
 - [What's new in 0.13.0](#whats-new-in-0130)
 - [60-second pitch](#60-second-pitch)
 - [The Kronn way: engineering, not prompting](#the-kronn-way-engineering-not-prompting)
@@ -233,7 +252,10 @@ Workflow engine supports **12 step types** total: `Agent`, `ApiCall`, `BatchApiC
 A **Live Page** is a shared, versioned HTML report—not a monitoring backend.
 Its sandboxed document can render Markdown, tables and charts while a workflow
 updates only its persisted JSON datasets. Pages can also start standalone or
-with mock data, then be linked to workflows and discussions later.
+with mock data, then be linked to workflows and discussions later. A button on
+a Page can launch a Quick Prompt, Quick API, Quick Exec or workflow for each row
+of its data, shows that row's live state, and opens a card telling what the run
+produced.
 
 <p align="center">
   <img src="docs/screenshots/kronn-workflow-wizard.en.png" alt="Advanced workflow builder, the 5-step wizard (Info, Trigger, Steps, Config, Summary) on the Steps tab; a typed Agent step with its per-step model picker and a reusable Quick Prompt link. Form-based, no DSL to learn." />
