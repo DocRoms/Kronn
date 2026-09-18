@@ -1772,7 +1772,7 @@
         <a href="screenshots/workflows.png" target="_blank" rel="noopener">
           <img src="screenshots/workflows.png" width="1600" height="1000" loading="lazy" alt="Détail d'un workflow : la carte de branchement à gauche, et à droite les dix étapes avec leur type — exec, appel API, agent, porte humaine, notification" />
         </a>
-        <figcaption><strong>Enchaîner des étapes</strong>&#8239;: une automatisation mêle commandes, appels d'API, étapes confiées à une IA, points d'arrêt où un humain valide, et notifications. Les étapes déterministes ne consomment aucun token : vous ne payez un modèle que sur celles qui en demandent vraiment un.</figcaption>
+        <figcaption><strong>Enchaîner des étapes</strong>&#8239;: une automatisation mêle commandes, appels d'API, étapes confiées à une IA, points d'arrêt où un humain valide, et notifications. Les étapes déterministes ne consomment aucun token : vous ne payez un modèle que sur celles qui en demandent vraiment un — et rien du tout si ce modèle tourne en local.</figcaption>
       </figure>
       <figure class="gallery-card">
         <a href="screenshots/KronnCaptureAutoPilot.png" target="_blank" rel="noopener">
@@ -1811,7 +1811,7 @@
           </video>
         </a>
         <span class="gallery-badge" aria-hidden="true">▶ VIDÉO</span>
-        <figcaption><strong>Le résultat sur une page Kronn, à jour tout seul</strong>&#8239;: l'automatisation est découpée : elle collecte les données par appels d'API ou par fetch, les retravaille, et n'appelle l'IA que pour la synthèse — là où il en faut vraiment. Sur ce run, les 6 092 tokens sont tous passés dans cette seule étape ; les trois autres n'ont rien coûté. Une dernière étape réécrit la page Kronn que vous avez déclarée : vous n'avez plus qu'à l'ouvrir. Et si le workflow est planifié en cron, elle se met à jour toute seule.</figcaption>
+        <figcaption><strong>Le résultat sur une page Kronn, à jour tout seul</strong>&#8239;: l'automatisation est découpée : elle collecte par appels d'API ou par fetch, retravaille les données, et n'appelle l'IA que pour la synthèse — là où il en faut vraiment. Ici cette étape tourne sur un modèle local : 6 092 tokens consommés, zéro euro dépensé. Les trois autres n'appellent aucun modèle. Une dernière réécrit la page Kronn que vous avez déclarée : vous n'avez plus qu'à l'ouvrir — et si le workflow est planifié en cron, elle se met à jour toute seule.</figcaption>
       </figure>
       <figure class="gallery-card">
         <a href="screenshots/kronn-live-page.png" target="_blank" rel="noopener">

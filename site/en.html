@@ -1726,7 +1726,7 @@
         <a href="screenshots/workflows.png" target="_blank" rel="noopener">
           <img src="screenshots/workflows.png" width="1600" height="1000" loading="lazy" alt="A workflow in detail: the branch map on the left, and on the right its ten steps with their kind — exec, API call, agent, human gate, notification" />
         </a>
-        <figcaption><strong>Chain steps together</strong>: an automation mixes shell commands, API calls, steps handed to an AI, checkpoints where a human approves, and notifications. Deterministic steps burn no tokens: you pay for a model only on the steps that genuinely need one.</figcaption>
+        <figcaption><strong>Chain steps together</strong>: an automation mixes shell commands, API calls, steps handed to an AI, checkpoints where a human approves, and notifications. Deterministic steps burn no tokens: you pay for a model only on the steps that genuinely need one — and nothing at all if that model runs locally.</figcaption>
       </figure>
       <figure class="gallery-card">
         <a href="screenshots/KronnCaptureAutoPilot.png" target="_blank" rel="noopener">
@@ -1765,7 +1765,7 @@
           </video>
         </a>
         <span class="gallery-badge" aria-hidden="true">▶ VIDEO</span>
-        <figcaption><strong>The result on a Kronn page, current by itself</strong>: the automation is split up: it collects the data through API calls or a fetch, reworks it, and calls the AI only for the synthesis — where one is genuinely needed. On this run all 6,092 tokens went into that single step; the other three cost nothing. A last step rewrites the Kronn page you declared, and all you have to do is open it. Put the workflow on a cron schedule and it updates itself.</figcaption>
+        <figcaption><strong>The result on a Kronn page, current by itself</strong>: the automation is split up: it collects through API calls or a fetch, reworks the data, and calls the AI only for the synthesis — where one is genuinely needed. Here that step runs on a local model: 6,092 tokens spent, nothing paid. The other three call no model at all. A last step rewrites the Kronn page you declared, and all you have to do is open it — put the workflow on a cron schedule and it updates itself.</figcaption>
       </figure>
       <figure class="gallery-card">
         <a href="screenshots/kronn-live-page.png" target="_blank" rel="noopener">
