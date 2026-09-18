@@ -21,10 +21,26 @@ const MAX_WORKER_SEARCH_TEXT_CALLS: usize = 24;
 // not the primary guard — identical repeats, same-answer digests and error
 // circuits catch an actual loop long before 48 reads do.
 pub(crate) const MAX_READ_FILE_CALLS: usize = 48;
+// Reading the open web and enumerating a configured API are not the paid loop
+// this guard was sized against. A `web_fetch` is an HTTP GET that costs
+// nothing, and walking a repository's issues is enumeration, not repetition:
+// twelve cut a real analysis of PR #205 off at the eighth page and left the
+// agent to answer with what it had. The count cannot tell a loop from
+// progress, so it is a backstop here too — identical repeats, same-answer
+// digests, the three-error circuit and the global round cap are what actually
+// stop a loop, and they act long before these numbers do.
+const MAX_WEB_FETCH_CALLS: usize = 120;
+const MAX_API_ENUMERATION_CALLS: usize = 60;
 const MAX_ERRORS_PER_TOOL: usize = 3;
 const MAX_ERROR_ONLY_TOOL_ROUNDS: usize = 6;
 const ACP_DIAGNOSTIC_MAX_CHARS: usize = 1_024;
 const WORKER_EXPLORATION_NUDGE_AT: usize = 24;
+// The window a worker gets to gather evidence before it must turn it into a
+// delivery. It used to be the global round cap by accident, so raising that
+// cap for analysis would have let a worker explore three times longer before
+// finalizing — a different question, and not one the incident asked. Fifty is
+// what the finalization flow was measured against; it stays.
+const WORKER_EXPLORATION_ROUNDS: usize = 50;
 const WORKER_FINALIZATION_ITERATIONS: usize = 12;
 const WORKER_FINALIZATION_READ_FILE_CALLS: usize = 3;
 const WORKER_FINALIZATION_GIT_INSPECTION_CALLS: usize = 3;
@@ -192,7 +208,7 @@ fn worker_exploration_policy(
         }
     } else {
         WorkerExplorationPolicy {
-            max_iterations: crate::agents::tools::MAX_TOOL_ITERATIONS,
+            max_iterations: WORKER_EXPLORATION_ROUNDS,
             max_observations_without_mutation: None,
             context_pressure_percent: DEFAULT_WORKER_CONTEXT_PRESSURE_PERCENT,
             mlx_mitigation,
@@ -656,6 +672,8 @@ fn max_calls_for_tool(name: &str, run_mode: crate::agents::tools::ToolRunMode) -
     // separately after one replay, and the global 50-round cap remains.
     match (run_mode, name) {
         (_, "read_file") => MAX_READ_FILE_CALLS,
+        (_, "web_fetch") => MAX_WEB_FETCH_CALLS,
+        (_, "api_call" | "qa_run") => MAX_API_ENUMERATION_CALLS,
         (crate::agents::tools::ToolRunMode::Worker, "search_text") => MAX_WORKER_SEARCH_TEXT_CALLS,
         _ => MAX_CALLS_PER_TOOL,
     }
