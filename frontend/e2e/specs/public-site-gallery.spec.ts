@@ -18,19 +18,31 @@ for (const locale of locales) {
     const html = await readFile(path.join(repoRoot, 'site', locale.file), 'utf8');
     await page.setContent(html, { waitUntil: 'domcontentloaded' });
 
+    // The count was pinned at eight and broke the day the gallery grew. What
+    // the carousel owes the reader is that it opens on the card clicked and
+    // moves one slide at a time, whatever the total happens to be.
+    const total = await page.locator('.gallery-card a').count();
+    expect(total).toBeGreaterThanOrEqual(8);
+
     const firstLink = page.locator('.gallery-card a').first();
     await firstLink.click();
 
     const dialog = page.getByRole('dialog', { name: locale.dialog });
     await expect(dialog).toBeVisible();
-    await expect(dialog.locator('.lb-count')).toHaveText('1 / 8');
+    await expect(dialog.locator('.lb-count')).toHaveText(`1 / ${total}`);
     await expect(dialog.locator('.lb-img')).toHaveAttribute('alt', /\S/);
 
     await page.keyboard.press('ArrowRight');
-    await expect(dialog.locator('.lb-count')).toHaveText('2 / 8');
+    await expect(dialog.locator('.lb-count')).toHaveText(`2 / ${total}`);
 
+    // The trap wraps from the first control to the last one. Naming that
+    // control pins the toolbar's order instead of the behaviour, and broke the
+    // day a button was added; what matters is that focus stays inside.
+    const controls = dialog.locator('button');
     await page.keyboard.press('Shift+Tab');
-    await expect(dialog.locator('.lb-next')).toBeFocused();
+    await expect(controls.last()).toBeFocused();
+    await page.keyboard.press('Tab');
+    await expect(dialog.locator('.lb-close')).toBeFocused();
 
     await page.keyboard.press('Escape');
     await expect(dialog).toBeHidden();
