@@ -209,6 +209,13 @@ and the head of its latest answer, where agents put their verdict. A launch
 whose result is a discussion reads `GET /api/discussions/{id}/outcome`.
 `[src: file: backend/src/db/run_outcome.rs]`
 `[src: file: frontend/src/components/RunOutcomePanel.tsx]`
+
+Agents learn this contract where they write Page HTML: the MCP manuals of
+`page_create` and `page_update_html` share one text (one block per row,
+`data-kronn-action-state`, what the card shows), `page_update_html` adds that a
+block's reference must stay stable across revisions since it ties a button to
+its past launches, and the `workflow-architect` skill carries the same rules.
+`[src: file: backend/scripts/disc-introspection-mcp.py]`
 `[src: file: frontend/src/lib/live-page-sandbox.ts]`
 Active and terminal execution rendering delegates to the common
 `RunStatusCard` contract used by Discussions. A Quick Prompt result records

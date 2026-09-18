@@ -137,11 +137,13 @@ async fn execute_claimed_action(
             match response.data {
                 Some(result) if response.success => {
                     let deep_link = format!("discussion:{}", result.disc_id);
+                    // The discussion exists; the answer does not yet. The
+                    // launch follows the agent's turn from here.
                     persist_completion(
                         &state,
                         action.id,
                         ActionCompletion {
-                            state: DiscussionActionState::Succeeded,
+                            state: DiscussionActionState::Running,
                             shared_run_id: None,
                             result_discussion_id: Some(result.disc_id),
                             deep_link: Some(deep_link),

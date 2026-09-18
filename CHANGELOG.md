@@ -38,6 +38,22 @@ Release notes for 0.9.3 and earlier are available in the
   instead of a raw JSON result, and the discussions the run opened are shown
   with their agent's state and the beginning of its latest answer, one click
   from the full text.
+- A Quick Prompt launched from a card is done when its agent has answered,
+  not when its discussion was created. The card said "done" and the Page
+  button showed ✓ while the agent was still reading, and kept saying it if the
+  agent then failed. The launch now stays running until the agent's first turn
+  ends, then succeeds or fails with the reason; later turns in that discussion
+  are not the launch's. This holds in Discussions and on Live Pages alike.
+- A Quick API card reads as its summary line ("POST …/graphql → 46 items") and
+  a table of its first rows instead of up to 20 000 characters of JSON, and a
+  Quick Exec card shows its JSON output as key → value. The raw payload stays
+  one fold away.
+- Agents are told how to put these buttons on a Page where they write its
+  HTML. The `page_update_html` tool now has a manual of its own, sharing the
+  button contract with `page_create`'s: one block for every row, the button
+  states, what the card shows, and why a block's reference must stay stable
+  across revisions. It used to say nothing about buttons, though it is the
+  tool that adds them to an existing Page.
 - `workflow_run_discussions` finds the discussions a workflow's Batch Quick
   Prompt step opened. They belong to a child batch run, and only the run's own
   discussions were looked up, so the tool answered "none" for exactly the runs

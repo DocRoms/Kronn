@@ -14,7 +14,7 @@
 
 use anyhow::Result;
 use chrono::Utc;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::HashMap;
 
 use super::discussion_actions::{
@@ -49,6 +49,9 @@ pub(crate) struct ActionCore {
     pub(crate) state: DiscussionActionState,
     pub(crate) values: Vec<DiscussionActionValue>,
     pub(crate) shared_run_id: Option<String>,
+    /// The discussion a Quick Prompt launch opened. It has no shared run: its
+    /// execution is that discussion's first agent turn.
+    pub(crate) result_discussion_id: Option<String>,
     pub(crate) diagnostic: Option<String>,
     pub(crate) launched_at: Option<String>,
     pub(crate) finished_at: Option<String>,
@@ -75,10 +78,6 @@ pub(crate) fn state_db_str(state: DiscussionActionState) -> &'static str {
     }
 }
 
-/// Refresh a `launching`/`running` row from its `shared_runs` row, or fail it
-/// closed if the launch was interrupted before a run id was ever published.
-/// Mutates `core` in place and persists the transition; a no-op for any
-/// other state or when nothing actually changed.
 /// Whether a reconciliation may write what it worked out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Reconcile {
@@ -105,7 +104,12 @@ pub enum Reconcile {
 ///
 /// The logic stays in one place; only the writing is now the caller's to grant.
 /// A projected read still returns the reconciled truth.
-pub(crate) fn refresh_from_shared_run(
+///
+/// What runs behind a launch depends on its target: a shared run for a Quick
+/// API, Quick Exec or workflow, the first agent turn of the result discussion
+/// for a Quick Prompt. A launch with neither is either still being claimed or
+/// has lost what it produced.
+pub(crate) fn reconcile(
     conn: &Connection,
     table: ActionTable,
     core: &mut ActionCore,
@@ -116,6 +120,25 @@ pub(crate) fn refresh_from_shared_run(
         DiscussionActionState::Launching | DiscussionActionState::Running
     ) {
         return Ok(());
+    }
+    if core.shared_run_id.is_none() {
+        if let Some(discussion_id) = core.result_discussion_id.clone() {
+            return reconcile_from_agent_turn(conn, table, core, mode, &discussion_id);
+        }
+        if core.state == DiscussionActionState::Running {
+            // Running means a completion recorded what it produced; both links
+            // are `ON DELETE SET NULL`, so nothing left means it was deleted.
+            let diagnostic = "Ce que ce lancement avait produit n’existe plus.".to_string();
+            return settle(
+                conn,
+                table,
+                core,
+                mode,
+                DiscussionActionState::Failed,
+                Some(diagnostic),
+                None,
+            );
+        }
     }
     let Some(run_id) = core.shared_run_id.clone() else {
         // The launch claim is the idempotency boundary. If the backend stops
@@ -188,6 +211,78 @@ pub(crate) fn refresh_from_shared_run(
     }
     core.state = next;
     core.diagnostic = run.diagnostic;
+    core.finished_at = finished_at;
+    core.updated_at = now;
+    Ok(())
+}
+
+/// A Quick Prompt launch has succeeded when its agent has answered, not when
+/// its discussion was created: the card and the Page button used to say
+/// "done" while the agent was still reading the ticket, and kept saying it if
+/// the agent then failed. The launch's own turn is the discussion's first; the
+/// ones a human asks for afterwards are that discussion's business.
+fn reconcile_from_agent_turn(
+    conn: &Connection,
+    table: ActionTable,
+    core: &mut ActionCore,
+    mode: Reconcile,
+    discussion_id: &str,
+) -> Result<()> {
+    let turn: Option<(String, Option<String>, String)> = conn
+        .query_row(
+            "SELECT status, last_error, COALESCE(completed_at, updated_at)
+             FROM agent_dispatch_jobs WHERE discussion_id = ?1
+             ORDER BY created_at ASC, id ASC LIMIT 1",
+            params![discussion_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    // Not queued yet: the launch is still starting, nothing to settle.
+    let Some((status, error, at)) = turn else {
+        return Ok(());
+    };
+    use crate::db::agent_dispatch::DispatchStatus;
+    let (next, diagnostic) = match DispatchStatus::parse(&status)? {
+        DispatchStatus::Pending | DispatchStatus::Running => (DiscussionActionState::Running, None),
+        DispatchStatus::Completed => (DiscussionActionState::Succeeded, None),
+        DispatchStatus::Failed => (
+            DiscussionActionState::Failed,
+            Some(error.unwrap_or_else(|| "L’agent n’a pas pu répondre.".into())),
+        ),
+        DispatchStatus::Cancelled => (DiscussionActionState::Cancelled, None),
+    };
+    let finished_at = (next != DiscussionActionState::Running).then_some(at);
+    settle(conn, table, core, mode, next, diagnostic, finished_at)
+}
+
+/// Record a reconciled state, in memory always and in the row when allowed.
+fn settle(
+    conn: &Connection,
+    table: ActionTable,
+    core: &mut ActionCore,
+    mode: Reconcile,
+    next: DiscussionActionState,
+    diagnostic: Option<String>,
+    finished_at: Option<String>,
+) -> Result<()> {
+    if next == core.state && diagnostic == core.diagnostic {
+        return Ok(());
+    }
+    let now = Utc::now().to_rfc3339();
+    let finished_at =
+        finished_at.or_else(|| (next != DiscussionActionState::Running).then(|| now.clone()));
+    if mode == Reconcile::Persisted {
+        conn.execute(
+            &format!(
+                "UPDATE {} SET state = ?2, diagnostic = ?3, finished_at = ?4, updated_at = ?5
+                 WHERE id = ?1 AND state IN ('launching', 'running')",
+                table.name()
+            ),
+            params![core.id, state_db_str(next), diagnostic, finished_at, now],
+        )?;
+    }
+    core.state = next;
+    core.diagnostic = diagnostic;
     core.finished_at = finished_at;
     core.updated_at = now;
     Ok(())

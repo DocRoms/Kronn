@@ -3932,6 +3932,8 @@ KRONN:APPLY; eso sobreescribiría el valor real con un placeholder
   'run.resultTruncated': '… truncado. Abre la ejecución para leer la salida completa.',
   'run.media.open': 'Abrir el medio',
   'run.details': 'Detalles',
+  'run.preview.items': '{0} elementos',
+  'run.preview.more': '+{0} más',
   'run.durationUnavailable': 'Duración no disponible',
   'run.progress': '{0} de {1} pasos',
   'run.freshness.live': 'En directo',

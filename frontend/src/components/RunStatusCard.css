@@ -46,3 +46,72 @@
 .run-status-card-step-kind { color: var(--kr-text-tertiary); font-size: var(--kr-fs-2xs); }
 .run-status-card-step-duration { margin-inline-start: auto; color: var(--kr-text-tertiary); font-variant-numeric: tabular-nums; }
 .run-status-card-step-dot { width: 12px; text-align: center; color: var(--kr-text-tertiary); }
+
+/* A Quick API's summary line and its first rows: what came back, readable at
+   a glance. The raw payload stays folded under the details. */
+.run-status-card-preview { display: grid; gap: 6px; margin-top: 8px; }
+
+.run-status-card-summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  overflow: hidden;
+  color: var(--kr-text-secondary);
+  font-size: var(--kr-fs-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.run-status-card-summary-status {
+  flex: none;
+  padding: 0 5px;
+  border: 1px solid var(--kr-border-strong);
+  border-radius: var(--kr-radius-sm);
+  color: var(--kr-text-primary);
+  font-size: var(--kr-fs-2xs);
+  font-weight: 600;
+}
+
+.run-status-card-table-wrap { overflow-x: auto; }
+
+.run-status-card-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--kr-fs-2xs);
+  table-layout: fixed;
+}
+
+.run-status-card-table caption {
+  padding-bottom: 4px;
+  color: var(--kr-text-tertiary);
+  text-align: start;
+}
+
+.run-status-card-table th,
+.run-status-card-table td {
+  padding: 3px 6px;
+  overflow: hidden;
+  border-bottom: 1px solid var(--kr-border);
+  text-align: start;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.run-status-card-table th { color: var(--kr-text-tertiary); font-weight: 600; }
+.run-status-card-table td { color: var(--kr-text-secondary); }
+
+.run-status-card-list { margin: 0; padding-inline-start: 18px; color: var(--kr-text-secondary); font-size: var(--kr-fs-xs); }
+.run-status-card-more { margin: 0; color: var(--kr-text-tertiary); font-size: var(--kr-fs-2xs); }
+
+/* A Quick Exec's flat JSON output, key → value. */
+.run-status-card-entries {
+  display: grid;
+  gap: 2px;
+  margin: 8px 0 0;
+  font-size: var(--kr-fs-xs);
+}
+
+.run-status-card-entries > div { display: flex; gap: 8px; }
+.run-status-card-entries dt { color: var(--kr-text-tertiary); }
+.run-status-card-entries dd { margin: 0; color: var(--kr-text-primary); overflow-wrap: anywhere; }

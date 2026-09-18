@@ -1519,7 +1519,8 @@ TOOLS = [
             "Replace a Live Page's presentation by creating a new immutable "
             "HTML revision. Dataset values and publication history are kept. "
             "Call page_get first, then send the complete self-contained HTML; "
-            "this is a full replacement, not a patch."
+            "this is a full replacement, not a patch. Inline QP/QA/QE/Workflow "
+            "buttons: `tool_manual({tool: \"page_update_html\"})`."
         ),
         "inputSchema": {
             "type": "object",
@@ -9625,6 +9626,32 @@ ROOM_WORK_PROTOCOL = (
     "is not a read. Keep plan writes event-driven; host compliance is not guaranteed."
 )
 
+# The inline button contract, shared by the two tools that write Page HTML so
+# their manuals cannot drift apart.
+_PAGE_ACTION_CONTRACT = (
+    "A human-gated inline action pairs a visible element carrying "
+    "`data-kronn-action=\"stable-ref\"` with an inert "
+    "`<script type=\"application/kronn-action\" data-action-id=\"stable-ref\">` "
+    "JSON block. The shared reference is 1–256 URL-safe characters "
+    "(`[A-Za-z0-9._~-]`). Its shape is `{kind,target_id,project_id?,values?}` and kind is "
+    "quick_prompt, quick_api, quick_exec or workflow; discover and use a real "
+    "target id. A Page-only value may use provenance `dynamic_binding` plus a "
+    "source_ref such as `<page.title>`, `<page.dataset.summary.owner>` or "
+    "`<page.dataset.tickets.find(key).id>`. For the last form, "
+    "`data-kronn-bindings` carries only a JSON selector map keyed by variable name. "
+    "Never put secrets or resolved environment values in HTML. The sandbox emits "
+    "an intention; only the native card's explicit human launch can execute it."
+    "\n\nOne block serves every row: give each row's button its own "
+    "`data-kronn-bindings` and each click launches that row alone; a row still "
+    "running is never launched twice. Kronn marks each button with "
+    "`data-kronn-action-state` (launching, running, succeeded, failed, "
+    "preflight_failed) and a default indicator: style that attribute instead of "
+    "tracking launches in Page scripts. A click opens the native card on the offer "
+    "for a row that never ran, on its latest run otherwise: the steps, the "
+    "discussions it opened with the agent's answer, and a way to launch it again. "
+    "A Quick Prompt counts as succeeded once its agent has answered."
+)
+
 TOOL_MANUALS = {
     "disc_question_list": (
         "A blocking human decision MUST be a `kronn-question` JSON fence posted "
@@ -9811,18 +9838,14 @@ TOOL_MANUALS = {
         "may omit discussion_id and create a standalone Page. The returned id is the exact "
         "PublishPageData.page_publish.page_id. HTML reads the initial value from "
         "window.KronnPageData and listens for the `kronn:page-data` CustomEvent."
-        "\n\nA human-gated inline action pairs a visible element carrying "
-        "`data-kronn-action=\"stable-ref\"` with an inert "
-        "`<script type=\"application/kronn-action\" data-action-id=\"stable-ref\">` "
-        "JSON block. The shared reference is 1–256 URL-safe characters "
-        "(`[A-Za-z0-9._~-]`). Its shape is `{kind,target_id,project_id?,values?}` and kind is "
-        "quick_prompt, quick_api, quick_exec or workflow; discover and use a real "
-        "target id. A Page-only value may use provenance `dynamic_binding` plus a "
-        "source_ref such as `<page.title>`, `<page.dataset.summary.owner>` or "
-        "`<page.dataset.tickets.find(key).id>`. For the last form, "
-        "`data-kronn-bindings` carries only a JSON selector map keyed by variable name. "
-        "Never put secrets or resolved environment values in HTML. The sandbox emits "
-        "an intention; only the native card's explicit human launch can execute it."
+        "\n\n" + _PAGE_ACTION_CONTRACT
+    ),
+    "page_update_html": (
+        "The new revision replaces the whole document. Keep each action block's "
+        "`data-action-id` and its button's `data-kronn-action` unchanged across "
+        "revisions: the reference is what ties a button to its past launches. A block "
+        "removed from the HTML keeps its launches as history, marked as coming from an "
+        "older revision.\n\n" + _PAGE_ACTION_CONTRACT
     ),
     "workflow_create_draft": (
         "The workflow always lands with `enabled:false`; no cron fires until the user "
@@ -11113,7 +11136,7 @@ def _handle(req):
                     "• Workflows (multi-step pipelines): `workflow_list` (compact) · `workflow_get` (FULL, every step) · `workflow_step_schema` (CANONICAL step schema as an untruncatable result — the closed 12 `step_type`s, per-type fields, runtime contracts; call before authoring) · `workflow_create_draft` · `workflow_clone`/`workflow_update`/`workflow_set_enabled` · `workflow_trigger`/`workflow_run_status` · run history `workflow_runs`/`workflow_run_get` · `workflow_active_runs`/`workflow_cancel_run`. Agent-step bindings (full CRUD): `skills_list`/`profiles_list`/`directives_list` enumerate valid ids; `skill_get`/`profile_get`/`directive_get` read FULL bodies; `skill_create`/`skill_update`/`skill_delete` (+ `profile_*`/`directive_*`) author & edit custom ones.\n"
                     "• Quick Prompts (reusable prompt templates): `qp_list` (no body) · `qp_get` (FULL incl `prompt_template` — read this to know what a QP does, or to run it yourself) · `qp_create_draft`/`qp_update`/`qp_delete` · `qp_run`/`qp_batch_run`.\n"
                     "• Quick APIs + API broker: `qa_list`/`qa_run`/`qa_create_draft`/`qa_update` · `mcp_list` → `api_call` (configured plugins, auth injected). Quick Execs: `qe_list`/`qe_run`/`qe_create_draft`/`qe_update` for saved shell-free CLI collectors.\n"
-                    "• Live Pages (shared HTML reports): `page_list` · `page_get` · `page_create` · `page_update_html` · `page_add_dataset`. Resolve or create the Page before authoring a `PublishPageData` step.\n"
+                    "• Live Pages (shared HTML reports): `page_list` · `page_get` · `page_create` · `page_update_html` · `page_add_dataset`. Resolve or create the Page before authoring a `PublishPageData` step. A Page button can launch a real QP/QA/QE/Workflow for each data row and shows that row's live state and outcome: `tool_manual({tool: \"page_create\"})`.\n"
                     "• Docs/conventions: `convention_get`. Continual learning: `learning_propose`.\n"
                     "**Navigation rule:** to understand a CAPABILITY, read the relevant tool's description AND `*_get` a REAL, rich example — never infer what the system can do from a single workflow/QP you happened to open.\n\n"
                     "**API actions — order to avoid burning tokens:** "

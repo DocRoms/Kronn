@@ -43,6 +43,18 @@ cannot execute the proposal twice. The card then follows the shared run and
 links to the created discussion or Automation result. If the process stops after
 the claim but before a run id is published, Kronn fails closed after five minutes
 and explains that it did not replay a potentially side-effecting action.
+The card says what the launch produced, the same way in a Discussion and on
+a Live Page. A Quick Prompt launch stays `running` until its agent's first turn
+ends: it succeeds once the agent has answered and fails, with the reason, when
+it cannot; the discussion's later turns are not the launch's. A workflow reads
+as its steps (name, type, status, duration) and the discussions of its whole
+run tree, each with its agent's state and the head of its latest answer. A
+Quick API reads as its summary line and a table of its first rows, a Quick
+Exec's flat JSON output as key → value; the raw payload stays folded under
+the details.
+`[src: file: backend/src/db/kronn_action_engine.rs]`
+`[src: file: frontend/src/lib/runResultPreview.ts]`
+
 `KRONN:CHAIN_QP` remains a temporary variable-free Quick Prompt compatibility
 path; `kronn-action` is the canonical contract for new agent proposals.
 

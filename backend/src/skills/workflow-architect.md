@@ -361,7 +361,8 @@ One block serves every row: give each row's button its own
 `data-kronn-bindings` and each click is launched for that row alone. Kronn
 marks each button with `data-kronn-action-state` (`launching`, `running`,
 `succeeded`, `failed`, `preflight_failed`) and a default indicator; style that
-attribute rather than tracking launches in Page scripts.
+attribute rather than tracking launches in Page scripts. A Quick Prompt button
+turns `succeeded` only once its agent has answered.
 
 Canonical Page pipeline:
 
