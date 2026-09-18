@@ -1783,7 +1783,7 @@
         <a href="screenshots/workflows.png" target="_blank" rel="noopener">
           <img src="screenshots/workflows.png" width="1600" height="1000" loading="lazy" alt="Détail d'un workflow : la carte de branchement à gauche, et à droite les dix étapes avec leur type — exec, appel API, agent, porte humaine, notification" />
         </a>
-        <figcaption><strong>Enchaîner des étapes</strong>&#8239;: une automatisation peut mêler commandes, appels d'API, étapes confiées à une IA, points d'arrêt où un humain valide, et notifications. La carte des branchements montre le parcours avant que vous ne la lanciez.</figcaption>
+        <figcaption><strong>Enchaîner des étapes</strong>&#8239;: une automatisation mêle commandes, appels d'API, étapes confiées à une IA, points d'arrêt où un humain valide, et notifications. Les étapes déterministes ne consomment aucun token : vous ne payez un modèle que sur celles qui en demandent vraiment un.</figcaption>
       </figure>
       <figure class="gallery-card">
         <a href="screenshots/KronnCaptureAutoPilot.png" target="_blank" rel="noopener">
@@ -1822,7 +1822,7 @@
           </video>
         </a>
         <span class="gallery-badge" aria-hidden="true">▶ VIDÉO</span>
-        <figcaption><strong>Publier le résultat, pas seulement le lire</strong>&#8239;: l'automatisation collecte les données, l'IA rédige, et une dernière étape réécrit la page web que vous avez déclarée. Vous n'avez plus qu'à l'ouvrir ou la partager.</figcaption>
+        <figcaption><strong>L'IA seulement là où il en faut</strong>&#8239;: sur ce run de quatre étapes, trois ne coûtent rien : la collecte interroge les API, la transformation range les données, la publication réécrit la page — du déterministe, zéro token. Seule la synthèse appelle un modèle, et c'est elle qui a consommé les 6 092 tokens du run.</figcaption>
       </figure>
       <figure class="gallery-card">
         <a href="screenshots/kronn-live-page.png" target="_blank" rel="noopener">

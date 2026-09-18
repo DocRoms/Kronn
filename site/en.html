@@ -1737,7 +1737,7 @@
         <a href="screenshots/workflows.png" target="_blank" rel="noopener">
           <img src="screenshots/workflows.png" width="1600" height="1000" loading="lazy" alt="A workflow in detail: the branch map on the left, and on the right its ten steps with their kind — exec, API call, agent, human gate, notification" />
         </a>
-        <figcaption><strong>Chain steps together</strong>: an automation can mix shell commands, API calls, steps handed to an AI, checkpoints where a human approves, and notifications. The branch map shows the path before you run it.</figcaption>
+        <figcaption><strong>Chain steps together</strong>: an automation mixes shell commands, API calls, steps handed to an AI, checkpoints where a human approves, and notifications. Deterministic steps burn no tokens: you pay for a model only on the steps that genuinely need one.</figcaption>
       </figure>
       <figure class="gallery-card">
         <a href="screenshots/KronnCaptureAutoPilot.png" target="_blank" rel="noopener">
@@ -1776,7 +1776,7 @@
           </video>
         </a>
         <span class="gallery-badge" aria-hidden="true">▶ VIDEO</span>
-        <figcaption><strong>Publish the result, don't just read it</strong>: the automation collects the data, the AI writes it up, and a final step rewrites the web page you declared. All that is left is to open it or share it.</figcaption>
+        <figcaption><strong>AI only where AI is needed</strong>: on this four-step run, three cost nothing: the collection queries the APIs, the transform arranges the data, the publication rewrites the page — deterministic, zero tokens. Only the synthesis calls a model, and it accounted for all 6,092 tokens of the run.</figcaption>
       </figure>
       <figure class="gallery-card">
         <a href="screenshots/kronn-live-page.png" target="_blank" rel="noopener">

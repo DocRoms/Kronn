@@ -1735,7 +1735,7 @@
         <a href="screenshots/workflows.png" target="_blank" rel="noopener">
           <img src="screenshots/workflows.png" width="1600" height="1000" loading="lazy" alt="Detalle de un workflow: el mapa de ramas a la izquierda y a la derecha sus diez pasos con su tipo: exec, llamada API, agente, puerta humana, notificación" />
         </a>
-        <figcaption><strong>Encadenar pasos</strong>: una automatización puede mezclar comandos, llamadas de API, pasos encargados a una IA, puntos donde un humano aprueba, y notificaciones. El mapa de ramas enseña el recorrido antes de que la lances.</figcaption>
+        <figcaption><strong>Encadenar pasos</strong>: una automatización mezcla comandos, llamadas de API, pasos encargados a una IA, puntos donde un humano aprueba, y notificaciones. Los pasos deterministas no consumen tokens: solo pagas un modelo en los pasos que de verdad lo necesitan.</figcaption>
       </figure>
       <figure class="gallery-card">
         <a href="screenshots/KronnCaptureAutoPilot.png" target="_blank" rel="noopener">
@@ -1774,7 +1774,7 @@
           </video>
         </a>
         <span class="gallery-badge" aria-hidden="true">▶ VÍDEO</span>
-        <figcaption><strong>Publicar el resultado, no solo leerlo</strong>: la automatización recopila los datos, la IA los redacta, y un último paso reescribe la página web que has declarado. Solo queda abrirla o compartirla.</figcaption>
+        <figcaption><strong>IA solo donde hace falta IA</strong>: en esta ejecución de cuatro pasos, tres no cuestan nada: la recopilación consulta las API, la transformación ordena los datos, la publicación reescribe la página — determinista, cero tokens. Solo la síntesis llama a un modelo, y es la que gastó los 6 092 tokens del run.</figcaption>
       </figure>
       <figure class="gallery-card">
         <a href="screenshots/kronn-live-page.png" target="_blank" rel="noopener">
