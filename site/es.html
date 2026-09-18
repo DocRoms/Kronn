@@ -484,11 +484,12 @@
     }
     .lb-overlay.open { opacity: 1; visibility: visible; }
     .lb-stage { position: relative; display: flex; align-items: center; justify-content: center; max-width: 100%; }
-    .lb-img {
+    .lb-img, .lb-vid {
       max-width: 90vw; max-height: 80vh; width: auto; height: auto;
       border: 1.5px solid var(--lila); background: var(--bg-deep);
       box-shadow: 0 0 40px rgba(0, 0, 0, 0.6);
     }
+    .lb-vid[hidden], .lb-img[hidden] { display: none; }
     .lb-cap { margin-top: 14px; max-width: 820px; text-align: center; font-family: var(--body); font-size: 14px; line-height: 1.5; color: var(--text-dim); }
     .lb-cap strong { color: var(--lila); }
     .lb-count { font-family: var(--terminal); font-size: 13px; color: var(--kronn); letter-spacing: 0.08em; margin-top: 4px; }
@@ -1665,11 +1666,13 @@
         <figcaption><strong>Encadenar planos</strong> · la última imagen de un clip es la primera del siguiente</figcaption>
       </figure>
       <figure class="gallery-card">
-        <video width="800" height="460" autoplay muted loop playsinline
-               preload="metadata" aria-label="La imagen generada, luego el clip que produjo y su último fotograma: el que inicia el plano siguiente">
-          <source src="screenshots/kronn-media-chain.mp4" type="video/mp4" />
-          <source src="screenshots/kronn-media-chain.webm" type="video/webm" />
-        </video>
+        <a href="screenshots/kronn-media-chain.mp4" target="_blank" rel="noopener">
+          <video width="800" height="460" autoplay muted loop playsinline
+                 preload="metadata" aria-label="La imagen generada, luego el clip que produjo y su último fotograma: el que inicia el plano siguiente">
+            <source src="screenshots/kronn-media-chain.mp4" type="video/mp4" />
+            <source src="screenshots/kronn-media-chain.webm" type="video/webm" />
+          </video>
+        </a>
         <span class="gallery-badge" aria-hidden="true">▶ VÍDEO</span>
         <figcaption><strong>El plano, en movimiento</strong> · la imagen de partida, los cuatro segundos y el fotograma que se guarda para lo que sigue</figcaption>
       </figure>
@@ -1686,11 +1689,13 @@
         <figcaption><strong>Elegir los contendientes</strong> · marcar los agentes, rellenar la variable, lanzar una sola vez</figcaption>
       </figure>
       <figure class="gallery-card">
-        <video width="1280" height="800" autoplay muted loop playsinline
-               preload="metadata" aria-label="Selección de tres discusiones en la lista, luego la vista de comparación y el veredicto del juez IA">
-          <source src="screenshots/kronn-comparaison-flux.mp4" type="video/mp4" />
-          <source src="screenshots/kronn-comparaison-flux.webm" type="video/webm" />
-        </video>
+        <a href="screenshots/kronn-comparaison-flux.mp4" target="_blank" rel="noopener">
+          <video width="1280" height="800" autoplay muted loop playsinline
+                 preload="metadata" aria-label="Selección de tres discusiones en la lista, luego la vista de comparación y el veredicto del juez IA">
+            <source src="screenshots/kronn-comparaison-flux.mp4" type="video/mp4" />
+            <source src="screenshots/kronn-comparaison-flux.webm" type="video/webm" />
+          </video>
+        </a>
         <span class="gallery-badge" aria-hidden="true">▶ VÍDEO</span>
         <figcaption><strong>Seleccionar y comparar</strong> · tres discusiones, una sola vista, sin copiar y pegar</figcaption>
       </figure>
@@ -1731,29 +1736,35 @@
         <figcaption><strong>Selector de modelo en 1 clic</strong> · 10 agentes × Eco / Estándar / Avanzado, en cualquier paso</figcaption>
       </figure>
       <figure class="gallery-card">
-        <video width="1280" height="800" autoplay muted loop playsinline
-               preload="metadata" aria-label="Cambio del agente de un paso de workflow: se abre el selector y el paso pasa de Claude Code a un modelo Ollama local">
-          <source src="screenshots/kronn-step-agent-swap.mp4" type="video/mp4" />
-          <source src="screenshots/kronn-step-agent-swap.webm" type="video/webm" />
-        </video>
+        <a href="screenshots/kronn-step-agent-swap.mp4" target="_blank" rel="noopener">
+          <video width="1280" height="800" autoplay muted loop playsinline
+                 preload="metadata" aria-label="Cambio del agente de un paso de workflow: se abre el selector y el paso pasa de Claude Code a un modelo Ollama local">
+            <source src="screenshots/kronn-step-agent-swap.mp4" type="video/mp4" />
+            <source src="screenshots/kronn-step-agent-swap.webm" type="video/webm" />
+          </video>
+        </a>
         <span class="gallery-badge" aria-hidden="true">▶ VÍDEO</span>
         <figcaption><strong>Claude Code, luego Ollama, en un clic</strong> · el paso no cambia; solo cambia el modelo que lo ejecuta</figcaption>
       </figure>
       <figure class="gallery-card">
-        <video width="1280" height="800" autoplay muted loop playsinline
-               preload="metadata" aria-label="Un agente Claude Code crea un workflow de varios pasos desde la discusión, con sus llamadas API y su paso de agente">
-          <source src="screenshots/kronn-agent-workflow.mp4" type="video/mp4" />
-          <source src="screenshots/kronn-agent-workflow.webm" type="video/webm" />
-        </video>
+        <a href="screenshots/kronn-agent-workflow.mp4" target="_blank" rel="noopener">
+          <video width="1280" height="800" autoplay muted loop playsinline
+                 preload="metadata" aria-label="Un agente Claude Code crea un workflow de varios pasos desde la discusión, con sus llamadas API y su paso de agente">
+            <source src="screenshots/kronn-agent-workflow.mp4" type="video/mp4" />
+            <source src="screenshots/kronn-agent-workflow.webm" type="video/webm" />
+          </video>
+        </a>
         <span class="gallery-badge" aria-hidden="true">▶ VÍDEO</span>
         <figcaption><strong>Un agente construye el workflow</strong> · describes la cadena, él coloca los pasos y las ramas</figcaption>
       </figure>
       <figure class="gallery-card">
-        <video width="1280" height="800" autoplay muted loop playsinline
-               preload="metadata" aria-label="Se lanza un workflow: los pasos se ponen en verde uno a uno y la página publicada muestra el tiempo y los titulares del día">
-          <source src="screenshots/kronn-page-vivante.mp4" type="video/mp4" />
-          <source src="screenshots/kronn-page-vivante.webm" type="video/webm" />
-        </video>
+        <a href="screenshots/kronn-page-vivante.mp4" target="_blank" rel="noopener">
+          <video width="1280" height="800" autoplay muted loop playsinline
+                 preload="metadata" aria-label="Se lanza un workflow: los pasos se ponen en verde uno a uno y la página publicada muestra el tiempo y los titulares del día">
+            <source src="screenshots/kronn-page-vivante.mp4" type="video/mp4" />
+            <source src="screenshots/kronn-page-vivante.webm" type="video/webm" />
+          </video>
+        </a>
         <span class="gallery-badge" aria-hidden="true">▶ VÍDEO</span>
         <figcaption><strong>Del workflow a la página, en directo</strong> · cuatro pasos, cuatro fuentes públicas, una página que se reescribe</figcaption>
       </figure>
@@ -2173,7 +2184,15 @@
       var fig = a.closest('.gallery-card');
       var cap = fig && fig.querySelector('figcaption');
       var img = a.querySelector('img');
-      return { src: a.getAttribute('href'), caption: cap ? cap.innerHTML : '', alt: img ? (img.getAttribute('alt') || '') : '' };
+      var vid = a.querySelector('video');
+      var webm = vid && vid.querySelector('source[type="video/webm"]');
+      return {
+        video: !!vid,
+        src: a.getAttribute('href'),
+        webm: webm ? webm.getAttribute('src') : '',
+        caption: cap ? cap.innerHTML : '',
+        alt: (img || vid) ? ((img || vid).getAttribute('alt') || (img || vid).getAttribute('aria-label') || '') : ''
+      };
     });
     var overlay = document.createElement('div');
     overlay.className = 'lb-overlay';
@@ -2186,24 +2205,53 @@
       '<div class="lb-stage">' +
         '<button class="lb-btn lb-prev" type="button" aria-label="' + t.prev + '">‹</button>' +
         '<img class="lb-img" alt="" />' +
+        '<video class="lb-vid" controls loop muted playsinline preload="metadata" hidden></video>' +
         '<button class="lb-btn lb-next" type="button" aria-label="' + t.next + '">›</button>' +
       '</div>' +
       '<div class="lb-count" aria-live="polite"></div>' +
       '<div class="lb-cap"></div>';
     document.body.appendChild(overlay);
     var imgEl = overlay.querySelector('.lb-img');
+    var vidEl = overlay.querySelector('.lb-vid');
     var capEl = overlay.querySelector('.lb-cap');
     var countEl = overlay.querySelector('.lb-count');
     var idx = 0, lastFocus = null;
+    function stopVideo() {
+      vidEl.pause();
+      vidEl.removeAttribute('src');
+      vidEl.innerHTML = '';
+      vidEl.load();
+    }
     function render() {
       var it = items[idx];
-      imgEl.src = it.src; imgEl.alt = it.alt;
+      stopVideo();
+      if (it.video) {
+        // Les deux sources, dans l'ordre de la carte : mp4 d'abord, webm en secours.
+        vidEl.innerHTML =
+          '<source src="' + it.src + '" type="video/mp4" />' +
+          (it.webm ? '<source src="' + it.webm + '" type="video/webm" />' : '');
+        vidEl.setAttribute('aria-label', it.alt);
+        vidEl.load();
+        imgEl.hidden = true; imgEl.removeAttribute('src');
+        vidEl.hidden = false;
+        var play = vidEl.play();
+        if (play && play.catch) play.catch(function () {});
+      } else {
+        vidEl.hidden = true;
+        imgEl.hidden = false;
+        imgEl.src = it.src; imgEl.alt = it.alt;
+      }
       capEl.innerHTML = it.caption;
       countEl.textContent = (idx + 1) + ' / ' + items.length;
-      [1, -1].forEach(function (d) { var p = new Image(); p.src = items[(idx + d + items.length) % items.length].src; });
+      // Précharger le voisin n'a de sens que pour une image : une vidéo se
+      // télécharge en continu, et en précharger deux annule le bénéfice.
+      [1, -1].forEach(function (d) {
+        var near = items[(idx + d + items.length) % items.length];
+        if (!near.video) { var p = new Image(); p.src = near.src; }
+      });
     }
     function openAt(i) { idx = i; lastFocus = document.activeElement; render(); overlay.setAttribute('aria-hidden', 'false'); overlay.classList.add('open'); document.body.classList.add('lb-lock'); overlay.querySelector('.lb-close').focus(); }
-    function close() { overlay.classList.remove('open'); overlay.setAttribute('aria-hidden', 'true'); document.body.classList.remove('lb-lock'); imgEl.removeAttribute('src'); if (lastFocus && lastFocus.focus) lastFocus.focus(); }
+    function close() { overlay.classList.remove('open'); overlay.setAttribute('aria-hidden', 'true'); document.body.classList.remove('lb-lock'); imgEl.removeAttribute('src'); stopVideo(); if (lastFocus && lastFocus.focus) lastFocus.focus(); }
     function go(step) { idx = (idx + step + items.length) % items.length; render(); }
     links.forEach(function (a, i) { a.addEventListener('click', function (e) { if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return; e.preventDefault(); openAt(i); }); });
     overlay.querySelector('.lb-close').addEventListener('click', close);
