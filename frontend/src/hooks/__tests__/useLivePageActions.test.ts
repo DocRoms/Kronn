@@ -89,16 +89,49 @@ describe('useLivePageActions', () => {
     expect(result.current.actions).toEqual([]);
   });
 
-  it('handleChanged updates the stored action in place so a re-derived selection reflects it', async () => {
+  it('handleChanged follows the open card without touching the offer', async () => {
     vi.mocked(pagesApi.actions).mockResolvedValue([action()]);
     const { result } = renderHook(() => useLivePageActions(vi.fn()));
     await act(() => result.current.reload('page-1'));
     act(() => result.current.handleIntent({ actionRef: 'refresh', bindings: {}, anchor }));
 
-    const launching = action({ state: 'launching' });
-    act(() => result.current.handleChanged(launching));
+    const launching = action({ id: 'page-launch:1', state: 'launching' });
+    act(() => result.current.handleChanged(launching, result.current.activeAction!.activation));
 
     await waitFor(() => expect(result.current.selectedAction).toEqual(launching));
-    expect(result.current.actions).toEqual([launching]);
+    expect(result.current.actions).toEqual([action()]);
+  });
+
+  it('a click on another row of the same block opens the offer, not the last launch', async () => {
+    // The reported shape: one "Framer" block, a button per ticket. After the
+    // first ticket's launch succeeded, every other button reopened on it.
+    vi.mocked(pagesApi.actions).mockResolvedValue([action()]);
+    const { result } = renderHook(() => useLivePageActions(vi.fn()));
+    await act(() => result.current.reload('page-1'));
+
+    act(() => result.current.handleIntent({ actionRef: 'refresh', bindings: { ticket: 'EW-7706' }, anchor }));
+    act(() => result.current.handleChanged(
+      action({ id: 'page-launch:7706', state: 'succeeded' }),
+      result.current.activeAction!.activation,
+    ));
+    expect(result.current.selectedAction?.state).toBe('succeeded');
+
+    act(() => result.current.handleIntent({ actionRef: 'refresh', bindings: { ticket: 'EW-7704' }, anchor }));
+
+    expect(result.current.selectedAction).toEqual(action());
+    expect(result.current.activeAction?.bindings).toEqual({ ticket: 'EW-7704' });
+  });
+
+  it('a launch answering after the user moved to another row stays on its own card', async () => {
+    vi.mocked(pagesApi.actions).mockResolvedValue([action()]);
+    const { result } = renderHook(() => useLivePageActions(vi.fn()));
+    await act(() => result.current.reload('page-1'));
+    act(() => result.current.handleIntent({ actionRef: 'refresh', bindings: { ticket: 'EW-7706' }, anchor }));
+    const firstClick = result.current.activeAction!.activation;
+    act(() => result.current.handleIntent({ actionRef: 'refresh', bindings: { ticket: 'EW-7704' }, anchor }));
+
+    act(() => result.current.handleChanged(action({ id: 'page-launch:7706', state: 'running' }), firstClick));
+
+    expect(result.current.selectedAction).toEqual(action());
   });
 });

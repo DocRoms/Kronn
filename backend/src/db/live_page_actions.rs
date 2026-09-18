@@ -19,6 +19,16 @@
 //! (`ingest_page_actions`, called from `create_live_page` /
 //! `update_live_page_html`); the sandboxed document is never reparsed at
 //! render time. See `docs/architecture/live-pages.md`.
+//!
+//! **A block is a gabarit, not a proposal** (KT-678). The page instantiates it
+//! once per dataset row, so one declaration draws as many buttons as the list
+//! is long — 39 tickets, 39 buttons, 39 liaisons, one `action_ref`. The
+//! declaration here is therefore the *offer* and is never consumed: it carries
+//! no execution state at all. Each click becomes a row of its own in
+//! `live_page_action_launches`, identified by the binding it was clicked on,
+//! and that row is what the shared state machine drives. What the API speaks
+//! stays a single `LivePageAction`: the declaration alone before any click,
+//! the declaration joined to one of its launches afterwards.
 
 use std::collections::{HashMap, HashSet};
 
@@ -34,6 +44,13 @@ use super::discussion_actions::{
 };
 use super::kronn_action_engine::{self, ActionTable};
 
+/// One Page action as the API speaks it: a declaration, plus the launch it
+/// produced when there is one.
+///
+/// `id` is the handle for *this* card, not for the block: the declaration's id
+/// before a click, that launch's id afterwards. A card therefore polls its own
+/// launch instead of the last one anybody happened to start — which is what
+/// made 39 buttons report the first ticket's success (KT-678).
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct LivePageAction {
@@ -374,12 +391,16 @@ fn upsert_action_row(
     } else {
         "proposed"
     };
+    // No `WHERE state IN (...)` guard any more: a declaration only ever holds
+    // `proposed` or `preflight_failed`, so republishing always refreshes it.
+    // The guard used to exclude rows that had launched, which is precisely how
+    // a `succeeded` CTA stayed dead through every later republish (KT-678).
     conn.execute(
         "INSERT INTO live_page_actions (
              id, live_page_id, live_page_revision_id, action_ref, kind,
              target_id, target_name, project_id, state, values_json,
-             diagnostic, finished_at, created_at, updated_at
-         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?13)
+             diagnostic, created_at, updated_at
+         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?12)
          ON CONFLICT(live_page_id, action_ref) DO UPDATE SET
              live_page_revision_id = excluded.live_page_revision_id,
              kind = excluded.kind,
@@ -389,9 +410,7 @@ fn upsert_action_row(
              state = excluded.state,
              values_json = excluded.values_json,
              diagnostic = excluded.diagnostic,
-             finished_at = excluded.finished_at,
-             updated_at = excluded.updated_at
-         WHERE live_page_actions.state IN ('proposed', 'preflight_failed')",
+             updated_at = excluded.updated_at",
         params![
             action_id,
             live_page_id,
@@ -403,24 +422,41 @@ fn upsert_action_row(
             project_id,
             state,
             values_json,
-            diagnostic.clone(),
-            diagnostic.as_ref().map(|_| now.to_string()),
+            diagnostic,
             now,
         ],
     )?;
     Ok(())
 }
 
-const SELECT_LIVE_PAGE_ACTION: &str = "SELECT a.id, a.live_page_id, a.live_page_revision_id,
+/// The offer on its own — what every button shows before it is clicked. The
+/// execution columns are literal NULLs because a declaration has none: it is
+/// never launched, only instantiated.
+const SELECT_DECLARATION: &str = "SELECT a.id, a.live_page_id, a.live_page_revision_id,
     a.action_ref, a.kind, a.target_id, a.target_name, a.project_id, a.state, a.values_json,
-    a.shared_run_id, a.result_discussion_id, a.deep_link, a.diagnostic, a.launched_at,
-    a.finished_at, a.created_at, a.updated_at,
+    NULL, NULL, NULL, a.diagnostic, NULL, NULL, a.created_at, a.updated_at,
     (a.live_page_revision_id != p.current_revision_id) AS stale_source,
     proj.name
     -- LEFT for the project: one deleted after the proposal must still return
     -- the card, with no name rather than no card.
     FROM live_page_actions a JOIN live_pages p ON p.id = a.live_page_id
     LEFT JOIN projects proj ON proj.id = a.project_id";
+
+/// One launch, presented under its declaration's identity so the client keeps
+/// reading a single shape. Same column order as `SELECT_DECLARATION`, so both
+/// go through `map_action`. Everything but the Page anchor comes from the
+/// launch itself, frozen at the click: a later republish moves the
+/// declaration on, never what already ran.
+const SELECT_LAUNCH: &str = "SELECT l.id, a.live_page_id, l.live_page_revision_id,
+    a.action_ref, l.kind, l.target_id, l.target_name, l.project_id, l.state, l.values_json,
+    l.shared_run_id, l.result_discussion_id, l.deep_link, l.diagnostic, l.launched_at,
+    l.finished_at, l.created_at, l.updated_at,
+    (l.live_page_revision_id != p.current_revision_id) AS stale_source,
+    proj.name
+    FROM live_page_action_launches l
+    JOIN live_page_actions a ON a.id = l.action_id
+    JOIN live_pages p ON p.id = a.live_page_id
+    LEFT JOIN projects proj ON proj.id = l.project_id";
 
 fn map_action(row: &rusqlite::Row<'_>) -> rusqlite::Result<LivePageAction> {
     let kind_raw = row.get::<_, String>(4)?;
@@ -483,7 +519,12 @@ fn refresh_from_shared_run(
         finished_at: action.finished_at.clone(),
         updated_at: action.updated_at.clone(),
     };
-    kronn_action_engine::refresh_from_shared_run(conn, ActionTable::LivePage, &mut core, mode)?;
+    kronn_action_engine::refresh_from_shared_run(
+        conn,
+        ActionTable::LivePageLaunch,
+        &mut core,
+        mode,
+    )?;
     action.state = core.state;
     action.values = core.values;
     action.diagnostic = core.diagnostic;
@@ -492,15 +533,15 @@ fn refresh_from_shared_run(
     Ok(())
 }
 
-pub fn get(
+fn launch_by_id(
     mode: kronn_action_engine::Reconcile,
     conn: &Connection,
-    id: &str,
+    launch_id: &str,
 ) -> Result<Option<LivePageAction>> {
     let mut action = conn
         .query_row(
-            &format!("{SELECT_LIVE_PAGE_ACTION} WHERE a.id = ?1"),
-            [id],
+            &format!("{SELECT_LAUNCH} WHERE l.id = ?1"),
+            [launch_id],
             map_action,
         )
         .optional()?;
@@ -510,27 +551,151 @@ pub fn get(
     Ok(action)
 }
 
-pub fn list_for_live_page(
+fn declaration_by_id(conn: &Connection, action_id: &str) -> Result<Option<LivePageAction>> {
+    // No reconciliation: a declaration has no run behind it to reconcile with.
+    Ok(conn
+        .query_row(
+            &format!("{SELECT_DECLARATION} WHERE a.id = ?1"),
+            [action_id],
+            map_action,
+        )
+        .optional()?)
+}
+
+/// Resolve a card handle, whichever half of the model it names — the launch a
+/// card is following, or the declaration it has not launched yet.
+pub fn get(
     mode: kronn_action_engine::Reconcile,
     conn: &Connection,
-    live_page_id: &str,
-) -> Result<Vec<LivePageAction>> {
+    id: &str,
+) -> Result<Option<LivePageAction>> {
+    match launch_by_id(mode, conn, id)? {
+        Some(action) => Ok(Some(action)),
+        None => declaration_by_id(conn, id),
+    }
+}
+
+/// Every offer the Page currently carries. Launches are deliberately absent:
+/// this is what arms the buttons, and a button is armed as long as its block
+/// is on the page — no matter how many times it, or its neighbours, have run.
+pub fn list_for_live_page(conn: &Connection, live_page_id: &str) -> Result<Vec<LivePageAction>> {
     let mut statement = conn.prepare(&format!(
-        "{SELECT_LIVE_PAGE_ACTION} WHERE a.live_page_id = ?1 ORDER BY a.created_at, a.action_ref"
+        "{SELECT_DECLARATION} WHERE a.live_page_id = ?1 ORDER BY a.created_at, a.action_ref"
     ))?;
-    let mut actions = statement
+    let actions = statement
         .query_map([live_page_id], map_action)?
         .collect::<Result<Vec<_>, _>>()?;
-    drop(statement);
-    for action in &mut actions {
-        refresh_from_shared_run(mode, conn, action)?;
-    }
     Ok(actions)
 }
 
+/// Declining an offer is an act like launching it, and just as much a
+/// per-click one: it is recorded as its own cancelled launch. The declaration
+/// is left alone, so the other rows — and this one, on the next click — stay
+/// armed. Cancelling a launch handle is the engine's idempotent no-op.
 pub fn cancel(conn: &Connection, id: &str) -> Result<Option<LivePageAction>> {
-    kronn_action_engine::cancel(conn, ActionTable::LivePage, id)?;
-    get(kronn_action_engine::Reconcile::Persisted, conn, id)
+    if launch_by_id(kronn_action_engine::Reconcile::Persisted, conn, id)?.is_some() {
+        kronn_action_engine::cancel(conn, ActionTable::LivePageLaunch, id)?;
+        return launch_by_id(kronn_action_engine::Reconcile::Persisted, conn, id);
+    }
+    let Some(declaration) = declaration_by_id(conn, id)? else {
+        return Ok(None);
+    };
+    let transaction = conn.unchecked_transaction()?;
+    let now = Utc::now().to_rfc3339();
+    let launch_id = format!("page-launch:{}", uuid::Uuid::new_v4());
+    // The binding is unknown here — a decline carries no row selector — and it
+    // does not matter: a cancelled launch never enters the in-flight guard.
+    insert_launch(
+        &transaction,
+        &launch_id,
+        &declaration,
+        "",
+        DiscussionActionState::Cancelled,
+        &now,
+    )?;
+    transaction.commit()?;
+    launch_by_id(kronn_action_engine::Reconcile::Persisted, conn, &launch_id)
+}
+
+/// Open a launch row from its declaration, copying what it runs against so
+/// that record stays true whatever the page becomes afterwards.
+fn insert_launch(
+    conn: &Connection,
+    launch_id: &str,
+    declaration: &LivePageAction,
+    binding_key: &str,
+    state: DiscussionActionState,
+    now: &str,
+) -> Result<()> {
+    let finished_at = (state == DiscussionActionState::Cancelled).then_some(now);
+    conn.execute(
+        "INSERT INTO live_page_action_launches (
+             id, action_id, binding_key, live_page_revision_id, kind, target_id,
+             target_name, project_id, state, values_json, finished_at,
+             created_at, updated_at
+         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?12)",
+        params![
+            launch_id,
+            declaration.id,
+            binding_key,
+            declaration.live_page_revision_id,
+            declaration.kind.as_db_str(),
+            declaration.target_id,
+            declaration.target_name,
+            declaration.project_id,
+            kronn_action_engine::state_db_str(state),
+            serde_json::to_string(&declaration.values)?,
+            finished_at,
+            now,
+        ],
+    )?;
+    Ok(())
+}
+
+/// The identity of one click: the row it bound to, as sorted `name=selector`
+/// pairs. Empty for a CTA with no dynamic binding, which is one logical
+/// instance and, with the guard scoped here, relaunchable once it is done.
+fn binding_key(bindings: &HashMap<String, String>) -> String {
+    let mut pairs: Vec<String> = bindings
+        .iter()
+        .map(|(name, selector)| format!("{name}={selector}"))
+        .collect();
+    pairs.sort();
+    pairs.join("\u{1f}")
+}
+
+/// The launch still running for this exact binding, if there is one, brought
+/// up to date with the run behind it first — a launch that has since finished
+/// is not in flight and must not stand in the way of the next click.
+fn in_flight_launch(
+    conn: &Connection,
+    action_id: &str,
+    binding_key: &str,
+) -> Result<Option<LivePageAction>> {
+    let candidate = conn
+        .query_row(
+            &format!(
+                "{SELECT_LAUNCH} WHERE l.action_id = ?1 AND l.binding_key = ?2
+                 AND l.state IN ('launching','running')
+                 ORDER BY l.created_at DESC, l.id DESC LIMIT 1"
+            ),
+            params![action_id, binding_key],
+            map_action,
+        )
+        .optional()?;
+    let Some(mut candidate) = candidate else {
+        return Ok(None);
+    };
+    refresh_from_shared_run(
+        kronn_action_engine::Reconcile::Persisted,
+        conn,
+        &mut candidate,
+    )?;
+    Ok(matches!(
+        candidate.state,
+        DiscussionActionState::Launching | DiscussionActionState::Running
+    )
+    .then_some(candidate))
 }
 
 /// Resolve one `dynamic_binding` `source_ref` against real, current Page or
@@ -654,6 +819,11 @@ fn json_value_as_string(value: &serde_json::Value) -> String {
     }
 }
 
+/// Launch one instance of a Page action — the one the click bound to.
+///
+/// `id` is normally a declaration id. A launch id is accepted too and answered
+/// with that launch as it stands, so a second click on a card that already
+/// launched reports its run instead of starting another.
 pub fn claim_launch(
     conn: &Connection,
     id: &str,
@@ -661,18 +831,21 @@ pub fn claim_launch(
     bindings: &HashMap<String, String>,
 ) -> Result<Option<LivePageActionClaimOutcome>> {
     let transaction = conn.unchecked_transaction()?;
-    let Some(mut action) = get(kronn_action_engine::Reconcile::Persisted, &transaction, id)? else {
+    let Some(mut action) = declaration_by_id(&transaction, id)? else {
+        let existing = launch_by_id(kronn_action_engine::Reconcile::Persisted, &transaction, id)?;
         transaction.commit()?;
-        return Ok(None);
+        return Ok(existing.map(LivePageActionClaimOutcome::Existing));
     };
-    if action.state == DiscussionActionState::Proposed && action.stale_source {
+    if action.state != DiscussionActionState::Proposed {
+        // Kronn could not make sense of the block; there is nothing to launch
+        // and the card shows why.
+        transaction.commit()?;
+        return Ok(Some(LivePageActionClaimOutcome::Existing(action)));
+    }
+    if action.stale_source {
         anyhow::bail!(
             "this action is no longer present in the current Page revision; reload the Page and use a current CTA"
         );
-    }
-    if action.state != DiscussionActionState::Proposed {
-        transaction.commit()?;
-        return Ok(Some(LivePageActionClaimOutcome::Existing(action)));
     }
     for (name, selector) in bindings {
         let declared = action.values.iter().any(|value| {
@@ -685,6 +858,14 @@ pub fn claim_launch(
         if selector.len() > 4_096 {
             anyhow::bail!("dynamic action binding `{name}` is too large");
         }
+    }
+    // The idempotency guard, scoped to the binding rather than to the block:
+    // clicking a row that is still running shows that run, clicking any other
+    // row launches it.
+    let binding_key = binding_key(bindings);
+    if let Some(running) = in_flight_launch(&transaction, &action.id, &binding_key)? {
+        transaction.commit()?;
+        return Ok(Some(LivePageActionClaimOutcome::Existing(running)));
     }
     // Resolve every `dynamic_binding` value server-side before the shared
     // engine ever sees it. Any value the caller placed in `supplied` for one
@@ -706,26 +887,42 @@ pub fn claim_launch(
             resolve_dynamic_binding(&transaction, &action.live_page_id, source_ref, binding_key)?;
         resolved_supplied.insert(value.name.clone(), resolved);
     }
+
+    // The launch starts as a copy of the offer's contract; the engine then
+    // claims it exactly as it claims a discussion proposal. The declaration
+    // itself is never written to.
+    let now = Utc::now().to_rfc3339();
+    let launch_id = format!("page-launch:{}", uuid::Uuid::new_v4());
+    insert_launch(
+        &transaction,
+        &launch_id,
+        &action,
+        &binding_key,
+        DiscussionActionState::Proposed,
+        &now,
+    )?;
     let mut core = kronn_action_engine::ActionCore {
-        id: action.id.clone(),
-        state: action.state,
+        id: launch_id.clone(),
+        state: DiscussionActionState::Proposed,
         values: std::mem::take(&mut action.values),
-        shared_run_id: action.shared_run_id.clone(),
-        diagnostic: action.diagnostic.clone(),
-        launched_at: action.launched_at.clone(),
-        finished_at: action.finished_at.clone(),
-        updated_at: action.updated_at.clone(),
+        shared_run_id: None,
+        diagnostic: None,
+        launched_at: None,
+        finished_at: None,
+        updated_at: now.clone(),
     };
     let target_still_exists =
         discussion_actions::target_contract(&transaction, action.kind, &action.target_id)?
             .is_some();
     let claimed_variables = kronn_action_engine::claim_launch(
         &transaction,
-        ActionTable::LivePage,
+        ActionTable::LivePageLaunch,
         &mut core,
         &resolved_supplied,
         target_still_exists,
     )?;
+    action.id = launch_id;
+    action.created_at = now;
     action.state = core.state;
     action.values = core.values;
     action.diagnostic = core.diagnostic;
@@ -743,7 +940,7 @@ pub fn complete(
     id: &str,
     completion: kronn_action_engine::ActionCompletion,
 ) -> Result<()> {
-    kronn_action_engine::complete(conn, ActionTable::LivePage, id, completion)
+    kronn_action_engine::complete(conn, ActionTable::LivePageLaunch, id, completion)
 }
 
 /// Complete a Page-authored QP and register its result discussion atomically.
@@ -819,9 +1016,19 @@ mod tests {
                 "INSERT INTO live_page_actions (
                      id, live_page_id, live_page_revision_id, action_ref, kind,
                      target_id, target_name, project_id, state, values_json,
-                     shared_run_id, launched_at, created_at, updated_at
+                     created_at, updated_at
                  ) VALUES ('act-1','page-1','rev-1','cta-1','quick_prompt',
-                           'qp-1','Framer',NULL,'running','[]','run-1',?1,?1,?1)",
+                           'qp-1','Framer',NULL,'proposed','[]',?1,?1)",
+                params![now],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO live_page_action_launches (
+                     id, action_id, binding_key, live_page_revision_id, kind,
+                     target_id, target_name, state, values_json, shared_run_id,
+                     launched_at, created_at, updated_at
+                 ) VALUES ('launch-1','act-1','','rev-1','quick_prompt','qp-1',
+                           'Framer','running','[]','run-1',?1,?1,?1)",
                 params![now],
             )
             .unwrap();
@@ -835,22 +1042,28 @@ mod tests {
         )
         .unwrap();
 
-        let actions = list_for_live_page(
+        let actions =
+            list_for_live_page(&read_only, "page-1").expect("a listing must never need to write");
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].state, DiscussionActionState::Proposed);
+
+        // The card polls its launch through the same companion. Projected, not
+        // merely unwritten: the reader still sees the truth, or the page would
+        // show a run that finished long ago as still running.
+        let polled = get(
             kronn_action_engine::Reconcile::Projected,
             &read_only,
-            "page-1",
+            "launch-1",
         )
-        .expect("a listing must never need to write");
-        assert_eq!(actions.len(), 1);
-        // Projected, not merely unwritten: the reader still sees the truth, or
-        // the page would show a run that finished long ago as still running.
-        assert_eq!(actions[0].state, DiscussionActionState::Succeeded);
+        .expect("a poll must never need to write")
+        .unwrap();
+        assert_eq!(polled.state, DiscussionActionState::Succeeded);
 
         // The row itself is untouched — this connection cannot write, and the
         // projection did not pretend otherwise.
         let stored: String = read_only
             .query_row(
-                "SELECT state FROM live_page_actions WHERE id = 'act-1'",
+                "SELECT state FROM live_page_action_launches WHERE id = 'launch-1'",
                 [],
                 |row| row.get(0),
             )
@@ -861,10 +1074,10 @@ mod tests {
         // connection to persist still fails. The fix is the caller's choice,
         // not a weakened connection.
         assert!(
-            list_for_live_page(
+            get(
                 kronn_action_engine::Reconcile::Persisted,
                 &read_only,
-                "page-1"
+                "launch-1"
             )
             .is_err(),
             "a read-only connection must still refuse a write"
@@ -1082,8 +1295,7 @@ mod tests {
         ingest_page_actions(&conn, "page-1", "rev-1", &html).unwrap();
         ingest_page_actions(&conn, "page-1", "rev-1", &html).unwrap();
 
-        let actions =
-            list_for_live_page(kronn_action_engine::Reconcile::Persisted, &conn, "page-1").unwrap();
+        let actions = list_for_live_page(&conn, "page-1").unwrap();
         assert_eq!(actions.len(), 1, "re-ingestion must remain idempotent");
         let action = &actions[0];
         assert_eq!(action.id, "page-action:page-1:collect-logs");
@@ -1113,9 +1325,7 @@ mod tests {
         // secondary sort by `action_ref` is what makes the order below
         // deterministic (document position isn't tracked for Page blocks the
         // way `fence_index` tracks it for discussion fences).
-        let actions =
-            list_for_live_page(kronn_action_engine::Reconcile::Persisted, &conn, "page-all")
-                .unwrap();
+        let actions = list_for_live_page(&conn, "page-all").unwrap();
         assert_eq!(
             actions.iter().map(|action| action.kind).collect::<Vec<_>>(),
             vec![
@@ -1230,15 +1440,23 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        assert!(matches!(second, LivePageActionClaimOutcome::Existing(_)));
-        let reloaded = get(
+        let LivePageActionClaimOutcome::Existing(second) = second else {
+            panic!("a second click on a binding still in flight must not launch again");
+        };
+        assert_eq!(second.id, action.id, "it shows the launch already running");
+        assert_eq!(second.state, DiscussionActionState::Launching);
+        let offer = get(
             kronn_action_engine::Reconcile::Persisted,
             &conn,
             "page-action:page-3:collect-logs",
         )
         .unwrap()
         .unwrap();
-        assert_eq!(reloaded.state, DiscussionActionState::Launching);
+        assert_eq!(
+            offer.state,
+            DiscussionActionState::Proposed,
+            "the declaration is never consumed by a launch"
+        );
     }
 
     #[test]
@@ -1274,14 +1492,23 @@ mod tests {
         assert!(action.values[0].value.is_none());
         let stored: String = conn
             .query_row(
-                "SELECT values_json FROM live_page_actions WHERE id = ?1",
-                [&proposed.id],
+                "SELECT values_json FROM live_page_action_launches WHERE id = ?1",
+                [&action.id],
                 |row| row.get(0),
             )
             .unwrap();
         let stored: Vec<DiscussionActionValue> = serde_json::from_str(&stored).unwrap();
         assert!(stored[0].value.is_none());
         assert_eq!(stored[0].suggested_value.as_deref(), Some("api"));
+        // The next click on the same button opens prefilled again.
+        let offer = get(
+            kronn_action_engine::Reconcile::Persisted,
+            &conn,
+            &proposed.id,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(offer.values[0].value.as_deref(), Some("api"));
     }
 
     #[test]
@@ -1447,34 +1674,46 @@ mod tests {
         insert_page(&conn, "page-stale", "rev-1", &html);
         ingest_page_actions(&conn, "page-stale", "rev-1", &html).unwrap();
         let supplied = HashMap::from([("service".into(), "api".into())]);
-        claim_launch(
+        let Some(LivePageActionClaimOutcome::Claimed { action: launch, .. }) = claim_launch(
+            &conn,
+            "page-action:page-stale:collect-logs",
+            &supplied,
+            &HashMap::new(),
+        )
+        .unwrap() else {
+            panic!("expected a fresh claim");
+        };
+        conn.execute(
+            "UPDATE live_page_action_launches SET launched_at = ?2 WHERE id = ?1",
+            params![
+                launch.id,
+                (Utc::now() - chrono::Duration::minutes(6)).to_rfc3339()
+            ],
+        )
+        .unwrap();
+
+        let action = get(kronn_action_engine::Reconcile::Persisted, &conn, &launch.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(action.state, DiscussionActionState::Failed);
+        assert!(action
+            .diagnostic
+            .unwrap()
+            .contains("not retried automatically"));
+
+        // Failing closed must not wedge the button: the dead launch is no
+        // longer in flight, so the next click on that row is a new launch.
+        let retry = claim_launch(
             &conn,
             "page-action:page-stale:collect-logs",
             &supplied,
             &HashMap::new(),
         )
         .unwrap();
-        conn.execute(
-            "UPDATE live_page_actions SET launched_at = ?2 WHERE id = ?1",
-            params![
-                "page-action:page-stale:collect-logs",
-                (Utc::now() - chrono::Duration::minutes(6)).to_rfc3339()
-            ],
-        )
-        .unwrap();
-
-        let action = get(
-            kronn_action_engine::Reconcile::Persisted,
-            &conn,
-            "page-action:page-stale:collect-logs",
-        )
-        .unwrap()
-        .unwrap();
-        assert_eq!(action.state, DiscussionActionState::Failed);
-        assert!(action
-            .diagnostic
-            .unwrap()
-            .contains("not retried automatically"));
+        assert!(matches!(
+            retry,
+            Some(LivePageActionClaimOutcome::Claimed { action, .. }) if action.id != launch.id
+        ));
     }
 
     #[test]
@@ -1553,6 +1792,203 @@ mod tests {
             panic!("expected a fresh claim");
         };
         assert_eq!(variables["service"], "Add feature");
+    }
+
+    /// The reported shape: one "Framer" block over a list of tickets, one
+    /// button per row. Clicking a second ticket after the first succeeded used
+    /// to answer with the first ticket's success, and nothing ran.
+    #[test]
+    fn each_row_of_a_listed_action_launches_its_own_run() {
+        let conn = connection();
+        insert_target(&conn);
+        let html = action_block(
+            "frame",
+            r#"{"kind":"quick_exec","target_id":"qe-1","values":[{"name":"service","provenance":"dynamic_binding","source_ref":"<page.dataset.tickets.find(key).key>"}]}"#,
+        );
+        insert_page(&conn, "page-team", "rev-1", &html);
+        insert_dataset(
+            &conn,
+            "page-team",
+            "tickets",
+            "collection",
+            r#"[{"key":"EW-7706"},{"key":"EW-7704"},{"key":"EW-7701"}]"#,
+        );
+        ingest_page_actions(&conn, "page-team", "rev-1", &html).unwrap();
+        let declaration = "page-action:page-team:frame";
+        let click = |ticket: &str| {
+            claim_launch(
+                &conn,
+                declaration,
+                &HashMap::new(),
+                &HashMap::from([("service".into(), ticket.into())]),
+            )
+            .unwrap()
+            .unwrap()
+        };
+
+        let LivePageActionClaimOutcome::Claimed {
+            action: first,
+            variables,
+        } = click("EW-7706")
+        else {
+            panic!("the first ticket launches");
+        };
+        assert_eq!(variables["service"], "EW-7706");
+        complete(
+            &conn,
+            &first.id,
+            kronn_action_engine::ActionCompletion {
+                state: DiscussionActionState::Succeeded,
+                shared_run_id: None,
+                result_discussion_id: None,
+                deep_link: Some("automation:quick_exec:run-7706".into()),
+                diagnostic: None,
+            },
+        )
+        .unwrap();
+
+        let LivePageActionClaimOutcome::Claimed {
+            action: second,
+            variables,
+        } = click("EW-7704")
+        else {
+            panic!("another ticket must launch, not replay the first one's result");
+        };
+        assert_eq!(variables["service"], "EW-7704");
+        assert_ne!(second.id, first.id);
+        assert_eq!(second.state, DiscussionActionState::Launching);
+        assert_eq!(
+            second.deep_link, None,
+            "it does not carry the first run's link"
+        );
+
+        // A ticket still in flight is not launched twice, and the others are
+        // unaffected by it.
+        assert!(matches!(
+            click("EW-7704"),
+            LivePageActionClaimOutcome::Existing(ref running) if running.id == second.id
+        ));
+        assert!(matches!(
+            click("EW-7701"),
+            LivePageActionClaimOutcome::Claimed { .. }
+        ));
+
+        let first_now = get(kronn_action_engine::Reconcile::Persisted, &conn, &first.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(first_now.state, DiscussionActionState::Succeeded);
+        let offers = list_for_live_page(&conn, "page-team").unwrap();
+        assert_eq!(offers.len(), 1);
+        assert_eq!(
+            offers[0].state,
+            DiscussionActionState::Proposed,
+            "every button stays armed, however many rows have run"
+        );
+    }
+
+    #[test]
+    fn a_cta_without_binding_can_be_launched_again_once_its_run_is_over() {
+        let conn = connection();
+        insert_target(&conn);
+        let html = action_block("refresh", r#"{"kind":"quick_exec","target_id":"qe-1"}"#);
+        insert_page(&conn, "page-once", "rev-1", &html);
+        ingest_page_actions(&conn, "page-once", "rev-1", &html).unwrap();
+        let supplied = HashMap::from([("service".into(), "api".into())]);
+        let launch = || {
+            claim_launch(
+                &conn,
+                "page-action:page-once:refresh",
+                &supplied,
+                &HashMap::new(),
+            )
+            .unwrap()
+            .unwrap()
+        };
+
+        let LivePageActionClaimOutcome::Claimed { action: first, .. } = launch() else {
+            panic!("expected a fresh claim");
+        };
+        complete(
+            &conn,
+            &first.id,
+            kronn_action_engine::ActionCompletion {
+                state: DiscussionActionState::Failed,
+                shared_run_id: None,
+                result_discussion_id: None,
+                deep_link: None,
+                diagnostic: Some("boom".into()),
+            },
+        )
+        .unwrap();
+
+        let LivePageActionClaimOutcome::Claimed { action: again, .. } = launch() else {
+            panic!("a finished run must not turn the button into a single-use one");
+        };
+        assert_ne!(again.id, first.id);
+        assert_eq!(again.diagnostic, None);
+    }
+
+    #[test]
+    fn upgrading_keeps_every_launch_already_recorded_on_a_declaration() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        crate::db::migrations::run_through(&conn, "180_agent_resume_release_attempts").unwrap();
+        insert_page(&conn, "page-old", "rev-1", "<p>x</p>");
+        let now = Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO live_page_actions (
+                 id, live_page_id, live_page_revision_id, action_ref, kind,
+                 target_id, target_name, state, values_json, deep_link,
+                 launched_at, finished_at, created_at, updated_at
+             ) VALUES
+             ('act-ran','page-old','rev-1','ran','quick_exec','qe-1','Run',
+              'succeeded','[]','automation:quick_exec:run-9',?1,?1,?1,?1),
+             ('act-fresh','page-old','rev-1','fresh','quick_exec','qe-1','Run',
+              'proposed','[]',NULL,NULL,NULL,?1,?1),
+             ('act-broken','page-old','rev-1','broken','invalid','','(bloc invalide)',
+              'preflight_failed','[]',NULL,NULL,NULL,?1,?1)",
+            params![now],
+        )
+        .unwrap();
+
+        crate::db::migrations::run(&conn).unwrap();
+
+        let states: Vec<(String, String)> = conn
+            .prepare("SELECT id, state FROM live_page_actions ORDER BY id")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            states,
+            vec![
+                ("act-broken".into(), "preflight_failed".into()),
+                ("act-fresh".into(), "proposed".into()),
+                ("act-ran".into(), "proposed".into()),
+            ],
+            "the CTA that had run is armed again, the unreadable one still says why"
+        );
+        let carried = get(
+            kronn_action_engine::Reconcile::Persisted,
+            &conn,
+            "page-launch:act-ran",
+        )
+        .unwrap()
+        .expect("the launch that ran survives the upgrade");
+        assert_eq!(carried.state, DiscussionActionState::Succeeded);
+        assert_eq!(
+            carried.deep_link.as_deref(),
+            Some("automation:quick_exec:run-9")
+        );
+        let launches: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM live_page_action_launches",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(launches, 1, "only what actually launched becomes a launch");
     }
 
     #[test]
@@ -1683,12 +2119,7 @@ mod tests {
         republish_revision(&conn, "page-refresh", "rev-2", &html_v2);
         ingest_page_actions(&conn, "page-refresh", "rev-2", &html_v2).unwrap();
 
-        let actions = list_for_live_page(
-            kronn_action_engine::Reconcile::Persisted,
-            &conn,
-            "page-refresh",
-        )
-        .unwrap();
+        let actions = list_for_live_page(&conn, "page-refresh").unwrap();
         assert_eq!(
             actions.len(),
             1,
@@ -1774,17 +2205,20 @@ mod tests {
             &HashMap::new(),
         )
         .unwrap();
-        assert!(
-            !matches!(outcome, Some(LivePageActionClaimOutcome::Claimed { .. })),
-            "a deleted target must not be launchable from a page either"
-        );
+        let Some(LivePageActionClaimOutcome::Existing(refused)) = outcome else {
+            panic!("a deleted target must not be launchable from a page either");
+        };
         let reloaded = get(
             kronn_action_engine::Reconcile::Persisted,
             &conn,
-            &proposed.id,
+            &refused.id,
         )
         .unwrap()
         .unwrap();
+        assert_ne!(
+            reloaded.id, proposed.id,
+            "the refusal is recorded on the click"
+        );
         assert_eq!(reloaded.state, DiscussionActionState::PreflightFailed);
         assert!(reloaded
             .diagnostic
@@ -1800,16 +2234,18 @@ mod tests {
         insert_page(&conn, "page-frozen", "rev-1", &html_v1);
         ingest_page_actions(&conn, "page-frozen", "rev-1", &html_v1).unwrap();
         let supplied = HashMap::from([("service".into(), "api".into())]);
-        claim_launch(
+        let Some(LivePageActionClaimOutcome::Claimed { action: launch, .. }) = claim_launch(
             &conn,
             "page-action:page-frozen:cta",
             &supplied,
             &HashMap::new(),
         )
-        .unwrap();
+        .unwrap() else {
+            panic!("expected a fresh claim");
+        };
         complete(
             &conn,
-            "page-action:page-frozen:cta",
+            &launch.id,
             kronn_action_engine::ActionCompletion {
                 state: DiscussionActionState::Succeeded,
                 shared_run_id: None,
@@ -1825,13 +2261,9 @@ mod tests {
         republish_revision(&conn, "page-frozen", "rev-2", html_v2);
         ingest_page_actions(&conn, "page-frozen", "rev-2", html_v2).unwrap();
 
-        let action = get(
-            kronn_action_engine::Reconcile::Persisted,
-            &conn,
-            "page-action:page-frozen:cta",
-        )
-        .unwrap()
-        .unwrap();
+        let action = get(kronn_action_engine::Reconcile::Persisted, &conn, &launch.id)
+            .unwrap()
+            .unwrap();
         assert_eq!(
             action.state,
             DiscussionActionState::Succeeded,
@@ -1857,22 +2289,12 @@ mod tests {
         insert_page(&conn, "page-multi", "rev-1", &html);
         ingest_page_actions(&conn, "page-multi", "rev-1", &html).unwrap();
 
-        let actions = list_for_live_page(
-            kronn_action_engine::Reconcile::Persisted,
-            &conn,
-            "page-multi",
-        )
-        .unwrap();
+        let actions = list_for_live_page(&conn, "page-multi").unwrap();
         assert_eq!(actions.len(), 2);
 
-        cancel(&conn, "page-action:page-multi:cta-a").unwrap();
-        let a = get(
-            kronn_action_engine::Reconcile::Persisted,
-            &conn,
-            "page-action:page-multi:cta-a",
-        )
-        .unwrap()
-        .unwrap();
+        let a = cancel(&conn, "page-action:page-multi:cta-a")
+            .unwrap()
+            .unwrap();
         let b = get(
             kronn_action_engine::Reconcile::Persisted,
             &conn,
@@ -1895,12 +2317,16 @@ mod tests {
         let html = action_block("frame", r#"{"kind":"quick_prompt","target_id":"qp-1"}"#);
         insert_page(&conn, "page-trace", "rev-trace", &html);
         ingest_page_actions(&conn, "page-trace", "rev-trace", &html).unwrap();
-        let action_id = "page-action:page-trace:frame";
-        let claimed = claim_launch(&conn, action_id, &HashMap::new(), &HashMap::new()).unwrap();
-        assert!(matches!(
-            claimed,
-            Some(LivePageActionClaimOutcome::Claimed { .. })
-        ));
+        let Some(LivePageActionClaimOutcome::Claimed { action: launch, .. }) = claim_launch(
+            &conn,
+            "page-action:page-trace:frame",
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .unwrap() else {
+            panic!("expected a fresh claim");
+        };
+        let action_id = launch.id.as_str();
         let now = Utc::now().to_rfc3339();
         conn.execute(
             "INSERT INTO discussions (id, title, agent, language, participants_json, created_at, updated_at)

@@ -691,6 +691,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "180_agent_resume_release_attempts",
         include_str!("sql/180_agent_resume_release_attempts.sql"),
     ),
+    (
+        "181_live_page_action_launches",
+        include_str!("sql/181_live_page_action_launches.sql"),
+    ),
 ];
 
 /// Apply one migration inside the caller-owned transaction.
