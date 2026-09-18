@@ -9,7 +9,13 @@ const mocks = vi.hoisted(() => ({
   launch: vi.fn(),
 }));
 
-vi.mock('../../lib/api', () => ({ discussionActions: mocks }));
+vi.mock('../../lib/api', () => ({
+  discussionActions: mocks,
+  runsApi: {
+    outcome: vi.fn(() => Promise.resolve({ discussion_count: 0, discussions: [] })),
+    discussionOutcome: vi.fn((id: string) => Promise.resolve({ discussion_count: 1, discussions: [{ id, title: 'Result', agent: 'ClaudeCode', agent_status: 'answered', answer_excerpt: null, answer_truncated: false, answered_at: null, diagnostic: null, updated_at: '2026-09-18T10:00:00Z' }] })),
+  },
+}));
 vi.mock('../../lib/I18nContext', () => ({
   useT: () => ({
     t: (key: string, ...args: (string | number)[]) =>
@@ -177,7 +183,7 @@ describe('DiscussionActionCard', () => {
         onOpenDiscussion={onOpenDiscussion}
       />,
     );
-    fireEvent.click(screen.getByRole('button', { name: /disc\.action\.openDiscussion/ }));
+    fireEvent.click(await screen.findByRole('button', { name: /disc\.action\.openDiscussion/ }));
     expect(onOpenDiscussion).toHaveBeenCalledWith('disc-result');
     // A fence is one intention: a discussion card is never relaunched.
     expect(screen.queryByTestId('action-card-relaunch')).not.toBeInTheDocument();

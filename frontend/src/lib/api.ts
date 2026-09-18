@@ -213,6 +213,7 @@ import type {
   ValidationSpec,
   ExternalApiConnectionPreset,
   SharedRun,
+  RunOutcome,
   DiscussionNoteListResponse,
   DiscussionListItem,
   SourceDirectoryListing,
@@ -3319,6 +3320,9 @@ export const userContext = {
 
 export const runsApi = {
   get: (id: string) => api<SharedRun>('GET', `/runs/${encodeURIComponent(id)}`),
+  outcome: (id: string) => api<RunOutcome>('GET', `/runs/${encodeURIComponent(id)}/outcome`),
+  discussionOutcome: (discussionId: string) =>
+    api<RunOutcome>('GET', `/discussions/${encodeURIComponent(discussionId)}/outcome`),
   list: (filters: { kind?: string; sourceId?: string; projectId?: string; discussionId?: string; limit?: number; offset?: number } = {}) => {
     const query = new URLSearchParams();
     if (filters.kind) query.set('kind', filters.kind);

@@ -1,0 +1,111 @@
+/* What a launch produced, inside an action card: a short, readable account,
+   not the run page. Each produced discussion gets its agent's state and the
+   head of its latest answer, which is where agents put their verdict. */
+.run-outcome {
+  margin: 10px 14px 0;
+}
+
+.run-outcome__title {
+  margin: 0 0 6px;
+  color: var(--kr-text-tertiary);
+  font-size: var(--kr-fs-2xs);
+  font-weight: 600;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+
+.run-outcome__list {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.run-outcome__item {
+  padding: 8px 10px;
+  border: 1px solid var(--kr-border);
+  border-radius: var(--kr-radius-md);
+  background: var(--kr-bg-subtle);
+}
+
+.run-outcome__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+}
+
+.run-outcome__name {
+  color: var(--kr-text-primary);
+  font-size: var(--kr-fs-sm);
+  font-weight: 600;
+}
+
+.run-outcome__agent {
+  color: var(--kr-text-tertiary);
+  font-size: var(--kr-fs-2xs);
+}
+
+.run-outcome__status {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-inline-start: auto;
+  padding: 1px 6px;
+  border-radius: var(--kr-r-pill);
+  color: var(--kr-text-secondary);
+  font-size: var(--kr-fs-2xs);
+  font-weight: 600;
+}
+
+.run-outcome__status[data-status='answered'] { color: var(--kr-success); }
+.run-outcome__status[data-status='failed'] { color: var(--kr-danger); }
+.run-outcome__status[data-status='working'] { color: var(--kr-accent); }
+
+/* The head of the answer, capped so a long verdict never pushes the card
+   off the page; the full text is one "open" away. */
+.run-outcome__excerpt {
+  position: relative;
+  max-height: 14em;
+  margin-top: 6px;
+  overflow: hidden;
+  color: var(--kr-text-secondary);
+  font-size: var(--kr-fs-xs);
+}
+
+.run-outcome__more {
+  color: var(--kr-text-tertiary);
+}
+
+.run-outcome__diagnostic {
+  margin: 6px 0 0;
+  color: var(--kr-danger);
+  font-size: var(--kr-fs-xs);
+}
+
+.run-outcome__open {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 8px;
+  padding: 3px 8px;
+  border: 1px solid var(--kr-border-strong);
+  border-radius: var(--kr-radius-sm);
+  color: var(--kr-text-primary);
+  background: transparent;
+  font: inherit;
+  font-size: var(--kr-fs-xs);
+  cursor: pointer;
+}
+
+.run-outcome__open:hover,
+.run-outcome__open:focus-visible {
+  border-color: var(--kr-accent);
+}
+
+.run-outcome__hidden {
+  margin: 6px 0 0;
+  color: var(--kr-text-tertiary);
+  font-size: var(--kr-fs-2xs);
+}

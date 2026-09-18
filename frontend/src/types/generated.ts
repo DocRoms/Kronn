@@ -5548,6 +5548,25 @@ export type RunAgentRequest = {
  */
 idempotency_key?: string | null, };
 
+export type RunOutcome = {
+/**
+ * Every discussion produced, even beyond the ones listed.
+ */
+discussion_count: number, discussions: Array<RunOutcomeDiscussion>, };
+
+export type RunOutcomeAgentStatus = "working" | "answered" | "failed" | "cancelled" | "idle";
+
+export type RunOutcomeDiscussion = { id: string, title: string, agent: AgentType, agent_status: RunOutcomeAgentStatus,
+/**
+ * The beginning of the agent's latest answer: agents lead with their
+ * verdict, so this is the part a card has room for.
+ */
+answer_excerpt: string | null, answer_truncated: boolean, answered_at: string | null,
+/**
+ * Why the agent failed, when it did.
+ */
+diagnostic: string | null, updated_at: string, };
+
 /**
  * 0.6.0 — payload for `POST /api/quick-apis/:id/run`. Lets the user
  * launch a saved QuickApi standalone (Run drawer in the Quick APIs page),

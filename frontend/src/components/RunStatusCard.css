@@ -21,3 +21,28 @@
 .run-status-card-fold > summary { cursor: pointer; font-size: var(--kr-fs-xs); color: var(--kr-text-muted); }
 .run-status-card-fold > .run-status-card-result { margin-top: 6px; }
 .run-status-card-cost { margin: 8px 0 0; text-align: right; font-size: var(--kr-fs-xs); font-weight: 700; color: var(--kr-text-secondary); }
+
+/* A workflow's steps, one line each: what ran, as what, how long. */
+.run-status-card-steps {
+  display: grid;
+  gap: 3px;
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--kr-fs-xs);
+}
+
+.run-status-card-steps li {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--kr-text-secondary);
+}
+
+.run-status-card-steps li[data-status='success'] svg { color: var(--kr-success); }
+.run-status-card-steps li[data-status='failed'] svg { color: var(--kr-danger); }
+
+.run-status-card-step-name { color: var(--kr-text-primary); font-weight: 500; }
+.run-status-card-step-kind { color: var(--kr-text-tertiary); font-size: var(--kr-fs-2xs); }
+.run-status-card-step-duration { margin-inline-start: auto; color: var(--kr-text-tertiary); font-variant-numeric: tabular-nums; }
+.run-status-card-step-dot { width: 12px; text-align: center; color: var(--kr-text-tertiary); }

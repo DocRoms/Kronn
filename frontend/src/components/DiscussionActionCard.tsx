@@ -5,6 +5,7 @@ import { useT } from '../lib/I18nContext';
 import type { DiscussionAction, DiscussionActionValue, LivePageAction, PromptVariable } from '../types/generated';
 import { PromptVariableInput } from './workflows/PromptVariableInput';
 import { RunStatusCard } from './RunStatusCard';
+import { RunOutcomePanel } from './RunOutcomePanel';
 import './DiscussionActionCard.css';
 
 interface Props {
@@ -181,6 +182,10 @@ export function KronnActionCard<T extends KronnAction>({
   const stalePageSource = 'stale_source' in current && current.stale_source;
   const row = boundRow(current, bindings);
   const relaunch = operations.relaunch;
+  // Once launched, what the run produced is told here — including the
+  // discussion a workflow step opened, which the run itself does not carry.
+  const showOutcome = current.state !== 'proposed'
+    && Boolean(current.shared_run_id || resultDiscussionId);
 
   return (
     <section className="discussion-action-card" data-state={current.state} data-expanded={expanded} data-testid={`${testIdPrefix}-${current.id}`}>
@@ -282,6 +287,17 @@ export function KronnActionCard<T extends KronnAction>({
       {expanded && current.shared_run_id && (
         <RunStatusCard runId={current.shared_run_id} />
       )}
+      {expanded && showOutcome && (
+        // A result discussion is the product itself (a Quick Prompt); a run
+        // without one produced whatever its steps opened (a workflow).
+        <RunOutcomePanel
+          key={resultDiscussionId ?? current.shared_run_id ?? ''}
+          runId={resultDiscussionId ? null : current.shared_run_id}
+          discussionId={resultDiscussionId}
+          runActive={ACTIVE_STATES.has(current.state)}
+          onOpenDiscussion={onOpenDiscussion}
+        />
+      )}
 
       {expanded && stalePageSource && (
         <p className="discussion-action-card__diagnostic" role="status">
@@ -321,7 +337,7 @@ export function KronnActionCard<T extends KronnAction>({
             </button>
           </>
         )}
-        {terminal && resultDiscussionId && (
+        {terminal && resultDiscussionId && !showOutcome && (
           <button
             type="button"
             className="discussion-action-card__open"

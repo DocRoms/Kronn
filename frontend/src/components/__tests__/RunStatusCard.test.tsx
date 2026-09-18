@@ -110,6 +110,34 @@ describe('RunStatusCard', () => {
     expect(screen.getByText('publish')).toBeInTheDocument();
   });
 
+  it('reads a finished workflow as its steps, never as a JSON dump', () => {
+    render(
+      <RunStatusCard
+        model={{
+          id: 'run-frame',
+          kind: 'workflow',
+          status: 'success',
+          durationMs: 2368,
+          result: {
+            progress: { completed: 3, total: 3, current_label: null },
+            steps: [
+              { step_name: 'fetch', step_kind: 'ApiCall', status: 'Success', duration_ms: 425 },
+              { step_name: 'reshape', step_kind: 'Exec', status: 'Success', duration_ms: 24 },
+              { step_name: 'triage', step_kind: 'BatchQuickPrompt', status: 'Failed', duration_ms: 1 },
+            ],
+          },
+        }}
+      />,
+    );
+
+    const steps = screen.getByTestId('run-status-card-steps');
+    expect(within(steps).getAllByRole('listitem').map(item => item.getAttribute('data-status')))
+      .toEqual(['success', 'success', 'failed']);
+    expect(within(steps).getByText('fetch')).toBeInTheDocument();
+    expect(within(steps).getByText('ApiCall')).toBeInTheDocument();
+    expect(screen.queryByText(/"steps"/)).not.toBeInTheDocument();
+  });
+
   it('makes unavailable duration and diagnostics explicit for a failed direct run', () => {
     render(
       <RunStatusCard

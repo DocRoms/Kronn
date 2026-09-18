@@ -600,6 +600,28 @@ pub fn list_discussions_by_run(conn: &Connection, run_id: &str) -> Result<Vec<Di
     Ok(discussions)
 }
 
+/// The discussions a run produced anywhere in its tree: its own, and those of
+/// the runs it started. A `BatchQuickPrompt` step inside a workflow opens its
+/// discussions under a child batch run, so a direct lookup finds nothing for
+/// the workflow that caused them.
+pub fn list_discussions_by_run_tree(conn: &Connection, run_id: &str) -> Result<Vec<Discussion>> {
+    let sql = format!(
+        "WITH RECURSIVE tree(id) AS (
+             SELECT ?1
+             UNION SELECT r.id FROM workflow_runs r JOIN tree t ON r.parent_run_id = t.id
+         )
+         SELECT {} FROM discussions d
+         WHERE d.workflow_run_id IN (SELECT id FROM tree)
+         ORDER BY d.created_at ASC",
+        DISC_SELECT_COLS
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let discussions: Vec<Discussion> = stmt
+        .query_map(params![run_id], map_discussion_row)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(discussions)
+}
+
 pub fn list_discussions_paginated(
     conn: &Connection,
     limit: Option<u32>,

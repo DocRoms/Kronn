@@ -195,9 +195,20 @@ while any row runs. The parent posts those states to the iframe as
 rows a Page script renders later. A zero-specificity default indicator is
 injected; the author's own CSS wins. Clicking a row that is still running
 reopens its run instead of a blank offer, clicking the button of the open card
-closes it, and the card also closes with its × or Escape. Once a run is over,
-the card offers to go back to the offer and launch the same row again; a
-Discussion card never does, since a fence carries one intention.
+closes it, and the card also closes with its × or Escape. A row that has run
+reopens on its latest launch, finished or not, and the card offers to go back
+to the offer and launch the same row again; a Discussion card never does,
+since a fence carries one intention.
+
+Once launched, a card tells what the run produced, the same way on a Page and
+in a Discussion. A workflow's steps are listed (name, type, status, duration)
+instead of its raw result, and `GET /api/runs/{id}/outcome` gathers the
+discussions of the run's whole tree, because a `BatchQuickPrompt` step opens
+its discussions under a child batch run. Each one carries its agent's state
+and the head of its latest answer, where agents put their verdict. A launch
+whose result is a discussion reads `GET /api/discussions/{id}/outcome`.
+`[src: file: backend/src/db/run_outcome.rs]`
+`[src: file: frontend/src/components/RunOutcomePanel.tsx]`
 `[src: file: frontend/src/lib/live-page-sandbox.ts]`
 Active and terminal execution rendering delegates to the common
 `RunStatusCard` contract used by Discussions. A Quick Prompt result records

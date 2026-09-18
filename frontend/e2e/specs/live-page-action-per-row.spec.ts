@@ -79,5 +79,13 @@ test.describe('Live Page inline action — each row is its own launch', () => {
     // Clicking the button of the open card closes it.
     await frame.locator('button:has-text("Framer EW-7704")').click();
     await expect(card).toHaveCount(0);
+
+    // A row that has run reopens on what happened, with the way to run it again.
+    await frame.locator('button:has-text("Framer EW-7706")').click();
+    await expect(card).toHaveAttribute('data-state', 'succeeded');
+    await expect(page.getByTestId('run-outcome-item')).toBeVisible();
+    await expect(page.getByTestId('action-card-relaunch')).toBeVisible();
+    await page.getByTestId('action-card-relaunch').click();
+    await expect(card).toHaveAttribute('data-state', 'proposed');
   });
 });
