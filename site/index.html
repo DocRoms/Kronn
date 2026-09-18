@@ -454,6 +454,7 @@
       margin-top: 28px;
     }
     .gallery-card {
+      position: relative;
       margin: 0;
       border: 1.5px solid var(--electric);
       background: var(--bg-card-hi);
@@ -462,7 +463,24 @@
     }
     .gallery-card a { display: block; line-height: 0; }
     .gallery-card img { width: 100%; height: auto; display: block; transition: filter 0.15s; }
+    .gallery-card video { width: 100%; height: auto; display: block; background: #0b0816; }
     .gallery-card a:hover img { filter: brightness(1.08); }
+    /* Une vignette animée ressemble à une capture fixe tant qu'on ne l'a pas regardée. */
+    .gallery-badge {
+      position: absolute;
+      top: 10px;
+      right: 10px;
+      padding: 3px 8px;
+      border: 1px solid var(--electric);
+      border-radius: 3px;
+      background: rgba(10, 8, 20, 0.82);
+      color: var(--lila);
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      line-height: 1.6;
+      pointer-events: none;
+    }
     .gallery-card figcaption { padding: 10px 14px; font-size: 13px; line-height: 1.45; color: var(--text-dim); }
     .gallery-card figcaption strong { color: var(--lila); }
     @media (max-width: 760px) { .gallery-grid { grid-template-columns: 1fr; } }
@@ -478,11 +496,12 @@
     }
     .lb-overlay.open { opacity: 1; visibility: visible; }
     .lb-stage { position: relative; display: flex; align-items: center; justify-content: center; max-width: 100%; }
-    .lb-img {
+    .lb-img, .lb-vid {
       max-width: 90vw; max-height: 80vh; width: auto; height: auto;
       border: 1.5px solid var(--lila); background: var(--bg-deep);
       box-shadow: 0 0 40px rgba(0, 0, 0, 0.6);
     }
+    .lb-vid[hidden], .lb-img[hidden] { display: none; }
     .lb-cap { margin-top: 14px; max-width: 820px; text-align: center; font-family: var(--body); font-size: 14px; line-height: 1.5; color: var(--text-dim); }
     .lb-cap strong { color: var(--lila); }
     .lb-count { font-family: var(--terminal); font-size: 13px; color: var(--kronn); letter-spacing: 0.08em; margin-top: 4px; }
@@ -505,6 +524,14 @@
       transition: background 0.15s, color 0.15s, border-color 0.15s;
     }
     .lb-close:hover { background: var(--kronn); color: var(--bg-deep); border-color: var(--kronn); }
+    .lb-link {
+      margin-top: 8px; padding: 5px 14px;
+      border: 1px solid var(--text-dim); border-radius: 999px;
+      background: rgba(10, 12, 8, 0.7); color: var(--text-dim);
+      font-family: var(--terminal); font-size: 12px; letter-spacing: 0.05em;
+      cursor: pointer; transition: background 0.15s, color 0.15s, border-color 0.15s;
+    }
+    .lb-link:hover { background: var(--lila); color: var(--bg-deep); border-color: var(--lila); }
     body.lb-lock { overflow: hidden; }
     @media (max-width: 900px) {
       .lb-prev { left: 8px; } .lb-next { right: 8px; }
@@ -1659,52 +1686,173 @@
     <p class="section-intro">Le concept c'est bien. Voilà à quoi ça ressemble vraiment.</p>
     <div class="gallery-grid">
       <figure class="gallery-card">
-        <a href="screenshots/kronn_dashboard.png" target="_blank" rel="noopener">
-          <img src="screenshots/kronn_dashboard.png" width="1440" height="960" loading="lazy" alt="Dashboard Kronn : liste des projets, statut d'audit, accès rapide" />
+        <a href="screenshots/kronn-projets.png" target="_blank" rel="noopener">
+          <img src="screenshots/kronn-projets.png" width="1600" height="1000" loading="lazy" alt="Détail d'un projet Kronn : état de l'audit, instructions des agents, dépendances à mettre à jour, onglets Docs, Code, Docker et Git" />
         </a>
-        <figcaption><strong>Dashboard</strong> · tes projets, statut d'audit, accès rapide</figcaption>
-      </figure>
-      <figure class="gallery-card">
-        <a href="screenshots/kronn_multi-ai_discussion.png" target="_blank" rel="noopener">
-          <img src="screenshots/kronn_multi-ai_discussion.png" width="1440" height="960" loading="lazy" alt="Discussion multi-agent : plusieurs CLIs dans la même room Kronn" />
-        </a>
-        <figcaption><strong>Discussion multi-agent</strong> · plusieurs CLIs dans la même room</figcaption>
-      </figure>
-      <figure class="gallery-card">
-        <a href="screenshots/kronn-quick-prompts.png" target="_blank" rel="noopener">
-          <img src="screenshots/kronn-quick-prompts.png" width="1440" height="960" loading="lazy" alt="Bibliothèque de Quick Prompts réutilisables et versionnés" />
-        </a>
-        <figcaption><strong>Quick Prompts</strong> · réutilisables, versionnés, mesurés</figcaption>
-      </figure>
-      <figure class="gallery-card">
-        <a href="screenshots/kronn-qp-launch.png" target="_blank" rel="noopener">
-          <img src="screenshots/kronn-qp-launch.png" width="1440" height="960" loading="lazy" alt="Compare-agents : le même prompt lancé sur plusieurs CLIs en parallèle" />
-        </a>
-        <figcaption><strong>Compare-agents</strong> · le même prompt sur N CLIs</figcaption>
-      </figure>
-      <figure class="gallery-card">
-        <a href="screenshots/KronnCaptureAutoPilot.png" target="_blank" rel="noopener">
-          <img src="screenshots/KronnCaptureAutoPilot.png" width="1440" height="960" loading="lazy" alt="Automatisation : sélecteur de modèle en 1 clic — 7 agents (Claude Code, Codex, Gemini CLI, Kiro, GitHub Copilot, Ollama, LiteLLM) × Éco / Standard / Avancé, par step, avec la branch map colorée" />
-        </a>
-        <figcaption><strong>Choix du modèle en 1 clic</strong> · 7 agents × Éco / Standard / Avancé, par step</figcaption>
-      </figure>
-      <figure class="gallery-card">
-        <a href="screenshots/mcps.png" target="_blank" rel="noopener">
-          <img src="screenshots/mcps.png" width="1440" height="960" loading="lazy" alt="Page Plugins : 20 plugins visibles dont 19 configurés, 55+ au registre (MCP et API), ou n'importe quelle API" />
-        </a>
-        <figcaption><strong>Plugins MCP &amp; API</strong> · 19 configurés · 55+ au registre</figcaption>
+        <figcaption><strong>Votre vue projet</strong>&#8239;: vous pointez Kronn sur un dossier de code et vous obtenez sur un seul écran ce qu'a trouvé le dernier audit (un agent lit le projet et en documente l'état), la santé de la documentation, les dépendances à mettre à jour, l'accès aux fichiers et aux branches Git, et l'accès à Docker si le projet en utilise.</figcaption>
       </figure>
       <figure class="gallery-card">
         <a href="screenshots/KronnDocumentationView.jpg" target="_blank" rel="noopener">
-          <img src="screenshots/KronnDocumentationView.jpg" width="1440" height="960" loading="lazy" alt="Vue Documentation de Kronn : doc générée par l'audit (archi, tech-debt) rendue dans le viewer" />
+          <img src="screenshots/KronnDocumentationView.jpg" width="1600" height="1000" loading="lazy" alt="Onglet Docs d'un projet : l'arbre des fichiers à gauche, le markdown rendu à droite, et le bouton « Discuter de ce fichier »" />
         </a>
-        <figcaption><strong>Audit IA</strong> · toute la doc + tech-debt générées (Yep, Kronn lui-même n'a pas beaucoup de dette tech ;))</figcaption>
+        <figcaption><strong>La doc de votre projet</strong>&#8239;: si le dépôt contient des fichiers Markdown, les vôtres ou ceux qu'un agent a écrits pendant l'audit, vous les lisez ici. Vous pouvez aussi ouvrir une conversation sur un fichier précis pour le faire relire ou compléter.</figcaption>
+      </figure>
+      <figure class="gallery-card">
+        <a href="screenshots/kronn-planification.png" target="_blank" rel="noopener">
+          <img src="screenshots/kronn-planification.png" width="1600" height="1000" loading="lazy" alt="Planification : tâches groupées par projet avec leur statut, et le détail d'une tâche montrant sa Définition de Fini et ses liens" />
+        </a>
+        <figcaption><strong>Votre backlog</strong>&#8239;: vous suivez vos tâches, groupées par projet et par statut. Chacune porte sa « Définition de Fini », c'est-à-dire la liste des critères qu'un agent devra remplir le jour où vous lui confierez le travail.</figcaption>
+      </figure>
+      <figure class="gallery-card">
+        <a href="screenshots/kronn_multi-ai_discussion.png" target="_blank" rel="noopener">
+          <img src="screenshots/kronn_multi-ai_discussion.png" width="1600" height="1000" loading="lazy" alt="Une même question posée à trois agents dans la même discussion : Claude Code, Codex et un modèle OpenRouter répondent tour à tour, chacun avec sa couleur" />
+        </a>
+        <figcaption><strong>Plusieurs IA dans la même conversation</strong>&#8239;: vous réunissez dans une même conversation des agents en ligne de commande installés sur votre machine (Claude Code, Codex…), des modèles qui tournent en local et des modèles appelés par API, parmi ceux que vous avez configurés. Ensuite vous confrontez leurs réponses à la même question.</figcaption>
+      </figure>
+      <figure class="gallery-card">
+        <a href="screenshots/kronn-media-room.png" target="_blank" rel="noopener">
+          <img src="screenshots/kronn-media-room.png" width="1600" height="1000" loading="lazy" alt="Une vidéo générée apparaît dans la discussion avec sa durée, sa définition, son coût réel et la mention qu'elle démarre sur une image de la room" />
+        </a>
+        <figcaption><strong>Générer une image ou un clip vidéo dans la conversation</strong>&#8239;: vous le demandez à l'agent. Si vous avez configuré un modèle d'image ou de vidéo chez un de vos fournisseurs, Kronn lui transmet la demande et dépose le fichier dans la conversation, avec le coût réellement facturé une fois le fichier rendu.</figcaption>
+      </figure>
+      <figure class="gallery-card">
+        <a href="screenshots/kronn-media-generation.mp4" target="_blank" rel="noopener">
+          <video width="1280" height="800" autoplay muted loop playsinline
+                 preload="metadata" aria-label="vous demandez le plan à l'agent, il écrit le prompt, lance le modèle et vous rend le clip dans la conversation. Ensuite vous coupez sa dernière image et vous lui demandez la suite : le plan d'après repart de cette image. Ici, chaton vers lion, puis lion vers dragon, 5 secondes chacun en 720p pour 0,13 $ le clip.">
+            <source src="screenshots/kronn-media-generation.mp4" type="video/mp4" />
+            <source src="screenshots/kronn-media-generation.webm" type="video/webm" />
+          </video>
+        </a>
+        <span class="gallery-badge" aria-hidden="true">▶ VIDÉO</span>
+        <figcaption><strong>Demander, attendre, regarder</strong>&#8239;: vous demandez le plan à l'agent, il écrit le prompt, lance le modèle et vous rend le clip dans la conversation. Ensuite vous coupez sa dernière image et vous lui demandez la suite : le plan d'après repart de cette image. Ici, chaton vers lion, puis lion vers dragon, 5 secondes chacun en 720p pour 0,13 $ le clip.</figcaption>
+      </figure>
+      <figure class="gallery-card">
+        <a href="screenshots/kronn-frame-extraite.png" target="_blank" rel="noopener">
+          <img src="screenshots/kronn-frame-extraite.png" width="1600" height="1000" loading="lazy" alt="Image extraite d'une vidéo, portant sa provenance et un lien vers le clip dont elle vient" />
+        </a>
+        <figcaption><strong>Enchaîner deux plans</strong>&#8239;: quand un clip vidéo est dans la conversation, vous récupérez sa dernière image depuis la galerie des fichiers et vous la donnez comme point de départ à la génération suivante. Le plan continue au lieu de repartir de zéro.</figcaption>
+      </figure>
+      <figure class="gallery-card">
+        <a href="screenshots/kronn-quick-prompts.png" target="_blank" rel="noopener">
+          <img src="screenshots/kronn-quick-prompts.png" width="1600" height="1000" loading="lazy" alt="Éditeur d'un Quick Prompt : son agent, sa variable obligatoire, son prompt, et le compteur de runs, de tokens et de durée accumulés" />
+        </a>
+        <figcaption><strong>Vos prompts enregistrés</strong>&#8239;: vous sauvegardez un prompt avec ses variables et l'agent qui l'exécute, puis vous le relancez d'un clic. Kronn compte ce qu'il vous a coûté : nombre d'exécutions, tokens consommés, temps passé.</figcaption>
+      </figure>
+      <figure class="gallery-card">
+        <a href="screenshots/kronn-qp-launch.png" target="_blank" rel="noopener">
+          <img src="screenshots/kronn-qp-launch.png" width="1600" height="1000" loading="lazy" alt="Barre de lancement d'un Quick Prompt en comparaison : le texte à traduire est saisi et cinq agents sont cochés comme cibles" />
+        </a>
+        <figcaption><strong>Le même prompt sur plusieurs IA</strong>&#8239;: vous remplissez les variables une seule fois, vous cochez les modèles à confronter parmi ceux que Kronn a détectés ou que vous avez configurés, et il ouvre une conversation par modèle en un seul lancement.</figcaption>
+      </figure>
+      <figure class="gallery-card">
+        <a href="screenshots/kronn-comparaison-flux.mp4" target="_blank" rel="noopener">
+          <video width="1280" height="800" autoplay muted loop playsinline
+                 preload="metadata" aria-label="Sélection de trois discussions dans la liste, puis ouverture de la vue de comparaison et du verdict du juge IA">
+            <source src="screenshots/kronn-comparaison-flux.mp4" type="video/mp4" />
+            <source src="screenshots/kronn-comparaison-flux.webm" type="video/webm" />
+          </video>
+        </a>
+        <span class="gallery-badge" aria-hidden="true">▶ VIDÉO</span>
+        <figcaption><strong>Comparer même après coup</strong>&#8239;: vous sélectionnez des conversations qui existent déjà et vous les ouvrez côte à côte. Elles n'ont pas besoin de venir du même lancement.</figcaption>
+      </figure>
+      <figure class="gallery-card">
+        <a href="screenshots/kronn-comparaison.png" target="_blank" rel="noopener">
+          <img src="screenshots/kronn-comparaison.png" width="1600" height="1000" loading="lazy" alt="Comparaison côte à côte de trois agents sur la même traduction : tableau ISO par langue, avis de chaque modèle, durée et tokens consommés" />
+        </a>
+        <figcaption><strong>Les réponses côte à côte</strong>&#8239;: vous lisez chaque modèle dans sa colonne, avec le temps qu'il a mis et les tokens qu'il a consommés. De quoi arbitrer sur autre chose qu'une impression.</figcaption>
+      </figure>
+      <figure class="gallery-card">
+        <a href="screenshots/kronn-comparaison-juge.png" target="_blank" rel="noopener">
+          <img src="screenshots/kronn-comparaison-juge.png" width="1600" height="1000" loading="lazy" alt="Panneau de classement : note IA avec son niveau de confiance, note humaine en étoiles, curseur de pondération, et le détail du verdict" />
+        </a>
+        <figcaption><strong>Faire trancher, ou trancher vous-même</strong>&#8239;: vous notez les réponses à la main. Si elles répondent toutes au même prompt, vous pouvez aussi charger un modèle de les noter à l'aveugle, puis régler le poids de chaque avis dans le classement.</figcaption>
+      </figure>
+      <figure class="gallery-card">
+        <a href="screenshots/kronn-automatisations.png" target="_blank" rel="noopener">
+          <img src="screenshots/kronn-automatisations.png" width="1600" height="1000" loading="lazy" alt="Bibliothèque d'automatisation : workflows, Quick APIs, Quick Prompts et Quick Execs, chacun avec son agent et ses actions" />
+        </a>
+        <figcaption><strong>Tout ce que vous automatisez, au même endroit</strong>&#8239;: vous retrouvez ici vos enchaînements d'étapes, vos appels d'API, vos prompts et vos commandes enregistrées. Chacun garde l'agent qui l'exécute, l'historique de ses versions et son bouton de lancement.</figcaption>
+      </figure>
+      <figure class="gallery-card">
+        <a href="screenshots/kronn-selecteur-agent.png" target="_blank" rel="noopener">
+          <img src="screenshots/kronn-selecteur-agent.png" width="1600" height="1000" loading="lazy" alt="Sélecteur d'agent ouvert : dix agents, chacun avec trois paliers et son état — détecté, à configurer, ou absent du catalogue" />
+        </a>
+        <figcaption><strong>Changer de modèle sans toucher au prompt</strong>&#8239;: vous choisissez l'agent et son palier (Éco, Standard ou Avancé : trois niveaux réglables agent par agent, avec un modèle par défaut si vous n'y touchez pas). Kronn vous dit lesquels il a trouvés sur la machine et lesquels demandent encore une configuration.</figcaption>
       </figure>
       <figure class="gallery-card">
         <a href="screenshots/workflows.png" target="_blank" rel="noopener">
-          <img src="screenshots/workflows.png" width="1440" height="960" loading="lazy" alt="Page Automatisation : orchestration step-based (workflows multi-étapes)" />
+          <img src="screenshots/workflows.png" width="1600" height="1000" loading="lazy" alt="Détail d'un workflow : la carte de branchement à gauche, et à droite les dix étapes avec leur type — exec, appel API, agent, porte humaine, notification" />
         </a>
-        <figcaption><strong>Automatisation</strong> · orchestration step-based</figcaption>
+        <figcaption><strong>Enchaîner des étapes</strong>&#8239;: une automatisation mêle commandes, appels d'API, étapes confiées à une IA, points d'arrêt où un humain valide, et notifications. Les étapes déterministes ne consomment aucun token. Vous ne payez un modèle que sur celles qui en demandent vraiment un, et rien du tout si ce modèle tourne en local.</figcaption>
+      </figure>
+      <figure class="gallery-card">
+        <a href="screenshots/KronnCaptureAutoPilot.png" target="_blank" rel="noopener">
+          <img src="screenshots/KronnCaptureAutoPilot.png" width="1600" height="1000" loading="lazy" alt="Sélecteur ouvert sur l'étape « review » d'un workflow : dix agents, chacun avec ses trois paliers, par-dessus la carte de branchement" />
+        </a>
+        <figcaption><strong>Un modèle par étape</strong>&#8239;: chaque étape a son propre agent et son propre palier, parmi ceux que vous avez configurés. Vous payez le modèle cher là où il change quelque chose, et vous laissez le modèle local faire le reste.</figcaption>
+      </figure>
+      <figure class="gallery-card">
+        <a href="screenshots/kronn-step-agent-swap.mp4" target="_blank" rel="noopener">
+          <video width="1280" height="800" autoplay muted loop playsinline
+                 preload="metadata" aria-label="Changement de l'agent d'une étape de workflow : le sélecteur s'ouvre et l'étape passe de Claude Code à un modèle Ollama local">
+            <source src="screenshots/kronn-step-agent-swap.mp4" type="video/mp4" />
+            <source src="screenshots/kronn-step-agent-swap.webm" type="video/webm" />
+          </video>
+        </a>
+        <span class="gallery-badge" aria-hidden="true">▶ VIDÉO</span>
+        <figcaption><strong>En un clic, sans rien réécrire</strong>&#8239;: si Ollama tourne sur votre machine avec le modèle voulu, vous basculez une étape de Claude Code vers ce modèle local. Le prompt de l'étape, ses entrées et ses sorties ne bougent pas.</figcaption>
+      </figure>
+      <figure class="gallery-card">
+        <a href="screenshots/kronn-agent-workflow.mp4" target="_blank" rel="noopener">
+          <video width="1280" height="800" autoplay muted loop playsinline
+                 preload="metadata" aria-label="Un agent Claude Code crée un workflow multi-étapes depuis la discussion, avec ses appels API et son étape agent">
+            <source src="screenshots/kronn-agent-workflow.mp4" type="video/mp4" />
+            <source src="screenshots/kronn-agent-workflow.webm" type="video/webm" />
+          </video>
+        </a>
+        <span class="gallery-badge" aria-hidden="true">▶ VIDÉO</span>
+        <figcaption><strong>Faire écrire l'automatisation par une IA</strong>&#8239;: avec un agent en ligne de commande, dans une conversation rattachée à un projet, vous décrivez l'enchaînement en français. L'agent lit lui-même le format attendu des étapes et vous rend un brouillon, laissé inactif tant que vous ne l'avez pas relu.</figcaption>
+      </figure>
+      <figure class="gallery-card">
+        <a href="screenshots/kronn-page-vivante.mp4" target="_blank" rel="noopener">
+          <video width="1280" height="800" autoplay muted loop playsinline
+                 preload="metadata" aria-label="Lancement d'un workflow : les étapes passent au vert une à une, puis la page publiée affiche la météo et les dépêches du jour">
+            <source src="screenshots/kronn-page-vivante.mp4" type="video/mp4" />
+            <source src="screenshots/kronn-page-vivante.webm" type="video/webm" />
+          </video>
+        </a>
+        <span class="gallery-badge" aria-hidden="true">▶ VIDÉO</span>
+        <figcaption><strong>Le résultat sur une page Kronn, à jour tout seul</strong>&#8239;: l'automatisation est découpée. Elle collecte par appels d'API ou par fetch, retravaille les données, et n'appelle l'IA que pour la synthèse, là où il en faut vraiment. Ici cette étape tourne sur un modèle local : 6 092 tokens consommés, zéro euro dépensé. Les trois autres n'appellent aucun modèle. Une dernière étape réécrit la page Kronn que vous avez déclarée, et vous n'avez plus qu'à l'ouvrir. Si le workflow est planifié en cron, elle se met à jour toute seule.</figcaption>
+      </figure>
+      <figure class="gallery-card">
+        <a href="screenshots/kronn-live-page.png" target="_blank" rel="noopener">
+          <img src="screenshots/kronn-live-page.png" width="1600" height="1000" loading="lazy" alt="Page vivante : prévisions heure par heure pour Lyon, et les dernières dépêches d'Euronews, Le Monde et The Guardian avec le logo de chaque source" />
+        </a>
+        <figcaption><strong>Une page qui se tient à jour</strong>&#8239;: vous écrivez son HTML une fois et vous déclarez les données qu'elle attend. Vos automatisations les y déposent à chaque exécution, et la page se réécrit sans que vous y reveniez.</figcaption>
+      </figure>
+      <figure class="gallery-card">
+        <a href="screenshots/kronn-connexions-media.png" target="_blank" rel="noopener">
+          <img src="screenshots/kronn-connexions-media.png" width="1600" height="1000" loading="lazy" alt="Configuration des connexions API externes : chaque fournisseur a son alias, ses paliers Éco / Standard / Avancé, et ses modèles de génération d'images et de vidéos" />
+        </a>
+        <figcaption><strong>Brancher un fournisseur par API</strong>&#8239;: vous déclarez une adresse d'API compatible OpenAI et sa clé, vous associez un modèle à chacun des trois paliers, et vous désignez ceux qui serviront à l'image et à la vidéo. Ce sont eux que les agents appelleront.</figcaption>
+      </figure>
+      <figure class="gallery-card">
+        <a href="screenshots/mcps.png" target="_blank" rel="noopener">
+          <img src="screenshots/mcps.png" width="1600" height="1000" loading="lazy" alt="Détail du plugin GitHub : ses deux interfaces MCP et API déterministe, l'interface préférée, son identifiant masqué, et sa portée par projet" />
+        </a>
+        <figcaption><strong>Vos outils, pour les IA et pour les automatisations</strong>&#8239;: un plugin fournit ses outils aux agents, via MCP (le standard qui sert à ça), et ses appels d'API aux étapes d'automatisation. Vous saisissez ses identifiants une fois, Kronn les garde chiffrés, et vous l'activez projet par projet.</figcaption>
+      </figure>
+      <figure class="gallery-card">
+        <a href="screenshots/kronn-agents-cli.png" target="_blank" rel="noopener">
+          <img src="screenshots/kronn-agents-cli.png" width="1600" height="1000" loading="lazy" alt="Configuration des agents : sept CLIs détectés avec leur version, et pour chacun le modèle associé aux niveaux Éco, Standard et Avancé" />
+        </a>
+        <figcaption><strong>Les agents que vous avez déjà</strong>&#8239;: Kronn détecte ceux qui sont installés sur la machine, affiche leur version et s'ils sont authentifiés. Vous choisissez quel modèle répond derrière chacun des trois paliers. Un agent absent reste affiché, marqué comme tel.</figcaption>
+      </figure>
+      <figure class="gallery-card">
+        <a href="screenshots/kronn-base-donnees.png" target="_blank" rel="noopener">
+          <img src="screenshots/kronn-base-donnees.png" width="1600" height="1000" loading="lazy" alt="Section base de données : répartition du poids table par table, avec le nombre de lignes et la part de chacune" />
+        </a>
+        <figcaption><strong>Savoir ce que vous stockez</strong>&#8239;: vous mesurez à la demande le poids de chaque table, vous fixez combien de temps les valeurs d'exécution sont gardées, et vous exportez ou réimportez toute la base.</figcaption>
       </figure>
     </div>
   </section>
@@ -2065,21 +2213,48 @@
 </div>
 
   <script>
+  // Five looping videos on one page is five decoders running for nothing. Each one
+  // plays while it is on screen and stops when it leaves; `muted` keeps autoplay
+  // allowed, and a browser that defers autoplay still gets a play() on entry.
+  (function () {
+    var videos = Array.prototype.slice.call(document.querySelectorAll('.gallery-card video'));
+    if (!videos.length || !('IntersectionObserver' in window)) return;
+    var io = new IntersectionObserver(function (entries) {
+      entries.forEach(function (entry) {
+        var v = entry.target;
+        if (entry.isIntersecting) { var p = v.play(); if (p && p.catch) p.catch(function () {}); }
+        else if (!v.paused) { v.pause(); }
+      });
+    }, { rootMargin: '150px 0px' });
+    videos.forEach(function (v) { io.observe(v); });
+  })();
+
   // Native gallery lightbox / carousel — progressive enhancement over the <a> links.
   (function () {
     var links = Array.prototype.slice.call(document.querySelectorAll('.gallery-card a'));
     if (!links.length) return;
     var L = {
-      fr: { gallery: 'Galerie de captures Kronn', close: 'Fermer', prev: 'Image précédente', next: 'Image suivante' },
-      en: { gallery: 'Kronn screenshot gallery', close: 'Close', prev: 'Previous image', next: 'Next image' },
-      es: { gallery: 'Galería de capturas de Kronn', close: 'Cerrar', prev: 'Imagen anterior', next: 'Imagen siguiente' }
+      fr: { gallery: 'Galerie de captures Kronn', close: 'Fermer', prev: 'Image précédente', next: 'Image suivante', link: 'Copier le lien', copied: 'Lien copié' },
+      en: { gallery: 'Kronn screenshot gallery', close: 'Close', prev: 'Previous image', next: 'Next image', link: 'Copy link', copied: 'Link copied' },
+      es: { gallery: 'Galería de capturas de Kronn', close: 'Cerrar', prev: 'Imagen anterior', next: 'Imagen siguiente', link: 'Copiar el enlace', copied: 'Enlace copiado' }
     };
     var t = L[(document.documentElement.lang || 'en').slice(0, 2)] || L.en;
     var items = links.map(function (a) {
       var fig = a.closest('.gallery-card');
       var cap = fig && fig.querySelector('figcaption');
       var img = a.querySelector('img');
-      return { src: a.getAttribute('href'), caption: cap ? cap.innerHTML : '', alt: img ? (img.getAttribute('alt') || '') : '' };
+      var vid = a.querySelector('video');
+      var webm = vid && vid.querySelector('source[type="video/webm"]');
+      return {
+        video: !!vid,
+        // L'identifiant partagé est le nom du fichier, pas son rang : la galerie
+        // a déjà été réordonnée trois fois, un lien en #media=7 aurait suivi.
+        slug: a.getAttribute('href').replace(/^screenshots\//, '').replace(/\.[a-z0-9]+$/i, ''),
+        src: a.getAttribute('href'),
+        webm: webm ? webm.getAttribute('src') : '',
+        caption: cap ? cap.innerHTML : '',
+        alt: (img || vid) ? ((img || vid).getAttribute('alt') || (img || vid).getAttribute('aria-label') || '') : ''
+      };
     });
     var overlay = document.createElement('div');
     overlay.className = 'lb-overlay';
@@ -2092,26 +2267,93 @@
       '<div class="lb-stage">' +
         '<button class="lb-btn lb-prev" type="button" aria-label="' + t.prev + '">‹</button>' +
         '<img class="lb-img" alt="" />' +
+        '<video class="lb-vid" controls loop muted playsinline preload="metadata" hidden></video>' +
         '<button class="lb-btn lb-next" type="button" aria-label="' + t.next + '">›</button>' +
       '</div>' +
       '<div class="lb-count" aria-live="polite"></div>' +
+      '<button class="lb-link" type="button">' + t.link + '</button>' +
       '<div class="lb-cap"></div>';
     document.body.appendChild(overlay);
     var imgEl = overlay.querySelector('.lb-img');
+    var vidEl = overlay.querySelector('.lb-vid');
     var capEl = overlay.querySelector('.lb-cap');
     var countEl = overlay.querySelector('.lb-count');
+    var linkEl = overlay.querySelector('.lb-link');
+    var linkTimer = null;
     var idx = 0, lastFocus = null;
+    function stopVideo() {
+      vidEl.pause();
+      vidEl.removeAttribute('src');
+      vidEl.innerHTML = '';
+      vidEl.load();
+    }
     function render() {
       var it = items[idx];
-      imgEl.src = it.src; imgEl.alt = it.alt;
+      stopVideo();
+      if (it.video) {
+        // Les deux sources, dans l'ordre de la carte : mp4 d'abord, webm en secours.
+        vidEl.innerHTML =
+          '<source src="' + it.src + '" type="video/mp4" />' +
+          (it.webm ? '<source src="' + it.webm + '" type="video/webm" />' : '');
+        vidEl.setAttribute('aria-label', it.alt);
+        vidEl.load();
+        imgEl.hidden = true; imgEl.removeAttribute('src');
+        vidEl.hidden = false;
+        var play = vidEl.play();
+        if (play && play.catch) play.catch(function () {});
+      } else {
+        vidEl.hidden = true;
+        imgEl.hidden = false;
+        imgEl.src = it.src; imgEl.alt = it.alt;
+      }
       capEl.innerHTML = it.caption;
       countEl.textContent = (idx + 1) + ' / ' + items.length;
-      [1, -1].forEach(function (d) { var p = new Image(); p.src = items[(idx + d + items.length) % items.length].src; });
+      // Précharger le voisin n'a de sens que pour une image : une vidéo se
+      // télécharge en continu, et en précharger deux annule le bénéfice.
+      [1, -1].forEach(function (d) {
+        var near = items[(idx + d + items.length) % items.length];
+        if (!near.video) { var p = new Image(); p.src = near.src; }
+      });
     }
-    function openAt(i) { idx = i; lastFocus = document.activeElement; render(); overlay.setAttribute('aria-hidden', 'false'); overlay.classList.add('open'); document.body.classList.add('lb-lock'); overlay.querySelector('.lb-close').focus(); }
-    function close() { overlay.classList.remove('open'); overlay.setAttribute('aria-hidden', 'true'); document.body.classList.remove('lb-lock'); imgEl.removeAttribute('src'); if (lastFocus && lastFocus.focus) lastFocus.focus(); }
-    function go(step) { idx = (idx + step + items.length) % items.length; render(); }
+    function shareUrl(i) {
+      return location.origin + location.pathname + location.search + '#media=' + items[i].slug;
+    }
+    // replaceState plutôt que pushState : sinon parcourir vingt-quatre diapos
+    // laisse vingt-quatre entrées dans l'historique et le bouton Retour ne
+    // ramène plus à la page d'où l'on vient.
+    function writeHash(i) {
+      if (!history.replaceState) { return; }
+      history.replaceState(null, '', shareUrl(i));
+    }
+    function clearHash() {
+      if (!history.replaceState) { return; }
+      history.replaceState(null, '', location.pathname + location.search + '#gallery');
+    }
+    function indexFromHash() {
+      var m = /^#media=(.+)$/.exec(location.hash || '');
+      if (!m) { return -1; }
+      var key = decodeURIComponent(m[1]);
+      for (var i = 0; i < items.length; i++) { if (items[i].slug === key) { return i; } }
+      var n = parseInt(key, 10);              // #media=7 marche aussi, par commodité
+      return (n >= 1 && n <= items.length) ? n - 1 : -1;
+    }
+    function openAt(i, keepHash) { idx = i; lastFocus = document.activeElement; render(); if (!keepHash) { writeHash(i); } overlay.setAttribute('aria-hidden', 'false'); overlay.classList.add('open'); document.body.classList.add('lb-lock'); overlay.querySelector('.lb-close').focus(); }
+    function close() { overlay.classList.remove('open'); overlay.setAttribute('aria-hidden', 'true'); document.body.classList.remove('lb-lock'); imgEl.removeAttribute('src'); stopVideo(); clearHash(); if (lastFocus && lastFocus.focus) lastFocus.focus(); }
+    function go(step) { idx = (idx + step + items.length) % items.length; render(); writeHash(idx); }
     links.forEach(function (a, i) { a.addEventListener('click', function (e) { if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return; e.preventDefault(); openAt(i); }); });
+    linkEl.addEventListener('click', function () {
+      var url = shareUrl(idx);
+      var done = function () {
+        linkEl.textContent = t.copied;
+        clearTimeout(linkTimer);
+        linkTimer = setTimeout(function () { linkEl.textContent = t.link; }, 1800);
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(url).then(done, function () { window.prompt(t.link, url); });
+      } else {
+        window.prompt(t.link, url);       // pas de presse-papiers hors contexte sûr
+      }
+    });
     overlay.querySelector('.lb-close').addEventListener('click', close);
     overlay.querySelector('.lb-prev').addEventListener('click', function () { go(-1); });
     overlay.querySelector('.lb-next').addEventListener('click', function () { go(1); });
@@ -2128,6 +2370,20 @@
         else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
       }
     });
+    function openFromHash(scroll) {
+      var i = indexFromHash();
+      if (i < 0) { return false; }
+      if (scroll) {
+        var card = links[i].closest('.gallery-card');
+        if (card && card.scrollIntoView) { card.scrollIntoView({ block: 'center' }); }
+      }
+      openAt(i, true);
+      return true;
+    }
+    window.addEventListener('hashchange', function () {
+      if (!openFromHash(false) && overlay.classList.contains('open')) { close(); }
+    });
+    openFromHash(true);                     // un lien partagé ouvre sa diapo
   })();
   </script>
 </body>

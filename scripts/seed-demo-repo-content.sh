@@ -157,16 +157,45 @@ MD
 # Architecture
 
 ```
-HTTP  →  Express router  →  zod validation  →  pg pool  →  Postgres
+HTTP  →  Express router  →  zod validation  →  service  →  pg pool  →  Postgres
+                                                   ↘  Redis (cache lecture)
 ```
 
-- **Routes** (`src/routes/`) hold no business rules beyond validation and SQL.
-- **Pool** (`src/db/pool.ts`) is the single Postgres connection pool.
-- **Logging** uses `pino` with a per-service name.
+Le backend est volontairement plat : une requête traverse quatre couches, et
+chacune a une seule responsabilité. Il n'y a pas de framework maison au-dessus
+d'Express — ce que vous lisez dans `src/` est ce qui s'exécute.
+
+- **Routes** (`src/routes/`) ne portent aucune règle métier au-delà de la
+  validation et de l'appel au service.
+- **Services** (`src/services/`) portent les règles. Ce sont les seuls fichiers
+  qui ont le droit d'écrire en base.
+- **Pool** (`src/db/pool.ts`) est l'unique pool Postgres. N'en ouvrez jamais un
+  second : le pool est dimensionné pour la taille de l'instance, pas du process.
+- **Logs** via `pino`, avec un nom de service par ligne et l'`x-request-id`
+  propagé de bout en bout.
 
 ## Conventions
-- All timestamps are stored UTC (`timestamptz`).
-- Tags are a text array column, not a join table (kept simple on purpose).
+
+- Tous les horodatages sont stockés en UTC (`timestamptz`). La conversion se
+  fait à l'affichage, jamais en base.
+- Les tags sont une colonne tableau de texte, pas une table de jointure —
+  choix assumé tant qu'on reste sous ~20 tags par article.
+- Les migrations sont **en avant uniquement**. Pour annuler, on écrit une
+  nouvelle migration ; on ne réécrit pas l'historique.
+- Toute route publique renvoie une enveloppe `{ data, error }`. Jamais un
+  tableau nu : ça nous a coûté une rupture de contrat en v1.
+
+## Cache
+
+Redis ne sert qu'à la lecture, et seulement pour `GET /api/posts`. La clé
+inclut le hash des paramètres de requête ; l'invalidation est faite à
+l'écriture par le service, pas par un TTL seul.
+
+## Ce qui n'est pas là
+
+Pas de file de messages, pas de workers, pas de multi-tenant. Si l'un des trois
+devient nécessaire, c'est une décision d'architecture à documenter ici avant
+d'écrire la première ligne.
 MD
   cat > "$p/docs/getting-started.md" <<'MD'
 # Getting started

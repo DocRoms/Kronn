@@ -59,16 +59,23 @@ post() {  # post <path> <json> <label>
   local path="$1" body="$2" label="$3" resp
   resp=$(curl -fsS -X POST -H "Content-Type: application/json" -d "$body" "$API$path" 2>&1 || true)
   case "$resp" in
-    *'"success":true'*) echo "  ✓ $label"; printf '%s' "$resp" ;;
+    # The tick goes to stderr: callers capture stdout to read an id out of the
+    # response, and a success line mixed into it would be captured too.
+    *'"success":true'*) echo "  ✓ $label" >&2; printf '%s' "$resp" ;;
     *) echo "  ✗ $label — $(printf '%s' "$resp" | head -c 200)" >&2; printf '' ;;
   esac
 }
 
-# Reads one string field out of a JSON response without jq: the values we pull
-# are opaque ids, so a non-greedy match on the key is exact enough and keeps
-# this script's "pure bash + curl" contract.
+# Reads one string field out of a JSON response without jq, keeping this
+# script's "pure bash + curl" contract.
+#
+# `grep -o` rather than a `sed` substitution: a leading `.*` is greedy, so the
+# substitution returned the LAST match of the key. A create response carries
+# several ids — the object's, and the first message's — so that silently
+# handed back a message id and every append went to a discussion that did not
+# exist. The first match is the one that belongs to the object.
 field() {  # field <json> <key>
-  printf '%s' "$1" | sed -n "s/.*\"$2\":\"\([^\"]*\)\".*/\1/p" | head -1
+  printf '%s' "$1" | grep -o "\"$2\":\"[^\"]*\"" | head -1 | cut -d'"' -f4
 }
 
 # ── Named external connections ─────────────────────────────────────────
@@ -91,7 +98,20 @@ OPENROUTER=$(post /external-api/connections '{
   "api_key":"'"$OPENROUTER_KEY"'"
 }' "OpenRouter — 3 tiers + image + video")
 
-post /external-api/connections '{
+# These two already exist: Kronn creates a legacy connection per built-in HTTP
+# provider at first boot, so their aliases are taken. Fill them in rather than
+# duplicate them — an empty tier list is exactly what the screenshot must not
+# show.
+put() {  # put <path> <json> <label>
+  local resp
+  resp=$(curl -fsS -X PUT -H "Content-Type: application/json" -d "$2" "$API$1" 2>&1 || true)
+  case "$resp" in
+    *'"success":true'*) echo "  ✓ $3" >&2 ;;
+    *) echo "  ✗ $3 — $(printf '%s' "$resp" | head -c 160)" >&2 ;;
+  esac
+}
+
+put /external-api/connections/external-api-litellm '{
   "display_name":"LiteLLM",
   "mention_alias":"litellm",
   "endpoint":"https://litellm.demo.internal",
@@ -100,16 +120,16 @@ post /external-api/connections '{
   "default_model":"claude-sonnet-4-6",
   "reasoning_model":"gpt-5.1",
   "api_key":"sk-demo-not-a-real-key"
-}' "LiteLLM — routed tiers" >/dev/null
+}' "LiteLLM — routed tiers"
 
-post /external-api/connections '{
+put /external-api/connections/external-api-nvidia '{
   "display_name":"NVIDIA",
   "mention_alias":"nvidia",
   "endpoint":"https://integrate.api.nvidia.com",
   "origin_preset":"nvidia",
   "default_model":"meta/llama-3.3-70b-instruct",
   "api_key":"nvapi-demo-not-a-real-key"
-}' "NVIDIA — single tier" >/dev/null
+}' "NVIDIA — single tier"
 
 CONNECTION_ID=$(field "$OPENROUTER" id)
 
@@ -134,8 +154,16 @@ if [ -n "$ROOM_ID" ]; then
     local body
     body=$(printf '{"disc_id":"%s","messages":[{"source_msg_id":"%s","role":"Agent","content":%s,"agent_type":"%s"}]}' \
       "$ROOM_ID" "$1" "$3" "$2")
-    curl -fsS -X POST -H "Content-Type: application/json" -d "$body" \
-      "$API/disc/append" >/dev/null 2>&1 && echo "  ✓ réponse $2" || echo "  ✗ réponse $2" >&2
+    # Checked on the payload, not on curl's exit code: the API answers HTTP 200
+    # with `success:false` for a refused append, so an exit-code check reported
+    # three replies that were never written.
+    local resp
+    resp=$(curl -fsS -X POST -H "Content-Type: application/json" -d "$body" \
+      "$API/disc/append" 2>&1 || true)
+    case "$resp" in
+      *'"success":true'*) echo "  ✓ réponse $2" >&2 ;;
+      *) echo "  ✗ réponse $2 — $(printf '%s' "$resp" | head -c 140)" >&2 ;;
+    esac
   }
 
   append demo-1 ClaudeCode '"Oui, mais pas pour la raison qu'\''on croit.\n\nLe problème n'\''est pas le flush : c'\''est qu'\''il s'\''exécute **dans** le processus qui sert le trafic. `RedisFlushController` bloque le worker, l'\''ALB voit un health check qui ne répond plus, et sort l'\''instance du pool. Le 503 est une conséquence de l'\''éviction, pas du flush.\n\nDéplacer vers Lambda règle ça. Ce que ça casse : le flush devient asynchrone, donc il faut un signal de fin — sinon on purge et on continue à servir du cache périmé sans le savoir."'
@@ -164,6 +192,41 @@ if [ -n "$CONNECTION_ID" ]; then
 fi
 
 # ── A Quick Prompt worth comparing ─────────────────────────────────────
+# ── Ollama tiers, from what is actually pulled ─────────────────────────
+# The default tiers name models this machine may never have pulled, and the
+# failure is a flat `404 … may not support tool calling` from a workflow step —
+# a message about tools for what is really a missing model. Read the installed
+# list and bind the tiers to it, so the sandbox works on whatever the host has.
+echo
+echo "▸ Paliers Ollama…"
+OLLAMA_TAGS=$(curl -fsS --max-time 6 http://127.0.0.1:11434/api/tags 2>/dev/null || true)
+if [ -n "$OLLAMA_TAGS" ]; then
+  TIERS=$(printf '%s' "$OLLAMA_TAGS" | python3 -c '
+import json, sys
+names = [m["name"] for m in (json.load(sys.stdin).get("models") or [])]
+if not names:
+    sys.exit(1)
+# Smallest first: a one-sentence synthesis does not need the largest model,
+# and the economy tier is what a demo should exercise.
+names.sort(key=len)
+eco, default = names[0], names[min(1, len(names) - 1)]
+reasoning = names[-1]
+print(json.dumps({"economy": eco, "default": default, "reasoning": reasoning}))
+' 2>/dev/null || true)
+  if [ -n "$TIERS" ]; then
+    curl -fsS -X POST -H "Content-Type: application/json" -d "{
+      \"claude_code\":{},\"codex\":{},\"open_code\":{},\"gemini_cli\":{},\"kiro\":{},
+      \"vibe\":{},\"copilot_cli\":{},\"ollama\":$TIERS,
+      \"lite_llm\":{\"economy\":\"gpt-4.1-mini\",\"default\":\"claude-sonnet-4-6\",\"reasoning\":\"gpt-5.1\"},
+      \"nvidia\":{\"default\":\"meta/llama-3.3-70b-instruct\"}
+    }" "$API/config/model-tiers" >/dev/null 2>&1 \
+      && echo "  ✓ paliers liés aux modèles installés" \
+      || echo "  ✗ paliers non appliqués" >&2
+  fi
+else
+  echo "  · Ollama injoignable, paliers laissés par défaut"
+fi
+
 echo
 echo "▸ Quick Prompt de comparaison…"
 post /quick-prompts '{
@@ -171,7 +234,7 @@ post /quick-prompts '{
   "icon":"⚖️",
   "prompt_template":"Voici les symptômes d'\''un incident de production :\n\n{{symptomes}}\n\nDonne la cause la plus probable, ce qui l'\''infirmerait, et la première mesure à prendre. Sois bref.",
   "variables":[{"name":"symptomes","label":"Symptômes observés","placeholder":"503 en rafale après un déploiement…","required":true}],
-  "agent":"Custom","tier":"default","skill_ids":[],
+  "agent":"Custom","connection_id":"'"$CONNECTION_ID"'","tier":"default","skill_ids":[],
   "description":"Le même diagnostic posé à plusieurs modèles, pour comparer les réponses côte à côte sur un run unique."
 }' "Comparer les modèles sur un diagnostic" >/dev/null
 
