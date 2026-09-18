@@ -686,6 +686,23 @@ pub(super) enum ToolRecord {
 /// Classified through the same `classify_tool_call` the CLI path uses, so
 /// kronn-internal and agent-native keep splitting visually. ACP reports a name
 /// without arguments, hence the empty input.
+/// A line the ACP forwarder wrote to reach [`lift_acp_tool_calls`].
+///
+/// The marker is a wire detail between the two, so it must not escape to a
+/// surface a human reads. The transcript consumes it; the live log panel skips
+/// it. One predicate for both, so the two halves cannot drift apart again.
+pub(super) fn is_acp_tool_marker(line: &str) -> bool {
+    line.starts_with(runner::ACP_TOOL_MARKER)
+}
+
+/// Whether a captured stderr line belongs in the live log panel.
+///
+/// The streaming task and its test call this, so the panel's contract is
+/// pinned by the same code the task runs.
+pub(super) fn forwards_to_log_panel(trimmed: &str) -> bool {
+    !trimmed.is_empty() && !is_acp_tool_marker(trimmed)
+}
+
 pub(super) fn lift_acp_tool_calls(
     stderr_lines: &[String],
     kronn_tool_calls: &mut Vec<String>,
@@ -3063,13 +3080,20 @@ async fn make_agent_stream_inner(
                         if lines.len() > last_len {
                             for line in &lines[last_len..] {
                                 let trimmed = line.trim();
-                                if !trimmed.is_empty() {
-                                    let _ = log_tx
-                                        .send(AgentStreamEvent::Log {
-                                            text: trimmed.to_string(),
-                                        })
-                                        .await;
+                                // ACP has no stdout event stream, so a tool call rides the
+                                // stderr capture to reach `lift_acp_tool_calls`. That marker
+                                // is a wire detail: the transcript already renders the call
+                                // under the reply, and this panel is for run diagnostics.
+                                // Forwarding it here fills the log with `[acp-tool] Bash`
+                                // and evicts the diagnostics the panel exists for.
+                                if !forwards_to_log_panel(trimmed) {
+                                    continue;
                                 }
+                                let _ = log_tx
+                                    .send(AgentStreamEvent::Log {
+                                        text: trimmed.to_string(),
+                                    })
+                                    .await;
                             }
                             last_len = lines.len();
                         }
@@ -4929,8 +4953,8 @@ mod agent_lifecycle_tests {
         agent_start_error_content, agent_start_failure_outcome, auth_required_system_message,
         cap_agent_response, child_run_counts_as_success, configured_agent_global_timeout,
         connection_mismatch, effective_global_timeout, effective_stall_timeout,
-        finish_tracked_preflight, lift_acp_tool_calls, AgentExecutionOutcome, ConnectionMismatch,
-        NON_STREAMING_STALL_TIMEOUT,
+        finish_tracked_preflight, forwards_to_log_panel, lift_acp_tool_calls,
+        AgentExecutionOutcome, ConnectionMismatch, NON_STREAMING_STALL_TIMEOUT,
     };
     use crate::models::{AgentType, MessageRole};
     use std::time::Duration;
@@ -5169,6 +5193,43 @@ mod agent_lifecycle_tests {
             &mut native,
         );
         assert!(kronn.is_empty() && native.is_empty());
+    }
+
+    #[test]
+    fn the_live_log_panel_never_shows_the_marker_the_transcript_consumes() {
+        // The contract was pinned on the transcript half only, so the marker
+        // reached the log panel verbatim: one `[acp-tool] Bash` per call, and
+        // on a successful ACP turn the panel held nothing else. This asserts
+        // the half that was missing — what the streaming task forwards.
+        let capture = [
+            "ACP transport failed: broken pipe".to_string(),
+            format!("{}Bash", crate::agents::runner::ACP_TOOL_MARKER),
+            format!("{}Bash", crate::agents::runner::ACP_TOOL_MARKER),
+            "  ".to_string(),
+            "npm warn deprecated".to_string(),
+        ];
+
+        let forwarded: Vec<&str> = capture
+            .iter()
+            .map(|line| line.trim())
+            .filter(|line| forwards_to_log_panel(line))
+            .collect();
+
+        assert_eq!(
+            forwarded,
+            vec!["ACP transport failed: broken pipe", "npm warn deprecated"],
+            "the panel keeps diagnostics and drops the wire marker"
+        );
+
+        // And the transcript still reads the very lines the panel dropped.
+        let mut kronn = Vec::new();
+        let mut native = Vec::new();
+        lift_acp_tool_calls(&capture, &mut kronn, &mut native);
+        assert_eq!(
+            kronn.len() + native.len(),
+            2,
+            "both calls still reach the group under the reply"
+        );
     }
 
     #[tokio::test]
