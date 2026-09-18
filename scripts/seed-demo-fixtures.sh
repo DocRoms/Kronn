@@ -137,8 +137,14 @@ EOF
 
 # ── Spawn backend in background ───────────────────────────────────────
 echo "▸ Starting backend…"
+# 8 192 is the portable fallback, not what a local model can hold. A demo
+# workflow that hands an agent a few headlines trips the admission gate at
+# that size — correctly, which is the point: the gate refuses rather than let
+# Ollama truncate the brief. Give the sandbox the window its models really
+# have, so the refusal only fires on a genuinely oversized prompt.
 KRONN_DATA_DIR="$DATA_DIR" \
 KRONN_HOST_HOME="$HOST_HOME_DIR" \
+KRONN_OLLAMA_NUM_CTX_CAP="${KRONN_OLLAMA_NUM_CTX_CAP:-24576}" \
   "$BINARY" > /tmp/kronn-demo-backend.log 2>&1 &
 BACKEND_PID=$!
 echo "$BACKEND_PID" > /tmp/kronn-demo-backend.pid

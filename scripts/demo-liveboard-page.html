@@ -1,0 +1,136 @@
+<!doctype html><meta charset="utf-8"><title>Lyon &amp; l'actualité</title>
+<style>
+ :root{--bg:#0d0f13;--card:#151920;--line:#232833;--dim:#8b93a1;--txt:#e9ecf1;--accent:#4ade80}
+ *{box-sizing:border-box}
+ body{font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;background:var(--bg);color:var(--txt);margin:0;padding:38px 40px 56px}
+ header{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap;margin-bottom:6px}
+ h1{font-size:27px;margin:0;letter-spacing:-.02em}
+ .rev{font-size:11px;color:var(--dim);border:1px solid var(--line);border-radius:99px;padding:3px 10px}
+ .sub{color:var(--dim);font-size:13px;margin:0 0 24px}
+ .synth{background:linear-gradient(135deg,#132a1f,#101c19);border:1px solid #23503a;border-radius:14px;padding:18px 22px;margin-bottom:24px;font-size:15.5px;line-height:1.6}
+ .grid{display:grid;grid-template-columns:340px 1fr;gap:20px;align-items:start}
+ @media(max-width:1000px){.grid{grid-template-columns:1fr}}
+ .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:20px}
+ .lbl{color:var(--dim);font-size:10.5px;text-transform:uppercase;letter-spacing:.09em;margin-bottom:14px}
+ .now{display:flex;align-items:baseline;gap:8px}
+ .t{font-size:52px;font-weight:650;line-height:.95;letter-spacing:-.03em}
+ .u{font-size:19px;color:var(--dim)}
+ .meta{color:var(--dim);font-size:12.5px;margin-top:8px}
+ .hours{display:flex;gap:6px;margin-top:20px;overflow-x:auto;padding-bottom:4px}
+ .h{flex:0 0 46px;text-align:center}
+ .h .hh{font-size:10.5px;color:var(--dim);margin-bottom:6px}
+ .bar{height:56px;display:flex;align-items:flex-end;justify-content:center}
+ .bar i{display:block;width:16px;border-radius:4px 4px 0 0;background:linear-gradient(180deg,#4ade80,#1c7a46)}
+ .h .tt{font-size:11.5px;margin-top:6px;font-variant-numeric:tabular-nums}
+ .h .pp{font-size:9.5px;color:#5c93d6;margin-top:2px;height:12px}
+ ul{list-style:none;margin:0;padding:0}
+ li{display:flex;gap:11px;align-items:flex-start;padding:11px 0;border-bottom:1px solid var(--line)}
+ li:last-child{border-bottom:0}
+ li img{width:16px;height:16px;border-radius:3px;flex:0 0 16px;margin-top:2px}
+ .ti{flex:1;font-size:13.5px;line-height:1.45}
+ .src{display:block;color:var(--dim);font-size:11px;margin-top:3px}
+ a.cta{flex:0 0 auto;color:var(--accent);text-decoration:none;font-size:12px;border:1px solid #23503a;border-radius:8px;padding:5px 11px;white-space:nowrap}
+ a.cta:hover{background:#132a1f}
+ .empty{color:#5a6070;font-style:italic}
+</style>
+<header><h1>Lyon &amp; l'actualité</h1><span class="rev" id="rev">…</span></header>
+<p class="sub" id="stamp">…</p>
+<div class="synth" id="synth"><span class="empty">en attente de la publication</span></div>
+<div class="grid">
+  <div class="card">
+    <div class="lbl">Météo · Lyon</div>
+    <div id="now"><span class="empty">—</span></div>
+    <div class="hours" id="hours"></div>
+  </div>
+  <div class="card">
+    <div class="lbl">À la une · trois rédactions</div>
+    <ul id="news"><li><span class="empty">—</span></li></ul>
+  </div>
+</div>
+<script>
+ var ICONS = {"euronews": "data:image/x-icon;base64,AAABAAMAMDAAAAEACACoDgAANgAAACAgAAABAAgAqAgAAN4OAAAQEAAAAQAIAGgFAACGFwAAKAAAADAAAABgAAAAAQAIAAAAAAAACQAAAAAAAAAAAAAAAQAAAAAAAPF5DQD5yJsA/vr2APBvAAD4v4sA8HUIAP7x5gDwcgAA+9a2AP7z6QD96tkA9q9uAPvYuQD6z6kA9JQ+APBzBgDxeQ4A+9q8APrRrADzjTEA+L+MAPKEIQD3tnwA8HIBAPOPNAD//PoA/vPqAP717QD8480A9qhiAPrRrQDyhCIA8XsSAP738ADwcgIA/OXQAPaqZQD4wZAA97iAAPF9FQDwdAUA/fDjAPamYADzizAA/vXuAPF/GADwcAAA8HYIAPexcwD6zqYA/vfxAPezdgD73MEA9qpmAPSYRgD++fQA8HQGAPvexAD83sQA+9W0APOROQD5w5QA8HYJAPexdAD96dcA+s6nAPF4DAD60KoA+ceaAP759QD4vooA/fDlAPKDHwDyiCoA//v4AP7y6ADxfBIA/enYAPBzAgD6zqgA8XgNAPi5gAD3sHAA9qdgAPvZuwD60KsA8G4AAPSVQADzjDAA8oMgAPF6EADwcQAA+tKuAPOOMwD4wI4A8oUjAPF8EwD++PEA8HMDAPnLoQD//fwA8oEeAPnCkQD2p2EA9JVBAPOMMQD///8A8XoRAP727wD4u4QA8HEBAPeydAD2qWQA9aBUAPOONAD++PIA+L2HAP3v4gDwcwQA/ObSAPWiVwD0mUcA+cKSAPKHJwD++vUA/fHlAPB1BwD5xJUA8HcKAPF3CgD6z6gA/vjzAPF8FQD4vYgA/e/jAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXWy5bBxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFy44SFh7EC4XFxciYnZiFxcXFxdOdnYiFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXIg4NdRsJOnBCW1tfY1xSThcXF1sdXDFYWxcXFxcXFxcXFxcXFxcXFxcXFxcXFxciKhoKhR1vEUUBay4YIWqCYhcXF1t6akp5LhcXFxcXFxcXFxcXFxcXFxcXFxcXFy5XSxIVLgMuQjBzbVtyIWpPYhcXF1t6akp5LhcXFxcXFxcXFxcXFxcXFxcXFxcXF34eI2UDW1tbWw9TCy9yIWpPYhcXF1t6akp5LhcXFxcXFxcXFxcXFxcXFxcXFxcXW3sGbSAnJycnJydMYD5yIWpPYhcXF1t6akp5LhcXFxcXFxcXFxcXFxcXFxcXFxcXLmh8R0BAQEBAQE1ATW9dIWpBYhcXF1tmakp5LhcXFxcXFxcXFxcXFxcXFxcXFxcXLmiDXEYUFBQUFAR/bIUTbGpDYhcXF1s9ako2LhcXFxcXFxcXFxcXFxcXFxcXFxcXW3t9P1YuLi4uLgMrCSQfR2ochFsXWwU7amE8LhcXFxcXFxcXFxcXFxcXFxcXFxcXF34eI2UuFxcXW3YlKUkvDGoZFoEuKGdzanctWxcXFxcXFxcXFxcXFxcXFxcXFxcXFy5XS1VZLgMuQjAyUSIueEVqAgxeHiFqZDNbFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxciKhpNdGdvVEVEWlsHfiY3ampqamoZRFpbFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXIg4NdRsJOXBCWxcXW35xCIYsBjQ1UFsXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFy44SFh7AC4XFxcXFxcugF9pewAubhcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXWy5bBxcXFxcXFxcXF1suWwcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA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", "lemonde": "data:image/x-icon;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAAAAABWESUoAAABMUlEQVR4AWMYOoC5moCClhYGzY7Di1UYGFxmCQL5knOiGJGkGdW/nz/5HwiuyK76//++MVPOx///T9iyRQhBFeh5/fkPAVdK3/7//+PCpK6fQM6fxSJQBZxZVpGO1lVAMeV0t0///08UyPbc+v9/OaoznCOAChQZUk///9/LwOBg8OE3O6oCy0iwgrjjYAWCd/9fY8CjQDvp//+z+BQElBBQEFVNQEEs2QoEoQrisCkAhsNbBjwKnBP+/y+BKYjHokB86pMgBnwKpCfwMsAVJGAocJ6w59AUPQY+JAVXkaTtLoAj++e63WAFTQwZhf///22bA0sv7be74oIynvx/m8EEUnBMjsHb9+v/v9Nh6SUunomBQbgxbIYwiDPJC6Sn0n2ZMZojWRXAlAKUq80wlAAAJbvjBhQMZdcAAAAASUVORK5CYII=", "guardian": "data:image/x-icon;base64,AAABAAEAICAAAAEAIACoEAAAFgAAACgAAAAgAAAAQAAAAAEAIAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAEAMAAGADAgKgAgEBzwIBAe8DAgL/AwIC/wIBAe8CAQHPAwICnwMAAGAAAAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAMCAqADAgL/AwIC/wMCAv8DAgL/AwIC/wMCAv8DAgL/AwIC/wMCAv8DAgL/AwIC/wIBAe8EAgKQAAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQCAoADAgL/AwIC/wMCAv8DAgL/AwIC/wMCAv8DAgL/AwIC/wMCAv8DAgL/AwIC/wMCAv8DAgL/AwIC/wMCAv8DAgL/BAICkAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACACAQHfAwIC/wMCAv8DAgL/AwIC/wMCAv8DAgL/AwIC/0JBQf9SUVH/YWFh/wMCAv8TEhL/ExIS/wMCAv8DAgL/AwIC/wMCAv8DAgL/AgEB3wAAACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgAgEB3wMCAv8DAgL/AwIC/wMCAv8DAgL/YWFh/8C/v///////7+/v/2JhYf8yMTH/AwIC/0JBQf//////wL+//0JBQf8DAgL/AwIC/wMCAv8DAgL/AgEB3wAAACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAIBAd8DAgL/AwIC/wMCAv8DAgL/MjEx/+Dg4P///////////+/v7/8iIiL/AwIC/wMCAv8DAgL/QkFB/////////////////8C/v/9CQUH/AwIC/wMCAv8DAgL/AgEB3wAAACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAQHfAwIC/wMCAv8DAgL/AwIC/4GAgP//////////////////////QkFB/wMCAv8DAgL/AwIC/wMCAv9CQUH///////////////////////////9CQUH/AwIC/wMCAv8DAgL/AgEB3wAAAAAAAAAAAAAAAAAAAAAAAAAABAICkAMCAv8DAgL/AwIC/wMCAv+BgID//////////////////////8DAwP8DAgL/AwIC/wMCAv8DAgL/AwIC/0JBQf///////////////////////////2JhYf8DAgL/AwIC/wMCAv8DAgL/BAICgAAAAAAAAAAAAAAAAAAAACADAgL/AwIC/wMCAv8DAgL/cXBw////////////////////////////YmFh/wMCAv8DAgL/AwIC/wMCAv8DAgL/QkFB////////////////////////////YmFh/wMCAv8DAgL/AwIC/wMCAv8DAgL/AAAAIAAAAAAAAAAAAgICkAMCAv8DAgL/AwIC/xMSEv/v7+////////////////////////////8TEhL/AwIC/wMCAv8DAgL/AwIC/wMCAv9CQUH///////////////////////////9iYWH/AwIC/wMCAv8DAgL/AwIC/wMCAv8DAgKfAAAAAAAAABADAgLvAwIC/wMCAv8DAgL/gYCA////////////////////////////0NDQ/wMCAv8DAgL/AwIC/wMCAv8DAgL/AwIC/0JBQf///////////////////////////2JhYf8DAgL/AwIC/wMCAv8DAgL/AwIC/wMCAv8AAAAQAwMDYAMCAv8DAgL/AwIC/xMSEv/v7+////////////////////////////+goKD/AwIC/wMCAv8DAgL/AwIC/wMCAv8DAgL/QkFB////////////////////////////YmFh/wMCAv8DAgL/AwIC/wMCAv8DAgL/AwIC/wMAAGACAgKgAwIC/wMCAv8DAgL/QkFB/////////////////////////////////4GAgP8DAgL/AwIC/wMCAv8DAgL/AwIC/wMCAv9CQUH///////////////////////////9iYWH/AwIC/wMCAv8DAgL/AwIC/wMCAv8DAgL/AwICnwICAs8DAgL/AwIC/wMCAv+RkJD/////////////////////////////////YmFh/wMCAv8DAgL/AwIC/wMCAv8DAgL/AwIC/0JBQf///////////////////////////2JhYf8DAgL/AwIC/wMCAv8DAgL/AwIC/wMCAv8CAQHPAwIC7wMCAv8DAgL/AwIC/6GgoP////////////////////////////////9iYWH/AwIC/wMCAv8DAgL/AwIC/wMCAv9CQUH/sLCw////////////////////////////0NDQ/2JhYf8DAgL/AwIC/wMCAv8DAgL/AwIC/wMCAu8DAgL/AwIC/wMCAv8DAgL/wMDA/////////////////////////////////2JhYf8DAgL/AwIC/wMCAv8DAgL/AwIC/2FhYf9hYWH/YWFh/2FhYf9hYWH/YWFh/2FhYf9hYWH/YWFh/xMSEv8DAgL/AwIC/wMCAv8DAgL/AwIC/wMCAv8DAgL/AwIC/wMCAv/AwMD/////////////////////////////////YmFh/wMCAv8DAgL/AwIC/wMCAv8DAgL/AwIC/wMCAv8DAgL/AwIC/wMCAv8DAgL/AwIC/wMCAv8DAgL/AwIC/wMCAv8DAgL/AwIC/wMCAv8DAgL/AwIC7wMCAv8DAgL/AwIC/6GgoP////////////////////////////////9iYWH/AwIC/wMCAv8DAgL/AwIC/wMCAv8DAgL/AwIC/wMCAv8DAgL/AwIC/wMCAv8DAgL/AwIC/wMCAv8DAgL/AwIC/wMCAv8DAgL/AwIC/wMCAu8CAgLPAwIC/wMCAv8DAgL/gYCA/////////////////////////////////3FwcP8DAgL/AwIC/wMCAv8DAgL/AwIC/wMCAv8DAgL/AwIC/wMCAv8DAgL/AwIC/wMCAv8DAgL/AwIC/wMCAv8DAgL/AwIC/wMCAv8DAgL/AgEBzwMCAp8DAgL/AwIC/wMCAv9SUVH/////////////////////////////////gYCA/wMCAv8DAgL/AwIC/wMCAv8DAgL/AwIC/wMCAv8DAgL/AwIC/wMCAv8DAgL/AwIC/wMCAv8DAgL/AwIC/wMCAv8DAgL/AwIC/wMCAv8DAgKfAwMDYAMCAv8DAgL/AwIC/wMCAv/v7+////////////////////////////+wsLD/AwIC/wMCAv8DAgL/AwIC/wMCAv8DAgL/AwIC/wMCAv8DAgL/AwIC/wMCAv8jIiL/IiIi/wMCAv8DAgL/AwIC/wMCAv8DAgL/AwIC/wMDA2AAAAAQAwIC/wMCAv8DAgL/AwIC/6CgoP///////////////////////////9DQ0P8DAgL/AwIC/wMCAv8DAgL/AwIC/wMCAv8DAgL/AwIC/wMCAv8DAgL/AwIC/8DAwP9iYWH/AwIC/wMCAv8DAgL/AwIC/wMCAv8DAgLvAAAAEAAAAAADAgKfAwIC/wMCAv8DAgL/IyIi/+Dg4P///////////////////////////yIiIv8DAgL/AwIC/wMCAv8DAgL/AwIC/wMCAv8DAgL/AwIC/wMCAv+BgID//////2JhYf8DAgL/AwIC/wMCAv8DAgL/AwIC/wICApAAAAAAAAAAAAAAACADAgL/AwIC/wMCAv8DAgL/YWFh////////////////////////////YmFh/wMCAv8DAgL/AwIC/wMCAv8DAgL/AwIC/wMCAv8DAgL/QkFB////////////YmFh/wMCAv8DAgL/AwIC/wMCAv8DAgL/AAAAIAAAAAAAAAAAAAAAAAICAn8DAgL/AwIC/wMCAv8DAgL/gYGB///////////////////////f39//AwIC/wMCAv8DAgL/AwIC/wMCAv8DAgL/AwIC/yMiIv/g4OD///////////9iYWH/AwIC/wMCAv8DAgL/AwIC/wQCAo8AAAAAAAAAAAAAAAAAAAAAAAAAAAMCAt8DAgL/AwIC/wMCAv8DAgL/cXFx//////////////////////9iYWH/AwIC/wMCAv8DAgL/AwIC/wMCAv8DAgL/wMDA////////////39/f/zIxMf8DAgL/AwIC/wMCAv8DAgLfAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAMCAt8DAgL/AwIC/wMCAv8DAgL/MjEx/8DAwP///////////+/v7/8yMTH/AwIC/wMCAv8DAgL/AwIC/4GAgP///////////6CgoP8iIiL/AwIC/wMCAv8DAgL/AwIC3wAAACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAMCAt8DAgL/AwIC/wMCAv8DAgL/AwIC/0JBQf/AwMD/7+/v/+/v7/+BgID/UlFR/wMCAv8yMTH/39/f/6CgoP8iIiL/AwIC/wMCAv8DAgL/AwIC/wMCAt8AAAAgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAMCAt8DAgL/AwIC/wMCAv8DAgL/AwIC/wMCAv8DAgL/MjEx/1JRUf9hYWH/AwIC/wMCAv8DAgL/AwIC/wMCAv8DAgL/AwIC/wMCAv8DAgLfAAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAEAICAo8DAgL/AwIC/wMCAv8DAgL/AwIC/wMCAv8DAgL/AwIC/wMCAv8DAgL/AwIC/wMCAv8DAgL/AwIC/wMCAv8DAgL/AgICfwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAEAgKPAwIC7wMCAv8DAgL/AwIC/wMCAv8DAgL/AwIC/wMCAv8DAgL/AwIC/wMCAv8DAgL/AwICnwAAACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQAAAAYAMCAp8CAQHPAwIC7wMCAv8DAgL/AwIC7wIBAc8DAgKfAwMDYAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/8AD//8AAP/+AAA/+AAAH/AAAA/gAAAHwAAAB8AAAAOAAAABgAAAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAAGAAAABwAAAA+AAAAPgAAAH8AAAD/gAAB/8AAB//wAA///AA/8="};
+ var LABELS = {euronews:'Euronews', lemonde:'Le Monde', guardian:'The Guardian'};
+ var WMO = {0:'ciel clair',1:'peu nuageux',2:'partiellement nuageux',3:'couvert',45:'brouillard',48:'brouillard givrant',51:'bruine',61:'pluie faible',63:'pluie',65:'pluie forte',80:'averses',95:'orage'};
+
+ // Kronn defines KronnPageData as a lazy getter on the sandbox window, so it
+ // is not there at parse time. Poll briefly, then give up quietly: an empty
+ // card is honest, a spinner that never stops is not.
+ (function wait(n){
+   var K = window.KronnPageData;
+   if (K && K.datasets && Object.keys(K.datasets).length) return render(K);
+   if (n > 60) return;
+   setTimeout(function(){ wait(n+1); }, 50);
+ })(0);
+
+ function esc(s){ return String(s == null ? '' : s).replace(/[<>&]/g, function(c){ return {'<':'&lt;','>':'&gt;','&':'&amp;'}[c]; }); }
+
+ function render(K){
+   var D = K.datasets || {}, page = K.page || {};
+   function cur(n){ return D[n] && D[n].current; }
+
+   document.getElementById('rev').textContent = 'données r' + (page.data_revision == null ? '?' : page.data_revision);
+   document.getElementById('stamp').textContent = 'Publié par un workflow Kronn — météo Open-Meteo, dépêches Euronews, Le Monde et The Guardian.';
+
+   // A local model sometimes answers twice — two complete sentences glued
+   // together. Keeping the first is the honest render: the page shows what was
+   // asked for, one sentence, without pretending the second does not exist in
+   // the dataset.
+   var s = cur('synthese');
+   if (s) {
+     var text = typeof s === 'string' ? s.trim() : JSON.stringify(s);
+     var cut = text.indexOf('.', 40);
+     if (cut > -1 && cut < text.length - 1) text = text.slice(0, cut + 1);
+     document.getElementById('synth').textContent = text;
+   }
+
+   var m = cur('meteo');
+   if (m && m.current) {
+     var c = m.current;
+     document.getElementById('now').innerHTML =
+       '<div class="now"><span class="t">' + c.temperature_2m + '</span><span class="u">°C</span></div>' +
+       '<div class="meta">' + (WMO[c.weather_code] || 'conditions ' + c.weather_code) +
+       ' · vent ' + c.wind_speed_10m + ' km/h · relevé ' + String(c.time).slice(11) + '</div>';
+
+     var h = m.hourly || {};
+     var times = h.time || [], temps = h.temperature_2m || [], rain = h.precipitation_probability || [];
+     if (times.length) {
+       var slice = times.slice(0, 10), tt = temps.slice(0, 10);
+       var lo = Math.min.apply(null, tt), hi = Math.max.apply(null, tt), span = (hi - lo) || 1;
+       document.getElementById('hours').innerHTML = slice.map(function(ts, i){
+         var pct = 18 + Math.round(((tt[i] - lo) / span) * 38);
+         var p = rain[i];
+         return '<div class="h">' +
+           '<div class="hh">' + String(ts).slice(11, 16) + '</div>' +
+           '<div class="bar"><i style="height:' + pct + 'px"></i></div>' +
+           '<div class="tt">' + Math.round(tt[i]) + '°</div>' +
+           '<div class="pp">' + (p > 0 ? p + '%' : '') + '</div></div>';
+       }).join('');
+     }
+   }
+
+   // Three datasets, one list: each publisher keeps its own dataset, and the
+   // page is what interleaves them and stamps each line with where it came
+   // from. Sorted newest first, so the mix reads as one feed rather than
+   // three blocks stacked.
+   var a = [];
+   ['euronews','lemonde','guardian'].forEach(function(src){
+     var items = cur(src);
+     if (Array.isArray(items)) items.slice(0, 5).forEach(function(x){
+       a.push({ title: x.title, link: x.link, pubDate: x.pubDate, source: src });
+     });
+   });
+   a.sort(function(x, y){ return String(y.pubDate || '').localeCompare(String(x.pubDate || '')); });
+   if (a.length) {
+     document.getElementById('news').innerHTML = a.slice(0, 15).map(function(x){
+       var src = x.source || 'euronews';
+       return '<li>' +
+         '<img src="' + (ICONS[src] || '') + '" alt="" />' +
+         '<span class="ti">' + esc(x.title) +
+           '<span class="src">' + esc(LABELS[src] || src) + (x.pubDate ? ' · ' + esc(String(x.pubDate).slice(0, 16)) : '') + '</span>' +
+         '</span>' +
+         (x.link ? '<a class="cta" href="' + esc(x.link) + '" target="_blank" rel="noopener">Voir l\'article →</a>' : '') +
+       '</li>';
+     }).join('');
+   }
+ }
+</script>

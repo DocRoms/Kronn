@@ -444,6 +444,7 @@
       margin-top: 28px;
     }
     .gallery-card {
+      position: relative;
       margin: 0;
       border: 1.5px solid var(--electric);
       background: var(--bg-card-hi);
@@ -452,7 +453,24 @@
     }
     .gallery-card a { display: block; line-height: 0; }
     .gallery-card img { width: 100%; height: auto; display: block; transition: filter 0.15s; }
+    .gallery-card video { width: 100%; height: auto; display: block; background: #0b0816; }
     .gallery-card a:hover img { filter: brightness(1.08); }
+    /* Une vignette animée ressemble à une capture fixe tant qu'on ne l'a pas regardée. */
+    .gallery-badge {
+      position: absolute;
+      top: 10px;
+      right: 10px;
+      padding: 3px 8px;
+      border: 1px solid var(--electric);
+      border-radius: 3px;
+      background: rgba(10, 8, 20, 0.82);
+      color: var(--lila);
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      line-height: 1.6;
+      pointer-events: none;
+    }
     .gallery-card figcaption { padding: 10px 14px; font-size: 13px; line-height: 1.45; color: var(--text-dim); }
     .gallery-card figcaption strong { color: var(--lila); }
     @media (max-width: 760px) { .gallery-grid { grid-template-columns: 1fr; } }
@@ -468,11 +486,12 @@
     }
     .lb-overlay.open { opacity: 1; visibility: visible; }
     .lb-stage { position: relative; display: flex; align-items: center; justify-content: center; max-width: 100%; }
-    .lb-img {
+    .lb-img, .lb-vid {
       max-width: 90vw; max-height: 80vh; width: auto; height: auto;
       border: 1.5px solid var(--lila); background: var(--bg-deep);
       box-shadow: 0 0 40px rgba(0, 0, 0, 0.6);
     }
+    .lb-vid[hidden], .lb-img[hidden] { display: none; }
     .lb-cap { margin-top: 14px; max-width: 820px; text-align: center; font-family: var(--body); font-size: 14px; line-height: 1.5; color: var(--text-dim); }
     .lb-cap strong { color: var(--lila); }
     .lb-count { font-family: var(--terminal); font-size: 13px; color: var(--kronn); letter-spacing: 0.08em; margin-top: 4px; }
@@ -495,6 +514,14 @@
       transition: background 0.15s, color 0.15s, border-color 0.15s;
     }
     .lb-close:hover { background: var(--kronn); color: var(--bg-deep); border-color: var(--kronn); }
+    .lb-link {
+      margin-top: 8px; padding: 5px 14px;
+      border: 1px solid var(--text-dim); border-radius: 999px;
+      background: rgba(10, 12, 8, 0.7); color: var(--text-dim);
+      font-family: var(--terminal); font-size: 12px; letter-spacing: 0.05em;
+      cursor: pointer; transition: background 0.15s, color 0.15s, border-color 0.15s;
+    }
+    .lb-link:hover { background: var(--lila); color: var(--bg-deep); border-color: var(--lila); }
     body.lb-lock { overflow: hidden; }
     @media (max-width: 900px) {
       .lb-prev { left: 8px; } .lb-next { right: 8px; }
@@ -1613,52 +1640,173 @@
     <p class="section-intro">The concept is nice. Here's what it actually looks like.</p>
     <div class="gallery-grid">
       <figure class="gallery-card">
-        <a href="screenshots/kronn_dashboard.png" target="_blank" rel="noopener">
-          <img src="screenshots/kronn_dashboard.png" width="1440" height="960" loading="lazy" alt="Kronn dashboard: project list, audit status, quick access" />
+        <a href="screenshots/kronn-projets.png" target="_blank" rel="noopener">
+          <img src="screenshots/kronn-projets.png" width="1600" height="1000" loading="lazy" alt="Kronn project detail: audit state, agent instructions, dependencies needing updates, and the Docs, Code, Docker and Git tabs" />
         </a>
-        <figcaption><strong>Dashboard</strong> · your projects, audit status, quick access</figcaption>
-      </figure>
-      <figure class="gallery-card">
-        <a href="screenshots/kronn_multi-ai_discussion.png" target="_blank" rel="noopener">
-          <img src="screenshots/kronn_multi-ai_discussion.png" width="1440" height="960" loading="lazy" alt="Multi-agent discussion: several CLIs in the same Kronn room" />
-        </a>
-        <figcaption><strong>Multi-agent discussion</strong> · several CLIs in the same room</figcaption>
-      </figure>
-      <figure class="gallery-card">
-        <a href="screenshots/kronn-quick-prompts.png" target="_blank" rel="noopener">
-          <img src="screenshots/kronn-quick-prompts.png" width="1440" height="960" loading="lazy" alt="Library of reusable, versioned Quick Prompts" />
-        </a>
-        <figcaption><strong>Quick Prompts</strong> · reusable, versioned, measured</figcaption>
-      </figure>
-      <figure class="gallery-card">
-        <a href="screenshots/kronn-qp-launch.png" target="_blank" rel="noopener">
-          <img src="screenshots/kronn-qp-launch.png" width="1440" height="960" loading="lazy" alt="Compare-agents: the same prompt launched across several CLIs in parallel" />
-        </a>
-        <figcaption><strong>Compare-agents</strong> · the same prompt across N CLIs</figcaption>
-      </figure>
-      <figure class="gallery-card">
-        <a href="screenshots/KronnCaptureAutoPilot.png" target="_blank" rel="noopener">
-          <img src="screenshots/KronnCaptureAutoPilot.png" width="1440" height="960" loading="lazy" alt="Automation: one-click model picker — 7 agents (Claude Code, Codex, Gemini CLI, Kiro, GitHub Copilot, Ollama, LiteLLM) × Eco / Standard / Advanced, per step, with the colored branch map" />
-        </a>
-        <figcaption><strong>One-click model picker</strong> · 7 agents × Eco / Standard / Advanced, per step</figcaption>
-      </figure>
-      <figure class="gallery-card">
-        <a href="screenshots/mcps.png" target="_blank" rel="noopener">
-          <img src="screenshots/mcps.png" width="1440" height="960" loading="lazy" alt="Plugins page: 20 visible plugins, 19 configured, 55+ in the registry (MCP and API), or any API" />
-        </a>
-        <figcaption><strong>MCP &amp; API plugins</strong> · 19 configured · 55+ in the registry</figcaption>
+        <figcaption><strong>Your project, on one screen</strong>: point Kronn at a folder of code and you get, on a single screen, what the last audit found (an agent reads the project and documents its state), the health of the documentation, the dependencies waiting on an update, a way into the files and the Git branches, and into Docker if the project uses it.</figcaption>
       </figure>
       <figure class="gallery-card">
         <a href="screenshots/KronnDocumentationView.jpg" target="_blank" rel="noopener">
-          <img src="screenshots/KronnDocumentationView.jpg" width="1440" height="960" loading="lazy" alt="Kronn Documentation view: docs generated by the audit (architecture, tech debt) rendered in the viewer" />
+          <img src="screenshots/KronnDocumentationView.jpg" width="1600" height="1000" loading="lazy" alt="A project's Docs tab: the file tree on the left, rendered markdown on the right, and a “Discuss this file” button" />
         </a>
-        <figcaption><strong>AI audit</strong> · all the docs + tech debt generated (Yep, Kronn itself doesn't carry much tech debt ;))</figcaption>
+        <figcaption><strong>Your project's docs</strong>: if the repository holds Markdown, yours or what an agent wrote during the audit, you read it here. You can also open a conversation about one file to have it reviewed or filled in.</figcaption>
+      </figure>
+      <figure class="gallery-card">
+        <a href="screenshots/kronn-planification.png" target="_blank" rel="noopener">
+          <img src="screenshots/kronn-planification.png" width="1600" height="1000" loading="lazy" alt="Planning: tasks grouped by project with their status, and one task's detail showing its Definition of Done and its links" />
+        </a>
+        <figcaption><strong>Your backlog</strong>: you track your tasks, grouped by project and by state. Each one carries its Definition of Done, meaning the list of criteria an agent will have to meet the day you hand it the work.</figcaption>
+      </figure>
+      <figure class="gallery-card">
+        <a href="screenshots/kronn_multi-ai_discussion.png" target="_blank" rel="noopener">
+          <img src="screenshots/kronn_multi-ai_discussion.png" width="1600" height="1000" loading="lazy" alt="One question put to three agents in the same discussion: Claude Code, Codex and an OpenRouter model answer in turn, each in its own colour" />
+        </a>
+        <figcaption><strong>Several AIs in the same conversation</strong>: you bring together, in one conversation, command-line agents installed on your machine (Claude Code, Codex…), models running locally and models called over an API, from those you have set up. Then you put their answers to the same question side by side.</figcaption>
+      </figure>
+      <figure class="gallery-card">
+        <a href="screenshots/kronn-media-room.png" target="_blank" rel="noopener">
+          <img src="screenshots/kronn-media-room.png" width="1600" height="1000" loading="lazy" alt="A generated video lands in the discussion with its duration, resolution, real cost, and a note that it starts from an image in the room" />
+        </a>
+        <figcaption><strong>Generate an image or a video clip in the conversation</strong>: you ask the agent for it. If you have set up an image or video model with one of your providers, Kronn passes the request on and drops the file into the conversation, with the cost actually charged once the file comes back.</figcaption>
+      </figure>
+      <figure class="gallery-card">
+        <a href="screenshots/kronn-media-generation.mp4" target="_blank" rel="noopener">
+          <video width="1280" height="800" autoplay muted loop playsinline
+                 preload="metadata" aria-label="you ask the agent for the shot; it writes the prompt, calls the model and hands you the clip in the conversation. Then you cut its last frame and ask for what comes next, and the following shot starts from that frame. Here: kitten into lion, then lion into dragon, five seconds each at 720p for $0.13 a clip.">
+            <source src="screenshots/kronn-media-generation.mp4" type="video/mp4" />
+            <source src="screenshots/kronn-media-generation.webm" type="video/webm" />
+          </video>
+        </a>
+        <span class="gallery-badge" aria-hidden="true">▶ VIDEO</span>
+        <figcaption><strong>Ask, wait, watch</strong>: you ask the agent for the shot; it writes the prompt, calls the model and hands you the clip in the conversation. Then you cut its last frame and ask for what comes next, and the following shot starts from that frame. Here: kitten into lion, then lion into dragon, five seconds each at 720p for $0.13 a clip.</figcaption>
+      </figure>
+      <figure class="gallery-card">
+        <a href="screenshots/kronn-frame-extraite.png" target="_blank" rel="noopener">
+          <img src="screenshots/kronn-frame-extraite.png" width="1600" height="1000" loading="lazy" alt="Frame extracted from a video, carrying its provenance and a link back to the clip it came from" />
+        </a>
+        <figcaption><strong>Chain two shots</strong>: once a video clip is in the conversation, you take its last frame from the file gallery and hand it to the next generation as its starting point. The shot continues instead of starting over.</figcaption>
+      </figure>
+      <figure class="gallery-card">
+        <a href="screenshots/kronn-quick-prompts.png" target="_blank" rel="noopener">
+          <img src="screenshots/kronn-quick-prompts.png" width="1600" height="1000" loading="lazy" alt="A Quick Prompt's editor: its agent, its required variable, its prompt, and the running count of runs, tokens and time" />
+        </a>
+        <figcaption><strong>Your saved prompts</strong>: you save a prompt with its variables and the agent that runs it, then re-run it with one click. Kronn keeps the tally: how many runs, how many tokens, how much time.</figcaption>
+      </figure>
+      <figure class="gallery-card">
+        <a href="screenshots/kronn-qp-launch.png" target="_blank" rel="noopener">
+          <img src="screenshots/kronn-qp-launch.png" width="1600" height="1000" loading="lazy" alt="A Quick Prompt's compare bar: the text to translate is filled in and five agents are ticked as targets" />
+        </a>
+        <figcaption><strong>One prompt, several AIs</strong>: you fill the variables once, tick the models you want to put head to head among those Kronn detected or you configured yourself, and it opens one conversation per model from a single launch.</figcaption>
+      </figure>
+      <figure class="gallery-card">
+        <a href="screenshots/kronn-comparaison-flux.mp4" target="_blank" rel="noopener">
+          <video width="1280" height="800" autoplay muted loop playsinline
+                 preload="metadata" aria-label="Selecting three discussions from the list, then opening the comparison view and the AI judge's verdict">
+            <source src="screenshots/kronn-comparaison-flux.mp4" type="video/mp4" />
+            <source src="screenshots/kronn-comparaison-flux.webm" type="video/webm" />
+          </video>
+        </a>
+        <span class="gallery-badge" aria-hidden="true">▶ VIDEO</span>
+        <figcaption><strong>Compare after the fact</strong>: you select conversations that already exist and open them side by side. They do not have to come from the same launch.</figcaption>
+      </figure>
+      <figure class="gallery-card">
+        <a href="screenshots/kronn-comparaison.png" target="_blank" rel="noopener">
+          <img src="screenshots/kronn-comparaison.png" width="1600" height="1000" loading="lazy" alt="Three agents compared side by side on the same translation: an ISO table per language, each model's opinion, time taken and tokens spent" />
+        </a>
+        <figcaption><strong>The answers side by side</strong>: you read each model in its own column, with the time it took and the tokens it spent. Enough to decide on something other than an impression.</figcaption>
+      </figure>
+      <figure class="gallery-card">
+        <a href="screenshots/kronn-comparaison-juge.png" target="_blank" rel="noopener">
+          <img src="screenshots/kronn-comparaison-juge.png" width="1600" height="1000" loading="lazy" alt="Ranking panel: AI score with its confidence, human star rating, a weighting slider, and the verdict's reasoning" />
+        </a>
+        <figcaption><strong>Let a model judge, or judge yourself</strong>: you score the answers by hand. If they all answer the same prompt, you can also have a model score them blind, then set how much each verdict weighs in the ranking.</figcaption>
+      </figure>
+      <figure class="gallery-card">
+        <a href="screenshots/kronn-automatisations.png" target="_blank" rel="noopener">
+          <img src="screenshots/kronn-automatisations.png" width="1600" height="1000" loading="lazy" alt="Automation library: workflows, Quick APIs, Quick Prompts and Quick Execs, each with its agent and its actions" />
+        </a>
+        <figcaption><strong>Everything you automate, in one place</strong>: here you find your chains of steps, your API calls, your saved prompts and your saved commands. Each keeps the agent that runs it, the history of its versions and its launch button.</figcaption>
+      </figure>
+      <figure class="gallery-card">
+        <a href="screenshots/kronn-selecteur-agent.png" target="_blank" rel="noopener">
+          <img src="screenshots/kronn-selecteur-agent.png" width="1600" height="1000" loading="lazy" alt="Agent picker open: ten agents, each with three tiers and its state — detected, needs configuration, or absent from the catalogue" />
+        </a>
+        <figcaption><strong>Change the model without touching the prompt</strong>: you pick the agent and its tier (Eco, Standard or Advanced: three levels you set per agent, each with a default model if you leave it alone). Kronn tells you which ones it found on the machine and which ones still need configuring.</figcaption>
       </figure>
       <figure class="gallery-card">
         <a href="screenshots/workflows.png" target="_blank" rel="noopener">
-          <img src="screenshots/workflows.png" width="1440" height="960" loading="lazy" alt="Automation page: step-based orchestration (multi-step workflows)" />
+          <img src="screenshots/workflows.png" width="1600" height="1000" loading="lazy" alt="A workflow in detail: the branch map on the left, and on the right its ten steps with their kind — exec, API call, agent, human gate, notification" />
         </a>
-        <figcaption><strong>Automation</strong> · step-based orchestration</figcaption>
+        <figcaption><strong>Chain steps together</strong>: an automation mixes shell commands, API calls, steps handed to an AI, checkpoints where a human approves, and notifications. Deterministic steps burn no tokens. You pay for a model only on the steps that genuinely need one, and nothing at all if that model runs locally.</figcaption>
+      </figure>
+      <figure class="gallery-card">
+        <a href="screenshots/KronnCaptureAutoPilot.png" target="_blank" rel="noopener">
+          <img src="screenshots/KronnCaptureAutoPilot.png" width="1600" height="1000" loading="lazy" alt="The picker open on a workflow's “review” step: ten agents, each with its three tiers, over the branch map" />
+        </a>
+        <figcaption><strong>One model per step</strong>: each step has its own agent and its own tier, from those you have configured. You pay for the expensive model where it changes the outcome, and let the local one handle the rest.</figcaption>
+      </figure>
+      <figure class="gallery-card">
+        <a href="screenshots/kronn-step-agent-swap.mp4" target="_blank" rel="noopener">
+          <video width="1280" height="800" autoplay muted loop playsinline
+                 preload="metadata" aria-label="Switching a workflow step's agent: the picker opens and the step moves from Claude Code to a local Ollama model">
+            <source src="screenshots/kronn-step-agent-swap.mp4" type="video/mp4" />
+            <source src="screenshots/kronn-step-agent-swap.webm" type="video/webm" />
+          </video>
+        </a>
+        <span class="gallery-badge" aria-hidden="true">▶ VIDEO</span>
+        <figcaption><strong>One click, nothing rewritten</strong>: if Ollama is running on your machine with the model you want, you switch a step from Claude Code to that local model. The step's prompt, its inputs and its outputs stay as they were.</figcaption>
+      </figure>
+      <figure class="gallery-card">
+        <a href="screenshots/kronn-agent-workflow.mp4" target="_blank" rel="noopener">
+          <video width="1280" height="800" autoplay muted loop playsinline
+                 preload="metadata" aria-label="A Claude Code agent creates a multi-step workflow from the discussion, with its API calls and its agent step">
+            <source src="screenshots/kronn-agent-workflow.mp4" type="video/mp4" />
+            <source src="screenshots/kronn-agent-workflow.webm" type="video/webm" />
+          </video>
+        </a>
+        <span class="gallery-badge" aria-hidden="true">▶ VIDEO</span>
+        <figcaption><strong>Have an AI write the automation</strong>: with a command-line agent, in a conversation attached to a project, you describe the chain in plain words. The agent reads the expected shape of the steps itself and leaves you a draft, inactive until you have reviewed it.</figcaption>
+      </figure>
+      <figure class="gallery-card">
+        <a href="screenshots/kronn-page-vivante.mp4" target="_blank" rel="noopener">
+          <video width="1280" height="800" autoplay muted loop playsinline
+                 preload="metadata" aria-label="A workflow runs: its steps go green one by one, then the published page shows today's weather and headlines">
+            <source src="screenshots/kronn-page-vivante.mp4" type="video/mp4" />
+            <source src="screenshots/kronn-page-vivante.webm" type="video/webm" />
+          </video>
+        </a>
+        <span class="gallery-badge" aria-hidden="true">▶ VIDEO</span>
+        <figcaption><strong>The result on a Kronn page, current by itself</strong>: the automation is split up. It collects through API calls or a fetch, reworks the data, and calls the AI only for the synthesis, where one is genuinely needed. Here that step runs on a local model: 6,092 tokens spent, nothing paid. The other three call no model at all. A last step rewrites the Kronn page you declared, and all you have to do is open it. Put the workflow on a cron schedule and it updates itself.</figcaption>
+      </figure>
+      <figure class="gallery-card">
+        <a href="screenshots/kronn-live-page.png" target="_blank" rel="noopener">
+          <img src="screenshots/kronn-live-page.png" width="1600" height="1000" loading="lazy" alt="Live Page: hour-by-hour forecast for Lyon, and the latest from Euronews, Le Monde and The Guardian with each publisher's icon" />
+        </a>
+        <figcaption><strong>A page that keeps itself current</strong>: you write its HTML once and declare the data it expects. Your automations drop that data in on every run, and the page rewrites itself without you coming back to it.</figcaption>
+      </figure>
+      <figure class="gallery-card">
+        <a href="screenshots/kronn-connexions-media.png" target="_blank" rel="noopener">
+          <img src="screenshots/kronn-connexions-media.png" width="1600" height="1000" loading="lazy" alt="External API connection settings: each provider has its alias, its Economy / Standard / Advanced tiers, and its image and video generation models" />
+        </a>
+        <figcaption><strong>Plug in a provider over its API</strong>: you declare an OpenAI-compatible API address and its key, map a model to each of the three tiers, and name the ones that will serve images and video. Those are what the agents will call.</figcaption>
+      </figure>
+      <figure class="gallery-card">
+        <a href="screenshots/mcps.png" target="_blank" rel="noopener">
+          <img src="screenshots/mcps.png" width="1600" height="1000" loading="lazy" alt="The GitHub plugin in detail: its two interfaces (MCP and deterministic API), the preferred one, its masked credential, and its per-project scope" />
+        </a>
+        <figcaption><strong>Your tools, for the AIs and for the automations</strong>: a plugin gives its tools to agents, through MCP (the standard made for that), and its API calls to automation steps. You enter its credentials once, Kronn keeps them encrypted, and you switch it on project by project.</figcaption>
+      </figure>
+      <figure class="gallery-card">
+        <a href="screenshots/kronn-agents-cli.png" target="_blank" rel="noopener">
+          <img src="screenshots/kronn-agents-cli.png" width="1600" height="1000" loading="lazy" alt="Agent settings: seven CLIs detected with their versions, each mapping the Eco, Standard and Advanced tiers to a model" />
+        </a>
+        <figcaption><strong>The agents you already have</strong>: Kronn finds the ones installed on the machine and shows their version and whether they are authenticated. You choose which model answers behind each of the three tiers. An agent that is missing still shows up, marked as such.</figcaption>
+      </figure>
+      <figure class="gallery-card">
+        <a href="screenshots/kronn-base-donnees.png" target="_blank" rel="noopener">
+          <img src="screenshots/kronn-base-donnees.png" width="1600" height="1000" loading="lazy" alt="Database section: weight broken down table by table, with row counts and each table's share" />
+        </a>
+        <figcaption><strong>Know what you are storing</strong>: you measure each table's weight on demand, set how long execution values are kept, and export or re-import the whole database.</figcaption>
       </figure>
     </div>
   </section>
@@ -2016,21 +2164,48 @@
 </div>
 
   <script>
+  // Five looping videos on one page is five decoders running for nothing. Each one
+  // plays while it is on screen and stops when it leaves; `muted` keeps autoplay
+  // allowed, and a browser that defers autoplay still gets a play() on entry.
+  (function () {
+    var videos = Array.prototype.slice.call(document.querySelectorAll('.gallery-card video'));
+    if (!videos.length || !('IntersectionObserver' in window)) return;
+    var io = new IntersectionObserver(function (entries) {
+      entries.forEach(function (entry) {
+        var v = entry.target;
+        if (entry.isIntersecting) { var p = v.play(); if (p && p.catch) p.catch(function () {}); }
+        else if (!v.paused) { v.pause(); }
+      });
+    }, { rootMargin: '150px 0px' });
+    videos.forEach(function (v) { io.observe(v); });
+  })();
+
   // Native gallery lightbox / carousel — progressive enhancement over the <a> links.
   (function () {
     var links = Array.prototype.slice.call(document.querySelectorAll('.gallery-card a'));
     if (!links.length) return;
     var L = {
-      fr: { gallery: 'Galerie de captures Kronn', close: 'Fermer', prev: 'Image précédente', next: 'Image suivante' },
-      en: { gallery: 'Kronn screenshot gallery', close: 'Close', prev: 'Previous image', next: 'Next image' },
-      es: { gallery: 'Galería de capturas de Kronn', close: 'Cerrar', prev: 'Imagen anterior', next: 'Imagen siguiente' }
+      fr: { gallery: 'Galerie de captures Kronn', close: 'Fermer', prev: 'Image précédente', next: 'Image suivante', link: 'Copier le lien', copied: 'Lien copié' },
+      en: { gallery: 'Kronn screenshot gallery', close: 'Close', prev: 'Previous image', next: 'Next image', link: 'Copy link', copied: 'Link copied' },
+      es: { gallery: 'Galería de capturas de Kronn', close: 'Cerrar', prev: 'Imagen anterior', next: 'Imagen siguiente', link: 'Copiar el enlace', copied: 'Enlace copiado' }
     };
     var t = L[(document.documentElement.lang || 'en').slice(0, 2)] || L.en;
     var items = links.map(function (a) {
       var fig = a.closest('.gallery-card');
       var cap = fig && fig.querySelector('figcaption');
       var img = a.querySelector('img');
-      return { src: a.getAttribute('href'), caption: cap ? cap.innerHTML : '', alt: img ? (img.getAttribute('alt') || '') : '' };
+      var vid = a.querySelector('video');
+      var webm = vid && vid.querySelector('source[type="video/webm"]');
+      return {
+        video: !!vid,
+        // L'identifiant partagé est le nom du fichier, pas son rang : la galerie
+        // a déjà été réordonnée trois fois, un lien en #media=7 aurait suivi.
+        slug: a.getAttribute('href').replace(/^screenshots\//, '').replace(/\.[a-z0-9]+$/i, ''),
+        src: a.getAttribute('href'),
+        webm: webm ? webm.getAttribute('src') : '',
+        caption: cap ? cap.innerHTML : '',
+        alt: (img || vid) ? ((img || vid).getAttribute('alt') || (img || vid).getAttribute('aria-label') || '') : ''
+      };
     });
     var overlay = document.createElement('div');
     overlay.className = 'lb-overlay';
@@ -2043,26 +2218,93 @@
       '<div class="lb-stage">' +
         '<button class="lb-btn lb-prev" type="button" aria-label="' + t.prev + '">‹</button>' +
         '<img class="lb-img" alt="" />' +
+        '<video class="lb-vid" controls loop muted playsinline preload="metadata" hidden></video>' +
         '<button class="lb-btn lb-next" type="button" aria-label="' + t.next + '">›</button>' +
       '</div>' +
       '<div class="lb-count" aria-live="polite"></div>' +
+      '<button class="lb-link" type="button">' + t.link + '</button>' +
       '<div class="lb-cap"></div>';
     document.body.appendChild(overlay);
     var imgEl = overlay.querySelector('.lb-img');
+    var vidEl = overlay.querySelector('.lb-vid');
     var capEl = overlay.querySelector('.lb-cap');
     var countEl = overlay.querySelector('.lb-count');
+    var linkEl = overlay.querySelector('.lb-link');
+    var linkTimer = null;
     var idx = 0, lastFocus = null;
+    function stopVideo() {
+      vidEl.pause();
+      vidEl.removeAttribute('src');
+      vidEl.innerHTML = '';
+      vidEl.load();
+    }
     function render() {
       var it = items[idx];
-      imgEl.src = it.src; imgEl.alt = it.alt;
+      stopVideo();
+      if (it.video) {
+        // Les deux sources, dans l'ordre de la carte : mp4 d'abord, webm en secours.
+        vidEl.innerHTML =
+          '<source src="' + it.src + '" type="video/mp4" />' +
+          (it.webm ? '<source src="' + it.webm + '" type="video/webm" />' : '');
+        vidEl.setAttribute('aria-label', it.alt);
+        vidEl.load();
+        imgEl.hidden = true; imgEl.removeAttribute('src');
+        vidEl.hidden = false;
+        var play = vidEl.play();
+        if (play && play.catch) play.catch(function () {});
+      } else {
+        vidEl.hidden = true;
+        imgEl.hidden = false;
+        imgEl.src = it.src; imgEl.alt = it.alt;
+      }
       capEl.innerHTML = it.caption;
       countEl.textContent = (idx + 1) + ' / ' + items.length;
-      [1, -1].forEach(function (d) { var p = new Image(); p.src = items[(idx + d + items.length) % items.length].src; });
+      // Précharger le voisin n'a de sens que pour une image : une vidéo se
+      // télécharge en continu, et en précharger deux annule le bénéfice.
+      [1, -1].forEach(function (d) {
+        var near = items[(idx + d + items.length) % items.length];
+        if (!near.video) { var p = new Image(); p.src = near.src; }
+      });
     }
-    function openAt(i) { idx = i; lastFocus = document.activeElement; render(); overlay.setAttribute('aria-hidden', 'false'); overlay.classList.add('open'); document.body.classList.add('lb-lock'); overlay.querySelector('.lb-close').focus(); }
-    function close() { overlay.classList.remove('open'); overlay.setAttribute('aria-hidden', 'true'); document.body.classList.remove('lb-lock'); imgEl.removeAttribute('src'); if (lastFocus && lastFocus.focus) lastFocus.focus(); }
-    function go(step) { idx = (idx + step + items.length) % items.length; render(); }
+    function shareUrl(i) {
+      return location.origin + location.pathname + location.search + '#media=' + items[i].slug;
+    }
+    // replaceState plutôt que pushState : sinon parcourir vingt-quatre diapos
+    // laisse vingt-quatre entrées dans l'historique et le bouton Retour ne
+    // ramène plus à la page d'où l'on vient.
+    function writeHash(i) {
+      if (!history.replaceState) { return; }
+      history.replaceState(null, '', shareUrl(i));
+    }
+    function clearHash() {
+      if (!history.replaceState) { return; }
+      history.replaceState(null, '', location.pathname + location.search + '#gallery');
+    }
+    function indexFromHash() {
+      var m = /^#media=(.+)$/.exec(location.hash || '');
+      if (!m) { return -1; }
+      var key = decodeURIComponent(m[1]);
+      for (var i = 0; i < items.length; i++) { if (items[i].slug === key) { return i; } }
+      var n = parseInt(key, 10);              // #media=7 marche aussi, par commodité
+      return (n >= 1 && n <= items.length) ? n - 1 : -1;
+    }
+    function openAt(i, keepHash) { idx = i; lastFocus = document.activeElement; render(); if (!keepHash) { writeHash(i); } overlay.setAttribute('aria-hidden', 'false'); overlay.classList.add('open'); document.body.classList.add('lb-lock'); overlay.querySelector('.lb-close').focus(); }
+    function close() { overlay.classList.remove('open'); overlay.setAttribute('aria-hidden', 'true'); document.body.classList.remove('lb-lock'); imgEl.removeAttribute('src'); stopVideo(); clearHash(); if (lastFocus && lastFocus.focus) lastFocus.focus(); }
+    function go(step) { idx = (idx + step + items.length) % items.length; render(); writeHash(idx); }
     links.forEach(function (a, i) { a.addEventListener('click', function (e) { if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return; e.preventDefault(); openAt(i); }); });
+    linkEl.addEventListener('click', function () {
+      var url = shareUrl(idx);
+      var done = function () {
+        linkEl.textContent = t.copied;
+        clearTimeout(linkTimer);
+        linkTimer = setTimeout(function () { linkEl.textContent = t.link; }, 1800);
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(url).then(done, function () { window.prompt(t.link, url); });
+      } else {
+        window.prompt(t.link, url);       // pas de presse-papiers hors contexte sûr
+      }
+    });
     overlay.querySelector('.lb-close').addEventListener('click', close);
     overlay.querySelector('.lb-prev').addEventListener('click', function () { go(-1); });
     overlay.querySelector('.lb-next').addEventListener('click', function () { go(1); });
@@ -2079,6 +2321,20 @@
         else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
       }
     });
+    function openFromHash(scroll) {
+      var i = indexFromHash();
+      if (i < 0) { return false; }
+      if (scroll) {
+        var card = links[i].closest('.gallery-card');
+        if (card && card.scrollIntoView) { card.scrollIntoView({ block: 'center' }); }
+      }
+      openAt(i, true);
+      return true;
+    }
+    window.addEventListener('hashchange', function () {
+      if (!openFromHash(false) && overlay.classList.contains('open')) { close(); }
+    });
+    openFromHash(true);                     // un lien partagé ouvre sa diapo
   })();
   </script>
 </body>
