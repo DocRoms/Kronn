@@ -64,7 +64,8 @@ test.describe('Live Page inline action — launch and secure discussion deep lin
     await expect(card).toHaveAttribute('data-state', 'succeeded', { timeout: 10_000 });
 
     const popupPromise = page.waitForEvent('popup');
-    await card.locator('.discussion-action-card__open').click();
+    // The result discussion is reached from the card's outcome, which names it.
+    await card.getByTestId('run-outcome-open').first().click();
     const popup = await popupPromise;
     await popup.waitForLoadState();
 

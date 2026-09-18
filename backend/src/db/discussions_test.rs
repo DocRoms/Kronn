@@ -285,6 +285,157 @@ mod tests {
             .is_empty());
     }
 
+    /// Seeds the shape seen on a live instance: a workflow whose
+    /// `BatchQuickPrompt` step opened its discussion under a child batch run.
+    fn seed_workflow_with_batch_child(conn: &Connection) {
+        let ts = Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO workflows (id, name, trigger_json, steps_json, created_at, updated_at)
+             VALUES ('wf-frame', 'Frame 1 ticket', '{}', '[]', ?1, ?1)",
+            params![ts],
+        )
+        .unwrap();
+        for (run_id, parent) in [
+            ("run-wf", None),
+            ("run-batch", Some("run-wf")),
+            ("run-other", None),
+        ] {
+            conn.execute(
+                "INSERT INTO workflow_runs (id, workflow_id, started_at, parent_run_id)
+                 VALUES (?1, 'wf-frame', ?2, ?3)",
+                params![run_id, ts, parent],
+            )
+            .unwrap();
+        }
+        for (id, run) in [
+            ("d-direct", "run-wf"),
+            ("d-triage", "run-batch"),
+            ("d-other", "run-other"),
+        ] {
+            let mut discussion = make_discussion(id);
+            discussion.workflow_run_id = Some(run.into());
+            insert_discussion(conn, &discussion).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_workflow_finds_the_discussions_its_batch_step_opened() {
+        let conn = test_conn();
+        seed_workflow_with_batch_child(&conn);
+
+        let ids = |found: Vec<Discussion>| found.into_iter().map(|d| d.id).collect::<Vec<_>>();
+        // The direct lookup misses the triage discussion: it belongs to the
+        // child batch run, not to the workflow run that caused it.
+        assert_eq!(
+            ids(list_discussions_by_run(&conn, "run-wf").unwrap()),
+            vec!["d-direct"]
+        );
+        let mut tree = ids(list_discussions_by_run_tree(&conn, "run-wf").unwrap());
+        tree.sort();
+        assert_eq!(tree, vec!["d-direct", "d-triage"]);
+        assert_eq!(
+            ids(list_discussions_by_run_tree(&conn, "run-batch").unwrap()),
+            vec!["d-triage"],
+            "a child run never reaches up to its parent's discussions"
+        );
+    }
+
+    #[test]
+    fn a_run_outcome_tells_what_each_agent_did_and_leads_with_its_verdict() {
+        use crate::db::agent_dispatch::{self, NewAgentDispatchJob};
+        use crate::db::run_outcome::{self, RunOutcomeAgentStatus};
+
+        let conn = test_conn();
+        seed_workflow_with_batch_child(&conn);
+        insert_message(
+            &conn,
+            "d-triage",
+            &make_message("m-ask", MessageRole::User, None),
+        )
+        .unwrap();
+        agent_dispatch::enqueue(
+            &conn,
+            NewAgentDispatchJob {
+                id: "job-triage",
+                discussion_id: "d-triage",
+                trigger_message_id: "m-ask",
+                trigger_sort_order: 1,
+                dedupe_key: "d-triage:m-ask",
+                agent_override: None,
+                chain_prompt_ids: &[],
+                batch_item: None,
+                group_id: None,
+                group_concurrency_limit: None,
+            },
+        )
+        .unwrap();
+        let status = |id: &str| {
+            run_outcome::for_run(&conn, "run-wf")
+                .unwrap()
+                .discussions
+                .into_iter()
+                .find(|d| d.id == id)
+                .unwrap()
+        };
+        assert_eq!(
+            status("d-triage").agent_status,
+            RunOutcomeAgentStatus::Working
+        );
+        assert_eq!(status("d-direct").agent_status, RunOutcomeAgentStatus::Idle);
+
+        // A long answer, multibyte all the way: the excerpt keeps its head.
+        let mut answer = make_message("m-answer", MessageRole::Agent, Some(AgentType::ClaudeCode));
+        answer.content = format!(
+            "**🟡 Décision requise** · confiance moyenne\n\n{}",
+            "é".repeat(900)
+        );
+        insert_message(&conn, "d-triage", &answer).unwrap();
+        conn.execute(
+            "UPDATE agent_dispatch_jobs SET status = 'Completed' WHERE id = 'job-triage'",
+            [],
+        )
+        .unwrap();
+        let answered = status("d-triage");
+        assert_eq!(answered.agent_status, RunOutcomeAgentStatus::Answered);
+        let excerpt = answered.answer_excerpt.unwrap();
+        assert!(excerpt.starts_with("**🟡 Décision requise**"));
+        assert_eq!(excerpt.chars().count(), 700);
+        assert!(answered.answer_truncated);
+
+        conn.execute(
+            "UPDATE agent_dispatch_jobs SET status = 'Failed', last_error = 'provider refused'
+             WHERE id = 'job-triage'",
+            [],
+        )
+        .unwrap();
+        let failed = status("d-triage");
+        assert_eq!(failed.agent_status, RunOutcomeAgentStatus::Failed);
+        assert_eq!(failed.diagnostic.as_deref(), Some("provider refused"));
+        conn.execute(
+            "UPDATE agent_dispatch_jobs SET status = 'Cancelled' WHERE id = 'job-triage'",
+            [],
+        )
+        .unwrap();
+        let cancelled = status("d-triage");
+        assert_eq!(cancelled.agent_status, RunOutcomeAgentStatus::Cancelled);
+        assert!(
+            cancelled.answer_excerpt.is_some(),
+            "what it said before still shows"
+        );
+
+        let outcome = run_outcome::for_run(&conn, "run-wf").unwrap();
+        assert_eq!(
+            outcome.discussion_count, 2,
+            "the other run's discussion is not this run's"
+        );
+        let single = run_outcome::for_discussion(&conn, "d-direct").unwrap();
+        assert_eq!(single.discussion_count, 1);
+        assert!(run_outcome::for_discussion(&conn, "missing")
+            .unwrap()
+            .discussions
+            .is_empty());
+    }
+
     // ═══════════════════════════════════════════════════════════════════════════
     // insert_message + get_discussion
     // ═══════════════════════════════════════════════════════════════════════════

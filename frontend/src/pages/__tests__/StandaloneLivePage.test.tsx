@@ -27,6 +27,10 @@ const detail: LivePageDetail = {
 
 vi.mock('../../lib/api', () => ({
   pages: { get: vi.fn(), actions: vi.fn(), actionLaunches: vi.fn(() => Promise.resolve([])), getAction: vi.fn(), cancelAction: vi.fn(), launchAction: vi.fn() },
+  runsApi: {
+    outcome: vi.fn(() => Promise.resolve({ discussion_count: 0, discussions: [] })),
+    discussionOutcome: vi.fn((id: string) => Promise.resolve({ discussion_count: 1, discussions: [{ id, title: 'Result', agent: 'ClaudeCode', agent_status: 'answered', answer_excerpt: null, answer_truncated: false, answered_at: null, diagnostic: null, updated_at: '2026-09-18T10:00:00Z' }] })),
+  },
 }));
 vi.mock('../../lib/I18nContext', () => ({
   useT: () => ({ t: (key: string, ...args: (string | number)[]) => args.length ? `${key}:${args.join(',')}` : key }),
@@ -147,7 +151,7 @@ describe('StandaloneLivePage', () => {
     act(() => linkRelay.onAction?.({ actionRef: 'qp', bindings: {}, anchor }));
     await screen.findByTestId(`live-page-action-${succeeded.id}`);
 
-    fireEvent.click(screen.getByRole('button', { name: /disc\.action\.openDiscussion/ }));
+    fireEvent.click(await screen.findByRole('button', { name: /disc\.action\.openDiscussion/ }));
 
     expect(sessionStorage.getItem('kronn:navigation:page')).toBe('discussions');
     expect(sessionStorage.getItem('kronn:navigation:discussion')).toBe('disc-99');

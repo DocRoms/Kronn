@@ -216,6 +216,43 @@ pub async fn get(
     }
 }
 
+/// What a run produced — the discussions of its whole tree, each with its
+/// agent's state and the beginning of its latest answer. Read on the
+/// companion connection: an action card polls it while an agent works.
+pub async fn outcome(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Json<ApiResponse<crate::db::run_outcome::RunOutcome>> {
+    match state
+        .db
+        .with_read_conn(move |conn| crate::db::run_outcome::for_run(conn, &id))
+        .await
+    {
+        Ok(outcome) => Json(ApiResponse::ok(outcome)),
+        Err(error) => Json(ApiResponse::err(format!(
+            "Unable to read run outcome: {error}"
+        ))),
+    }
+}
+
+/// The same projection for a launch whose result is a single discussion, such
+/// as a Quick Prompt started from a card.
+pub async fn discussion_outcome(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Json<ApiResponse<crate::db::run_outcome::RunOutcome>> {
+    match state
+        .db
+        .with_read_conn(move |conn| crate::db::run_outcome::for_discussion(conn, &id))
+        .await
+    {
+        Ok(outcome) => Json(ApiResponse::ok(outcome)),
+        Err(error) => Json(ApiResponse::err(format!(
+            "Unable to read discussion outcome: {error}"
+        ))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -32,6 +32,17 @@ Release notes for 0.9.3 and earlier are available in the
   exactly then. Once a run is over, the card offers to launch the same row
   again.
 
+- An action card tells what its run produced, on a Page and in a Discussion
+  alike. A row that has run reopens on its latest run rather than on a blank
+  form. A workflow's steps are listed by name, type, status and duration
+  instead of a raw JSON result, and the discussions the run opened are shown
+  with their agent's state and the beginning of its latest answer, one click
+  from the full text.
+- `workflow_run_discussions` finds the discussions a workflow's Batch Quick
+  Prompt step opened. They belong to a child batch run, and only the run's own
+  discussions were looked up, so the tool answered "none" for exactly the runs
+  whose work happened there.
+
 ## [0.13.0] - 2026-09-17
 
 ### Added

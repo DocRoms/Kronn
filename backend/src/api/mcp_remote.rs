@@ -998,7 +998,7 @@ pub async fn workflow_run_discussions(
     let discs = match state
         .db
         .with_conn(move |conn| {
-            crate::db::discussions::list_discussions_by_run(conn, &run_id_lookup)
+            crate::db::discussions::list_discussions_by_run_tree(conn, &run_id_lookup)
         })
         .await
     {

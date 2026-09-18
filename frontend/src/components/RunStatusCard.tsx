@@ -35,6 +35,39 @@ function measuredDuration(model: RunStatusCardModel, now: number): number | null
   return isActive(model.status) ? Math.max(0, now - start) : null;
 }
 
+interface RunStep {
+  name: string;
+  kind: string | null;
+  status: string;
+  durationMs: number | null;
+}
+
+/** A workflow's result lists the steps it ran. Read as such, never dumped:
+ *  a card that printed `{"progress":…,"steps":[…]}` told a human nothing. */
+function workflowSteps(result: unknown): RunStep[] | null {
+  const steps = (result as { steps?: unknown } | null)?.steps;
+  if (!Array.isArray(steps) || steps.length === 0) return null;
+  const read = steps.flatMap(step => {
+    const entry = step as { step_name?: unknown; step_kind?: unknown; status?: unknown; duration_ms?: unknown };
+    if (typeof entry?.step_name !== 'string' || typeof entry.status !== 'string') return [];
+    return [{
+      name: entry.step_name,
+      kind: typeof entry.step_kind === 'string' ? entry.step_kind : null,
+      status: entry.status,
+      durationMs: typeof entry.duration_ms === 'number' ? entry.duration_ms : null,
+    }];
+  });
+  return read.length > 0 ? read : null;
+}
+
+function stepIcon(status: string) {
+  const normalized = status.toLowerCase();
+  if (normalized === 'success') return <CheckCircle2 size={12} aria-hidden />;
+  if (normalized === 'running' || normalized === 'pending') return <Loader2 className="spin" size={12} aria-hidden />;
+  if (normalized === 'skipped') return <span className="run-status-card-step-dot" aria-hidden>–</span>;
+  return <XCircle size={12} aria-hidden />;
+}
+
 /** What a card will put in the DOM before it stops. A card is a summary and
  *  links to the run for the rest, so there is no size at which dumping more
  *  helps — and an unbounded dump is how a workflow result of several megabytes
@@ -111,7 +144,8 @@ export function RunStatusCard({ model: initialModel, runId, compact = false, hid
     return () => window.clearInterval(timer);
   }, [model?.startedAt, ticking, visible]);
 
-  const result = useMemo(() => resultText(model?.result), [model?.result]);
+  const steps = useMemo(() => workflowSteps(model?.result), [model?.result]);
+  const result = useMemo(() => steps ? null : resultText(model?.result), [model?.result, steps]);
 
   if (!model) return <section ref={rootRef} className="run-status-card" data-testid="run-status-card"><span>{t('run.freshness.unavailable')}</span></section>;
 
@@ -178,6 +212,24 @@ export function RunStatusCard({ model: initialModel, runId, compact = false, hid
             </div>
           )}
           {model.diagnostic && <p className="run-status-card-diagnostic">{model.diagnostic}</p>}
+          {steps && (
+            <ol className="run-status-card-steps" data-testid="run-status-card-steps">
+              {steps.map((step, index) => {
+                const kindKey = `wiz.stepType${step.kind === 'BatchQuickPrompt' ? 'BatchQP' : step.kind}`;
+                const kindLabel = step.kind ? (t(kindKey) === kindKey ? step.kind : t(kindKey)) : null;
+                return (
+                  <li key={`${index}-${step.name}`} data-status={step.status.toLowerCase()}>
+                    {stepIcon(step.status)}
+                    <span className="run-status-card-step-name">{step.name}</span>
+                    {kindLabel && <span className="run-status-card-step-kind">{kindLabel}</span>}
+                    {step.durationMs != null && (
+                      <span className="run-status-card-step-duration">{formatDurationCompact(step.durationMs)}</span>
+                    )}
+                  </li>
+                );
+              })}
+            </ol>
+          )}
           {result && (foldResult ? (
             <details className="run-status-card-fold" data-testid="run-status-card-result-fold">
               <summary>{t('run.details')}</summary>

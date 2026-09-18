@@ -53,7 +53,7 @@ function sameLaunches(left: LivePageAction[], right: LivePageAction[]): boolean 
  * `actions` are the Page's offers and are never mutated by a click: one block
  * draws a button per dataset row, so the result of one row's launch belongs to
  * that click's card alone. `launches` holds the latest run of each row, which
- * is what a button shows and what clicking it reopens while it still runs.
+ * is what a button shows and what clicking it reopens.
  */
 export function useLivePageActions(onUnavailable: () => void): UseLivePageActionsResult {
   const [actions, setActions] = useState<LivePageAction[]>([]);
@@ -108,12 +108,13 @@ export function useLivePageActions(onUnavailable: () => void): UseLivePageAction
       setActiveAction(null);
       return;
     }
-    // A row still running reopens on its run instead of on a blank offer.
-    const running = launchesRef.current.find(launch =>
-      launch.action_ref === intent.actionRef && launch.binding_key === bindingKey
-        && IN_FLIGHT.has(launch.state));
+    // A row that has run reopens on its latest run — what happened, or where
+    // it stands — rather than on a blank offer; the card offers to launch it
+    // again from there.
+    const latest = launchesRef.current.find(launch =>
+      launch.action_ref === intent.actionRef && launch.binding_key === bindingKey);
     activationRef.current += 1;
-    setActiveAction({ ...intent, activation: activationRef.current, card: running });
+    setActiveAction({ ...intent, activation: activationRef.current, card: latest });
   }, [setActiveAction]);
 
   // Keyed on the activation, not the block: a launch that answers after the

@@ -1605,6 +1605,11 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route("/api/quick-execs/{id}/run", post(api::quick_execs::run))
         .route("/api/runs", get(api::shared_runs::list))
         .route("/api/runs/{id}", get(api::shared_runs::get))
+        .route("/api/runs/{id}/outcome", get(api::shared_runs::outcome))
+        .route(
+            "/api/discussions/{id}/outcome",
+            get(api::shared_runs::discussion_outcome),
+        )
         .route(
             "/api/discussions/{id}/important",
             get(api::discussion_important::list),
