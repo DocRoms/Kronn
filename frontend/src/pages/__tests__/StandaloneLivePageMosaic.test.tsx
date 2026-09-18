@@ -35,7 +35,7 @@ const relays = vi.hoisted(() => [] as {
 }[]);
 
 vi.mock('../../lib/api', () => ({
-  pages: { get: vi.fn(), actions: vi.fn(), getAction: vi.fn(), cancelAction: vi.fn(), launchAction: vi.fn() },
+  pages: { get: vi.fn(), actions: vi.fn(), actionLaunches: vi.fn(() => Promise.resolve([])), getAction: vi.fn(), cancelAction: vi.fn(), launchAction: vi.fn() },
 }));
 vi.mock('../../lib/I18nContext', () => ({
   useT: () => ({ t: (key: string, ...args: (string | number)[]) => args.length ? `${key}:${args.join(',')}` : key }),
@@ -62,7 +62,7 @@ function pageAction(pageId: string, actionRef: string, overrides: Partial<LivePa
     project_id: null, project_name: null, state: 'proposed', values: [], shared_run_id: null,
     result_discussion_id: null, deep_link: null, diagnostic: null, launched_at: null,
     finished_at: null, created_at: '2026-08-29T10:00:00Z', updated_at: '2026-08-29T10:00:00Z',
-    stale_source: false,
+    stale_source: false, binding_key: null,
     ...overrides,
   };
 }

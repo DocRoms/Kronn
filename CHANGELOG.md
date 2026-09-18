@@ -22,6 +22,16 @@ Release notes for 0.9.3 and earlier are available in the
   without a row binding can be relaunched. Launches recorded before the upgrade
   are kept.
 
+- A Live Page button now shows how its row went, and its card says where the
+  run is. The button is marked while its run goes and once it has succeeded or
+  failed, including after a reload. Clicking a row that is still running
+  reopens that run rather than a blank form, clicking the same button again
+  closes the card, and the card also closes with × or Escape. The card names
+  the row it is about, says the run is starting before one exists, and shows
+  the run's steps and elapsed time while it goes; it used to fold them away
+  exactly then. Once a run is over, the card offers to launch the same row
+  again.
+
 ## [0.13.0] - 2026-09-17
 
 ### Added

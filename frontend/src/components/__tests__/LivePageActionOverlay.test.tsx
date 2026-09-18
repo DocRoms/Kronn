@@ -46,6 +46,7 @@ function overlayAt(left: number): HTMLElement {
       active={activeAt(left)}
       action={action}
       onChanged={() => {}}
+      onClose={() => {}}
       onOpenDiscussion={() => {}}
     />,
   );
@@ -86,7 +87,8 @@ describe('LivePageActionOverlay', () => {
 
   it('renders nothing without an active action', () => {
     const { container } = render(
-      <LivePageActionOverlay active={null} action={action} onChanged={() => {}} onOpenDiscussion={() => {}} />,
+      <LivePageActionOverlay active={null} action={action} onChanged={() => {}}
+      onClose={() => {}} onOpenDiscussion={() => {}} />,
     );
     expect(container.querySelector('.live-page-action-overlay')).toBeNull();
   });

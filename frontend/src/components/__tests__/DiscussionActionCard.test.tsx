@@ -179,6 +179,8 @@ describe('DiscussionActionCard', () => {
     );
     fireEvent.click(screen.getByRole('button', { name: /disc\.action\.openDiscussion/ }));
     expect(onOpenDiscussion).toHaveBeenCalledWith('disc-result');
+    // A fence is one intention: a discussion card is never relaunched.
+    expect(screen.queryByTestId('action-card-relaunch')).not.toBeInTheDocument();
   });
 
   it('renders the shared run deep-link card after a QA/QE/Workflow launch', () => {

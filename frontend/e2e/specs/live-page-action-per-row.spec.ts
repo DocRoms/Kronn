@@ -64,11 +64,20 @@ test.describe('Live Page inline action — each row is its own launch', () => {
     const first = await launchRow('EW-7706');
     const second = await launchRow('EW-7704');
 
+    // Two launches, two runs. Which ticket each one received is not readable
+    // here by design: a Quick Prompt keeps its template in the transcript and
+    // its values in the encrypted variable snapshot. The backend test
+    // `each_row_of_a_listed_action_launches_its_own_run` pins the value per row.
     expect(second.id).not.toBe(first.id);
     expect(second.result_discussion_id).not.toBe(first.result_discussion_id);
-    const discussion = await page.request.get(`/api/discussions/${second.result_discussion_id}`);
-    const content = JSON.stringify(await discussion.json());
-    expect(content, 'the second run was framed for its own ticket').toContain('EW-7704');
-    expect(content).not.toContain('EW-7706');
+
+    // Each button in the Page shows how its own row went.
+    for (const ticket of ['EW-7706', 'EW-7704']) {
+      await expect(frame.locator(`button:has-text("Framer ${ticket}")`))
+        .toHaveAttribute('data-kronn-action-state', 'succeeded');
+    }
+    // Clicking the button of the open card closes it.
+    await frame.locator('button:has-text("Framer EW-7704")').click();
+    await expect(card).toHaveCount(0);
   });
 });

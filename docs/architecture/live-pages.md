@@ -186,6 +186,19 @@ when the Page moves on. The API keeps speaking one `LivePageAction`: the
 declaration before a click, the declaration joined to its launch afterwards,
 with `id` naming the launch so a card follows its own run.
 `[src: file: backend/src/db/live_page_actions.rs]`
+
+The Page reads back how each row went. `GET /api/pages/{id}/action-launches`
+returns the latest launch per row (declines excluded), polled every few seconds
+while any row runs. The parent posts those states to the iframe as
+`kronn:page-action-states`, and the bridge marks every matching
+`[data-kronn-action]` with `data-kronn-action-state` and `aria-busy`, including
+rows a Page script renders later. A zero-specificity default indicator is
+injected; the author's own CSS wins. Clicking a row that is still running
+reopens its run instead of a blank offer, clicking the button of the open card
+closes it, and the card also closes with its × or Escape. Once a run is over,
+the card offers to go back to the offer and launch the same row again; a
+Discussion card never does, since a fence carries one intention.
+`[src: file: frontend/src/lib/live-page-sandbox.ts]`
 Active and terminal execution rendering delegates to the common
 `RunStatusCard` contract used by Discussions. A Quick Prompt result records
 both the action's result-discussion anchor and the existing Page-to-discussion

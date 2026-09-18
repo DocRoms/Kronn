@@ -2,7 +2,7 @@ import { act, renderHook, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { LivePageAction } from '../../types/generated';
 
-vi.mock('../../lib/api', () => ({ pages: { actions: vi.fn() } }));
+vi.mock('../../lib/api', () => ({ pages: { actions: vi.fn(), actionLaunches: vi.fn(() => Promise.resolve([])) } }));
 
 import { pages as pagesApi } from '../../lib/api';
 import { useLivePageActions } from '../useLivePageActions';
@@ -14,7 +14,7 @@ function action(overrides: Partial<LivePageAction> = {}): LivePageAction {
     project_id: null, project_name: null, state: 'proposed', values: [], shared_run_id: null,
     result_discussion_id: null, deep_link: null, diagnostic: null, launched_at: null,
     finished_at: null, created_at: '2026-09-01T08:00:00Z', updated_at: '2026-09-01T08:00:00Z',
-    stale_source: false,
+    stale_source: false, binding_key: null,
     ...overrides,
   };
 }
@@ -23,6 +23,7 @@ const anchor = { left: 10, top: 20, width: 100, height: 30 };
 
 beforeEach(() => {
   vi.mocked(pagesApi.actions).mockReset();
+  vi.mocked(pagesApi.actionLaunches).mockReset().mockResolvedValue([]);
 });
 
 describe('useLivePageActions', () => {
@@ -54,16 +55,71 @@ describe('useLivePageActions', () => {
     expect(result.current.selectedAction).toBeNull();
   });
 
-  it('bumps activation on every intent so the same ref remounts a fresh card', async () => {
+  it('a second click on the same button closes its card, the next one opens a fresh one', async () => {
     vi.mocked(pagesApi.actions).mockResolvedValue([action()]);
     const { result } = renderHook(() => useLivePageActions(vi.fn()));
     await act(() => result.current.reload('page-1'));
 
-    act(() => result.current.handleIntent({ actionRef: 'refresh', bindings: {}, anchor }));
-    const firstActivation = result.current.activeAction?.activation;
-    act(() => result.current.handleIntent({ actionRef: 'refresh', bindings: {}, anchor }));
+    act(() => result.current.handleIntent({ actionRef: 'refresh', bindings: { ticket: 'EW-1' }, anchor }));
+    const firstActivation = result.current.activeAction?.activation ?? 0;
+    act(() => result.current.handleIntent({ actionRef: 'refresh', bindings: { ticket: 'EW-1' }, anchor }));
+    expect(result.current.activeAction).toBeNull();
 
-    expect(result.current.activeAction?.activation).toBe((firstActivation ?? 0) + 1);
+    act(() => result.current.handleIntent({ actionRef: 'refresh', bindings: { ticket: 'EW-1' }, anchor }));
+    expect(result.current.activeAction?.activation).toBeGreaterThan(firstActivation);
+  });
+
+  it('another row of the same block switches the card instead of closing it', async () => {
+    vi.mocked(pagesApi.actions).mockResolvedValue([action()]);
+    const { result } = renderHook(() => useLivePageActions(vi.fn()));
+    await act(() => result.current.reload('page-1'));
+
+    act(() => result.current.handleIntent({ actionRef: 'refresh', bindings: { ticket: 'EW-1' }, anchor }));
+    act(() => result.current.handleIntent({ actionRef: 'refresh', bindings: { ticket: 'EW-2' }, anchor }));
+
+    expect(result.current.activeAction?.bindings).toEqual({ ticket: 'EW-2' });
+  });
+
+  it('a row still running reopens on its run, and a finished one on the offer', async () => {
+    const running = action({ id: 'page-launch:1', state: 'running', shared_run_id: 'run-1', binding_key: 'ticket=EW-1' });
+    const done = action({ id: 'page-launch:2', state: 'succeeded', binding_key: 'ticket=EW-2' });
+    vi.mocked(pagesApi.actions).mockResolvedValue([action()]);
+    vi.mocked(pagesApi.actionLaunches).mockResolvedValue([running, done]);
+    const { result } = renderHook(() => useLivePageActions(vi.fn()));
+    await act(() => result.current.reload('page-1'));
+    expect(result.current.launches).toEqual([running, done]);
+
+    act(() => result.current.handleIntent({ actionRef: 'refresh', bindings: { ticket: 'EW-1' }, anchor }));
+    expect(result.current.selectedAction).toEqual(running);
+    expect(result.current.selectedOffer).toEqual(action());
+
+    act(() => result.current.handleIntent({ actionRef: 'refresh', bindings: { ticket: 'EW-2' }, anchor }));
+    expect(result.current.selectedAction).toEqual(action());
+  });
+
+  it('a launch seen on a card updates the button states, a decline does not', async () => {
+    vi.mocked(pagesApi.actions).mockResolvedValue([action()]);
+    const { result } = renderHook(() => useLivePageActions(vi.fn()));
+    await act(() => result.current.reload('page-1'));
+    act(() => result.current.handleIntent({ actionRef: 'refresh', bindings: { ticket: 'EW-1' }, anchor }));
+    const activation = result.current.activeAction!.activation;
+
+    act(() => result.current.handleChanged(action({ id: 'page-launch:c', state: 'cancelled', binding_key: '' }), activation));
+    expect(result.current.launches).toEqual([]);
+
+    const launching = action({ id: 'page-launch:1', state: 'launching', binding_key: 'ticket=EW-1' });
+    act(() => result.current.handleChanged(launching, activation));
+    expect(result.current.launches).toEqual([launching]);
+  });
+
+  it('the buttons keep their actions when their states cannot be read', async () => {
+    vi.mocked(pagesApi.actions).mockResolvedValue([action()]);
+    vi.mocked(pagesApi.actionLaunches).mockRejectedValue(new Error('offline'));
+    const { result } = renderHook(() => useLivePageActions(vi.fn()));
+    await act(() => result.current.reload('page-1'));
+
+    expect(result.current.actions).toEqual([action()]);
+    expect(result.current.launches).toEqual([]);
   });
 
   it('reload clears a pending activation and replaces the actions list', async () => {

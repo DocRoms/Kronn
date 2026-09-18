@@ -1,4 +1,4 @@
-import type { LivePageDetail } from '../types/generated';
+import type { LivePageAction, LivePageDetail } from '../types/generated';
 
 export const LIVE_PAGE_CSP = [
   "default-src 'none'",
@@ -66,6 +66,28 @@ export interface LivePageActionIntent {
 }
 
 const MAX_LIVE_PAGE_LINK_CHARS = 8 * 1024;
+
+/** The row a click is bound to, spelled exactly as the backend stores a
+ * launch's `binding_key`: sorted `name=selector` pairs joined by U+001F, empty
+ * for an unbound CTA. The iframe bridge below computes the same string. */
+export function liveActionBindingKey(bindings: Record<string, string>): string {
+  return Object.entries(bindings).map(([name, selector]) => `${name}=${selector}`).sort().join('\u001f');
+}
+
+/** Tell the Page which of its buttons have run, and how it went. The iframe
+ * marks each matching `[data-kronn-action]` with `data-kronn-action-state`. */
+export function postLivePageActionStates(
+  target: Window,
+  channelId: string,
+  launches: Pick<LivePageAction, 'action_ref' | 'binding_key' | 'state'>[],
+): void {
+  const states = launches.map(launch => ({
+    action_ref: launch.action_ref,
+    binding_key: launch.binding_key ?? '',
+    state: launch.state,
+  }));
+  target.postMessage({ type: 'kronn:page-action-states', version: 1, channel_id: channelId, states }, '*');
+}
 const LIVE_PAGE_ACTION_REF = /^[A-Za-z0-9._~-]{1,256}$/;
 
 export function runtimeData(detail: LivePageDetail): LivePageRuntimeData {
@@ -88,6 +110,17 @@ export function runtimeData(detail: LivePageDetail): LivePageRuntimeData {
   };
 }
 
+/** A default look for a button whose row has run. Wrapped in `:where()` so it
+ * weighs nothing: any rule the author writes for the same button wins. */
+const ACTION_STATE_STYLE = `<style>
+:where([data-kronn-action-state="launching"],[data-kronn-action-state="running"]){cursor:progress}
+:where([data-kronn-action-state])::after{display:inline-block;margin-inline-start:.45em;line-height:1}
+:where([data-kronn-action-state="launching"],[data-kronn-action-state="running"])::after{content:"";width:.75em;height:.75em;border:2px solid currentColor;border-right-color:transparent;border-radius:50%;vertical-align:-.1em;animation:kronn-action-spin .8s linear infinite}
+:where([data-kronn-action-state="succeeded"])::after{content:"✓"}
+:where([data-kronn-action-state="failed"],[data-kronn-action-state="preflight_failed"])::after{content:"⚠"}
+@keyframes kronn-action-spin{to{transform:rotate(360deg)}}
+</style>`;
+
 /**
  * Inject the security policy before Page-authored markup and a tiny, local
  * data bridge. The iframe itself must still use `sandbox="allow-scripts"`
@@ -95,7 +128,7 @@ export function runtimeData(detail: LivePageDetail): LivePageRuntimeData {
  */
 export function buildSandboxDocument(html: string, channelId: string): string {
   const safeChannel = JSON.stringify(channelId).replaceAll('<', '\\u003c');
-  const head = `<meta http-equiv="Content-Security-Policy" content="${LIVE_PAGE_CSP}">`;
+  const head = `<meta http-equiv="Content-Security-Policy" content="${LIVE_PAGE_CSP}">${ACTION_STATE_STYLE}`;
   const bridge = `<script>(()=>{
     const channel=${safeChannel};
     const userActivation=navigator.userActivation;
@@ -109,6 +142,38 @@ export function buildSandboxDocument(html: string, channelId: string): string {
     const objectEntries=Object.entries;
     let latest=null;
     let linkPort=null;
+    let actionStates=new Map();
+    const readBindings=element=>{
+      let bindings={};
+      const raw=getAttribute.call(element,'data-kronn-bindings');
+      if(raw){
+        try{
+          const parsed=parseJson(raw);
+          if(parsed&&typeof parsed==='object'&&!Array.isArray(parsed)){
+            bindings=Object.fromEntries(objectEntries(parsed).filter(([key,value])=>key.length<=128&&typeof value==='string'&&value.length<=4096));
+          }
+        }catch(_error){}
+      }
+      return bindings;
+    };
+    const bindingKey=bindings=>objectEntries(bindings).map(([name,selector])=>name+'='+selector).sort().join('\\u001f');
+    const markActions=()=>{
+      document.querySelectorAll('[data-kronn-action]').forEach(element=>{
+        const ref=(getAttribute.call(element,'data-kronn-action')||'').trim();
+        const state=actionStates.get(ref+'\\n'+bindingKey(readBindings(element)));
+        if(state){
+          if(getAttribute.call(element,'data-kronn-action-state')!==state)element.setAttribute('data-kronn-action-state',state);
+          if(state==='launching'||state==='running')element.setAttribute('aria-busy','true');
+          else element.removeAttribute('aria-busy');
+        }else if(element.hasAttribute('data-kronn-action-state')){
+          element.removeAttribute('data-kronn-action-state');
+          element.removeAttribute('aria-busy');
+        }
+      });
+    };
+    // Pages render their rows from data, often after this runs: re-mark
+    // whenever rows appear or change their binding, never on our own marks.
+    new MutationObserver(()=>{if(actionStates.size)markActions();}).observe(document,{childList:true,subtree:true,attributes:true,attributeFilter:['data-kronn-action','data-kronn-bindings']});
     Object.defineProperty(window,'KronnPageData',{configurable:false,get:()=>latest});
     const materializedRoot=()=>{
       const root=document.documentElement.cloneNode(true);
@@ -155,16 +220,7 @@ export function buildSandboxDocument(html: string, channelId: string): string {
         if(!linkPort||(userActivation&&!userActivation.isActive))return;
         const actionRef=(getAttribute.call(action,'data-kronn-action')||'').trim();
         if(!/^[A-Za-z0-9._~-]{1,256}$/.test(actionRef))return;
-        let bindings={};
-        const raw=getAttribute.call(action,'data-kronn-bindings');
-        if(raw){
-          try{
-            const parsed=parseJson(raw);
-            if(parsed&&typeof parsed==='object'&&!Array.isArray(parsed)){
-              bindings=Object.fromEntries(objectEntries(parsed).filter(([key,value])=>key.length<=128&&typeof value==='string'&&value.length<=4096));
-            }
-          }catch(_error){}
-        }
+        const bindings=readBindings(action);
         const rect=getBounds.call(action);
         portPost.call(linkPort,{type:'kronn:page-action',version:1,channel_id:channel,action_ref:actionRef,bindings,anchor:{left:rect.left,top:rect.top,width:rect.width,height:rect.height}});
         return;
@@ -190,6 +246,14 @@ export function buildSandboxDocument(html: string, channelId: string): string {
       if(message.type==='kronn:page-data'){
         latest=message.data;
         dispatchEvent(new CustomEvent('kronn:page-data',{detail:latest}));
+        return;
+      }
+      if(message.type==='kronn:page-action-states'){
+        if(!Array.isArray(message.states))return;
+        actionStates=new Map(message.states
+          .filter(entry=>entry&&typeof entry.action_ref==='string'&&typeof entry.binding_key==='string'&&typeof entry.state==='string')
+          .map(entry=>[entry.action_ref+'\\n'+entry.binding_key,entry.state]));
+        markActions();
         return;
       }
       if(message.type!=='kronn:page-export-request'||typeof message.request_id!=='string')return;

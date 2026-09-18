@@ -22,6 +22,9 @@ export interface KronnActionOperations<T extends KronnAction> {
     variables: Record<string, string>;
     bindings?: Record<string, string>;
   }) => Promise<T>;
+  /** Back to the offer once a run is over, to launch the same row again. Only
+   * a Page provides it: a discussion fence is one intention, launched once. */
+  relaunch?: (action: T) => Promise<T>;
 }
 
 interface KronnActionCardProps<T extends KronnAction> {
@@ -71,6 +74,16 @@ function initialValues(action: KronnAction): Record<string, string> {
   return Object.fromEntries(action.values
     .filter(isEditableValue)
     .map(value => [value.name, value.value ?? value.suggested_value ?? '']));
+}
+
+/** The row a Page card is about, as the reader knows it: the selectors the
+ * click carried, or those recorded on the launch when it was reopened. */
+function boundRow(action: KronnAction, bindings?: Record<string, string>): string | null {
+  const fromClick = Object.values(bindings ?? {});
+  if (fromClick.length > 0) return fromClick.join(' · ');
+  const key = 'binding_key' in action ? action.binding_key : null;
+  if (!key) return null;
+  return key.split('\u001f').map(pair => pair.slice(pair.indexOf('=') + 1)).join(' · ');
 }
 
 function provenanceLabel(
@@ -150,7 +163,10 @@ export function KronnActionCard<T extends KronnAction>({
     setBusy(true);
     setError(null);
     try {
-      update(await operation());
+      const next = await operation();
+      // Back on an offer (a relaunch): the form restarts from its suggestions.
+      if (next.state === 'proposed') setValues(initialValues(next));
+      update(next);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -163,6 +179,8 @@ export function KronnActionCard<T extends KronnAction>({
   const kindLabel = t(`disc.action.kind.${current.kind}`);
   const resultDiscussionId = current.result_discussion_id;
   const stalePageSource = 'stale_source' in current && current.stale_source;
+  const row = boundRow(current, bindings);
+  const relaunch = operations.relaunch;
 
   return (
     <section className="discussion-action-card" data-state={current.state} data-expanded={expanded} data-testid={`${testIdPrefix}-${current.id}`}>
@@ -187,6 +205,11 @@ export function KronnActionCard<T extends KronnAction>({
                 <span className="discussion-action-card__project" data-testid="action-card-project">
                   <FolderGit2 size={10} aria-hidden />
                   {current.project_name}
+                </span>
+              )}
+              {row && (
+                <span className="discussion-action-card__row" data-testid="action-card-row" title={t('disc.action.row', row)}>
+                  {row}
                 </span>
               )}
             </span>
@@ -249,8 +272,15 @@ export function KronnActionCard<T extends KronnAction>({
         </div>
       )}
 
+      {expanded && current.state === 'launching' && !current.shared_run_id && (
+        <p className="discussion-action-card__starting" role="status" data-testid="action-card-starting">
+          <Loader2 size={13} className="spin" aria-hidden /> {t('disc.action.starting')}
+        </p>
+      )}
+      {/* Never compact: while a run is going is exactly when its steps, the
+          step in progress and the elapsed time are what the reader came for. */}
       {expanded && current.shared_run_id && (
-        <RunStatusCard runId={current.shared_run_id} compact={current.state === 'running'} />
+        <RunStatusCard runId={current.shared_run_id} />
       )}
 
       {expanded && stalePageSource && (
@@ -298,6 +328,17 @@ export function KronnActionCard<T extends KronnAction>({
             onClick={() => onOpenDiscussion(resultDiscussionId)}
           >
             <ExternalLink size={13} aria-hidden /> {t('disc.action.openDiscussion')}
+          </button>
+        )}
+        {terminal && relaunch && current.state !== 'cancelled' && (
+          <button
+            type="button"
+            className="discussion-action-card__launch"
+            disabled={busy}
+            data-testid="action-card-relaunch"
+            onClick={() => void runOnce(() => relaunch(current))}
+          >
+            <RotateCcw size={13} aria-hidden /> {t('disc.action.relaunch')}
           </button>
         )}
       </footer>}

@@ -188,6 +188,34 @@
 /* KT-582 — where this card will run. Quiet, because it is context rather than
    a warning; always shown, because the guard that used to refuse a card
    pointing elsewhere is gone and this is what replaces it. */
+/* The row a Page card is about (the ticket, the item): without it, forty cards
+   opened from forty buttons of the same block all read the same. */
+.discussion-action-card__row {
+  display: inline-flex;
+  align-items: center;
+  max-width: 24ch;
+  overflow: hidden;
+  padding: 1px 6px;
+  border: 1px solid color-mix(in srgb, var(--kr-accent) 45%, transparent);
+  border-radius: var(--kr-r-pill);
+  color: var(--kr-text-secondary);
+  font-size: var(--kr-fs-2xs);
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Between the click and the run id: says something is happening before
+   there is a run to show. */
+.discussion-action-card__starting {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 10px 14px 0;
+  color: var(--kr-text-secondary);
+  font-size: var(--kr-fs-xs);
+}
+
 .discussion-action-card__project {
   display: inline-flex;
   align-items: center;

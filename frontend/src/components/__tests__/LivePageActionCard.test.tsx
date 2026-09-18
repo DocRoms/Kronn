@@ -48,7 +48,7 @@ function action(overrides: Partial<LivePageAction> = {}): LivePageAction {
     finished_at: null,
     created_at: '2026-09-01T08:00:00Z',
     updated_at: '2026-09-01T08:00:00Z',
-    stale_source: false,
+    stale_source: false, binding_key: null,
     ...overrides,
   };
 }
@@ -68,7 +68,9 @@ describe('LivePageActionCard', () => {
     );
 
     expect(screen.getByDisplayValue('disc.action.resolvedAtLaunch')).toBeDisabled();
-    expect(screen.getByText(/KT-538/)).toBeInTheDocument();
+    // The row is named on the card, and its value is still resolved from the Page.
+    expect(screen.getByTestId('action-card-row')).toHaveTextContent('KT-538');
+    expect(screen.getByText(/dynamicBinding.*KT-538/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: /disc\.action\.launch/ }));
     await waitFor(() => expect(mocks.launchAction).toHaveBeenCalledWith(
       'page-action:page-1:ticket',
@@ -98,5 +100,47 @@ describe('LivePageActionCard', () => {
     );
     expect(screen.getByText('disc.action.unavailablePageAction')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /disc\.action\.launch/ })).toBeDisabled();
+  });
+
+  it('says the run is starting before it has a run to show', () => {
+    render(
+      <LivePageActionCard
+        action={action({ id: 'page-launch:1', state: 'launching', binding_key: 'ticket=EW-7704' })}
+        onChanged={vi.fn()}
+        onOpenDiscussion={vi.fn()}
+      />,
+    );
+    expect(screen.getByTestId('action-card-starting')).toHaveTextContent('disc.action.starting');
+    expect(screen.queryByTestId('run-card')).not.toBeInTheDocument();
+    // Reopened from the button, the card still names its row.
+    expect(screen.getByTestId('action-card-row')).toHaveTextContent('EW-7704');
+  });
+
+  it('a finished run goes back to its offer to launch the same row again', async () => {
+    const offer = action();
+    const onChanged = vi.fn();
+    render(
+      <LivePageActionCard
+        action={action({ id: 'page-launch:1', state: 'failed', binding_key: 'ticket=EW-7704', shared_run_id: 'run-1' })}
+        offer={offer}
+        bindings={{ ticket: 'EW-7704' }}
+        onChanged={onChanged}
+        onOpenDiscussion={vi.fn()}
+      />,
+    );
+    fireEvent.click(screen.getByTestId('action-card-relaunch'));
+    await waitFor(() => expect(onChanged).toHaveBeenCalledWith(offer));
+    expect(mocks.launchAction).not.toHaveBeenCalled();
+  });
+
+  it('offers no relaunch without an offer to go back to', () => {
+    render(
+      <LivePageActionCard
+        action={action({ id: 'page-launch:1', state: 'succeeded', binding_key: '' })}
+        onChanged={vi.fn()}
+        onOpenDiscussion={vi.fn()}
+      />,
+    );
+    expect(screen.queryByTestId('action-card-relaunch')).not.toBeInTheDocument();
   });
 });

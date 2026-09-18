@@ -2445,6 +2445,8 @@ export const pages = {
     api<PublishLivePageResult>('POST', `/pages/${encodeURIComponent(id)}/publish`, request),
   actions: (id: string) =>
     api<LivePageAction[]>('GET', `/pages/${encodeURIComponent(id)}/actions`),
+  actionLaunches: (id: string) =>
+    api<LivePageAction[]>('GET', `/pages/${encodeURIComponent(id)}/action-launches`),
   getAction: (actionId: string) =>
     api<LivePageAction>('GET', `/live-page-actions/${encodeURIComponent(actionId)}`),
   cancelAction: (actionId: string) =>

@@ -45,7 +45,7 @@ vi.mock('../../lib/api', () => ({
   docs: { generatePdf: vi.fn(), generateDocx: vi.fn(), generateCsv: vi.fn() },
   pages: {
     list: vi.fn(), get: vi.fn(), revisions: vi.fn(), workflows: vi.fn(), publications: vi.fn(), discussions: vi.fn(),
-    actions: vi.fn(), getAction: vi.fn(), cancelAction: vi.fn(), launchAction: vi.fn(),
+    actions: vi.fn(), actionLaunches: vi.fn(() => Promise.resolve([])), getAction: vi.fn(), cancelAction: vi.fn(), launchAction: vi.fn(),
     update: vi.fn(), delete: vi.fn(), updateHtml: vi.fn(),
   },
   workflows: { triggerStream: vi.fn() },
@@ -125,7 +125,7 @@ describe('PagesPage', () => {
       action_ref: 'refresh', kind: 'workflow', target_id: 'wf-1', target_name: 'Refresh report',
       project_id: null, project_name: null, state: 'proposed', values: [], shared_run_id: null,
       result_discussion_id: null, deep_link: null, diagnostic: null, launched_at: null,
-      finished_at: null, created_at: page.created_at, updated_at: page.updated_at, stale_source: false,
+      finished_at: null, created_at: page.created_at, updated_at: page.updated_at, stale_source: false, binding_key: null,
     };
     vi.mocked(pagesApi.actions).mockResolvedValue([pageAction]);
     render(<PagesPage />);
@@ -142,12 +142,16 @@ describe('PagesPage', () => {
     fireEvent.click(toggle);
     expect(toggle).toHaveAttribute('aria-expanded', 'false');
 
-    // The same CTA is an explicit new intention: remount its local form so a
-    // previously collapsed/stale instance cannot leak into the next click.
-    act(() => actionRelay.onAction?.({
+    // A second click on the same CTA closes its card; the next one is a new
+    // intention and remounts a fresh form, so the collapsed instance cannot
+    // leak into it.
+    const click = () => act(() => actionRelay.onAction?.({
       actionRef: 'refresh', bindings: {},
       anchor: { left: 24, top: 40, width: 120, height: 32 },
     }));
+    click();
+    expect(screen.queryByTestId(`live-page-action-${pageAction.id}`)).not.toBeInTheDocument();
+    click();
     expect(screen.getByRole('button', { name: /Refresh report/ })).toHaveAttribute('aria-expanded', 'true');
   });
 

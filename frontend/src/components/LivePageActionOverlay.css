@@ -33,3 +33,32 @@
 }
 
 .live-page-action-overlay .discussion-action-card { margin-top: 0; }
+
+/* Always reachable, whatever state the card is in: a launched card has no
+   Cancel button left, and used to have no way out at all. */
+.live-page-action-overlay__close {
+  position: absolute;
+  top: 6px;
+  inset-inline-end: 6px;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid var(--kr-border);
+  border-radius: 6px;
+  background: var(--kr-bg-elevated);
+  color: var(--kr-text-muted);
+  cursor: pointer;
+}
+
+.live-page-action-overlay__close:hover,
+.live-page-action-overlay__close:focus-visible {
+  color: var(--kr-text-primary);
+  border-color: var(--kr-border-strong);
+}
+
+/* Keep the header's state chip clear of the close button. */
+.live-page-action-overlay .discussion-action-card__header { padding-right: 38px; }
