@@ -524,6 +524,14 @@
       transition: background 0.15s, color 0.15s, border-color 0.15s;
     }
     .lb-close:hover { background: var(--kronn); color: var(--bg-deep); border-color: var(--kronn); }
+    .lb-link {
+      margin-top: 8px; padding: 5px 14px;
+      border: 1px solid var(--text-dim); border-radius: 999px;
+      background: rgba(10, 12, 8, 0.7); color: var(--text-dim);
+      font-family: var(--terminal); font-size: 12px; letter-spacing: 0.05em;
+      cursor: pointer; transition: background 0.15s, color 0.15s, border-color 0.15s;
+    }
+    .lb-link:hover { background: var(--lila); color: var(--bg-deep); border-color: var(--lila); }
     body.lb-lock { overflow: hidden; }
     @media (max-width: 900px) {
       .lb-prev { left: 8px; } .lb-next { right: 8px; }
@@ -2226,9 +2234,9 @@
     var links = Array.prototype.slice.call(document.querySelectorAll('.gallery-card a'));
     if (!links.length) return;
     var L = {
-      fr: { gallery: 'Galerie de captures Kronn', close: 'Fermer', prev: 'Image précédente', next: 'Image suivante' },
-      en: { gallery: 'Kronn screenshot gallery', close: 'Close', prev: 'Previous image', next: 'Next image' },
-      es: { gallery: 'Galería de capturas de Kronn', close: 'Cerrar', prev: 'Imagen anterior', next: 'Imagen siguiente' }
+      fr: { gallery: 'Galerie de captures Kronn', close: 'Fermer', prev: 'Image précédente', next: 'Image suivante', link: 'Copier le lien', copied: 'Lien copié' },
+      en: { gallery: 'Kronn screenshot gallery', close: 'Close', prev: 'Previous image', next: 'Next image', link: 'Copy link', copied: 'Link copied' },
+      es: { gallery: 'Galería de capturas de Kronn', close: 'Cerrar', prev: 'Imagen anterior', next: 'Imagen siguiente', link: 'Copiar el enlace', copied: 'Enlace copiado' }
     };
     var t = L[(document.documentElement.lang || 'en').slice(0, 2)] || L.en;
     var items = links.map(function (a) {
@@ -2239,6 +2247,9 @@
       var webm = vid && vid.querySelector('source[type="video/webm"]');
       return {
         video: !!vid,
+        // L'identifiant partagé est le nom du fichier, pas son rang : la galerie
+        // a déjà été réordonnée trois fois, un lien en #media=7 aurait suivi.
+        slug: a.getAttribute('href').replace(/^screenshots\//, '').replace(/\.[a-z0-9]+$/i, ''),
         src: a.getAttribute('href'),
         webm: webm ? webm.getAttribute('src') : '',
         caption: cap ? cap.innerHTML : '',
@@ -2260,12 +2271,15 @@
         '<button class="lb-btn lb-next" type="button" aria-label="' + t.next + '">›</button>' +
       '</div>' +
       '<div class="lb-count" aria-live="polite"></div>' +
+      '<button class="lb-link" type="button">' + t.link + '</button>' +
       '<div class="lb-cap"></div>';
     document.body.appendChild(overlay);
     var imgEl = overlay.querySelector('.lb-img');
     var vidEl = overlay.querySelector('.lb-vid');
     var capEl = overlay.querySelector('.lb-cap');
     var countEl = overlay.querySelector('.lb-count');
+    var linkEl = overlay.querySelector('.lb-link');
+    var linkTimer = null;
     var idx = 0, lastFocus = null;
     function stopVideo() {
       vidEl.pause();
@@ -2301,10 +2315,45 @@
         if (!near.video) { var p = new Image(); p.src = near.src; }
       });
     }
-    function openAt(i) { idx = i; lastFocus = document.activeElement; render(); overlay.setAttribute('aria-hidden', 'false'); overlay.classList.add('open'); document.body.classList.add('lb-lock'); overlay.querySelector('.lb-close').focus(); }
-    function close() { overlay.classList.remove('open'); overlay.setAttribute('aria-hidden', 'true'); document.body.classList.remove('lb-lock'); imgEl.removeAttribute('src'); stopVideo(); if (lastFocus && lastFocus.focus) lastFocus.focus(); }
-    function go(step) { idx = (idx + step + items.length) % items.length; render(); }
+    function shareUrl(i) {
+      return location.origin + location.pathname + location.search + '#media=' + items[i].slug;
+    }
+    // replaceState plutôt que pushState : sinon parcourir vingt-quatre diapos
+    // laisse vingt-quatre entrées dans l'historique et le bouton Retour ne
+    // ramène plus à la page d'où l'on vient.
+    function writeHash(i) {
+      if (!history.replaceState) { return; }
+      history.replaceState(null, '', shareUrl(i));
+    }
+    function clearHash() {
+      if (!history.replaceState) { return; }
+      history.replaceState(null, '', location.pathname + location.search + '#gallery');
+    }
+    function indexFromHash() {
+      var m = /^#media=(.+)$/.exec(location.hash || '');
+      if (!m) { return -1; }
+      var key = decodeURIComponent(m[1]);
+      for (var i = 0; i < items.length; i++) { if (items[i].slug === key) { return i; } }
+      var n = parseInt(key, 10);              // #media=7 marche aussi, par commodité
+      return (n >= 1 && n <= items.length) ? n - 1 : -1;
+    }
+    function openAt(i, keepHash) { idx = i; lastFocus = document.activeElement; render(); if (!keepHash) { writeHash(i); } overlay.setAttribute('aria-hidden', 'false'); overlay.classList.add('open'); document.body.classList.add('lb-lock'); overlay.querySelector('.lb-close').focus(); }
+    function close() { overlay.classList.remove('open'); overlay.setAttribute('aria-hidden', 'true'); document.body.classList.remove('lb-lock'); imgEl.removeAttribute('src'); stopVideo(); clearHash(); if (lastFocus && lastFocus.focus) lastFocus.focus(); }
+    function go(step) { idx = (idx + step + items.length) % items.length; render(); writeHash(idx); }
     links.forEach(function (a, i) { a.addEventListener('click', function (e) { if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return; e.preventDefault(); openAt(i); }); });
+    linkEl.addEventListener('click', function () {
+      var url = shareUrl(idx);
+      var done = function () {
+        linkEl.textContent = t.copied;
+        clearTimeout(linkTimer);
+        linkTimer = setTimeout(function () { linkEl.textContent = t.link; }, 1800);
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(url).then(done, function () { window.prompt(t.link, url); });
+      } else {
+        window.prompt(t.link, url);       // pas de presse-papiers hors contexte sûr
+      }
+    });
     overlay.querySelector('.lb-close').addEventListener('click', close);
     overlay.querySelector('.lb-prev').addEventListener('click', function () { go(-1); });
     overlay.querySelector('.lb-next').addEventListener('click', function () { go(1); });
@@ -2321,6 +2370,20 @@
         else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
       }
     });
+    function openFromHash(scroll) {
+      var i = indexFromHash();
+      if (i < 0) { return false; }
+      if (scroll) {
+        var card = links[i].closest('.gallery-card');
+        if (card && card.scrollIntoView) { card.scrollIntoView({ block: 'center' }); }
+      }
+      openAt(i, true);
+      return true;
+    }
+    window.addEventListener('hashchange', function () {
+      if (!openFromHash(false) && overlay.classList.contains('open')) { close(); }
+    });
+    openFromHash(true);                     // un lien partagé ouvre sa diapo
   })();
   </script>
 </body>
