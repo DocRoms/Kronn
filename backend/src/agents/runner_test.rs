@@ -2102,7 +2102,7 @@ mod tests {
         assert_eq!(
             worker_exploration_policy("qwen3.8:27b-q4_K_M", Some("gguf"), false),
             WorkerExplorationPolicy {
-                max_iterations: crate::agents::tools::MAX_TOOL_ITERATIONS,
+                max_iterations: WORKER_EXPLORATION_ROUNDS,
                 max_observations_without_mutation: None,
                 context_pressure_percent: DEFAULT_WORKER_CONTEXT_PRESSURE_PERCENT,
                 mlx_mitigation: false,
@@ -2112,7 +2112,7 @@ mod tests {
         assert_eq!(
             worker_exploration_policy("upstream:27b-mlx", Some("safetensors"), true),
             WorkerExplorationPolicy {
-                max_iterations: crate::agents::tools::MAX_TOOL_ITERATIONS,
+                max_iterations: WORKER_EXPLORATION_ROUNDS,
                 max_observations_without_mutation: None,
                 context_pressure_percent: DEFAULT_WORKER_CONTEXT_PRESSURE_PERCENT,
                 mlx_mitigation: false,
@@ -5541,8 +5541,16 @@ mod tests {
         use crate::agents::tools::ToolRunMode;
 
         assert_eq!(max_calls_for_tool("read_file", ToolRunMode::General), 48);
-        assert_eq!(max_calls_for_tool("api_call", ToolRunMode::General), 12);
         assert_eq!(max_calls_for_tool("mcp_list", ToolRunMode::General), 12);
+
+        // Enumerating is not looping. Analysing one pull request walked eight
+        // pages of the open web and was cut off on the ninth; a repository's
+        // issues are read a page at a time, and a hundred issues is an
+        // ordinary ask. Both stay bounded, and the loop guards are unchanged.
+        assert_eq!(max_calls_for_tool("web_fetch", ToolRunMode::General), 120);
+        assert_eq!(max_calls_for_tool("api_call", ToolRunMode::General), 60);
+        assert_eq!(max_calls_for_tool("qa_run", ToolRunMode::General), 60);
+        assert_eq!(max_calls_for_tool("web_fetch", ToolRunMode::Worker), 120);
         assert_eq!(
             max_calls_for_tool("search_text", ToolRunMode::Worker),
             24,

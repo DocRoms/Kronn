@@ -96,7 +96,16 @@ pub trait ToolExecutor: Send + Sync {
 /// it is the one the user sets, sees, and can raise. This stays as the
 /// anti-runaway backstop underneath it — high enough that honest work finishes,
 /// low enough that a model looping on a fast endpoint still terminates.
-pub const MAX_TOOL_ITERATIONS: usize = 50;
+///
+/// 150, raised from 50: fifty is a budget for a question, not for an analysis.
+/// Asked to detail one pull request against the issues it closes — fifteen
+/// commits, fifty issues, seven hundred files — an agent spends the whole
+/// allowance enumerating and answers with what it happened to reach. The
+/// duration the operator configures remains the real limit; this is the
+/// backstop under it, and the guards that catch an actual loop are unchanged:
+/// identical repeats after one replay, same-answer digests, the three-error
+/// circuit, and the per-tool budgets above.
+pub const MAX_TOOL_ITERATIONS: usize = 150;
 
 /// A piece of a tool call as it appears on the wire.
 ///
