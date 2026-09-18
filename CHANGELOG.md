@@ -285,6 +285,17 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Changed
 
+- The public-site gallery was rebuilt from the application as it is today:
+  twenty-four cards in the three languages, shot against a seeded sandbox with
+  real providers rather than mocks. Six captures still showed the shell from
+  before the Pages tab existed, and four capabilities — projects, planning, the
+  automation library, the database weight — had no card at all. Each caption now
+  names what you can do, the condition that makes it possible, and glosses the
+  words this project invented. The four animated cards became video with an mp4
+  and a webm source, pause when off-screen, and carry a badge; every slide has
+  its own shareable `#media=` link, and the carousel stopped skipping the
+  videos.
+
 - Projects > Code fetches one folder when it is opened, instead of the whole
   repository up front. The old whole-tree ceiling could silently cut the tree,
   making omitted files indistinguishable from files that did not exist. The
@@ -420,6 +431,16 @@ Release notes for 0.9.3 and earlier are available in the
   the answer is not there.
 
 ### Fixed
+
+- During an ACP turn the discussion's log panel showed nothing but the internal
+  thread marker: seventeen `Bash` calls produced seventeen `[acp-tool] Bash`
+  lines and nothing else. Routing tool calls through the run's stderr capture
+  is what lets the transcript render them under the reply, but the same capture
+  feeds the live panel verbatim, so the marker escaped to a surface a human
+  reads — filling the panel's fifty-line window and evicting the diagnostics it
+  exists for, and leaking into the collapsed status line by default. The task
+  and its test now share one predicate, so the two halves cannot drift apart
+  again (#210).
 
 - A room with two thousand messages froze on open. Neither the data nor the
   query was the cost — two megabytes in total, answered in under ten

@@ -2270,13 +2270,17 @@
     // replaceState plutôt que pushState : sinon parcourir vingt-quatre diapos
     // laisse vingt-quatre entrées dans l'historique et le bouton Retour ne
     // ramène plus à la page d'où l'on vient.
-    function writeHash(i) {
+    // A page opened from a file, or set as raw content, has no origin to write
+    // a history entry against, and replaceState throws there. The address is a
+    // convenience; the carousel has to open either way, so the failure is
+    // swallowed rather than allowed to take the dialog down with it.
+    function rewriteAddress(url) {
       if (!history.replaceState) { return; }
-      history.replaceState(null, '', shareUrl(i));
+      try { history.replaceState(null, '', url); } catch (e) { /* no origin */ }
     }
+    function writeHash(i) { rewriteAddress(shareUrl(i)); }
     function clearHash() {
-      if (!history.replaceState) { return; }
-      history.replaceState(null, '', location.pathname + location.search + '#gallery');
+      rewriteAddress(location.pathname + location.search + '#gallery');
     }
     function indexFromHash() {
       var m = /^#media=(.+)$/.exec(location.hash || '');
@@ -2286,7 +2290,7 @@
       var n = parseInt(key, 10);              // #media=7 marche aussi, par commodité
       return (n >= 1 && n <= items.length) ? n - 1 : -1;
     }
-    function openAt(i, keepHash) { idx = i; lastFocus = document.activeElement; render(); if (!keepHash) { writeHash(i); } overlay.setAttribute('aria-hidden', 'false'); overlay.classList.add('open'); document.body.classList.add('lb-lock'); overlay.querySelector('.lb-close').focus(); }
+    function openAt(i, keepHash) { idx = i; lastFocus = document.activeElement; render(); overlay.setAttribute('aria-hidden', 'false'); overlay.classList.add('open'); document.body.classList.add('lb-lock'); overlay.querySelector('.lb-close').focus(); if (!keepHash) { writeHash(i); } }
     function close() { overlay.classList.remove('open'); overlay.setAttribute('aria-hidden', 'true'); document.body.classList.remove('lb-lock'); imgEl.removeAttribute('src'); stopVideo(); clearHash(); if (lastFocus && lastFocus.focus) lastFocus.focus(); }
     function go(step) { idx = (idx + step + items.length) % items.length; render(); writeHash(idx); }
     links.forEach(function (a, i) { a.addEventListener('click', function (e) { if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return; e.preventDefault(); openAt(i); }); });
