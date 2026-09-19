@@ -1277,7 +1277,22 @@ extracted_from_asset_id?: string | null, created_at: string, };
  * Its presence is the attestation used by clients to label an asset as AI
  * generated. Ordinary uploads never receive inferred provenance.
  */
-export type ContextFileAiGeneration = { model: string, prompt: string, };
+export type ContextFileAiGeneration = { model: string, prompt: string,
+/**
+ * Length read from the produced file's header, not the one requested:
+ * a 5 s request came back as 5042 ms. Absent when it could not be read.
+ */
+duration_ms: number | null,
+/**
+ * Cost as declared by the provider for this generation. Absent when none
+ * was declared: never a guessed or zero price.
+ */
+cost_usd: number | null,
+/**
+ * Billed on the user's own provider key rather than through the
+ * connection's credit.
+ */
+is_byok: boolean, };
 
 /**
  * Cost aggregated across one or more token-cost observations. Never
@@ -6972,6 +6987,20 @@ export type UsageTotals = { input_tokens: number, output_tokens: number, cache_c
 export type ValidationSpec = { command: string, quick_exec_id?: string | null, timeout_secs?: number | null, };
 
 export type VersionCheck = { current: string, latest: string | null, release_url: string | null, up_to_date: boolean, };
+
+/**
+ * The clips a person arranged. Read back filtered to the files the
+ * discussion still has.
+ */
+export type VideoSequence = {
+/**
+ * Played, in this order.
+ */
+file_ids: Array<string>,
+/**
+ * Kept by the discussion, not played.
+ */
+excluded_ids: Array<string>, };
 
 export type WaitForPeerMessage = {
 /**

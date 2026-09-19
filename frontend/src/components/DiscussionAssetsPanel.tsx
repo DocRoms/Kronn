@@ -1,13 +1,17 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Clapperboard, FileText, Images, Search, Sparkles, X } from 'lucide-react';
+import { Clapperboard, FileText, Film, Images, LayoutGrid, Search, Sparkles, X } from 'lucide-react';
 import type { ContextFile } from '../types/generated';
 import type { ExternalApiConnectionView } from '../lib/api';
 import { MessageAttachments, type ImageGenerationRequest } from './MessageAttachments';
 import { MediaGenerateForm } from './MediaGenerateForm';
+import { VideoSequenceEditor } from './VideoSequenceEditor';
 import { mediaKind } from '../lib/mediaKind';
 
 type T = (key: string, ...args: (string | number)[]) => string;
 type AssetFilter = 'all' | 'images' | 'videos' | 'files' | 'pending';
+/// Three uses of one inventory: finding an asset, making one, and putting the
+/// clips in the order they play as a film.
+type AssetTab = 'all' | 'creator' | 'editor';
 
 const PAGE_SIZE = 40;
 
@@ -66,7 +70,7 @@ export function DiscussionAssetsPanel({
   // really scrolled to the asset. Kept apart from `visibleCount`: the same
   // request clears the query and filter, and their own reset would undo it.
   const [pinnedCount, setPinnedCount] = useState(0);
-  const [showGenerate, setShowGenerate] = useState(false);
+  const [tab, setTab] = useState<AssetTab>('all');
   const [generationRequest, setGenerationRequest] = useState<(ImageGenerationRequest & { nonce: number }) | null>(null);
   const clearPagination = useCallback(() => setPinnedCount(0), []);
 
@@ -75,7 +79,7 @@ export function DiscussionAssetsPanel({
     setFilter('all');
     setPaging({ key: '', count: PAGE_SIZE });
     setPinnedCount(0);
-    setShowGenerate(false);
+    setTab('all');
     setGenerationRequest(null);
   }, [discussionId]);
 
@@ -88,12 +92,21 @@ export function DiscussionAssetsPanel({
   const [answeredRequest, setAnsweredRequest] = useState<typeof openAssetRequest>(null);
   if (openAssetRequest && openAssetRequest !== answeredRequest) {
     setAnsweredRequest(openAssetRequest);
+    // The viewer lives in the inventory, so an asset opened from the
+    // transcript lands there whatever tab was showing.
+    setTab('all');
     setQuery('');
     setFilter('all');
     const ordered = [...files].sort((left, right) => right.created_at.localeCompare(left.created_at));
     const index = ordered.findIndex(file => file.id === openAssetRequest.assetId);
     setPinnedCount(index >= 0 ? index + 1 : 0);
   }
+
+  const videos = useMemo(() => files.filter(isVideo), [files]);
+  // An order needs at least two clips; with fewer the tab would only ever
+  // show a list of one.
+  const editorAvailable = videos.length >= 2;
+  const activeTab: AssetTab = tab === 'editor' && !editorAvailable ? 'all' : tab;
 
   const counts = useMemo(() => ({
     all: files.length,
@@ -129,15 +142,6 @@ export function DiscussionAssetsPanel({
     () => [...files].sort((left, right) => right.created_at.localeCompare(left.created_at)),
     [files],
   );
-  // Whether any connection can actually serve a modality. It gates the FORM,
-  // not the entry point: hiding the whole block made the feature invisible and
-  // left no clue that a media slot has to be configured first — the same
-  // mistake as a disabled selector that explains nothing.
-  const canGenerate = connections.some(
-    connection =>
-      (connection.image_model && connection.image_model.trim())
-      || (connection.video_model && connection.video_model.trim()),
-  );
   const filters: Array<{ id: AssetFilter; label: string; icon?: typeof Images }> = [
     { id: 'all', label: t('disc.assets.filterAll') },
     { id: 'images', label: t('disc.assets.filterImages'), icon: Images },
@@ -164,25 +168,35 @@ export function DiscussionAssetsPanel({
         </button>
       </header>
 
-      <div className="disc-assets-generate">
-        <button
-          type="button"
-          className="btn btn-sm"
-          onClick={() => setShowGenerate(open => !open)}
-          aria-expanded={showGenerate}
-          data-testid="assets-generate-toggle"
-        >
-          <Sparkles size={13} aria-hidden="true" />
-          <span>{showGenerate ? t('disc.media.closeForm') : t('disc.media.newAsset')}</span>
-        </button>
-        {!canGenerate && (
-          // Stated without a click: the reason it cannot run yet, and where to
-          // fix it. Discovering that through an empty form would be worse.
-          <p className="disc-assets-generate-hint" data-testid="assets-generate-hint">
-            {t('disc.media.noSlot')}
-          </p>
-        )}
-        {showGenerate && (
+      <div className="disc-assets-tabs" role="tablist" aria-label={t('disc.assets.tabs')}>
+        {([
+          { id: 'all', label: t('disc.assets.tabAll'), icon: LayoutGrid },
+          { id: 'creator', label: t('disc.assets.tabCreator'), icon: Sparkles },
+          ...(editorAvailable ? [{ id: 'editor', label: t('disc.assets.tabEditor'), icon: Film }] : []),
+        ] as Array<{ id: AssetTab; label: string; icon: typeof Film }>).map(item => {
+          const Icon = item.icon;
+          return (
+            <button
+              key={item.id}
+              type="button"
+              role="tab"
+              aria-selected={activeTab === item.id}
+              data-active={activeTab === item.id}
+              data-testid={`assets-tab-${item.id}`}
+              onClick={() => setTab(item.id)}
+            >
+              <Icon size={13} aria-hidden="true" />
+              <span>{item.label}</span>
+              {item.id === 'editor' && <span className="disc-assets-filter-count">{videos.length}</span>}
+            </button>
+          );
+        })}
+      </div>
+
+      {activeTab === 'creator' && (
+        <div className="disc-assets-generate" role="tabpanel">
+          {/* Always offered: with no media slot configured, the form itself
+              says so and where to fix it, which a hidden entry never did. */}
           <MediaGenerateForm
             key={generationRequest?.nonce ?? 0}
             discussionId={discussionId}
@@ -199,76 +213,86 @@ export function DiscussionAssetsPanel({
               ? { assetId: generationRequest.assetId, mode: generationRequest.referenceMode }
               : null}
           />
-        )}
-      </div>
-
-      <div className="disc-assets-panel-tools">
-        <label className="disc-assets-search">
-          <Search size={14} aria-hidden="true" />
-          <input
-            type="search"
-            value={query}
-            onChange={event => { clearPagination(); setQuery(event.target.value); }}
-            placeholder={t('disc.assets.search')}
-            aria-label={t('disc.assets.search')}
-          />
-        </label>
-        <div className="disc-assets-filters" role="group" aria-label={t('disc.assets.filters')}>
-          {filters.map(item => {
-            const Icon = item.icon;
-            return (
-              <button
-                key={item.id}
-                type="button"
-                data-active={filter === item.id}
-                onClick={() => { clearPagination(); setFilter(item.id); }}
-              >
-                {Icon && <Icon size={12} aria-hidden="true" />}
-                <span>{item.label}</span>
-                <span className="disc-assets-filter-count">{counts[item.id]}</span>
-              </button>
-            );
-          })}
         </div>
-      </div>
+      )}
 
-      <div className="disc-assets-panel-content">
-        {visibleFiles.length > 0 ? (
-          <>
-            <MessageAttachments
-              files={visibleFiles}
-              discussionId={discussionId}
-              t={t}
-              variant="library"
-              onNavigateMessage={onNavigateMessage}
-              carouselScope={carouselScope}
-              openRequest={openAssetRequest}
-              onDeleted={onAssetDeleted}
-              onExtracted={onAssetExtracted}
-              generationConnections={connections}
-              onGenerateFromImage={request => {
-                setGenerationRequest(previous => ({ ...request, nonce: (previous?.nonce ?? 0) + 1 }));
-                setShowGenerate(true);
-              }}
-            />
-            {shownCount < filteredFiles.length && (
-              <button
-                type="button"
-                className="btn btn-sm disc-assets-load-more"
-                onClick={() => setPaging({ key: pagingKey, count: shownCount + PAGE_SIZE })}
-              >
-                {t('disc.assets.loadMore', filteredFiles.length - shownCount)}
-              </button>
-            )}
-          </>
-        ) : (
-          <div className="disc-assets-empty">
-            <Images size={28} aria-hidden="true" />
-            <strong>{t('disc.assets.empty')}</strong>
-            <span>{query ? t('disc.assets.emptySearch') : t('disc.assets.emptyHint')}</span>
+      {activeTab === 'editor' && (
+        <div className="disc-assets-panel-content" role="tabpanel">
+          <VideoSequenceEditor key={discussionId} discussionId={discussionId} videos={videos} t={t} />
+        </div>
+      )}
+
+      {activeTab === 'all' && (
+        <>
+          <div className="disc-assets-panel-tools">
+            <label className="disc-assets-search">
+              <Search size={14} aria-hidden="true" />
+              <input
+                type="search"
+                value={query}
+                onChange={event => { clearPagination(); setQuery(event.target.value); }}
+                placeholder={t('disc.assets.search')}
+                aria-label={t('disc.assets.search')}
+              />
+            </label>
+            <div className="disc-assets-filters" role="group" aria-label={t('disc.assets.filters')}>
+              {filters.map(item => {
+                const Icon = item.icon;
+                return (
+                  <button
+                    key={item.id}
+                    type="button"
+                    data-active={filter === item.id}
+                    onClick={() => { clearPagination(); setFilter(item.id); }}
+                  >
+                    {Icon && <Icon size={12} aria-hidden="true" />}
+                    <span>{item.label}</span>
+                    <span className="disc-assets-filter-count">{counts[item.id]}</span>
+                  </button>
+                );
+              })}
+            </div>
           </div>
-        )}
-      </div>
+
+          <div className="disc-assets-panel-content" role="tabpanel">
+            {visibleFiles.length > 0 ? (
+              <>
+                <MessageAttachments
+                  files={visibleFiles}
+                  discussionId={discussionId}
+                  t={t}
+                  variant="library"
+                  onNavigateMessage={onNavigateMessage}
+                  carouselScope={carouselScope}
+                  openRequest={openAssetRequest}
+                  onDeleted={onAssetDeleted}
+                  onExtracted={onAssetExtracted}
+                  generationConnections={connections}
+                  onGenerateFromImage={request => {
+                    setGenerationRequest(previous => ({ ...request, nonce: (previous?.nonce ?? 0) + 1 }));
+                    setTab('creator');
+                  }}
+                />
+                {shownCount < filteredFiles.length && (
+                  <button
+                    type="button"
+                    className="btn btn-sm disc-assets-load-more"
+                    onClick={() => setPaging({ key: pagingKey, count: shownCount + PAGE_SIZE })}
+                  >
+                    {t('disc.assets.loadMore', filteredFiles.length - shownCount)}
+                  </button>
+                )}
+              </>
+            ) : (
+              <div className="disc-assets-empty">
+                <Images size={28} aria-hidden="true" />
+                <strong>{t('disc.assets.empty')}</strong>
+                <span>{query ? t('disc.assets.emptySearch') : t('disc.assets.emptyHint')}</span>
+              </div>
+            )}
+          </div>
+        </>
+      )}
     </aside>
   );
 }

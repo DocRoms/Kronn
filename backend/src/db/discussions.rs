@@ -3920,7 +3920,8 @@ pub fn context_file_exists(conn: &Connection, file_id: &str) -> rusqlite::Result
 const CONTEXT_FILE_SELECT: &str =
     "SELECT cf.id, cf.discussion_id, cf.filename, cf.mime_type, cf.original_size,
             cf.extracted_size, cf.disk_path, cf.message_id, cf.created_at,
-            mj.model, mj.prompt, cf.extracted_from_asset_id
+            mj.model, mj.prompt, cf.extracted_from_asset_id,
+            mj.rendered_duration_ms, mj.cost_usd, mj.is_byok
      FROM context_files cf
      LEFT JOIN media_jobs mj ON mj.id = (
          SELECT source.id FROM media_jobs source
@@ -3981,6 +3982,9 @@ pub fn list_context_files(
 fn map_context_file_row(row: &rusqlite::Row) -> rusqlite::Result<crate::models::ContextFile> {
     let ai_model: Option<String> = row.get(9)?;
     let ai_prompt: Option<String> = row.get(10)?;
+    let ai_duration_ms: Option<i64> = row.get(12)?;
+    let ai_cost_usd: Option<f64> = row.get(13)?;
+    let ai_is_byok: Option<i64> = row.get(14)?;
     Ok(crate::models::ContextFile {
         id: row.get(0)?,
         discussion_id: row.get(1)?,
@@ -3998,9 +4002,15 @@ fn map_context_file_row(row: &rusqlite::Row) -> rusqlite::Result<crate::models::
                     .and_utc()
             })
             .unwrap_or_else(|_| Utc::now()),
-        ai_generation: ai_model
-            .zip(ai_prompt)
-            .map(|(model, prompt)| crate::models::ContextFileAiGeneration { model, prompt }),
+        ai_generation: ai_model.zip(ai_prompt).map(|(model, prompt)| {
+            crate::models::ContextFileAiGeneration {
+                model,
+                prompt,
+                duration_ms: ai_duration_ms.and_then(|ms| u64::try_from(ms).ok()),
+                cost_usd: ai_cost_usd,
+                is_byok: ai_is_byok.unwrap_or(0) != 0,
+            }
+        }),
         extracted_from_asset_id: row.get(11)?,
     })
 }

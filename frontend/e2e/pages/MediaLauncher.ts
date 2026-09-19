@@ -1,7 +1,7 @@
 import { expect, type Page } from '@playwright/test';
 
-/** Drive the real panel rail and select only this test's local provider. */
-export async function openMediaLauncher(page: Page, connectionId: string) {
+/** Open the discussion's Assets panel through the real panel rail. */
+export async function openAssetsPanel(page: Page) {
   const rail = page.getByTestId('panel-switcher');
   const toggle = rail.getByTestId('panel-open-toggle');
   if (await toggle.getAttribute('aria-expanded') !== 'true') await toggle.click();
@@ -13,7 +13,13 @@ export async function openMediaLauncher(page: Page, connectionId: string) {
 
   const panel = page.getByRole('complementary', { name: 'Assets' });
   await expect(panel).toBeVisible();
-  await panel.getByTestId('assets-generate-toggle').click();
+  return panel;
+}
+
+/** Drive the real panel rail and select only this test's local provider. */
+export async function openMediaLauncher(page: Page, connectionId: string) {
+  const panel = await openAssetsPanel(page);
+  await panel.getByTestId('assets-tab-creator').click();
   const form = panel.getByTestId('media-generate-form');
   await expect(form).toBeVisible();
   const slot = form.getByTestId(`media-slot-${connectionId}:image`);

@@ -41,6 +41,9 @@ const FILES = [
     ai_generation: {
       model: 'provider/video-model-v3',
       prompt: 'Slow aerial movement above a green valley',
+      duration_ms: 5042,
+      cost_usd: 0.07,
+      is_byok: false,
     },
   },
   file('i4', 'd.png', 'image/png'),

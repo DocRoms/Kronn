@@ -68,6 +68,9 @@ describe('MessageAttachments', () => {
       ai_generation: {
         model: 'provider/image-model-v2',
         prompt: 'A lighthouse above a calm sea at dawn',
+        duration_ms: null,
+        cost_usd: null,
+        is_byok: false,
       },
     });
     render(

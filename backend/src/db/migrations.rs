@@ -695,6 +695,14 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "181_live_page_action_launches",
         include_str!("sql/181_live_page_action_launches.sql"),
     ),
+    (
+        "182_discussion_video_sequences",
+        include_str!("sql/182_discussion_video_sequences.sql"),
+    ),
+    (
+        "183_discussion_video_sequence_exclusions",
+        include_str!("sql/183_discussion_video_sequence_exclusions.sql"),
+    ),
 ];
 
 /// Apply one migration inside the caller-owned transaction.

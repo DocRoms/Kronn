@@ -2117,6 +2117,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             "/api/discussions/{id}/context-files/link-pending",
             post(api::discussions::link_pending_context_files),
         )
+        .route(
+            "/api/discussions/{id}/video-sequence",
+            get(api::discussion_video_sequence::get).put(api::discussion_video_sequence::set),
+        )
         // ── WebSocket ──
         .route("/api/ws", get(api::ws::ws_handler))
         // ── Contacts ──
