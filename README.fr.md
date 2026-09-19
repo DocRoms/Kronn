@@ -23,8 +23,28 @@
 
 **Prompts plus petits, code déterministe quand c'est possible : moins d'hallucinations, facture tokens divisée, écoconception par conception.**
 
-> **Statut : 0.13.1 (version actuelle).** Fonctionnel mais pré-1.0. Les versions mineures peuvent introduire des breaking changes ; les patch versions sont safe.
+> **Statut : 0.13.2 (version actuelle).** Fonctionnel mais pré-1.0. Les versions mineures peuvent introduire des breaking changes ; les patch versions sont safe.
 > **Licence : AGPL-3.0.** Utiliser Kronn localement pour développer *ton propre* produit ne déclenche pas le copyleft ; il ne s'applique que si tu redistribues une version modifiée à d'autres. Voir [Notes sur la licence](#notes-sur-la-licence-agpl-3-0).
+
+## Nouveautés de la 0.13.2
+
+- **Images et vidéos depuis n’importe quelle discussion :** la 0.13.0 promettait
+  qu’un agent génère des médias depuis une discussion, et ce n’était vrai que
+  dans les rooms. Dans une discussion ordinaire, `agent_list`, le seul endroit
+  où figure l’identifiant d’une connexion média, refusait l’agent : rien ne
+  pouvait être généré sans qu’un humain colle un identifiant opaque. Il répond
+  désormais dans toutes les discussions, une génération accepte l’alias ou le
+  nom de la connexion, et un refus liste les connexions capables de faire ce
+  qui est demandé.
+- **Des clips lus comme un seul film :** le panneau Assets d’une discussion
+  passe en onglets. Tout garde l’inventaire, Creator le formulaire de
+  génération, et Editor, dès le deuxième clip, range les clips dans l’ordre,
+  met de côté ceux qui n’ont rien à voir avec le film et lit les autres l’un
+  après l’autre en plein écran. L’ordre est enregistré avec la discussion ;
+  aucun fichier unique n’est produit.
+
+Voir les [notes de la version 0.13.2](CHANGELOG.md) et le
+[guide des connexions API externes](docs/operations/external-api-connections.md).
 
 ## Nouveautés de la 0.13.1
 
@@ -79,6 +99,7 @@ et le [guide de délégation des tâches](docs/guides/task-orchestration.md).
 
 ## Sommaire
 
+- [Nouveautés de la 0.13.2](#nouveautés-de-la-0132)
 - [Nouveautés de la 0.13.1](#nouveautés-de-la-0131)
 - [Nouveautés de la 0.13.0](#nouveautés-de-la-0130)
 - [Le pitch en 60 secondes](#le-pitch-en-60-secondes)
@@ -144,7 +165,7 @@ Télécharge l'installeur pour ton OS depuis [Releases](https://github.com/DocRo
 Requiert Docker + Docker Compose. Sur Windows, WSL2 (Docker Engine dans WSL fonctionne, Docker Desktop optionnel).
 
 ```bash
-git clone --branch 0.13.1 --depth 1 https://github.com/DocRoms/Kronn.git   # dernière release stable
+git clone --branch 0.13.2 --depth 1 https://github.com/DocRoms/Kronn.git   # dernière release stable
 cd Kronn
 ./kronn start
 # → http://localhost:3140

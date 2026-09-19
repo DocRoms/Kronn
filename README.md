@@ -23,8 +23,26 @@
 
 **Smaller prompts, more code where code is enough: fewer hallucinations, lower token bill, eco-design by default.**
 
-> **Status: 0.13.1 (current release).** Functional but pre-1.0. Breaking changes happen between minor versions; patch versions are safe.
+> **Status: 0.13.2 (current release).** Functional but pre-1.0. Breaking changes happen between minor versions; patch versions are safe.
 > **License: AGPL-3.0.** Using Kronn locally to build *your own* product is fine; the copyleft only kicks in if you distribute a modified Kronn to others. See [License notes](#license-notes-agpl-3-0).
+
+## What's new in 0.13.2
+
+- **Images and video from any discussion:** 0.13.0 promised that an agent
+  generates media from a discussion, and it only held in rooms. In a plain
+  discussion, `agent_list`, the only place a media connection id appears,
+  refused the agent, so nothing could be generated without a human pasting an
+  opaque id. It now answers in every discussion, a generation accepts the
+  connection's alias or name, and a refusal lists the connections that can do
+  what was asked.
+- **Clips played as one film:** the Assets panel of a discussion now has tabs.
+  Tout is the inventory, Creator the generation form, and Editor, from the
+  second clip on, puts the clips in order, leaves out the ones unrelated to the
+  film, and plays the rest one after the other in a full-screen player. The
+  order is saved with the discussion; nothing is rendered into a single file.
+
+See the [0.13.2 release notes](CHANGELOG.md) and the
+[external API connection guide](docs/operations/external-api-connections.md).
 
 ## What's new in 0.13.1
 
@@ -74,6 +92,7 @@ and the [task delegation guide](docs/guides/task-orchestration.md).
 
 ## Contents
 
+- [What's new in 0.13.2](#whats-new-in-0132)
 - [What's new in 0.13.1](#whats-new-in-0131)
 - [What's new in 0.13.0](#whats-new-in-0130)
 - [60-second pitch](#60-second-pitch)
@@ -136,7 +155,7 @@ Download the installer for your OS from [Releases](https://github.com/DocRoms/Kr
 ### From source: one command
 
 ```bash
-git clone --branch 0.13.1 --depth 1 https://github.com/DocRoms/Kronn.git   # latest stable release
+git clone --branch 0.13.2 --depth 1 https://github.com/DocRoms/Kronn.git   # latest stable release
 cd Kronn
 ./kronn start        # guided setup & launch (Docker)
 ```
@@ -167,7 +186,7 @@ app, Docker deployment and a bare `make run-backend` do not require it.
 Requires Docker + Docker Compose. On Windows, WSL2 (Docker Engine inside WSL works, Docker Desktop optional).
 
 ```bash
-git clone --branch 0.13.1 --depth 1 https://github.com/DocRoms/Kronn.git   # latest stable release
+git clone --branch 0.13.2 --depth 1 https://github.com/DocRoms/Kronn.git   # latest stable release
 cd Kronn
 ./kronn start
 # → http://localhost:3140
