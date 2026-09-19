@@ -5,7 +5,13 @@ import { LastFrameError } from '../../lib/lastFrame';
 import type * as LastFrameModule from '../../lib/lastFrame';
 
 const { discussionsApi, mediaApi, triggerDownload, extractLastFrame } = vi.hoisted(() => ({
-  discussionsApi: { contextFileBlob: vi.fn(), deleteContextFile: vi.fn(), uploadContextFile: vi.fn() },
+  discussionsApi: {
+    contextFileBlob: vi.fn(),
+    deleteContextFile: vi.fn(),
+    uploadContextFile: vi.fn(),
+    videoSequence: vi.fn(),
+    setVideoSequence: vi.fn(),
+  },
   mediaApi: { capabilities: vi.fn(), estimate: vi.fn(), generate: vi.fn() },
   triggerDownload: vi.fn(),
   extractLastFrame: vi.fn(),
@@ -48,6 +54,7 @@ describe('DiscussionAssetsPanel', () => {
     globalThis.URL.revokeObjectURL = vi.fn();
     discussionsApi.contextFileBlob.mockResolvedValue(new Blob(['image'], { type: 'image/png' }));
     discussionsApi.deleteContextFile.mockResolvedValue(undefined);
+    discussionsApi.videoSequence.mockResolvedValue({ file_ids: [] });
     mediaApi.capabilities.mockResolvedValue({ model: 'image-model', capabilities: { max_input_references: 1 } });
     mediaApi.estimate.mockResolvedValue({ model: 'image-model', estimated_usd: null, samples: 0 });
     extractLastFrame.mockResolvedValue({
@@ -56,6 +63,14 @@ describe('DiscussionAssetsPanel', () => {
       height: 640,
     });
   });
+
+  const imageConnection = {
+    id: 'conn-1', display_name: 'OpenRouter', mention_alias: '@openrouter',
+    endpoint: 'https://openrouter.ai/api/v1', origin_preset: 'open_router', has_credential: true,
+    economy_model: null, default_model: null, reasoning_model: null,
+    image_model: 'image-model', video_model: null, media_endpoint: null,
+    created_at: '2026-08-31T10:00:00Z', updated_at: '2026-08-31T10:00:00Z',
+  } as never;
 
   /** A clip of the discussion, as the viewer sees it. */
   function clip(overrides: Partial<ContextFile> = {}): ContextFile {
@@ -185,13 +200,7 @@ describe('DiscussionAssetsPanel', () => {
   });
 
   it('reveals the image form with the current carousel asset after generation handoff', async () => {
-    const connections = [{
-      id: 'conn-1', display_name: 'OpenRouter', mention_alias: '@openrouter',
-      endpoint: 'https://openrouter.ai/api/v1', origin_preset: 'open_router', has_credential: true,
-      economy_model: null, default_model: null, reasoning_model: null,
-      image_model: 'image-model', video_model: null, media_endpoint: null,
-      created_at: '2026-08-31T10:00:00Z', updated_at: '2026-08-31T10:00:00Z',
-    }] as never;
+    const connections = [imageConnection];
     render(
       <DiscussionAssetsPanel
         discussionId="disc-1"
@@ -378,9 +387,85 @@ describe('DiscussionAssetsPanel', () => {
       />,
     );
 
-    expect(screen.getByTestId('assets-generate-toggle')).toBeInTheDocument();
-    // And the reason is on screen without a click.
-    expect(screen.getByTestId('assets-generate-hint')).toHaveTextContent('disc.media.noSlot');
+    fireEvent.click(screen.getByTestId('assets-tab-creator'));
+    // Said once, where the form would be.
+    expect(screen.getAllByText('disc.media.noSlot')).toHaveLength(1);
+    expect(screen.getByTestId('media-generate-empty')).toBeInTheDocument();
+  });
+
+  it('separates finding, making and ordering assets into tabs', async () => {
+    const clips = [
+      file(2, { filename: 'b.mp4', mime_type: 'video/mp4', disk_path: '/tmp/b.mp4' }),
+      file(1, { filename: 'a.mp4', mime_type: 'video/mp4', disk_path: '/tmp/a.mp4' }),
+    ];
+    render(
+      <DiscussionAssetsPanel
+        discussionId="disc-1"
+        files={[...clips, file(3)]}
+        connections={[imageConnection]}
+        onClose={vi.fn()}
+        onNavigateMessage={vi.fn()}
+        t={t}
+      />,
+    );
+
+    // The inventory is what opens: search and filters, no form.
+    expect(screen.getByTestId('assets-tab-all')).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByRole('searchbox', { name: 'disc.assets.search' })).toBeInTheDocument();
+    expect(screen.queryByTestId('media-generate-form')).toBeNull();
+
+    fireEvent.click(screen.getByTestId('assets-tab-creator'));
+    expect(screen.getByTestId('assets-tab-creator')).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByTestId('media-generate-form')).toBeInTheDocument();
+    expect(screen.queryByRole('searchbox', { name: 'disc.assets.search' })).toBeNull();
+
+    const editorTab = screen.getByTestId('assets-tab-editor');
+    expect(editorTab).toHaveTextContent('2');
+    fireEvent.click(editorTab);
+    expect(await screen.findByTestId('video-sequence-editor')).toBeInTheDocument();
+    expect(screen.getAllByTestId('video-sequence-item')).toHaveLength(2);
+    expect(discussionsApi.videoSequence).toHaveBeenCalledWith('disc-1');
+  });
+
+  it('offers the editor only once there are two clips to order', async () => {
+    const one = file(1, { filename: 'a.mp4', mime_type: 'video/mp4', disk_path: '/tmp/a.mp4' });
+    const two = file(2, { filename: 'b.mp4', mime_type: 'video/mp4', disk_path: '/tmp/b.mp4' });
+    const props = { discussionId: 'disc-1', onClose: vi.fn(), onNavigateMessage: vi.fn(), t };
+    const { rerender } = render(<DiscussionAssetsPanel {...props} files={[one, file(3)]} />);
+
+    expect(screen.queryByTestId('assets-tab-editor')).toBeNull();
+
+    rerender(<DiscussionAssetsPanel {...props} files={[one, two, file(3)]} />);
+    fireEvent.click(screen.getByTestId('assets-tab-editor'));
+    await screen.findByTestId('video-sequence-editor');
+
+    // A clip deleted from under the editor leaves nothing to order: back to
+    // the inventory rather than an empty tab.
+    rerender(<DiscussionAssetsPanel {...props} files={[one, file(3)]} />);
+    expect(screen.queryByTestId('assets-tab-editor')).toBeNull();
+    expect(screen.getByTestId('assets-tab-all')).toHaveAttribute('aria-selected', 'true');
+  });
+
+  it('brings a requested asset into view from whichever tab was open', async () => {
+    const files = [file(1, { filename: 'shot.png', mime_type: 'image/png', disk_path: '/tmp/shot.png' })];
+    const props = { discussionId: 'disc-1', files, onClose: vi.fn(), onNavigateMessage: vi.fn(), t };
+    const { rerender } = render(<DiscussionAssetsPanel {...props} />);
+    fireEvent.click(screen.getByTestId('assets-tab-creator'));
+
+    rerender(<DiscussionAssetsPanel {...props} openAssetRequest={{ assetId: 'file-1', nonce: 1 }} />);
+
+    expect(screen.getByTestId('assets-tab-all')).toHaveAttribute('aria-selected', 'true');
+    expect(await screen.findByRole('dialog', { name: 'disc.attachmentGallery' })).toBeInTheDocument();
+  });
+
+  it('opens on the inventory again in another discussion', () => {
+    const props = { files: [file(1)], onClose: vi.fn(), onNavigateMessage: vi.fn(), t };
+    const { rerender } = render(<DiscussionAssetsPanel {...props} discussionId="disc-1" />);
+    fireEvent.click(screen.getByTestId('assets-tab-creator'));
+
+    rerender(<DiscussionAssetsPanel {...props} discussionId="disc-2" />);
+
+    expect(screen.getByTestId('assets-tab-all')).toHaveAttribute('aria-selected', 'true');
   });
 
   /// KT-554 — deleting an asset removes bytes from disk, so it takes two steps

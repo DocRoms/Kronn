@@ -256,6 +256,15 @@ fn default_per_page() -> u32 {
 pub struct ContextFileAiGeneration {
     pub model: String,
     pub prompt: String,
+    /// Length read from the produced file's header, not the one requested:
+    /// a 5 s request came back as 5042 ms. Absent when it could not be read.
+    pub duration_ms: Option<u64>,
+    /// Cost as declared by the provider for this generation. Absent when none
+    /// was declared: never a guessed or zero price.
+    pub cost_usd: Option<f64>,
+    /// Billed on the user's own provider key rather than through the
+    /// connection's credit.
+    pub is_byok: bool,
 }
 
 /// A file uploaded as context for a discussion.

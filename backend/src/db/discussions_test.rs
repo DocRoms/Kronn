@@ -2285,11 +2285,13 @@ mod tests {
             "INSERT INTO media_jobs
                 (id, modality, status, connection_id, model, prompt, params_json,
                  discussion_id, message_id, context_file_id, attempts,
+                 rendered_duration_ms, cost_usd, is_byok,
                  scheduled_at, deadline_at, completed_at, created_at, updated_at)
              VALUES
                 ('job-ai', 'video', 'completed', 'openrouter-main',
                  'provider/video-model', 'A quiet sunrise over the ocean', '{}',
                  'd-ai-asset', 'm-ai', 'cf-ai', 1,
+                 5042, 0.0708932, 0,
                  '2026-09-01T08:00:00Z', '2026-09-01T08:10:00Z',
                  '2026-09-01T08:02:00Z', '2026-09-01T08:00:00Z',
                  '2026-09-01T08:02:00Z')",
@@ -2302,6 +2304,10 @@ mod tests {
         let provenance = listed[0].ai_generation.as_ref().unwrap();
         assert_eq!(provenance.model, "provider/video-model");
         assert_eq!(provenance.prompt, "A quiet sunrise over the ocean");
+        // What the editor totals: the measured length and the declared price.
+        assert_eq!(provenance.duration_ms, Some(5042));
+        assert_eq!(provenance.cost_usd, Some(0.0708932));
+        assert!(!provenance.is_byok);
 
         let fetched = get_context_file(&conn, "cf-ai").unwrap().unwrap();
         assert_eq!(
@@ -2314,6 +2320,44 @@ mod tests {
             per_message[0].ai_generation.as_ref().unwrap().prompt,
             provenance.prompt
         );
+    }
+
+    #[test]
+    fn a_generation_with_no_declared_price_has_no_price() {
+        let conn = test_conn();
+        insert_discussion(&conn, &make_discussion("d-unpriced")).unwrap();
+        insert_context_file(
+            &conn,
+            "cf-unpriced",
+            "d-unpriced",
+            "clip.mp4",
+            "video/mp4",
+            4096,
+            "",
+            Some("/tmp/clip.mp4"),
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO media_jobs
+                (id, modality, status, connection_id, model, prompt, params_json,
+                 discussion_id, context_file_id, attempts, is_byok,
+                 scheduled_at, deadline_at, completed_at, created_at, updated_at)
+             VALUES
+                ('job-unpriced', 'video', 'completed', 'openrouter-main',
+                 'provider/video-model', 'A clip', '{}', 'd-unpriced', 'cf-unpriced', 1, 1,
+                 '2026-09-01T08:00:00Z', '2026-09-01T08:10:00Z',
+                 '2026-09-01T08:02:00Z', '2026-09-01T08:00:00Z',
+                 '2026-09-01T08:02:00Z')",
+            [],
+        )
+        .unwrap();
+
+        let file = get_context_file(&conn, "cf-unpriced").unwrap().unwrap();
+        let provenance = file.ai_generation.unwrap();
+        // Absent, not zero: a total must not count it as free.
+        assert_eq!(provenance.cost_usd, None);
+        assert_eq!(provenance.duration_ms, None);
+        assert!(provenance.is_byok);
     }
 
     #[test]

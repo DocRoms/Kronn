@@ -214,6 +214,7 @@ import type {
   ExternalApiConnectionPreset,
   SharedRun,
   RunOutcome,
+  VideoSequence,
   DiscussionNoteListResponse,
   DiscussionListItem,
   SourceDirectoryListing,
@@ -1748,6 +1749,10 @@ export const discussions = {
     if (!res.ok) throw new Error(`Failed to load attachment (${res.status})`);
     return res.blob();
   },
+  /** The order a discussion's clips play in as one film (Assets > Editor). */
+  videoSequence: (id: string) => api<VideoSequence>('GET', `/discussions/${id}/video-sequence`),
+  setVideoSequence: (id: string, fileIds: string[], excludedIds: string[]) =>
+    api<VideoSequence>('PUT', `/discussions/${id}/video-sequence`, { file_ids: fileIds, excluded_ids: excludedIds }),
   /** `extractedFromAssetId` marks a frame decoded out of a clip of the same
    *  discussion: the server then gives it its OWN transcript message, so it
    *  never waits to be pinned to the next thing the user sends. */

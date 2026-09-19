@@ -152,7 +152,7 @@ test('renders the launcher in both the dark and the light theme', async ({ page 
   await dashboard.openDiscussion(DISC);
   await page.getByRole('button', { name: /Parcourir tous les assets/ }).click();
   const panel = page.getByRole('complementary', { name: 'Assets' });
-  await panel.getByRole('button', { name: /Générer un média/ }).click();
+  await panel.getByTestId('assets-tab-creator').click();
   const form = page.getByTestId('media-generate-form');
   await expect(form).toBeVisible();
 

@@ -141,8 +141,12 @@ without a reload.
 * `POST /api/media/generate`, `GET /api/media/jobs/{id}`,
   `POST /api/media/jobs/{id}/cancel`, `GET /api/media/costs`,
   `GET /api/media/estimate`.
-* UI: the discussion's **Assets** tab has a launcher (modality, connection,
-  prompt, duration / resolution / ratio, soundtrack, estimated price).
+* UI: the discussion's **Assets** panel has three tabs. **Tout** is the
+  inventory (search, filters, viewer). **Creator** is the launcher (modality,
+  connection, prompt, duration / resolution / ratio, soundtrack, estimated
+  price); it is always offered, and with no media slot configured the form
+  itself says so. **Editor** appears from the second clip on: it orders the
+  clips and plays them as one film (see below).
 * Agents: `media_generate` and `media_job_status`, by two independent routes —
   CLI agents through the `kronn-internal` MCP bridge, HTTP agents through the
   native orchestration catalogue
@@ -236,8 +240,8 @@ extraction.
 
 The Assets carousel may hand its currently viewed image to the existing media
 form for a compatible configured slot. This is an explicit handoff: it closes
-the viewer and reveals the form with the source attached, but never starts a
-generation on its own. Until the selected model's input capability resolves,
+the viewer and switches to the Creator tab with the source attached, but never
+starts a generation on its own. Until the selected model's input capability resolves,
 the preserved source blocks submission rather than being silently downgraded
 to a text-only paid request.
 
@@ -322,3 +326,51 @@ so an agent knows it can ask for silence. An image is never asked the question.
 Media spend is its own counter: a generation is billed per image or per second
 and its usage payload carries no token count at all, so folding it into the
 token counters would report zero tokens against real spend.
+
+## Playing the clips as one film
+
+A video model produces clips of a few seconds, so a longer film is several
+clips played back to back. The Editor tab of the Assets panel says which clips
+make the film, in what order, and plays them through.
+
+* **The order belongs to the discussion.** `discussion_video_sequences` keeps,
+  per discussion, the ordered list of context-file ids that make the film
+  (migration 182) and the list of clips set aside from it (migration 183),
+  read and replaced together through
+  `GET` / `PUT /api/discussions/{id}/video-sequence`. A write is refused when
+  it names a file of another discussion, or the same clip twice, in either
+  list. A deleted clip drops out when the order is read, not when it is
+  deleted, so a deletion never needs to know about the sequence.
+  [src: file: backend/src/db/discussion_video_sequences.rs]
+* **A new clip joins the film, at the end.** Clips nobody has placed yet
+  follow the arranged ones, oldest first: clips are generated one after the
+  other, so the order they were made in is the film's default. A clip that
+  has nothing to do with the film is dragged to "Hors version finale", or
+  taken out with its button: it stays in the discussion and is not played,
+  until it is put back.
+  [src: file: frontend/src/lib/videoSequence.ts]
+* **Every move is saved at once.** Drag-and-drop or the buttons send both
+  lists; a refusal is shown in place, and the list keeps the order on screen.
+  While a clip is dragged, a line between two rows shows where it will land
+  (the upper half of a row points above it, the lower half below), and none
+  is drawn where the clip would not move.
+  [src: file: frontend/src/lib/videoSequence.ts]
+* **Each clip shows its first frame.** The thumbnail is the clip itself,
+  paused near its start, fetched once its row is on screen. The bytes are
+  fetched once per clip and shared with the player.
+* **Each clip shows its length and price, and the film its totals.** A
+  generated clip's provenance (`ContextFile.ai_generation`) carries the length
+  read from the file's header (`media_jobs.rendered_duration_ms`) and the price
+  the provider declared (`media_jobs.cost_usd`, with `is_byok`). An uploaded
+  clip's length is read by the browser from the clip itself. The totals count
+  only the clips of the film. A clip with no declared price, an upload, or one
+  billed on the user's own key is not added: the total says how many were left
+  out rather than counting them as free.
+  [src: file: frontend/src/lib/videoSequence.ts]
+* **"Lire la version finale" plays, it does not render.** A full-screen player
+  shows each clip of the film in order and starts the next one when the
+  current one ends,
+  fetching the following clip while the current one plays. A clip that cannot
+  be loaded is announced with a button to skip it. No file is produced:
+  cutting and exporting a single video are separate work.
+  [src: file: frontend/src/components/VideoSequenceEditor.tsx]

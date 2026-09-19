@@ -16,6 +16,7 @@ pub mod discussion_effort;
 pub mod discussion_important;
 pub mod discussion_questions;
 pub mod discussion_sessions;
+pub mod discussion_video_sequences;
 pub mod discussion_weight;
 pub mod discussion_workspaces;
 pub mod discussions;

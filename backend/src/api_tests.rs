@@ -241,6 +241,99 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_discussion_keeps_the_order_its_clips_play_in() {
+        let state = test_state();
+        state
+            .db
+            .with_conn(|conn| {
+                for discussion in ["disc-film", "disc-other"] {
+                    conn.execute(
+                        "INSERT INTO discussions (id, title, created_at, updated_at) \
+                         VALUES (?1, 'Film', '2026-09-19T00:00:00Z', '2026-09-19T00:00:00Z')",
+                        [discussion],
+                    )?;
+                }
+                for (id, discussion) in [
+                    ("clip-1", "disc-film"),
+                    ("clip-2", "disc-film"),
+                    ("clip-3", "disc-film"),
+                    ("elsewhere", "disc-other"),
+                ] {
+                    conn.execute(
+                        "INSERT INTO context_files (id, discussion_id, filename, mime_type, original_size, \
+                         extracted_text, extracted_size, created_at) \
+                         VALUES (?1, ?2, ?1, 'video/mp4', 1, '', 0, '2026-09-19T00:00:00Z')",
+                        [id, discussion],
+                    )?;
+                }
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let uri = "/api/discussions/disc-film/video-sequence";
+        let put = |played: serde_json::Value, excluded: serde_json::Value| {
+            Request::builder()
+                .method("PUT")
+                .uri(uri)
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "file_ids": played, "excluded_ids": excluded }).to_string(),
+                ))
+                .unwrap()
+        };
+        let read = || Request::builder().uri(uri).body(Body::empty()).unwrap();
+
+        let (_, stored) = send(
+            state.clone(),
+            false,
+            put(
+                serde_json::json!(["clip-2", "clip-1"]),
+                serde_json::json!(["clip-3"]),
+            ),
+        )
+        .await;
+        assert_eq!(stored["success"], true, "{stored}");
+        let (_, order) = send(state.clone(), false, read()).await;
+        assert_eq!(
+            order["data"]["file_ids"],
+            serde_json::json!(["clip-2", "clip-1"])
+        );
+        // Set aside, not forgotten: the clip stays out of the film on reload.
+        assert_eq!(order["data"]["excluded_ids"], serde_json::json!(["clip-3"]));
+
+        // Another room's clip would play in this one: refused, order untouched.
+        let (_, refused) = send(
+            state.clone(),
+            false,
+            put(
+                serde_json::json!(["clip-1"]),
+                serde_json::json!(["elsewhere"]),
+            ),
+        )
+        .await;
+        assert_eq!(refused["success"], false);
+        assert!(
+            refused["error"]
+                .as_str()
+                .unwrap()
+                .contains("not a file of this discussion"),
+            "{refused}"
+        );
+        let (_, order) = send(state.clone(), false, read()).await;
+        assert_eq!(
+            order["data"]["file_ids"],
+            serde_json::json!(["clip-2", "clip-1"])
+        );
+
+        let missing = Request::builder()
+            .uri("/api/discussions/disc-gone/video-sequence")
+            .body(Body::empty())
+            .unwrap();
+        let (_, missing) = send(state, false, missing).await;
+        assert_eq!(missing["success"], false);
+    }
+
+    #[tokio::test]
     async fn provider_quota_rearm_http_requires_operator_auth_and_confirmation() {
         let state = test_state_with_token("quota-rearm-token");
         state.config.write().await.server.auth_enabled = false;
