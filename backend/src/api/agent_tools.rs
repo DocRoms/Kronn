@@ -594,10 +594,12 @@ fn derived_media_idempotency_key(discussion_id: &str, arguments: &Value) -> Stri
     use sha2::{Digest, Sha256};
 
     let mut digest = Sha256::new();
-    digest.update(b"kronn-agent-media-v1\0");
+    // v2: the connection is no longer part of the key. The server binds the
+    // job to the connection it resolved, so an alias and the id it stands for
+    // are one generation, and two connections are still two jobs.
+    digest.update(b"kronn-agent-media-v2\0");
     digest.update(discussion_id.as_bytes());
     for field in [
-        "connection_id",
         "modality",
         "prompt",
         "duration_secs",
@@ -3524,7 +3526,6 @@ mod tests {
                 serde_json::json!("a silver robot bowing on stage"),
             ),
             ("modality", serde_json::json!("video")),
-            ("connection_id", serde_json::json!("conn-2")),
             ("aspect_ratio", serde_json::json!("16:9")),
         ] {
             let mut different = args.clone();
@@ -3535,6 +3536,17 @@ mod tests {
                 "changing `{field}` must not reuse the previous asset"
             );
         }
+
+        // The connection is named however the agent likes: its id and its
+        // alias are one generation. Two connections stay two jobs, because
+        // the server binds the job id to the connection it resolved.
+        let mut by_alias = args.clone();
+        by_alias["connection_id"] = serde_json::json!("openrouter");
+        assert_eq!(first, derived_media_idempotency_key("disc-1", &by_alias));
+        assert_ne!(
+            crate::api::media::idempotent_job_id("conn-1", &first),
+            crate::api::media::idempotent_job_id("conn-2", &first),
+        );
 
         // And two rooms asking for the same picture each get their own.
         assert_ne!(first, derived_media_idempotency_key("disc-2", &args));
@@ -3698,6 +3710,86 @@ mod tests {
                 .iter()
                 .any(|field| field == "worker_scope_intent"));
         }
+    }
+
+    /// Parity with a CLI agent: an HTTP agent in a plain discussion finds the
+    /// media connection in `agent_list` and generates on it by its alias.
+    #[tokio::test]
+    async fn an_http_agent_in_a_plain_discussion_finds_and_uses_a_media_connection() {
+        let db = std::sync::Arc::new(crate::db::Database::open_in_memory().unwrap());
+        db.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO discussions (id, title, created_at, updated_at) \
+                 VALUES ('disc-plain', 'Clip', '2026-09-18T00:00:00Z', '2026-09-18T00:00:00Z')",
+                [],
+            )?;
+            crate::db::external_api_connections::insert(
+                conn,
+                &crate::models::ExternalApiConnection {
+                    id: "731fe83a-3082-4b45-8ebc-c16af38406f0".into(),
+                    display_name: "OpenRouter".into(),
+                    mention_alias: "openrouter".into(),
+                    // Closed on purpose: nothing here may reach a provider.
+                    endpoint: Some("http://127.0.0.1:1".into()),
+                    credential_slug: "openrouter".into(),
+                    origin_preset: crate::models::ExternalApiConnectionPreset::OpenRouter,
+                    economy_model: Some("qwen/qwen3.8-max".into()),
+                    default_model: None,
+                    reasoning_model: None,
+                    created_at: chrono::Utc::now(),
+                    updated_at: chrono::Utc::now(),
+                    image_model: None,
+                    video_model: Some("google/veo-3.1-lite".into()),
+                    media_endpoint: None,
+                },
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let state = crate::AppState::new_defaults(
+            std::sync::Arc::new(tokio::sync::RwLock::new(
+                crate::core::config::default_config(),
+            )),
+            db,
+            crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+        );
+        let executor = KronnToolExecutor::arc(
+            state,
+            Some("disc-plain".into()),
+            crate::models::AgentType::Ollama,
+            None,
+            None,
+        );
+
+        let listed = executor
+            .execute(&ToolCall {
+                id: "list".into(),
+                name: "agent_list".into(),
+                arguments: json!({}),
+            })
+            .await;
+        assert!(listed.ok, "{}", listed.content);
+        let listed = listed.content.to_string();
+        assert!(
+            listed.contains("731fe83a-3082-4b45-8ebc-c16af38406f0"),
+            "{listed}"
+        );
+        assert!(listed.contains("google/veo-3.1-lite"), "{listed}");
+
+        let generated = executor
+            .execute(&ToolCall {
+                id: "clip".into(),
+                name: "media_generate".into(),
+                arguments: json!({
+                    "connection_id": "openrouter",
+                    "modality": "video",
+                    "prompt": "a man is handed a pair of earrings in the street",
+                }),
+            })
+            .await;
+        assert!(generated.ok, "{}", generated.content);
+        assert!(generated.content.to_string().contains("job_id"));
     }
 
     #[tokio::test]

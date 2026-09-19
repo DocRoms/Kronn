@@ -115,6 +115,38 @@ pub fn get(conn: &Connection, id: &str) -> Result<Option<ExternalApiConnection>>
         .optional()?)
 }
 
+/// What an agent called a connection, resolved.
+pub enum ConnectionReference {
+    Found(Box<ExternalApiConnection>),
+    /// A name several connections answer to: never guess between them.
+    Ambiguous(Vec<ExternalApiConnection>),
+    Missing,
+}
+
+/// Resolve a connection by its id, its mention alias (with or without `@`)
+/// or its display name, in that order. The id is opaque and an agent only
+/// learns it from `agent_list`; the alias and the name are what a human
+/// types, and what an agent reads in the UI copy it is given.
+pub fn resolve(conn: &Connection, reference: &str) -> Result<ConnectionReference> {
+    let reference = reference.trim();
+    if let Some(found) = get(conn, reference)? {
+        return Ok(ConnectionReference::Found(Box::new(found)));
+    }
+    let wanted = reference.trim_start_matches('@').to_lowercase();
+    let mut matches: Vec<ExternalApiConnection> = list(conn)?
+        .into_iter()
+        .filter(|connection| {
+            connection.mention_alias.trim().to_lowercase() == wanted
+                || connection.display_name.trim().to_lowercase() == wanted
+        })
+        .collect();
+    Ok(match matches.len() {
+        0 => ConnectionReference::Missing,
+        1 => ConnectionReference::Found(Box::new(matches.remove(0))),
+        _ => ConnectionReference::Ambiguous(matches),
+    })
+}
+
 /// Remove a connection row. The caller is responsible for clearing the linked
 /// credential from the token store; the row only references it by slug.
 pub fn delete(conn: &Connection, id: &str) -> Result<bool> {

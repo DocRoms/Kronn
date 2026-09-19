@@ -231,6 +231,14 @@ the runtime-resolution guide.
   model, and an HTTP failure is reported with a hint keyed to the status and the
   model actually tried — not a bare code.
   [src: file: backend/src/api/external_api_connections.rs]
+- **An agent cannot find the connection to generate an image or a video:**
+  fixed in 0.13.2. In a plain discussion, `agent_list`, the only place the
+  connection id appears, refused any agent that was not a member of a room, and
+  `media_generate` answered `unknown connection` to the model name the agent
+  tried instead. The catalogue now answers in every discussion, and a
+  generation accepts the connection's id, alias or display name; a refusal
+  lists the connections that can generate the requested modality.
+  [src: file: backend/src/api/media.rs]
 - **Wrong model after an endpoint edit:** test again before selecting tiers;
   model choices are tied to the exact tested endpoint and credential state.
   [src: file: frontend/src/components/settings/ExternalApiSection.tsx:362-400]

@@ -5699,16 +5699,20 @@ def _task_exec_scope_contract(args, tool_name):
 
 def call_agent_list(_args):
     _require_fresh_bridge("agent_list")
-    source_agent, source_session_id = _task_exec_identity("agent_list")
-    return _unwrap(_http(
-        "POST",
-        "/api/orchestration/tool/workers",
-        {
-            "parent_discussion_id": _disc_id(),
-            "source_agent": source_agent,
-            "source_session_id": source_session_id,
-        },
-    ))
+    # A read of the bound discussion's catalogue, like disc_meta. It requires no
+    # room identity: an agent Kronn launched in a plain discussion has none, and
+    # without this list it could never learn a media connection id.
+    body = {"parent_discussion_id": _disc_id()}
+    # Still sent when this bridge has one. A backend older than this script (a
+    # checkout switched before the restart, a Docker image behind the host)
+    # requires it, and refused every room with a 422 without it; a current
+    # backend ignores it.
+    source_agent = _agent_type_for_session()
+    source_session_id = _session_id_for_caller()
+    if source_agent and source_agent != "Unknown" and source_session_id:
+        body["source_agent"] = source_agent
+        body["source_session_id"] = source_session_id
+    return _unwrap(_http("POST", "/api/orchestration/tool/workers", body))
 
 
 def call_task_exec_prepare(args):
@@ -8249,10 +8253,12 @@ def _derived_media_key(body):
     picture are two callers, and each gets its own asset.
     """
     digest = hashlib.sha256()
-    digest.update(b"kronn-agent-media-v1\0")
+    # v2: the connection is left out. The server binds the job to the connection
+    # it resolved, so an alias and its id are one generation, two connections
+    # still two jobs.
+    digest.update(b"kronn-agent-media-v2\0")
     for field in (
         "discussion_id",
-        "connection_id",
         "modality",
         "prompt",
         "duration_secs",
@@ -9702,7 +9708,8 @@ TOOL_MANUALS = {
         "`generate_audio`). Those lists are what `media_generate` accepts — take the "
         "duration, resolution and ratio from them rather than from habit. A null "
         "`capabilities` means the catalogue could not be read, not that anything goes; an "
-        "empty `media` means this worker generates nothing."
+        "empty `media` means this worker generates nothing. This list answers in every "
+        "discussion, a room or not."
     ),
     "task_exec_prepare": (
         "**One durable lifecycle, two roles.** A principal starts by reading the room plan, "
@@ -10038,6 +10045,11 @@ TOOL_MANUALS["workflow_trigger"] = (
 )
 TOOL_MANUALS["task_exec_launch"] = TOOL_MANUALS["task_exec_prepare"]
 TOOL_MANUALS["media_generate"] = (
+    "Which connection. `connection_id` is the `worker.connection_id` of an "
+    "`agent_list` entry whose `media` has the modality you want; `agent_list` "
+    "answers in every discussion. The connection's alias (`openrouter`) or display "
+    "name are accepted too. A refusal lists the connections that can generate that "
+    "modality, with their ids: retry with one of them rather than guessing.\n\n"
     "Parameters come from the model, not from habit. `agent_list` returns one "
     "entry per configured media slot, each carrying the `capabilities` the "
     "provider advertises: `durations_secs`, `resolutions`, `aspect_ratios`, "
