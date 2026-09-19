@@ -803,19 +803,31 @@ class TaskExecPrincipalSurfaceTests(unittest.TestCase):
         self.assertIn("Native HTTP workers", worker_description)
         self.assertIn("Custom targets require their connection_id", worker_description)
 
-    def test_agent_list_injects_room_identity_and_documents_honest_availability(self):
+    def test_agent_list_reads_the_bound_discussion_without_a_room_identity(self):
+        # An agent Kronn launched in a plain discussion has no room session. It
+        # still has to reach the catalogue: it is the only place a media
+        # connection id can be learned.
         http = mock.MagicMock(return_value={
             "success": True,
             "data": {"workers": []},
         })
         with mock.patch.object(
+            self.mod, "_session_id_for_caller", return_value="",
+        ), mock.patch.object(self.mod, "_http", http):
+            self.assertEqual(self.mod.call_agent_list({}), {"workers": []})
+        http.assert_called_once_with("POST", "/api/orchestration/tool/workers", {
+            "parent_discussion_id": "disc-parent",
+        })
+
+        # A room CLI still sends its identity: a backend older than this bridge
+        # requires it, and refused every room with a 422 when it was dropped.
+        http.reset_mock()
+        with mock.patch.object(
             self.mod, "_agent_type_for_session", return_value="Codex",
         ), mock.patch.object(
             self.mod, "_session_id_for_caller", return_value="adhoc-live-a",
-        ), mock.patch.object(
-            self.mod, "_durable_session_id", return_value="cli-durable-a",
         ), mock.patch.object(self.mod, "_http", http):
-            self.assertEqual(self.mod.call_agent_list({}), {"workers": []})
+            self.mod.call_agent_list({})
         http.assert_called_once_with("POST", "/api/orchestration/tool/workers", {
             "parent_discussion_id": "disc-parent",
             "source_agent": "Codex",
@@ -829,6 +841,23 @@ class TaskExecPrincipalSurfaceTests(unittest.TestCase):
         self.assertIn("task_exec_launch", manual)
         self.assertIn("NVIDIA is not completion-probed", manual)
         self.assertIn("exact resolved tag is already pulled", manual)
+        self.assertIn("answers in every discussion", manual)
+
+    def test_media_key_is_the_same_whatever_the_connection_is_called(self):
+        # The server binds a job to the connection it resolved; the key must not
+        # tell an alias from the id it stands for, or a retry is billed twice.
+        body = {"discussion_id": "disc-1", "modality": "video", "prompt": "p"}
+        by_id = self.mod._derived_media_key({**body, "connection_id": "731fe83a"})
+        by_alias = self.mod._derived_media_key({**body, "connection_id": "openrouter"})
+        self.assertEqual(by_id, by_alias)
+        self.assertNotEqual(by_id, self.mod._derived_media_key({**body, "prompt": "q"}))
+        self.assertNotEqual(by_id, self.mod._derived_media_key({**body, "discussion_id": "disc-2"}))
+
+    def test_media_manual_says_where_the_connection_id_comes_from(self):
+        manual = self.mod.TOOL_MANUALS["media_generate"]
+        self.assertIn("`worker.connection_id`", manual)
+        self.assertIn("alias", manual)
+        self.assertIn("A refusal lists the connections", manual)
 
     def test_ollama_delegation_guidance_is_bounded_and_fail_closed(self):
         tools = {item["name"]: item for item in self.mod.TOOLS}
@@ -7548,9 +7577,8 @@ class AuditBridgeHardeningTests(unittest.TestCase):
         reloaded = _load_module()
         http = mock.MagicMock(return_value={"success": True, "data": []})
         with mock.patch.object(reloaded, "_spawned_task_worker_mode", return_value=False), \
-             mock.patch.object(
-                 reloaded, "_task_exec_identity", return_value=("Codex", "session-1")
-             ), mock.patch.object(reloaded, "_disc_id", return_value="disc-1"), \
+             mock.patch.object(reloaded, "_session_id_for_caller", return_value=""), \
+             mock.patch.object(reloaded, "_disc_id", return_value="disc-1"), \
              mock.patch.object(reloaded, "_http", http):
             retried = reloaded._handle({
                 "jsonrpc": "2.0",
@@ -7562,11 +7590,7 @@ class AuditBridgeHardeningTests(unittest.TestCase):
         http.assert_called_once_with(
             "POST",
             "/api/orchestration/tool/workers",
-            {
-                "parent_discussion_id": "disc-1",
-                "source_agent": "Codex",
-                "source_session_id": "session-1",
-            },
+            {"parent_discussion_id": "disc-1"},
         )
 
     def test_initialize_advertises_tool_list_change_notifications(self):

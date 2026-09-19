@@ -9,6 +9,25 @@ Release notes for 0.9.3 and earlier are available in the
 
 ---
 
+## [Unreleased]
+
+### Fixed
+
+- An agent in a plain discussion can generate an image or a video again, as
+  0.13.0 promised. `agent_list`, the only place a media connection id appears,
+  refused any agent that was not a member of a room, and an agent Kronn
+  launches in a plain discussion never is one. On a live instance an agent was
+  refused three times, tried three spellings of the model name, and stopped to
+  ask for an id it had no way to see. Reading the catalogue is not a
+  delegation: it now answers in every discussion, while `task_exec_prepare`
+  and `task_exec_launch` keep their guard.
+- A generation accepts the connection's alias or display name, not only its
+  opaque id. A name two connections share is refused rather than guessed, and
+  every refusal lists the connections that can generate the requested
+  modality, with their ids, so the next attempt is the right one. An alias and
+  the id it stands for are one generation: a retry that switches between them
+  is not billed twice.
+
 ## [0.13.1] - 2026-09-18
 
 ### Fixed

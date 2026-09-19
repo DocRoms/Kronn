@@ -138,31 +138,46 @@ pub async fn generate(
     }
 
     let lookup = req.connection_id.clone();
-    let connection = match state
+    let resolved = state
         .db
-        .with_read_conn(move |conn| crate::db::external_api_connections::get(conn, &lookup))
-        .await
-    {
-        Ok(Some(connection)) => connection,
-        Ok(None) => {
+        .with_read_conn(move |conn| {
+            Ok((
+                crate::db::external_api_connections::resolve(conn, &lookup)?,
+                crate::db::external_api_connections::list(conn)?,
+            ))
+        })
+        .await;
+    use crate::db::external_api_connections::ConnectionReference;
+    let (connection, all_connections) = match resolved {
+        Ok((ConnectionReference::Found(connection), all)) => (*connection, all),
+        Ok((ConnectionReference::Missing, all)) => {
             return Json(ApiResponse::err(format!(
-                "unknown connection: {}",
-                req.connection_id
+                "unknown connection `{}`. {}",
+                req.connection_id.trim(),
+                usable_connections(&all, req.modality)
             )))
+        }
+        Ok((ConnectionReference::Ambiguous(candidates), _)) => {
+            let ids = candidates
+                .iter()
+                .map(|candidate| format!("`{}` ({})", candidate.id, candidate.display_name))
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Json(ApiResponse::err(format!(
+                "`{}` names several connections; pass one of their ids: {ids}",
+                req.connection_id.trim()
+            )));
         }
         Err(e) => return Json(ApiResponse::err(format!("failed to read connection: {e}"))),
     };
 
     // The slot, not the request, decides the model.
-    let model = match req.modality {
-        MediaModality::Image => connection.image_model.clone(),
-        MediaModality::Video => connection.video_model.clone(),
-    };
-    let Some(model) = model.filter(|m| !m.trim().is_empty()) else {
+    let Some(model) = media_slot(&connection, req.modality) else {
         return Json(ApiResponse::err(format!(
-            "connection '{}' has no {} model configured",
+            "connection '{}' has no {} model configured. {}",
             connection.display_name,
-            req.modality.as_str()
+            req.modality.as_str(),
+            usable_connections(&all_connections, req.modality)
         )));
     };
 
@@ -310,7 +325,53 @@ pub async fn generate(
     }))
 }
 
-fn idempotent_job_id(connection_id: &str, key: &str) -> String {
+/// The model a connection generates for a modality, when it has one.
+fn media_slot(
+    connection: &crate::models::ExternalApiConnection,
+    modality: MediaModality,
+) -> Option<String> {
+    match modality {
+        MediaModality::Image => connection.image_model.clone(),
+        MediaModality::Video => connection.video_model.clone(),
+    }
+    .filter(|model| !model.trim().is_empty())
+}
+
+/// What an agent can pass instead, so a refusal is one retry away from
+/// working rather than the start of a guessing game: an agent once tried three
+/// spellings of a model name before stopping to ask for an id it could not see.
+fn usable_connections(
+    connections: &[crate::models::ExternalApiConnection],
+    modality: MediaModality,
+) -> String {
+    let usable = connections
+        .iter()
+        .filter_map(|connection| {
+            media_slot(connection, modality).map(|model| {
+                format!(
+                    "`{}` (alias `{}`, {}, model {model})",
+                    connection.id,
+                    connection.mention_alias.trim().to_lowercase(),
+                    connection.display_name
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    if usable.is_empty() {
+        format!(
+            "No connection has a {} model configured; a human sets one in Config > Agents.",
+            modality.as_str()
+        )
+    } else {
+        format!(
+            "Connections that can generate a {}: {}. Pass the id or the alias.",
+            modality.as_str(),
+            usable.join("; ")
+        )
+    }
+}
+
+pub(crate) fn idempotent_job_id(connection_id: &str, key: &str) -> String {
     let mut digest = Sha256::new();
     digest.update(b"kronn-media-launch-v1\0");
     digest.update(connection_id.as_bytes());
@@ -783,6 +844,178 @@ pub async fn estimate(
 mod tests {
     use super::*;
     use crate::db::Database;
+
+    fn connection(
+        id: &str,
+        name: &str,
+        alias: &str,
+        image: Option<&str>,
+        video: Option<&str>,
+    ) -> crate::models::ExternalApiConnection {
+        crate::models::ExternalApiConnection {
+            id: id.into(),
+            display_name: name.into(),
+            mention_alias: alias.into(),
+            // Closed on purpose: nothing here may reach a provider.
+            endpoint: Some("http://127.0.0.1:1".into()),
+            credential_slug: alias.into(),
+            origin_preset: crate::models::ExternalApiConnectionPreset::OpenRouter,
+            economy_model: Some("qwen/qwen3.8-max".into()),
+            default_model: None,
+            reasoning_model: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            image_model: image.map(str::to_string),
+            video_model: video.map(str::to_string),
+            media_endpoint: None,
+        }
+    }
+
+    async fn media_state(connections: Vec<crate::models::ExternalApiConnection>) -> AppState {
+        let db = std::sync::Arc::new(Database::open_in_memory().expect("in-memory db"));
+        db.with_conn(move |conn| {
+            conn.execute(
+                "INSERT INTO discussions (id, title, created_at, updated_at) \
+                 VALUES ('disc-1', 'Clip', '2026-09-18T00:00:00Z', '2026-09-18T00:00:00Z')",
+                [],
+            )?;
+            for connection in &connections {
+                crate::db::external_api_connections::insert(conn, connection)?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+        AppState::new_defaults(
+            std::sync::Arc::new(tokio::sync::RwLock::new(
+                crate::core::config::default_config(),
+            )),
+            db,
+            crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+        )
+    }
+
+    fn ask(connection_id: &str, modality: &str) -> GenerateMediaRequest {
+        serde_json::from_value(serde_json::json!({
+            "connection_id": connection_id,
+            "modality": modality,
+            "prompt": "a man is handed a pair of earrings in the street",
+            "discussion_id": "disc-1",
+        }))
+        .unwrap()
+    }
+
+    const OPENROUTER: &str = "731fe83a-3082-4b45-8ebc-c16af38406f0";
+
+    fn openrouter() -> crate::models::ExternalApiConnection {
+        connection(
+            OPENROUTER,
+            "OpenRouter",
+            "openrouter",
+            Some("openai/gpt-image-2"),
+            Some("google/veo-3.1-lite"),
+        )
+    }
+
+    /// The shape seen on a live instance: an agent tried three spellings of
+    /// the model before stopping to ask for an id it had no way to see.
+    #[tokio::test]
+    async fn an_unknown_connection_is_refused_with_what_can_be_used() {
+        let state = media_state(vec![openrouter()]).await;
+        let Json(refused) = generate(State(state), Json(ask("google/veo-3.1-lite", "video"))).await;
+        let error = refused.error.unwrap();
+        assert!(
+            error.starts_with("unknown connection `google/veo-3.1-lite`"),
+            "{error}"
+        );
+        assert!(error.contains(OPENROUTER), "{error}");
+        assert!(error.contains("alias `openrouter`"), "{error}");
+        assert!(error.contains("google/veo-3.1-lite"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn an_agent_may_name_a_connection_by_its_alias_or_its_name() {
+        let state = media_state(vec![openrouter()]).await;
+        for name in ["openrouter", "@OpenRouter", "OpenRouter"] {
+            let Json(accepted) = generate(State(state.clone()), Json(ask(name, "video"))).await;
+            let job = accepted
+                .data
+                .unwrap_or_else(|| panic!("{name}: {:?}", accepted.error));
+            // The job is bound to the connection itself, never to its nickname.
+            let job_id = job.job_id.clone();
+            let bound: String = state
+                .db
+                .with_read_conn(move |conn| {
+                    Ok(conn.query_row(
+                        "SELECT connection_id FROM media_jobs WHERE id = ?1",
+                        [&job_id],
+                        |row| row.get(0),
+                    )?)
+                })
+                .await
+                .unwrap();
+            assert_eq!(bound, OPENROUTER, "{name}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_name_two_connections_share_is_refused_rather_than_guessed() {
+        let state = media_state(vec![
+            connection(
+                "conn-a",
+                "Media",
+                "media-a",
+                None,
+                Some("google/veo-3.1-lite"),
+            ),
+            connection("conn-b", "Media", "media-b", None, Some("kling/v2")),
+        ])
+        .await;
+        let Json(refused) = generate(State(state), Json(ask("media", "video"))).await;
+        let error = refused.error.unwrap();
+        assert!(error.contains("names several connections"), "{error}");
+        assert!(
+            error.contains("conn-a") && error.contains("conn-b"),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_connection_without_the_slot_names_those_that_have_it() {
+        let state = media_state(vec![
+            connection(
+                "conn-img",
+                "Images",
+                "images",
+                Some("openai/gpt-image-2"),
+                None,
+            ),
+            openrouter(),
+        ])
+        .await;
+        let Json(refused) = generate(State(state), Json(ask("images", "video"))).await;
+        let error = refused.error.unwrap();
+        assert!(error.contains("has no video model configured"), "{error}");
+        assert!(error.contains(OPENROUTER), "{error}");
+        assert!(
+            !error.contains("conn-img`"),
+            "an image-only connection is no answer: {error}"
+        );
+
+        let nothing = media_state(vec![connection(
+            "conn-img",
+            "Images",
+            "images",
+            Some("x"),
+            None,
+        )])
+        .await;
+        let Json(refused) = generate(State(nothing), Json(ask("images", "video"))).await;
+        assert!(refused
+            .error
+            .unwrap()
+            .contains("No connection has a video model configured"));
+    }
 
     fn launch(job_id: &str, prompt: &str, now: chrono::DateTime<Utc>) -> MediaLaunchWrite {
         MediaLaunchWrite {

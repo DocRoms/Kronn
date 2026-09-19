@@ -376,7 +376,21 @@ catalogue, and no agent could delegate to it or learn that image and video
 generation existed at all. `media` lists one entry per configured model and
 stays absent otherwise, so reading it is enough — an agent is never told about a
 modality the generation request would then refuse.
-[src: file: backend/src/api/orchestration.rs] The catalogue reports `configured` and `reachable`
+
+`agent_list` answers in every discussion, a room or not (0.13.2). Reading the
+catalogue is not a delegation: nothing in it is secret or scoped to one party.
+It used to sit behind the room-membership guard of `task_exec_prepare` and
+`task_exec_launch`, which an agent Kronn launches in a plain discussion can
+never pass, so image and video generation was unreachable there without a
+human pasting a connection id. The two delegation tools keep that guard.
+`media_generate` takes the entry's `worker.connection_id`, or the connection's
+alias or display name; a name two connections share is refused rather than
+guessed, and every refusal lists the connections that can generate the
+modality asked for, with their ids.
+[src: file: backend/src/api/orchestration.rs] [src: file: backend/src/api/media.rs]
+[src: file: backend/src/db/external_api_connections.rs]
+
+The catalogue reports `configured` and `reachable`
 independently; its only strict implication is
 `available => configured && reachable`. Availability is deliberately only a
 transport preflight, never a claim about task fit or model quality. Probe

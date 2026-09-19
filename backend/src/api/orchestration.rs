@@ -7997,9 +7997,10 @@ pub enum TaskWorkerScopeIntent {
 
 #[derive(Deserialize)]
 pub struct TaskWorkerCatalogueRequest {
+    /// The discussion whose catalogue is read. No caller identity: reading it
+    /// is not a delegation, and an agent Kronn launched in a plain discussion
+    /// has no room session to prove anyway.
     pub parent_discussion_id: String,
-    pub source_agent: String,
-    pub source_session_id: String,
 }
 
 #[derive(Deserialize)]
@@ -8731,32 +8732,39 @@ pub async fn rearm_provider_quota(
 /// MCP-only worker discovery. Caller identity is injected by the bridge and
 /// authorized against the principal room before any room/session catalogue is
 /// returned.
+/// The agents and connections a discussion can reach, and the media each
+/// connection generates. A read, like `disc_meta`: nothing in it is secret or
+/// scoped to one party. It used to sit behind the room-membership guard the
+/// delegation tools need, which an agent Kronn launches in a plain discussion
+/// can never pass, so `media_generate` had no way to learn a connection id.
+/// `task_exec_prepare` and `task_exec_launch` keep that guard.
 pub async fn task_worker_catalogue(
     State(state): State<AppState>,
     Json(request): Json<TaskWorkerCatalogueRequest>,
 ) -> Json<ApiResponse<crate::models::TaskWorkerCatalogue>> {
-    let Some((agent, session_id)) =
-        caller_fields(&request.source_agent, &request.source_session_id)
-    else {
+    let parent = request.parent_discussion_id.trim().to_string();
+    if parent.is_empty() {
         return Json(ApiResponse::err_coded(
             ApiErrorCode::Validation,
-            "durable source_agent and source_session_id are required",
+            "parent_discussion_id is required",
         ));
-    };
-    let parent = request.parent_discussion_id.trim().to_string();
-    let authorized = {
+    }
+    let exists = {
         let parent = parent.clone();
         state
             .db
             .with_read_conn(move |conn| {
-                principal_cli_is_authorized(conn, &parent, &agent, &session_id)
+                Ok(crate::db::discussions::get_discussion(conn, &parent)?.is_some())
             })
             .await
     };
-    if !matches!(authorized, Ok(true)) {
+    if !matches!(exists, Ok(true)) {
         return Json(ApiResponse::err_coded(
             ApiErrorCode::NotFound,
-            "principal discussion not found or caller is not an active member",
+            format!(
+                "discussion `{parent}` not found: agent_list reads the catalogue of the \
+                 discussion this bridge is bound to, so bind or reopen that discussion"
+            ),
         ));
     }
     match target_aware_task_worker_catalogue_for_discussion(&state, &parent).await {
@@ -10315,6 +10323,69 @@ mod tests {
                 .find(|tier| tier.tier == crate::models::ModelTier::Economy)
                 .and_then(|tier| tier.resolved_model.as_deref()),
             Some("qwen/qwen3.8-max")
+        );
+    }
+
+    /// An agent Kronn launches in a plain discussion has no room session. The
+    /// catalogue used to demand one, so on a live instance an agent asked for a
+    /// video, was refused by `agent_list` three times, and never learned the
+    /// connection id `media_generate` needed.
+    #[tokio::test]
+    async fn a_plain_discussion_reads_its_worker_catalogue_without_a_room_session() {
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let mut connection = media_connection(None, Some("google/veo-3.1-lite"));
+        // Closed on purpose: the reachability probe must fail at once.
+        connection.endpoint = Some("http://127.0.0.1:1".into());
+        db.with_conn(move |conn| {
+            conn.execute(
+                "INSERT INTO discussions (id, title, created_at, updated_at) \
+                 VALUES ('disc-plain', 'Test image', '2026-09-18T00:00:00Z', '2026-09-18T00:00:00Z')",
+                [],
+            )?;
+            crate::db::external_api_connections::insert(conn, &connection)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let state = AppState::new_defaults(
+            std::sync::Arc::new(tokio::sync::RwLock::new(
+                crate::core::config::default_config(),
+            )),
+            db,
+            crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+        );
+        let read = |discussion: &str| {
+            task_worker_catalogue(
+                State(state.clone()),
+                Json(TaskWorkerCatalogueRequest {
+                    parent_discussion_id: discussion.into(),
+                }),
+            )
+        };
+
+        let Json(response) = read("disc-plain").await;
+        let catalogue = response
+            .data
+            .unwrap_or_else(|| panic!("{:?}", response.error));
+        let entry = catalogue
+            .workers
+            .iter()
+            .find(|entry| entry.worker.connection_id.as_deref() == Some("conn-or"))
+            .expect("the configured connection must be listed");
+        assert!(
+            entry.media.iter().any(|slot| {
+                slot.modality == crate::models::MediaModality::Video
+                    && slot.model == "google/veo-3.1-lite"
+            }),
+            "its video slot is what media_generate needs: {:?}",
+            entry.media
+        );
+
+        let Json(missing) = read("disc-gone").await;
+        let error = missing.error.unwrap();
+        assert!(
+            error.contains("not found") && error.contains("agent_list"),
+            "a refusal says what to do: {error}"
         );
     }
 
