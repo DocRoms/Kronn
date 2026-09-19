@@ -1516,11 +1516,10 @@ TOOLS = [
     {
         "name": "page_update_html",
         "description": (
-            "Replace a Live Page's presentation by creating a new immutable "
-            "HTML revision. Dataset values and publication history are kept. "
-            "Call page_get first, then send the complete self-contained HTML; "
-            "this is a full replacement, not a patch. Inline QP/QA/QE/Workflow "
-            "buttons: `tool_manual({tool: \"page_update_html\"})`."
+            "New immutable HTML revision of a Live Page; datasets and publication "
+            "history are kept. Call page_get first and send the complete "
+            "self-contained HTML, not a patch. Action buttons: "
+            "`tool_manual({tool: \"page_update_html\"})`."
         ),
         "inputSchema": {
             "type": "object",
