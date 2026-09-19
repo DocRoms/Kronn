@@ -9,7 +9,28 @@ Release notes for 0.9.3 and earlier are available in the
 
 ---
 
-## [Unreleased]
+## [0.13.2] - 2026-09-19
+
+### Added
+
+- The Assets panel of a discussion is split into tabs. **Tout** keeps the
+  inventory with its search and filters, **Creator** replaces the "Générer un
+  média" button with the generation form, and **Editor** appears once the
+  discussion holds two clips or more.
+- Editor puts the clips in the order they should play, by drag-and-drop (a
+  line shows where the clip will land) or with the arrows, each shown by a
+  small thumbnail of its first frame, its length and its price. A clip that
+  has nothing to do with the film is moved to "Hors version finale": it stays
+  in the discussion and is not played. The order and the clips set aside are
+  saved with the discussion, and a clip generated later joins the end of the
+  film.
+- Editor shows the total length and the total price of the clips in the
+  final cut. A clip with no declared price, an upload, or one billed on your
+  own key is not added: the total says how many were left out rather than
+  counting them as free.
+- "Lire la version finale" plays every clip of the film in order in a
+  full-screen player, each one starting as the previous ends. It only plays
+  them; no video file is produced.
 
 ### Fixed
 
