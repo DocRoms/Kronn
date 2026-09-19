@@ -51,7 +51,10 @@ BRIDGE = "backend/scripts/disc-introspection-mcp.py"
 # did.
 # KT-670: `audit_launch` dropped a top-level `allOf` the OpenAI wire refuses.
 # Ceiling lowered by what it weighed.
-CATALOGUE_MAX_BYTES = 86_636
+# KT-678: `page_update_html` now points at its own manual for Page buttons, the
+# tool that adds them having said nothing about them. The description was
+# rewritten to carry the pointer and still weighs 9 B less; ceiling lowered.
+CATALOGUE_MAX_BYTES = 86_627
 
 # Per-declaration ceiling. The five heaviest tools were 29% of the catalogue for
 # 6% of the tools; their descriptions had grown into manuals. A per-tool cap is
