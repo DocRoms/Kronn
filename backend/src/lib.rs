@@ -637,6 +637,7 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route("/api/open-url", post(api::setup::open_url))
         .route("/api/setup/status", get(api::setup::get_status))
         .route("/api/setup/scan-paths", post(api::setup::set_scan_paths))
+        .route("/api/setup/browse", get(api::setup::browse))
         .route("/api/setup/install-agent", post(api::setup::install_agent))
         .route("/api/setup/complete", post(api::setup::complete))
         .route("/api/setup/reset", post(api::setup::reset))
@@ -1025,6 +1026,12 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             "/api/projects/{id}/linked-repos",
             put(api::projects::set_linked_repos),
         )
+        // how this project's isolated worktrees are prepared,
+        // inherited by every workflow of the project that asks for one.
+        .route(
+            "/api/projects/{id}/workspace",
+            get(api::projects::get_project_workspace).put(api::projects::set_project_workspace),
+        )
         // 0.8.6 (#27) — autocomplete picker source for the
         // linked-repos drawer. Returns other Kronn-known projects
         // sorted by proximity.
@@ -1327,6 +1334,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         )
         // ── Workflows ──
         .route(
+            "/api/workflows/step-schema",
+            get(api::workflows::step_schema),
+        )
+        .route(
             "/api/workflows",
             get(api::workflows::list).post(api::workflows::create),
         )
@@ -1603,6 +1614,7 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
                 .delete(api::quick_execs::delete),
         )
         .route("/api/quick-execs/{id}/run", post(api::quick_execs::run))
+        .route("/api/signals/catalog", get(api::signal_catalog::get))
         .route("/api/runs", get(api::shared_runs::list))
         .route("/api/runs/{id}", get(api::shared_runs::get))
         .route("/api/runs/{id}/outcome", get(api::shared_runs::outcome))

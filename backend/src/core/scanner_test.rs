@@ -389,6 +389,208 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
+    // ─── des dépôts hors du répertoire personnel ────────────────────
+
+    /// A symlinked scan root reaches repositories outside the home directory.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_symlinked_root_is_followed_to_the_repositories_it_points_at() {
+        let real = tempfile::tempdir().unwrap();
+        // /<réel>/git/agaches/site/.git — l'arborescence d'Arnaud.
+        let repo = real.path().join("git/agaches/site");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+
+        let home = tempfile::tempdir().unwrap();
+        let link = home.path().join("workspace");
+        std::os::unix::fs::symlink(real.path(), &link).unwrap();
+
+        let repos = scan_paths_with_depth(&[link.to_string_lossy().into()], &[], 4)
+            .await
+            .unwrap();
+        assert_eq!(
+            repos.len(),
+            1,
+            "un lien vers la racine réelle doit mener aux dépôts: {repos:?}"
+        );
+        assert!(repos[0].path.contains("site"));
+    }
+
+    /// Suivre les liens veut dire se protéger des cycles. Un lien qui pointe sur
+    /// un ancêtre ferait tourner la marche indéfiniment, ou rapporterait le même
+    /// dépôt une fois par chemin qui y mène.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_symlink_loop_is_walked_once_and_does_not_hang() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = root.path().join("projet");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        // projet/retour -> la racine : un cycle.
+        std::os::unix::fs::symlink(root.path(), repo.join("retour")).unwrap();
+        // raccourci -> projet : un second chemin vers le même dépôt.
+        std::os::unix::fs::symlink(&repo, root.path().join("raccourci")).unwrap();
+
+        let repos = scan_paths_with_depth(&[root.path().to_string_lossy().into()], &[], 6)
+            .await
+            .unwrap();
+        assert_eq!(
+            repos.len(),
+            1,
+            "un dépôt atteignable par deux routes reste un dépôt: {repos:?}"
+        );
+    }
+
+    /// Local-only repositories sharing a directory name remain distinct.
+    #[tokio::test]
+    async fn two_local_repositories_sharing_a_name_are_two_repositories() {
+        let root = tempfile::tempdir().unwrap();
+        for org in ["agaches", "onepoint"] {
+            std::fs::create_dir_all(root.path().join(format!("{org}/site/.git"))).unwrap();
+        }
+
+        let repos = scan_paths_with_depth(&[root.path().to_string_lossy().into()], &[], 4)
+            .await
+            .unwrap();
+        assert_eq!(
+            repos.len(),
+            2,
+            "deux organisations, deux `site`, deux dépôts: {repos:?}"
+        );
+        let mut paths: Vec<&str> = repos.iter().map(|r| r.path.as_str()).collect();
+        paths.sort();
+        assert!(paths[0].contains("agaches") && paths[1].contains("onepoint"));
+    }
+
+    /// Independent clones of the same remote remain distinct. Initialize real Git
+    /// repositories so remote discovery exercises the intended collision.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn two_clones_of_one_repository_are_two_working_copies() {
+        const ORIGINE: &str = "git@example.com:acme/kronn.git";
+        let root = tempfile::tempdir().unwrap();
+        for copie in ["travail", "relecture"] {
+            let repo = root.path().join(format!("{copie}/kronn"));
+            std::fs::create_dir_all(&repo).unwrap();
+            git_dans(&repo, &["init", "-q"]);
+            // Même remote pour les deux : c'est bien le même dépôt d'origine.
+            git_dans(&repo, &["remote", "add", "origin", ORIGINE]);
+        }
+
+        let repos = scan_paths_with_depth(&[root.path().to_string_lossy().into()], &[], 4)
+            .await
+            .unwrap();
+        assert_eq!(
+            repos.len(),
+            2,
+            "deux copies de travail du même dépôt restent deux: {repos:?}"
+        );
+        for r in &repos {
+            assert_eq!(
+                r.remote_url.as_deref(),
+                Some(ORIGINE),
+                "les deux entrées portent bien le remote commun: {repos:?}"
+            );
+        }
+    }
+
+    /// `git init` sans réseau ni configuration globale héritée.
+    #[cfg(unix)]
+    fn git_dans(repo: &std::path::Path, args: &[&str]) {
+        let sortie = std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .output()
+            .expect("git est disponible");
+        assert!(
+            sortie.status.success(),
+            "git {args:?} dans {}: {}",
+            repo.display(),
+            String::from_utf8_lossy(&sortie.stderr)
+        );
+    }
+
+    /// A directory revisited through a shorter path may expose deeper repositories.
+    /// Deduplication must not prune that traversal, regardless of filesystem order.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_long_route_seen_first_does_not_close_the_short_one() {
+        let cible = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(cible.path().join("a/b/depot/.git")).unwrap();
+
+        for (ordre, longue, courte) in [
+            ("longue d'abord", "a-profond", "z-direct"),
+            ("courte d'abord", "z-profond", "a-direct"),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            std::fs::create_dir_all(root.path().join(format!("{longue}/n1"))).unwrap();
+            std::os::unix::fs::symlink(cible.path(), root.path().join(format!("{longue}/n1/lien")))
+                .unwrap();
+            std::os::unix::fs::symlink(cible.path(), root.path().join(courte)).unwrap();
+
+            // La route longue atteint `lien` à 3, donc `a` à 4 : le dépôt est
+            // hors d'atteinte. La courte atteint le lien à 1, le dépôt à 4.
+            let repos = scan_paths_with_depth(&[root.path().to_string_lossy().into()], &[], 4)
+                .await
+                .unwrap();
+            assert_eq!(
+                repos.len(),
+                1,
+                "{ordre}: le dépôt est trouvé, et une seule fois: {repos:?}"
+            );
+            assert!(repos[0].path.ends_with("a/b/depot"), "{ordre}: {repos:?}");
+        }
+    }
+
+    /// À l'inverse, deux chemins d'accès vers le MÊME dossier ne font qu'une
+    /// copie de travail, quel que soit le nom du lien.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn two_names_for_one_directory_are_one_working_copy() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = root.path().join("reel");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::os::unix::fs::symlink(&repo, root.path().join("autre-nom")).unwrap();
+
+        let repos = scan_paths_with_depth(&[root.path().to_string_lossy().into()], &[], 4)
+            .await
+            .unwrap();
+        assert_eq!(
+            repos.len(),
+            1,
+            "un seul dossier, atteint par deux noms: {repos:?}"
+        );
+    }
+
+    /// Default scan depth reaches root/organisation/repository outside the home.
+    #[tokio::test]
+    async fn the_default_depth_reaches_a_repository_nested_under_an_organisation() {
+        let root = tempfile::tempdir().unwrap();
+        if let Some(maison) = directories::UserDirs::new() {
+            assert!(
+                !root.path().starts_with(maison.home_dir()),
+                "le banc doit se tenir hors du répertoire personnel: {}",
+                root.path().display()
+            );
+        }
+        for org in ["agaches", "onepoint", "client1"] {
+            std::fs::create_dir_all(root.path().join(format!("git/{org}/depot/.git"))).unwrap();
+        }
+        std::fs::create_dir_all(root.path().join("thinking/2e-cerveau/.git")).unwrap();
+
+        let repos = scan_paths(&[root.path().to_string_lossy().into()], &[])
+            .await
+            .unwrap();
+        assert_eq!(repos.len(), 4, "les quatre dépôts: {repos:?}");
+        let mut chemins: Vec<&str> = repos.iter().map(|r| r.path.as_str()).collect();
+        chemins.sort();
+        assert!(
+            chemins.iter().filter(|p| p.contains("/git/")).count() == 3
+                && chemins.iter().any(|p| p.ends_with("2e-cerveau")),
+            "trois dépôts sous git/<organisation>/, plus celui à côté: {chemins:?}"
+        );
+    }
+
     #[tokio::test]
     async fn scan_nonexistent_path_returns_empty() {
         let repos =

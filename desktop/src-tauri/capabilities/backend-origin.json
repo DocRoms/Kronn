@@ -1,11 +1,18 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "backend-origin",
-  "description": "Allows the verified loopback UI to restart its own desktop process.",
+  "description": "Allows the verified loopback UI to restart its own desktop process and open a native folder dialog.",
   "local": false,
-  "windows": ["main"],
+  "windows": [
+    "main"
+  ],
   "remote": {
-    "urls": ["http://127.0.0.1:*"]
+    "urls": [
+      "http://127.0.0.1:*"
+    ]
   },
-  "permissions": ["allow-restart-app"]
+  "permissions": [
+    "allow-restart-app",
+    "allow-pick-folders"
+  ]
 }

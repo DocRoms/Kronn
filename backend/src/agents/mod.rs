@@ -20,6 +20,7 @@ async fn run_shell_cmd(cmd: &str) -> Result<std::process::Output> {
 }
 
 pub mod chat_codec;
+pub(crate) mod generation_settings;
 pub mod media_asset_url;
 pub mod media_capabilities;
 pub mod media_codec;
@@ -43,6 +44,14 @@ struct AgentDef {
     origin: &'static str,
     install_cmd: &'static str,
 }
+
+/// Use the native installer for each OS; the vendor shell script supports Linux only.
+#[cfg(target_os = "macos")]
+const OLLAMA_INSTALL: &str = "brew upgrade ollama || brew install ollama";
+#[cfg(target_os = "windows")]
+const OLLAMA_INSTALL: &str = "winget install Ollama.Ollama";
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+const OLLAMA_INSTALL: &str = "curl -fsSL https://ollama.com/install.sh | sh";
 
 const KNOWN_AGENTS: &[AgentDef] = &[
     AgentDef {
@@ -99,7 +108,7 @@ const KNOWN_AGENTS: &[AgentDef] = &[
         agent_type: AgentType::Ollama,
         binary: "ollama",
         origin: "US",
-        install_cmd: "curl -fsSL https://ollama.com/install.sh | sh",
+        install_cmd: OLLAMA_INSTALL,
     },
     // Like Ollama, this is a server: the binary being present means
     // "installed", not "reachable" — the health endpoint reports the latter.
@@ -1105,8 +1114,17 @@ fn install_prerequisite(agent_type: &AgentType) -> Option<(&'static str, &'stati
             "uv",
             "uv is required. Install it from https://docs.astral.sh/uv",
         )),
+        // The macOS install command goes through Homebrew; the Linux script
+        // and winget carry their own dependencies.
+        #[cfg(target_os = "macos")]
+        AgentType::Ollama => Some((
+            "brew",
+            "Homebrew is required. Install it from https://brew.sh",
+        )),
+        #[cfg(not(target_os = "macos"))]
+        AgentType::Ollama => None,
         // Nvidia is a remote endpoint: no local prerequisite to install.
-        AgentType::Kiro | AgentType::Ollama | AgentType::Nvidia | AgentType::Custom => None,
+        AgentType::Kiro | AgentType::Nvidia | AgentType::Custom => None,
     }
 }
 
@@ -1744,6 +1762,34 @@ mod tests {
                 def.agent_type
             );
         }
+    }
+
+    /// Each OS must receive an installer it can execute.
+    #[test]
+    fn the_ollama_install_command_fits_the_host_os() {
+        let def = KNOWN_AGENTS
+            .iter()
+            .find(|d| matches!(d.agent_type, AgentType::Ollama))
+            .expect("Ollama is a known agent");
+
+        #[cfg(target_os = "macos")]
+        assert!(
+            def.install_cmd.starts_with("brew "),
+            "macOS installs Ollama with Homebrew, not `{}`",
+            def.install_cmd
+        );
+        #[cfg(target_os = "windows")]
+        assert!(
+            def.install_cmd.starts_with("winget "),
+            "Windows installs Ollama with winget, not `{}`",
+            def.install_cmd
+        );
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        assert!(
+            def.install_cmd.contains("ollama.com/install.sh"),
+            "Linux installs Ollama with the vendor script, not `{}`",
+            def.install_cmd
+        );
     }
 
     /// Every agent in KNOWN_AGENTS must NOT be the Custom variant.

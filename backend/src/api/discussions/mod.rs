@@ -15,6 +15,7 @@ use std::time::Duration;
 use axum::response::sse::Event;
 use futures::stream::Stream;
 
+pub(crate) mod ceilings;
 pub mod context;
 pub mod crud;
 pub mod messaging;

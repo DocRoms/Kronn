@@ -291,6 +291,7 @@ pub async fn execute_api_call_step_core(
     // Set by the walk below (Ok arm); the Err arm returns, so it's always
     // definitely-assigned before use — avoids a dead initial store.
     let pagination_truncated: bool;
+    let empty_response_status: Option<u16>;
 
     let response = match walk_pages(
         method.clone(),
@@ -307,8 +308,9 @@ pub async fn execute_api_call_step_core(
     )
     .await
     {
-        Ok((v, was_truncated)) => {
+        Ok((v, was_truncated, empty_status)) => {
             pagination_truncated = was_truncated;
+            empty_response_status = empty_status;
             v
         }
         Err(msg) => return fail(step, start, msg),
@@ -337,7 +339,14 @@ pub async fn execute_api_call_step_core(
     } else {
         "OK"
     };
-    let summary = summarize(&extract_out.value, &full_url, method.as_str());
+    let summary = match empty_response_status {
+        Some(status) => format!(
+            "{} {} → HTTP {status} (empty response)",
+            method,
+            redact_url_query(&full_url)
+        ),
+        None => summarize(&extract_out.value, &full_url, method.as_str()),
+    };
 
     // 0.8.5 — emit the canonical Kronn step-output envelope (markers +
     // signal) via `format_step_output`. Pre-fix this site emitted a
@@ -356,6 +365,10 @@ pub async fn execute_api_call_step_core(
     // tighter filter, alert, etc.) instead of trusting a silently-partial
     // result. Status stays OK/NO_RESULTS — truncation is informational.
     let mut signals: Vec<&str> = vec![signal];
+    let empty_http_signal = empty_response_status.map(|status| format!("http_{status}"));
+    if let Some(signal) = empty_http_signal.as_deref() {
+        signals.push(signal);
+    }
     if pagination_truncated {
         signals.push("PAGINATION_TRUNCATED");
     }
@@ -1315,8 +1328,10 @@ async fn walk_pages(
     pagination: &PaginationSpec,
     plugin_slug: &str,
     config_id: &str,
-) -> Result<(Value, bool), String> {
-    // 2026-06-11 — returns `(merged_response, truncated)`. `truncated` is
+) -> Result<(Value, bool, Option<u16>), String> {
+    // Returns `(merged_response, truncated, empty_response_status)`. The HTTP
+    // code is kept separate from API data when the first response has no body.
+    // `truncated` is
     // true when the walk stopped because it hit `max_pages` while the API
     // still had more pages — the caller surfaces it as a branchable
     // `[SIGNAL: PAGINATION_TRUNCATED]` instead of silently returning a
@@ -1429,7 +1444,7 @@ async fn walk_pages(
         // fan-out compete for the same bucket.
         super::api_call_ratelimit::acquire_slot(plugin_slug, config_id).await;
 
-        let (resp, link_header) = send_with_retry(
+        let (resp, link_header, empty_status) = send_with_retry(
             method.clone(),
             &url,
             auth,
@@ -1440,6 +1455,16 @@ async fn walk_pages(
         )
         .await?;
 
+        // A bodyless success terminates pagination. On a later page, preserve
+        // data already collected; on the first page, expose the absent body as
+        // null and retain the transport status outside the API payload.
+        if let Some(status) = empty_status {
+            if first_response.is_none() {
+                return Ok((Value::Null, false, Some(status)));
+            }
+            break;
+        }
+
         // First-page handling: short-circuit for None/Auto, detect items
         // key for explicit pagination variants.
         if first_response.is_none() {
@@ -1447,7 +1472,7 @@ async fn walk_pages(
                 pagination,
                 PaginationSpec::None | PaginationSpec::Auto { .. }
             ) {
-                return Ok((resp, false));
+                return Ok((resp, false, None));
             }
             bare_array = resp.is_array();
             if !bare_array {
@@ -1545,7 +1570,7 @@ async fn walk_pages(
             map.insert(key.to_string(), Value::Array(accumulated_items));
         }
     }
-    Ok((final_resp, truncated))
+    Ok((final_resp, truncated, None))
 }
 
 /// Heuristic: top-level object → first key whose value is an array.
@@ -1663,7 +1688,7 @@ async fn send_with_retry(
     body: Option<&Value>,
     timeout: Duration,
     max_retries: u8,
-) -> Result<(Value, Option<String>), String> {
+) -> Result<(Value, Option<String>, Option<u16>), String> {
     // 0.8.2 — Explicit User-Agent. GitHub REQUIRES one (returns 403
     // "Request forbidden by administrative rules" without it — see
     // https://docs.github.com/en/rest/overview/resources-in-the-rest-api#user-agent-required).
@@ -1726,10 +1751,15 @@ async fn send_with_retry(
                 .get(reqwest::header::LINK)
                 .and_then(|v| v.to_str().ok())
                 .map(String::from);
-            return response
-                .json::<Value>()
+            let bytes = response
+                .bytes()
                 .await
-                .map(|v| (v, link))
+                .map_err(|e| format!("Response body read failed ({}): {e}", status.as_u16()))?;
+            if bytes.is_empty() {
+                return Ok((Value::Null, link, Some(status.as_u16())));
+            }
+            return serde_json::from_slice::<Value>(&bytes)
+                .map(|value| (value, link, None))
                 .map_err(|e| format!("Response JSON parse failed ({}): {e}", status.as_u16()));
         }
 
@@ -3703,6 +3733,194 @@ mod tests {
     // Mirrors the Exec-step contract: ApiCall surfaces signals so a
     // workflow can branch on HTTP status without writing a wrapper
     // Agent step ("503 → Goto retry, 401 → Goto refresh_auth").
+
+    #[tokio::test]
+    async fn empty_success_is_null_with_visible_http_status_and_one_request() {
+        for (verb, status) in [
+            ("PUT", 204),
+            ("POST", 204),
+            ("DELETE", 204),
+            ("HEAD", 200),
+            ("POST", 201),
+            ("POST", 202),
+            ("POST", 205),
+            ("GET", 200),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method(verb))
+                .and(path("/write"))
+                .respond_with(ResponseTemplate::new(status))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let plugin = mk_plugin(
+                &server.uri(),
+                ApiAuthKind::None,
+                vec![mk_endpoint(verb, "/write")],
+            );
+            let mut step = mk_step("/write");
+            step.api_method = Some(verb.into());
+            let outcome = execute_api_call_step_core(
+                &step,
+                &plugin,
+                &HashMap::new(),
+                &TemplateContext::new(),
+                SecurityPolicy::allow_loopback_for_tests(),
+            )
+            .await;
+            assert_eq!(
+                outcome.result.status,
+                RunStatus::Success,
+                "{}",
+                outcome.result.output
+            );
+            assert!(outcome.condition_action.is_none());
+            let envelope = extract_envelope(&outcome.result.output);
+            assert_eq!(envelope["data"], Value::Null);
+            assert_eq!(envelope["status"], "OK");
+            assert!(envelope["summary"]
+                .as_str()
+                .unwrap()
+                .contains(&format!("HTTP {status} (empty response)")));
+            assert_eq!(
+                extract_http_status_from_output(&outcome.result.output),
+                Some(status)
+            );
+            assert!(outcome.result.output.contains("[SIGNAL: OK]"));
+            assert_eq!(server.received_requests().await.unwrap().len(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn empty_page_ends_pagination_without_discarding_prior_data() {
+        for first_page_empty in [true, false] {
+            let server = MockServer::start().await;
+            let first = if first_page_empty {
+                ResponseTemplate::new(204)
+            } else {
+                ResponseTemplate::new(200).set_body_json(json!([{"id": 1}]))
+            };
+            Mock::given(method("GET"))
+                .and(path("/items"))
+                .respond_with(first.insert_header("link", "</next>; rel=\"next\""))
+                .expect(1)
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path("/next"))
+                .respond_with(
+                    ResponseTemplate::new(204).insert_header("link", "</never>; rel=\"next\""),
+                )
+                .expect(if first_page_empty { 0 } else { 1 })
+                .mount(&server)
+                .await;
+            let plugin = mk_plugin(
+                &server.uri(),
+                ApiAuthKind::None,
+                vec![mk_endpoint("GET", "/items")],
+            );
+            let mut step = mk_step("/items");
+            step.api_pagination = Some(PaginationSpec::LinkHeader {
+                page_size_param: None,
+                page_size: None,
+                max_pages: Some(10),
+            });
+            let outcome = execute_api_call_step_core(
+                &step,
+                &plugin,
+                &HashMap::new(),
+                &TemplateContext::new(),
+                SecurityPolicy::allow_loopback_for_tests(),
+            )
+            .await;
+            assert_eq!(
+                outcome.result.status,
+                RunStatus::Success,
+                "{}",
+                outcome.result.output
+            );
+            assert_eq!(
+                extract_envelope(&outcome.result.output)["data"],
+                if first_page_empty {
+                    Value::Null
+                } else {
+                    json!([{"id": 1}])
+                }
+            );
+            assert!(!outcome.result.output.contains("PAGINATION_TRUNCATED"));
+            assert_eq!(
+                server.received_requests().await.unwrap().len(),
+                if first_page_empty { 1 } else { 2 }
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn nonempty_invalid_json_still_fails_without_resending_a_write() {
+        for body in [" ", "<html>accepted</html>", "{invalid"] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/write"))
+                .respond_with(ResponseTemplate::new(200).set_body_string(body))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let plugin = mk_plugin(
+                &server.uri(),
+                ApiAuthKind::None,
+                vec![mk_endpoint("POST", "/write")],
+            );
+            let mut step = mk_step("/write");
+            step.api_method = Some("POST".into());
+            let outcome = execute_api_call_step_core(
+                &step,
+                &plugin,
+                &HashMap::new(),
+                &TemplateContext::new(),
+                SecurityPolicy::allow_loopback_for_tests(),
+            )
+            .await;
+            assert_eq!(outcome.result.status, RunStatus::Failed);
+            assert!(outcome
+                .result
+                .output
+                .contains("Response JSON parse failed (200)"));
+            assert_eq!(server.received_requests().await.unwrap().len(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn nonempty_json_payloads_keep_their_original_meaning() {
+        for value in [
+            Value::Null,
+            json!({"status": "from-api", "items": [1, 2]}),
+            json!([]),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/data"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(value.clone()))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let plugin = mk_plugin(
+                &server.uri(),
+                ApiAuthKind::None,
+                vec![mk_endpoint("GET", "/data")],
+            );
+            let outcome = execute_api_call_step_core(
+                &mk_step("/data"),
+                &plugin,
+                &HashMap::new(),
+                &TemplateContext::new(),
+                SecurityPolicy::allow_loopback_for_tests(),
+            )
+            .await;
+            assert_eq!(outcome.result.status, RunStatus::Success);
+            assert_eq!(extract_envelope(&outcome.result.output)["data"], value);
+            assert!(!outcome.result.output.contains("empty response"));
+        }
+    }
 
     #[tokio::test]
     async fn success_appends_signal_ok() {

@@ -1067,6 +1067,18 @@ async fn validate_saved_quick_exec_refs(
     Ok(())
 }
 
+/// Shared by the MCP bridge and native HTTP agents; kept out of every-turn
+/// declarations so the canonical authoring contract is paid only on demand.
+pub(super) fn canonical_step_schema() -> serde_json::Value {
+    serde_json::from_str(include_str!("workflow_step_schema.json"))
+        .expect("versioned workflow step schema is valid JSON")
+}
+
+/// GET /api/workflows/step-schema
+pub async fn step_schema() -> Json<ApiResponse<serde_json::Value>> {
+    Json(ApiResponse::ok(canonical_step_schema()))
+}
+
 /// GET /api/workflows
 pub async fn list(State(state): State<AppState>) -> Json<ApiResponse<Vec<WorkflowSummary>>> {
     match state

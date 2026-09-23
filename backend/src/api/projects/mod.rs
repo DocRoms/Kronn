@@ -473,6 +473,7 @@ mod tests {
             default_profile_id: None,
             briefing_notes: None,
             linked_repos: vec![],
+            workspace: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };
@@ -572,6 +573,7 @@ mod tests {
             default_profile_id: None,
             briefing_notes: None,
             linked_repos: vec![],
+            workspace: None,
             created_at: now,
             updated_at: now,
         }

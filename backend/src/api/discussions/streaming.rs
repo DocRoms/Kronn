@@ -2711,40 +2711,59 @@ async fn make_agent_stream_inner(
         Some(&model_tiers_config),
     );
 
-    let qp_reasoning_effort = if tier_override.is_none() && external_connection.is_none() {
+    let (qp_reasoning_effort, qp_max_tokens) = if tier_override.is_none() {
         let did = discussion_id.clone();
         let agent = agent_type.clone();
         let model = attempted_model.clone();
+        let connection_id = external_connection.as_ref().map(|c| c.id.clone());
         match state
             .db
             .with_read_conn(move |conn| {
-                crate::db::discussion_effort::for_run(
-                    conn,
-                    &did,
-                    &agent,
-                    disc_tier,
-                    model.as_deref(),
-                )
+                if runner::is_http_chat_agent(&agent) {
+                    crate::db::discussion_launch_settings::for_http_run(
+                        conn,
+                        &did,
+                        &agent,
+                        disc_tier,
+                        connection_id.as_deref(),
+                        model.as_deref(),
+                    )
+                    .map(|settings| {
+                        let settings = settings.unwrap_or_default();
+                        (settings.reasoning_effort, settings.max_tokens)
+                    })
+                } else {
+                    crate::db::discussion_effort::for_run(
+                        conn,
+                        &did,
+                        &agent,
+                        disc_tier,
+                        model.as_deref(),
+                    )
+                    .map(|effort| (effort, None))
+                }
             })
             .await
         {
             Ok(effort) => effort,
             Err(error) => {
-                tracing::error!("Unable to read launch-time Quick Prompt effort: {error}");
+                tracing::error!(
+                    "Unable to read launch-time Quick Prompt generation settings: {error}"
+                );
                 finish_tracked_preflight(
                     &mut completion_tx,
-                    "unable to read the launch-time Quick Prompt effort",
+                    "unable to read the launch-time Quick Prompt generation settings",
                 );
                 let stream: SseStream = Box::pin(futures::stream::once(async move {
                     Ok::<_, Infallible>(Event::default().event("error").data(
-                        serde_json::json!({"error": "quick_prompt_effort_snapshot_unavailable"}).to_string()
+                        serde_json::json!({"error": "quick_prompt_settings_snapshot_unavailable"}).to_string()
                     ))
                 }));
                 return Sse::new(prepend_initial_event(stream, initial_event.take()));
             }
         }
     } else {
-        None
+        (None, None)
     };
 
     let runtime_target_id = external_connection
@@ -2941,6 +2960,7 @@ async fn make_agent_stream_inner(
             cancel_token: Some(cancel_token.clone()),
             model_override: disc_model.as_deref(),
             reasoning_effort_override: qp_reasoning_effort.as_deref(),
+            max_tokens_override: qp_max_tokens,
             context_files_prompt: &context_files_prompt,
             // Forward to the agent process env so the kronn-internal MCP
             // bridge knows which discussion to introspect when called.
@@ -3479,6 +3499,7 @@ async fn make_agent_stream_inner(
                         !line.starts_with("ollama_tokens:")
                             && !line.starts_with("kronn_http_turn:")
                             && !line.starts_with("kronn_http_tool_exec:")
+                            && !line.starts_with(runner::CEILING_TRACE_PREFIX)
                             && !line.starts_with("[provider-retry:")
                     })
                     .cloned()
@@ -3671,6 +3692,19 @@ async fn make_agent_stream_inner(
                 let (cleaned_response, marked_handoffs) =
                     extract_agent_handoff_markers(&full_response);
                 full_response = cleaned_response;
+
+                // Publish reached ceilings unless the human already stopped this run.
+                let ceiling_question = if stopped_on_cancel {
+                    None
+                } else {
+                    runner::parse_ceiling_report(&stderr_lines)
+                        .map(|report| super::ceilings::ceiling_question(&report, &disc.language))
+                };
+                if let Some(question) = ceiling_question.as_ref() {
+                    full_response.push_str(&question.markdown);
+                }
+                let ceiling_request =
+                    ceiling_question.map(|question| (question.key, question.ceilings));
 
                 // Save agent response to DB — always runs even if client is gone
                 let tier_label = match disc_tier {
@@ -3867,18 +3901,31 @@ async fn make_agent_stream_inner(
                 match state
                     .db
                     .with_conn(move |conn| {
-                        crate::db::discussions::insert_native_agent_message_with_checkpoint(
-                            conn,
-                            &did,
-                            &msg,
-                            child_run_was_success,
-                            dispatch_id.as_deref(),
-                            &source_agent,
-                            &candidate_handoffs,
-                            handoffs_enabled,
-                            handoff_paid_limit,
-                            checkpoint.as_ref(),
-                        )
+                        let outcome =
+                            crate::db::discussions::insert_native_agent_message_with_checkpoint(
+                                conn,
+                                &did,
+                                &msg,
+                                child_run_was_success,
+                                dispatch_id.as_deref(),
+                                &source_agent,
+                                &candidate_handoffs,
+                                handoffs_enabled,
+                                handoff_paid_limit,
+                                checkpoint.as_ref(),
+                            )?;
+                        // Recorded with the message that carries the question:
+                        // only this record lets an answer raise a budget.
+                        if let Some((key, ceilings)) = ceiling_request.as_ref() {
+                            crate::db::discussion_ceiling_requests::record(
+                                conn,
+                                &did,
+                                key,
+                                &crate::db::discussions::format_agent_type(&source_agent),
+                                ceilings,
+                            )?;
+                        }
+                        Ok(outcome)
                     })
                     .await
                 {
@@ -4687,7 +4734,12 @@ pub(super) async fn run_agent_streaming(
     process.fix_ownership();
     let success = status.map(|s| s.success).unwrap_or(false);
     let stderr = process.captured_stderr_flushed().await;
-    let stderr_text = stderr.join("\n");
+    let stderr_text = stderr
+        .iter()
+        .filter(|line| !line.trim_start().starts_with(runner::CEILING_TRACE_PREFIX))
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("\n");
 
     if let Some(failure) = stream_json_failure.as_ref() {
         let notice = failure.user_message();

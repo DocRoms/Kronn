@@ -31,6 +31,15 @@ pub enum SharedRunStatus {
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
+pub struct QuickExecDiagnostics {
+    /// None when the process did not start, timed out or died on a signal.
+    pub exit_code: Option<i32>,
+    /// Captured, bounded stderr; None means unavailable, not an empty stream.
+    pub stderr: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
 pub struct SharedRun {
     pub id: String,
     pub kind: SharedRunKind,
@@ -44,6 +53,9 @@ pub struct SharedRun {
     #[ts(type = "unknown")]
     pub result: Option<serde_json::Value>,
     pub diagnostic: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub exec_details: Option<QuickExecDiagnostics>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

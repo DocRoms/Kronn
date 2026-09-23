@@ -58,6 +58,13 @@ pub async fn execute_collect_api_data_step(
     };
 
     for (index, source) in config.sources.iter().cloned().enumerate() {
+        let source_id = if source.quick_exec.is_some() {
+            None
+        } else if !source.quick_exec_id.is_empty() {
+            Some(source.quick_exec_id.clone())
+        } else {
+            Some(source.quick_api_id.clone())
+        };
         let semaphore = semaphore.clone();
         let state = state.clone();
         let project_id = project_id.map(str::to_owned);
@@ -65,7 +72,7 @@ pub async fn execute_collect_api_data_step(
         let log_context = log_context.clone();
         let workflow_allowlist = workflow_allowlist.to_vec();
         let work_dir = quick_exec_work_dir.clone();
-        handles.push(tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let source_kind = if source.quick_exec.is_some() || !source.quick_exec_id.is_empty() {
                 "quick_exec"
             } else {
@@ -244,21 +251,25 @@ pub async fn execute_collect_api_data_step(
                 error: None,
                 duration_ms: outcome.result.duration_ms,
                 source_kind,
+                source_id: None,
             }
-        }));
+        });
+        handles.push((source_id, handle));
     }
 
     let mut results = Vec::with_capacity(handles.len());
-    for handle in handles {
-        match handle.await {
-            Ok(result) => results.push(result),
-            Err(error) => results.push(SourceResult::failed(
+    for (source_id, handle) in handles {
+        let mut result = match handle.await {
+            Ok(result) => result,
+            Err(error) => SourceResult::failed(
                 usize::MAX,
                 "unknown".to_string(),
                 true,
                 format!("collector task failed: {error}"),
-            )),
-        }
+            ),
+        };
+        result.source_id = source_id;
+        results.push(result);
     }
     results.sort_by_key(|result| result.index);
 
@@ -343,6 +354,7 @@ struct SourceResult {
     error: Option<String>,
     duration_ms: u64,
     source_kind: &'static str,
+    source_id: Option<String>,
 }
 
 impl SourceResult {
@@ -357,6 +369,7 @@ impl SourceResult {
             error: Some(error),
             duration_ms: 0,
             source_kind: "unknown",
+            source_id: None,
         }
     }
 
@@ -413,7 +426,11 @@ fn collector_failure_message(
         };
     }
 
-    detail.to_string()
+    if detail.is_empty() {
+        "Source failed without a diagnostic".to_string()
+    } else {
+        detail.to_string()
+    }
 }
 
 pub(crate) fn quick_exec_value(
@@ -484,7 +501,10 @@ fn finish(step: &WorkflowStep, started: Instant, results: Vec<SourceResult>) -> 
             } else {
                 concise.to_string()
             };
-            format!("{}: {concise}", result.alias)
+            match result.source_id.as_deref() {
+                Some(id) => format!("{} ({id}): {concise}", result.alias),
+                None => format!("{}: {concise}", result.alias),
+            }
         })
     });
 
@@ -501,6 +521,7 @@ fn finish(step: &WorkflowStep, started: Instant, results: Vec<SourceResult>) -> 
         source_meta.push(json!({
             "alias": result.alias,
             "kind": result.source_kind,
+            "source_id": result.source_id,
             "required": result.required,
             "status": result.status,
             "summary": result.summary,
@@ -735,6 +756,7 @@ mod tests {
                 error: None,
                 duration_ms: 12,
                 source_kind: "quick_api",
+                source_id: None,
             },
             SourceResult::failed(1, "billing".into(), false, "timeout".into()),
         ];
@@ -814,5 +836,81 @@ mod tests {
             super::super::step_output_format::parse_envelope_for_test(&outcome.result.output);
         assert_eq!(envelope["status"], "ERROR");
         assert_eq!(envelope["data"]["meta"]["required_failed"], 1);
+    }
+
+    #[tokio::test]
+    async fn missing_required_api_keeps_its_alias_id_and_cause() {
+        let db = crate::db::Database::open_in_memory().unwrap();
+        let state = crate::AppState::new_defaults(
+            Arc::new(tokio::sync::RwLock::new(
+                crate::core::config::default_config(),
+            )),
+            Arc::new(db),
+            crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+        );
+        let mut missing = source("news", true);
+        missing.quick_api_id = "qa-deleted".into();
+        let step = WorkflowStep {
+            name: "collect".into(),
+            step_type: StepType::CollectApiData,
+            collect_api_data: Some(CollectApiDataConfig {
+                sources: vec![missing],
+                concurrent_limit: None,
+            }),
+            ..WorkflowStep::default()
+        };
+        let result = execute_collect_api_data_step(
+            &step,
+            None,
+            &state,
+            &TemplateContext::new(),
+            ApiCallLogContext::workflow(),
+            &[],
+            "",
+        )
+        .await
+        .result;
+        assert_eq!(result.status, RunStatus::Failed);
+        let envelope = super::super::step_output_format::parse_envelope_for_test(&result.output);
+        let source = &envelope["data"]["meta"]["sources"][0];
+        assert_eq!(source["alias"], "news");
+        assert_eq!(source["source_id"], "qa-deleted");
+        assert_eq!(source["kind"], "quick_api");
+        assert_eq!(source["required"], true);
+        assert!(source["error"].as_str().unwrap().contains("does not exist"));
+        assert!(!source["error"].as_str().unwrap().contains("HTTP"));
+        let summary = envelope["summary"].as_str().unwrap();
+        assert!(summary.contains("news (qa-deleted)"), "{summary}");
+        assert!(summary.contains("does not exist"), "{summary}");
+    }
+
+    #[test]
+    fn http_and_parse_failures_keep_source_identity_in_the_result() {
+        let step = WorkflowStep {
+            name: "collect".into(),
+            ..WorkflowStep::default()
+        };
+        for cause in [
+            "HTTP 401 on GET /news — unauthorized",
+            "Response JSON parse failed (200): invalid JSON",
+        ] {
+            let mut source =
+                SourceResult::failed(0, "news".into(), true, cause.into()).with_kind("quick_api");
+            source.source_id = Some("qa-news".into());
+            let result = finish(&step, Instant::now(), vec![source]).result;
+            assert_eq!(result.status, RunStatus::Failed);
+            let envelope =
+                super::super::step_output_format::parse_envelope_for_test(&result.output);
+            assert!(envelope["summary"]
+                .as_str()
+                .unwrap()
+                .contains(&format!("news (qa-news): {cause}")));
+            assert_eq!(envelope["data"]["meta"]["sources"][0]["error"], cause);
+            assert_eq!(
+                envelope["data"]["meta"]["sources"][0]["source_id"],
+                "qa-news"
+            );
+        }
+        assert!(!collector_failure_message(" \n ", None).is_empty());
     }
 }

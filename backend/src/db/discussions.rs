@@ -3800,7 +3800,7 @@ pub(crate) fn parse_agent_type(s: &str) -> rusqlite::Result<AgentType> {
     })
 }
 
-fn format_agent_type(a: &AgentType) -> String {
+pub(crate) fn format_agent_type(a: &AgentType) -> String {
     match a {
         AgentType::ClaudeCode => "ClaudeCode".into(),
         AgentType::Codex => "Codex".into(),

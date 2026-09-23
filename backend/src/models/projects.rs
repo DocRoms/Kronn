@@ -14,6 +14,15 @@ use super::AgentType;
 
 // ─── Projects & Repositories ──────────────────────────────────────────────
 
+/// Project defaults for worktree preparation hooks. Workflow hooks override them
+/// field by field; omitted fields inherit the project value.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ProjectWorkspace {
+    #[serde(default)]
+    pub hooks: crate::models::WorkspaceHooks,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct Project {
@@ -75,6 +84,9 @@ pub struct Project {
     /// projects rarely have more than 5 links).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub linked_repos: Vec<LinkedRepo>,
+    /// Worktree preparation defaults inherited by this project's isolated workflows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<ProjectWorkspace>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

@@ -9,6 +9,8 @@ license = "AGPL-3.0-only"
 # Tauri framework
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-shell = "2"
+# Native folder picker for the setup wizard
+tauri-plugin-dialog = "2"
 
 # Open URLs in system browser
 open = "5"

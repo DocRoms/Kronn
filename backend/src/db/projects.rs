@@ -21,7 +21,7 @@ pub fn list_projects(conn: &Connection) -> Result<Vec<Project>> {
         "SELECT id, name, path, repo_url, token_override_json, ai_config_json,
                 created_at, updated_at, default_skill_ids_json, default_profile_id,
                 briefing_notes, linked_repos_json,
-                mcp_sync_status, mcp_sync_detail, mcp_synced_at
+                mcp_sync_status, mcp_sync_detail, mcp_synced_at, workspace_json
          FROM projects ORDER BY name",
     )?;
 
@@ -35,6 +35,7 @@ pub fn list_projects(conn: &Connection) -> Result<Vec<Project>> {
             let sync_status: Option<String> = row.get(12)?;
             let sync_detail: Option<String> = row.get(13)?;
             let sync_at: Option<String> = row.get(14)?;
+            let workspace_str: Option<String> = row.get(15).unwrap_or(None);
 
             Ok((
                 id.clone(),
@@ -59,6 +60,9 @@ pub fn list_projects(conn: &Connection) -> Result<Vec<Project>> {
                     default_profile_id: row.get(9)?,
                     briefing_notes: row.get(10)?,
                     linked_repos: serde_json::from_str(&linked_repos_str).unwrap_or_default(),
+                    workspace: workspace_str
+                        .as_deref()
+                        .and_then(|value| serde_json::from_str(value).ok()),
                     created_at: parse_dt(row.get::<_, String>(6)?),
                     updated_at: parse_dt(row.get::<_, String>(7)?),
                 },
@@ -76,7 +80,7 @@ pub fn get_project(conn: &Connection, id: &str) -> Result<Option<Project>> {
         "SELECT id, name, path, repo_url, token_override_json, ai_config_json,
                 created_at, updated_at, default_skill_ids_json, default_profile_id,
                 briefing_notes, linked_repos_json,
-                mcp_sync_status, mcp_sync_detail, mcp_synced_at
+                mcp_sync_status, mcp_sync_detail, mcp_synced_at, workspace_json
          FROM projects WHERE id = ?1",
     )?;
 
@@ -89,6 +93,7 @@ pub fn get_project(conn: &Connection, id: &str) -> Result<Option<Project>> {
             let sync_status: Option<String> = row.get(12)?;
             let sync_detail: Option<String> = row.get(13)?;
             let sync_at: Option<String> = row.get(14)?;
+            let workspace_str: Option<String> = row.get(15).unwrap_or(None);
 
             Ok(Project {
                 id: row.get(0)?,
@@ -111,6 +116,9 @@ pub fn get_project(conn: &Connection, id: &str) -> Result<Option<Project>> {
                 default_profile_id: row.get(9)?,
                 briefing_notes: row.get(10)?,
                 linked_repos: serde_json::from_str(&linked_repos_str).unwrap_or_default(),
+                workspace: workspace_str
+                    .as_deref()
+                    .and_then(|value| serde_json::from_str(value).ok()),
                 created_at: parse_dt(row.get::<_, String>(6)?),
                 updated_at: parse_dt(row.get::<_, String>(7)?),
             })
@@ -170,8 +178,8 @@ pub fn get_project_names(conn: &Connection) -> Result<std::collections::HashMap<
 
 pub fn insert_project(conn: &Connection, project: &Project) -> Result<()> {
     conn.execute(
-        "INSERT INTO projects (id, name, path, repo_url, token_override_json, ai_config_json, created_at, updated_at, default_skill_ids_json, briefing_notes, linked_repos_json)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        "INSERT INTO projects (id, name, path, repo_url, token_override_json, ai_config_json, created_at, updated_at, default_skill_ids_json, briefing_notes, linked_repos_json, workspace_json)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
         params![
             project.id,
             project.name,
@@ -184,6 +192,29 @@ pub fn insert_project(conn: &Connection, project: &Project) -> Result<()> {
             serde_json::to_string(&project.default_skill_ids)?,
             project.briefing_notes,
             serde_json::to_string(&project.linked_repos)?,
+            project
+                .workspace
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()?,
+        ],
+    )?;
+    Ok(())
+}
+
+/// the project's own recipe for making a worktree usable. `None`
+/// clears it, which puts the project back to the default behaviour.
+pub fn update_project_workspace(
+    conn: &Connection,
+    id: &str,
+    workspace: Option<&crate::models::ProjectWorkspace>,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE projects SET workspace_json = ?1, updated_at = ?2 WHERE id = ?3",
+        params![
+            workspace.map(serde_json::to_string).transpose()?,
+            chrono::Utc::now().to_rfc3339(),
+            id
         ],
     )?;
     Ok(())

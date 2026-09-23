@@ -703,6 +703,22 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "183_discussion_video_sequence_exclusions",
         include_str!("sql/183_discussion_video_sequence_exclusions.sql"),
     ),
+    (
+        "184_discussion_ceiling_requests",
+        include_str!("sql/184_discussion_ceiling_requests.sql"),
+    ),
+    (
+        "185_project_workspace",
+        include_str!("sql/185_project_workspace.sql"),
+    ),
+    (
+        "186_discussion_http_settings",
+        include_str!("sql/186_discussion_http_settings.sql"),
+    ),
+    (
+        "187_shared_run_exec_details",
+        include_str!("sql/187_shared_run_exec_details.sql"),
+    ),
 ];
 
 /// Apply one migration inside the caller-owned transaction.

@@ -515,14 +515,12 @@ fn render_qp_template(template: &str, vars: &HashMap<String, String>) -> String 
 /// One-shot Quick Prompt launch :
 ///   1. Loads the QP, renders the template with the agent-supplied vars.
 ///   2. Creates a single-item batch (= 1 disc) via `create_batch_run`.
-///   3. Returns disc_id + ETA hint. The agent then `disc_load_other`s
+///   3. Commits a dispatch obligation with the child and wakes the dispatcher.
+///   4. Returns disc_id + ETA hint. The agent then `disc_load_other`s
 ///      to read the result once `next_check.wait_seconds` elapsed.
 ///
-/// **Note on agent kickoff** : the actual agent run is NOT started by
-/// this route — mirrors the existing `/quick-prompts/:id/batch` contract.
-/// The MCP wrapper triggers `POST /api/discussions/:id/run` immediately
-/// after this call returns (fire-and-forget — the backend spawns the
-/// agent task in tokio, the wrapper doesn't need to wait for SSE).
+/// The durable dispatcher owns kickoff; callers need neither an SSE consumer
+/// nor a separate request to start the agent.
 pub async fn qp_run(
     State(state): State<AppState>,
     Json(req): Json<McpQpRunRequest>,
@@ -601,6 +599,14 @@ pub async fn qp_run(
         }
     }
 
+    // Native callers expose no target override. Preserve the legacy MCP
+    // override path without transplanting saved generation controls to it.
+    let launch_model_tiers = if req.agent.is_none() {
+        Some(state.config.read().await.agents.model_tiers.clone())
+    } else {
+        None
+    };
+
     // Agent override (mutates the QP clone so create_batch_run carries it)
     if let Some(a) = req.agent {
         qp.agent = a;
@@ -629,7 +635,7 @@ pub async fn qp_run(
     let outcome = match state
         .db
         .with_conn(move |conn| {
-            crate::db::workflows::create_batch_run_with_identities(
+            crate::db::workflows::create_batch_run_with_launch_settings(
                 conn,
                 crate::db::workflows::CreateBatchRunInput {
                     quick_prompt: &qp_for_create,
@@ -647,6 +653,7 @@ pub async fn qp_run(
                 },
                 None,
                 std::slice::from_ref(&execution_id),
+                launch_model_tiers.as_ref(),
             )
         })
         .await

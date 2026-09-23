@@ -666,6 +666,40 @@ pub struct SetupStatus {
     pub scan_paths_set: bool,
     pub repos_detected: Vec<super::DetectedRepo>,
     pub default_scan_path: Option<String>,
+    /// Paths actually scanned, exposed to diagnose empty results and missing mounts.
+    pub scan_paths_explored: Vec<String>,
+}
+
+/// Named server-visible root offered by the setup folder browser.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct BrowseRoot {
+    pub label: String,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct BrowseEntry {
+    pub name: String,
+    pub path: String,
+    /// This directory is itself a working copy — worth selecting as is.
+    pub is_repository: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct BrowseListing {
+    /// The directory listed, as Kronn reaches it.
+    pub path: String,
+    /// Its parent, when the parent is still inside an allowed root.
+    pub parent: Option<String>,
+    /// Where browsing may start. Always sent, so the wizard can offer them
+    /// again after a refusal.
+    pub roots: Vec<BrowseRoot>,
+    pub entries: Vec<BrowseEntry>,
+    /// Subdirectories beyond the cap, not listed.
+    pub truncated: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]

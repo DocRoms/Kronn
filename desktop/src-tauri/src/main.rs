@@ -806,6 +806,27 @@ fn restart_app(app: tauri::AppHandle) {
     app.restart();
 }
 
+/// Open the native folder picker. Dismissal returns an empty list.
+#[tauri::command]
+async fn pick_folders(app: tauri::AppHandle) -> Result<Vec<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog().file().pick_folders(move |chosen| {
+        // The receiver is only dropped if the app is going away.
+        let _ = tx.send(chosen);
+    });
+    let chosen = rx
+        .await
+        .map_err(|_| "the folder dialog was closed by the application".to_string())?;
+    Ok(chosen
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|file| file.into_path().ok())
+        .map(|path| path.display().to_string())
+        .collect())
+}
+
 // ── Main ───────────────────────────────────────────────────────────────────
 
 fn main() {
@@ -840,11 +861,16 @@ fn main() {
     // This ensures SharedArrayBuffer is available for WASM threading (TTS/STT)
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_dialog::init())
         .manage(BackendInfo {
             port,
             startup_error: std::sync::Mutex::new(startup_error),
         })
-        .invoke_handler(tauri::generate_handler![wait_for_backend, restart_app])
+        .invoke_handler(tauri::generate_handler![
+            wait_for_backend,
+            restart_app,
+            pick_folders
+        ])
         .setup(move |app| {
             use tauri::Manager;
 

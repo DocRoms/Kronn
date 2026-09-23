@@ -221,22 +221,62 @@ pub fn update_quick_api_pinned(conn: &Connection, id: &str, pinned: bool) -> Res
 }
 
 pub fn delete_quick_api(conn: &Connection, id: &str) -> Result<()> {
-    conn.execute("DELETE FROM quick_apis WHERE id = ?1", params![id])?;
+    let tx = conn.unchecked_transaction()?;
+    let references = workflow_step_references(&tx, id)?;
+    if !references.is_empty() {
+        return Err(QuickApiInUse(format!(
+            "Cannot delete Quick API {id}: referenced by {}. Remove or replace these references first.",
+            references.join("; ")
+        ))
+        .into());
+    }
+    tx.execute("DELETE FROM quick_apis WHERE id = ?1", params![id])?;
+    tx.commit()?;
     Ok(())
 }
 
-/// Workflow steps that call this API by id. Each fails on its next run once
-/// the API is gone, so a deletion says this number before it is confirmed
-/// (KT-561).
-pub fn count_workflow_step_usage(conn: &Connection, id: &str) -> Result<u32> {
-    let n: i64 = conn.query_row(
-        "SELECT COUNT(*)
-           FROM workflows w, json_each(w.steps_json) s
-          WHERE json_extract(s.value, '$.quick_api_id') = ?1",
-        params![id],
-        |row| row.get(0),
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+pub struct QuickApiInUse(String);
+
+/// Include direct calls, collection sources and failure handlers. EXISTS
+/// counts a step once even when several of its source aliases use this API.
+fn workflow_step_references(conn: &Connection, id: &str) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "WITH steps AS (
+            SELECT w.id, w.name, s.key AS step_index, s.value AS step, 0 AS rollback
+              FROM workflows w, json_each(w.steps_json) s
+            UNION ALL
+            SELECT w.id, w.name, s.key AS step_index, s.value AS step, 1 AS rollback
+              FROM workflows w, json_each(w.on_failure) s
+         )
+         SELECT id, name,
+                COALESCE(NULLIF(json_extract(step, '$.name'), ''), 'step ' || (step_index + 1)),
+                rollback
+           FROM steps
+          WHERE json_extract(step, '$.quick_api_id') = ?1
+             OR EXISTS (
+                 SELECT 1 FROM json_each(step, '$.collect_api_data.sources') source
+                  WHERE json_extract(source.value, '$.quick_api_id') = ?1
+             )
+          ORDER BY name, id, rollback, step_index",
     )?;
-    Ok(n as u32)
+    let rows = stmt.query_map(params![id], |row| {
+        let workflow_id: String = row.get(0)?;
+        let workflow_name: String = row.get(1)?;
+        let step_name: String = row.get(2)?;
+        let rollback: bool = row.get(3)?;
+        Ok(format!(
+            "workflow {workflow_name:?} ({workflow_id}), {}step {step_name:?}",
+            if rollback { "on_failure " } else { "" }
+        ))
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+/// Number of workflow steps blocking deletion of this API.
+pub fn count_workflow_step_usage(conn: &Connection, id: &str) -> Result<u32> {
+    Ok(workflow_step_references(conn, id)?.len().try_into()?)
 }
 
 #[cfg(test)]
@@ -345,6 +385,66 @@ mod tests {
         let conn = open_test_db();
         let qa = mk_quick_api();
         insert_quick_api(&conn, &qa).unwrap();
+        delete_quick_api(&conn, &qa.id).unwrap();
+        assert!(get_quick_api(&conn, &qa.id).unwrap().is_none());
+    }
+
+    #[test]
+    fn deletion_names_all_referencing_steps_and_keeps_the_api_until_detached() {
+        let conn = open_test_db();
+        let qa = mk_quick_api();
+        insert_quick_api(&conn, &qa).unwrap();
+        let steps = serde_json::json!([
+            {"name":"Fetch météo", "quick_api_id":"qa-1"},
+            {"name":"Batch", "quick_api_id":"qa-1"},
+            {"name":"Collect", "collect_api_data":{"sources":[
+                {"alias":"morning", "quick_api_id":"qa-1"},
+                {"alias":"evening", "quick_api_id":"qa-1"},
+                {"alias":"exec", "quick_exec_id":"qa-1"}
+            ]}},
+            {"name":"Prompt", "quick_prompt_id":"qa-1"}
+        ]);
+        let rollback = serde_json::json!([
+            {"name":"Cleanup", "quick_api_id":"qa-1"},
+            {"name":"Collect failure", "collect_api_data":{"sources":[
+                {"alias":"failure", "quick_api_id":"qa-1"}
+            ]}}
+        ]);
+        conn.execute(
+            "INSERT INTO workflows (id, name, trigger_json, steps_json, on_failure, created_at, updated_at)
+             VALUES ('wf-weather', 'Météo ☀', '{}', ?1, ?2, '2026-01-01', '2026-01-01')",
+            params![steps.to_string(), rollback.to_string()],
+        ).unwrap();
+
+        assert_eq!(count_workflow_step_usage(&conn, &qa.id).unwrap(), 5);
+        let error = delete_quick_api(&conn, &qa.id).unwrap_err();
+        assert!(error.is::<QuickApiInUse>());
+        let message = error.to_string();
+        for name in [
+            "qa-1",
+            "Météo ☀",
+            "wf-weather",
+            "Fetch météo",
+            "Batch",
+            "Collect",
+            "Cleanup",
+            "Collect failure",
+            "on_failure",
+        ] {
+            assert!(message.contains(name), "missing {name}: {message}");
+        }
+        assert!(!message.contains("Prompt"));
+        assert!(get_quick_api(&conn, &qa.id).unwrap().is_some());
+
+        // Clearing main steps alone must not bypass a failure-handler reference.
+        conn.execute("UPDATE workflows SET steps_json = '[]'", [])
+            .unwrap();
+        assert!(delete_quick_api(&conn, &qa.id)
+            .unwrap_err()
+            .is::<QuickApiInUse>());
+        conn.execute("UPDATE workflows SET on_failure = NULL", [])
+            .unwrap();
+        assert_eq!(count_workflow_step_usage(&conn, &qa.id).unwrap(), 0);
         delete_quick_api(&conn, &qa.id).unwrap();
         assert!(get_quick_api(&conn, &qa.id).unwrap().is_none());
     }

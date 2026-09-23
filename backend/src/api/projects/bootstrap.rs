@@ -179,6 +179,7 @@ pub async fn bootstrap(
         default_profile_id: None,
         briefing_notes: None,
         linked_repos: vec![],
+        workspace: None,
         created_at: now,
         updated_at: now,
     };

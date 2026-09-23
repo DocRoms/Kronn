@@ -79,25 +79,19 @@ pub async fn scan_paths_with_depth(
             before_ghost - repos.len(), before_ghost, repos.len());
     }
 
-    // Deduplicate repos (handles macOS symlinks like /Users -> /private/var/Users).
-    // Strategy: use a composite key of (repo name, git remote URL) to detect duplicates.
-    // This works even inside Docker where host paths can't be canonicalized.
-    // Fallback: if no remote URL, use the repo name + canonicalized container path.
+    // Deduplicate canonical working-copy paths after host/container mapping.
+    // Names and remotes do not distinguish independent clones or local-only repos.
     {
         let mut seen = HashSet::new();
         repos.retain(|r| {
-            let key = if let Some(ref url) = r.remote_url {
-                // Same name + same remote URL = same repo found via different paths
-                // (different names with same URL = intentional separate clones, keep both)
-                format!("{}:{}", r.name, url)
-            } else {
-                // No remote: try canonical path of the container-mapped path
-                let container_path = resolve_host_path(&r.path);
-                let canon = std::fs::canonicalize(&container_path).unwrap_or(container_path);
-                format!("path:{}", canon.display())
-            };
+            let container_path = resolve_host_path(&r.path);
+            let key = std::fs::canonicalize(&container_path)
+                .unwrap_or(container_path)
+                .display()
+                .to_string();
             if seen.contains(&key) {
-                tracing::debug!("Filtering duplicate repo: {} (key: {})", r.path, key);
+                tracing::debug!(target: "kronn::scanner",
+                    "same working copy reached twice: {} (resolved: {})", r.path, key);
                 false
             } else {
                 seen.insert(key);
@@ -119,9 +113,12 @@ async fn scan_directory(
 ) -> Result<Vec<DetectedRepo>> {
     let mut repos = Vec::new();
 
+    // Follow symlinks for repositories outside the scan root. Canonical-path
+    // tracking prevents repeated traversal and cycles.
+    let mut visited: HashSet<PathBuf> = HashSet::new();
     let walker = WalkDir::new(base)
         .max_depth(max_depth)
-        .follow_links(false)
+        .follow_links(true)
         .into_iter()
         .filter_entry(|entry| {
             let name = entry.file_name().to_string_lossy();
@@ -141,6 +138,15 @@ async fn scan_directory(
         };
 
         let path = entry.path();
+
+        // One directory, one visit, whatever route led here. Two symlinks into
+        // the same tree would otherwise report the same repository twice.
+        if path.is_dir() {
+            let key = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+            if !visited.insert(key) {
+                continue;
+            }
+        }
 
         // Check if this directory contains a .git folder
         if path.is_dir() && path.join(".git").exists() {

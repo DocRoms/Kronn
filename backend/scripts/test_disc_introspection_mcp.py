@@ -857,7 +857,37 @@ class TaskExecPrincipalSurfaceTests(unittest.TestCase):
         manual = self.mod.TOOL_MANUALS["media_generate"]
         self.assertIn("`worker.connection_id`", manual)
         self.assertIn("alias", manual)
-        self.assertIn("A refusal lists the connections", manual)
+        self.assertIn("the refusal names them", manual)
+        # A media request may omit its connection identifier.
+        self.assertIn("OPTIONAL", manual)
+        self.assertIn("Never ask a human for it", manual)
+
+    def test_media_points_at_the_tool_that_actually_lists_connections(self):
+        # External connections come from agent_list, not the MCP-server catalogue.
+        declaration = next(
+            tool for tool in self.mod.TOOLS if tool["name"] == "media_generate"
+        )
+        connection = declaration["inputSchema"]["properties"]["connection_id"]
+        self.assertIn("agent_list", connection["description"])
+        self.assertNotIn("mcp_list", connection["description"])
+        self.assertNotIn("connection_id", declaration["inputSchema"]["required"])
+
+    def test_media_generate_sends_no_connection_when_none_was_named(self):
+        # Absent, the server uses the only connection configured for the
+        # modality; sending an empty string would read as an unknown one.
+        self.mod._set_current_disc_id("d-media")
+        http = mock.MagicMock(return_value={"success": True, "data": {"job_id": "job-1"}})
+        with mock.patch.object(self.mod, "_http", http):
+            self.mod.call_media_generate({"modality": "image", "prompt": "a lighthouse"})
+        body = _bodies_for(http, "/api/media/generate")[0]
+        self.assertNotIn("connection_id", body)
+        with mock.patch.object(self.mod, "_http", http):
+            self.mod.call_media_generate(
+                {"modality": "image", "prompt": "a lighthouse", "connection_id": "router"}
+            )
+        self.assertEqual(
+            _bodies_for(http, "/api/media/generate")[1]["connection_id"], "router"
+        )
 
     def test_ollama_delegation_guidance_is_bounded_and_fail_closed(self):
         tools = {item["name"]: item for item in self.mod.TOOLS}
@@ -3959,7 +3989,11 @@ class DiscWaitForPeerTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 self.mod.call_disc_wait_for_peer({"since_sort_order": 5})
         self.assertEqual(mock_http.call_count, 1, "no retry on HTTP errors")
-        mock_sleep.assert_not_called()
+        # Count only transport-backoff sleeps; unrelated paths may also sleep.
+        backoff_sleeps = [
+            c for c in mock_sleep.call_args_list if c.args and c.args[0] in (2, 4, 8, 12, 16)
+        ]
+        self.assertEqual(backoff_sleeps, [], "an HTTP error must not back off and retry")
 
     def test_forwards_since_and_timeout_in_query_string(self):
         with mock.patch.object(self.mod, "_http") as mock_http:
@@ -6029,6 +6063,18 @@ class StepSchemaAndBindingListTests(unittest.TestCase):
 
     def setUp(self):
         self.mod = _load_module()
+        schema_path = _SCRIPT.parent.parent / "src" / "api" / "workflow_step_schema.json"
+        self.schema = json.loads(schema_path.read_text())
+        def read_schema(method, path, *args, **kwargs):
+            self.assertEqual((method, path), ("GET", "/api/workflows/step-schema"))
+            return self._env(self.schema)
+        patcher = mock.patch.object(self.mod, "_http", side_effect=read_schema)
+        self.schema_http = patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_step_schema_reads_the_shared_backend_contract(self):
+        self.assertEqual(self.mod.call_workflow_step_schema({}), self.schema)
+        self.schema_http.assert_called_once_with("GET", "/api/workflows/step-schema")
 
     @staticmethod
     def _env(data):
@@ -9901,6 +9947,56 @@ class DurableSessionLinkTests(unittest.TestCase):
         self.assertIn("no durable identity", str(ctx.exception))
         http.assert_not_called()
 
+    def test_disc_update_renames_pins_and_archives_the_bound_room(self):
+        self.mod._set_current_disc_id("d-room")
+        http = mock.MagicMock(return_value={"success": True, "data": None})
+        with mock.patch.object(self.mod, "_http", http):
+            result = self.mod.call_disc_update({
+                "title": "  Analyse PR #205  ", "pinned": True, "archived": False,
+            })
+        self.assertEqual(
+            _bodies_for(http, "/api/discussions/d-room")[0],
+            {"title": "Analyse PR #205", "pinned": True, "archived": False},
+        )
+        self.assertEqual(http.call_args_list[0].args[0], "PATCH")
+        # The route answers with no body; the call still says what changed.
+        self.assertEqual(result["disc_id"], "d-room")
+        self.assertEqual(result["changed"]["title"], "Analyse PR #205")
+
+    def test_disc_update_changes_nothing_that_decides_who_answers(self):
+        # The route behind it accepts agent, tier, connection, project, skills
+        # and directives. None of them is reachable from this tool, and an
+        # agent passing them must not have them forwarded in silence.
+        self.mod._set_current_disc_id("d-room")
+        http = mock.MagicMock(return_value={"success": True, "data": None})
+        with mock.patch.object(self.mod, "_http", http):
+            self.mod.call_disc_update({
+                "title": "Kept", "agent": "ClaudeCode", "tier": "reasoning",
+                "connection_id": "conn-x", "project_id": "p-1",
+                "skill_ids": ["s-1"], "directive_ids": ["d-1"],
+            })
+        self.assertEqual(_bodies_for(http, "/api/discussions/d-room")[0], {"title": "Kept"})
+        declaration = next(t for t in self.mod.TOOLS if t["name"] == "disc_update")
+        self.assertEqual(
+            sorted(declaration["inputSchema"]["properties"]),
+            ["archived", "disc_id", "pinned", "title"],
+        )
+
+    def test_disc_update_refuses_an_empty_or_malformed_change(self):
+        self.mod._set_current_disc_id("d-room")
+        http = mock.MagicMock(return_value={"success": True, "data": None})
+        with mock.patch.object(self.mod, "_http", http):
+            for args, expected in (
+                ({}, "nothing to change"),
+                ({"title": "   "}, "non-empty string"),
+                ({"title": "x" * 201}, "200 characters"),
+                ({"pinned": "yes"}, "true or false"),
+            ):
+                with self.assertRaises(RuntimeError) as ctx:
+                    self.mod.call_disc_update(args)
+                self.assertIn(expected, str(ctx.exception))
+        http.assert_not_called()
+
     def test_durable_id_is_stable_and_absent_without_identity(self):
         with mock.patch.object(self.mod, "_binding_identity", return_value=("claude-session", "u-1")):
             first = self.mod._durable_session_id()
@@ -11016,6 +11112,19 @@ class ToolManualTests(unittest.TestCase):
     def test_no_argument_lists_what_exists(self):
         result = self.mod.call_tool_manual({})
         self.assertIn("qa_create_draft", result["available"])
+        self.assertIn("signals", result["available"])
+
+    def test_signal_catalogue_is_read_from_the_running_server_without_launching(self):
+        registry = {"schema_version": 1, "signals": [{"name": "kronn-action"}]}
+        with mock.patch.object(self.mod, "_http", return_value={"success": True, "data": registry}) as http:
+            result = self.mod.DISPATCH["tool_manual"]({"tool": " signals "})
+        self.assertEqual(result, {"tool": "signals", "catalogue": registry})
+        http.assert_called_once_with("GET", "/api/signals/catalog")
+
+    def test_signal_catalogue_failure_does_not_fabricate_a_local_contract(self):
+        with mock.patch.object(self.mod, "_http", side_effect=RuntimeError("server unavailable")):
+            with self.assertRaisesRegex(RuntimeError, "server unavailable"):
+                self.mod.call_tool_manual({"tool": "signals"})
 
     def test_an_unknown_name_names_the_alternatives(self):
         result = self.mod.call_tool_manual({"tool": "qa_create_drafts"})
