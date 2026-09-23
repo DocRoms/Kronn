@@ -664,6 +664,15 @@ These reads reuse the existing list endpoints and do not mutate the library.
 [src: file: backend/scripts/disc-introspection-mcp.py:1044-1088]
 [src: file: backend/scripts/disc-introspection-mcp.py:4223-4234]
 
+## Workflow run detail
+
+`workflow_run_get` preserves the API's stored `agent_provenance` attempt history
+alongside compact step metadata while still truncating long step outputs.
+Missing/null provenance stays absent for historical runs; an explicit empty
+attempt list is preserved. The bridge does not look up today's model settings
+or infer attempts from output text.
+[src: file: backend/scripts/disc-introspection-mcp.py:7863]
+
 ## Joined CLI worktrees
 
 - Call `disc_workspace_get({})` before editing when several peers may be

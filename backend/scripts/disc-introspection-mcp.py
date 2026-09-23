@@ -7885,7 +7885,7 @@ def call_workflow_run_get(args):
                 "step_agent": s.get("step_agent"),
                 "output": out,
             }
-            for field in ["step_model", "step_api_plugin_slug", "step_api_endpoint_path", "envelope_detected", "child_run_id"]:
+            for field in ["step_model", "step_api_plugin_slug", "step_api_endpoint_path", "envelope_detected", "child_run_id", "agent_provenance"]:
                 val = s.get(field)
                 if val is not None:
                     step_dict[field] = val

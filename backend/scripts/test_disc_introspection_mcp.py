@@ -6535,6 +6535,37 @@ class WorkflowRunHistoryTests(unittest.TestCase):
         for field in ["step_model", "step_api_plugin_slug", "step_api_endpoint_path", "envelope_detected", "child_run_id", "is_rollback", "native_tool_calls"]:
             self.assertNotIn(field, s2)
 
+    def test_workflow_run_get_keeps_captured_attempts_without_inventing_legacy_data(self):
+        provenance = {
+            "selected_attempt": None,
+            "attempts": [{
+                "id": 1, "role": "Initial", "retry": 1,
+                "agent": "Ollama", "tier": "Default", "connection_id": None,
+                "requested_model": "local-alias", "resolved_model": "local-alias",
+                "model_applied": True, "observed_models": [], "format_fallback": True,
+                "started_at": "2026-09-23T13:00:00Z", "duration_ms": 25, "succeeded": False,
+            }],
+        }
+        empty = {"selected_attempt": None, "attempts": []}
+        run = {"id": "r", "step_results": [
+            {"step_name": "failed", "status": "Failed", "output": "x" * 5000,
+             "agent_provenance": provenance},
+            {"step_name": "preflight", "agent_provenance": empty},
+            {"step_name": "legacy", "step_model": "historical-model"},
+            {"step_name": "null", "agent_provenance": None},
+        ]}
+        with mock.patch.object(self.mod, "_http", return_value=self._env(run)) as http:
+            out = self.mod.call_workflow_run_get({"workflow_id": "wf", "run_id": "r"})
+        steps = out["step_results"]
+        self.assertEqual(steps[0]["agent_provenance"], provenance)
+        self.assertIn("truncated", steps[0]["output"])
+        self.assertEqual(steps[1]["agent_provenance"], empty)
+        self.assertEqual(steps[2]["step_model"], "historical-model")
+        self.assertNotIn("agent_provenance", steps[2])
+        self.assertNotIn("agent_provenance", steps[3])
+        http.assert_called_once_with("GET", "/api/workflows/wf/runs/r")
+        self.assertEqual(run["step_results"][0]["output"], "x" * 5000)
+
     def test_workflow_run_get_requires_both_ids(self):
         with self.assertRaises(RuntimeError):
             self.mod.call_workflow_run_get({"workflow_id": "wf"})
