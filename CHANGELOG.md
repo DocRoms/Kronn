@@ -11,6 +11,16 @@ Release notes for 0.9.3 and earlier are available in the
 
 ## [Unreleased]
 
+### Fixed
+
+- Workflow HTTP agents recover once from an explicit unsupported structured
+  output response by keeping the schema in the prompt and retaining the model,
+  tools and local validation policy. A persistent notice records the fallback,
+  including when repair or escalation replaces the answer. Generic 501 errors
+  are no longer retried as transient failures, and tool-support advice appears
+  only when the provider explicitly rejects tools. Invalid schemas, credentials
+  and quota errors remain failures.
+
 ## [0.14.0] - 2026-09-23
 
 ### Added

@@ -3762,8 +3762,232 @@ mod tests {
             + "data: [DONE]\n\n"
     }
 
+    #[tokio::test]
+    async fn structured_output_refusal_falls_back_without_losing_tools_on_both_wires() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        for agent in [AgentType::Ollama, AgentType::LiteLlm] {
+            let ollama = agent == AgentType::Ollama;
+            let endpoint = if ollama {
+                "/api/chat"
+            } else {
+                "/v1/chat/completions"
+            };
+            let format_key = if ollama { "format" } else { "response_format" };
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/api/show"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+                .mount(&server)
+                .await;
+            Mock::given(method("POST"))
+                .and(path(endpoint))
+                .respond_with(move |request: &wiremock::Request| {
+                    let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+                    if body.get(format_key).is_some() {
+                        return if ollama {
+                            ResponseTemplate::new(501).set_body_json(serde_json::json!({"error":"structured output is unavailable"}))
+                        } else {
+                            ResponseTemplate::new(400).set_body_json(serde_json::json!({"error":{"message":"This model does not support response_format"}}))
+                        };
+                    }
+                    let after_tool = body["messages"].as_array().unwrap().iter().any(|m| m["role"] == "tool");
+                    let content = if after_tool { r#"{"data":{"ok":true},"status":"OK"}"# } else { "" };
+                    let mut message = serde_json::json!({"role":"assistant","content":content});
+                    if !after_tool {
+                        message["tool_calls"] = serde_json::json!([{
+                            "id":"probe-1", "type":"function",
+                            "function":{"name":"mcp_list","arguments":if ollama { serde_json::json!({}) } else { serde_json::json!("{}") }}
+                        }]);
+                    }
+                    ResponseTemplate::new(200).set_body_json(if ollama {
+                        serde_json::json!({"message":message,"done":true,"prompt_eval_count":5,"eval_count":2})
+                    } else {
+                        serde_json::json!({"choices":[{"message":message,"finish_reason":if after_tool { "stop" } else { "tool_calls" }}],"usage":{"prompt_tokens":5,"completion_tokens":2}})
+                    })
+                })
+                .expect(3)
+                .mount(&server).await;
+            let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let schema = serde_json::json!({"type":"object","properties":{"data":{"type":"object"},"status":{"type":"string"}}});
+            let mut process = start_ollama_http(
+                &agent,
+                "Call mcp_list, then return data.ok and status as JSON.",
+                "",
+                "test-model",
+                Some(&schema),
+                Some(&server.uri()),
+                None,
+                Some(std::sync::Arc::new(FakeTools { seen: seen.clone() })),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("an explicit unsupported format must recover before any tool runs");
+            let mut output = String::new();
+            while let Some(chunk) = process.next_line().await {
+                output.push_str(&chunk);
+            }
+            assert!(process.child.wait().await.unwrap().success(), "{output}");
+            assert!(
+                output.contains("[structured-output fallback:"),
+                "operator notice missing: {output}"
+            );
+            let envelope = crate::workflows::template::extract_step_envelope(&output)
+                .expect("notice must not hide JSON");
+            crate::workflows::template::validate_envelope_against_schema(
+                &envelope.data_json, &serde_json::json!({"type":"object","properties":{"ok":{"type":"boolean"}},"required":["ok"]}),
+            ).expect("local schema validation remains applicable");
+            assert_eq!(*seen.lock().unwrap(), ["mcp_list"]);
+            let bodies: Vec<serde_json::Value> = server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .filter(|r| r.url.path() == endpoint)
+                .map(|r| serde_json::from_slice(&r.body).unwrap())
+                .collect();
+            assert_eq!(bodies.len(), 3);
+            let mut expected = bodies[0].clone();
+            expected.as_object_mut().unwrap().remove(format_key);
+            assert_eq!(
+                bodies[1], expected,
+                "only the unsupported format may change"
+            );
+            assert!(
+                bodies[2].get(format_key).is_none(),
+                "format must stay removed after tool execution"
+            );
+            assert_eq!(bodies[2]["tools"], bodies[0]["tools"]);
+        }
+    }
+
+    #[tokio::test]
+    async fn structured_output_fallback_is_bounded_and_does_not_mask_other_errors() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        for (status, detail, expected_calls) in [
+            (501, "structured output is unavailable", 2),
+            (501, "endpoint not implemented", 1),
+            (
+                400,
+                "Invalid schema for response_format: property maxItems is not supported",
+                1,
+            ),
+            (401, "structured output is unavailable: invalid API key", 1),
+            (429, "insufficient_quota", 1),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/v1/chat/completions"))
+                .respond_with(
+                    ResponseTemplate::new(status)
+                        .set_body_json(serde_json::json!({"error":{"message":detail}})),
+                )
+                .expect(expected_calls)
+                .mount(&server)
+                .await;
+            let schema = serde_json::json!({"type":"object"});
+            let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let error = match start_ollama_http(
+                &AgentType::LiteLlm,
+                "hello",
+                "",
+                "test-model",
+                Some(&schema),
+                Some(&server.uri()),
+                None,
+                Some(std::sync::Arc::new(FakeTools { seen: seen.clone() })),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            {
+                Ok(_) => panic!("a persistent rejection must stay failed"),
+                Err(error) => error,
+            };
+            assert!(
+                error.contains(detail),
+                "original diagnostic missing: {error}"
+            );
+            assert!(
+                !error.contains("may not support tool calling"),
+                "false tool attribution: {error}"
+            );
+            assert_eq!(
+                server.received_requests().await.unwrap().len(),
+                expected_calls as usize
+            );
+            assert!(seen.lock().unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn structured_output_fallback_can_be_cancelled_before_headers() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        let fallback_seen = std::sync::Arc::new(tokio::sync::Notify::new());
+        let mock_seen = fallback_seen.clone();
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(move |request: &wiremock::Request| {
+                let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+                if body.get("response_format").is_some() {
+                    ResponseTemplate::new(501).set_body_string("structured output is unavailable")
+                } else {
+                    mock_seen.notify_one();
+                    ResponseTemplate::new(200).set_delay(std::time::Duration::from_secs(60))
+                }
+            })
+            .expect(2)
+            .mount(&server)
+            .await;
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let schema = serde_json::json!({"type":"object"});
+        let base = server.uri();
+        let starting = start_ollama_http(
+            &AgentType::LiteLlm,
+            "hello",
+            "",
+            "test-model",
+            Some(&schema),
+            Some(&base),
+            None,
+            None,
+            None,
+            None,
+            Some(&cancel),
+            None,
+            None,
+        );
+        tokio::pin!(starting);
+        tokio::select! {
+            result = &mut starting => panic!("fallback finished before cancellation: {}", result.is_ok()),
+            _ = fallback_seen.notified() => cancel.cancel(),
+        }
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2), starting)
+            .await
+            .expect("fallback cancellation must remain responsive");
+        match result {
+            Err(error) => assert!(error.contains("cancelled before"), "{error}"),
+            Ok(_) => panic!("cancelled fallback must not start an agent"),
+        }
+    }
+
     #[test]
     fn provider_retry_classifier_separates_capacity_from_permanent_failures() {
+        assert!(!is_transient_provider_failure(
+            Some(reqwest::StatusCode::NOT_IMPLEMENTED),
+            "structured output is unavailable"
+        ));
         assert!(is_transient_provider_failure(
             Some(reqwest::StatusCode::SERVICE_UNAVAILABLE),
             "upstream unavailable"
@@ -3792,6 +4016,44 @@ mod tests {
             None,
             "ResourceExhausted: account quota exhausted"
         ));
+    }
+
+    #[test]
+    fn structured_output_detection_requires_an_explicit_error_message() {
+        for (status, detail, expected) in [
+            (
+                422,
+                r#"{"error":{"message":"structured outputs are not supported"}}"#,
+                true,
+            ),
+            (
+                400,
+                r#"{"error":{"message":"Invalid schema for response_format: additionalProperties must be false"}}"#,
+                false,
+            ),
+            (
+                501,
+                r#"{"request":{"prompt":"structured output is unavailable"}}"#,
+                false,
+            ),
+            (
+                500,
+                r#"{"error":"structured output is unavailable"}"#,
+                false,
+            ),
+            (
+                400,
+                r#"{"error":"Invalid schema","request":{"prompt":"does not support json_schema"}}"#,
+                false,
+            ),
+        ] {
+            let failure = HttpProviderFailure {
+                status: Some(reqwest::StatusCode::from_u16(status).unwrap()),
+                detail: detail.into(),
+                attempts: 1,
+            };
+            assert_eq!(rejects_structured_output(&failure), expected, "{detail}");
+        }
     }
 
     #[tokio::test]

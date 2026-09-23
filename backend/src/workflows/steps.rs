@@ -26,6 +26,23 @@ struct AgentOutput {
     text: String,
     tokens_used: u64,
     native_tool_calls: Vec<NativeToolCallLog>,
+    runtime_notices: Vec<String>,
+}
+
+// Keep transport notices when repair/escalation replaces the model's answer.
+// They precede the final envelope and must not participate in schema/signals.
+fn with_runtime_notices(output: String, notices: &[String]) -> String {
+    let mut missing = Vec::new();
+    for notice in notices {
+        if !output.lines().any(|line| line == notice) && !missing.contains(notice) {
+            missing.push(notice.clone());
+        }
+    }
+    if missing.is_empty() {
+        output
+    } else {
+        format!("{}\n\n{output}", missing.join("\n"))
+    }
 }
 
 /// Optional sender for streaming partial agent output during step execution.
@@ -369,6 +386,7 @@ pub async fn execute_step(
                 let mut final_output = agent_output.text.clone();
                 let mut total_tokens = agent_output.tokens_used;
                 let mut native_tool_calls = agent_output.native_tool_calls;
+                let mut runtime_notices = agent_output.runtime_notices;
 
                 // For Structured / TypedSchema steps: verify envelope exists,
                 // try repair if missing. TypedSchema additionally validates
@@ -460,6 +478,7 @@ pub async fn execute_step(
                             tracing::warn!("Step '{}': repair run failed: {}", step.name, e);
                         }
                         if let Ok(repair_output) = repair_res {
+                            runtime_notices.extend(repair_output.runtime_notices.clone());
                             total_tokens += repair_output.tokens_used;
                             native_tool_calls.extend(repair_output.native_tool_calls.clone());
                             let repaired_env = crate::workflows::template::extract_step_envelope(
@@ -559,6 +578,7 @@ pub async fn execute_step(
                                 );
                             }
                             if let Ok(esc) = esc_res {
+                                runtime_notices.extend(esc.runtime_notices.clone());
                                 total_tokens += esc.tokens_used;
                                 native_tool_calls.extend(esc.native_tool_calls.clone());
                                 let esc_env =
@@ -604,7 +624,7 @@ pub async fn execute_step(
                                         status: RunStatus::Failed,
                                         output: format!(
                                             "TypedSchema validation failed after repair attempt.\n\nError: {}\n\nLast agent output:\n{}",
-                                            err_msg, final_output,
+                                            err_msg, with_runtime_notices(final_output, &runtime_notices),
                                         ),
                                         tokens_used: total_tokens,
                                         duration_ms: start.elapsed().as_millis() as u64,
@@ -734,7 +754,7 @@ pub async fn execute_step(
                     result: StepResult {
                         step_name: step.name.clone(),
                         status: RunStatus::Success,
-                        output: final_output,
+                        output: with_runtime_notices(final_output, &runtime_notices),
                         tokens_used: total_tokens,
                         duration_ms,
                         started_at: None,
@@ -1301,6 +1321,10 @@ async fn drive_agent_to_output(
         text: output,
         tokens_used,
         native_tool_calls,
+        runtime_notices: stderr_lines
+            .into_iter()
+            .filter(|line| line.starts_with("[structured-output fallback:"))
+            .collect(),
     })
 }
 
@@ -2436,6 +2460,30 @@ mod drive_agent_to_output_tests {
     }
 
     const LONG: Duration = Duration::from_secs(3600);
+
+    #[tokio::test]
+    async fn structured_output_notice_survives_collection_and_replaced_answer() {
+        let notice = "[structured-output fallback: Ollama rejected constrained JSON]";
+        let process = ScriptedProcess::raw(["initial invalid answer"]).with_stderr([notice]);
+        let collected = drive_agent_to_output(process, None, LONG, &AgentType::Ollama, "advise")
+            .await
+            .expect("successful collection");
+        assert_eq!(collected.runtime_notices, [notice]);
+        let repaired = r#"{"data":{"ok":true},"status":"OK"}"#;
+        let recorded = super::with_runtime_notices(repaired.into(), &collected.runtime_notices);
+        assert!(recorded.starts_with(notice));
+        assert!(crate::workflows::template::extract_step_envelope(&recorded).is_some());
+        assert_eq!(
+            super::with_runtime_notices(recorded.clone(), &collected.runtime_notices),
+            recorded,
+            "the initial streamed notice must not be duplicated"
+        );
+        let duplicate = vec![notice.to_string(), notice.to_string()];
+        assert_eq!(
+            super::with_runtime_notices(repaired.into(), &duplicate),
+            recorded
+        );
+    }
 
     #[test]
     fn native_tool_history_keeps_name_and_status_but_drops_arguments() {

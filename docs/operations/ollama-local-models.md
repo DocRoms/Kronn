@@ -453,11 +453,28 @@ bounded. The saved value is per model and survives restart.
 
 For an Agent step with `output_format: TypedSchema`, `steps.rs::ollama_envelope_format`
 wraps the author's `data` schema in the canonical envelope shape
-`{data, status, summary}` and passes it as Ollama's `format` param — decoding is
-grammar-constrained, so the output is a structurally-valid bare envelope object
-that `extract_step_envelope` strategy-2 recovers. `stream:false` is used in this
-case (one validated blob, not chunks). Post-extract schema validation + the
-repair / `on_invalid` flow are unchanged.
+`{data, status, summary}` and requests constrained decoding through Ollama's
+`format` parameter. OpenAI-compatible HTTP agents send the corresponding
+`response_format: json_schema`. Both use `stream:false`; CLI agents receive the
+schema through the prompt. Provider acceptance alone does not prove schema
+enforcement: Kronn still extracts and validates the returned envelope.
+
+If the initial HTTP response explicitly rejects structured output support
+(400, 422 or 501), Kronn retries once without that format field. The model,
+prompt, tools and other settings stay unchanged. This occurs before any tool
+execution, and a notice is retained in the run output and diagnostics. A
+generic 501, invalid schema, authentication or quota error does not authorize
+this fallback; 501 is never treated as a transient capacity failure. There is
+no permanent MLX/model blacklist: a future provider that accepts the format
+uses it normally.
+
+Post-extract schema validation and repair still run. The step's `on_invalid`
+policy is unchanged: `Fail` rejects output that remains invalid, while
+`Continue` may keep invalid raw output. Prompt-based output is not a guarantee
+of schema compliance. Repeated launches, including a repair launch, negotiate
+the capability independently; no persistent capability cache is written.
+`[src: file: backend/src/agents/runner.rs]`
+`[src: file: backend/src/workflows/steps.rs]`
 
 **Quality escalation** (`steps.rs::escalation_step`): if a LOCAL (Ollama)
 TypedSchema step still fails validation after the repair attempt, it retries

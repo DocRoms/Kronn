@@ -6281,7 +6281,10 @@ fn is_permanent_provider_failure(detail: &str) -> bool {
 }
 
 fn is_transient_provider_failure(status: Option<reqwest::StatusCode>, detail: &str) -> bool {
-    if is_permanent_provider_failure(detail) {
+    // 501 declares an unimplemented capability; repeating the same body cannot
+    // recover it. This differs from capacity/availability failures (503/504).
+    if status == Some(reqwest::StatusCode::NOT_IMPLEMENTED) || is_permanent_provider_failure(detail)
+    {
         return false;
     }
     if status.is_some_and(|status| {
@@ -6326,6 +6329,53 @@ fn provider_retry_delay(failed_attempt: usize) -> std::time::Duration {
         // Long enough for a saturated worker slot to clear, still bounded so
         // the user is never left behind an invisible minute-long retry loop.
         std::time::Duration::from_secs(if failed_attempt == 1 { 2 } else { 5 })
+    }
+}
+
+/// Positive evidence that the provider rejects constrained output itself.
+/// Do not infer this from model names/storage formats, a generic 501, or an
+/// invalid schema: those must retain their original failure and request body.
+fn rejects_structured_output(failure: &HttpProviderFailure) -> bool {
+    if !matches!(
+        failure.status,
+        Some(
+            reqwest::StatusCode::BAD_REQUEST
+                | reqwest::StatusCode::UNPROCESSABLE_ENTITY
+                | reqwest::StatusCode::NOT_IMPLEMENTED
+        )
+    ) || is_permanent_provider_failure(&failure.detail)
+    {
+        return false;
+    }
+    // Inspect the error message, not a serialized request/schema echoed beside
+    // it: a schema property named response_format is not a capability signal.
+    let Some(message) = provider_error_message(&failure.detail) else {
+        return false;
+    };
+    [
+        "structured output is unavailable",
+        "structured outputs are unavailable",
+        "structured output is not supported",
+        "structured outputs are not supported",
+        "does not support structured output",
+        "response_format is not supported",
+        "does not support response_format",
+        "unsupported response_format",
+        "json_schema is not supported",
+        "does not support json_schema",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle))
+}
+
+fn provider_error_message(detail: &str) -> Option<String> {
+    match serde_json::from_str::<serde_json::Value>(detail) {
+        Ok(value) => value["error"]
+            .as_str()
+            .or_else(|| value["error"]["message"].as_str())
+            .or_else(|| value["message"].as_str())
+            .map(str::to_ascii_lowercase),
+        Err(_) => Some(detail.to_ascii_lowercase()),
     }
 }
 
@@ -6814,7 +6864,7 @@ async fn start_ollama_http(
         .map(tokio_util::sync::CancellationToken::child_token)
         .unwrap_or_default();
     let initial_request_started_at = std::time::Instant::now();
-    let initial = tokio::select! {
+    let mut initial = tokio::select! {
         biased;
         _ = http_cancel.cancelled() => {
             return Err(format!("{backend} run cancelled before the provider accepted the initial request"));
@@ -6831,19 +6881,64 @@ async fn start_ollama_http(
             &stderr_capture,
         ) => response,
     };
+    // Workflow prompts already carry the schema and the caller validates the
+    // resulting envelope. Negotiate only an explicitly refused wire feature,
+    // once, before any output/tool execution; keep all other request settings.
+    let mut format_fallback_notice = None;
+    if let Err(failure) = &initial {
+        if format.is_some() && rejects_structured_output(failure) {
+            let attempt = failure.attempts + 1;
+            let notice = format!(
+                "[structured-output fallback: {backend} rejected constrained JSON; retrying once using the schema in the prompt. Model and tools are unchanged; workflow validation and on_invalid policy still apply.]\n\n"
+            );
+            tracing::warn!(target: "kronn::agent::structured_output", backend, model, "{notice}");
+            if let Ok(mut capture) = stderr_capture.lock() {
+                capture.push(notice.trim().to_string());
+            }
+            if let Some(object) = body.as_object_mut() {
+                object.remove(if is_openai_wire {
+                    "response_format"
+                } else {
+                    "format"
+                });
+            }
+            format_fallback_notice = Some(notice);
+            initial = tokio::select! {
+                biased;
+                _ = http_cancel.cancelled() => {
+                    return Err(format!("{backend} run cancelled before the provider accepted the format fallback"));
+                }
+                response = send_http_agent_request(
+                    &client, &url, &body, auth_key.as_deref(), backend,
+                    attempt, attempt, false, &stderr_capture,
+                ) => response,
+            };
+        }
+    }
+    let used_format_fallback = format_fallback_notice.is_some();
     let (response, initial_provider_attempt) = initial.map_err(|failure| {
-        let tool_hint = if tools_declared > 0 {
-            " Kronn declared native tools on this request; this provider route/model may not support tool calling. Choose a tool-capable model or move the call to an ApiCall step."
-        } else {
-            ""
-        };
-        format_provider_failure(backend, &base, &failure, tool_hint)
+        let tools_rejected = tools_declared > 0 && provider_error_message(&failure.detail)
+            .is_some_and(|message| ["tools are not supported", "does not support tools", "tool calling is not supported"]
+                .iter().any(|needle| message.contains(needle)));
+        let hint = if tools_rejected {
+            " This provider route/model may not support tool calling. Choose a tool-capable model or move the call to an ApiCall step."
+        } else { "" };
+        let error = format_provider_failure(backend, &base, &failure, hint);
+        match format_fallback_notice.as_deref() {
+            Some(notice) => format!("{notice}{error}"),
+            None => error,
+        }
     })?;
 
     // Stream the response — each line is a JSON object with a `message.content` field.
     // The last chunk has `done: true` and includes token counts.
     let (tx, rx) = tokio::sync::mpsc::channel::<String>(256);
     let stderr_clone = stderr_capture.clone();
+    // Successful workflows do not persist arbitrary stderr, so expose the
+    // notice in the run output too. It precedes (never splits) the JSON envelope.
+    if let Some(notice) = format_fallback_notice {
+        let _ = tx.send(notice).await;
+    }
 
     // AgentProcess requires a child, but Ollama's execution is HTTP-based. The
     // child must mirror the STREAM's lifetime exactly: consumers `child.wait()`
@@ -7142,7 +7237,7 @@ async fn start_ollama_http(
             // A 2xx only means that the provider accepted the request; NVIDIA
             // may still put ResourceExhausted inside the SSE body. Call an
             // attempt successful only after its terminal frame was decoded.
-            if got_done && !got_error && provider_attempt > 1 {
+            if got_done && !got_error && provider_attempt > 1 && !used_format_fallback {
                 push_provider_retry_trace(
                     &stderr_clone,
                     format!(
@@ -7161,6 +7256,7 @@ async fn start_ollama_http(
                 !got_done && !got_error && calls.is_empty()
             };
             if retryable_stream_failure
+                && !used_format_fallback
                 && !external_effect_observed
                 && !emitted_this_turn
                 && provider_attempt < HTTP_PROVIDER_MAX_ATTEMPTS
@@ -7222,6 +7318,7 @@ async fn start_ollama_http(
                 }
             }
             if retryable_stream_failure
+                && !used_format_fallback
                 && !external_effect_observed
                 && !emitted_this_turn
                 && provider_attempt >= HTTP_PROVIDER_MAX_ATTEMPTS
