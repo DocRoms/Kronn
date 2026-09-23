@@ -45,6 +45,10 @@ Release notes for 0.9.3 and earlier are available in the
   it. Changed content with a credential signal now fails the step with a
   persistent, secret-free diagnostic; legitimate documents over 8 KiB are not
   rejected for their size. See the [audit and recovery notes](docs/operations/workflow-docs-audit.md).
+- Commits made through a task worker drop `Signed-off-by`, `Co-authored-by` and
+  similar identity trailers written by the model, keeping only the sign-off Kronn
+  adds from the git configuration. The tool result lists what was removed. A
+  worker could otherwise record an invented identity in the history.
 
 ## [0.14.0] - 2026-09-23
 

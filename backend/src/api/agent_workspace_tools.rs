@@ -567,13 +567,49 @@ pub fn git_commit_payload(root: &Path, files: &[String], message: &str) -> Resul
     git_commit_payload_with_data_dir_lock(root, files, message, None)
 }
 
+/// Trailers that attribute a commit to a person. Kronn adds the sign-off from
+/// the git config itself; a model writing one invents an identity.
+const IDENTITY_TRAILERS: &[&str] = &[
+    "signed-off-by",
+    "co-authored-by",
+    "reviewed-by",
+    "acked-by",
+    "tested-by",
+    "reported-by",
+    "suggested-by",
+    "helped-by",
+];
+
+/// Drop identity trailer lines from a worker-written message, returning the
+/// cleaned message and the trailer names removed.
+fn strip_identity_trailers(message: &str) -> (String, Vec<String>) {
+    let mut removed = Vec::new();
+    let kept: Vec<&str> = message
+        .lines()
+        .filter(|line| {
+            let Some((key, _)) = line.trim_start().split_once(':') else {
+                return true;
+            };
+            let key = key.trim();
+            if IDENTITY_TRAILERS.contains(&key.to_ascii_lowercase().as_str()) {
+                removed.push(key.to_string());
+                false
+            } else {
+                true
+            }
+        })
+        .collect();
+    (kept.join("\n").trim().to_string(), removed)
+}
+
 pub fn git_commit_payload_with_data_dir_lock(
     root: &Path,
     files: &[String],
     message: &str,
     data_dir_lock: Option<&std::fs::File>,
 ) -> Result<Value, String> {
-    let message = message.trim();
+    let (message, removed_trailers) = strip_identity_trailers(message);
+    let message = message.as_str();
     if message.is_empty() {
         return Err("refused: commit message cannot be empty".into());
     }
@@ -615,11 +651,18 @@ pub fn git_commit_payload_with_data_dir_lock(
         false,
         data_dir_lock,
     )?;
-    Ok(json!({
+    let mut payload = json!({
         "hash": committed.hash,
         "message": committed.message,
         "files": normalized,
-    }))
+    });
+    if !removed_trailers.is_empty() {
+        payload["removed_trailers"] = json!(removed_trailers);
+        payload["note"] = json!(
+            "Kronn adds the sign-off from the git configuration; identity trailers you wrote were removed."
+        );
+    }
+    Ok(payload)
 }
 
 /// The tool definitions this module contributes to the native catalogue.
@@ -3232,6 +3275,60 @@ mod tests {
             staged.trim().is_empty(),
             "validation must finish before the first path is staged: {staged}"
         );
+    }
+
+    #[test]
+    fn identity_trailers_are_stripped_case_insensitively_and_prose_is_kept() {
+        let (message, removed) = strip_identity_trailers(
+            "fix(mcp): expose fields\n\nWhy: the bridge dropped them.\n\nSigned-off-by: Someone <made-up@example.com>\nco-authored-by: Bot <bot@example.com>\n",
+        );
+        assert_eq!(
+            message,
+            "fix(mcp): expose fields\n\nWhy: the bridge dropped them."
+        );
+        assert_eq!(removed, ["Signed-off-by", "co-authored-by"]);
+        let (only, removed) = strip_identity_trailers("Signed-off-by: A <a@example.com>");
+        assert!(only.is_empty());
+        assert_eq!(removed.len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn worker_commit_keeps_only_the_configured_sign_off() {
+        let repo = tiny_repo();
+        git_read(repo.path(), &["config", "user.name", "Configured Person"]).unwrap();
+        git_read(
+            repo.path(),
+            &["config", "user.email", "configured@example.com"],
+        )
+        .unwrap();
+        std::fs::write(repo.path().join("a.txt"), "changed a\n").unwrap();
+
+        let committed = git_commit_payload(
+            repo.path(),
+            &["a.txt".into()],
+            "fix: change a\n\nSigned-off-by: Invented <invented@example.com>\nCo-Authored-By: Model <model@example.com>",
+        )
+        .unwrap();
+
+        let body = git_read(repo.path(), &["log", "-1", "--format=%B"]).unwrap();
+        assert!(!body.contains("invented@example.com"), "{body}");
+        assert!(!body.contains("model@example.com"), "{body}");
+        assert!(
+            body.contains("Signed-off-by: Configured Person <configured@example.com>"),
+            "{body}"
+        );
+        assert_eq!(
+            committed["removed_trailers"],
+            json!(["Signed-off-by", "Co-Authored-By"])
+        );
+        assert!(git_commit_payload(
+            repo.path(),
+            &["a.txt".into()],
+            "Signed-off-by: Invented <invented@example.com>",
+        )
+        .unwrap_err()
+        .contains("empty"));
     }
 
     #[cfg(unix)]
