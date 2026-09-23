@@ -6,6 +6,12 @@ legacy `ai/`). The scope is Git-tracked files and non-ignored untracked files,
 enumerated with `git ls-files --cached --others --exclude-standard`; tracked
 files remain included even if an ignore pattern matches them. Non-Git projects
 remain outside this audit, as in earlier releases.
+On Unix, Git's NUL-delimited filename bytes are kept intact for filesystem
+access, including non-UTF-8 names. Diagnostics preserve ordinary Unicode names;
+invalid names, control characters and literal backslashes use an explicit
+`[escaped path bytes]` label with byte escapes instead of replacement characters.
+The label is never used to open a file. Platforms without Unix byte paths keep
+the UTF-8 conversion and fail explicitly if a Git path cannot be represented.
 After the step, it checks new or changed text for credential
 patterns, high-entropy tokens and overlaps with the run's sensitive-file scan.
 Unchanged content that was already modified, staged or untracked before the

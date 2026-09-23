@@ -384,6 +384,49 @@ fn read_document(path: &Path, retain_content: bool) -> std::io::Result<Option<Do
     }))
 }
 
+/// Git -z emits native path bytes on Unix. Never decode them lossily for I/O.
+fn native_document_path(raw: &[u8]) -> Result<std::path::PathBuf, String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        Ok(std::ffi::OsStr::from_bytes(raw).into())
+    }
+    #[cfg(not(unix))]
+    {
+        std::str::from_utf8(raw)
+            .map(std::path::PathBuf::from)
+            .map_err(|_| "Document path is not valid UTF-8; audit incomplete".to_string())
+    }
+}
+
+/// Human-readable, project-relative diagnostic only; never used to open a file.
+/// Escape the entire byte representation when a component needs escaping, so
+/// distinct invalid names and literal backslashes cannot collapse to one label.
+fn document_path_label(path: &Path) -> String {
+    let parts: Vec<_> = path.components().map(|part| part.as_os_str()).collect();
+    let plain: Option<Vec<_>> = parts.iter().map(|part| part.to_str()).collect();
+    if let Some(plain) = plain {
+        if plain
+            .iter()
+            .all(|part| !part.chars().any(|c| c == '\\' || c.is_control()))
+        {
+            return plain.join("/");
+        }
+    }
+    let escaped = parts
+        .iter()
+        .map(|part| {
+            part.as_encoded_bytes()
+                .iter()
+                .flat_map(|byte| byte.escape_ascii())
+                .map(char::from)
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("/");
+    format!("[escaped path bytes] {escaped}")
+}
+
 fn document_paths(worktree: &Path) -> Result<Vec<std::path::PathBuf>, String> {
     let docs_dir = crate::core::scanner::detect_docs_dir(worktree);
     let docs_rel = docs_dir
@@ -416,9 +459,7 @@ fn document_paths(worktree: &Path) -> Result<Vec<std::path::PathBuf>, String> {
         .split(|byte| *byte == 0)
         .filter(|raw| !raw.is_empty())
     {
-        let name = std::str::from_utf8(raw)
-            .map_err(|_| "Document path is not valid UTF-8; audit incomplete".to_string())?;
-        let path = std::path::PathBuf::from(name);
+        let path = native_document_path(raw)?;
         if !path.starts_with(docs_rel)
             || path
                 .components()
@@ -448,7 +489,12 @@ fn document_paths(worktree: &Path) -> Result<Vec<std::path::PathBuf>, String> {
                     regular = false;
                     break;
                 }
-                Err(e) => return Err(format!("Cannot inspect document {}: {e}", path.display())),
+                Err(e) => {
+                    return Err(format!(
+                        "Cannot inspect document {}: {e}",
+                        document_path_label(&path)
+                    ))
+                }
             }
         }
         if regular && current.is_file() {
@@ -465,8 +511,13 @@ pub async fn snapshot_docs(worktree: &Path) -> Result<DocsSnapshot, String> {
     tokio::task::spawn_blocking(move || {
         let mut snapshot = DocsSnapshot::default();
         for relative in document_paths(&worktree)? {
-            if let Some(document) = read_document(&worktree.join(&relative), false)
-                .map_err(|e| format!("Cannot fingerprint document {}: {e}", relative.display()))?
+            if let Some(document) =
+                read_document(&worktree.join(&relative), false).map_err(|e| {
+                    format!(
+                        "Cannot fingerprint document {}: {e}",
+                        document_path_label(&relative)
+                    )
+                })?
             {
                 snapshot.files.insert(relative, document.fingerprint);
             }
@@ -495,7 +546,12 @@ pub async fn audit_docs_writes(
         let document = tokio::task::spawn_blocking(move || read_document(&absolute, true))
             .await
             .map_err(|e| format!("Document read interrupted: {e}"))?
-            .map_err(|e| format!("Cannot audit changed document {}: {e}", path.display()))?;
+            .map_err(|e| {
+                format!(
+                    "Cannot audit changed document {}: {e}",
+                    document_path_label(&path)
+                )
+            })?;
         let Some(document) = document else {
             continue;
         };
@@ -503,21 +559,14 @@ pub async fn audit_docs_writes(
             continue;
         }
         let bytes = document.content.ok_or_else(|| format!(
-            "Changed document {} exceeds the 16 MiB audit buffer; content was not inspected and the file was preserved", path.display()
+            "Changed document {} exceeds the 16 MiB audit buffer; content was not inspected and the file was preserved", document_path_label(&path)
         ))?;
         // Binary assets are not textual memory/documentation.
         let Ok(content) = std::str::from_utf8(&bytes) else {
             continue;
         };
         if let Err(reason) = check_docs_content(content, sensitive) {
-            // Keep persisted project-relative paths portable on Windows too,
-            // without rewriting a literal backslash in a Unix file name.
-            let label = path
-                .components()
-                .map(|component| component.as_os_str().to_string_lossy())
-                .collect::<Vec<_>>()
-                .join("/");
-            rejections.push((label, reason));
+            rejections.push((document_path_label(&path), reason));
         }
     }
     Ok(rejections)
@@ -614,6 +663,130 @@ mod tests {
         assert_eq!(
             fixture_git(root, &["status", "--porcelain=v1", "-uall"]),
             status_before
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_document_paths_preserve_bytes_and_diagnostics_distinguish_names() {
+        use std::os::unix::ffi::OsStrExt;
+        for (raw, label) in [
+            ("docs/déjà présent.md".as_bytes(), "docs/déjà présent.md"),
+            (
+                &b"docs/notes-\xff.md"[..],
+                r"[escaped path bytes] docs/notes-\xff.md",
+            ),
+            (
+                &b"docs/notes-\xfe.md"[..],
+                r"[escaped path bytes] docs/notes-\xfe.md",
+            ),
+            (
+                &b"docs/notes-\\xff.md"[..],
+                r"[escaped path bytes] docs/notes-\\xff.md",
+            ),
+            (
+                &b"docs/line\nbreak.md"[..],
+                r"[escaped path bytes] docs/line\nbreak.md",
+            ),
+            (
+                "docs/notes-\u{fffd}.md".as_bytes(),
+                "docs/notes-\u{fffd}.md",
+            ),
+        ] {
+            let path = native_document_path(raw).unwrap();
+            assert_eq!(path.as_os_str().as_bytes(), raw);
+            assert_eq!(document_path_label(&path), label);
+        }
+    }
+
+    // The filesystem must accept arbitrary filename bytes. The local macOS
+    // test volume rejects their creation with EILSEQ; pure conversions above
+    // still run there. This fixture is qualified on Linux, not silently skipped.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn audit_handles_non_utf8_names_without_lossy_access_or_index_changes() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fixture_git(root, &["init", "-q"]);
+        std::fs::create_dir(root.join("docs")).unwrap();
+        let relative = Path::new(std::ffi::OsStr::from_bytes(b"docs/notes-\xff.md"));
+        let path = root.join(relative);
+        // A lossy conversion would alias this DIFFERENT, valid UTF-8 name.
+        let unicode = root.join("docs/notes-\u{fffd}.md");
+        std::fs::write(&path, "committed notes\n").unwrap();
+        std::fs::write(&unicode, "separate Unicode document\n").unwrap();
+        fixture_git(root, &["add", "docs"]);
+        fixture_git(root, &["commit", "-q", "-m", "fixture"]);
+        std::fs::write(&path, "staged human notes\n").unwrap();
+        fixture_git(root, &["add", "docs"]);
+        let working = "preexisting human architecture\n".repeat(600);
+        std::fs::write(&path, &working).unwrap();
+        let index_before = fixture_git(root, &["ls-files", "--stage", "-z"]);
+
+        let before = snapshot_docs(root).await.unwrap();
+        assert!(before.files.contains_key(relative));
+        assert!(
+            audit_docs_writes(root, &SensitiveSubstrings::new(), &before)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), working.as_bytes());
+        assert_eq!(
+            fixture_git(root, &["ls-files", "--stage", "-z"]),
+            index_before
+        );
+
+        let fake_secret = "sk-1234567890abcdefghijklmnopqrstuvwxyz";
+        std::fs::write(&path, fake_secret).unwrap();
+        let fresh = root.join(std::ffi::OsStr::from_bytes(b"docs/notes-\xfe.md"));
+        std::fs::write(&fresh, fake_secret).unwrap();
+        let rejected = audit_docs_writes(root, &SensitiveSubstrings::new(), &before)
+            .await
+            .unwrap();
+        assert_eq!(rejected.len(), 2);
+        for expected in [
+            r"[escaped path bytes] docs/notes-\xfe.md",
+            r"[escaped path bytes] docs/notes-\xff.md",
+        ] {
+            assert!(
+                rejected.iter().any(|(label, _)| label == expected),
+                "{rejected:?}"
+            );
+        }
+        for file in [&path, &fresh] {
+            assert_eq!(std::fs::read(file).unwrap(), fake_secret.as_bytes());
+        }
+        assert_eq!(
+            std::fs::read_to_string(&unicode).unwrap(),
+            "separate Unicode document\n"
+        );
+        assert_eq!(
+            fixture_git(root, &["ls-files", "--stage", "-z"]),
+            index_before
+        );
+
+        // Incomplete-audit diagnostics must identify the exact same path too.
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len((MAX_AUDIT_BUFFER_BYTES + 1) as u64)
+            .unwrap();
+        let error = audit_docs_writes(root, &SensitiveSubstrings::new(), &before)
+            .await
+            .unwrap_err();
+        assert!(error.contains(r"[escaped path bytes] docs/notes-\xff.md"));
+        assert!(error.contains("content was not inspected and the file was preserved"));
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().len(),
+            (MAX_AUDIT_BUFFER_BYTES + 1) as u64
+        );
+        assert_eq!(
+            fixture_git(root, &["ls-files", "--stage", "-z"]),
+            index_before
         );
     }
 

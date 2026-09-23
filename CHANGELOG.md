@@ -32,6 +32,9 @@ Release notes for 0.9.3 and earlier are available in the
   are no longer retried as transient failures, and tool-support advice appears
   only when the provider explicitly rejects tools. Invalid schemas, credentials
   and quota errors remain failures.
+- Workflow document audits keep native Unix filename bytes instead of failing
+  on non-UTF-8 names. Escaped diagnostic labels distinguish these files without
+  changing their names, contents or index entries.
 - Workflow document audits preserve preexisting and concurrent working-tree
   changes, staged content and untracked files. They compare pre-step content
   fingerprints instead of restoring every dirty document from HEAD or deleting
