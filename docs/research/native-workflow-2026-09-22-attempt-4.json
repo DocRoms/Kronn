@@ -1,0 +1,200 @@
+{
+  "calls": [
+    {
+      "arguments": {
+        "step_type": "JsonData"
+      },
+      "error": null,
+      "name": "workflow_step_schema",
+      "ok": true
+    },
+    {
+      "arguments": {
+        "step_type": "TransformData"
+      },
+      "error": null,
+      "name": "workflow_step_schema",
+      "ok": true
+    },
+    {
+      "arguments": {
+        "name": "Compter trois valeurs",
+        "steps": [
+          {
+            "json_data_payload": {
+              "items": [
+                1,
+                2,
+                3
+              ]
+            },
+            "name": "Seed",
+            "step_type": {
+              "type": "JsonData"
+            }
+          },
+          {
+            "name": "CountItems",
+            "step_type": {
+              "type": "TransformData"
+            },
+            "transform_data": {
+              "fields": [
+                {
+                  "operation": "count",
+                  "source": "$.items",
+                  "target": "count"
+                }
+              ],
+              "input_from": "steps.Seed.data"
+            }
+          },
+          {
+            "name": "SetTotal",
+            "step_type": {
+              "type": "TransformData"
+            },
+            "transform_data": {
+              "fields": [
+                {
+                  "operation": "copy",
+                  "source": "$.count",
+                  "target": "total"
+                }
+              ],
+              "input_from": "steps.CountItems.data"
+            }
+          }
+        ],
+        "trigger": {
+          "type": "Manual"
+        }
+      },
+      "error": null,
+      "name": "workflow_create_draft",
+      "ok": true
+    }
+  ],
+  "catalogue_bytes": 42861,
+  "emitted_text": "J'ai créé le workflow désactivé nommé « Compter trois valeurs » avec les trois étapes déterministes demandées.\n\nLe workflow est prêt à être activé et contient la séquence suivante :\n\n1.  **Seed** (`JsonData`) : Émet l'objet `{\"items\":[1,2,3]}`.\n2.  **CountItems** (`TransformData`) : Compte les éléments de `$.items` et stocke le résultat dans le champ `count`.\n3.  **SetTotal** (`TransformData`) : Copie la valeur de `$.count` vers le champ `total`.\n\nLe workflow est actuellement désactivé et ne nécessite aucune exécution ou activation.",
+  "executed_steps": [
+    {
+      "name": "Seed",
+      "ok": true,
+      "output": "---STEP_OUTPUT---\n{\"data\":{\"items\":[1,2,3]},\"status\":\"OK\",\"summary\":\"JSON data (1 object, 1 field(s))\"}\n---END_STEP_OUTPUT---\n[SIGNAL: OK]"
+    },
+    {
+      "name": "CountItems",
+      "ok": true,
+      "output": "---STEP_OUTPUT---\n{\"data\":{\"count\":3},\"status\":\"OK\",\"summary\":\"Transformed data (1 top-level field(s))\"}\n---END_STEP_OUTPUT---\n[SIGNAL: OK]"
+    },
+    {
+      "name": "SetTotal",
+      "ok": true,
+      "output": "---STEP_OUTPUT---\n{\"data\":{\"total\":3},\"status\":\"OK\",\"summary\":\"Transformed data (1 top-level field(s))\"}\n---END_STEP_OUTPUT---\n[SIGNAL: OK]"
+    }
+  ],
+  "exit_success": true,
+  "final_value": {
+    "total": 3
+  },
+  "model": "gemma4:e4b",
+  "ok": true,
+  "prompt": "Crée un workflow désactivé nommé « Compter trois valeurs », à déclenchement manuel, avec exactement trois étapes déterministes. Une étape JsonData émet l'objet {\"items\":[1,2,3]}. Une étape TransformData compte ces éléments dans le champ count. Une dernière étape TransformData copie ce nombre vers le champ total. Consulte d'abord les contrats canoniques des types d'étapes nécessaires. Ne lance aucun modèle enfant, aucune API, notification ou commande, et n'active pas le workflow.",
+  "seconds": 30.071909375,
+  "total_prompt_tokens": 48858,
+  "turns": 4,
+  "workflow": {
+    "actions": [],
+    "concurrency_limit": null,
+    "created_at": "2026-09-22T09:35:24.178325Z",
+    "enabled": false,
+    "id": "5dd6aab1-94fa-44f4-ab9f-5021c93ec7a4",
+    "name": "Compter trois valeurs",
+    "pinned": false,
+    "project_id": null,
+    "safety": {
+      "require_approval": false,
+      "sandbox": false
+    },
+    "steps": [
+      {
+        "agent": "ClaudeCode",
+        "id": "3375a5fe-9ac0-4de1-8f37-b76d3b5ff1e7",
+        "json_data_payload": {
+          "items": [
+            1,
+            2,
+            3
+          ]
+        },
+        "mode": {
+          "type": "Normal"
+        },
+        "name": "Seed",
+        "output_format": {
+          "type": "FreeText"
+        },
+        "prompt_template": "",
+        "step_type": {
+          "type": "JsonData"
+        }
+      },
+      {
+        "agent": "ClaudeCode",
+        "id": "21d5d53c-0fc3-46d3-987f-06502f439c26",
+        "mode": {
+          "type": "Normal"
+        },
+        "name": "CountItems",
+        "output_format": {
+          "type": "FreeText"
+        },
+        "prompt_template": "",
+        "step_type": {
+          "type": "TransformData"
+        },
+        "transform_data": {
+          "fields": [
+            {
+              "operation": "count",
+              "source": "$.items",
+              "target": "count"
+            }
+          ],
+          "input_from": "steps.Seed.data"
+        }
+      },
+      {
+        "agent": "ClaudeCode",
+        "id": "e69d2e3e-2adf-41ca-ad36-1aa8e4024bf5",
+        "mode": {
+          "type": "Normal"
+        },
+        "name": "SetTotal",
+        "output_format": {
+          "type": "FreeText"
+        },
+        "prompt_template": "",
+        "step_type": {
+          "type": "TransformData"
+        },
+        "transform_data": {
+          "fields": [
+            {
+              "operation": "copy",
+              "source": "$.count",
+              "target": "total"
+            }
+          ],
+          "input_from": "steps.CountItems.data"
+        }
+      }
+    ],
+    "trigger": {
+      "type": "Manual"
+    },
+    "updated_at": "2026-09-22T09:35:24.178325Z",
+    "workspace_config": null
+  }
+}

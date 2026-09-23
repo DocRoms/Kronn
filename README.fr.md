@@ -23,8 +23,29 @@
 
 **Prompts plus petits, code déterministe quand c'est possible : moins d'hallucinations, facture tokens divisée, écoconception par conception.**
 
-> **Statut : 0.13.2 (version actuelle).** Fonctionnel mais pré-1.0. Les versions mineures peuvent introduire des breaking changes ; les patch versions sont safe.
+> **Statut : 0.14.0 (version actuelle).** Fonctionnel mais pré-1.0. Les versions mineures peuvent introduire des breaking changes ; les patch versions sont safe.
 > **Licence : AGPL-3.0.** Utiliser Kronn localement pour développer *ton propre* produit ne déclenche pas le copyleft ; il ne s'applique que si tu redistribues une version modifiée à d'autres. Voir [Notes sur la licence](#notes-sur-la-licence-agpl-3-0).
+
+## Nouveautés de la 0.14.0
+
+- **Davantage d’automatisations pour les agents HTTP :** découvrir, lancer et
+  modifier les Quick Prompts enregistrés, et rédiger des workflows désactivés
+  pour revue humaine. Une demande média peut omettre la connexion lorsqu’une
+  seule prend en charge la modalité.
+- **Des pièces jointes lisibles et des Pages vivantes plus stables :** textes,
+  JSON et logs s’ouvrent à côté des images et vidéos dans le carrousel, avec
+  téléchargement de l’original. Les Pages suivent le thème de Kronn et gardent
+  leur état local quand le rafraîchissement n’apporte aucune donnée modifiée.
+- **Des workflows corrigés :** les entrées facultatives laissées vides restent
+  disponibles dans les templates Gate et Exec (#213). Les Quick Exec conservent
+  leur code de sortie et stderr ; une Quick API utilisée par un workflow ne
+  peut plus être supprimée par inadvertance.
+- **Une installation plus simple :** parcourir les dossiers réellement
+  accessibles au serveur et sélectionner plusieurs racines de dépôts dans
+  l’assistant de configuration.
+
+Voir les [notes de la version 0.14.0](CHANGELOG.md), avec le périmètre des
+validations et les résultats conservés des campagnes de modèles.
 
 ## Nouveautés de la 0.13.2
 
@@ -99,6 +120,7 @@ et le [guide de délégation des tâches](docs/guides/task-orchestration.md).
 
 ## Sommaire
 
+- [Nouveautés de la 0.14.0](#nouveautés-de-la-0140)
 - [Nouveautés de la 0.13.2](#nouveautés-de-la-0132)
 - [Nouveautés de la 0.13.1](#nouveautés-de-la-0131)
 - [Nouveautés de la 0.13.0](#nouveautés-de-la-0130)
@@ -165,7 +187,7 @@ Télécharge l'installeur pour ton OS depuis [Releases](https://github.com/DocRo
 Requiert Docker + Docker Compose. Sur Windows, WSL2 (Docker Engine dans WSL fonctionne, Docker Desktop optionnel).
 
 ```bash
-git clone --branch 0.13.2 --depth 1 https://github.com/DocRoms/Kronn.git   # dernière release stable
+git clone --branch 0.14.0 --depth 1 https://github.com/DocRoms/Kronn.git   # dernière release stable
 cd Kronn
 ./kronn start
 # → http://localhost:3140

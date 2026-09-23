@@ -28,6 +28,7 @@ Kronn/
 │       │   ├── discover.rs     # Remote repo discovery (~426L) — GitHub/GitLab multi-source with token from MCPs
 │       │   ├── discussions.rs  # Discussion CRUD + SSE streaming + orchestration (~2880L). make_agent_stream checkpoints partial_response every 30s/100 chunks. /stop cancels via cancel_registry. /dismiss-partial force-recovers (shared path with boot recovery)
 │       │   ├── disc_helpers.rs # Pure agent/text helpers (~320L, 15 tests): agent_prompt_budget, auth_mode_for, agent_display_name, smart_truncate, summary_threshold/cooldown, is_compact_agent, language_instruction, estimate_extra_context_len
+│       │   ├── signal_catalog.rs # Versioned discussion action contracts shared by HTTP, MCP and native tool_manual(signals)
 │       │   ├── disc_prompts.rs # Pure prompt builders (~625L, 9 tests): build_agent_prompt, build_orchestration_prompt, build_synthesis_prompt, OrchestrationContext struct
 │       │   ├── disc_git.rs     # Discussion Git actions, optionally scoped to one declared CLI workspace
 │       │   ├── disc_workspace.rs # Joined-session worktree declaration plus advisory history-rewrite lease
@@ -37,6 +38,9 @@ Kronn/
 │       │   ├── plugin_portability.rs # Versioned multi-plugin bundle preview/export/import; encrypted values, trust/scope checks, idempotence and audit
 │       │   ├── workflows.rs    # Workflow CRUD + trigger + runs + cancel_run (cascades via parent_run_id) + test_step + test_batch_step (dry-run preview: eligible_items + sample_rendered_prompts + warnings)
 │       │   ├── quick_prompts.rs # Quick Prompts CRUD + render + launch (0.3.4)
+│       │   ├── agent_workflow_tools.rs # Native workflow reads and disabled-draft authoring; shared HTTP validation
+│       │   ├── agent_workflow_tests.rs # Native scope, draft, partial-update and canonical-schema regressions
+│       │   ├── workflow_step_schema.json # Canonical step contracts served to MCP and native HTTP agents
 │       │   ├── ollama.rs      # Ollama local LLM (0.4.0) — health check (contextual hints per env) + model listing via HTTP API. ollama_base_url_pub() reused by runner
 │       │   ├── agents.rs       # Agent detection + install + uninstall + toggle (enable/disable)
 │       │   ├── model_catalog.rs # Dynamic catalog snapshot, refresh and manual model CRUD
@@ -47,13 +51,15 @@ Kronn/
 │       │   ├── docs.rs         # Kronn Docs proxy (post-0.5.0) — 5 endpoints POST /api/docs/{pdf,docx,xlsx,csv,pptx} + GET /api/docs/file/:disc/:filename. All POSTs go through proxy_to_sidecar() helper. Filename sanitization (alphanumerics + -_ space, UUID suffix, extension forced) + canonicalize check against path traversal. Output dir: ~/.kronn/generated/<discussion_id>/. Graceful update/reinstall error when no sidecar runtime is available.
 │       │   └── git_ops.rs      # Shared git helpers — status/diff/blame/commit/push used by projects + discussions
 │       ├── agents/             # Agent runner (CLI execution)
+│       │   ├── generation_settings.rs # Explicit effort and token-limit validation and HTTP wire mapping
 │       │   ├── mod.rs          # Agent detection: PATH → KRONN_HOST_BIN (with .cmd/.exe extension matching) → WSL (via bash -lc). Version detection handles WSL paths. Runtime probe (npx fallback, 5min cache). 6 agents: Claude, Codex, Vibe, Gemini, Kiro, Copilot
 │       │   └── runner.rs       # Spawns agent CLIs, streams stdout as SSE. Two output modes: Text (line-by-line) and StreamJson (Claude Code stream-json with token tracking). Cross-platform HOME resolution (KRONN_HOST_HOME → HOME → USERPROFILE). COPILOT_HOME for Copilot CLI auth. MCP contexts injected into prompts
 │       ├── db/                 # SQLite persistence layer
 │       │   ├── mod.rs          # Database struct (Mutex<Connection>), with_conn() async accessor, init
-│       │   ├── migrations.rs   # Versioned migration runner (through 153; schema-aware OpenRouter repair runs before Mutex wrap)
+│       │   ├── migrations.rs   # Versioned migration runner (through 187; schema-aware OpenRouter repair runs before Mutex wrap)
 │       │   ├── projects.rs     # Project CRUD operations
 │       │   ├── discussions.rs  # Discussion + message CRUD (+ archive/rename via update_discussion)
+│       │   ├── discussion_launch_settings.rs # Immutable Quick Prompt generation settings bound to the original runtime target
 │       │   ├── discussion_workspaces.rs # Managed/external worktrees declared by joined CLI sessions
 │       │   ├── discussions_test.rs # 21 tests (CRUD, archive, title, messages, AgentType round-trip for all 6 agents + Custom, DB string stability)
 │       │   ├── model_catalog.rs # runtime_target_id persistence, reconciliation and tier projection
@@ -173,6 +179,7 @@ Kronn/
 │       │   ├── AgentSwitchPicker.tsx # Shared compact agent × reasoning-tier picker used by discussion, Quick Prompt and workflow surfaces
 │       │   ├── MarkdownComposerTools.tsx # Shared edit/preview tabs, Markdown help, insertable examples and emoji guidance
 │       │   ├── workflows/WorkflowWizard.tsx # Full workflow editor (~4170L): progressive modes, direct stage/step navigation, reusable prompt editor, save/cancel from each stage
+│       │   ├── workflows/LoadedRunDetail.tsx # Load omitted step outputs when a run panel opens; stale-response guard and explicit read retry
 │       │   ├── PluginPortabilityModal.tsx # Safe bundle export/import, encrypted-value danger zone, explicit post-import Global/project assignment
 │       │   ├── DocPreview.tsx    # HTML doc preview + export (0.5.1) — sandboxed iframe (empty `sandbox=""`) renders the agent-authored HTML, two buttons export PDF / DOCX via /api/docs/{pdf,docx}. Per-format state (idle/loading/ready/error).
 │       │   ├── DocDataExport.tsx # Structured-data export (0.5.1) — JSON payload card for CSV / XLSX / PPTX (no iframe). Header shows format + summary (row/sheet/slide count), single "Export" button per card.

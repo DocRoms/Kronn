@@ -1,0 +1,580 @@
+{
+  "metadata": {
+    "binary": "/private/tmp/kt679-signal-bin",
+    "sha256": "fd539c0374f15325288dbc10ca9a63b25221db6f5fa22d49838bb78ee8ead2f3",
+    "context_cap": 24576,
+    "models": [
+      "qwen3.5:2b",
+      "gemma4:e2b"
+    ],
+    "started_at": "2026-09-22T14:05:02.331826+00:00",
+    "results": [
+      {
+        "model": "qwen3.5:2b",
+        "exit_code": 101
+      },
+      {
+        "model": "gemma4:e2b",
+        "exit_code": 101
+      }
+    ],
+    "finished_at": "2026-09-22T14:06:43.848765+00:00"
+  },
+  "reports": [
+    {
+      "actions": [],
+      "calls": [
+        {
+          "arguments": {},
+          "error": null,
+          "name": "mcp_list",
+          "ok": true,
+          "rejected": false
+        },
+        {
+          "arguments": {},
+          "error": null,
+          "name": "qp_list",
+          "ok": true,
+          "rejected": false
+        },
+        {
+          "arguments": {
+            "quick_api_id": "global",
+            "variables": {
+              "topic": "été"
+            }
+          },
+          "error": "This proposal-only benchmark permits catalogue reads only",
+          "name": "qa_run",
+          "ok": false,
+          "rejected": true
+        }
+      ],
+      "catalogue_bytes": 42775,
+      "contract_read": false,
+      "discoverable": false,
+      "emitted_text": "Je vais d'abord explorer les outils disponibles pour comprendre ce que je peux utiliser, puis identifier les Quick Prompts existants.Je vais d'abord lister les Quick Prompts disponibles pour trouver le prompt « Résumé ».J'ai trouvé le Quick Prompt « Résumé » avec l'ID `global`. Voici son contrat de variables :\n\n- **Variable requise** : `topic` (type texte)\n\nPour proposer une suite utile, je vais suggérer d'ajouter un bloc `kronn-action` qui lance ce prompt. La proposition respecte les contraintes :\n- Pas d'exécution réelle\n- Une seule suggestion avec le vrai ID et ses variables\n- Valeurs non secrètes (pas de secrets résolus)J'ai trouvé le Quick Prompt « Résumé » avec l'ID `global`. Voici la proposition :\n\n**Carte pour le Quick Prompt « Résumé »**  \n- **Sujet**: été  \n- **Variables requises**: `topic`  \n- **Proposition**: Remplir manuellement `topic=\"été\"` dans les variables du prompt  \n\n**Format de la proposition (à copier)**:\n```json\n{\n  \"kind\": \"quick_prompt\",\n  \"target_id\": \"global\",\n  \"project_id\": null,\n  \"values\": [\n    {\n      \"name\": \"topic\",\n      \"value\": \"été\",\n      \"provenance\": \"agent_suggestion\",\n      \"suggested_by\": \"@ollama\"\n    }\n  ]\n}\n```\n\n**Note**: Cette proposition est une suggestion pour le prompt existant. Elle ne lance pas le prompt, elle propose simplement de remplacer la valeur par défaut du champ `topic` avec « été ». Les entrées inconnues (comme les variables manquantes) seront laissées à l'humain de remplir.",
+      "exit_success": true,
+      "first_prompt_tokens": 12425,
+      "kind": "quick_prompt",
+      "launches": 0,
+      "model": "qwen3.5:2b",
+      "notice_bytes": 666,
+      "ok": false,
+      "prompt": "Actions Automatisation — si une action QP, QA, QE ou Workflow existante serait une suite utile, résous d'abord son vrai id et son contrat de variables avec les outils de catalogue/get. Propose-la sans l'exécuter avec exactement un bloc `kronn-action` : `{\"kind\":\"quick_prompt|quick_api|quick_exec|workflow\",\"target_id\":\"<id réel>\",\"project_id\":\"<id optionnel>\",\"values\":[{\"name\":\"<variable déclarée>\",\"value\":\"<suggestion éditable>\",\"provenance\":\"agent_suggestion\",\"suggested_by\":\"<ton alias>\"}]}`. Kronn valide et persiste la proposition ; seul le clic humain la lance. N'invente jamais d'id ou de variable et n'inclus jamais une valeur secrète/résolue.\n\nTu réponds sous l'alias @ollama. Propose une carte pour le Quick Prompt existant « Résumé », avec le sujet été. Ne la lance pas et ne modifie aucune définition. Utilise une seule proposition et laisse les entrées inconnues à remplir par l'humain.",
+      "seconds": 6.658057167,
+      "suggested_topic": false,
+      "target_read": true,
+      "total_prompt_tokens": 50067,
+      "turns": 4,
+      "valid_card": false
+    },
+    {
+      "actions": [],
+      "calls": [
+        {
+          "arguments": {
+            "tool": "signals"
+          },
+          "error": null,
+          "name": "tool_manual",
+          "ok": true,
+          "rejected": false
+        }
+      ],
+      "catalogue_bytes": 42775,
+      "contract_read": true,
+      "discoverable": true,
+      "emitted_text": "Je vais d'abord explorer les outils disponibles dans ce projet pour comprendre comment fonctionne cette architecture.Je recommande de proposer une carte pour le Quick Prompt existant « Résumé » avec le sujet été. Voici la proposition conforme aux règles du catalogue `kronn-action`:\n\n```json\n{\n  \"kind\": \"quick_prompt\",\n  \"target_id\": \"Résumé\",\n  \"values\": {\n    \"name\": \"Résumé\",\n    \"provenance\": \"user_input\",\n    \"source_ref\": null,\n    \"suggested_by\": null,\n    \"value\": \"été\"\n  }\n}\n```",
+      "exit_success": true,
+      "first_prompt_tokens": 12316,
+      "kind": "quick_prompt",
+      "launches": 0,
+      "model": "qwen3.5:2b",
+      "notice_bytes": 245,
+      "ok": false,
+      "prompt": "Actions Automatisation — pour proposer un QP, QA, QE ou Workflow existant, lis `tool_manual({tool: \"signals\"})`, puis émets un bloc `kronn-action` conforme. Seul le clic humain le lance. N'invente aucun id/variable et n'inclus aucun secret.\n\nTu réponds sous l'alias @ollama. Propose une carte pour le Quick Prompt existant « Résumé », avec le sujet été. Ne la lance pas et ne modifie aucune définition. Utilise une seule proposition et laisse les entrées inconnues à remplir par l'humain.",
+      "seconds": 1.5276692079999998,
+      "suggested_topic": false,
+      "target_read": false,
+      "total_prompt_tokens": 25118,
+      "turns": 2,
+      "valid_card": false
+    },
+    {
+      "actions": [],
+      "calls": [
+        {
+          "arguments": {
+            "tool": "signals"
+          },
+          "error": null,
+          "name": "tool_manual",
+          "ok": true,
+          "rejected": false
+        },
+        {
+          "arguments": {},
+          "error": null,
+          "name": "qa_list",
+          "ok": true,
+          "rejected": false
+        }
+      ],
+      "catalogue_bytes": 42775,
+      "contract_read": true,
+      "discoverable": true,
+      "emitted_text": "Je vais d'abord explorer les outils disponibles dans ce projet pour comprendre la structure, puis je proposerai un QP (Quick Prompt) pour « Lire ticket ».Je recommande de proposer une carte pour la Quick API existante « Lire ticket ». Je vais utiliser les outils disponibles pour découvrir cette Quick API et créer une proposition conforme.Je recommande une proposition de carte pour la Quick API existante « Lire ticket ».\n\n```json\n{\n  \"kind\": \"quick_api\",\n  \"target_id\": \"ca795e88-bc2b-417f-be80-ee1012990dfa\",\n  \"values\": {\n    \"name\": \"Lire ticket\",\n    \"provenance\": \"user_input\",\n    \"source_ref\": null,\n    \"suggested_by\": null,\n    \"value\": null\n  }\n}\n```",
+      "exit_success": true,
+      "first_prompt_tokens": 12312,
+      "kind": "quick_api",
+      "launches": 0,
+      "model": "qwen3.5:2b",
+      "notice_bytes": 245,
+      "ok": false,
+      "prompt": "Actions Automatisation — pour proposer un QP, QA, QE ou Workflow existant, lis `tool_manual({tool: \"signals\"})`, puis émets un bloc `kronn-action` conforme. Seul le clic humain le lance. N'invente aucun id/variable et n'inclus aucun secret.\n\nTu réponds sous l'alias @ollama. Propose une carte pour la Quick API existante « Lire ticket ». Ne la lance pas et ne modifie aucune définition. Utilise une seule proposition et laisse les entrées inconnues à remplir par l'humain.",
+      "seconds": 2.677216583,
+      "suggested_topic": true,
+      "target_read": true,
+      "total_prompt_tokens": 50987,
+      "turns": 4,
+      "valid_card": false
+    },
+    {
+      "actions": [],
+      "calls": [
+        {
+          "arguments": {},
+          "error": null,
+          "name": "mcp_list",
+          "ok": true,
+          "rejected": false
+        },
+        {
+          "arguments": {},
+          "error": null,
+          "name": "qa_list",
+          "ok": true,
+          "rejected": false
+        },
+        {
+          "arguments": {
+            "quick_api_id": "6eab78dc-3add-43b9-8a1c-1a1fd1e9cfe9"
+          },
+          "error": "This proposal-only benchmark permits catalogue reads only",
+          "name": "qa_run",
+          "ok": false,
+          "rejected": true
+        }
+      ],
+      "catalogue_bytes": 42775,
+      "contract_read": false,
+      "discoverable": false,
+      "emitted_text": "Je vais d'abord explorer les outils disponibles dans ce projet pour comprendre le contexte, puis identifier les actions QP, QA, QE ou Workflow existantes qui pourraient former une suite utile.Je vais d'abord explorer les outils disponibles pour trouver la Quick API « Lire ticket ».J'ai trouvé la Quick API « Lire ticket » avec l'ID `6eab78dc-3add-43b9-8a1c-1a1fd1e9cfe9`. Elle n'a pas de variables requises, mais je dois vérifier son contrat complet.J'ai trouvé la Quick API « Lire ticket » avec l'ID `6eab78dc-3add-43b9-8a1c-1a1fd1e9cfe9`. Elle n'a pas de variables requises.\n\nVoici ma proposition pour créer une suite d'action :\n\n```json\n{\n  \"kind\": \"quick_api\",\n  \"target_id\": \"6eab78dc-3add-43b9-8a1c-1a1fd1e9cfe9\",\n  \"project_id\": null,\n  \"values\": [\n    {\n      \"name\": \"ticket_id\",\n      \"value\": \"\",\n      \"provenance\": \"agent_suggestion\",\n      \"suggested_by\": \"@ollama\"\n    }\n  ]\n}\n```\n\nCette proposition permet à l'humain de compléter manuellement la variable `ticket_id` avant d'exécuter la suite.",
+      "exit_success": true,
+      "first_prompt_tokens": 12421,
+      "kind": "quick_api",
+      "launches": 0,
+      "model": "qwen3.5:2b",
+      "notice_bytes": 666,
+      "ok": false,
+      "prompt": "Actions Automatisation — si une action QP, QA, QE ou Workflow existante serait une suite utile, résous d'abord son vrai id et son contrat de variables avec les outils de catalogue/get. Propose-la sans l'exécuter avec exactement un bloc `kronn-action` : `{\"kind\":\"quick_prompt|quick_api|quick_exec|workflow\",\"target_id\":\"<id réel>\",\"project_id\":\"<id optionnel>\",\"values\":[{\"name\":\"<variable déclarée>\",\"value\":\"<suggestion éditable>\",\"provenance\":\"agent_suggestion\",\"suggested_by\":\"<ton alias>\"}]}`. Kronn valide et persiste la proposition ; seul le clic humain la lance. N'invente jamais d'id ou de variable et n'inclus jamais une valeur secrète/résolue.\n\nTu réponds sous l'alias @ollama. Propose une carte pour la Quick API existante « Lire ticket ». Ne la lance pas et ne modifie aucune définition. Utilise une seule proposition et laisse les entrées inconnues à remplir par l'humain.",
+      "seconds": 4.071204083,
+      "suggested_topic": true,
+      "target_read": true,
+      "total_prompt_tokens": 62869,
+      "turns": 5,
+      "valid_card": false
+    },
+    {
+      "actions": [],
+      "calls": [
+        {
+          "arguments": {},
+          "error": "refused: this discussion is not attached to any directory — it has no project and no workspace — so there is nothing to read from or write to. Attach it to a project to give it one.",
+          "name": "git_status",
+          "ok": false,
+          "rejected": false
+        },
+        {
+          "arguments": {},
+          "error": null,
+          "name": "mcp_list",
+          "ok": true,
+          "rejected": false
+        }
+      ],
+      "catalogue_bytes": 42775,
+      "contract_read": false,
+      "discoverable": false,
+      "emitted_text": "Je vais analyser le workflow « Rapport » et proposer une suite d'actions automatisée. D'abord, je dois explorer ce projet pour comprendre sa structure.Je suis @ollama, un modèle Qwen3.5:2b local via Ollama. Je ne peux pas exécuter de code ou d'API externes directement.\n\nPour répondre à ta demande sur l'automatisation des actions (QP, QA, QE, Workflow), je dois d'abord explorer le projet pour comprendre son architecture et les outils disponibles.Je suis le modèle `qwen3.5:2b` local via Ollama. Je ne connais pas les détails du projet \"Rapport\" ni des actions QP/QA/QE/Workflow existantes dans ce contexte spécifique.\n\nPour proposer une suite d'actions automatisée, j'ai besoin de connaître :\n1. Les IDs et contrats de variables des actions QP (Quick Prompt), QA (Quick API), QE (Quick Exec) ou Workflow existantes\n2. Le projet associé au workflow \"Rapport\"\n\nJe vais vérifier les ressources disponibles dans ce contexte.",
+      "exit_success": true,
+      "first_prompt_tokens": 12419,
+      "kind": "workflow",
+      "launches": 0,
+      "model": "qwen3.5:2b",
+      "notice_bytes": 666,
+      "ok": false,
+      "prompt": "Actions Automatisation — si une action QP, QA, QE ou Workflow existante serait une suite utile, résous d'abord son vrai id et son contrat de variables avec les outils de catalogue/get. Propose-la sans l'exécuter avec exactement un bloc `kronn-action` : `{\"kind\":\"quick_prompt|quick_api|quick_exec|workflow\",\"target_id\":\"<id réel>\",\"project_id\":\"<id optionnel>\",\"values\":[{\"name\":\"<variable déclarée>\",\"value\":\"<suggestion éditable>\",\"provenance\":\"agent_suggestion\",\"suggested_by\":\"<ton alias>\"}]}`. Kronn valide et persiste la proposition ; seul le clic humain la lance. N'invente jamais d'id ou de variable et n'inclus jamais une valeur secrète/résolue.\n\nTu réponds sous l'alias @ollama. Propose une carte pour le workflow existant « Rapport ». Ne la lance pas et ne modifie aucune définition. Utilise une seule proposition et laisse les entrées inconnues à remplir par l'humain.",
+      "seconds": 2.643655833,
+      "suggested_topic": true,
+      "target_read": false,
+      "total_prompt_tokens": 37462,
+      "turns": 3,
+      "valid_card": false
+    },
+    {
+      "actions": [],
+      "calls": [
+        {
+          "arguments": {
+            "tool": "signals"
+          },
+          "error": null,
+          "name": "tool_manual",
+          "ok": true,
+          "rejected": false
+        },
+        {
+          "arguments": {},
+          "error": null,
+          "name": "workflow_list",
+          "ok": true,
+          "rejected": false
+        },
+        {
+          "arguments": {
+            "workflow_id": "2ef032b7-9d96-481a-b76b-67829b6fd347"
+          },
+          "error": null,
+          "name": "workflow_get",
+          "ok": true,
+          "rejected": false
+        }
+      ],
+      "catalogue_bytes": 42775,
+      "contract_read": true,
+      "discoverable": true,
+      "emitted_text": "Je vais d'abord explorer les outils disponibles dans ce projet pour comprendre comment proposer un QP, QA ou QE existant.Je recommande de proposer une carte pour le workflow existant « Rapport ». Je vais d'abord lister les workflows disponibles.Je recommande une proposition de carte pour le workflow « Rapport ». Voici la structure conforme aux règles du catalogue `kronn-action` :\n\n```json\n{\n  \"kind\": \"workflow\",\n  \"target_id\": \"2ef032b7-9d96-481a-b76b-67829b6fd347\",\n  \"values\": [\n    {\n      \"name\": \"nom_fichier\",\n      \"provenance\": \"user_input\",\n      \"source_ref\": null,\n      \"suggested_by\": null,\n      \"value\": \"\"\n    }\n  ]\n}\n```\n\nCette carte propose un clic humain pour lancer le workflow « Rapport ». Les entrées inconnues sont à remplir par l'humain.",
+      "exit_success": true,
+      "first_prompt_tokens": 12310,
+      "kind": "workflow",
+      "launches": 0,
+      "model": "qwen3.5:2b",
+      "notice_bytes": 245,
+      "ok": false,
+      "prompt": "Actions Automatisation — pour proposer un QP, QA, QE ou Workflow existant, lis `tool_manual({tool: \"signals\"})`, puis émets un bloc `kronn-action` conforme. Seul le clic humain le lance. N'invente aucun id/variable et n'inclus aucun secret.\n\nTu réponds sous l'alias @ollama. Propose une carte pour le workflow existant « Rapport ». Ne la lance pas et ne modifie aucune définition. Utilise une seule proposition et laisse les entrées inconnues à remplir par l'humain.",
+      "seconds": 3.093520458,
+      "suggested_topic": true,
+      "target_read": true,
+      "total_prompt_tokens": 51137,
+      "turns": 4,
+      "valid_card": false
+    },
+    {
+      "actions": [
+        {
+          "created_at": "2026-09-22T14:05:38.014092+00:00",
+          "deep_link": null,
+          "diagnostic": null,
+          "discussion_id": "general",
+          "fence_index": 0,
+          "finished_at": null,
+          "id": "action:proposal:0",
+          "kind": "quick_prompt",
+          "launched_at": null,
+          "project_id": null,
+          "project_name": null,
+          "result_discussion_id": null,
+          "shared_run_id": null,
+          "source_message_id": "proposal",
+          "state": "proposed",
+          "target_id": "global",
+          "target_name": "Résumé",
+          "updated_at": "2026-09-22T14:05:38.014092+00:00",
+          "values": [
+            {
+              "allow_manual_override": false,
+              "description": null,
+              "label": "Topic",
+              "name": "topic",
+              "placeholder": "Kronn",
+              "provenance": "agent_suggestion",
+              "required": true,
+              "suggested_by": "@ollama",
+              "suggested_value": "été",
+              "value": "été"
+            }
+          ]
+        }
+      ],
+      "calls": [
+        {
+          "arguments": {},
+          "error": null,
+          "name": "qp_list",
+          "ok": true,
+          "rejected": false
+        }
+      ],
+      "catalogue_bytes": 42775,
+      "contract_read": false,
+      "discoverable": false,
+      "emitted_text": "@ollama\n@ollama\n```kronn-action\n{\n  \"kind\": \"quick_prompt\",\n  \"target_id\": \"global\",\n  \"values\": [\n    {\n      \"name\": \"topic\",\n      \"value\": \"été\",\n      \"provenance\": \"agent_suggestion\",\n      \"suggested_by\": \"@ollama\"\n    }\n  ]\n}\n```",
+      "exit_success": true,
+      "first_prompt_tokens": 11764,
+      "kind": "quick_prompt",
+      "launches": 0,
+      "model": "gemma4:e2b",
+      "notice_bytes": 666,
+      "ok": true,
+      "prompt": "Actions Automatisation — si une action QP, QA, QE ou Workflow existante serait une suite utile, résous d'abord son vrai id et son contrat de variables avec les outils de catalogue/get. Propose-la sans l'exécuter avec exactement un bloc `kronn-action` : `{\"kind\":\"quick_prompt|quick_api|quick_exec|workflow\",\"target_id\":\"<id réel>\",\"project_id\":\"<id optionnel>\",\"values\":[{\"name\":\"<variable déclarée>\",\"value\":\"<suggestion éditable>\",\"provenance\":\"agent_suggestion\",\"suggested_by\":\"<ton alias>\"}]}`. Kronn valide et persiste la proposition ; seul le clic humain la lance. N'invente jamais d'id ou de variable et n'inclus jamais une valeur secrète/résolue.\n\nTu réponds sous l'alias @ollama. Propose une carte pour le Quick Prompt existant « Résumé », avec le sujet été. Ne la lance pas et ne modifie aucune définition. Utilise une seule proposition et laisse les entrées inconnues à remplir par l'humain.",
+      "seconds": 14.276689416,
+      "suggested_topic": true,
+      "target_read": true,
+      "total_prompt_tokens": 23584,
+      "turns": 2,
+      "valid_card": true
+    },
+    {
+      "actions": [
+        {
+          "created_at": "2026-09-22T14:05:47.879642+00:00",
+          "deep_link": null,
+          "diagnostic": "Cette proposition d’action n’a pas pu être lue (JSON invalide) : missing field `kind` at line 10 column 1.",
+          "discussion_id": "general",
+          "fence_index": 0,
+          "finished_at": "2026-09-22T14:05:47.879642+00:00",
+          "id": "action:proposal:0",
+          "kind": "invalid",
+          "launched_at": null,
+          "project_id": null,
+          "project_name": null,
+          "result_discussion_id": null,
+          "shared_run_id": null,
+          "source_message_id": "proposal",
+          "state": "preflight_failed",
+          "target_id": "",
+          "target_name": "(proposition invalide)",
+          "updated_at": "2026-09-22T14:05:47.879642+00:00",
+          "values": []
+        }
+      ],
+      "calls": [],
+      "catalogue_bytes": 42775,
+      "contract_read": false,
+      "discoverable": true,
+      "emitted_text": "@ollama\n```kronn-action\n{\n  \"action\": \"propose_qp_edit\",\n  \"target_qp_name\": \"Résumé\",\n  \"new_variable\": {\n    \"variable_name\": \"sujet\",\n    \"placeholder\": \"Entrez le nouveau sujet ici\",\n    \"required\": true\n  },\n  \"note\": \"Cette proposition est destinée à l'action humaine. Veuillez compléter les champs manquants avant de lancer l'action.\"\n}\n```",
+      "exit_success": true,
+      "first_prompt_tokens": 11651,
+      "kind": "quick_prompt",
+      "launches": 0,
+      "model": "gemma4:e2b",
+      "notice_bytes": 245,
+      "ok": false,
+      "prompt": "Actions Automatisation — pour proposer un QP, QA, QE ou Workflow existant, lis `tool_manual({tool: \"signals\"})`, puis émets un bloc `kronn-action` conforme. Seul le clic humain le lance. N'invente aucun id/variable et n'inclus aucun secret.\n\nTu réponds sous l'alias @ollama. Propose une carte pour le Quick Prompt existant « Résumé », avec le sujet été. Ne la lance pas et ne modifie aucune définition. Utilise une seule proposition et laisse les entrées inconnues à remplir par l'humain.",
+      "seconds": 9.759358833,
+      "suggested_topic": false,
+      "target_read": false,
+      "total_prompt_tokens": 11651,
+      "turns": 1,
+      "valid_card": false
+    },
+    {
+      "actions": [
+        {
+          "created_at": "2026-09-22T14:05:59.491956+00:00",
+          "deep_link": null,
+          "diagnostic": "Cette proposition d’action n’a pas pu être lue (JSON invalide) : missing field `kind` at line 16 column 1.",
+          "discussion_id": "general",
+          "fence_index": 0,
+          "finished_at": "2026-09-22T14:05:59.491956+00:00",
+          "id": "action:proposal:0",
+          "kind": "invalid",
+          "launched_at": null,
+          "project_id": null,
+          "project_name": null,
+          "result_discussion_id": null,
+          "shared_run_id": null,
+          "source_message_id": "proposal",
+          "state": "preflight_failed",
+          "target_id": "",
+          "target_name": "(proposition invalide)",
+          "updated_at": "2026-09-22T14:05:59.491956+00:00",
+          "values": []
+        }
+      ],
+      "calls": [],
+      "catalogue_bytes": 42775,
+      "contract_read": false,
+      "discoverable": true,
+      "emitted_text": "@ollama\n```kronn-action\n{\n  \"action_type\": \"propose_card\",\n  \"target_type\": \"qa\",\n  \"target_name\": \"Lire ticket\",\n  \"status\": \"suggestion\",\n  \"details\": {\n    \"description\": \"Proposition pour la Quick API existante 'Lire ticket'.\",\n    \"action_type\": \"suggestion\",\n    \"note\": \"Ceci est une proposition pour l'humain. Aucune exécution ni modification n'est effectuée.\"\n  },\n  \"user_input_placeholder\": {\n    \"api_name\": \"[À remplir par l'humain]\",\n    \"description\": \"[À remplir par l'humain]\",\n    \"parameters\": \"[À remplir par l'humain]\"\n  }\n}\n```",
+      "exit_success": true,
+      "first_prompt_tokens": 11646,
+      "kind": "quick_api",
+      "launches": 0,
+      "model": "gemma4:e2b",
+      "notice_bytes": 245,
+      "ok": false,
+      "prompt": "Actions Automatisation — pour proposer un QP, QA, QE ou Workflow existant, lis `tool_manual({tool: \"signals\"})`, puis émets un bloc `kronn-action` conforme. Seul le clic humain le lance. N'invente aucun id/variable et n'inclus aucun secret.\n\nTu réponds sous l'alias @ollama. Propose une carte pour la Quick API existante « Lire ticket ». Ne la lance pas et ne modifie aucune définition. Utilise une seule proposition et laisse les entrées inconnues à remplir par l'humain.",
+      "seconds": 11.505639583,
+      "suggested_topic": true,
+      "target_read": false,
+      "total_prompt_tokens": 11646,
+      "turns": 1,
+      "valid_card": false
+    },
+    {
+      "actions": [
+        {
+          "created_at": "2026-09-22T14:06:14.413630+00:00",
+          "deep_link": null,
+          "diagnostic": "unknown target variable `Lire ticket`",
+          "discussion_id": "general",
+          "fence_index": 0,
+          "finished_at": "2026-09-22T14:06:14.413630+00:00",
+          "id": "action:proposal:0",
+          "kind": "quick_api",
+          "launched_at": null,
+          "project_id": null,
+          "project_name": null,
+          "result_discussion_id": null,
+          "shared_run_id": null,
+          "source_message_id": "proposal",
+          "state": "preflight_failed",
+          "target_id": "f99b0332-04d1-4334-9c93-6a03a8d989e3",
+          "target_name": "Lire ticket",
+          "updated_at": "2026-09-22T14:06:14.413630+00:00",
+          "values": []
+        }
+      ],
+      "calls": [
+        {
+          "arguments": {},
+          "error": null,
+          "name": "qa_list",
+          "ok": true,
+          "rejected": false
+        }
+      ],
+      "catalogue_bytes": 42775,
+      "contract_read": false,
+      "discoverable": false,
+      "emitted_text": "@ollama\n```kronn-action\n{\n  \"kind\": \"quick_api\",\n  \"target_id\": \"f99b0332-04d1-4334-9c93-6a03a8d989e3\",\n  \"project_id\": null,\n  \"values\": [\n    {\n      \"name\": \"Lire ticket\",\n      \"value\": \"Suggestion pour la Quick API existante 'Lire ticket'\"\n    }\n  ]\n}\n```",
+      "exit_success": true,
+      "first_prompt_tokens": 11759,
+      "kind": "quick_api",
+      "launches": 0,
+      "model": "gemma4:e2b",
+      "notice_bytes": 666,
+      "ok": false,
+      "prompt": "Actions Automatisation — si une action QP, QA, QE ou Workflow existante serait une suite utile, résous d'abord son vrai id et son contrat de variables avec les outils de catalogue/get. Propose-la sans l'exécuter avec exactement un bloc `kronn-action` : `{\"kind\":\"quick_prompt|quick_api|quick_exec|workflow\",\"target_id\":\"<id réel>\",\"project_id\":\"<id optionnel>\",\"values\":[{\"name\":\"<variable déclarée>\",\"value\":\"<suggestion éditable>\",\"provenance\":\"agent_suggestion\",\"suggested_by\":\"<ton alias>\"}]}`. Kronn valide et persiste la proposition ; seul le clic humain la lance. N'invente jamais d'id ou de variable et n'inclus jamais une valeur secrète/résolue.\n\nTu réponds sous l'alias @ollama. Propose une carte pour la Quick API existante « Lire ticket ». Ne la lance pas et ne modifie aucune définition. Utilise une seule proposition et laisse les entrées inconnues à remplir par l'humain.",
+      "seconds": 14.827314834,
+      "suggested_topic": true,
+      "target_read": true,
+      "total_prompt_tokens": 23599,
+      "turns": 2,
+      "valid_card": false
+    },
+    {
+      "actions": [
+        {
+          "created_at": "2026-09-22T14:06:31.410424+00:00",
+          "deep_link": null,
+          "diagnostic": "unknown target variable `Nom du Workflow`",
+          "discussion_id": "general",
+          "fence_index": 0,
+          "finished_at": "2026-09-22T14:06:31.410424+00:00",
+          "id": "action:proposal:0",
+          "kind": "workflow",
+          "launched_at": null,
+          "project_id": null,
+          "project_name": null,
+          "result_discussion_id": null,
+          "shared_run_id": null,
+          "source_message_id": "proposal",
+          "state": "preflight_failed",
+          "target_id": "21141787-f428-45e9-a12b-0941c5ee0f11",
+          "target_name": "Rapport",
+          "updated_at": "2026-09-22T14:06:31.410424+00:00",
+          "values": []
+        }
+      ],
+      "calls": [
+        {
+          "arguments": {},
+          "error": null,
+          "name": "workflow_list",
+          "ok": true,
+          "rejected": false
+        }
+      ],
+      "catalogue_bytes": 42775,
+      "contract_read": false,
+      "discoverable": false,
+      "emitted_text": "@ollama\n```kronn-action\n{\n  \"kind\": \"workflow\",\n  \"target_id\": \"21141787-f428-45e9-a12b-0941c5ee0f11\",\n  \"project_id\": null,\n  \"values\": [\n    {\n      \"name\": \"Nom du Workflow\",\n      \"value\": \"Rapport\"\n    }\n  ]\n}\n```",
+      "exit_success": true,
+      "first_prompt_tokens": 11757,
+      "kind": "workflow",
+      "launches": 0,
+      "model": "gemma4:e2b",
+      "notice_bytes": 666,
+      "ok": false,
+      "prompt": "Actions Automatisation — si une action QP, QA, QE ou Workflow existante serait une suite utile, résous d'abord son vrai id et son contrat de variables avec les outils de catalogue/get. Propose-la sans l'exécuter avec exactement un bloc `kronn-action` : `{\"kind\":\"quick_prompt|quick_api|quick_exec|workflow\",\"target_id\":\"<id réel>\",\"project_id\":\"<id optionnel>\",\"values\":[{\"name\":\"<variable déclarée>\",\"value\":\"<suggestion éditable>\",\"provenance\":\"agent_suggestion\",\"suggested_by\":\"<ton alias>\"}]}`. Kronn valide et persiste la proposition ; seul le clic humain la lance. N'invente jamais d'id ou de variable et n'inclus jamais une valeur secrète/résolue.\n\nTu réponds sous l'alias @ollama. Propose une carte pour le workflow existant « Rapport ». Ne la lance pas et ne modifie aucune définition. Utilise une seule proposition et laisse les entrées inconnues à remplir par l'humain.",
+      "seconds": 16.896755625,
+      "suggested_topic": true,
+      "target_read": true,
+      "total_prompt_tokens": 23664,
+      "turns": 2,
+      "valid_card": false
+    },
+    {
+      "actions": [
+        {
+          "created_at": "2026-09-22T14:06:43.756777+00:00",
+          "deep_link": null,
+          "diagnostic": "Cette proposition d’action n’a pas pu être lue (JSON invalide) : missing field `kind` at line 38 column 1.",
+          "discussion_id": "general",
+          "fence_index": 0,
+          "finished_at": "2026-09-22T14:06:43.756777+00:00",
+          "id": "action:proposal:0",
+          "kind": "invalid",
+          "launched_at": null,
+          "project_id": null,
+          "project_name": null,
+          "result_discussion_id": null,
+          "shared_run_id": null,
+          "source_message_id": "proposal",
+          "state": "preflight_failed",
+          "target_id": "",
+          "target_name": "(proposition invalide)",
+          "updated_at": "2026-09-22T14:06:43.756777+00:00",
+          "values": []
+        }
+      ],
+      "calls": [],
+      "catalogue_bytes": 42775,
+      "contract_read": false,
+      "discoverable": true,
+      "emitted_text": "@ollama\n\nVoici une proposition de carte pour le workflow existant « Rapport ». Cette proposition est destinée à être revue et validée par l'utilisateur avant toute exécution.\n\n```kronn-action\n{\n  \"action_type\": \"workflow_proposal\",\n  \"workflow_name\": \"Rapport\",\n  \"proposal_details\": {\n    \"description\": \"Proposition de carte pour le workflow 'Rapport'. À compléter par l'utilisateur.\",\n    \"status\": \"idea\",\n    \"suggested_steps\": [\n      {\n        \"step_number\": 1,\n        \"description\": \"Définir les entrées nécessaires pour le rapport.\",\n        \"status\": \"todo\",\n        \"owner\": \"Human\"\n      },\n      {\n        \"step_number\": 2,\n        \"description\": \"Générer les données brutes.\",\n        \"status\": \"todo\",\n        \"owner\": \"Human\"\n      },\n      {\n        \"step_number\": 3,\n        \"description\": \"Analyser et formater le rapport.\",\n        \"status\": \"todo\",\n        \"owner\": \"Human\"\n      }\n    ],\n    \"dependencies\": [\n      {\n        \"task_id\": \"N/A\",\n        \"type\": \"workflow_reference\",\n        \"reference\": \"Rapport\"\n      }\n    ],\n    \"notes\": \"Cette proposition ne lance aucune action. Les étapes et les détails doivent être complétés manuellement par l'utilisateur.\"\n  },\n  \"execution_status\": \"draft\",\n  \"user_action_required\": \"Approbation et modification manuelle\"\n}\n```",
+      "exit_success": true,
+      "first_prompt_tokens": 11644,
+      "kind": "workflow",
+      "launches": 0,
+      "model": "gemma4:e2b",
+      "notice_bytes": 245,
+      "ok": false,
+      "prompt": "Actions Automatisation — pour proposer un QP, QA, QE ou Workflow existant, lis `tool_manual({tool: \"signals\"})`, puis émets un bloc `kronn-action` conforme. Seul le clic humain le lance. N'invente aucun id/variable et n'inclus aucun secret.\n\nTu réponds sous l'alias @ollama. Propose une carte pour le workflow existant « Rapport ». Ne la lance pas et ne modifie aucune définition. Utilise une seule proposition et laisse les entrées inconnues à remplir par l'humain.",
+      "seconds": 12.246379084,
+      "suggested_topic": true,
+      "target_read": false,
+      "total_prompt_tokens": 11644,
+      "turns": 1,
+      "valid_card": false
+    }
+  ],
+  "source_commit": "fe23675619fb640352fc756a37f08c3d9678427c",
+  "scope": "Same-build isolated proposal notice comparison, full native catalogue, real executor and production message ingestion. Mutating calls rejected and scored as failures; no automation launched.",
+  "decision": "Ship discoverable catalogue, retain existing inline production guidance. The shorter prompt-only discovery candidate is not shipped."
+}

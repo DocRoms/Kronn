@@ -9,6 +9,211 @@ Release notes for 0.9.3 and earlier are available in the
 
 ---
 
+## [Unreleased]
+
+## [0.14.0] - 2026-09-23
+
+### Added
+
+- Text, JSON and log attachments open in the discussion carousel from their
+  message or the Assets panel. The preview preserves source text, marks files
+  truncated at 256 KiB, and keeps the original file available for download.
+  Images, videos and text can be browsed together.
+- Live Page action history keeps up to 1,000 finished launches per block,
+  alongside active launches. New launches, declines and completions prune old
+  snapshots atomically; their results and discussions remain available. An old
+  pruned card cannot accidentally start another run.
+- Agents can discover the versioned discussion action contract through
+  `tool_manual({tool: "signals"})`. The native and MCP paths share the same
+  schema for proposing existing Quick Prompts, Quick APIs, Quick Execs and
+  workflows. Reading it and emitting a proposal leave execution to the human.
+- HTTP discussion agents can list and read workflows, consult canonical step
+  contracts, create disabled drafts, and patch disabled workflows. Drafts stay
+  disabled for human review; omitted fields and project bindings survive edits.
+  The MCP bridge and native tools share one step contract, including corrected
+  Notify and JsonData examples. Validation includes one successful local-model
+  three-step workflow and three failed attempts; it does not establish a general
+  authoring success rate. The [retained observations](docs/research/native-workflow-2026-09-22.md)
+  document both outcomes.
+- The setup wizard shows the folders Kronn can actually reach, and several can
+  be chosen at once. Somebody whose repositories live outside the home had only
+  a text field, and a browser cannot supply an absolute path — it yields a
+  relative name and nothing else. The server lists the home, whatever Docker
+  mounted, the configured paths and every top-level directory that is not the
+  system's, one level at a time, refusing anything outside them. Under Docker
+  this also shows what the container ended up seeing, which is rarely what was
+  pictured. The desktop build can open the system's own dialog instead; that
+  integration was compiled and tested with doubles, but the system dialog was
+  not opened manually during this validation. The server folder browser is the
+  exercised path. And
+  when the scan finds nothing, the screen names the paths it walked, so an
+  empty result can be told apart from a mount that never happened.
+- A ceiling that cuts an agent run is now said in the discussion: which one, its
+  value, how many calls were refused and what they were after. The same message
+  asks whether to go further — more calls or rounds for the agent's next turn, no
+  call limit for the rest of the discussion, or keep the partial answer. Keeping
+  it wakes nobody. A grant only moves a counter: repeated-call, same-answer,
+  error-circuit and duration guards stay exactly as they were, and only a question
+  Kronn itself recorded can raise a budget.
+- A project declares once how its isolated worktrees are prepared
+  (`Project.workspace.hooks`), and every workflow of the project that asks for
+  isolation inherits it, overriding it field by field. A worktree is invisible
+  to containers mounted on the main checkout, so a validation launched there
+  reads the wrong code and passes — green, silent and wrong. The recipe that
+  fixes that is the project's, and until now it had to be copied into every
+  workflow that needed it. A project that declares nothing behaves exactly as
+  before.
+- An agent no longer has to name the connection a generation runs on. Omitted,
+  Kronn uses the only one configured for that modality; when several can serve
+  it, the request is refused with their names rather than a budget being
+  chosen for you, and the answer says which connection was billed. Contract
+  tests cover selection, ambiguity and idempotent retries. A launch with no
+  identifier in the request is now backed by a
+  [native check across seven models](docs/research/media-without-connection-id-2026-09-22.md):
+  six models were checked on September 22 and the 35b on September 23; all
+  created a pending job without asking for an id. The 2b model first
+  corrected an invalid resolution. Workers were stopped; image generation
+  itself and a before/after comparison are outside this check.
+  The bridge also stopped pointing at `mcp_list` for that id, which never listed
+  a connection.
+- Progressive tool loading is available with `KRONN_TIERED_TOOLS=1`; full
+  declarations remain the default. The native dispatcher now reaches
+  `tools_load`, which previously failed with "unknown tool". Earlier simulated
+  measurements missed that defect and their performance claims are withdrawn.
+  A real-executor campaign across six local models succeeded in 35/42 scenarios
+  with full declarations and 17/42 with progressive loading. Loading a family
+  now reserves its complete JSON size, including separators.
+- HTTP discussion agents can list, launch, create and update Quick Prompts.
+  Launches retain the saved model and bindings; updates preserve omitted fields
+  and the existing project scope. New prompts inherit the room's project unless
+  explicitly created as general. Batch launch and deletion remain unavailable,
+  and bounded task workers do not receive these tools. Seven native scenarios
+  passed on both Sonnet through LiteLLM and Qwen through Ollama on the same final
+  executable. Quick Prompt and media cells verify queued jobs, not execution of
+  their children; [the report](docs/research/native-qp-litellm-ollama-2026-09-22.md)
+  records input-token measurements and the single-observation limits.
+- `disc_update`: an agent can rename the discussion it works in, pin it or
+  archive it. It cannot change the agent that answers, the model tier, the
+  connection, the project or the instructions bound to the room: those decide
+  who answers and with whose credentials, and stay a human decision.
+- A Quick Prompt backed by an HTTP connection can be compared across agents
+  again. Its connection used to leave with every target, so each CLI or local
+  one was refused at dispatch: a sandbox comparison ended 0 of 5. The target
+  now decides which connection its run uses, and a connection Kronn cannot
+  route to yet is shown in the list with the reason rather than dropped from
+  it in silence.
+- The round ceiling of a discussion agent follows the window its model really has
+  instead of one constant: measured for a local model, published per endpoint for
+  an OpenRouter one, and the previous 150 where the provider says nothing. In a
+  discussion, reaching it now ends on a partial answer rather than a failed run.
+
+### Fixed
+
+- Live Pages follow Kronn's selected theme instead of the operating system's.
+  Refreshes with unchanged data no longer republish to the iframe and reset
+  local page state; newly loaded frames still receive the current data.
+- Optional workflow inputs left blank or omitted no longer disappear from
+  execution snapshots and fail Gate messages or Exec stdin templates with
+  "Unknown workflow template variable" (#213). Declared empty inputs remain
+  available, Select defaults still apply when omitted, and required inputs
+  and genuinely unknown variables retain their checks. Existing snapshots
+  stay immutable; affected runs need a new launch.
+- Quick Exec runs retain their measured exit code and captured stderr across
+  reloads, including failed commands and invalid JSON output. The run card
+  shows the exit code and folds stderr separately from the business result;
+  old runs and processes with no measured exit code remain unknown.
+- A Quick API cannot be deleted while a workflow references it. The refusal
+  names the affected workflows and steps, including collection sources and
+  failure handlers. The workflow editor also flags missing Quick APIs left
+  by older deletions before a run is launched.
+- Expanding a workflow run loads its complete step outputs instead of showing
+  the empty output fields from the compact history list. A failed detail read
+  is visible and can be retried; collection failures include the saved source
+  id alongside the alias and cause.
+- API steps accept successful responses with an empty body, including 204
+  after an assignment, transition or deletion. They return null data with the
+  HTTP code in the summary and signal, so a completed write does not look like
+  a JSON parsing failure. Nonempty invalid JSON still fails explicitly.
+- Single Quick Prompt launches retain saved effort and output-token limits in
+  an immutable launch snapshot. HTTP requests apply those controls on each
+  tool round, even after the template is edited. A transport that cannot apply
+  an explicit control refuses the launch with an explanation.
+- A discussion agent can read its own history even when its room has no
+  project. Reading a different room still requires a shared project.
+- The setup folder picker can select the mounted root itself, keeps the latest
+  requested folder when responses arrive out of order, and reports unreadable
+  directories instead of showing them as empty.
+- Repositories are found wherever they live. The scan did not follow symbolic
+  links, so the obvious workaround — a link in the home pointing at the real
+  folder — changed nothing. It follows them now, guarding against walking the
+  same directory twice. Identity was also keyed on the repository's name and
+  remote, which merged two clones of one repository into a single entry and
+  collapsed every local-only repository sharing a directory name, a missing
+  remote reading as an empty string rather than as absent. A workstation
+  holding `git/<organisation>/<repository>` for several organisations saw one
+  of them. It is now the directory itself.
+- An agent that read its task three times lost the ability to read it at all.
+  The duplicate-call guard does not merely refuse a repeated call, it removes
+  the tool's declaration from the request — so after a change made the answer
+  different, the agent could no longer see it. The reading tools come back once
+  progress actually moves, without ever widening the catalogue the run was
+  given.
+- A local run is sized from what it actually costs instead of a guess. A prompt
+  was priced at three bytes per token for everything; measured across six local
+  models, prose runs 4.9 and JSON tool declarations 3.7, so Kronn over-estimated
+  a request by 24 to 64% and refused runs that would have fit. The window a
+  machine can hold is now computed too, from the model's own weight and the
+  cache cost it publishes, rather than read off a memory band: a model that says
+  how wide its attention is gets its real window, and one that says nothing
+  keeps exactly the ceiling it had.
+- The project documentation is no longer copied into every request to an HTTP
+  agent. Those agents read files through their own tools now, so the prompt
+  carries the doc's section index and the path, and the agent opens it when the
+  turn needs it. Measured on six local models plus two remote providers: every
+  one of them reads the doc in a single call and answers as well as before, for
+  42% fewer prompt tokens on a turn that does not need it. `read_file` was
+  already declared to them; the prompt was still telling them it was the only
+  file they could see. An agent with no file tools keeps the inline copy, and
+  `KRONN_INLINE_PROJECT_DOC=1` restores it for anything else.
+- An Ollama request is sized with the tools it carries. The window was computed
+  from the messages alone, while the declared catalogue reaches the model in the
+  same prompt and is the larger half of a short turn. The guard that refuses an
+  oversized prompt, whose whole purpose is to stop Ollama from silently dropping
+  the head of a conversation, was reading the same blind estimate. Both count the
+  catalogue now, and a request that still does not fit says so in the log instead
+  of being quietly truncated.
+- The worker mitigations for Ollama's MLX engine apply only to the versions that
+  need them. They were sized against a prompt-prefix bug fixed in 0.34, so on a
+  newer server an MLX worker explores as long as any other instead of stopping
+  eighteen rounds early. Kronn reads the server version once per endpoint; one
+  that does not answer keeps the mitigation. The window cap stays either way:
+  MLX fixes the slot when the model loads, which is a memory bound, not a
+  latency one.
+- The `/no_think` control token is no longer sent to a server that honours the
+  `think` flag, which Ollama has done since 0.19.
+- A tool an agent cannot see is no longer read as a tool that does not exist.
+  Asked for two things at once, a local model answered that the image tool "is
+  not available in my current catalogue" and stopped, without ever loading the
+  family that declares it; another sent `tools_load` with no arguments at all,
+  read the refusal as a dead end and abandoned the task. The index now says that
+  a tool it names is one load away and that calling it missing is always wrong,
+  and a `tools_load` with no family is answered with the families that exist
+  rather than an error. Measured on six local models: all six now reach the
+  tool, where two of them used to give up.
+- A local model that falls into a repetition loop no longer blocks its run.
+  Ollama caps nothing on output, so such a model generated until the context
+  window was full: measured on a local 12b, a single turn ran past twenty
+  minutes and returned nothing, and the same turn answers in eight seconds once
+  the output is bounded. One turn now generates at most a quarter of its window
+  (1024 to 8192 tokens); `KRONN_OLLAMA_NUM_PREDICT` moves that bound and `0`
+  removes it.
+- The command Kronn offers to install or update Ollama now matches the machine
+  it runs on: Homebrew on macOS, winget on Windows, the vendor script on Linux.
+  That script refuses to run anywhere but Linux, so a Mac reading the update
+  badge was handed a command that could not work.
+
+---
+
 ## [0.13.2] - 2026-09-19
 
 ### Added

@@ -55,6 +55,19 @@ the details.
 `[src: file: backend/src/db/kronn_action_engine.rs]`
 `[src: file: frontend/src/lib/runResultPreview.ts]`
 
+Quick Exec cards also show the measured exit code and a folded, bounded stderr
+preview after reload. `SharedRun.exec_details` persists those diagnostics
+separately from `result`, so JSON/CSV business data keeps its original shape.
+The launch response exposes `exit_code` alongside stdout/stderr even when the
+command fails or the configured output parser rejects its stdout. A process
+that exits 0 but returns invalid JSON still has a failed run and exit code 0.
+Old records are not backfilled with invented process metadata; timeouts and
+spawn failures have no captured exit code. Signal deaths keep a null code.
+[src: file: backend/src/api/quick_execs.rs:397-452]
+[src: file: backend/src/models/shared_runs.rs:34-58]
+[src: file: backend/src/db/sql/187_shared_run_exec_details.sql:1-3]
+[src: file: frontend/src/components/RunStatusCard.tsx:308-324]
+
 `KRONN:CHAIN_QP` remains a temporary variable-free Quick Prompt compatibility
 path; `kronn-action` is the canonical contract for new agent proposals.
 
@@ -74,10 +87,10 @@ Automation has no additional page-title band: the selected workflow, Quick
 Prompt, Quick API or Quick Exec header is the single visible content header.
 `[src: file: frontend/src/components/CollectionShell.css:2-5]`
 `[src: file: frontend/src/components/workflows/WorkflowDetail.tsx:1712-1716]`
-`[src: file: frontend/src/pages/WorkflowsPage.tsx:2141-2144]`
-`[src: file: frontend/src/pages/WorkflowsPage.tsx:2623-2633]`
-`[src: file: frontend/src/pages/WorkflowsPage.tsx:3159-3169]`
-`[src: file: frontend/src/pages/WorkflowsPage.tsx:3570-3582]`
+`[src: file: frontend/src/pages/WorkflowsPage.tsx:2139-2142]`
+`[src: file: frontend/src/pages/WorkflowsPage.tsx:2621-2631]`
+`[src: file: frontend/src/pages/WorkflowsPage.tsx:3157-3167]`
+`[src: file: frontend/src/pages/WorkflowsPage.tsx:3568-3580]`
 
 The Projects initial loading state keeps the complete master/detail shell
 mounted. Its indicators render inside the sidebar and detail slots rather than
@@ -99,8 +112,8 @@ Navigation preferences are local UI state. Automatisation restores its active
 resource and collapsed resource categories, while search expands matching
 categories only temporarily. `[src: file: frontend/src/pages/WorkflowsPage.tsx:49-90]`
 `[src: file: frontend/src/pages/WorkflowsPage.tsx:156-275]`
-`[src: file: frontend/src/pages/WorkflowsPage.tsx:606-624]`
-`[src: file: frontend/src/pages/WorkflowsPage.tsx:1635-1661]` Pages follows the
+`[src: file: frontend/src/pages/WorkflowsPage.tsx:604-622]`
+`[src: file: frontend/src/pages/WorkflowsPage.tsx:1633-1659]` Pages follows the
 same contract for its active Page and sidebar categories, including a safe
 fallback when a saved Page was removed. `[src: file: frontend/src/pages/PagesPage.tsx:23-52]`
 `[src: file: frontend/src/pages/PagesPage.tsx:80-135]`
@@ -152,6 +165,22 @@ full operational payload is collapsed behind “Show details” by default; that
 toggle lives in the fixed card header so expanding it never moves the pointer
 target. `[src: file: backend/src/db/discussions.rs]`
 `[src: file: frontend/src/components/MessageBubble.tsx]`
+
+**Attachment preview:** message attachments and the Assets panel share the
+same carousel for images, videos and disk-backed text files (including JSON
+and logs). Text is fetched only on selection, through the authenticated API,
+and rendered as escaped source. The browser decodes at most 256 KiB, cancels
+the remaining stream and labels a truncated preview; the full original file
+remains downloadable. Invalid UTF-8/binary text and failed requests show an
+error with download access. Changing the selection cancels the previous text
+request. This is a client preview limit, not a server streaming guarantee:
+the existing content endpoint still reads the stored file before responding.
+Office documents represented only by extracted text (no original disk file)
+remain filename chips.
+`[src: file: frontend/src/components/TextAttachmentPreview.tsx:1]`
+`[src: file: frontend/src/lib/textAttachmentPreview.ts:1]`
+`[src: file: frontend/src/lib/mediaKind.ts:1]`
+`[src: file: backend/src/api/discussions/context.rs:448]`
 
 **Compact routing receipt:** durable targets are shown inline in the human
 author header (`human → @agent · tier`) instead of consuming a separate message

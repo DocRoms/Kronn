@@ -1,0 +1,285 @@
+{
+  "source_commit": "7d1656f187040996f768d01e0dab7acd6dbb4d1f",
+  "binary_sha256": "fa4e8863e000f44a35222178db6309d2fa75a4c2d58a80e5dd10bb0b57ca41f7",
+  "started_at": "2026-09-22T16:07:41.240095+00:00",
+  "description": "Six sequential local models; native media job without a supplied connection id; no media worker runs.",
+  "runs": [
+    {
+      "model": "qwen3.5:2b",
+      "started_at": "2026-09-22T16:07:41.240719+00:00",
+      "command": [
+        "/private/tmp/kt686-media-native-bin",
+        "api::agent_tools::quick_prompt_bench::bench_quick_prompt_native_catalogue",
+        "--exact",
+        "--ignored",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exit_code": 0,
+      "finished_at": "2026-09-22T16:07:50.217850+00:00",
+      "cells": [
+        {
+          "calls": [
+            {
+              "arguments": {
+                "modality": "image",
+                "prompt": "Phare maritime au lever du jour, soleil levant sur l'eau, lumière dorée et bleue, coucher de soleil, ambiance dramatique, haute définition, photoréaliste",
+                "resolution": "1024x768"
+              },
+              "error": "resolution must be one of 480p, 720p, 1080p",
+              "name": "media_generate",
+              "ok": true
+            },
+            {
+              "arguments": {
+                "modality": "image",
+                "prompt": "Phare maritime au lever du jour, soleil levant sur l'eau, lumière dorée et bleue, coucher de soleil, ambiance dramatique, haute définition, photoréaliste",
+                "resolution": "720p"
+              },
+              "error": null,
+              "name": "media_generate",
+              "ok": true
+            }
+          ],
+          "catalogue_bytes": 42775,
+          "emitted_text": "Je vais lancer une image pour générer un phare au lever du jour. Je confirme le lancement sans attendre le résultat.Je recommande de générer une image de phare au lever du jour. Pour le formatage de la résolution, je vais utiliser 720p.Lancement de la génération d'image de phare au lever du jour. Le job a été créé avec le ID `media-32c254e3f8a9ccbacc7d4140cc58d9874c668678ba30fd713ed89767a6ea5b4e`. Le résultat sera disponible plus tard.",
+          "exit_success": true,
+          "first_prompt_tokens": 12217,
+          "model": "qwen3.5:2b",
+          "ok": true,
+          "persisted": true,
+          "prompt": "Lance la génération d'une image de phare au lever du jour. Confirme seulement son lancement, sans attendre le résultat.",
+          "reached": true,
+          "scenario": "media",
+          "seconds": 6.145018292,
+          "tiered": false,
+          "total_prompt_tokens": 37176,
+          "turns": 3
+        }
+      ],
+      "log_sha256": "edf6ed6b1ce0913ef76612384fc21c7a66e642ef9f06299e8e57d72d81a02710"
+    },
+    {
+      "model": "qwen3.5:4b",
+      "started_at": "2026-09-22T16:07:50.226855+00:00",
+      "command": [
+        "/private/tmp/kt686-media-native-bin",
+        "api::agent_tools::quick_prompt_bench::bench_quick_prompt_native_catalogue",
+        "--exact",
+        "--ignored",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exit_code": 0,
+      "finished_at": "2026-09-22T16:07:58.731296+00:00",
+      "cells": [
+        {
+          "calls": [
+            {
+              "arguments": {
+                "modality": "image",
+                "prompt": "Phare au lever du jour - un phare élégant illuminé par les premiers rayons de soleil, ciel rose et orange, brume matinale"
+              },
+              "error": null,
+              "name": "media_generate",
+              "ok": true
+            }
+          ],
+          "catalogue_bytes": 42775,
+          "emitted_text": "Lancement confirmé. La génération de l'image du phare au lever du jour a été initiée avec succès (job_id: media-8254904633c85b63d40ae59714201d66038ba3f2403e736d5dfc0e480a871e2b).",
+          "exit_success": true,
+          "first_prompt_tokens": 12217,
+          "model": "qwen3.5:4b",
+          "ok": true,
+          "persisted": true,
+          "prompt": "Lance la génération d'une image de phare au lever du jour. Confirme seulement son lancement, sans attendre le résultat.",
+          "reached": true,
+          "scenario": "media",
+          "seconds": 8.404757875,
+          "tiered": false,
+          "total_prompt_tokens": 24661,
+          "turns": 2
+        }
+      ],
+      "log_sha256": "8efbad0fda03f6d1910f2af8ef293b42e408bbfde1a1756a6c8a84b9f73c2d81"
+    },
+    {
+      "model": "gemma4:e2b",
+      "started_at": "2026-09-22T16:07:58.747944+00:00",
+      "command": [
+        "/private/tmp/kt686-media-native-bin",
+        "api::agent_tools::quick_prompt_bench::bench_quick_prompt_native_catalogue",
+        "--exact",
+        "--ignored",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exit_code": 0,
+      "finished_at": "2026-09-22T16:08:09.991496+00:00",
+      "cells": [
+        {
+          "calls": [
+            {
+              "arguments": {
+                "modality": "image",
+                "prompt": "a lighthouse at sunrise"
+              },
+              "error": null,
+              "name": "media_generate",
+              "ok": true
+            }
+          ],
+          "catalogue_bytes": 42775,
+          "emitted_text": "La génération de l'image d'un phare au lever du jour a été lancée.",
+          "exit_success": true,
+          "first_prompt_tokens": 11548,
+          "model": "gemma4:e2b",
+          "ok": true,
+          "persisted": true,
+          "prompt": "Lance la génération d'une image de phare au lever du jour. Confirme seulement son lancement, sans attendre le résultat.",
+          "reached": true,
+          "scenario": "media",
+          "seconds": 11.123218375,
+          "tiered": false,
+          "total_prompt_tokens": 23284,
+          "turns": 2
+        }
+      ],
+      "log_sha256": "20f24ecfca8dca4d28a92ff1a27d084bf800af97045b23f4a0e57f4d0ae296ce"
+    },
+    {
+      "model": "gemma4:e4b",
+      "started_at": "2026-09-22T16:08:10.009061+00:00",
+      "command": [
+        "/private/tmp/kt686-media-native-bin",
+        "api::agent_tools::quick_prompt_bench::bench_quick_prompt_native_catalogue",
+        "--exact",
+        "--ignored",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exit_code": 0,
+      "finished_at": "2026-09-22T16:08:26.078756+00:00",
+      "cells": [
+        {
+          "calls": [
+            {
+              "arguments": {
+                "modality": "image",
+                "prompt": "phare au lever du jour",
+                "wake_when_ready": false
+              },
+              "error": null,
+              "name": "media_generate",
+              "ok": true
+            }
+          ],
+          "catalogue_bytes": 42775,
+          "emitted_text": "La génération de l'image de phare au lever du jour a été lancée avec succès.\n\n**ID du job :** `media-4b24b36d753f819b45f743066ac15638712e97052c6daf5cf628c2e2cdfe8baf`\n\nVous recevrez le résultat dans cette discussion lorsque le processus sera terminé.",
+          "exit_success": true,
+          "first_prompt_tokens": 11548,
+          "model": "gemma4:e4b",
+          "ok": true,
+          "persisted": true,
+          "prompt": "Lance la génération d'une image de phare au lever du jour. Confirme seulement son lancement, sans attendre le résultat.",
+          "reached": true,
+          "scenario": "media",
+          "seconds": 15.95842475,
+          "tiered": false,
+          "total_prompt_tokens": 23292,
+          "turns": 2
+        }
+      ],
+      "log_sha256": "b657114395d0849ebf56761005aa3b67514c23582e227000cdca5f2b388ece60"
+    },
+    {
+      "model": "gemma4:12b-mlx",
+      "started_at": "2026-09-22T16:08:26.094048+00:00",
+      "command": [
+        "/private/tmp/kt686-media-native-bin",
+        "api::agent_tools::quick_prompt_bench::bench_quick_prompt_native_catalogue",
+        "--exact",
+        "--ignored",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exit_code": 0,
+      "finished_at": "2026-09-22T16:08:42.297555+00:00",
+      "cells": [
+        {
+          "calls": [
+            {
+              "arguments": {
+                "modality": "image",
+                "prompt": "un phare au lever du jour"
+              },
+              "error": null,
+              "name": "media_generate",
+              "ok": true
+            }
+          ],
+          "catalogue_bytes": 42775,
+          "emitted_text": "C'est fait, la génération de l'image a été lancée.",
+          "exit_success": true,
+          "first_prompt_tokens": 11552,
+          "model": "gemma4:12b-mlx",
+          "ok": true,
+          "persisted": true,
+          "prompt": "Lance la génération d'une image de phare au lever du jour. Confirme seulement son lancement, sans attendre le résultat.",
+          "reached": true,
+          "scenario": "media",
+          "seconds": 16.092565125,
+          "tiered": false,
+          "total_prompt_tokens": 23302,
+          "turns": 2
+        }
+      ],
+      "log_sha256": "9e05f6bc6d057b9188f3372639341a4a6e8cccfdba083adbfe5ea5b0176fd4c6"
+    },
+    {
+      "model": "qwen3.8:27b-mlx",
+      "started_at": "2026-09-22T16:08:42.339038+00:00",
+      "command": [
+        "/private/tmp/kt686-media-native-bin",
+        "api::agent_tools::quick_prompt_bench::bench_quick_prompt_native_catalogue",
+        "--exact",
+        "--ignored",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exit_code": 0,
+      "finished_at": "2026-09-22T16:09:33.629094+00:00",
+      "cells": [
+        {
+          "calls": [
+            {
+              "arguments": {
+                "modality": "image",
+                "prompt": "Un phare au lever du jour, lumière dorée du soleil levant, ciel rose et orange, mer calme, ambiance paisible"
+              },
+              "error": null,
+              "name": "media_generate",
+              "ok": true
+            }
+          ],
+          "catalogue_bytes": 42775,
+          "emitted_text": "Je lance la génération d'image.Lancement confirmé ✅\n\n- **Job** : `media-fe5fac24e1f2bc9540aa7cdf9b62254622de5f4d6e5526533e416bf6e5e2ac14`\n- **Modèle** : `openai/gpt-image-2`\n- **Statut** : `pending`\n- **Prompt** : phare au lever du jour, lumière dorée, ciel rose/orange, mer calme\n\nL'image arrivera dans la discussion dès qu'elle sera prête — je ne l'attends pas.",
+          "exit_success": true,
+          "first_prompt_tokens": 12223,
+          "model": "qwen3.8:27b-mlx",
+          "ok": true,
+          "persisted": true,
+          "prompt": "Lance la génération d'une image de phare au lever du jour. Confirme seulement son lancement, sans attendre le résultat.",
+          "reached": true,
+          "scenario": "media",
+          "seconds": 51.135500625,
+          "tiered": false,
+          "total_prompt_tokens": 24663,
+          "turns": 2
+        }
+      ],
+      "log_sha256": "f7cbb5f7b623252a711595219886f378c601eea0303871b883059a8ac872497e"
+    }
+  ],
+  "finished_at": "2026-09-22T16:09:33.705733+00:00"
+}
