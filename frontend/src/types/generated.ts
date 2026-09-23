@@ -2490,6 +2490,16 @@ poll_policy: PollBackoffPolicy,
  */
 pacing?: PacingState, project_id: string | null, };
 
+/**
+ * A bounded read-only view for monitoring several rooms without loading their
+ * full transcripts. Missing or unreadable discussions fail independently.
+ */
+export type DiscussionMonitorItem = { id: string, preview: DiscussionMonitorPreview | null, error: string | null, };
+
+export type DiscussionMonitorMessage = { id: string, role: string, channel: string, content: string, truncated: boolean, agent_type: AgentType | null, model: string | null, author_pseudo: string | null, author_cli_ordinal: number | null, timestamp: string, };
+
+export type DiscussionMonitorPreview = { plan: PlanningPlanStats, title: string, shared_id: string | null, agent: AgentType | null, connection_name: string | null, awaiting_agent: boolean, agent_running: boolean, progress_phase: string | null, pending_question_count: number, updated_at: string, messages: Array<DiscussionMonitorMessage>, partial_response: DiscussionMonitorMessage | null, };
+
 export type DiscussionNativeAgentMode = { disabled: boolean, };
 
 export type DiscussionNote = { sort_order: number, message: DiscussionMessage, attachments: Array<MessageAttachment>,

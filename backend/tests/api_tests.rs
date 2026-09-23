@@ -25,6 +25,121 @@ use futures::{SinkExt, StreamExt};
 use kronn::models::WsMessage;
 use kronn::{build_router_with_auth, AppState, DEFAULT_MAX_CONCURRENT_AGENTS};
 
+#[tokio::test]
+async fn discussion_monitor_is_bounded_read_only_and_isolates_missing_rooms() {
+    let state = test_state();
+    state.db.with_conn(|conn| {
+        let now = chrono::Utc::now().to_rfc3339();
+        for (id, agent) in [("monitor-a", "Codex"), ("monitor-b", "ClaudeCode"), ("monitor-bad", "unknown-agent")] {
+            conn.execute("INSERT INTO discussions (id, title, agent, created_at, updated_at) VALUES (?1, ?1, ?2, ?3, ?3)", rusqlite::params![id, agent, now])?;
+        }
+        // Exercise every status, placement and blocker state. A finished task
+        // stays done even with an active blocker; archived tasks disappear.
+        let mut number = 0;
+        for placement in ["active", "later"] {
+            for status in ["idea", "todo", "in_progress", "blocked", "done", "archived"] {
+                for blocker in ["idea", "todo", "done", "archived"] {
+                    number += 1;
+                    let id = format!("monitor-task-{number}");
+                    let blocker_id = format!("monitor-blocker-{number}");
+                    for (task_id, task_number, task_status) in [(&id, number, status), (&blocker_id, number + 100, blocker)] {
+                        conn.execute("INSERT INTO planning_tasks (id, task_number, title, status, created_at, updated_at) VALUES (?1, ?2, ?1, ?3, ?4, ?4)", rusqlite::params![task_id, task_number, task_status, now])?;
+                    }
+                    conn.execute("INSERT INTO planning_task_discussions (task_id, discussion_id, placement, created_at) VALUES (?1, 'monitor-a', ?2, ?3)", rusqlite::params![id, placement, now])?;
+                    conn.execute("INSERT INTO planning_task_blockers (task_id, blocker_task_id, created_at) VALUES (?1, ?2, ?3)", rusqlite::params![id, blocker_id, now])?;
+                }
+            }
+        }
+        for index in 0..12 {
+            conn.execute("INSERT INTO messages (id, discussion_id, role, content, timestamp, sort_order, agent_type, model) VALUES (?1, 'monitor-a', 'Agent', ?2, ?3, ?4, 'Codex', 'served-model')",
+                rusqlite::params![format!("monitor-message-{index}"), "é🙂".repeat(5000), now, index])?;
+        }
+        conn.execute("UPDATE discussions SET awaiting_agent = 1, partial_response = ?1, partial_response_message_id = 'partial-id', partial_response_agent_type = 'Codex', partial_response_model = 'live-model', partial_response_started_at = ?2 WHERE id = 'monitor-a'",
+            rusqlite::params![format!("{}終", "é🙂".repeat(5000)), now])?;
+        conn.execute("INSERT INTO agent_dispatch_jobs (id, discussion_id, trigger_message_id, trigger_sort_order, dedupe_key, status, agent_started_at, progress_phase, available_at, created_at, updated_at) VALUES ('monitor-job', 'monitor-a', 'monitor-message-0', 0, 'monitor-job', 'Running', ?1, 'tool_activity', ?1, ?1, ?1)", [&now])?;
+        Ok(())
+    }).await.unwrap();
+    let app = build_router_with_auth(state.clone(), false);
+    let (status, body) = get_json(
+        app.clone(),
+        "/api/discussions/monitor?ids=monitor-a,missing,monitor-b,monitor-bad,monitor-a",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["success"], true, "{body}");
+    let items = body["data"].as_array().unwrap();
+    assert_eq!(items.len(), 4, "selection is deduplicated in order");
+    let preview = &items[0]["preview"];
+    let expected_plan = state
+        .db
+        .with_read_conn(|conn| {
+            Ok(serde_json::to_value(
+                kronn::db::planning::get_discussion_plan(conn, "monitor-a")?.stats,
+            )?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(preview["plan"], expected_plan);
+    assert_eq!(
+        preview["plan"],
+        serde_json::json!({"ready":2,"blocked":10,"in_progress":2,"ideas":2,"done":4,"later":20})
+    );
+    assert_eq!(
+        items[2]["preview"]["plan"],
+        serde_json::json!({"ready":0,"blocked":0,"in_progress":0,"ideas":0,"done":0,"later":0})
+    );
+    assert_eq!(preview["agent_running"], true);
+    assert_eq!(preview["progress_phase"], "tool_activity");
+    let messages = preview["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 8);
+    assert_eq!(messages[0]["id"], "monitor-message-4");
+    assert_eq!(messages[7]["id"], "monitor-message-11");
+    assert_eq!(
+        messages[0]["content"].as_str().unwrap().chars().count(),
+        2048
+    );
+    assert_eq!(messages[0]["truncated"], true);
+    assert_eq!(messages[0]["model"], "served-model");
+    let partial = &preview["partial_response"];
+    assert_eq!(partial["content"].as_str().unwrap().chars().count(), 4096);
+    assert!(partial["content"].as_str().unwrap().ends_with('終'));
+    assert_eq!(partial["truncated"], true);
+    assert_eq!(partial["model"], "live-model");
+    assert_eq!(items[1]["error"], "not_found");
+    assert_eq!(items[2]["preview"]["title"], "monitor-b");
+    assert_eq!(items[3]["error"], "unavailable");
+    assert!(items[3]["preview"].is_null());
+    state.db.with_conn(|conn| {
+        let unchanged: (u32, u32, u32) = conn.query_row("SELECT (SELECT COUNT(*) FROM messages), (SELECT COUNT(*) FROM agent_dispatch_jobs), length(partial_response) FROM discussions WHERE id = 'monitor-a'", [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+        assert_eq!(unchanged, (12, 1, 10001), "monitoring does not mutate, dispatch, or recover");
+        conn.execute("DELETE FROM discussions WHERE id = 'monitor-b'", [])?;
+        Ok(())
+    }).await.unwrap();
+    let (_, body) = get_json(app, "/api/discussions/monitor?ids=monitor-a,monitor-b").await;
+    assert!(body["data"][0]["preview"].is_object());
+    assert_eq!(body["data"][1]["error"], "not_found");
+}
+
+#[tokio::test]
+async fn discussion_monitor_rejects_unbounded_selections() {
+    let app = test_app();
+    for uri in [
+        "/api/discussions/monitor".into(),
+        format!(
+            "/api/discussions/monitor?ids={}",
+            (0..13)
+                .map(|i| format!("room-{i}"))
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        format!("/api/discussions/monitor?ids={}", "x".repeat(129)),
+    ] {
+        let (status, body) = get_json(app.clone(), &uri).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(body["success"], false);
+    }
+}
+
 fn sha256_lower_hex(bytes: &[u8]) -> String {
     Sha256::digest(bytes)
         .iter()

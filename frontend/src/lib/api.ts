@@ -39,6 +39,7 @@ import type {
   ImportPluginBundleReport,
   Discussion,
   DiscussionDetail,
+  DiscussionMonitorItem,
   DiscussionNativeAgentMode,
   DiscussionAgentHandoffMode,
   DiscussionExecutionVariableRetention,
@@ -590,6 +591,7 @@ async function api<T>(
   method: string,
   path: string,
   body?: unknown,
+  signal?: AbortSignal,
 ): Promise<T> {
   const headers: Record<string, string> = { ...authHeaders() };
   // Distinguish "no body" (undefined — e.g. GET, or POST with no payload)
@@ -604,6 +606,7 @@ async function api<T>(
     method,
     headers,
     body: hasBody ? JSON.stringify(body) : undefined,
+    signal,
   });
 
   const contentType = res.headers.get('content-type') ?? '';
@@ -1490,6 +1493,9 @@ function webSessionId(): string {
 }
 
 export const discussions = {
+  monitor: (ids: string[], signal?: AbortSignal) => api<DiscussionMonitorItem[]>(
+    'GET', `/discussions/monitor?ids=${encodeURIComponent(ids.join(','))}`, undefined, signal,
+  ),
   /** KT-595 — `DiscussionListItem` is `Discussion` plus `pending_question_count`,
    *  so a room waiting on a decision says so in the list, before it is opened. */
   list: () => api<DiscussionListItem[]>('GET', '/discussions'),

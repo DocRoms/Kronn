@@ -19,6 +19,7 @@ pub(crate) mod ceilings;
 pub mod context;
 pub mod crud;
 pub mod messaging;
+pub mod monitor;
 pub mod orchestration;
 pub(crate) mod routing;
 pub mod runtime;
