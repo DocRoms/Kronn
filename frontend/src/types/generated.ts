@@ -837,6 +837,36 @@ export type BootstrapProjectRequest = { name: string, description: string, agent
 
 export type BootstrapProjectResponse = { project_id: string, discussion_id: string, };
 
+export type BrowseEntry = { name: string, path: string,
+/**
+ * This directory is itself a working copy — worth selecting as is.
+ */
+is_repository: boolean, };
+
+export type BrowseListing = {
+/**
+ * The directory listed, as Kronn reaches it.
+ */
+path: string,
+/**
+ * Its parent, when the parent is still inside an allowed root.
+ */
+parent: string | null,
+/**
+ * Where browsing may start. Always sent, so the wizard can offer them
+ * again after a refusal.
+ */
+roots: Array<BrowseRoot>, entries: Array<BrowseEntry>,
+/**
+ * Subdirectories beyond the cap, not listed.
+ */
+truncated: boolean, };
+
+/**
+ * Named server-visible root offered by the setup folder browser.
+ */
+export type BrowseRoot = { label: string, path: string, };
+
 /**
  * The whole assessment: a verdict, plus every axis so the reason is visible.
  */
@@ -4795,7 +4825,11 @@ mcp_sync_report?: ProjectMcpSyncReport | null, default_skill_ids?: Array<string>
  * system prompt prelude. Stored as in-row JSON (small data,
  * projects rarely have more than 5 links).
  */
-linked_repos?: Array<LinkedRepo>, created_at: string, updated_at: string, };
+linked_repos?: Array<LinkedRepo>,
+/**
+ * Worktree preparation defaults inherited by this project's isolated workflows.
+ */
+workspace?: ProjectWorkspace | null, created_at: string, updated_at: string, };
 
 export type ProjectDockerAction = "start" | "stop" | "restart";
 
@@ -4852,6 +4886,12 @@ export type ProjectMcpSyncReport = { status: ProjectMcpSyncStatus, detail?: stri
 export type ProjectMcpSyncStatus = "Written" | "Unchanged" | "ReadOnly" | "MissingSecrets" | "Failed";
 
 export type ProjectUsage = { project_id: string, project_name: string, tokens_used: number, cost: CostAggregate, };
+
+/**
+ * Project defaults for worktree preparation hooks. Workflow hooks override them
+ * field by field; omitted fields inherit the project value.
+ */
+export type ProjectWorkspace = { hooks: WorkspaceHooks, };
 
 export type ProjectWriteAccess = { status: ProjectWriteAccessStatus, reason?: string | null, writable_roots?: Array<string>, };
 
@@ -5066,6 +5106,16 @@ export type QuickExec = { id: string, name: string, icon: string, description: s
  * User-pinned / favorite Quick Exec in the Automation library.
  */
 pinned: boolean, created_at: string, updated_at: string, };
+
+export type QuickExecDiagnostics = {
+/**
+ * None when the process did not start, timed out or died on a signal.
+ */
+exit_code: number | null,
+/**
+ * Captured, bounded stderr; None means unavailable, not an empty stream.
+ */
+stderr: string | null, };
 
 export type QuickExecExportEnvelope = { kind: string, version: number, exported_at: string, quick_exec: QuickExec, };
 
@@ -5611,7 +5661,7 @@ error: string | null, };
 
 export type RunQuickExecRequest = { variables?: Record<string, string>, };
 
-export type RunQuickExecResponse = { run_id: string, success: boolean, duration_ms: number, data: any, stdout: string | null, stderr: string | null, error: string | null, };
+export type RunQuickExecResponse = { run_id: string, success: boolean, duration_ms: number, exit_code: number | null, data: any, stdout: string | null, stderr: string | null, error: string | null, };
 
 export type RunStatus = "Pending" | "Running" | "Success" | "Partial" | "Failed" | "Cancelled" | "WaitingApproval" | "StoppedByGuard" | "Interrupted";
 
@@ -6001,13 +6051,17 @@ recovery_code: string, };
 
 export type SetScanPathsRequest = { paths: Array<string>, };
 
-export type SetupStatus = { is_first_run: boolean, current_step: SetupStep, agents_detected: Array<AgentDetection>, scan_paths_set: boolean, repos_detected: Array<DetectedRepo>, default_scan_path: string | null, };
+export type SetupStatus = { is_first_run: boolean, current_step: SetupStep, agents_detected: Array<AgentDetection>, scan_paths_set: boolean, repos_detected: Array<DetectedRepo>, default_scan_path: string | null,
+/**
+ * Paths actually scanned, exposed to diagnose empty results and missing mounts.
+ */
+scan_paths_explored: Array<string>, };
 
 export type SetupStep = "Agents" | "ScanPaths" | "Detection" | "Complete";
 
 export type ShareDiscussionRequest = { contact_ids: Array<string>, };
 
-export type SharedRun = { id: string, kind: SharedRunKind, source_id: string, project_id: string | null, discussion_id: string | null, status: SharedRunStatus, started_at: string | null, finished_at: string | null, duration_ms: number | null, result: unknown, diagnostic: string | null, created_at: string, updated_at: string, };
+export type SharedRun = { id: string, kind: SharedRunKind, source_id: string, project_id: string | null, discussion_id: string | null, status: SharedRunStatus, started_at: string | null, finished_at: string | null, duration_ms: number | null, result: unknown, diagnostic: string | null, exec_details?: QuickExecDiagnostics, created_at: string, updated_at: string, };
 
 export type SharedRunKind = "quick_prompt" | "quick_api" | "quick_exec" | "workflow" | "media";
 

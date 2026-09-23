@@ -16,7 +16,8 @@ import { filterRuns, groupRunsByParent, RUN_PAGE_SIZE, type RunStatusFilter } fr
 import { formatDurationCompact } from '../../lib/kronnToolParser';
 import { computeGotoEdges } from '../../lib/stepGraph';
 import { StepBranchMap } from './StepBranchMap';
-import { RunDetail, RunStatusTrail } from './RunDetail';
+import { RunStatusTrail } from './RunDetail';
+import { LoadedRunDetail } from './LoadedRunDetail';
 import { RunStatusCard } from '../RunStatusCard';
 import { workflowRunStatusCardModel } from '../../lib/runStatusCardModel';
 import { liveStepWaitingKey, runStatusTimeline } from '../../lib/workflowUiUtils';
@@ -2424,7 +2425,7 @@ export function WorkflowDetail({ workflow, runs, availableAgentTypes, agentChoic
             </button>
             {expanded && (<>
             <RunStatusCard runId={run.id} model={workflowRunStatusCardModel(run)} />
-            <RunDetail
+            <LoadedRunDetail
               run={run}
               workflowSteps={workflow.steps}
               onNavigateToWorkflow={onNavigateToWorkflow}

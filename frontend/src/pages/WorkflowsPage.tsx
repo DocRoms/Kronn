@@ -1,4 +1,5 @@
 import { Fragment, useState, useRef, useMemo, useEffect, useCallback } from 'react';
+import { isUsableExternalConnection, unusableExternalAgentTargets } from '../lib/externalAgentIdentity';
 import { appendLiveBuffer } from '../lib/workflowUiUtils';
 import { useIsMobile } from '../hooks/useMediaQuery';
 import { useT } from '../lib/I18nContext';
@@ -342,17 +343,18 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
   const { data: directivesCatalog } = useApi(() => directivesApi.list(), []);
   const externalAgentTargets = useMemo<AgentSwitchTarget[]>(() =>
     (externalConnectionList ?? [])
-      .filter(connection =>
-        (connection.origin_preset === 'open_router' || connection.origin_preset === 'other')
-        && Boolean(connection.endpoint)
-        && Boolean(connection.economy_model || connection.default_model || connection.reasoning_model)
-      )
+      .filter(isUsableExternalConnection)
       .map(externalConnectionSwitchTarget),
   [externalConnectionList]);
   const compareAgentChoices = useMemo<AgentSwitchTarget[]>(() => [
     ...(installedAgentTypes ?? []).map(agent => ({ agent })),
     ...externalAgentTargets,
   ], [externalAgentTargets, installedAgentTypes]);
+  // Show unavailable connections with their reason instead of hiding them.
+  const unusableCompareChoices = useMemo(
+    () => unusableExternalAgentTargets(externalConnectionList ?? []),
+    [externalConnectionList],
+  );
   const recordQuickPromptUsage = useCallback((qpId: string, launches: number) => {
     setQuickPromptUsage(current =>
       current[qpId] === launches ? current : { ...current, [qpId]: launches }
@@ -799,9 +801,10 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
       ]);
       if (detailSeqRef.current !== seq) return;
       setDetailWorkflow(wf);
-      const runs = focusedRun && !page.runs.some(run => run.id === focusedRun.id)
-        ? [...page.runs, focusedRun]
-        : page.runs;
+      const runs = !focusedRun ? page.runs
+        : page.runs.some(run => run.id === focusedRun.id)
+          ? page.runs.map(run => run.id === focusedRun.id ? focusedRun : run)
+          : [...page.runs, focusedRun];
       setDetailRuns(runs);
       setDetailRunPageCount(page.runs.length);
       setDetailRunTotal(page.total);
@@ -3250,6 +3253,21 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                                     </span>
                                   );
                                 })}
+                                {unusableCompareChoices.map(choice => (
+                                  <span
+                                    key={`unusable-${choice.connectionId}`}
+                                    className="qp-compare-target qp-compare-target--unusable"
+                                    data-testid={`qp-compare-chip-unusable-${choice.connectionId}`}
+                                    title={t(`qp.compareAgents.unusable.${choice.reason}`)}
+                                  >
+                                    <span className="qp-compare-target-empty">
+                                      {choice.label}
+                                      <span className="qp-compare-target-reason">
+                                        {t(`qp.compareAgents.unusable.${choice.reason}`)}
+                                      </span>
+                                    </span>
+                                  </span>
+                                ))}
                                 {missingChoices.map(choice => {
                                   const label = choice.label ?? AGENT_LABELS[choice.agent] ?? choice.agent;
                                   const key = choice.connectionId ?? choice.agent;

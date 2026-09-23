@@ -7343,6 +7343,19 @@
 .qp-compare-target--inactive:hover {
   opacity: 0.85;
 }
+/* a connection that cannot run yet: shown, named, and not clickable. */
+.qp-compare-target--unusable {
+  border: 1px dashed var(--kr-border, rgba(255, 255, 255, 0.18));
+  color: var(--kr-text-tertiary);
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.qp-compare-target-reason {
+  color: var(--kr-text-muted);
+  font-weight: 400;
+  font-size: var(--kr-fs-2xs);
+}
+
 .qp-compare-target-toggle {
   width: 21px;
   height: 21px;

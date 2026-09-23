@@ -3,11 +3,18 @@ import type { LivePageDetail } from '../types/generated';
 import { pages as pagesApi } from '../lib/api';
 import {
   buildSandboxDocument,
+  hostTheme,
   createLivePageOpenLinkRelay,
   runtimeData,
 } from '../lib/live-page-sandbox';
 import { openStandaloneDiscussion } from '../lib/live-page-navigation';
-import { useActionStatesInFrame, useLivePageActions } from '../hooks/useLivePageActions';
+import {
+  useActionStatesInFrame,
+  useLivePageActions,
+  useLivePageActionSlot,
+  useLivePageTheme,
+  usePublishPageDataWhenChanged,
+} from '../hooks/useLivePageActions';
 import { LivePageActionOverlay } from '../components/LivePageActionOverlay';
 import { useT } from '../lib/I18nContext';
 import { userError } from '../lib/userError';
@@ -32,6 +39,7 @@ export function StandaloneLivePage({ pageId }: { pageId: string }) {
     launches: pageLaunches,
     close: closePageAction,
     handleIntent: handlePageActionIntent,
+    moveAnchor: movePageActionAnchor,
     handleChanged: handlePageActionChanged,
     reload: reloadPageActions,
   } = useLivePageActions(() => setActionUnavailable(true));
@@ -57,7 +65,7 @@ export function StandaloneLivePage({ pageId }: { pageId: string }) {
   }, [detail]);
 
   const sandboxDocument = useMemo(
-    () => detail ? buildSandboxDocument(detail.revision.html, bridgeChannel) : '',
+    () => detail ? buildSandboxDocument(detail.revision.html, bridgeChannel, hostTheme()) : '',
     [bridgeChannel, detail],
   );
   const publishToFrame = useCallback(() => {
@@ -76,16 +84,21 @@ export function StandaloneLivePage({ pageId }: { pageId: string }) {
     const relay = createLivePageOpenLinkRelay(bridgeChannel, undefined, intent => {
       setActionUnavailable(false);
       handlePageActionIntent(intent);
-    });
+    }, movePageActionAnchor);
     linkRelayRef.current = relay;
     return () => {
       if (linkRelayRef.current === relay) linkRelayRef.current = null;
       relay.dispose();
     };
-  }, [bridgeChannel, handlePageActionIntent]);
-  useEffect(() => { publishToFrame(); }, [publishToFrame]);
+  }, [bridgeChannel, handlePageActionIntent, movePageActionAnchor]);
+  usePublishPageDataWhenChanged(detail, publishToFrame);
   // Each button shows how its row's last run went, and keeps up while it runs.
   const publishAllToFrame = useActionStatesInFrame(iframeRef, bridgeChannel, pageLaunches, publishToFrame);
+  // The Page keeps a collapse of exactly this height open under the row.
+  const [actionCardHeight, setActionCardHeight] = useState<number | null>(null);
+  useLivePageActionSlot(iframeRef, bridgeChannel, pageActiveAction, actionCardHeight);
+  // La Page suit le thème de Kronn, pas celui du système.
+  useLivePageTheme(iframeRef, bridgeChannel);
 
   if (error) {
     return <main className="standalone-live-page-state" role="alert">{t('pages.standaloneLoadError', error)}</main>;
@@ -117,6 +130,7 @@ export function StandaloneLivePage({ pageId }: { pageId: string }) {
           onClose={closePageAction}
           onChanged={handlePageActionChanged}
           onOpenDiscussion={openStandaloneDiscussion}
+          onHeightChange={setActionCardHeight}
         />
       </div>
     </main>

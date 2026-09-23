@@ -50,6 +50,20 @@ describe('Live Page sandbox', () => {
     expect(output).toContain("element.closest('a[href]')");
     expect(output).toContain("closest.call(element,'[data-kronn-action]')");
     expect(output).toContain("type:'kronn:page-action'");
+    // La card s'ouvre sous la LIGNE : l'ancrage remonte au tr/li du bouton,
+    // et se réémet au défilement puisque le host ne défile pas avec la page.
+    expect(output).toContain("closest.call(element,'tr,li')");
+    expect(output).toContain("type:'kronn:page-action-anchor'");
+    expect(output).toContain("addEventListener('scroll',queueAnchor");
+    // La card se loge dans une VRAIE ligne du DOM de la page, qui pousse les
+    // suivantes — elle ne flotte plus au-dessus.
+    expect(output).toContain("kronn:page-action-slot");
+    expect(output).toContain("data-kronn-action-slot");
+    expect(output).toContain("row.parentNode.insertBefore(slotEl,row.nextSibling)");
+    // L'iframe est une origine opaque : elle n'herite pas du theme de l'hote,
+    // et `prefers-color-scheme` repond pour l'OS. On le lui dit donc.
+    expect(output).toContain("kronn:page-theme");
+    expect(output).toContain("document.documentElement.setAttribute('data-theme',t)");
     expect(output).toContain("anchor.target.toLowerCase()!=='_blank'");
     expect(output).toContain('userActivation&&!userActivation.isActive');
     expect(output).toContain("Object.defineProperty(window,'open'");
@@ -132,6 +146,87 @@ describe('Live Page sandbox', () => {
       bindings: { ticket: 'KT-538' },
       anchor: { left: 12, top: 40, width: 100, height: 32 },
     }));
+    relay.dispose();
+  });
+
+  it('carries the host theme into the document before the Page paints', () => {
+    const out = buildSandboxDocument('<html><head></head><body>x</body></html>', 'channel-1', 'light');
+    // Avant le markup de la Page : sinon elle peint une frame dans le mauvais theme.
+    expect(out.indexOf("setAttribute('data-theme',\"light\")")).toBeLessThan(out.indexOf('<body'));
+    expect(out).toContain("kronn:page-theme");
+  });
+
+  it('refuses a theme value that is not a plain identifier', () => {
+    const out = buildSandboxDocument('<html><head></head><body>x</body></html>', 'channel-1',
+      '"></script><script>alert(1)</script>');
+    expect(out).not.toContain('alert(1)');
+    expect(out).not.toContain(`setAttribute('data-theme',"`);
+  });
+
+  it('omits the theme entirely when the host has none yet', () => {
+    const out = buildSandboxDocument('<html><head></head><body>x</body></html>', 'channel-1', null);
+    expect(out).not.toContain(`setAttribute('data-theme',"`);
+  });
+
+  it('moves an open card without user activation, and cannot launch anything', async () => {
+    const postMessage = vi.fn();
+    const onAction = vi.fn();
+    const onAnchor = vi.fn();
+    const relay = createLivePageOpenLinkRelay('channel-1', vi.fn(), onAction, onAnchor);
+    relay.connect({ postMessage } as unknown as Window);
+    const port = (postMessage.mock.calls[0][2] as MessagePort[])[0];
+    // A scroll carries no activation. The card must still follow its row.
+    Object.defineProperty(navigator, 'userActivation', {
+      configurable: true,
+      value: { isActive: false, hasBeenActive: true },
+    });
+    port.postMessage({
+      type: 'kronn:page-action-anchor',
+      version: 1,
+      channel_id: 'channel-1',
+      anchor: { left: 12, top: 400, width: 880, height: 28 },
+      action_ref: 'frame-ticket',
+    });
+
+    await vi.waitFor(() => expect(onAnchor).toHaveBeenCalledWith({
+      left: 12, top: 400, width: 880, height: 28, slot: false,
+    }));
+    expect(onAction).not.toHaveBeenCalled();
+    relay.dispose();
+  });
+
+  it('reports an anchor that is the collapse the Page opened, not its row', async () => {
+    const postMessage = vi.fn();
+    const onAnchor = vi.fn();
+    const relay = createLivePageOpenLinkRelay('channel-1', vi.fn(), vi.fn(), onAnchor);
+    relay.connect({ postMessage } as unknown as Window);
+    const port = (postMessage.mock.calls[0][2] as MessagePort[])[0];
+    port.postMessage({
+      type: 'kronn:page-action-anchor',
+      version: 1,
+      channel_id: 'channel-1',
+      anchor: { left: 12, top: 400, width: 880, height: 186, slot: true },
+    });
+    await vi.waitFor(() => expect(onAnchor).toHaveBeenCalledWith({
+      left: 12, top: 400, width: 880, height: 186, slot: true,
+    }));
+    relay.dispose();
+  });
+
+  it('ignores an anchor whose rectangle is not finite', async () => {
+    const postMessage = vi.fn();
+    const onAnchor = vi.fn();
+    const relay = createLivePageOpenLinkRelay('channel-1', vi.fn(), vi.fn(), onAnchor);
+    relay.connect({ postMessage } as unknown as Window);
+    const port = (postMessage.mock.calls[0][2] as MessagePort[])[0];
+    port.postMessage({
+      type: 'kronn:page-action-anchor',
+      version: 1,
+      channel_id: 'channel-1',
+      anchor: { left: 12, top: Number.NaN, width: 880, height: 28 },
+    });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(onAnchor).not.toHaveBeenCalled();
     relay.dispose();
   });
 

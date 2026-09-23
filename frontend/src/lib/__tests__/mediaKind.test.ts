@@ -5,7 +5,7 @@
  * "is it an image" boolean no longer answers the question.
  */
 import { describe, it, expect } from 'vitest';
-import { mediaKind, isViewableMedia, isImageFile, isVideoFile } from '../mediaKind';
+import { mediaKind, isViewableMedia, isImageFile, isVideoFile, isTextAttachment, isPreviewableAttachment } from '../mediaKind';
 import type { ContextFile } from '../../types/generated';
 
 function file(p: Partial<ContextFile>): ContextFile {
@@ -35,11 +35,23 @@ describe('mediaKind', () => {
     expect(isViewableMedia(file({ mime_type: 'video/mp4', disk_path: null }))).toBe(false);
   });
 
-  it('excludes documents from the carousel', () => {
+  it('keeps documents out of image/video classification', () => {
     for (const name of ['report.pdf', 'notes.md', 'data.csv', 'archive.zip']) {
       expect(mediaKind(file({ filename: name, mime_type: 'application/octet-stream' }))).toBe('other');
       expect(isViewableMedia(file({ filename: name, mime_type: 'application/octet-stream' }))).toBe(false);
     }
+  });
+
+  it('includes disk-backed text, JSON and logs in the attachment carousel', () => {
+    for (const filename of ['report.JSON', 'output.log', 'notes.md', 'data.csv', 'source.html']) {
+      const item = file({ filename, mime_type: 'application/octet-stream' });
+      expect(isTextAttachment(item)).toBe(true);
+      expect(isPreviewableAttachment(item)).toBe(true);
+      expect(isTextAttachment({ ...item, disk_path: null })).toBe(false);
+    }
+    expect(isTextAttachment(file({ mime_type: 'application/problem+json; charset=utf-8' }))).toBe(true);
+    expect(isTextAttachment(file({ mime_type: 'text/plain', filename: 'a.png' }))).toBe(false);
+    expect(isPreviewableAttachment(file({ mime_type: 'application/pdf', filename: 'a.pdf' }))).toBe(false);
   });
 
   it('keeps the image and video predicates mutually exclusive', () => {

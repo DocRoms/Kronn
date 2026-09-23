@@ -7,6 +7,7 @@ import type * as LastFrameModule from '../../lib/lastFrame';
 const { discussionsApi, mediaApi, triggerDownload, extractLastFrame } = vi.hoisted(() => ({
   discussionsApi: {
     contextFileBlob: vi.fn(),
+    contextFileTextPreview: vi.fn(),
     deleteContextFile: vi.fn(),
     uploadContextFile: vi.fn(),
     videoSequence: vi.fn(),
@@ -48,6 +49,20 @@ function file(index: number, overrides: Partial<ContextFile> = {}): ContextFile 
 }
 
 describe('DiscussionAssetsPanel', () => {
+  it('opens a JSON file from the files filter inside the shared carousel', async () => {
+    discussionsApi.contextFileTextPreview.mockResolvedValueOnce({ text: '{"result":"ok"}', truncated: false });
+    render(<DiscussionAssetsPanel discussionId="disc-1" files={[
+      file(1, { filename: 'report.json', mime_type: 'application/json', disk_path: '/tmp/report.json' }),
+      file(2, { filename: 'image.png', mime_type: 'image/png', disk_path: '/tmp/image.png' }),
+    ]} onClose={vi.fn()} onNavigateMessage={vi.fn()} t={t} />);
+    fireEvent.click(screen.getByRole('button', { name: /disc\.assets\.filterFiles/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'disc.attachmentText:report.json' }));
+    const dialog = screen.getByRole('dialog');
+    expect(await within(dialog).findByText('{"result":"ok"}')).toBeInTheDocument();
+    expect(dialog).toHaveTextContent('/ 2');
+    expect(within(dialog).getByRole('button', { name: 'disc.assets.downloadFor:report.json' })).toBeEnabled();
+  });
+
   beforeEach(() => {
     vi.clearAllMocks();
     globalThis.URL.createObjectURL = vi.fn(({ type }: Blob) => `blob:${type}`);

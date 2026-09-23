@@ -10,6 +10,7 @@ export type MediaKind = 'image' | 'video' | 'other';
 
 const IMAGE_EXTENSIONS = /\.(?:png|jpe?g|gif|webp|svg|bmp|tiff?|ico|avif)$/i;
 const VIDEO_EXTENSIONS = /\.(?:mp4|webm|mov|m4v|ogv)$/i;
+const TEXT_EXTENSIONS = /\.(?:txt|log|json|jsonl|ndjson|csv|tsv|md|markdown|yaml|yml|toml|xml|html?|css|js|ts|tsx|jsx|py|rs|sh|sql|ini|conf)$/i;
 
 /**
  * A file the browser can display inline needs its bytes on disk. Extensions
@@ -25,6 +26,19 @@ export function mediaKind(file: ContextFile): MediaKind {
 /** True when the file belongs in the carousel at all. */
 export function isViewableMedia(file: ContextFile): boolean {
   return mediaKind(file) !== 'other';
+}
+
+/** Text is shown as escaped source, including HTML and XML. */
+export function isTextAttachment(file: ContextFile): boolean {
+  if (!file.disk_path || isViewableMedia(file)) return false;
+  const mime = file.mime_type.split(';')[0].trim().toLowerCase();
+  return mime.startsWith('text/')
+    || /^application\/(?:json|[\w.+-]+\+json|x-ndjson|xml|[\w.+-]+\+xml|yaml|x-yaml|toml|javascript)$/.test(mime)
+    || TEXT_EXTENSIONS.test(file.filename);
+}
+
+export function isPreviewableAttachment(file: ContextFile): boolean {
+  return isViewableMedia(file) || isTextAttachment(file);
 }
 
 /** Kept for the thumbnail path, which still treats images specially. */

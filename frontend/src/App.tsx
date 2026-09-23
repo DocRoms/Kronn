@@ -59,6 +59,7 @@ export function App() {
               current_step: 'Complete',
               agents_detected: [],
               scan_paths_set: true,
+              scan_paths_explored: [],
               repos_detected: [],
               default_scan_path: null,
             });

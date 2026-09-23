@@ -589,6 +589,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
   const [availableDirectives, setAvailableDirectives] = useState<Directive[]>([]);
   const [availableQuickPrompts, setAvailableQuickPrompts] = useState<QuickPrompt[]>([]);
   const [availableQuickApis, setAvailableQuickApis] = useState<QuickApi[]>([]);
+  const [quickApisLoaded, setQuickApisLoaded] = useState(false);
   const [availableQuickExecs, setAvailableQuickExecs] = useState<QuickExec[]>([]);
   // 2026-06-11 (Phase 1c) — other workflows, for the SubWorkflow step picker.
   const [availableWorkflows, setAvailableWorkflows] = useState<WorkflowSummary[]>([]);
@@ -659,7 +660,10 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
     refetchProfiles();
     directivesApi.list().then(setAvailableDirectives).catch(e => console.warn('Failed to load directives:', e));
     quickPromptsApi.list().then(setAvailableQuickPrompts).catch(e => console.warn('Failed to load quick prompts:', e));
-    quickApisApi.list().then(setAvailableQuickApis).catch(e => console.warn('Failed to load quick apis:', e));
+    quickApisApi.list().then(items => {
+      setAvailableQuickApis(items);
+      setQuickApisLoaded(true);
+    }).catch(e => console.warn('Failed to load quick apis:', e));
     quickExecsApi.list().then(setAvailableQuickExecs).catch(e => console.warn('Failed to load quick execs:', e));
     workflowsApi.list().then(setAvailableWorkflows).catch(e => console.warn('Failed to load workflows:', e));
     pagesApi.list().then(setAvailablePages).catch(e => console.warn('Failed to load Pages:', e));
@@ -1248,6 +1252,20 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
   const WIZARD_STEPS = isSimple ? WIZARD_STEPS_SIMPLE : WIZARD_STEPS_ADVANCED;
   const lastStep = WIZARD_STEPS.length - 1;
   const saveDisabled = saving || !name || steps.some(isWorkflowStepIncomplete);
+  // A pending or failed catalogue request is not evidence of a missing resource.
+  const quickApiIds = new Set(availableQuickApis.map(api => api.id));
+  const missingQuickApis = quickApisLoaded ? [
+    ...steps.map(step => ({ step, label: step.name || t('wiz.stepName') })),
+    ...onFailureSteps.map(step => ({ step, label: `${t('wiz.rollbackTitle')} — ${step.name || t('wiz.stepName')}` })),
+  ].flatMap(({ step, label }, index) => {
+    const references = new Set([
+      step.quick_api_id,
+      ...(step.collect_api_data?.sources.map(source => source.quick_api_id) ?? []),
+    ]);
+    return [...references]
+      .filter((id): id is string => !!id?.trim() && !quickApiIds.has(id))
+      .map(id => ({ key: `${index}:${id}`, id, label }));
+  }) : [];
   const jumpToStep = (index: number) => {
     setFocusedStepIndex(index);
     requestAnimationFrame(() => {
@@ -1297,6 +1315,18 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
       </header>}
 
       <div className="wf-wizard-body">
+        {missingQuickApis.length > 0 && (
+          <div className="wf-restricted-warning" role="alert">
+            <AlertTriangle size={14} aria-hidden="true" />
+            <div>
+              {missingQuickApis.map(reference => (
+                <p key={reference.key}>
+                  {t('wiz.missingQuickApiReference', reference.label, reference.id)}
+                </p>
+              ))}
+            </div>
+          </div>
+        )}
         {!focusedStepOnly && <nav className="wf-wizard-progress" aria-label={t('wiz.progressLabel')}>
           <span className="wf-wizard-progress-label">
             {t('wiz.stepProgress', wizardStep + 1, WIZARD_STEPS.length)}

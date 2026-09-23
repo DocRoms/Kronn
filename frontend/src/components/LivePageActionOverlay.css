@@ -1,24 +1,23 @@
-/* The card is positioned at the click point, but its WIDTH must not depend on
-   where that click landed.
+/* The card opens as a panel under the row that was clicked, spanning that
+   row's full width — not as a floating modal.
 
-   It used to: `left` was set inline and `right: 8px` here, with no `width`. An
-   absolutely positioned box with both offsets fixed and no width takes exactly
-   the space between them — so a CTA at the end of a row opened a card a few
-   dozen pixels wide, while the same CTA on the left opened a normal one.
-   `max-width` is a ceiling and never a floor, so it could not help.
+   Two things make that work, and both come from the Page, not from here. The
+   iframe bridge anchors on the CTA's `tr`/`li` rather than on the button, so
+   `--kr-action-anchor-width` IS the row's width. And because the Page scrolls
+   INSIDE its iframe while this card lives in the host layer that does not, the
+   bridge re-sends that rectangle on every scroll frame; without it the card
+   would stay behind while its row moved away.
 
-   Fixed without measuring anything in JS: percentages in `left` and `width`
-   resolve against the containing block, so CSS can do the arithmetic itself.
-   `width` is decided first and independently of the anchor; `left` is then
-   clamped so the box always fits. When the anchor sits too far right, the card
-   slides left instead of being crushed.
-
-   `clamp()` is safe at every size: when the container is narrower than the card
-   plus its gutters the upper bound falls below the lower one, and clamp then
-   returns the lower — 8px, the full-width mobile layout, which is why the
-   `!important` media query this replaced is no longer needed. */
+   The anchor stays a preference, never a raw position: `clamp()` keeps the
+   panel inside the shell when a row starts near the right edge or is wider
+   than the viewport, and falls back to the full-width layout on narrow
+   screens — the lower bound wins when the upper one drops below it. */
 .live-page-action-overlay {
-  --kr-action-card-width: min(720px, calc(100% - 16px));
+  --kr-action-card-width: clamp(
+    280px,
+    var(--kr-action-anchor-width, min(720px, calc(100% - 16px))),
+    calc(100% - 16px)
+  );
 
   position: absolute;
   z-index: 4;
@@ -26,13 +25,19 @@
   left: clamp(
     8px,
     var(--kr-action-anchor-left, 8px),
-    calc(100% - var(--kr-action-card-width) - 8px)
+    max(8px, calc(100% - var(--kr-action-card-width) - 8px))
   );
   max-height: calc(100% - 16px);
   overflow: auto;
 }
 
-.live-page-action-overlay .discussion-action-card { margin-top: 0; }
+/* The card caps itself at 720px, which is right inside a discussion thread
+   but not here: in a Page it IS the collapse, so it takes the row's width.
+   Scoped to this panel, so the card keeps its own sizing everywhere else. */
+.live-page-action-overlay .discussion-action-card {
+  width: 100%;
+  margin-top: 0;
+}
 
 /* Always reachable, whatever state the card is in: a launched card has no
    Cancel button left, and used to have no way out at all. */

@@ -18,7 +18,7 @@
 // key-passthrough i18n stub, confirm stub, ComponentProps<typeof X> props.
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, fireEvent, waitFor, cleanup, within } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, cleanup, within, act } from '@testing-library/react';
 import type { ComponentProps } from 'react';
 import { buildApiMock } from '../../../test/apiMock';
 import type {
@@ -542,6 +542,70 @@ describe('WorkflowWizard — BatchApiCall form', () => {
 });
 
 // ── Deterministic data pipeline forms ──────────────────────────────
+
+describe('WorkflowWizard — missing Quick API references', () => {
+  it('flags deleted APIs in direct, collection and failure steps only after loading the catalogue', async () => {
+    let resolveApis!: (apis: QuickApi[]) => void;
+    qaListMock.mockReturnValue(new Promise<QuickApi[]>(resolve => { resolveApis = resolve; }));
+    renderWizard({ editWorkflow: mkWorkflow({
+      steps: [
+        mkStep({ name: 'Direct call', step_type: { type: 'ApiCall' }, quick_api_id: 'qa-deleted' }),
+        mkStep({ name: 'Existing call', step_type: { type: 'BatchApiCall' }, quick_api_id: 'qa-kept' }),
+        mkStep({ name: 'Collect météo', step_type: { type: 'CollectApiData' }, collect_api_data: {
+          sources: [
+            { alias: 'morning', quick_api_id: 'qa-deleted', quick_exec_id: '', required: true, variables: {} },
+            { alias: 'evening', quick_api_id: 'qa-deleted', quick_exec_id: '', required: false, variables: {} },
+            { alias: 'exec', quick_api_id: '', quick_exec_id: 'qe-kept', required: true, variables: {} },
+          ], concurrent_limit: 5,
+        } }),
+      ],
+      on_failure: [mkStep({ name: 'Cleanup', step_type: { type: 'ApiCall' }, quick_api_id: 'qa-rollback' })],
+    }) });
+
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    await act(async () => { resolveApis([{ id: 'qa-kept' } as QuickApi]); });
+    const warning = await screen.findByRole('alert');
+    expect(warning).toBeVisible();
+    expect(within(warning).getByText('wiz.missingQuickApiReference:Direct call,qa-deleted')).toBeInTheDocument();
+    expect(within(warning).getAllByText('wiz.missingQuickApiReference:Collect météo,qa-deleted')).toHaveLength(1);
+    expect(warning).toHaveTextContent('wiz.rollbackTitle — Cleanup,qa-rollback');
+    expect(warning).not.toHaveTextContent('qa-kept');
+    expect(warning).not.toHaveTextContent('qe-kept');
+  });
+
+  it('clears a missing-source warning when another Quick API is selected', async () => {
+    qaListMock.mockResolvedValue([
+      { id: 'qa-new', name: 'New weather API', icon: '🔌', api_method: 'GET', api_endpoint_path: '/weather' } as QuickApi,
+    ]);
+    toSteps([
+      mkStep({ name: 'Collect', step_type: { type: 'CollectApiData' }, collect_api_data: {
+        sources: [{ alias: 'weather', quick_api_id: 'qa-deleted', quick_exec_id: '', required: true, variables: {} }],
+        concurrent_limit: 5,
+      } }),
+      mkStep({ name: 'Next' }),
+    ]);
+    expect(await screen.findByRole('alert')).toHaveTextContent('qa-deleted');
+    const picker = (screen.getAllByRole('combobox') as HTMLSelectElement[])
+      .find(select => Array.from(select.options).some(option => option.value === 'qa-new'));
+    expect(picker).toBeDefined();
+    fireEvent.change(picker!, { target: { value: 'qa-new' } });
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
+  it('does not call a resource missing when the catalogue request fails', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      qaListMock.mockRejectedValue(new Error('Catalogue unavailable'));
+      renderWizard({ editWorkflow: mkWorkflow({ steps: [
+        mkStep({ step_type: { type: 'ApiCall' }, quick_api_id: 'qa-unknown' }),
+      ] }) });
+      await waitFor(() => expect(warn).toHaveBeenCalledWith('Failed to load quick apis:', expect.any(Error)));
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+});
 
 describe('WorkflowWizard — data pipeline forms', () => {
   it('adds a saved Quick API source with a generated stable alias', async () => {

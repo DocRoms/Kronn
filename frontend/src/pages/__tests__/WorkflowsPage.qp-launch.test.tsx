@@ -333,6 +333,57 @@ describe('WorkflowsPage — QP launch double-click race', () => {
     ]);
   });
 
+  /// Unconfigured connections remain visible but cannot be selected.
+  it('shows a connection it cannot route to, with its reason, instead of hiding it', async () => {
+    mockQuickPromptsApi.list.mockResolvedValue([sampleQpNoVar]);
+    mockQuickPromptsApi.compareAgents.mockResolvedValue({
+      run_id: 'run-unusable',
+      batch_total: 2,
+      discussion_ids: [],
+    });
+    const connection = (id: string, name: string, model: string | null) => ({
+      id,
+      display_name: name,
+      mention_alias: id,
+      endpoint: 'https://example.test/api/v1',
+      origin_preset: 'open_router',
+      has_credential: true,
+      economy_model: null,
+      default_model: model,
+      reasoning_model: null,
+      image_model: null,
+      video_model: null,
+      media_endpoint: null,
+      created_at: '2026-09-19T10:00:00Z',
+      updated_at: '2026-09-19T10:00:00Z',
+    });
+    mockExternalApi.list.mockResolvedValue([
+      connection('router', 'OpenRouter', 'a/model'),
+      connection('halfway', 'Halfway', null),
+    ]);
+
+    await wrap(
+      <WorkflowsPage projects={[]} installedAgentTypes={['ClaudeCode']} agentAccess={fullConfig} />,
+    );
+    await act(async () => { fireEvent.click(await screen.findByText(/Quick Prompts/)); });
+    await act(async () => { fireEvent.click(await screen.findByTestId('qp-compare-agents-btn')); });
+
+    // The finished connection is an ordinary target.
+    expect(await screen.findByTestId('qp-compare-chip-router')).toBeInTheDocument();
+    // The unfinished one is named, with why, and cannot be selected.
+    const unusable = screen.getByTestId('qp-compare-chip-unusable-halfway');
+    expect(unusable).toHaveTextContent('Halfway');
+    expect(unusable).toHaveTextContent('aucun modèle configuré');
+    expect(unusable.querySelector('button')).toBeNull();
+
+    await act(async () => { fireEvent.click(screen.getByTestId('qp-compare-agents-launch')); });
+    const targets = mockQuickPromptsApi.compareAgents.mock.calls[0][1].targets;
+    expect(targets).toEqual([
+      { agent: 'ClaudeCode', tier: 'default' },
+      { agent: 'Custom', tier: 'default', connection_id: 'router' },
+    ]);
+  });
+
   it('compare mode cannot fall back to a single discussion through Enter or a competing CTA', async () => {
     mockQuickPromptsApi.list.mockResolvedValue([sampleQpWithVar]);
     mockQuickPromptsApi.compareAgents.mockResolvedValue({

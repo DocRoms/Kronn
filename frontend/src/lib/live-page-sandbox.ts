@@ -59,10 +59,31 @@ interface LivePageActionRequest {
   anchor: { left: number; top: number; width: number; height: number };
 }
 
+/** Sent while a card is open, so it tracks the row it belongs to as the Page
+ * scrolls. It carries no action and no binding: it can only move a card the
+ * user already opened, which is why it is accepted without user activation. */
+interface LivePageActionAnchorRequest {
+  type: 'kronn:page-action-anchor';
+  version: 1;
+  channel_id: string;
+  anchor: { left: number; top: number; width: number; height: number; slot?: boolean };
+}
+
 export interface LivePageActionIntent {
   actionRef: string;
   bindings: Record<string, string>;
-  anchor: { left: number; top: number; width: number; height: number };
+  anchor: LivePageActionAnchor;
+}
+
+export interface LivePageActionAnchor {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+  /** The rectangle is the collapse the Page opened for this card, so the card
+   * fills it. False (or absent) means it is the row, and the card sits under
+   * it — the placement used for the frame between the click and the slot. */
+  slot?: boolean;
 }
 
 const MAX_LIVE_PAGE_LINK_CHARS = 8 * 1024;
@@ -72,6 +93,43 @@ const MAX_LIVE_PAGE_LINK_CHARS = 8 * 1024;
  * for an unbound CTA. The iframe bridge below computes the same string. */
 export function liveActionBindingKey(bindings: Record<string, string>): string {
   return Object.entries(bindings).map(([name, selector]) => `${name}=${selector}`).sort().join('\u001f');
+}
+
+/**
+ * Mirror the host data-theme into the opaque iframe. Pages style explicit
+ * light/dark values and may fall back to their media query for custom themes.
+ */
+export function postLivePageTheme(target: Window, channelId: string, theme: string): void {
+  target.postMessage({
+    type: 'kronn:page-theme',
+    version: 1,
+    channel_id: channelId,
+    theme,
+  }, '*');
+}
+
+/** The theme the host is currently showing, read from the attribute
+ * `ThemeContext` maintains. `null` before the provider has run. */
+export function hostTheme(): string | null {
+  return document.documentElement.getAttribute('data-theme');
+}
+
+/**
+ * Reserve space below the active row for the privileged host action card.
+ * null closes the slot. Page code walking sibling rows must skip elements
+ * marked data-kronn-action-slot.
+ */
+export function postLivePageActionSlot(
+  target: Window,
+  channelId: string,
+  slot: { actionRef: string; bindingKey: string; height: number } | null,
+): void {
+  target.postMessage({
+    type: 'kronn:page-action-slot',
+    version: 1,
+    channel_id: channelId,
+    slot: slot && { action_ref: slot.actionRef, binding_key: slot.bindingKey, height: slot.height },
+  }, '*');
 }
 
 /** Tell the Page which of its buttons have run, and how it went. The iframe
@@ -126,9 +184,15 @@ const ACTION_STATE_STYLE = `<style>
  * data bridge. The iframe itself must still use `sandbox="allow-scripts"`
  * without `allow-same-origin`; CSP and sandbox are complementary boundaries.
  */
-export function buildSandboxDocument(html: string, channelId: string): string {
+export function buildSandboxDocument(html: string, channelId: string, initialTheme?: string | null): string {
   const safeChannel = JSON.stringify(channelId).replaceAll('<', '\\u003c');
-  const head = `<meta http-equiv="Content-Security-Policy" content="${LIVE_PAGE_CSP}">${ACTION_STATE_STYLE}`;
+  // Set before the Page's own markup parses, so it never paints in the wrong
+  // theme for a frame. Runtime changes arrive by message instead, because
+  // rebuilding this document would reload the iframe and lose its state.
+  const theme = typeof initialTheme === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(initialTheme)
+    ? `<script>document.documentElement.setAttribute('data-theme',${JSON.stringify(initialTheme)})</script>`
+    : '';
+  const head = `<meta http-equiv="Content-Security-Policy" content="${LIVE_PAGE_CSP}">${theme}${ACTION_STATE_STYLE}`;
   const bridge = `<script>(()=>{
     const channel=${safeChannel};
     const userActivation=navigator.userActivation;
@@ -143,6 +207,75 @@ export function buildSandboxDocument(html: string, channelId: string): string {
     let latest=null;
     let linkPort=null;
     let actionStates=new Map();
+    // The CTA that opened a card, so its anchor can be re-sent while this
+    // document scrolls: the host draws the card in a layer that does NOT
+    // scroll with us, so a one-shot anchor drifts away from its row.
+    let anchored=null;
+    let anchorQueued=false;
+    // A row, not the button: the card belongs under the whole line it acts on.
+    const anchorRect=element=>{
+      const row=closest.call(element,'tr,li')||element;
+      const rect=getBounds.call(row);
+      return {left:rect.left,top:rect.top,width:rect.width,height:rect.height};
+    };
+    // The collapse the host asked us to open, in THIS document, so the rows
+    // below are pushed down instead of being covered by a floating panel.
+    let slotEl=null;
+    const dropSlot=()=>{
+      if(slotEl&&slotEl.parentNode)slotEl.parentNode.removeChild(slotEl);
+      slotEl=null;
+    };
+    const findCta=(ref,key)=>{
+      const all=document.querySelectorAll('[data-kronn-action]');
+      for(let i=0;i<all.length;i+=1){
+        const el=all[i];
+        if((getAttribute.call(el,'data-kronn-action')||'').trim()!==ref)continue;
+        if(bindingKey(readBindings(el))===key)return el;
+      }
+      return null;
+    };
+    const openSlot=(ref,key,height)=>{
+      const cta=findCta(ref,key);
+      const row=cta?closest.call(cta,'tr,li')||cta:null;
+      if(!row||!row.parentNode){dropSlot();return;}
+      const inRow=row.tagName==='TR';
+      if(!slotEl||slotEl.__row!==row){
+        dropSlot();
+        slotEl=document.createElement(inRow?'tr':'li');
+        slotEl.setAttribute('data-kronn-action-slot','');
+        if(inRow){
+          const cell=document.createElement('td');
+          cell.setAttribute('colspan','99');
+          cell.style.padding='0';
+          cell.style.border='0';
+          slotEl.appendChild(cell);
+        }else{
+          slotEl.style.listStyle='none';
+        }
+        slotEl.__row=row;
+        row.parentNode.insertBefore(slotEl,row.nextSibling);
+      }
+      const box=inRow?slotEl.firstChild:slotEl;
+      box.style.height=height+'px';
+      queueAnchor();
+    };
+    const sendAnchor=()=>{
+      anchorQueued=false;
+      if(!anchored||!linkPort)return;
+      if(!anchored.isConnected){anchored=null;return;}
+      // With a slot open the card fills it, so the slot IS the anchor.
+      const inSlot=Boolean(slotEl&&slotEl.isConnected);
+      const rect=inSlot?getBounds.call(slotEl):anchorRect(anchored);
+      portPost.call(linkPort,{type:'kronn:page-action-anchor',version:1,channel_id:channel,anchor:{left:rect.left,top:rect.top,width:rect.width,height:rect.height,slot:inSlot}});
+    };
+    const queueAnchor=()=>{
+      if(anchorQueued||!anchored)return;
+      anchorQueued=true;
+      if(typeof requestAnimationFrame==='function')requestAnimationFrame(sendAnchor);
+      else setTimeout(sendAnchor,16);
+    };
+    addEventListener('scroll',queueAnchor,{capture:true,passive:true});
+    addEventListener('resize',queueAnchor,{passive:true});
     const readBindings=element=>{
       let bindings={};
       const raw=getAttribute.call(element,'data-kronn-bindings');
@@ -221,8 +354,8 @@ export function buildSandboxDocument(html: string, channelId: string): string {
         const actionRef=(getAttribute.call(action,'data-kronn-action')||'').trim();
         if(!/^[A-Za-z0-9._~-]{1,256}$/.test(actionRef))return;
         const bindings=readBindings(action);
-        const rect=getBounds.call(action);
-        portPost.call(linkPort,{type:'kronn:page-action',version:1,channel_id:channel,action_ref:actionRef,bindings,anchor:{left:rect.left,top:rect.top,width:rect.width,height:rect.height}});
+        anchored=action;
+        portPost.call(linkPort,{type:'kronn:page-action',version:1,channel_id:channel,action_ref:actionRef,bindings,anchor:anchorRect(action)});
         return;
       }
       const anchor=element&&element.closest?element.closest('a[href]'):null;
@@ -246,6 +379,22 @@ export function buildSandboxDocument(html: string, channelId: string): string {
       if(message.type==='kronn:page-data'){
         latest=message.data;
         dispatchEvent(new CustomEvent('kronn:page-data',{detail:latest}));
+        return;
+      }
+      if(message.type==='kronn:page-theme'){
+        const t=message.theme;
+        if(typeof t!=='string'||t.length>64)return;
+        document.documentElement.setAttribute('data-theme',t);
+        dispatchEvent(new CustomEvent('kronn:page-theme',{detail:t}));
+        return;
+      }
+      if(message.type==='kronn:page-action-slot'){
+        const slot=message.slot;
+        if(!slot){dropSlot();queueAnchor();return;}
+        if(typeof slot.action_ref!=='string'||typeof slot.binding_key!=='string')return;
+        const height=Number(slot.height);
+        if(!isFinite(height)||height<0||height>4000)return;
+        openSlot(slot.action_ref,slot.binding_key,height);
         return;
       }
       if(message.type==='kronn:page-action-states'){
@@ -310,14 +459,25 @@ export function createLivePageOpenLinkRelay(
   channelId: string,
   openExternal: (url: string, target: string, features: string) => unknown = window.open.bind(window),
   onAction?: (intent: LivePageActionIntent) => void,
+  onAnchor?: (anchor: LivePageActionIntent['anchor']) => void,
 ): LivePageOpenLinkRelay {
   let activePort: MessagePort | null = null;
-  const onMessage = (message: LivePageOpenLinkRequest | LivePageActionRequest) => {
+  const validAnchor = (anchor: LivePageActionAnchor | undefined): anchor is LivePageActionAnchor => (
+    Boolean(anchor) && [anchor?.left, anchor?.top, anchor?.width, anchor?.height].every(Number.isFinite)
+  );
+  const onMessage = (message: LivePageOpenLinkRequest | LivePageActionRequest | LivePageActionAnchorRequest) => {
     if (
       !message
       || message.version !== 1
       || message.channel_id !== channelId
     ) return;
+    // Before the activation gate on purpose: a scroll is not a click, and this
+    // message only repositions a card that is already open.
+    if (message.type === 'kronn:page-action-anchor') {
+      if (!validAnchor(message.anchor)) return;
+      onAnchor?.({ ...message.anchor, slot: message.anchor.slot === true });
+      return;
+    }
     if (navigator.userActivation && !navigator.userActivation.isActive) return;
     if (message.type === 'kronn:page-action') {
       if (
@@ -331,7 +491,7 @@ export function createLivePageOpenLinkRelay(
         key.length <= 128 && typeof value === 'string' && value.length <= 4096
       ))) as Record<string, string>;
       const anchor = message.anchor;
-      if (![anchor.left, anchor.top, anchor.width, anchor.height].every(Number.isFinite)) return;
+      if (!validAnchor(anchor)) return;
       onAction?.({ actionRef: message.action_ref, bindings, anchor });
       return;
     }

@@ -13,6 +13,7 @@ import { docs as docsApi, pages as pagesApi, workflows as workflowsApi } from '.
 import { datasetRecords, recordsToRows } from '../lib/live-page-csv';
 import {
   buildSandboxDocument,
+  hostTheme,
   createLivePageOpenLinkRelay,
   requestRenderedPageHtml,
   runtimeData,
@@ -29,7 +30,13 @@ import { CollectionShell, CollectionSidebarCollapseButton } from '../components/
 import { HtmlCodeEditor, HtmlRevisionDiff } from '../components/HtmlCodeEditor';
 import { useT } from '../lib/I18nContext';
 import { useAsyncGuard } from '../hooks/useAsyncGuard';
-import { useActionStatesInFrame, useLivePageActions } from '../hooks/useLivePageActions';
+import {
+  useActionStatesInFrame,
+  useLivePageActions,
+  useLivePageActionSlot,
+  useLivePageTheme,
+  usePublishPageDataWhenChanged,
+} from '../hooks/useLivePageActions';
 import { userError } from '../lib/userError';
 import {
   livePageMosaicLayouts,
@@ -188,6 +195,7 @@ export function PagesPage({
     launches: pageLaunches,
     close: closePageAction,
     handleIntent: handlePageActionIntent,
+    moveAnchor: movePageActionAnchor,
     handleChanged: handlePageActionChanged,
     reload: reloadPageActions,
   } = useLivePageActions(() => setError(t('disc.action.unavailablePageAction')));
@@ -603,7 +611,7 @@ export function PagesPage({
     return () => window.removeEventListener('resize', reposition);
   }, [mosaicMenuRef, positionMosaicMenu]);
   const document = useMemo(
-    () => revisionHtml ? buildSandboxDocument(revisionHtml, bridgeChannel) : '',
+    () => revisionHtml ? buildSandboxDocument(revisionHtml, bridgeChannel, hostTheme()) : '',
     [bridgeChannel, revisionHtml],
   );
   const publishToFrame = useCallback(() => {
@@ -622,16 +630,21 @@ export function PagesPage({
     const relay = createLivePageOpenLinkRelay(bridgeChannel, undefined, intent => {
       setError(null);
       handlePageActionIntent(intent);
-    });
+    }, movePageActionAnchor);
     linkRelayRef.current = relay;
     return () => {
       if (linkRelayRef.current === relay) linkRelayRef.current = null;
       relay.dispose();
     };
-  }, [bridgeChannel, handlePageActionIntent]);
-  useEffect(() => { publishToFrame(); }, [publishToFrame]);
+  }, [bridgeChannel, handlePageActionIntent, movePageActionAnchor]);
+  usePublishPageDataWhenChanged(detail, publishToFrame);
   // Each button shows how its row's last run went, and keeps up while it runs.
   const publishAllToFrame = useActionStatesInFrame(iframeRef, bridgeChannel, pageLaunches, publishToFrame);
+  // The Page keeps a collapse of exactly this height open under the row.
+  const [actionCardHeight, setActionCardHeight] = useState<number | null>(null);
+  useLivePageActionSlot(iframeRef, bridgeChannel, pageActiveAction, actionCardHeight);
+  // La Page suit le thème de Kronn, pas celui du système.
+  useLivePageTheme(iframeRef, bridgeChannel);
 
   return (
     <div className="live-pages" data-testid="live-pages-page">
@@ -1189,6 +1202,7 @@ export function PagesPage({
                   onClose={closePageAction}
                   onChanged={handlePageActionChanged}
                   onOpenDiscussion={discussionId => onNavigateDiscussion?.(discussionId)}
+                  onHeightChange={setActionCardHeight}
                 />
               </div>
             )}

@@ -1,4 +1,4 @@
-import { useCallback, useEffect } from 'react';
+import { useCallback, useEffect, useRef } from 'react';
 import { X } from 'lucide-react';
 import type { LivePageAction } from '../types/generated';
 import type { LivePageActiveActionState } from '../hooks/useLivePageActions';
@@ -14,13 +14,20 @@ export interface LivePageActionOverlayProps {
   onChanged: (action: LivePageAction, activation: number) => void;
   onClose: () => void;
   onOpenDiscussion: (discussionId: string) => void;
+  /** The card's measured height, so the Page can reserve exactly that much
+   * room under its row. `null` once the card is gone. */
+  onHeightChange?: (height: number | null) => void;
 }
 
-/** Anchors the shared native action card at the exact click point inside a
- * Page's iframe shell, identically for the embedded viewer, the standalone
- * tab and every mosaic tile. */
-export function LivePageActionOverlay({ active, action, offer, onChanged, onClose, onOpenDiscussion }: LivePageActionOverlayProps) {
+/**
+ * Place the host action card in the row slot reported by the iframe bridge.
+ * Updated anchors keep it aligned while the Page scrolls.
+ */
+export function LivePageActionOverlay({ active, action, offer, onChanged, onClose, onOpenDiscussion, onHeightChange }: LivePageActionOverlayProps) {
   const { t } = useT();
+  const cardRef = useRef<HTMLDivElement | null>(null);
+  const reportHeight = useRef(onHeightChange);
+  useEffect(() => { reportHeight.current = onHeightChange; });
   const activation = active?.activation ?? 0;
   // Stable per click: the card restarts its polling whenever this changes.
   const handleChanged = useCallback(
@@ -35,18 +42,38 @@ export function LivePageActionOverlay({ active, action, offer, onChanged, onClos
     return () => window.removeEventListener('keydown', onKey);
   }, [onClose, open]);
 
+  // The card grows as its run advances (steps appear, a form opens), so the
+  // reserved room has to follow it rather than be measured once.
+  useEffect(() => {
+    const element = cardRef.current;
+    if (!open || !element) {
+      reportHeight.current?.(null);
+      return undefined;
+    }
+    const publish = () => reportHeight.current?.(Math.ceil(element.getBoundingClientRect().height));
+    publish();
+    const observer = new ResizeObserver(publish);
+    observer.observe(element);
+    return () => {
+      observer.disconnect();
+      reportHeight.current?.(null);
+    };
+  }, [open]);
+
   if (!active || !action) return null;
+  const inSlot = active.anchor.slot === true;
   return (
     <div
+      ref={cardRef}
       className="live-page-action-overlay"
       style={{
-        top: Math.max(8, active.anchor.top + active.anchor.height + 6),
-        // The anchor is a preference, not a position: the stylesheet clamps it
-        // so a CTA near the right edge slides the card left instead of
-        // narrowing it. Setting `left` directly here is what crushed the card,
-        // because it co-constrained the box with the `right` that used to sit
-        // in the CSS.
+        // Fill an existing slot; before it opens, place the card below the row.
+        // Do not clamp vertically: the card must scroll with its row.
+        top: inSlot ? active.anchor.top : active.anchor.top + active.anchor.height + 4,
+        // CSS constrains both offsets at the viewport edge; direct width/left values
+        // would conflict with its right-side constraint.
         ['--kr-action-anchor-left' as string]: `${Math.max(8, active.anchor.left)}px`,
+        ['--kr-action-anchor-width' as string]: `${active.anchor.width}px`,
       }}
     >
       <button
