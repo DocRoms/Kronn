@@ -18,6 +18,10 @@ Release notes for 0.9.3 and earlier are available in the
   runtime model observations and format fallback. Compact agent/model badges
   follow the retained output; historical runs keep their existing metadata.
   See [workflow agent provenance](docs/operations/workflow-agent-provenance.md).
+- A workflow run's Agent step lists every attempt in its details (role, agent,
+  reported or resolved model, format fallback, duration, outcome) and marks the
+  one whose output was kept. A step with no recorded model shows "unknown
+  model" instead of today's step configuration.
 
 ### Fixed
 
