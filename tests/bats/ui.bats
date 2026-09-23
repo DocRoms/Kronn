@@ -557,6 +557,92 @@ EOF
     assert_success
 }
 
+@test "dev backend supervisor reaps children interrupted before PID bookkeeping" {
+    local fixture="$BATS_TEST_TMPDIR/supervisor-interrupted"
+    mkdir -p "$fixture"
+    printf '#!/usr/bin/env bash\nexit 0\n' >"$fixture/cargo"
+    printf '#!/usr/bin/env bash\nexit 0\n' >"$fixture/curl"
+    cat >"$fixture/df" <<'EOF'
+#!/usr/bin/env bash
+printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/test 100 0 104857600 0%% /tmp\n'
+EOF
+    cat >"$fixture/kronn" <<'EOF'
+#!/usr/bin/env bash
+echo $$ >"$KRONN_TEST_FIXTURE/backend_pid"
+trap 'exit 0' TERM INT
+while true; do sleep 0.1; done
+EOF
+    cat >"$fixture/watchexec" <<'EOF'
+#!/usr/bin/env bash
+echo $$ >"$KRONN_TEST_FIXTURE/watcher_pid"
+trap 'exit 0' TERM INT
+while true; do sleep 0.1; done
+EOF
+    cat >"$fixture/interrupt" <<'EOF'
+#!/usr/bin/env bash
+set -T
+# Deliver TERM after fork, before the supervisor records the child's PID.
+trap 'if [[ "$BASH_COMMAND" == "${KRONN_TEST_INTERRUPT_ASSIGNMENT}=\$!" ]]; then
+    trap - DEBUG
+    for ((attempt=0; attempt<100; attempt++)); do
+        [[ -s "$KRONN_TEST_FIXTURE/$KRONN_TEST_INTERRUPT_ASSIGNMENT" ]] && break
+        sleep 0.01
+    done
+    [[ -s "$KRONN_TEST_FIXTURE/$KRONN_TEST_INTERRUPT_ASSIGNMENT" ]] || exit 99
+    kill -TERM "$$"
+fi' DEBUG
+source "$1"
+EOF
+    cat >"$fixture/check" <<'EOF'
+#!/usr/bin/env bash
+supervisor=""
+cleanup_fixture() {
+    local file pid
+    for file in "$KRONN_TEST_FIXTURE/backend_pid" "$KRONN_TEST_FIXTURE/watcher_pid"; do
+        if [[ -s "$file" ]]; then
+            pid="$(cat "$file")"
+            kill -KILL "$pid" 2>/dev/null || true
+        fi
+    done
+    if [[ -n "$supervisor" ]]; then
+        kill -KILL "$supervisor" 2>/dev/null || true
+        wait "$supervisor" 2>/dev/null || true
+    fi
+}
+trap cleanup_fixture EXIT
+bash "$KRONN_TEST_FIXTURE/interrupt" "$1" >/dev/null 2>&1 3>&- &
+supervisor=$!
+for ((attempt=0; attempt<200; attempt++)); do
+    kill -0 "$supervisor" 2>/dev/null || break
+    sleep 0.025
+done
+if kill -0 "$supervisor" 2>/dev/null; then
+    echo 'supervisor did not stop after TERM'
+    exit 1
+fi
+wait "$supervisor"
+[[ $? -eq 143 ]] || exit 1
+child="$(cat "$KRONN_TEST_FIXTURE/$KRONN_TEST_INTERRUPT_ASSIGNMENT")"
+if kill -0 "$child" 2>/dev/null; then
+    echo "unreaped child: $KRONN_TEST_INTERRUPT_ASSIGNMENT"
+    exit 1
+fi
+EOF
+    chmod +x "$fixture/cargo" "$fixture/curl" "$fixture/df" "$fixture/kronn" "$fixture/watchexec"
+    local assignment
+    for assignment in backend_pid watcher_pid; do
+        run env \
+            PATH="$fixture:$PATH" \
+            KRONN_DEV_BACKEND_DIR="$fixture" \
+            KRONN_DEV_BACKEND_BINARY="$fixture/kronn" \
+            KRONN_DEV_BACKEND_TARGET_DIR="$fixture/target" \
+            KRONN_TEST_FIXTURE="$fixture" \
+            KRONN_TEST_INTERRUPT_ASSIGNMENT="$assignment" \
+            bash "$fixture/check" "$PROJECT_ROOT/scripts/dev-backend-supervisor.sh"
+        assert_success
+    done
+}
+
 @test "dev backend supervisor serves the last successful binary while Cargo is blocked" {
     local fake_bin="$BATS_TEST_TMPDIR/supervisor-warm-bin"
     local fake_backend_dir="$BATS_TEST_TMPDIR/backend-warm"

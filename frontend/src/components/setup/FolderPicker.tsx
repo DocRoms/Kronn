@@ -23,19 +23,20 @@ export function FolderPicker({ selected, onConfirm, onClose }: Props) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [picked, setPicked] = useState<string[]>(selected);
-  const latestRequest = useRef(0);
+  const requestState = useRef({ latest: 0 });
 
   const open = useCallback(async (path?: string) => {
-    const request = ++latestRequest.current;
+    const requests = requestState.current;
+    const request = ++requests.latest;
     setLoading(true);
     setError(null);
     try {
       const next = await setupApi.browse(path);
-      if (request === latestRequest.current) setListing(next);
+      if (request === requests.latest) setListing(next);
     } catch (e) {
-      if (request === latestRequest.current) setError(e instanceof Error ? e.message : String(e));
+      if (request === requests.latest) setError(e instanceof Error ? e.message : String(e));
     } finally {
-      if (request === latestRequest.current) setLoading(false);
+      if (request === requests.latest) setLoading(false);
     }
   }, []);
 
@@ -43,13 +44,14 @@ export function FolderPicker({ selected, onConfirm, onClose }: Props) {
   // component already starts in its loading state, and a setState in an effect
   // body costs a cascading render.
   useEffect(() => {
-    const request = ++latestRequest.current;
+    const requests = requestState.current;
+    const request = ++requests.latest;
     setupApi
       .browse()
-      .then(first => { if (request === latestRequest.current) setListing(first); })
-      .catch(e => { if (request === latestRequest.current) setError(e instanceof Error ? e.message : String(e)); })
-      .finally(() => { if (request === latestRequest.current) setLoading(false); });
-    return () => { latestRequest.current++; };
+      .then(first => { if (request === requests.latest) setListing(first); })
+      .catch(e => { if (request === requests.latest) setError(e instanceof Error ? e.message : String(e)); })
+      .finally(() => { if (request === requests.latest) setLoading(false); });
+    return () => { requests.latest++; };
   }, []);
 
   const toggle = (path: string) =>

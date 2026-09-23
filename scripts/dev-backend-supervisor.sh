@@ -53,6 +53,11 @@ stop_child() {
 cleanup() {
     stop_child "$watcher_pid"
     stop_child "$backend_pid"
+    # A signal can arrive after a fork but before its PID is recorded.
+    local child
+    for child in $(jobs -pr); do
+        stop_child "$child"
+    done
 }
 
 start_backend() {
