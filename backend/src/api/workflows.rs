@@ -2273,12 +2273,16 @@ pub async fn import_workflow(
     let root_id_for_return = root_new_id;
     match state
         .db
-        .with_conn(move |conn| {
+        .with_conn(move |connection| {
+            let tx = connection.unchecked_transaction()?;
+            let conn = &tx;
             for (mut page, revision, datasets) in imported_pages {
                 if crate::db::live_pages::get_live_page(conn, &page.slug)?.is_some() {
                     page.slug = format!("{}-{}", page.slug, &page.id[..8]);
                 }
-                crate::db::live_pages::create_live_page(conn, &page, &revision, &datasets, None)?;
+                crate::db::live_pages::create_live_page_in_transaction(
+                    conn, &page, &revision, &datasets, None,
+                )?;
             }
             for qp in &qps {
                 crate::db::quick_prompts::insert_quick_prompt(conn, qp)?;
@@ -2300,15 +2304,15 @@ pub async fn import_workflow(
                     root_out = Some(w);
                 }
             }
+            let root_out = root_out.ok_or_else(|| {
+                anyhow::anyhow!("Import interne : workflow racine introuvable après insertion")
+            })?;
+            tx.commit()?;
             Ok(root_out)
         })
         .await
     {
-        Ok(Some(w)) => Json(ApiResponse::ok(w)),
-        Ok(None) => Json(ApiResponse::err_coded(
-            ApiErrorCode::Internal,
-            "Import interne : workflow racine introuvable après insertion",
-        )),
+        Ok(w) => Json(ApiResponse::ok(w)),
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
     }
 }

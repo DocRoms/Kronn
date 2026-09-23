@@ -1610,8 +1610,7 @@ async fn live_page_workflows_returns_configured_publishers() {
     assert_eq!(missing["error_code"], "not_found");
 }
 
-#[tokio::test]
-async fn workflow_export_import_bundles_quick_prompt_quick_api_and_page() {
+async fn workflow_portability_fixture() -> (AppState, Value) {
     let state = test_state();
     let now = chrono::Utc::now();
     state
@@ -1811,6 +1810,13 @@ async fn workflow_export_import_bundles_quick_prompt_quick_api_and_page() {
         .get("current")
         .is_none());
 
+    (state, exported)
+}
+
+#[tokio::test]
+async fn workflow_export_import_bundles_quick_prompt_quick_api_and_page() {
+    let (state, exported) = workflow_portability_fixture().await;
+    let app = build_router_with_auth(state.clone(), false);
     let (import_status, imported) = post_json(
         app.clone(),
         "/api/workflows/import",
@@ -1863,6 +1869,196 @@ async fn workflow_export_import_bundles_quick_prompt_quick_api_and_page() {
         imported_page_body["data"]["datasets"][0]["current"],
         Value::Null
     );
+}
+
+// Snapshot complete persisted rows, including existing resources and the
+// capability latch, so rollback cannot pass by deleting/recreating old data.
+async fn workflow_import_database_snapshot(state: &AppState) -> Vec<(String, Vec<String>)> {
+    state
+        .db
+        .with_conn(|conn| {
+            let mut snapshot = Vec::new();
+            for table in [
+                "live_pages",
+                "live_page_revisions",
+                "live_page_datasets",
+                "live_page_dataset_points",
+                "live_pages_capability",
+                "live_page_actions",
+                "live_page_discussion_links",
+                "quick_prompts",
+                "quick_prompt_versions",
+                "quick_apis",
+                "quick_execs",
+                "workflows",
+            ] {
+                let mut statement =
+                    conn.prepare(&format!("SELECT * FROM {table} ORDER BY rowid"))?;
+                let columns = statement.column_count();
+                let rows = statement
+                    .query_map([], |row| {
+                        let values = (0..columns)
+                            .map(|column| row.get_ref(column).map(|value| format!("{value:?}")))
+                            .collect::<rusqlite::Result<Vec<_>>>()?;
+                        Ok(format!("{values:?}"))
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                snapshot.push((table.to_owned(), rows));
+            }
+            Ok(snapshot)
+        })
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn workflow_import_legacy_formats_keep_existing_unbundled_references() {
+    let (state, exported) = workflow_portability_fixture().await;
+    let app = build_router_with_auth(state.clone(), false);
+    let before = workflow_import_database_snapshot(&state).await;
+    for version in [1, 2] {
+        let legacy = serde_json::json!({
+            "kind": exported["kind"], "version": version, "exported_at": exported["exported_at"],
+            "workflow": exported["workflow"]
+        });
+        let (_, imported) = post_json(
+            app.clone(),
+            "/api/workflows/import",
+            serde_json::json!({
+                "content": serde_json::to_string(&legacy).unwrap(), "project_id": null
+            }),
+        )
+        .await;
+        assert_eq!(imported["success"], true, "v{version}: {imported}");
+        assert_ne!(imported["data"]["id"], exported["workflow"]["id"]);
+        assert_eq!(
+            imported["data"]["steps"][0]["quick_prompt_id"],
+            "qp-portable"
+        );
+        assert_eq!(
+            imported["data"]["steps"][1]["collect_api_data"]["sources"][0]["quick_api_id"],
+            "qa-portable"
+        );
+        assert_eq!(
+            imported["data"]["steps"][2]["page_publish"]["page_id"],
+            "page-portable"
+        );
+    }
+    let after = workflow_import_database_snapshot(&state).await;
+    for ((table, before_rows), (_, after_rows)) in before.iter().zip(after.iter()) {
+        if table == "workflows" {
+            assert_eq!(after_rows.len(), before_rows.len() + 2);
+        } else {
+            assert_eq!(after_rows, before_rows, "{table}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn workflow_import_rolls_back_first_page_when_later_dataset_is_invalid() {
+    let (_, mut exported) = workflow_portability_fixture().await;
+    let mut invalid_page = exported["referenced_pages"][0].clone();
+    invalid_page["id"] = serde_json::json!("invalid-page");
+    invalid_page["slug"] = serde_json::json!("invalid-page");
+    invalid_page["datasets"][0]["name"] = serde_json::json!("invalid dataset name");
+    exported["referenced_pages"]
+        .as_array_mut()
+        .unwrap()
+        .push(invalid_page);
+    let state = test_state();
+    let before = workflow_import_database_snapshot(&state).await;
+    let app = build_router_with_auth(state.clone(), false);
+    let (status, body) = post_json(
+        app,
+        "/api/workflows/import",
+        serde_json::json!({
+            "content": serde_json::to_string(&exported).unwrap(), "project_id": null
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["success"], false, "{body}");
+    assert!(
+        body["error"].as_str().unwrap().contains("Dataset"),
+        "{body}"
+    );
+    assert_eq!(
+        workflow_import_database_snapshot(&state).await,
+        before,
+        "a failed import must leave no page, revision, dataset or activated capability"
+    );
+}
+
+#[tokio::test]
+async fn workflow_import_rolls_back_all_dependencies_and_root_on_late_insert_failure() {
+    let (state, mut exported) = workflow_portability_fixture().await;
+    let mut child = exported["workflow"].clone();
+    child["id"] = serde_json::json!("child-late-failure");
+    child["name"] = serde_json::json!("Fail after root");
+    exported["referenced_workflows"] = serde_json::json!([child]);
+    state.db.with_conn(|conn| {
+        conn.execute_batch("CREATE TRIGGER fail_late_workflow BEFORE INSERT ON workflows
+            WHEN NEW.name = 'Fail after root' BEGIN SELECT RAISE(ABORT, 'late import failure'); END;")?;
+        Ok(())
+    }).await.unwrap();
+    let before = workflow_import_database_snapshot(&state).await;
+    let app = build_router_with_auth(state.clone(), false);
+    let (_, body) = post_json(
+        app.clone(),
+        "/api/workflows/import",
+        serde_json::json!({
+            "content": serde_json::to_string(&exported).unwrap(), "project_id": null
+        }),
+    )
+    .await;
+    assert_eq!(body["success"], false, "{body}");
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap()
+            .contains("late import failure"),
+        "{body}"
+    );
+    assert_eq!(
+        workflow_import_database_snapshot(&state).await,
+        before,
+        "the root and every dependency must roll back without changing existing rows"
+    );
+
+    // A failed import must release its transaction and leave the connection
+    // usable: exactly the same valid bundle succeeds once the injected error goes.
+    state
+        .db
+        .with_conn(|conn| {
+            conn.execute_batch("DROP TRIGGER fail_late_workflow")?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let (_, imported) = post_json(
+        app,
+        "/api/workflows/import",
+        serde_json::json!({
+            "content": serde_json::to_string(&exported).unwrap(), "project_id": null
+        }),
+    )
+    .await;
+    assert_eq!(imported["success"], true, "{imported}");
+    let after = workflow_import_database_snapshot(&state).await;
+    for ((table, before_rows), (_, after_rows)) in before.iter().zip(after.iter()) {
+        let added = match table.as_str() {
+            "live_pages"
+            | "live_page_revisions"
+            | "live_page_datasets"
+            | "quick_prompts"
+            | "quick_prompt_versions"
+            | "quick_apis"
+            | "quick_execs" => 1,
+            "workflows" => 2,
+            _ => 0,
+        };
+        assert_eq!(after_rows.len(), before_rows.len() + added, "{table}");
+    }
 }
 
 #[tokio::test]

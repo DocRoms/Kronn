@@ -296,6 +296,15 @@ on import. Retained values and publication/run history are excluded to avoid
 silently leaking production observations through a Workflow definition file;
 the imported Page is populated by its next run.
 
+A Workflow import commits its entire bundle in one SQLite transaction: Pages,
+revisions, datasets, capability activation, Quick Prompts and their versions,
+Quick APIs, Quick Execs, root and child workflows. A late validation or SQL
+failure rolls everything back and preserves existing resources. The Page
+creation helper accepts the caller's transaction; starting and committing a
+separate Page transaction inside an import would break this guarantee.
+[src: file: backend/src/api/workflows.rs:2277]
+[src: file: backend/src/db/live_pages.rs:126]
+
 Kronn-bundled declarative charts are the default. Custom JavaScript and D3 are
 an advanced escape hatch and remain subject to the same iframe, CSP, payload
 and runtime limits.

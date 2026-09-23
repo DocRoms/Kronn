@@ -66,6 +66,9 @@ Release notes for 0.9.3 and earlier are available in the
   background stopped listening at its next call while the protocol said the
   wait remained active. That call's result now carries `wait_preempted`, the
   wait's own result says `interrupted`, and the protocol text asks for a re-arm.
+- A failed workflow import rolls back every bundled resource, including Pages
+  and Quick Prompts created before the error. Late validation or database
+  failures no longer leave partial imports or activate an empty Pages library.
 
 ## [0.14.0] - 2026-09-23
 
