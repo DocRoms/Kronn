@@ -4149,6 +4149,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await
         .expect("mock proxy reachable");
@@ -4183,6 +4184,7 @@ mod tests {
             "test-model",
             None,
             Some(&server.uri()),
+            None,
             None,
             None,
             None,
