@@ -1167,7 +1167,7 @@ pub struct WorkspaceConfig {
     pub require_isolation: bool,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct WorkspaceHooks {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1178,6 +1178,31 @@ pub struct WorkspaceHooks {
     pub after_run: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub before_remove: Option<String>,
+}
+
+impl WorkspaceHooks {
+    /// the project says how its worktrees are prepared; a workflow
+    /// that knows better says so field by field. What the workflow declares
+    /// wins; what it leaves out comes from the project. Same shape as a step
+    /// overriding its Quick Prompt.
+    pub fn inherit(project: &WorkspaceHooks, workflow: Option<&WorkspaceHooks>) -> WorkspaceHooks {
+        let Some(workflow) = workflow else {
+            return project.clone();
+        };
+        let pick = |own: &Option<String>, inherited: &Option<String>| {
+            own.clone().or_else(|| inherited.clone())
+        };
+        WorkspaceHooks {
+            after_create: pick(&workflow.after_create, &project.after_create),
+            before_run: pick(&workflow.before_run, &project.before_run),
+            after_run: pick(&workflow.after_run, &project.after_run),
+            before_remove: pick(&workflow.before_remove, &project.before_remove),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        *self == WorkspaceHooks::default()
+    }
 }
 
 // ─── Workflow Runs ────────────────────────────────────────────────────────

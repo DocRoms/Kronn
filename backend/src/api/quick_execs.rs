@@ -153,6 +153,7 @@ pub async fn run(
     let run_id = uuid::Uuid::new_v4().to_string();
     let created_at = Utc::now();
     let queued = crate::models::SharedRun {
+        exec_details: None,
         id: run_id.clone(),
         kind: crate::models::SharedRunKind::QuickExec,
         source_id: id.clone(),
@@ -180,6 +181,7 @@ pub async fn run(
         Ok(Some(item)) => item,
         Ok(None) => {
             let response = RunQuickExecResponse {
+                exit_code: None,
                 run_id: run_id.clone(),
                 success: false,
                 duration_ms: 0,
@@ -215,6 +217,7 @@ pub async fn run(
         let config = state.config.read().await;
         let Some(secret) = config.encryption_secret.clone() else {
             let response = RunQuickExecResponse {
+                exit_code: None,
                 run_id: run_id.clone(),
                 success: false,
                 duration_ms: 0,
@@ -267,6 +270,7 @@ pub async fn run(
         Ok(Ok(prepared)) => prepared.resolved,
         Ok(Err(failures)) => {
             let response = RunQuickExecResponse {
+                exit_code: None,
                 run_id: run_id.clone(),
                 success: false,
                 duration_ms: 0,
@@ -308,6 +312,7 @@ pub async fn run(
             Ok(Some(project)) => project.path,
             Ok(None) => {
                 let response = RunQuickExecResponse {
+                    exit_code: None,
                     run_id: run_id.clone(),
                     success: false,
                     duration_ms: 0,
@@ -351,6 +356,7 @@ pub async fn run(
     };
     let running_at = Utc::now();
     let running = crate::models::SharedRun {
+        exec_details: None,
         id: run_id.clone(),
         kind: crate::models::SharedRunKind::QuickExec,
         source_id: id.clone(),
@@ -388,124 +394,56 @@ pub async fn run(
             )
         })
         .await;
-    if outcome.result.status != RunStatus::Success {
+    // Process metadata is useful on failure too, including exit 0 followed by
+    // an output-format error. Read it before branching on the run's verdict.
+    let envelope = extract_step_envelope(&outcome.result.output);
+    let raw_result = envelope
+        .as_ref()
+        .ok_or_else(|| "Quick Exec returned no structured result".to_string())
+        .and_then(|envelope| {
+            serde_json::from_str::<serde_json::Value>(&envelope.data_json)
+                .map_err(|error| format!("Invalid Quick Exec result: {error}"))
+        });
+    let raw = raw_result.as_ref().ok();
+    let exit_code = raw
+        .and_then(|value| value.get("exit_code"))
+        .and_then(serde_json::Value::as_i64)
+        .and_then(|value| i32::try_from(value).ok());
+    let stdout = raw
+        .and_then(|value| value.get("stdout"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
+    let stderr = raw
+        .and_then(|value| value.get("stderr"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
+    let (data, error, status) = if outcome.result.status != RunStatus::Success {
         let status = if outcome.result.output.contains("timed out after") {
             crate::models::SharedRunStatus::Timeout
         } else {
             crate::models::SharedRunStatus::Failed
         };
-        let response = RunQuickExecResponse {
-            run_id: run_id.clone(),
-            success: false,
-            duration_ms: outcome.result.duration_ms,
-            data: None,
-            stdout: None,
-            stderr: None,
-            error: Some(outcome.result.output),
-        };
-        if let Err(error) = persist_quick_exec_terminal(
-            &state,
-            &id,
-            project_id.clone(),
-            launch.discussion_id.clone(),
-            created_at,
-            &response,
-            status,
-        )
-        .await
-        {
-            return Json(ApiResponse::err(format!("DB error: {error}")));
-        }
-        return Json(ApiResponse::ok(response));
-    }
-    let Some(envelope) = extract_step_envelope(&outcome.result.output) else {
-        let response = RunQuickExecResponse {
-            run_id: run_id.clone(),
-            success: false,
-            duration_ms: outcome.result.duration_ms,
-            data: None,
-            stdout: None,
-            stderr: None,
-            error: Some("Quick Exec returned no structured result".into()),
-        };
-        if let Err(error) = persist_quick_exec_terminal(
-            &state,
-            &id,
-            project_id.clone(),
-            launch.discussion_id.clone(),
-            created_at,
-            &response,
-            crate::models::SharedRunStatus::Failed,
-        )
-        .await
-        {
-            return Json(ApiResponse::err(format!("DB error: {error}")));
-        }
-        return Json(ApiResponse::ok(response));
-    };
-    let raw: serde_json::Value = match serde_json::from_str(&envelope.data_json) {
-        Ok(value) => value,
-        Err(error) => {
-            let response = RunQuickExecResponse {
-                run_id: run_id.clone(),
-                success: false,
-                duration_ms: outcome.result.duration_ms,
-                data: None,
-                stdout: None,
-                stderr: None,
-                error: Some(format!("Invalid Quick Exec result: {error}")),
-            };
-            if let Err(error) = persist_quick_exec_terminal(
-                &state,
-                &id,
-                project_id.clone(),
-                launch.discussion_id.clone(),
-                created_at,
-                &response,
-                crate::models::SharedRunStatus::Failed,
-            )
-            .await
-            {
-                return Json(ApiResponse::err(format!("DB error: {error}")));
-            }
-            return Json(ApiResponse::ok(response));
+        // Keep the original diagnostic: a failed command may explain itself
+        // on stdout alone, and the saved stderr cannot replace that evidence.
+        (None, Some(outcome.result.output), status)
+    } else {
+        match raw_result.and_then(|raw| {
+            crate::workflows::collect_api_data_step::quick_exec_value(&raw, item.output_format)
+        }) {
+            Ok(data) => (Some(data), None, crate::models::SharedRunStatus::Success),
+            Err(error) => (None, Some(error), crate::models::SharedRunStatus::Failed),
         }
     };
-    let stdout = raw
-        .get("stdout")
-        .and_then(|value| value.as_str())
-        .map(str::to_string);
-    let stderr = raw
-        .get("stderr")
-        .and_then(|value| value.as_str())
-        .map(str::to_string);
-    let (response, status) =
-        match crate::workflows::collect_api_data_step::quick_exec_value(&raw, item.output_format) {
-            Ok(data) => (
-                RunQuickExecResponse {
-                    run_id: run_id.clone(),
-                    success: true,
-                    duration_ms: outcome.result.duration_ms,
-                    data: Some(data),
-                    stdout,
-                    stderr,
-                    error: None,
-                },
-                crate::models::SharedRunStatus::Success,
-            ),
-            Err(error) => (
-                RunQuickExecResponse {
-                    run_id: run_id.clone(),
-                    success: false,
-                    duration_ms: outcome.result.duration_ms,
-                    data: None,
-                    stdout,
-                    stderr,
-                    error: Some(error),
-                },
-                crate::models::SharedRunStatus::Failed,
-            ),
-        };
+    let response = RunQuickExecResponse {
+        run_id: run_id.clone(),
+        success: error.is_none(),
+        duration_ms: outcome.result.duration_ms,
+        exit_code,
+        data,
+        stdout,
+        stderr,
+        error,
+    };
     if let Err(error) = persist_quick_exec_terminal(
         &state,
         &id,
@@ -533,6 +471,12 @@ async fn persist_quick_exec_terminal(
 ) -> anyhow::Result<()> {
     let now = chrono::Utc::now();
     let run = crate::models::SharedRun {
+        exec_details: (response.exit_code.is_some() || response.stderr.is_some()).then(|| {
+            crate::models::QuickExecDiagnostics {
+                exit_code: response.exit_code,
+                stderr: response.stderr.clone(),
+            }
+        }),
         id: response.run_id.clone(),
         kind: crate::models::SharedRunKind::QuickExec,
         source_id: source_id.to_owned(),

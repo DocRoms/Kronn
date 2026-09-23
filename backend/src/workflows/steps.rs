@@ -1064,6 +1064,7 @@ async fn run_agent_with_timeout(
             .agent_settings
             .as_ref()
             .and_then(|s| s.reasoning_effort.as_deref()),
+        max_tokens_override: step.agent_settings.as_ref().and_then(|s| s.max_tokens),
         // The named connection this step points at. `AgentType::Custom` is
         // shared by every OpenAI-compatible connection, so without this the
         // runner refuses the spawn outright.

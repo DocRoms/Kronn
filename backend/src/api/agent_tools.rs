@@ -20,6 +20,21 @@ use crate::AppState;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
+#[cfg(test)]
+#[path = "agent_quick_prompt_tests.rs"]
+mod quick_prompt_tests;
+
+#[cfg(test)]
+#[path = "agent_quick_prompt_bench.rs"]
+mod quick_prompt_bench;
+
+#[cfg(test)]
+#[path = "agent_signal_bench.rs"]
+mod signal_bench;
+
+#[path = "agent_workflow_tools.rs"]
+mod workflow_tools;
+
 pub struct KronnToolExecutor {
     state: AppState,
     /// Scopes `api_call` to the calling conversation when there is one, so the
@@ -163,8 +178,162 @@ fn fail(call: &ToolCall, message: impl Into<String>) -> ToolOutcome {
 
 /// The advertised tool schemas. A free function so it can be asserted on
 /// without standing up an `AppState` — it depends on nothing else.
+/// Optional tool families used when KRONN_TIERED_TOOLS=1; full declarations are
+/// the default. Core tools stay directly available for discovery. Loaded families
+/// remain available for the run. Quick Prompt batch launch and deletion are omitted
+/// to prevent unbounded fan-out and removal of saved run history.
+pub(crate) const TOOL_FAMILIES: &[(&str, &str, &[&str])] = &[
+    (
+        "media",
+        "make an image or a video: `media_generate`, `media_job_status` (the connection comes from `agent_list`, in the core)",
+        &["media_generate", "media_job_status"],
+    ),
+    (
+        "delegation",
+        "give a task to a worker agent and follow it: `task_exec_prepare`, `task_exec_launch`, `task_exec_status`, `task_exec_review`",
+        &[
+            // Keep agent_list in the core so worker and media-provider discovery needs no
+            // preliminary family load.
+            "task_exec_prepare",
+            "task_exec_launch",
+            "task_exec_status",
+            "task_exec_deliver",
+            "task_exec_review",
+            "task_exec_cancel",
+            "task_exec_reassign",
+            "agent_job_start",
+            "agent_schedule_wake",
+            "agent_resume_status",
+            "agent_resume_cancel",
+        ],
+    ),
+    (
+        "edit",
+        "change files in the workspace and commit: `write_file`, `edit_file`, `edit_lines`, `insert_after_line`, `git_commit`",
+        &[
+            "write_file",
+            "edit_file",
+            "edit_lines",
+            "insert_after_line",
+            "git_commit",
+        ],
+    ),
+    (
+        "automations",
+        "save and run APIs, commands and prompts; author disabled workflows: `qa_create_draft`, `qa_update`, `qe_create_draft`, `qe_update`, `qe_run`, `qe_list`, `qp_list`, `qp_run`, `qp_create_draft`, `qp_update`, `workflow_list`, `workflow_get`, `workflow_step_schema`, `workflow_create_draft`, `workflow_update`",
+        &[
+            "qa_create_draft",
+            "qa_update",
+            "qe_create_draft",
+            "qe_update",
+            "qe_run",
+            "qe_list",
+            "qp_list",
+            "qp_run",
+            "qp_create_draft",
+            "qp_update",
+            "workflow_list",
+            "workflow_get",
+            "workflow_step_schema",
+            "workflow_create_draft",
+            "workflow_update",
+        ],
+    ),
+];
+
+/// Use full declarations by default. Native-model measurements in docs/research/
+/// showed lower success with tiering; keep it opt-in via KRONN_TIERED_TOOLS=1.
+pub(crate) fn tiered_tools_enabled() -> bool {
+    explicit_tiering(std::env::var("KRONN_TIERED_TOOLS").ok().as_deref())
+}
+
+fn explicit_tiering(raw: Option<&str>) -> bool {
+    raw.map(str::trim) == Some("1")
+}
+
+/// The first sentence of a tool's description, for the index a loaded family
+/// returns. A weak model that received only names went looking elsewhere.
+fn first_sentence(description: &str) -> String {
+    let flat = description.split_whitespace().collect::<Vec<_>>().join(" ");
+    match flat.find(". ") {
+        Some(end) => flat[..=end].trim().to_string(),
+        None => flat.chars().take(160).collect(),
+    }
+}
+
+fn family_of(name: &str) -> Option<&'static str> {
+    TOOL_FAMILIES
+        .iter()
+        .find(|(_, _, tools)| tools.contains(&name))
+        .map(|(family, _, _)| *family)
+}
+
+pub(crate) fn declarations_for_family(family: &str) -> Vec<Value> {
+    let Some((_, _, names)) = TOOL_FAMILIES.iter().find(|(id, _, _)| *id == family) else {
+        return Vec::new();
+    };
+    full_discussion_catalogue()
+        .into_iter()
+        .filter(|tool| {
+            tool["function"]["name"]
+                .as_str()
+                .is_some_and(|name| names.contains(&name))
+        })
+        .collect()
+}
+
+fn tools_load_declaration() -> Value {
+    let index = TOOL_FAMILIES
+        .iter()
+        .map(|(family, what, _)| format!("`{family}` — {what}"))
+        .collect::<Vec<_>>()
+        .join(" | ");
+    json!({
+        "type": "function",
+        "function": {
+            "name": "tools_load",
+            "description": format!(
+                "Load one family of Kronn tools, then use them. Families: {index}. A tool named there EXISTS and works; it is simply not declared yet, to keep this conversation small. So a tool you cannot see is never unavailable: it is one `tools_load` away, and saying it is missing is always wrong. Call `tools_load` with its family FIRST, then call the tool it named. A request needing two families loads them ONE AT A TIME: load the first, finish that part, then load the second and finish the rest. Do not look for another route, and never answer that it cannot be done."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "family": {
+                        "type": "string",
+                        "enum": TOOL_FAMILIES.iter().map(|(id, _, _)| *id).collect::<Vec<_>>(),
+                    },
+                },
+                "required": ["family"],
+            },
+        },
+    })
+}
+
+/// The catalogue as it stands before the tiers are applied.
+pub(crate) fn full_discussion_catalogue() -> Vec<Value> {
+    let mut catalogue = tool_catalogue();
+    catalogue.extend(workspace_tool_catalogue());
+    catalogue.extend(orchestration_tool_catalogue());
+    catalogue.extend(agent_resume_tool_catalogue());
+    catalogue
+}
+
+/// Split a catalogue into what a run starts with, plus the index.
+pub(crate) fn tiered(catalogue: Vec<Value>) -> Vec<Value> {
+    let mut core: Vec<Value> = catalogue
+        .into_iter()
+        .filter(|tool| {
+            tool["function"]["name"]
+                .as_str()
+                .is_none_or(|name| family_of(name).is_none())
+        })
+        .collect();
+    core.push(tools_load_declaration());
+    core
+}
+
 pub fn tool_catalogue() -> Vec<Value> {
-    vec![
+    let mut catalogue = vec![
         json!({
             "type": "function",
             "function": {
@@ -316,6 +485,74 @@ pub fn tool_catalogue() -> Vec<Value> {
         json!({
             "type": "function",
             "function": {
+                "name": "qp_list",
+                "description": "List saved Quick Prompts available in this discussion, with their ids and required variables.",
+                "parameters": {"type": "object", "properties": {}, "required": []},
+            },
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "qp_run",
+                "description": "Launch one saved Quick Prompt in a new discussion, using its saved model, persona and rules. Tracking: tool_manual({tool: \"qp_run\"}).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "qp_id": {"type": "string", "description": "id from qp_list"},
+                        "vars": {"type": "object", "additionalProperties": {"type": "string"}},
+                        "title": {"type": "string"},
+                    },
+                    "required": ["qp_id"],
+                },
+            },
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "qp_create_draft",
+                "description": "Save a reusable prompt without running it. Shape and model defaults: tool_manual({tool: \"qp_create_draft\"}).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "description": {"type": "string"},
+                        "icon": {"type": "string"},
+                        "prompt_template": {"type": "string"},
+                        "project_id": {"type": ["string", "null"], "description": "Defaults to this discussion's project. Explicit null creates a general prompt."},
+                        "variables": {
+                            "type": "array", "items": {"type": "object"},
+                            "description": "Each: {name, label, placeholder, required}. Both label and placeholder are required.",
+                        },
+                    },
+                    "required": ["name", "prompt_template"],
+                },
+            },
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "qp_update",
+                "description": "Change only the named fields of a saved Quick Prompt, keeping its model, persona and rules. Merge details: tool_manual({tool: \"qp_update\"}).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "qp_id": {"type": "string", "description": "id from qp_list"},
+                        "name": {"type": "string"},
+                        "description": {"type": "string"},
+                        "icon": {"type": "string"},
+                        "prompt_template": {"type": "string"},
+                        "variables": {
+                            "type": "array", "items": {"type": "object"},
+                            "description": "Each: {name, label, placeholder, required}. Both label and placeholder are required.",
+                        },
+                    },
+                    "required": ["qp_id"],
+                },
+            },
+        }),
+        json!({
+            "type": "function",
+            "function": {
                 "name": "qe_create_draft",
                 "description": "Save a new Quick Exec: one command, its argv, its \
                                 timeout. No shell — no pipes, no redirection, no \
@@ -381,14 +618,11 @@ pub fn tool_catalogue() -> Vec<Value> {
             "type": "function",
             "function": {
                 "name": "tool_manual",
-                "description": "Read one tool's full contract: argument shapes, examples \
-                                and the mistakes worth avoiding. Call it before authoring \
-                                anything whose description points here. Without `tool`, \
-                                lists which tools have one.",
+                "description": "Read one tool's contract, or `signals` for proposal schemas and UI actions. Omit `tool` to list manuals.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "tool": { "type": "string", "description": "Tool name, or omit to list." },
+                        "tool": { "type": "string", "description": "Tool name or signals; omit to list." },
                     },
                     "required": [],
                 },
@@ -566,7 +800,9 @@ pub fn tool_catalogue() -> Vec<Value> {
                 },
             },
         }),
-    ]
+    ];
+    catalogue.extend(workflow_tools::declarations());
+    catalogue
 }
 
 /// Discussion-bound task execution lifecycle for native HTTP agents. These are
@@ -633,6 +869,35 @@ pub(crate) fn is_orchestration_tool(name: &str) -> bool {
         .any(|tool| tool["function"]["name"] == name)
 }
 
+enum ToolDispatch {
+    DiscussionRead,
+    DiscussionList,
+    Workspace,
+    Orchestration,
+    Resume,
+    Core,
+}
+
+fn tool_dispatch(name: &str) -> ToolDispatch {
+    // A declared tool still needs to reach its handler. Media generation and
+    // family loading both previously fell through at this boundary.
+    match name {
+        "disc_read" => ToolDispatch::DiscussionRead,
+        "disc_list" => ToolDispatch::DiscussionList,
+        // The family loader is declared by tiered(), outside the orchestration list.
+        "tools_load" => ToolDispatch::Orchestration,
+        _ if crate::api::agent_workspace_tools::TOOL_NAMES.contains(&name) => {
+            ToolDispatch::Workspace
+        }
+        _ if is_orchestration_tool(name) => ToolDispatch::Orchestration,
+        "agent_job_start"
+        | "agent_schedule_wake"
+        | "agent_resume_status"
+        | "agent_resume_cancel" => ToolDispatch::Resume,
+        _ => ToolDispatch::Core,
+    }
+}
+
 fn orchestration_tool_catalogue() -> Vec<Value> {
     let tool = |name: &str, description: &str, properties: Value, required: Value| {
         json!({
@@ -668,15 +933,18 @@ fn orchestration_tool_catalogue() -> Vec<Value> {
     vec![
         tool(
             "agent_list",
-            "List the worker identities this principal room can pass verbatim to task_exec_prepare. Separates configured, reachable and available with stable secret-free reason codes; availability proves transport readiness only, never task or model success.",
+            "List the worker identities this principal room can pass verbatim to task_exec_prepare, and the media connections `media_generate` can be billed on. Separates configured, reachable and available with stable secret-free reason codes; availability proves transport readiness only, never task or model success.",
             json!({}),
             json!([]),
         ),
         tool(
             "media_generate",
-            "Generate an image or a video on a configured HTTP connection; returns {job_id, status, model}. The configured slot fixes the model — you do not choose it; a modality with no slot is refused. `agent_list`'s `media` lists one entry per configured modality, with the `capabilities` advertised: take duration, resolution and ratio from there, never from habit. A video can start from a picture: pass the context file id of an image from this room in `reference_asset_ids` — generate the image first, then feed it in. Billed: video per second, image per picture. Keep the clip short. The asset lands in the discussion on its own as a context file, so poll `media_job_status` only when you need it inside this very answer.",
+            "Generate an image or a video on a configured HTTP connection; returns {job_id, status, model, connection_id}. Never ask a human for the connection: omit it and Kronn uses the only one configured for this modality, or names the candidates when there are several. The configured slot fixes the model — you do not choose it; a modality with no slot is refused. `agent_list`'s `media` lists one entry per configured modality, with the `connection_id` and the `capabilities` advertised: take duration, resolution and ratio from there, never from habit. A video can start from a picture: pass the context file id of an image from this room in `reference_asset_ids` — generate the image first, then feed it in. Billed: video per second, image per picture. Keep the clip short. The asset lands in the discussion on its own as a context file, so poll `media_job_status` only when you need it inside this very answer.",
             json!({
-                "connection_id": {"type": "string"},
+                "connection_id": {
+                    "type": "string",
+                    "description": "Optional. Omit it and Kronn uses the only connection configured for this modality; pass an id or an alias, from `agent_list`, only when several can serve it."
+                },
                 "modality": {"type": "string", "enum": ["image", "video"]},
                 "prompt": {"type": "string"},
                 "duration_secs": {"type": "integer"},
@@ -702,12 +970,12 @@ fn orchestration_tool_catalogue() -> Vec<Value> {
                     "description": "Reuse the SAME value when you retry a generation you already asked for: it is what stops the asset being bought, and billed, a second time. Omit it and Kronn derives one from this request, so an identical retry collapses onto the first job rather than paying twice. Pass a new value only when you genuinely want another, separate take."
                 }
             }),
-            json!(["connection_id", "modality", "prompt"]),
+            json!(["modality", "prompt"]),
         ),
         tool(
             "media_job_status",
             "Read one media generation job by id: status, model and the asset once it is ready. The asset reaches the discussion by itself; call this only when the result is needed within the current answer.",
-            json!({"job_id": {"type": "string"}}),
+            json!({"job_id": {"type": "string", "description": "From `media_generate`."}}),
             json!(["job_id"]),
         ),
         tool(
@@ -875,17 +1143,19 @@ fn workspace_tool_catalogue() -> Vec<Value> {
         "type": "function",
         "function": {
             "name": "disc_read",
-            "description": "Read the recent messages of another discussion of THIS project. \
-                            Returns the tail (most recent first requested `limit`, default 40, \
-                            max 200) with `truncated` set when the room is longer. A room from \
-                            another project is refused. Read-only.",
+            "description": "Read recent messages of a discussion of THIS project. Omit \
+                            `discussion_id` to re-read THIS one: that is how you recover what \
+                            a long run shortened out of your own context. Returns the tail \
+                            (most recent first requested `limit`, default 40, max 200) with \
+                            `truncated` set when the room is longer. A room from another \
+                            project is refused. Read-only.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "discussion_id": { "type": "string", "description": "UUID of the discussion, from disc_list." },
+                    "discussion_id": { "type": "string", "description": "UUID from disc_list. Omitted, this discussion." },
                     "limit": { "type": "integer", "description": "How many recent messages (1-200)." },
                 },
-                "required": ["discussion_id"],
+                "required": [],
             },
         },
     }));
@@ -970,9 +1240,18 @@ fn worker_room_catalogue(catalogue: Vec<Value>) -> Vec<Value> {
         "qa_update",
         "qe_create_draft",
         "qe_update",
+        "qp_list",
+        "qp_run",
+        "qp_create_draft",
+        "qp_update",
         "agent_schedule_wake",
         "agent_resume_status",
         "agent_resume_cancel",
+        "workflow_list",
+        "workflow_get",
+        "workflow_step_schema",
+        "workflow_create_draft",
+        "workflow_update",
     ];
     catalogue
         .into_iter()
@@ -1052,7 +1331,12 @@ impl ToolExecutor for KronnToolExecutor {
             if self.worker_room {
                 return worker_room_catalogue(catalogue);
             }
-            return catalogue;
+            // a discussion run may start on the core plus the index.
+            return if tiered_tools_enabled() {
+                tiered(catalogue)
+            } else {
+                catalogue
+            };
         }
         let mut catalogue = workflow_tool_catalogue(self.project_id.is_some());
         // A workflow scoped to a project gets the same file, web and git tools as a
@@ -1071,6 +1355,38 @@ impl ToolExecutor for KronnToolExecutor {
             crate::agents::tools::ToolRunMode::Worker
         } else {
             crate::agents::tools::ToolRunMode::General
+        }
+    }
+
+    /// only a discussion run has someone to ask when a ceiling is
+    /// reached; a workflow step or a worker keeps the plain ceilings.
+    async fn ceiling_allowance(&self) -> crate::agents::tools::CeilingAllowance {
+        let (Some(disc_id), Some(actor_type)) = (self.disc_id.clone(), self.actor_type.as_ref())
+        else {
+            return crate::agents::tools::CeilingAllowance::default();
+        };
+        if self.worker_room || self.workflow_run_id.is_some() {
+            return crate::agents::tools::CeilingAllowance::default();
+        }
+        let agent = crate::db::discussions::format_agent_type(actor_type);
+        match self
+            .state
+            .db
+            .with_conn(move |conn| {
+                crate::db::discussion_ceiling_requests::take_allowance(conn, &disc_id, &agent)
+            })
+            .await
+        {
+            Ok(allowance) => allowance,
+            Err(error) => {
+                // An unreadable grant is no grant, but the ceiling can still
+                // be put to the human.
+                tracing::warn!(target: "kronn::agent::tools", %error, "ceiling allowance unreadable");
+                crate::agents::tools::CeilingAllowance {
+                    ask_on_ceiling: true,
+                    ..Default::default()
+                }
+            }
         }
     }
 
@@ -1099,35 +1415,13 @@ impl ToolExecutor for KronnToolExecutor {
 
         // Handlers are invoked directly rather than over loopback HTTP: same
         // code path as the bridge's calls, minus a round-trip and an auth hop.
-        // KT-340 — cross-room reads, scoped to this discussion's project.
-        if call.name == "disc_read" {
-            return self.read_other_discussion(call).await;
-        }
-        if call.name == "disc_list" {
-            return self.list_project_discussions(call).await;
-        }
-        // KT-338 — web and workspace tools. Handled before the Kronn-internal
-        // catalogue because they need the discussion's workspace root, not the
-        // API handlers.
-        if crate::api::agent_workspace_tools::TOOL_NAMES.contains(&call.name.as_str()) {
-            return self.execute_workspace_tool(call).await;
-        }
-        // Routed by asking the catalogue, not by re-listing its names here.
-        // The media tools were declared in that catalogue and implemented in
-        // that dispatcher, and this line — the one step between them — still
-        // said `agent_list` and `task_exec_*`. An agent saw `media_generate`,
-        // called it, and fell through to "unknown tool".
-        if is_orchestration_tool(&call.name) {
-            return self.execute_orchestration_tool(call).await;
-        }
-        if matches!(
-            call.name.as_str(),
-            "agent_job_start"
-                | "agent_schedule_wake"
-                | "agent_resume_status"
-                | "agent_resume_cancel"
-        ) {
-            return self.execute_agent_resume_tool(call).await;
+        match tool_dispatch(&call.name) {
+            ToolDispatch::DiscussionRead => return self.read_other_discussion(call).await,
+            ToolDispatch::DiscussionList => return self.list_project_discussions(call).await,
+            ToolDispatch::Workspace => return self.execute_workspace_tool(call).await,
+            ToolDispatch::Orchestration => return self.execute_orchestration_tool(call).await,
+            ToolDispatch::Resume => return self.execute_agent_resume_tool(call).await,
+            ToolDispatch::Core => {}
         }
         match call.name.as_str() {
             "mcp_list" => {
@@ -1183,6 +1477,101 @@ impl ToolExecutor for KronnToolExecutor {
                 }
             }
             "tool_manual" => ok(call, tool_manual(call.arguments["tool"].as_str())),
+            "workflow_list"
+            | "workflow_get"
+            | "workflow_step_schema"
+            | "workflow_create_draft"
+            | "workflow_update" => self.execute_workflow_tool(call).await,
+            "qp_list" => {
+                let Json(res) = crate::api::quick_prompts::list(State(self.state.clone())).await;
+                match (res.success, res.data) {
+                    (true, Some(items)) => {
+                        let project_id = self.effective_project_id().await;
+                        ok(call, compact_quick_prompts(&items, project_id.as_deref()))
+                    }
+                    _ => fail(call, res.error.unwrap_or_else(|| "call failed".into())),
+                }
+            }
+            "qp_create_draft" => {
+                let project_id = self.effective_project_id().await;
+                let request = match quick_prompt_write_request(
+                    None,
+                    &call.arguments,
+                    project_id.as_deref(),
+                ) {
+                    Ok(request) => request,
+                    Err(error) => return fail(call, error),
+                };
+                let Json(res) =
+                    crate::api::quick_prompts::create(State(self.state.clone()), Json(request))
+                        .await;
+                unwrap_api(call, res.success, res.data, res.error)
+            }
+            "qp_update" | "qp_run" => {
+                let Some(id) = call.arguments["qp_id"].as_str() else {
+                    return fail(call, "missing required field `qp_id`");
+                };
+                let lookup = id.to_owned();
+                let saved = self
+                    .state
+                    .db
+                    .with_conn(move |conn| {
+                        crate::db::quick_prompts::get_quick_prompt(conn, &lookup)
+                    })
+                    .await;
+                let saved = match saved {
+                    Ok(saved) => saved,
+                    Err(error) => return fail(call, format!("DB error: {error}")),
+                };
+                let project_id = self.effective_project_id().await;
+                let Some(saved) = saved.filter(|qp| {
+                    project_is_in_scope(qp.project_id.as_deref(), project_id.as_deref())
+                }) else {
+                    return fail(call, "Quick Prompt is not available in this discussion's scope — call qp_list again");
+                };
+                if call.name == "qp_update" {
+                    let request = match quick_prompt_write_request(
+                        Some(&saved),
+                        &call.arguments,
+                        project_id.as_deref(),
+                    ) {
+                        Ok(request) => request,
+                        Err(error) => return fail(call, error),
+                    };
+                    let Json(res) = crate::api::quick_prompts::update(
+                        State(self.state.clone()),
+                        Path(saved.id),
+                        Json(request),
+                    )
+                    .await;
+                    unwrap_api(call, res.success, res.data, res.error)
+                } else {
+                    let request = crate::api::mcp_remote::McpQpRunRequest {
+                        qp_id: saved.id,
+                        vars: call.arguments["vars"]
+                            .as_object()
+                            .map(|values| {
+                                values
+                                    .iter()
+                                    .map(|(name, value)| (name.clone(), as_plain_string(value)))
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
+                        agent: None,
+                        project_id: None,
+                        title: call.arguments["title"].as_str().map(str::to_owned),
+                        launch: Some(crate::core::launch_context::LaunchContext {
+                            discussion_id: self.disc_id.clone(),
+                            project_id,
+                            context: Default::default(),
+                        }),
+                    };
+                    let Json(res) =
+                        crate::api::mcp_remote::qp_run(State(self.state.clone()), Json(request))
+                            .await;
+                    unwrap_api(call, res.success, res.data, res.error)
+                }
+            }
             "qe_run" => {
                 let Some(id) = call.arguments["quick_exec_id"].as_str() else {
                     return fail(call, "missing required field `quick_exec_id`");
@@ -1684,10 +2073,64 @@ impl KronnToolExecutor {
                     Err(error) => fail(call, error.to_string()),
                 }
             }
+            // the family's declarations go back to the runner, which
+            // adds them to the catalogue for the rest of the run.
+            "tools_load" => {
+                if self.worker_room {
+                    return fail(
+                        call,
+                        "tool families can only be loaded by a principal discussion agent",
+                    );
+                }
+                // Missing or unknown families return the discovery index so the model can recover.
+                let family = required_string(call, "family").unwrap_or_default();
+                let declarations = declarations_for_family(&family);
+                if declarations.is_empty() {
+                    return ToolOutcome {
+                        call: call.clone(),
+                        content: json!({
+                            "families": TOOL_FAMILIES
+                                .iter()
+                                .map(|(id, what, _)| json!({"family": id, "brings": what}))
+                                .collect::<Vec<_>>(),
+                            "note": "Call `tools_load` again with one of these as `family`,                                      then use the tools it declares. Load a second family the                                      same way once the first part is done.",
+                        }),
+                        ok: true,
+                    };
+                }
+                let loaded: Vec<Value> = declarations
+                    .iter()
+                    .map(|tool| {
+                        json!({
+                            "name": tool["function"]["name"],
+                            "what": first_sentence(
+                                tool["function"]["description"].as_str().unwrap_or_default(),
+                            ),
+                        })
+                    })
+                    .collect();
+                let first = loaded
+                    .first()
+                    .and_then(|tool| tool["name"].as_str())
+                    .unwrap_or("the one you need")
+                    .to_string();
+                ok(
+                    call,
+                    json!({
+                        "family": family,
+                        "loaded": loaded,
+                        "note": format!(
+                            "These tools are declared from now on. Call the one the request needs, starting with `{first}` if it fits: they are ready, and no other route is required."
+                        ),
+                        // Read by the runner, never shown to the model: it sees
+                        // the declarations themselves in the next turn's catalogue.
+                        "__kronn_tools_add": declarations,
+                    }),
+                )
+            }
             "media_generate" => {
-                let Some(connection_id) = required_string(call, "connection_id") else {
-                    return fail(call, "missing required field `connection_id`");
-                };
+                // Let the media handler resolve an absent connection or report ambiguous providers.
+                let connection_id = required_string(call, "connection_id");
                 let Some(prompt) = required_string(call, "prompt") else {
                     return fail(call, "missing required field `prompt`");
                 };
@@ -2454,15 +2897,17 @@ impl KronnToolExecutor {
     ///
     /// Reading only — no tool here can write to another room.
     async fn read_other_discussion(&self, call: &ToolCall) -> ToolOutcome {
-        let Some(target) = call.arguments["discussion_id"].as_str().map(str::to_string) else {
-            return fail(call, "missing required field `discussion_id`");
-        };
         let Some(disc_id) = self.disc_id.clone() else {
             return fail(
                 call,
                 "this run has no discussion, so it has no project to read within",
             );
         };
+        // Default to the executor room so the model can read its own discussion history.
+        let target = call.arguments["discussion_id"]
+            .as_str()
+            .map(str::to_string)
+            .unwrap_or_else(|| disc_id.clone());
         let limit = count_arg(call, "limit").unwrap_or(40).clamp(1, 200) as usize;
         let target_for_db = target.clone();
         let result = self
@@ -2480,7 +2925,7 @@ impl KronnToolExecutor {
                     (Some(a), Some(b)) => a == b,
                     _ => false,
                 };
-                if !same_project {
+                if here.id != there.id && !same_project {
                     return Ok(Some((there.title, Vec::new(), false)));
                 }
                 let messages = crate::db::discussions::list_messages(conn, &target_for_db)?;
@@ -3231,6 +3676,59 @@ fn merged_definition<T: serde::Serialize, R: serde::de::DeserializeOwned>(
 fn tool_manual(name: Option<&str>) -> Value {
     const MANUALS: &[(&str, &str)] = &[
         (
+            "workflow_create_draft",
+            "Read workflow_step_schema for the canonical step contracts; step_type narrows the result. \
+             Shared templating and data pipeline contracts are available by section. \
+             Read workflow_get on an accessible example. Send name, trigger (e.g. {type: Manual}) \
+             and 1–20 steps; each has name and step_type:{type: ...}. Optional authoring fields: \
+             actions, safety, workspace_config, guards, artifacts, on_failure (0–20 steps), \
+             exec_allowlist, concurrency_limit, variables ({name,label,placeholder,required}). \
+             Exec binaries must be allowlisted. The workflow is always disabled for human review; \
+             no native tool here enables, triggers or deletes it. Cron/Tracker drafts default \
+             concurrency_limit to 1. Omitted project_id inherits the room; null means general; \
+             other projects are refused. Unlisted top-level fields are ignored.",
+        ),
+        (
+            "workflow_update",
+            "Read workflow_get first. Pass workflow_id and only changed authoring fields from \
+             workflow_create_draft. Omitted fields survive; supplied arrays replace the whole \
+             array, so include all intended steps when editing steps. The project never moves \
+             and enabled cannot be set. Only disabled workflows can be updated; disable an \
+             enabled workflow in the Workflows UI first, or author a new disabled draft. \
+             No workflow runs from this call.",
+        ),
+        (
+            "qp_create_draft",
+            "Save a prompt_template with {{name}} placeholders. Declare each variable as \
+             {\"name\":\"topic\",\"label\":\"Topic\",\"placeholder\":\"Release notes\",\"required\":true}. \
+             Both label and placeholder are required. Allowed fields: name, description, icon, \
+             prompt_template, variables, project_id. Other fields are ignored. A draft does not run; \
+             it uses Kronn's creation defaults (Claude Code, default tier, no persona or rules). \
+             The human can configure its model and bindings in the automation library. \
+             project_id defaults to this discussion's project; an explicit null creates a general \
+             prompt. Another project's id is refused. qp_id and vars follow the MCP Quick Prompt contract.",
+        ),
+        (
+            "qp_update",
+            "Pass qp_id from qp_list and only the fields that change: name, description, icon, \
+             prompt_template, variables. Omitted fields keep their stored values; \
+             variables replaces the whole list. Use the variable shape in qp_create_draft. \
+             The project scope stays unchanged, including if project_id is supplied. \
+             The saved agent, connection, tier, settings, skills, profiles and directives are \
+             preserved. Fields outside the allowed list are ignored.",
+        ),
+        (
+            "qp_run",
+            "Pass qp_id from qp_list and vars mapping the required variable names to values. \
+             This launches exactly one new discussion with the saved agent, connection, tier, \
+             settings, skills, profiles and directives. Model or project overrides are ignored. \
+             A general prompt inherits the source discussion's project. The result includes \
+             disc_id and next_check; within a project, wait for that interval then call \
+             disc_read({discussion_id: disc_id}). Without a project the result is available \
+             in the new discussion's UI; cross-discussion reading is not available. \
+             An optional title names the new discussion. Batch launch and deletion are not available.",
+        ),
+        (
             "qa_create_draft",
             "A Quick API is a saved, replayable call through a configured plugin.              Kronn injects the credential server-side at run time — never put a key,              a token or an Authorization header in the definition.\n\n             Discovery order: `mcp_list` gives `api_plugin_slug` and `api_config_id`;              `api_endpoints` gives the exact `api_endpoint_path` for that plugin. Both              must come from those calls; a guessed path is a 404 at run time, not a              validation error here.\n\n             Variables are `{{name}}` placeholders anywhere in the path, query, headers              or body. Declare each one as `{\"name\": \"service_id\", \"label\":              \"Service\", \"placeholder\": \"abc123\", \"required\": true}`; `label`              and `placeholder` are what a human sees in the launcher, so write them for              a human. A variable used but not declared fails the launch.\n\n             `project_id` scopes it: set it and only that project's rooms see it, omit it              and every room does. A draft is saved disabled-safe — it runs only when              someone calls `qa_run` with it.",
         ),
@@ -3266,14 +3764,17 @@ fn tool_manual(name: Option<&str>) -> Value {
 
     match name.map(str::trim).filter(|name| !name.is_empty()) {
         None => json!({
-            "available": MANUALS.iter().map(|(name, _)| *name).collect::<Vec<_>>(),
-            "hint": "Pass `tool` to read one. Only tools whose description points here have one; for every other tool the description IS the whole contract.",
+            "available": MANUALS.iter().map(|(name, _)| *name).chain(std::iter::once("signals")).collect::<Vec<_>>(),
+            "hint": "Pass `tool` to read one. signals lists structured proposal contracts; other entries document the named tool.",
         }),
+        Some("signals") => {
+            json!({"tool": "signals", "catalogue": crate::api::signal_catalog::catalogue()})
+        }
         Some(wanted) => match MANUALS.iter().find(|(name, _)| *name == wanted) {
             Some((name, manual)) => json!({ "tool": name, "manual": manual }),
             None => json!({
                 "error": format!("no manual for `{wanted}`"),
-                "available": MANUALS.iter().map(|(name, _)| *name).collect::<Vec<_>>(),
+                "available": MANUALS.iter().map(|(name, _)| *name).chain(std::iter::once("signals")).collect::<Vec<_>>(),
             }),
         },
     }
@@ -3287,6 +3788,65 @@ fn quick_api_is_in_scope(quick_api: &crate::models::QuickApi, project_id: Option
             .is_none_or(|id| id == project_id),
         None => quick_api.project_id.is_none(),
     }
+}
+
+fn project_is_in_scope(target: Option<&str>, project_id: Option<&str>) -> bool {
+    target.is_none() || target == project_id
+}
+
+fn quick_prompt_write_request(
+    existing: Option<&crate::models::QuickPrompt>,
+    arguments: &Value,
+    project_id: Option<&str>,
+) -> Result<crate::models::CreateQuickPromptRequest, String> {
+    let Some(fields) = arguments.as_object() else {
+        return Err("invalid Quick Prompt: definition is not an object".into());
+    };
+    // These tools may edit a template, never choose its model or bindings.
+    // Schemas alone do not constrain arguments actually sent by a provider.
+    let allowed = [
+        "name",
+        "description",
+        "icon",
+        "prompt_template",
+        "variables",
+        "project_id",
+    ];
+    let mut filtered = Value::Object(
+        fields
+            .iter()
+            .filter(|(key, _)| {
+                allowed.contains(&key.as_str())
+                    && !(existing.is_some() && key.as_str() == "project_id")
+            })
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect(),
+    );
+    if existing.is_none() && !fields.contains_key("project_id") {
+        filtered["project_id"] = json!(project_id);
+    }
+    let request: crate::models::CreateQuickPromptRequest = match existing {
+        Some(saved) => merged_definition(saved, &filtered)?,
+        None => serde_json::from_value(filtered)
+            .map_err(|error| format!("invalid Quick Prompt: {error}"))?,
+    };
+    if !project_is_in_scope(request.project_id.as_deref(), project_id) {
+        return Err("Quick Prompt project is outside this discussion's scope".into());
+    }
+    Ok(request)
+}
+
+fn compact_quick_prompts(items: &[crate::models::QuickPrompt], project_id: Option<&str>) -> Value {
+    json!({"quick_prompts": items.iter()
+        .filter(|qp| project_is_in_scope(qp.project_id.as_deref(), project_id))
+        .map(|qp| json!({
+            "id": qp.id,
+            "name": qp.name,
+            "does": brief(&json!(qp.description), 140),
+            "agent": qp.agent,
+            "required_variables": qp.variables.iter().filter(|variable| variable.required)
+                .map(|variable| &variable.name).collect::<Vec<_>>(),
+        })).collect::<Vec<_>>()})
 }
 
 /// The Quick Execs this discussion could actually start, compacted.
@@ -3403,6 +3963,60 @@ fn unwrap_api_compact_task(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn progressive_tool_loading_requires_an_explicit_opt_in() {
+        for raw in [None, Some(""), Some("0"), Some("true"), Some("unexpected")] {
+            assert!(
+                !explicit_tiering(raw),
+                "{raw:?} must keep the full catalogue"
+            );
+        }
+        for raw in [Some("1"), Some(" 1 ")] {
+            assert!(explicit_tiering(raw));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_projectless_room_can_read_itself_but_not_other_unattached_rooms() {
+        let state = super::quick_prompt_tests::state_with_prompts().await;
+        state.db.with_conn(|conn| {
+            for (id, project) in [("other-general", None), ("other-a", Some("a")), ("room-b", Some("b"))] {
+                conn.execute("INSERT INTO discussions (id,title,project_id,created_at,updated_at) VALUES (?1,?1,?2,'2026-09-22T00:00:00Z','2026-09-22T00:00:00Z')", rusqlite::params![id, project])?;
+            }
+            conn.execute("INSERT INTO messages (id,discussion_id,role,content,timestamp) VALUES ('self-message','general','User','Own room history','2026-09-22T00:00:00Z')", [])?;
+            Ok(())
+        }).await.unwrap();
+        for (room, target, allowed) in [
+            ("general", None, true),
+            ("general", Some("general"), true),
+            ("general", Some("other-general"), false),
+            ("general", Some("room-a"), false),
+            ("room-a", None, true),
+            ("room-a", Some("other-a"), true),
+            ("room-a", Some("room-b"), false),
+            ("room-a", Some("general"), false),
+            ("general", Some("missing"), false),
+        ] {
+            let executor = KronnToolExecutor::new(state.clone(), Some(room.into()));
+            let result = executor
+                .execute(&ToolCall {
+                    id: "read".into(),
+                    name: "disc_read".into(),
+                    arguments: target.map_or_else(|| json!({}), |id| json!({"discussion_id":id})),
+                })
+                .await;
+            assert_eq!(
+                result.ok, allowed,
+                "{room} -> {target:?}: {}",
+                result.content
+            );
+            if allowed && room == "general" {
+                assert_eq!(result.content["discussion_id"], "general");
+                assert_eq!(result.content["messages"][0]["content"], "Own room history");
+            }
+        }
+    }
 
     fn call_with(arguments: serde_json::Value) -> ToolCall {
         ToolCall {
@@ -4055,6 +4669,10 @@ mod tests {
             "qe_run",
             "qa_create_draft",
             "qa_update",
+            "qp_list",
+            "qp_run",
+            "qp_create_draft",
+            "qp_update",
             "qe_create_draft",
             "qe_update",
             "tool_manual",
@@ -4068,6 +4686,11 @@ mod tests {
             "task_link_discussion",
             "task_add_blocker",
             "task_remove_blocker",
+            "workflow_list",
+            "workflow_get",
+            "workflow_step_schema",
+            "workflow_create_draft",
+            "workflow_update",
         ];
         let items = tool_catalogue();
         assert_eq!(items.len(), expected.len());
@@ -4270,6 +4893,10 @@ mod tests {
             .collect();
         let has = |name: &str| worker.iter().any(|tool| tool == name);
         for withheld in [
+            "qp_list",
+            "qp_run",
+            "qp_create_draft",
+            "qp_update",
             "qe_list",
             "qe_run",
             "qa_create_draft",
@@ -4363,7 +4990,7 @@ mod tests {
     }
 
     #[test]
-    fn every_manual_page_belongs_to_a_declared_tool() {
+    fn every_manual_entry_belongs_to_a_declared_tool_or_the_signal_registry() {
         // A page for a tool nobody can call is documentation of a capability
         // that does not exist — the exact shape that taught models to
         // hallucinate calls (tools.rs).
@@ -4373,6 +5000,12 @@ mod tests {
             .collect();
         for page in tool_manual(None)["available"].as_array().unwrap() {
             let name = page.as_str().unwrap();
+            if name == "signals" {
+                // This entry documents response fences, not a callable tool.
+                assert!(!declared.iter().any(|tool| tool == name));
+                assert!(tool_manual(Some(name))["catalogue"]["signals"].is_array());
+                continue;
+            }
             assert!(
                 declared.iter().any(|tool| tool == name),
                 "manual page `{name}` has no declared tool"
@@ -4524,5 +5157,135 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ── the catalogue in tiers ──
+
+    fn names(catalogue: &[Value]) -> std::collections::HashSet<String> {
+        catalogue
+            .iter()
+            .filter_map(|tool| tool["function"]["name"].as_str())
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// Omitting the discussion id must read the executor room, and the schema must say so.
+    #[test]
+    fn an_agent_can_ask_for_its_own_room_without_knowing_its_id() {
+        let disc_read = full_discussion_catalogue()
+            .into_iter()
+            .find(|tool| tool["function"]["name"] == "disc_read")
+            .expect("disc_read is declared");
+        let function = &disc_read["function"];
+        assert_eq!(
+            function["parameters"]["required"],
+            serde_json::json!([]),
+            "requiring an id it cannot know makes the tool unusable on its own room"
+        );
+        let description = function["description"].as_str().unwrap_or_default();
+        assert!(
+            description.contains("Omit `discussion_id` to re-read THIS one"),
+            "say that omitting it reads this room: {description}"
+        );
+        assert!(
+            description.contains("shortened"),
+            "name what it is for, or it reads as a way to snoop on other rooms: {description}"
+        );
+    }
+
+    #[test]
+    fn every_tool_is_either_in_the_core_or_in_exactly_one_family() {
+        let full = names(&full_discussion_catalogue());
+        let core = names(&tiered(full_discussion_catalogue()));
+        let mut in_families: Vec<&str> = Vec::new();
+        for (_, _, tools) in TOOL_FAMILIES {
+            in_families.extend(*tools);
+        }
+        for (index, tool) in in_families.iter().enumerate() {
+            assert!(
+                full.contains(*tool),
+                "family names `{tool}`, which the catalogue does not declare"
+            );
+            assert!(
+                !in_families[index + 1..].contains(tool),
+                "`{tool}` is in two families"
+            );
+        }
+        // Nothing may fall between the two: a capability declared nowhere is
+        // a capability an agent can never reach.
+        for tool in &full {
+            assert!(
+                core.contains(tool) || in_families.contains(&tool.as_str()),
+                "`{tool}` is neither in the core nor in a family"
+            );
+        }
+        assert_eq!(
+            core.len(),
+            full.len() - in_families.len() + 1,
+            "plus tools_load"
+        );
+        assert!(core.contains("tools_load"));
+    }
+
+    #[test]
+    fn discovery_tools_stay_in_the_core() {
+        let core = names(&tiered(full_discussion_catalogue()));
+        // Provider discovery must not require a preliminary family load.
+        for tool in [
+            "agent_list",
+            "plan_get",
+            "task_list",
+            "api_call",
+            "mcp_list",
+            "read_file",
+            "search_text",
+            "web_fetch",
+            "tool_manual",
+            "tools_load",
+        ] {
+            assert!(
+                core.contains(tool),
+                "`{tool}` must be declared from the start"
+            );
+        }
+    }
+
+    #[test]
+    fn the_index_names_every_family_and_the_tools_it_brings() {
+        let declaration = tools_load_declaration();
+        let description = declaration["function"]["description"].as_str().unwrap();
+        let options = declaration["function"]["parameters"]["properties"]["family"]["enum"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|value| value.as_str())
+            .collect::<Vec<_>>();
+        for (family, what, tools) in TOOL_FAMILIES {
+            assert!(options.contains(family), "`{family}` is not selectable");
+            assert!(description.contains(family), "the index omits `{family}`");
+            // A family that only says what it is for sent a 12B model looking
+            // elsewhere; naming its tools is what stopped that.
+            assert!(
+                tools.iter().any(|tool| what.contains(tool)),
+                "`{family}` names none of its tools: {what}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_family_answers_with_its_declarations_and_what_each_one_does() {
+        let declarations = declarations_for_family("media");
+        assert_eq!(
+            names(&declarations),
+            ["media_generate", "media_job_status"]
+                .into_iter()
+                .map(str::to_string)
+                .collect()
+        );
+        assert!(declarations_for_family("nope").is_empty());
+        let summary = first_sentence(
+            "Generate an image or a video. The rest of the description explains the envelope.",
+        );
+        assert_eq!(summary, "Generate an image or a video.");
     }
 }

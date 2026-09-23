@@ -124,7 +124,28 @@ pub fn resolve(
                     overridden,
                 });
             }
-            _ if !variable.required => {}
+            _ if !variable.required => {
+                // A declared optional input remains a known template variable
+                // even when blank (#213). Keep explicit blanks verbatim;
+                // distinguish an omitted input from a value actually supplied.
+                // Unresolved context/env sources retain their existing policy.
+                if source == PromptVariableSource::UserInput {
+                    let supplied = supplied.get(&variable.name);
+                    values.insert(variable.name.clone(), supplied.cloned().unwrap_or_default());
+                    provenance.push(VariableProvenance {
+                        name: variable.name.clone(),
+                        source,
+                        source_ref: variable.source_ref.clone(),
+                        effective_source_ref: if supplied.is_some() {
+                            "user_input"
+                        } else {
+                            "optional_empty"
+                        }
+                        .to_string(),
+                        overridden: false,
+                    });
+                }
+            }
             _ => {
                 let cause = match source {
                     PromptVariableSource::ProjectEnv => variable
@@ -305,6 +326,159 @@ fn reference_name(reference: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn input_var(required: bool) -> PromptVariable {
+        PromptVariable {
+            name: "foo".into(),
+            required,
+            source: None,
+            source_ref: None,
+            ..env_var()
+        }
+    }
+
+    #[test]
+    fn optional_user_input_preserves_empty_value_and_omitted_declarations() {
+        for supplied in [
+            HashMap::new(),
+            HashMap::from([("foo".into(), String::new())]),
+            HashMap::from([("foo".into(), " \t".into())]),
+        ] {
+            let resolved = resolve(
+                &[input_var(false)],
+                &supplied,
+                &HashMap::new(),
+                &HashMap::new(),
+                None,
+                "manual",
+            )
+            .unwrap();
+            assert_eq!(
+                resolved.values.get("foo"),
+                Some(&supplied.get("foo").cloned().unwrap_or_default())
+            );
+            assert_eq!(resolved.provenance.len(), 1);
+            assert_eq!(
+                resolved.provenance[0].effective_source_ref,
+                if supplied.contains_key("foo") {
+                    "user_input"
+                } else {
+                    "optional_empty"
+                }
+            );
+            assert!(!resolved.provenance[0].overridden);
+        }
+    }
+
+    #[test]
+    fn optional_input_select_default_can_be_cleared_but_invalid_options_still_fail() {
+        let mut variable = input_var(false);
+        variable.control = Some(crate::models::PromptVariableControl::Select {
+            options: vec![crate::models::PromptVariableOption {
+                value: "fr".into(),
+                label: "Français".into(),
+                enabled: true,
+            }],
+            default_value: Some("fr".into()),
+        });
+        for (supplied, expected) in [
+            (HashMap::new(), "fr"),
+            (HashMap::from([("foo".into(), "".into())]), ""),
+        ] {
+            let resolved = resolve(
+                &[variable.clone()],
+                &supplied,
+                &HashMap::new(),
+                &HashMap::new(),
+                None,
+                "manual",
+            )
+            .unwrap();
+            assert_eq!(resolved.values["foo"], expected);
+        }
+        let failures = resolve(
+            &[variable],
+            &HashMap::from([("foo".into(), "unknown".into())]),
+            &HashMap::new(),
+            &HashMap::new(),
+            None,
+            "manual",
+        )
+        .unwrap_err();
+        assert_eq!(failures[0].cause, "invalid_option");
+    }
+
+    #[test]
+    fn required_input_stays_required_and_unknown_keys_are_not_materialized() {
+        for supplied in [
+            HashMap::new(),
+            HashMap::from([("foo".into(), " \t".into())]),
+        ] {
+            assert_eq!(
+                resolve(
+                    &[input_var(true)],
+                    &supplied,
+                    &HashMap::new(),
+                    &HashMap::new(),
+                    None,
+                    "manual"
+                )
+                .unwrap_err()[0]
+                    .cause,
+                "missing_user_input"
+            );
+        }
+        let resolved = resolve(
+            &[input_var(false)],
+            &HashMap::from([("typo".into(), "secret".into())]),
+            &HashMap::new(),
+            &HashMap::new(),
+            None,
+            "manual",
+        )
+        .unwrap();
+        assert_eq!(resolved.values.len(), 1);
+        assert_eq!(resolved.values["foo"], "");
+        assert!(!resolved.values.contains_key("typo"));
+    }
+
+    #[test]
+    fn unresolved_optional_external_sources_are_not_relabelled_as_empty_inputs() {
+        let mut variable = env_var();
+        variable.required = false;
+        for environment in [
+            HashMap::new(),
+            HashMap::from([(
+                "TOKEN".into(),
+                vec![("a".into(), "one".into()), ("b".into(), "two".into())],
+            )]),
+        ] {
+            let resolved = resolve(
+                &[variable.clone()],
+                &HashMap::new(),
+                &HashMap::new(),
+                &environment,
+                Some("p"),
+                "project",
+            )
+            .unwrap();
+            assert!(resolved.values.is_empty());
+            assert!(resolved.provenance.is_empty());
+        }
+        variable.source = Some(PromptVariableSource::KronnContext);
+        variable.source_ref = Some("<context.TOKEN>".into());
+        let resolved = resolve(
+            &[variable],
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            None,
+            "manual",
+        )
+        .unwrap();
+        assert!(resolved.values.is_empty());
+        assert!(resolved.provenance.is_empty());
+    }
 
     fn env_var() -> PromptVariable {
         PromptVariable {
@@ -667,6 +841,46 @@ mod tests {
         .unwrap();
         assert_eq!(initial.snapshot_id, resumed.snapshot_id);
         assert_eq!(resumed.resolved.values["token"], "first");
+    }
+
+    #[test]
+    fn optional_empty_snapshot_stays_empty_on_resume_and_new_runs_resolve_fresh() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+        let secret = crate::core::crypto::generate_secret();
+        let declarations = [input_var(false)];
+        let empty = HashMap::new();
+        let prepare_run = |run_id, supplied| {
+            prepare(
+                &conn,
+                PrepareRequest {
+                    declarations: &declarations,
+                    supplied,
+                    context: &empty,
+                    project_id: None,
+                    discussion_id: None,
+                    environment_ref: "manual",
+                    run_kind: "workflow",
+                    run_id,
+                    encryption_secret: &secret,
+                    retention_days: 30,
+                },
+            )
+            .unwrap()
+            .unwrap()
+        };
+        let initial = prepare_run("first", &empty);
+        let changed = HashMap::from([("foo".into(), "new-value".into())]);
+        let resumed = prepare_run("first", &changed);
+        assert_eq!(resumed.snapshot_id, initial.snapshot_id);
+        assert_eq!(resumed.resolved.values["foo"], "");
+        assert_eq!(
+            resumed.resolved.provenance[0].effective_source_ref,
+            "optional_empty"
+        );
+        let next = prepare_run("second", &changed);
+        assert_ne!(next.snapshot_id, initial.snapshot_id);
+        assert_eq!(next.resolved.values["foo"], "new-value");
     }
 
     #[test]

@@ -759,7 +759,7 @@ mod tests {
     //     generated text — greedy-stable ≠ bit-exact on Metal, would be flaky) ─
     #[test]
     fn ollama_body_has_deterministic_options() {
-        let body = build_ollama_chat_body("qwen3:8b", "sys", "hi", None, 8192);
+        let body = build_ollama_chat_body("qwen3:8b", "sys", "hi", None, 8192, None);
         let opts = &body["options"];
         assert_eq!(opts["temperature"], 0);
         assert_eq!(opts["top_k"], 1);
@@ -774,15 +774,473 @@ mod tests {
         );
     }
 
+    /// Reserve output and all loadable tool families before the first turn so a
+    /// family load cannot trigger a mid-run context resize.
+    #[test]
+    fn the_window_does_not_move_when_a_run_loads_a_tool_family() {
+        let core =
+            crate::api::agent_tools::tiered(crate::api::agent_tools::full_discussion_catalogue());
+        let mut before =
+            build_ollama_chat_body("qwen3.5:4b", "sys", "génère une image", None, 65_536, None);
+        before["tools"] = serde_json::Value::Array(core.clone());
+        fit_ollama_num_ctx(&mut before, 65_536);
+
+        // The same run, one `tools_load(media)` later.
+        let mut after = before.clone();
+        for (family, _, _) in crate::api::agent_tools::TOOL_FAMILIES {
+            let loaded = crate::api::agent_tools::declarations_for_family(family);
+            assert!(!loaded.is_empty(), "{family} must declare tools");
+            after["tools"].as_array_mut().unwrap().extend(loaded);
+            fit_ollama_num_ctx(&mut after, 65_536);
+            assert_eq!(
+                reachable_tools_bytes(&before),
+                reachable_tools_bytes(&after),
+                "loading {family} must preserve the exact reachable JSON size"
+            );
+            assert_eq!(
+                before["options"]["num_ctx"], after["options"]["num_ctx"],
+                "loading {family} must not move the window mid-conversation"
+            );
+        }
+        // And the window it starts with really does cover the whole catalogue,
+        // so nothing is dropped once the families arrive.
+        let full = serde_json::Value::Array(crate::api::agent_tools::full_discussion_catalogue())
+            .to_string()
+            .len();
+        assert!(
+            reachable_tools_bytes(&before) >= full,
+            "a run that can load every family must be sized for every family"
+        );
+    }
+
+    /// A worker's catalogue is frozen: it has no `tools_load`, so nothing can
+    /// arrive later and the window is sized for exactly what is on the wire.
+    #[test]
+    fn a_frozen_catalogue_is_sized_for_itself_and_nothing_more() {
+        let mut body = build_ollama_chat_body("qwen3.5:4b", "sys", "hi", None, 65_536, None);
+        let frozen = crate::api::agent_tools::declarations_for_family("edit");
+        body["tools"] = serde_json::Value::Array(frozen.clone());
+        assert_eq!(
+            reachable_tools_bytes(&body),
+            serde_json::Value::Array(frozen).to_string().len(),
+            "without tools_load nothing can be added later"
+        );
+    }
+
+    /// The project doc is pointed at when the agent can open it, copied in when
+    /// it cannot, and copied in regardless when an operator says so.
+    #[test]
+    fn the_project_doc_is_pointed_at_only_when_the_agent_can_open_it() {
+        assert!(http_agent_reads_its_own_files(true, true));
+        // No file tools: the inline copy is its only grounding.
+        assert!(!http_agent_reads_its_own_files(true, false));
+        // A CLI agent reads the doc off the disk itself; this path is not its.
+        assert!(!http_agent_reads_its_own_files(false, true));
+    }
+
+    /// Infer cache cost from observed memory growth; attention shapes alone do not
+    /// account for sliding-window caches.
+    #[test]
+    fn a_token_of_context_is_priced_from_what_ollama_reported() {
+        let observed: std::collections::BTreeMap<u64, u64> = [
+            (4_096, 9_473_338_899),
+            (16_384, 9_628_161_145),
+            (65_536, 10_206_010_408),
+        ]
+        .into_iter()
+        .collect();
+        let cost = kv_bytes_per_token_from_samples(&observed).expect("three windows seen");
+        assert!(
+            (11_000..13_000).contains(&cost),
+            "{cost} bytes per token is not the ~12 KB measured on gemma4:e4b"
+        );
+    }
+
+    /// One window tells you where the model sits, not what a token costs. Until
+    /// a second one is seen there is no answer, and the caller keeps its band.
+    #[test]
+    fn one_observation_is_a_position_and_not_a_slope() {
+        let single: std::collections::BTreeMap<u64, u64> =
+            [(8_192, 9_611_383_929)].into_iter().collect();
+        assert_eq!(kv_bytes_per_token_from_samples(&single), None);
+        assert_eq!(
+            kv_bytes_per_token_from_samples(&std::collections::BTreeMap::new()),
+            None
+        );
+        // A wider window that somehow reported no more memory says nothing
+        // either, rather than a cost of zero.
+        let flat: std::collections::BTreeMap<u64, u64> =
+            [(4_096, 9_000), (8_192, 9_000)].into_iter().collect();
+        assert_eq!(kv_bytes_per_token_from_samples(&flat), None);
+    }
+
+    /// Use model weights only with a measured per-token cache cost; otherwise retain
+    /// the coarse memory-band estimate.
+    #[test]
+    fn the_machine_ceiling_is_computed_or_left_exactly_as_it_was() {
+        const GB: u64 = 1024 * 1024 * 1024;
+        let kv = 42 * 2 * (512 + 512) * 2;
+        // The model publishes its attention shape: a heavier model holds less.
+        let small = ram_ceiling_for_model(Some(32 * GB), Some(3 * GB), Some(kv));
+        let big = ram_ceiling_for_model(Some(32 * GB), Some(18 * GB), Some(kv));
+        assert!(
+            small > big,
+            "a 3 GB model and an 18 GB one cannot share a ceiling: {small} vs {big}"
+        );
+        // It does not publish it: the previous behaviour, to the token.
+        for (total, weight) in [
+            (Some(32 * GB), Some(18 * GB)),
+            (Some(64 * GB), Some(3 * GB)),
+            (Some(64 * GB), None),
+            (None, None),
+        ] {
+            assert_eq!(
+                ram_ceiling_for_model(total, weight, None),
+                ram_derived_ceiling(total),
+                "no cache cost means no new opinion about the ceiling"
+            );
+        }
+    }
+
+    /// When the model says what a token costs, the bound is arithmetic rather
+    /// than a band, and it can only tighten one.
+    #[test]
+    fn an_exact_cache_cost_bounds_the_window_to_what_fits() {
+        const GB: u64 = 1024 * 1024 * 1024;
+        // 16 GB host, a 9.6 GB model, 168 KB of cache per token: what is left
+        // of the 70% share is about 1.6 GB, so roughly 9 500 tokens.
+        let kv = 42 * 2 * (512 + 512) * 2;
+        let fits = window_the_machine_can_hold(Some(16 * GB), Some(9 * GB + 600_000_000), Some(kv))
+            .expect("all three known");
+        assert!(
+            (8_000..12_000).contains(&fits),
+            "{fits} tokens is not what 1.6 GB of cache holds at {kv} bytes per token"
+        );
+        // A model heavier than the share leaves nothing rather than overflowing.
+        assert_eq!(
+            window_the_machine_can_hold(Some(16 * GB), Some(15 * GB), Some(kv)),
+            None
+        );
+        assert!(ram_ceiling_for_model(Some(16 * GB), Some(15 * GB), Some(kv)) >= 2_048);
+    }
+
+    /// The guard refuses a prompt the window cannot hold, so its arithmetic
+    /// decides whether real runs start. Counting the catalogue was the fix;
+    /// counting it twice, or pricing it as prose, would refuse runs that fit.
+    #[test]
+    fn the_guard_prices_a_turn_the_way_the_model_does() {
+        let catalogue =
+            crate::api::agent_tools::tiered(crate::api::agent_tools::full_discussion_catalogue());
+        let tools = serde_json::Value::Array(catalogue).to_string().len();
+
+        // Measured: JSON runs 3.7 bytes per token and prose 4.9. The estimate
+        // must sit under both, and not by a factor.
+        let tools_only = estimated_prompt_tokens(0, tools) - REPLY_HEADROOM_TOKENS;
+        let real = tools as u64 * 10 / 37;
+        assert!(
+            tools_only >= real && tools_only <= real * 12 / 10,
+            "{tools_only} estimated against {real} measured: an estimate this far out \
+             refuses runs that would have fit"
+        );
+
+        // Prose is cheaper per byte than JSON, so the same bytes as messages
+        // must price lower than as catalogue.
+        assert!(
+            estimated_prompt_tokens(tools, 0) < estimated_prompt_tokens(0, tools),
+            "prose and tool schemas do not tokenise alike"
+        );
+
+        // An empty turn is the reply headroom and nothing else.
+        assert_eq!(estimated_prompt_tokens(0, 0), REPLY_HEADROOM_TOKENS);
+    }
+
+    /// The window must hold the reply it asks for. `num_predict` is a share of
+    /// `num_ctx`, so a run that sizes one without the other would promise the
+    /// model more output than the window can take.
+    #[test]
+    fn every_window_can_hold_the_reply_it_allows() {
+        let catalogue =
+            crate::api::agent_tools::tiered(crate::api::agent_tools::full_discussion_catalogue());
+        for cap in [2_048_u64, 8_192, 16_384, 24_576, 65_536, 262_144] {
+            let mut body = build_ollama_chat_body("qwen3.5:4b", "sys", "hi", None, cap, None);
+            body["tools"] = serde_json::Value::Array(catalogue.clone());
+            fit_ollama_num_ctx(&mut body, cap);
+            let num_ctx = body["options"]["num_ctx"].as_u64().unwrap();
+            let num_predict = body["options"]["num_predict"].as_i64().unwrap() as u64;
+            assert!(
+                num_ctx <= cap.max(OLLAMA_NUM_CTX_FLOOR),
+                "{num_ctx} over cap {cap}"
+            );
+            assert!(
+                num_predict < num_ctx,
+                "a {num_predict}-token reply cannot fit a {num_ctx}-token window"
+            );
+        }
+    }
+
+    /// What each catalogue mode actually costs, side by side and without a
+    /// model: the window is sized for what a run can reach, so tiering saves
+    /// prompt tokens per turn and nothing at all on the window.
+    #[test]
+    fn tiering_saves_tokens_per_turn_and_not_window() {
+        let full = crate::api::agent_tools::full_discussion_catalogue();
+        let tiered = crate::api::agent_tools::tiered(full.clone());
+
+        let sized = |catalogue: Vec<serde_json::Value>| {
+            let mut body = build_ollama_chat_body("qwen3.5:4b", "sys", "hi", None, 65_536, None);
+            body["tools"] = serde_json::Value::Array(catalogue);
+            fit_ollama_num_ctx(&mut body, 65_536);
+            (
+                body["tools"].to_string().len(),
+                reachable_tools_bytes(&body),
+                body["options"]["num_ctx"].as_u64().unwrap(),
+            )
+        };
+        let (full_declared, full_reach, full_window) = sized(full);
+        let (tiered_declared, tiered_reach, tiered_window) = sized(tiered);
+
+        println!(
+            "\nfull   declared {full_declared} B, reachable {full_reach} B, window {full_window}\n\
+             tiered declared {tiered_declared} B, reachable {tiered_reach} B, window {tiered_window}"
+        );
+        assert!(
+            tiered_declared < full_declared,
+            "tiering sends less per turn, which is the whole of what it buys"
+        );
+        // And it buys nothing on the window: a tiered run can reach every
+        // family, so it is sized for all of them plus the `tools_load`
+        // declaration the full catalogue does not carry.
+        assert!(
+            tiered_window >= full_window,
+            "tiering does not shrink the window: {tiered_window} against {full_window}"
+        );
+        assert!(
+            tiered_reach > full_reach,
+            "the reachable catalogue is the full one plus tools_load itself"
+        );
+    }
+
+    /// The duplicate guard keys on name and arguments, so `task_get(id)` looks
+    /// identical every time — and after two calls it is refused and the tool is
+    /// withdrawn. But its answer changes the moment an item is ticked, which is
+    /// precisely when an agent asks. Ticking clears the cached answer.
+    #[test]
+    fn ticking_a_task_makes_reading_it_a_new_question() {
+        assert!(is_progress_observation_tool("task_get"));
+        assert!(is_progress_observation_tool("task_list"));
+        assert!(is_progress_observation_tool("plan_get"));
+        assert!(!is_progress_observation_tool("read_file"));
+        assert!(is_progress_mutation_tool("task_update_dod"));
+        assert!(is_progress_mutation_tool("task_create"));
+        assert!(!is_progress_mutation_tool("task_get"));
+
+        let mut seen: std::collections::HashMap<String, (bool, serde_json::Value)> = [
+            (
+                "task_get|{\"task_id\":\"KT-1\"}".to_string(),
+                (true, serde_json::json!({})),
+            ),
+            (
+                "read_file|{\"path\":\"a.rs\"}".to_string(),
+                (true, serde_json::json!({})),
+            ),
+        ]
+        .into_iter()
+        .collect();
+        let mut repeated: std::collections::HashMap<String, usize> =
+            [("task_get|{\"task_id\":\"KT-1\"}".to_string(), 2)]
+                .into_iter()
+                .collect();
+        let mut results: std::collections::HashMap<(String, u64), String> =
+            [(("task_get".to_string(), 1_u64), "old".to_string())]
+                .into_iter()
+                .collect();
+
+        invalidate_progress_observation_cache(&mut seen, &mut repeated, &mut results);
+
+        assert!(
+            !seen.keys().any(|k| k.starts_with("task_get|")),
+            "a ticked task must be readable again"
+        );
+        assert!(repeated.is_empty(), "and its refusal count resets");
+        assert!(results.is_empty());
+        // A file read is not affected: that cache is invalidated by writes, not
+        // by task bookkeeping.
+        assert!(seen.keys().any(|k| k.starts_with("read_file|")));
+    }
+
+    /// Trimming used to cut the biggest tool result and tell the model to ask
+    /// for the rest — which returns the same result, cut the same way, a turn
+    /// later. Measured on a 20-file job: the run spent itself re-reading what
+    /// Kronn kept cutting. A shortened result keeps its facts and says plainly
+    /// that asking again buys nothing.
+    #[test]
+    fn a_result_too_big_for_the_window_is_shortened_not_destroyed() {
+        let file = serde_json::json!({
+            "path": "src/Controller/HomeController.php",
+            "sha256": "b7f3c1",
+            "lines": 412,
+            "content": "<?php\n".to_string() + &"// a long file\n".repeat(3_000),
+        })
+        .to_string();
+        let mut body = serde_json::json!({
+            "messages": [
+                {"role": "system", "content": "sys"},
+                {"role": "user", "content": "inventory src/"},
+                {"role": "tool", "content": file},
+            ],
+            "options": {"num_ctx": 4_096},
+        });
+        clamp_ollama_tool_results(&mut body, 4_096);
+        let kept = body["messages"][2]["content"].as_str().unwrap();
+
+        assert!(kept.len() < file.len(), "it must actually shorten");
+        // The coordinates of what was read survive, so the model knows what it
+        // has without going back for it.
+        assert!(
+            kept.contains("HomeController.php") && kept.contains("b7f3c1"),
+            "the facts must survive the shortening: {kept}"
+        );
+        // And nothing tells it to spend a turn on the identical call.
+        assert!(
+            !kept.contains("narrower range if you need the rest"),
+            "the old note invited the re-read this whole change exists to stop"
+        );
+        assert!(
+            kept.contains("same result"),
+            "say that calling again buys nothing: {kept}"
+        );
+        // Still parseable: a cut in the middle of the JSON leaves the model a
+        // result it cannot read at all.
+        assert!(
+            serde_json::from_str::<serde_json::Value>(kept).is_ok(),
+            "a shortened result must stay valid JSON: {kept}"
+        );
+    }
+
+    /// Non-JSON results have no facts to keep, so they are still cut — but the
+    /// note must not ask for the same call back.
+    #[test]
+    fn a_result_that_cannot_be_shortened_is_cut_without_inviting_a_repeat() {
+        let prose = "x".repeat(40_000);
+        let mut body = serde_json::json!({
+            "messages": [
+                {"role": "user", "content": "go"},
+                {"role": "tool", "content": prose},
+            ],
+            "options": {"num_ctx": 4_096},
+        });
+        clamp_ollama_tool_results(&mut body, 4_096);
+        let kept = body["messages"][1]["content"].as_str().unwrap();
+        assert!(kept.len() < 40_000);
+        assert!(
+            !kept.contains("narrower range if you need the rest"),
+            "{kept}"
+        );
+        assert!(kept.contains("returns the same result"), "{kept}");
+    }
+
+    /// The fallback window is what a run gets when Ollama will not say what the
+    /// model can hold. It has to fit the smallest real turn Kronn sends, or
+    /// every such run is refused before it starts. The declared catalogue is
+    /// the larger half of that turn, which is why this is measured and not
+    /// assumed.
+    #[test]
+    fn the_fallback_window_holds_the_smallest_turn_kronn_sends() {
+        let catalogue =
+            crate::api::agent_tools::tiered(crate::api::agent_tools::full_discussion_catalogue());
+        let tools_bytes = serde_json::Value::Array(catalogue).to_string().len();
+        // A bare discussion turn: the identity and tools notices, no project
+        // doc, no skills, no directives, and a one-line question.
+        let system_context = format!(
+            "{}\n\n{}",
+            http_agent_identity_context(&AgentType::Ollama, "qwen3.5:2b"),
+            http_agent_tools_notice(true)
+        );
+        let est = ((system_context.len() + 80 + tools_bytes) as u64 / 3) + 2048;
+        let fallback = resolve_ctx_cap_within(None, None, 65_536).value;
+        println!(
+            "smallest turn: {est} tokens ({} B of catalogue, {} B of notices) | fallback window: {fallback}",
+            tools_bytes,
+            system_context.len()
+        );
+        assert!(
+            est + 4_096 <= fallback,
+            "the smallest turn needs {est} tokens and the fallback window is {fallback}; \
+             a window that only just fits the floor leaves nothing for the conversation, and \
+             the run is refused outright on a server that does not answer /api/show"
+        );
+        // A host that cannot allocate the fallback gets its own ceiling, not a
+        // promise the machine cannot keep.
+        assert_eq!(resolve_ctx_cap_within(None, None, 8_192).value, 8_192);
+        assert_eq!(resolve_ctx_cap_within(None, None, 4_096).value, 4_096);
+    }
+
+    #[test]
+    fn ollama_body_bounds_what_one_turn_may_generate() {
+        let body = build_ollama_chat_body("qwen3:8b", "sys", "hi", None, 8192, None);
+        let num_ctx = body["options"]["num_ctx"].as_u64().unwrap();
+        let num_predict = body["options"]["num_predict"].as_i64().unwrap();
+        assert!(
+            num_predict > 0 && (num_predict as u64) < num_ctx,
+            "an answer must fit the window it is generated in: {num_predict} of {num_ctx}"
+        );
+    }
+
+    #[test]
+    fn the_generation_cap_is_a_quarter_of_the_window_between_its_bounds() {
+        // A quarter of the window, floored so a small window still answers.
+        assert_eq!(num_predict_for(24_576, None), Some(6_144));
+        assert_eq!(num_predict_for(2_048, None), Some(1_024));
+        // Ceilinged: past a point a longer answer is a loop, not an answer.
+        assert_eq!(num_predict_for(1_048_576, None), Some(8_192));
+    }
+
+    #[test]
+    fn an_operator_can_move_the_generation_cap_or_remove_it() {
+        assert_eq!(num_predict_for(24_576, Some("2048".into())), Some(2_048));
+        // Zero or less: no cap, the previous behaviour.
+        assert_eq!(num_predict_for(24_576, Some("0".into())), None);
+        assert_eq!(num_predict_for(24_576, Some("-1".into())), None);
+        // Blank or mistyped falls back to the default rather than lifting the
+        // guard: a typo must not cost an hour of a blocked run.
+        assert_eq!(num_predict_for(24_576, Some("   ".into())), Some(6_144));
+        assert_eq!(
+            num_predict_for(24_576, Some("beaucoup".into())),
+            Some(6_144)
+        );
+    }
+
+    /// The control token was for runtimes that had no `think` flag. A server
+    /// that honours the flag must not also be paying for the token.
+    #[test]
+    fn the_no_think_token_is_only_for_servers_without_the_think_flag() {
+        assert!(needs_no_think_token(None));
+        assert!(needs_no_think_token(Some((0, 18))));
+        assert!(!needs_no_think_token(Some((0, 19))));
+        assert!(!needs_no_think_token(Some((0, 34))));
+
+        let modern = build_ollama_chat_body("qwen3:8b", "", "hi", None, 8192, Some((0, 34)));
+        assert!(
+            !modern["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|m| m["content"] == "/no_think"),
+            "a server that honours think:false does not need the token too"
+        );
+        // The flag itself stays: it is the one that actually works.
+        assert_eq!(modern["think"], serde_json::json!(false));
+    }
+
     #[test]
     fn ollama_body_injects_no_think_for_qwen3_only() {
         // qwen3 → a dedicated `/no_think` system message is prepended.
-        let q = build_ollama_chat_body("qwen3:30b-a3b", "", "hi", None, 8192);
+        let q = build_ollama_chat_body("qwen3:30b-a3b", "", "hi", None, 8192, None);
         let msgs = q["messages"].as_array().unwrap();
         assert_eq!(msgs[0]["role"], "system");
         assert_eq!(msgs[0]["content"], "/no_think");
         // Non-qwen3 (e.g. llama3.3) → no /no_think message at all.
-        let l = build_ollama_chat_body("llama3.3:70b", "", "hi", None, 8192);
+        let l = build_ollama_chat_body("llama3.3:70b", "", "hi", None, 8192, None);
         let lmsgs = l["messages"].as_array().unwrap();
         assert!(
             !lmsgs.iter().any(|m| m["content"] == "/no_think"),
@@ -793,11 +1251,11 @@ mod tests {
     #[test]
     fn ollama_body_sends_think_false_for_qwen3_only() {
         // qwen3 → reasoning switched off in the body too, not just via /no_think.
-        let q = build_ollama_chat_body("qwen3.8:27b-mlx", "", "hi", None, 8192);
+        let q = build_ollama_chat_body("qwen3.8:27b-mlx", "", "hi", None, 8192, None);
         assert_eq!(q["think"], false);
         // Any other model → the field is absent, so its own default stands.
         // Never `think:true`, which would force reasoning ON.
-        let l = build_ollama_chat_body("llama3.3:70b", "", "hi", None, 8192);
+        let l = build_ollama_chat_body("llama3.3:70b", "", "hi", None, 8192, None);
         assert!(
             l.get("think").is_none(),
             "think must be omitted for non-qwen3, got {:?}",
@@ -808,12 +1266,12 @@ mod tests {
     #[test]
     fn ollama_body_format_switches_to_non_stream() {
         // No format → stream text.
-        let free = build_ollama_chat_body("qwen3:8b", "", "hi", None, 8192);
+        let free = build_ollama_chat_body("qwen3:8b", "", "hi", None, 8192, None);
         assert_eq!(free["stream"], true);
         assert!(free.get("format").is_none());
         // TypedSchema format → non-stream (one validated JSON blob) + schema passed through.
         let schema = serde_json::json!({"type":"object","properties":{"x":{"type":"integer"}}});
-        let typed = build_ollama_chat_body("qwen3:8b", "", "hi", Some(&schema), 8192);
+        let typed = build_ollama_chat_body("qwen3:8b", "", "hi", Some(&schema), 8192, None);
         assert_eq!(typed["stream"], false);
         assert_eq!(typed["format"], schema);
     }
@@ -880,7 +1338,7 @@ mod tests {
         // not that an oversized catalogue is survivable (the next test owns
         // that case).
 
-        let mut without = build_ollama_chat_body("qwen3.8:27b", "sys", "hi", None, 8192);
+        let mut without = build_ollama_chat_body("qwen3.8:27b", "sys", "hi", None, 8192, None);
         let mut with = without.clone();
         with["tools"] = declarations.clone();
         for body in [&mut without, &mut with] {
@@ -922,7 +1380,8 @@ mod tests {
         // stops when none is left, so an oversized catalogue costs context and
         // never the question being answered. The up-front gate refuses this run
         // anyway; the trimmer must not make it worse on the way there.
-        let mut body = build_ollama_chat_body("qwen3.8:27b", "sys", "the question", None, 8192);
+        let mut body =
+            build_ollama_chat_body("qwen3.8:27b", "sys", "the question", None, 8192, None);
         body["tools"] = serde_json::json!([{
             "type": "function",
             "function": {
@@ -956,7 +1415,7 @@ mod tests {
 
     #[test]
     fn clamp_trims_the_biggest_tool_result_to_fit_the_cap() {
-        let mut body = build_ollama_chat_body("qwen3.8:27b", "sys", "hi", None, 8192);
+        let mut body = build_ollama_chat_body("qwen3.8:27b", "sys", "hi", None, 8192, None);
         {
             let messages = body["messages"].as_array_mut().unwrap();
             messages.push(serde_json::json!({
@@ -1006,8 +1465,78 @@ mod tests {
     }
 
     #[test]
+    fn authoring_schemas_survive_clamping_when_tool_history_fills_the_window() {
+        let workflow_schema: serde_json::Value =
+            serde_json::from_str(include_str!("../api/workflow_step_schema.json")).unwrap();
+        for (name, schema) in [
+            ("workflow_step_schema", workflow_schema),
+            (
+                "tool_manual",
+                serde_json::json!({"tool":"signals", "catalogue":crate::api::signal_catalog::catalogue()}),
+            ),
+        ] {
+            let cap = 32768;
+            let mut body = build_ollama_chat_body(
+                "qwen3.8:27b-mlx",
+                "sys",
+                "Create a workflow",
+                None,
+                cap,
+                None,
+            );
+            body["tools"] = serde_json::json!(crate::api::agent_tools::full_discussion_catalogue());
+            fit_ollama_num_ctx(&mut body, cap);
+            // Production raises a tooled run to its effective cap before sending
+            // the first request. Reproduce that, then accumulated tool history.
+            body["options"]["num_ctx"] = serde_json::json!(cap);
+            let content = schema.to_string();
+            body["messages"]
+                .as_array_mut()
+                .unwrap()
+                .push(serde_json::json!({
+                    "role":"tool","tool_call_id":"schema","name":name,"content":content
+                }));
+            body["messages"]
+                .as_array_mut()
+                .unwrap()
+                .push(serde_json::json!({
+                    "role":"assistant","content":"prior reasoning ".repeat(400)
+                }));
+            body["messages"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "role":"tool","tool_call_id":"history","name":"git_diff","content":"d".repeat(60_000)
+            }));
+            // Reproduce the production order under actual history pressure.
+            clamp_ollama_tool_results(&mut body, cap);
+            resize_ollama_num_ctx(&mut body, cap);
+            let messages = body["messages"].as_array().unwrap();
+            let sent = messages
+                .iter()
+                .find(|m| m["tool_call_id"] == "schema")
+                .unwrap()["content"]
+                .as_str()
+                .unwrap();
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(sent).unwrap(),
+                schema
+            );
+            assert!(messages.last().unwrap()["content"]
+                .as_str()
+                .unwrap()
+                .contains("truncated by Kronn"));
+            assert!(
+                estimated_chat_history_tokens(&body) <= cap,
+                "the complete contract must fit the configured cap"
+            );
+            assert!(body["options"]["num_ctx"].as_u64().unwrap() <= cap);
+        }
+    }
+
+    #[test]
     fn clamp_never_blindly_cuts_a_checkpoint_receipt_envelope() {
-        let mut body = build_ollama_chat_body("qwen3.8:27b", "sys", "hi", None, 4096);
+        let mut body = build_ollama_chat_body("qwen3.8:27b", "sys", "hi", None, 4096, None);
         let protected = serde_json::json!({
             "kronn_checkpoint_compacted": true,
             "preserved_scalar_facts": [{
@@ -1054,7 +1583,7 @@ mod tests {
 
     #[test]
     fn clamp_leaves_results_that_already_fit() {
-        let mut body = build_ollama_chat_body("qwen3.8:27b", "sys", "hi", None, 32768);
+        let mut body = build_ollama_chat_body("qwen3.8:27b", "sys", "hi", None, 32768, None);
         body["messages"]
             .as_array_mut()
             .unwrap()
@@ -1080,7 +1609,7 @@ mod tests {
             })
         };
         let payload = serde_json::Value::Array((0..43).map(big_entry).collect());
-        let mut body = build_ollama_chat_body("qwen3.8:27b", "", "hi", None, 8192);
+        let mut body = build_ollama_chat_body("qwen3.8:27b", "", "hi", None, 8192, None);
         body["options"]["num_ctx"] = serde_json::json!(8192);
         body["messages"]
             .as_array_mut()
@@ -1128,7 +1657,7 @@ mod tests {
                 })
                 .collect(),
         );
-        let mut body = build_ollama_chat_body("qwen3.8:27b", "", "hi", None, 8192);
+        let mut body = build_ollama_chat_body("qwen3.8:27b", "", "hi", None, 8192, None);
         body["options"]["num_ctx"] = serde_json::json!(8192);
         body["messages"]
             .as_array_mut()
@@ -1170,7 +1699,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             "meta": { "total": 43 }
         });
-        let mut body = build_ollama_chat_body("qwen3.8:27b", "", "hi", None, 8192);
+        let mut body = build_ollama_chat_body("qwen3.8:27b", "", "hi", None, 8192, None);
         body["options"]["num_ctx"] = serde_json::json!(8192);
         body["messages"]
             .as_array_mut()
@@ -1201,7 +1730,7 @@ mod tests {
             "id": "svc-1",
             "verbose_field": quoted,
         }]);
-        let mut body = build_ollama_chat_body("qwen3.8:27b", "", "hi", None, 8192);
+        let mut body = build_ollama_chat_body("qwen3.8:27b", "", "hi", None, 8192, None);
         body["options"]["num_ctx"] = serde_json::json!(8192);
         body["messages"]
             .as_array_mut()
@@ -1239,7 +1768,7 @@ mod tests {
                 .map(|i| serde_json::Value::String(format!("item-{i}-{}", "x".repeat(4_000))))
                 .collect(),
         );
-        let mut body = build_ollama_chat_body("qwen3.8:27b", "", "hi", None, 4096);
+        let mut body = build_ollama_chat_body("qwen3.8:27b", "", "hi", None, 4096, None);
         body["messages"]
             .as_array_mut()
             .unwrap()
@@ -1267,7 +1796,7 @@ mod tests {
     fn a_truncated_text_still_reports_bytes() {
         // Not a collection: there is no item count to give, so the byte note
         // stays — it is the honest thing to say about a cut document.
-        let mut body = build_ollama_chat_body("qwen3.8:27b", "", "hi", None, 8192);
+        let mut body = build_ollama_chat_body("qwen3.8:27b", "", "hi", None, 8192, None);
         body["messages"]
             .as_array_mut()
             .unwrap()
@@ -1296,7 +1825,7 @@ mod tests {
         // prompt just as oversized for the slot Ollama had already fixed, so the
         // history was truncated until the user turn itself was gone (HTTP 500,
         // "no user query found in messages").
-        let mut body = build_ollama_chat_body("qwen3.8:27b", "", "hi", None, 32768);
+        let mut body = build_ollama_chat_body("qwen3.8:27b", "", "hi", None, 32768, None);
         body["options"]["num_ctx"] = serde_json::json!(4864);
         body["messages"]
             .as_array_mut()
@@ -1319,7 +1848,7 @@ mod tests {
 
     #[test]
     fn resize_num_ctx_grows_with_the_tool_results_and_never_shrinks() {
-        let mut body = build_ollama_chat_body("qwen3.8:27b", "sys", "hi", None, 32768);
+        let mut body = build_ollama_chat_body("qwen3.8:27b", "sys", "hi", None, 32768, None);
         let first_turn = body["options"]["num_ctx"].as_u64().unwrap();
 
         // The tool loop appends a result far bigger than the first-turn estimate.
@@ -1348,7 +1877,7 @@ mod tests {
 
     #[test]
     fn resize_num_ctx_respects_the_cap() {
-        let mut body = build_ollama_chat_body("qwen3.8:27b", "sys", "hi", None, 8192);
+        let mut body = build_ollama_chat_body("qwen3.8:27b", "sys", "hi", None, 8192, None);
         let big = "x".repeat(200_000);
         body["messages"]
             .as_array_mut()
@@ -1434,6 +1963,8 @@ mod tests {
             None,
             None,
             None,
+            None,
+            None,
         )
         .await
         .expect("proxy must be reachable");
@@ -1461,6 +1992,53 @@ mod tests {
     }
 
     // ─── The prose that once defeated the whole feature ──────────────────────
+
+    /// Pointed at a path and nothing else, two of six local models never opened
+    /// the doc: one searched the repository with `list_files` eight turns long,
+    /// the other went to `git_log` and `web_fetch`. The section index is what
+    /// tells them the file exists and what is in it.
+    #[test]
+    fn the_project_doc_pointer_carries_the_doc_s_own_section_index() {
+        let doc = "# Title\n\nintro\n\n## Entry procedure\n\ntext\n\n\
+                   ### Not a section\n\n## Source of truth\n\nmore\n";
+        assert_eq!(
+            doc_section_index(doc),
+            "- Entry procedure\n- Source of truth",
+            "only the top-level sections, in the doc's own order"
+        );
+        // A doc with no sections costs nothing rather than an empty bullet.
+        assert_eq!(doc_section_index("# Title\n\njust prose\n"), "");
+    }
+
+    /// An index that grew with the doc would recreate the cost it removes.
+    #[test]
+    fn the_section_index_stays_a_map_not_a_copy() {
+        let doc: String = (0..80)
+            .map(|n| format!("## Section {n}\n\nbody\n\n"))
+            .collect();
+        let index = doc_section_index(&doc);
+        assert_eq!(index.lines().count(), 24);
+        assert!(index.len() < 1_024, "{} bytes of index", index.len());
+    }
+
+    /// The notice is paid on every turn, so it carries rules only: what a tool
+    /// does belongs to its declaration. It grew to 2 700 characters by reciting
+    /// twenty tools, some of which a tiered run had not even declared yet.
+    #[test]
+    fn the_tools_notice_states_rules_rather_than_reciting_the_catalogue() {
+        let with = http_agent_tools_notice(true);
+        assert!(
+            with.len() < 1_900,
+            "the notice is {} bytes of every turn; describe tools in their declarations",
+            with.len()
+        );
+        for mechanical in ["expected_sha256", "offset", "recursive", "truncated"] {
+            assert!(
+                !with.contains(mechanical),
+                "`{mechanical}` belongs to its tool's own description: {with}"
+            );
+        }
+    }
 
     /// With tools on the wire, the prompt must not tell the model it has none.
     /// This exact contradiction shipped once: `tools_declared=5` while the
@@ -2073,48 +2651,85 @@ mod tests {
     }
 
     #[test]
+    fn an_ollama_version_is_read_or_left_unanswered() {
+        assert_eq!(parse_ollama_version("0.34.2"), Some((0, 34)));
+        assert_eq!(parse_ollama_version("v0.32.14"), Some((0, 32)));
+        assert_eq!(parse_ollama_version(" 1.0.0 "), Some((1, 0)));
+        // No answer rather than a guess: the mitigation stays on when the
+        // server does not say what it is.
+        assert_eq!(parse_ollama_version("nightly"), None);
+        assert_eq!(parse_ollama_version("0"), None);
+    }
+
+    /// The shortened exploration exists for one bug, fixed in 0.34. A server
+    /// that no longer has it must not keep paying for the workaround, and a
+    /// server that will not say its version keeps it.
+    #[test]
+    fn the_mlx_exploration_mitigation_stops_at_the_version_that_fixed_it() {
+        assert!(!mlx_prefix_cache_reused(None));
+        assert!(!mlx_prefix_cache_reused(Some((0, 32))));
+        assert!(!mlx_prefix_cache_reused(Some((0, 33))));
+        assert!(mlx_prefix_cache_reused(Some((0, 34))));
+        assert!(mlx_prefix_cache_reused(Some((1, 0))));
+
+        let affected = worker_exploration_policy("alias:latest", Some("safetensors"), false, false);
+        let fixed = worker_exploration_policy("alias:latest", Some("safetensors"), false, true);
+        // Both are native MLX: the window cap is a memory bound and stays.
+        assert!(affected.mlx_mitigation && fixed.mlx_mitigation);
+        assert!(
+            fixed.max_iterations > affected.max_iterations,
+            "a fixed server must explore as long as any other: {} vs {}",
+            fixed.max_iterations,
+            affected.max_iterations
+        );
+        assert_eq!(fixed.max_iterations, WORKER_EXPLORATION_ROUNDS);
+        assert!(fixed.max_observations_without_mutation.is_none());
+        assert!(affected.max_observations_without_mutation.is_some());
+    }
+
+    #[test]
     fn worker_exploration_policy_mitigates_only_native_ollama_mlx() {
         assert_eq!(
-            worker_exploration_policy("qwen3.8:27b-mlx", None, false),
+            worker_exploration_policy("qwen3.8:27b-mlx", None, false, false),
             WorkerExplorationPolicy {
                 max_iterations: MLX_WORKER_EXPLORATION_ITERATIONS,
                 max_observations_without_mutation: Some(
                     MLX_WORKER_MAX_OBSERVATIONS_WITHOUT_MUTATION,
                 ),
-                context_pressure_percent: MLX_WORKER_CONTEXT_PRESSURE_PERCENT,
+                context_pressure_percent: WORKER_CONTEXT_PRESSURE_PERCENT,
                 mlx_mitigation: true,
                 mlx_detection_source: Some("model_tag_fallback"),
             }
         );
         assert_eq!(
-            worker_exploration_policy("friendly-alias:latest", Some("safetensors"), false),
+            worker_exploration_policy("friendly-alias:latest", Some("safetensors"), false, false),
             WorkerExplorationPolicy {
                 max_iterations: MLX_WORKER_EXPLORATION_ITERATIONS,
                 max_observations_without_mutation: Some(
                     MLX_WORKER_MAX_OBSERVATIONS_WITHOUT_MUTATION,
                 ),
-                context_pressure_percent: MLX_WORKER_CONTEXT_PRESSURE_PERCENT,
+                context_pressure_percent: WORKER_CONTEXT_PRESSURE_PERCENT,
                 mlx_mitigation: true,
                 mlx_detection_source: Some("model_format"),
             },
             "the real storage format must catch aliases that hide the mlx tag"
         );
         assert_eq!(
-            worker_exploration_policy("qwen3.8:27b-q4_K_M", Some("gguf"), false),
+            worker_exploration_policy("qwen3.8:27b-q4_K_M", Some("gguf"), false, false),
             WorkerExplorationPolicy {
                 max_iterations: WORKER_EXPLORATION_ROUNDS,
                 max_observations_without_mutation: None,
-                context_pressure_percent: DEFAULT_WORKER_CONTEXT_PRESSURE_PERCENT,
+                context_pressure_percent: WORKER_CONTEXT_PRESSURE_PERCENT,
                 mlx_mitigation: false,
                 mlx_detection_source: None,
             }
         );
         assert_eq!(
-            worker_exploration_policy("upstream:27b-mlx", Some("safetensors"), true),
+            worker_exploration_policy("upstream:27b-mlx", Some("safetensors"), true, false),
             WorkerExplorationPolicy {
                 max_iterations: WORKER_EXPLORATION_ROUNDS,
                 max_observations_without_mutation: None,
-                context_pressure_percent: DEFAULT_WORKER_CONTEXT_PRESSURE_PERCENT,
+                context_pressure_percent: WORKER_CONTEXT_PRESSURE_PERCENT,
                 mlx_mitigation: false,
                 mlx_detection_source: None,
             }
@@ -2123,8 +2738,8 @@ mod tests {
 
     #[test]
     fn mlx_worker_uses_one_bounded_context_cap_for_the_whole_run() {
-        let mlx = worker_exploration_policy("alias:latest", Some("safetensors"), false);
-        let gguf = worker_exploration_policy("alias:latest", Some("gguf"), false);
+        let mlx = worker_exploration_policy("alias:latest", Some("safetensors"), false, false);
+        let gguf = worker_exploration_policy("alias:latest", Some("gguf"), false, false);
 
         assert_eq!(
             mlx.context_pressure_percent, 75,
@@ -2178,7 +2793,7 @@ mod tests {
 
     #[test]
     fn mlx_observation_budget_forces_finalization_without_affecting_other_engines() {
-        let mlx = worker_exploration_policy("alias:latest", Some("safetensors"), false);
+        let mlx = worker_exploration_policy("alias:latest", Some("safetensors"), false, false);
         assert_eq!(
             worker_exploration_boundary(
                 mlx,
@@ -2193,7 +2808,7 @@ mod tests {
             Some(WorkerExplorationBoundary::ObservationLimit)
         );
 
-        let gguf = worker_exploration_policy("alias:latest", Some("gguf"), false);
+        let gguf = worker_exploration_policy("alias:latest", Some("gguf"), false, false);
         assert_eq!(
             worker_exploration_boundary(gguf, 1, usize::MAX, None),
             None,
@@ -2492,6 +3107,8 @@ mod tests {
             None,
             None,
             None,
+            None,
+            None,
         )
         .await;
 
@@ -2595,6 +3212,8 @@ mod tests {
             None,
             None,
             None,
+            None,
+            None,
         )
         .await;
 
@@ -2650,6 +3269,8 @@ mod tests {
             Some(&server.uri()),
             None,
             Some(std::sync::Arc::new(WorkerTools { seen: seen.clone() })),
+            None,
+            None,
             None,
             None,
             None,
@@ -2716,6 +3337,8 @@ mod tests {
             None,
             None,
             None,
+            None,
+            None,
         )
         .await
         .expect("start");
@@ -2771,6 +3394,8 @@ mod tests {
             None,
             Some(std::time::Duration::from_secs(240 * 60)),
             Some(&parent_cancel),
+            None,
+            None,
         );
         tokio::pin!(starting);
 
@@ -2886,6 +3511,8 @@ mod tests {
                 drop_notify: drop_notify.clone(),
                 second_started: second_started.clone(),
             })),
+            None,
+            None,
             None,
             None,
             None,
@@ -3012,6 +3639,8 @@ mod tests {
             Some(std::sync::Arc::new(ReadThenWriteTools {
                 seen: seen.clone(),
             })),
+            None,
+            None,
             None,
             None,
             None,
@@ -3384,6 +4013,8 @@ mod tests {
             None,
             None,
             None,
+            None,
+            None,
         )
         .await
         .expect("start");
@@ -3435,6 +4066,8 @@ mod tests {
             Some(&server.uri()),
             None,
             Some(std::sync::Arc::new(FakeTools { seen: seen.clone() })),
+            None,
+            None,
             None,
             None,
             None,
@@ -3509,6 +4142,8 @@ mod tests {
             None,
             None,
             None,
+            None,
+            None,
         )
         .await
         .expect("transient saturation must be replayed before returning the process");
@@ -3556,6 +4191,8 @@ mod tests {
             None,
             None,
             None,
+            None,
+            None,
         )
         .await;
         let error = match started {
@@ -3589,6 +4226,8 @@ mod tests {
             "test-model",
             None,
             Some(&server.uri()),
+            None,
+            None,
             None,
             None,
             None,
@@ -3680,6 +4319,8 @@ mod tests {
             None,
             None,
             None,
+            None,
+            None,
         )
         .await
         .expect("initial request is accepted");
@@ -3757,6 +4398,8 @@ mod tests {
             Some(&base_url),
             None,
             Some(std::sync::Arc::new(FakeTools { seen: seen.clone() })),
+            None,
+            None,
             None,
             None,
             None,
@@ -3864,6 +4507,8 @@ mod tests {
             None,
             None,
             None,
+            None,
+            None,
         )
         .await;
 
@@ -3922,6 +4567,8 @@ mod tests {
             Some(std::sync::Arc::new(WorkerTools {
                 seen: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             })),
+            None,
+            None,
             None,
             None,
             None,
@@ -4059,6 +4706,8 @@ mod tests {
             None,
             None,
             None,
+            None,
+            None,
         )
         .await;
 
@@ -4186,6 +4835,8 @@ mod tests {
             Some(&base_url),
             None,
             Some(std::sync::Arc::new(WorkerTools { seen: seen.clone() })),
+            None,
+            None,
             None,
             None,
             None,
@@ -4318,6 +4969,8 @@ mod tests {
             None,
             None,
             None,
+            None,
+            None,
         )
         .await;
 
@@ -4390,6 +5043,8 @@ mod tests {
             Some(&server.uri()),
             None,
             Some(std::sync::Arc::new(FakeTools { seen: seen.clone() })),
+            None,
+            None,
             None,
             None,
             None,
@@ -4620,6 +5275,8 @@ mod tests {
             Some(&server.uri()),
             None,
             Some(std::sync::Arc::new(WorkerTools { seen: seen.clone() })),
+            None,
+            None,
             None,
             None,
             None,
@@ -4873,6 +5530,8 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
+                None,
             )
             .await
             .expect("start");
@@ -4968,6 +5627,8 @@ mod tests {
                     .into_iter()
                     .collect(),
             })),
+            None,
+            None,
             None,
             None,
             None,
@@ -5071,6 +5732,8 @@ mod tests {
             None,
             None,
             None,
+            None,
+            None,
         )
         .await
         .expect("start");
@@ -5128,6 +5791,8 @@ mod tests {
             Some(std::sync::Arc::new(IntermittentReadTools {
                 seen: seen.clone(),
             })),
+            None,
+            None,
             None,
             None,
             None,
@@ -5198,6 +5863,8 @@ mod tests {
             Some(&server.uri()),
             None,
             Some(std::sync::Arc::new(FakeTools { seen: seen.clone() })),
+            None,
+            None,
             None,
             None,
             None,
@@ -7493,7 +8160,7 @@ Suite de la réponse.";
         assert_eq!(limit, None, "a persistent failure still falls back");
         assert_eq!(
             resolve_ctx_cap_within(None, limit, 32768).value,
-            8192,
+            OLLAMA_NUM_CTX_CAP,
             "the portable fallback is what an unanswerable Ollama yields"
         );
         // `expect` above asserts the exact attempt count on drop: bounded, and
@@ -7524,8 +8191,9 @@ Suite de la réponse.";
             "model below ceiling → as-is"
         );
         assert_eq!(at(None, Some(1024)).value, 2048, "tiny model limit → floor");
-        // Ollama unreachable → legacy portable default.
-        assert_eq!(at(None, None).value, 8192);
+        // Ollama unreachable → the portable fallback, itself bounded by what
+        // the machine can hold.
+        assert_eq!(at(None, None).value, OLLAMA_NUM_CTX_CAP.min(32768));
         // Bad env falls through to the model-derived path.
         assert_eq!(at(Some("banana".into()), Some(16384)).value, 16384);
     }
@@ -7606,7 +8274,10 @@ Suite de la réponse.";
         let notice = fallback
             .throttle_notice("qwen3:8b")
             .expect("Ollama being unreachable must not read as a fact about the model");
-        assert!(notice.contains("8192"), "state the fallback used: {notice}");
+        assert!(
+            notice.contains(&OLLAMA_NUM_CTX_CAP.to_string()),
+            "state the fallback used: {notice}"
+        );
         assert!(
             notice.contains("/api/show"),
             "name why it fell back: {notice}"
@@ -7705,6 +8376,7 @@ Suite de la réponse.";
 
     #[test]
     fn parse_ollama_model_profile_keeps_context_and_storage_format() {
+        // An MLX build: it says its window, not its attention shape.
         let profile = parse_ollama_model_profile(&serde_json::json!({
             "details": { "format": "safetensors", "quantization_level": "nvfp4" },
             "model_info": { "qwen3_5.context_length": 262144 },
@@ -8825,5 +9497,2117 @@ sleep 3600
         // Local agents still get their always-present default of 1.
         assert_eq!(limits["ClaudeCode"], 1);
         assert_eq!(limits["Ollama"], 1);
+    }
+
+    // ── a ceiling reached in a discussion is reported, and a grant moves it ──
+
+    /// One tool, `probe`, under the generic twelve-call ceiling, with whatever
+    /// allowance the test grants. Every result differs, so no same-answer
+    /// guard can end the run before the ceiling does.
+    struct CeilingTools {
+        seen: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        allowance: crate::agents::tools::CeilingAllowance,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::agents::tools::ToolExecutor for CeilingTools {
+        fn catalogue(&self) -> Vec<serde_json::Value> {
+            vec![serde_json::json!({
+                "type": "function",
+                "function": {
+                    "name": "probe",
+                    "description": "Test tool probe",
+                    "parameters": {
+                        "type": "object",
+                        "properties": { "page": { "type": "integer" } },
+                        "required": [],
+                    },
+                },
+            })]
+        }
+
+        async fn ceiling_allowance(&self) -> crate::agents::tools::CeilingAllowance {
+            self.allowance.clone()
+        }
+
+        async fn execute(
+            &self,
+            call: &crate::agents::tools::ToolCall,
+        ) -> crate::agents::tools::ToolOutcome {
+            self.seen.lock().unwrap().push(call.arguments.to_string());
+            crate::agents::tools::ToolOutcome {
+                call: call.clone(),
+                content: serde_json::json!({ "page": call.arguments["page"], "items": [call.arguments.to_string()] }),
+                ok: true,
+            }
+        }
+    }
+
+    /// A provider that pages with `probe` for as long as Kronn declares it and
+    /// the page limit allows, then answers.
+    async fn paging_provider(pages: usize) -> wiremock::MockServer {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let round = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(move |request: &wiremock::Request| {
+                let body: serde_json::Value =
+                    serde_json::from_slice(&request.body).unwrap_or(serde_json::Value::Null);
+                let declared = body["tools"]
+                    .as_array()
+                    .is_some_and(|tools| tools.iter().any(|tool| tool["function"]["name"] == "probe"));
+                let n = round.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if declared && n < pages {
+                    ResponseTemplate::new(200).set_body_string(sse(&[&format!(
+                        r#"{{"choices":[{{"index":0,"delta":{{"tool_calls":[{{"index":0,"id":"c{n}","function":{{"name":"probe","arguments":"{{\"page\":{n}}}"}}}}]}}}}]}}"#
+                    )]))
+                } else {
+                    ResponseTemplate::new(200).set_body_string(sse(&[
+                        r#"{"choices":[{"index":0,"delta":{"content":"partial answer"}}]}"#,
+                    ]))
+                }
+            })
+            .mount(&server)
+            .await;
+        server
+    }
+
+    async fn run_paging(
+        server: &wiremock::MockServer,
+        allowance: crate::agents::tools::CeilingAllowance,
+    ) -> (Vec<String>, String, Vec<String>, bool) {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut process = start_ollama_http(
+            &AgentType::LiteLlm,
+            "page through everything",
+            "",
+            "test-model",
+            None,
+            Some(&server.uri()),
+            None,
+            Some(std::sync::Arc::new(CeilingTools {
+                seen: seen.clone(),
+                allowance,
+            })),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("start");
+        let mut text = String::new();
+        while let Some(line) = process.next_line().await {
+            text.push_str(&line);
+        }
+        let status = process.child.wait().await.expect("lifeline");
+        let stderr = process.captured_stderr_flushed().await;
+        let calls = seen.lock().unwrap().clone();
+        (calls, text, stderr, status.success())
+    }
+
+    fn asking() -> crate::agents::tools::CeilingAllowance {
+        crate::agents::tools::CeilingAllowance {
+            ask_on_ceiling: true,
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_ceiling_reached_in_a_discussion_is_reported_with_what_was_refused() {
+        let server = paging_provider(30).await;
+        let (calls, _, stderr, _) = run_paging(&server, asking()).await;
+
+        assert_eq!(
+            calls.len(),
+            12,
+            "the ceiling itself does not move: {calls:?}"
+        );
+        let report = parse_ceiling_report(&stderr).expect("a ceiling report");
+        assert_eq!(report.tools.len(), 1);
+        let hit = &report.tools[0];
+        assert_eq!(
+            (hit.tool.as_str(), hit.limit, hit.refused),
+            ("probe", 12, 1)
+        );
+        // What the refused call was after, so the human sees what is missing.
+        assert_eq!(hit.refused_calls, vec!["page=12".to_string()]);
+        assert_eq!(report.rounds, None);
+    }
+
+    #[tokio::test]
+    async fn without_anyone_to_ask_a_ceiling_leaves_no_report() {
+        let server = paging_provider(30).await;
+        let (calls, _, stderr, _) =
+            run_paging(&server, crate::agents::tools::CeilingAllowance::default()).await;
+
+        assert_eq!(calls.len(), 12);
+        assert!(
+            parse_ceiling_report(&stderr).is_none(),
+            "a workflow step has no one to ask"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_granted_allowance_lets_the_tool_run_past_its_ceiling() {
+        let server = paging_provider(30).await;
+        let mut allowance = asking();
+        allowance.extra_calls.insert("probe".into(), 5);
+        let (calls, _, stderr, _) = run_paging(&server, allowance).await;
+
+        assert_eq!(calls.len(), 17, "twelve plus the five granted");
+        let report = parse_ceiling_report(&stderr).expect("the raised ceiling is reached too");
+        assert_eq!(report.tools[0].limit, 17);
+    }
+
+    #[tokio::test]
+    async fn a_lifted_counter_never_refuses_the_tool() {
+        let server = paging_provider(20).await;
+        let mut allowance = asking();
+        allowance.unlimited_tools.insert("probe".into());
+        let (calls, text, stderr, ok) = run_paging(&server, allowance).await;
+
+        assert_eq!(calls.len(), 20, "every page the model asked for ran");
+        assert!(parse_ceiling_report(&stderr).is_none());
+        assert!(text.contains("partial answer") && ok);
+    }
+
+    /// The round ceiling in a discussion is not a failure any more: the last
+    /// round's calls are refused, the model answers with what it has, and the
+    /// report says which ceiling was reached. Outside a discussion it still
+    /// fails, with its reason.
+    #[tokio::test]
+    async fn the_round_ceiling_in_a_discussion_ends_on_an_answer() {
+        let server = paging_provider(1_000).await;
+        let mut allowance = asking();
+        allowance.unlimited_tools.insert("probe".into());
+        let (calls, text, stderr, ok) = run_paging(&server, allowance).await;
+
+        let cap = crate::agents::tools::MAX_TOOL_ITERATIONS;
+        assert_eq!(calls.len(), cap, "every round up to the ceiling ran");
+        assert!(ok, "an answer, not a failure: {stderr:?}");
+        assert!(text.contains("partial answer"));
+        let report = parse_ceiling_report(&stderr).expect("a ceiling report");
+        assert_eq!(report.rounds, Some(cap));
+    }
+
+    #[tokio::test]
+    async fn the_round_ceiling_outside_a_discussion_still_fails_with_its_reason() {
+        let server = paging_provider(1_000).await;
+        let mut allowance = crate::agents::tools::CeilingAllowance::default();
+        allowance.unlimited_tools.insert("probe".into());
+        let (_, _, stderr, ok) = run_paging(&server, allowance).await;
+
+        assert!(!ok);
+        assert!(
+            stderr
+                .iter()
+                .any(|line| line.contains("rounds — giving up")),
+            "{stderr:?}"
+        );
+        assert!(parse_ceiling_report(&stderr).is_none());
+    }
+
+    #[tokio::test]
+    async fn granted_rounds_extend_the_round_ceiling() {
+        let server = paging_provider(1_000).await;
+        let mut allowance = asking();
+        allowance.unlimited_tools.insert("probe".into());
+        allowance.extra_rounds = 10;
+        let (calls, _, stderr, _) = run_paging(&server, allowance).await;
+
+        let cap = crate::agents::tools::MAX_TOOL_ITERATIONS + 10;
+        assert_eq!(calls.len(), cap);
+        assert_eq!(
+            parse_ceiling_report(&stderr).and_then(|report| report.rounds),
+            Some(cap)
+        );
+    }
+
+    #[test]
+    fn the_round_ceiling_follows_the_model_window() {
+        assert_eq!(
+            round_cap_for_window(None),
+            crate::agents::tools::MAX_TOOL_ITERATIONS
+        );
+        assert_eq!(
+            round_cap_for_window(Some(0)),
+            crate::agents::tools::MAX_TOOL_ITERATIONS
+        );
+        assert_eq!(round_cap_for_window(Some(24_576)), 50);
+        assert_eq!(round_cap_for_window(Some(65_536)), 80);
+        assert_eq!(
+            round_cap_for_window(Some(131_072)),
+            crate::agents::tools::MAX_TOOL_ITERATIONS
+        );
+        assert_eq!(round_cap_for_window(Some(200_000)), 250);
+    }
+
+    #[test]
+    fn a_remote_window_is_the_smallest_its_provider_routes_to() {
+        let body = serde_json::json!({ "data": { "endpoints": [
+            { "provider_name": "Bedrock", "context_length": 200000 },
+            { "provider_name": "Google", "context_length": 1000000 },
+            { "provider_name": "Unknown" },
+        ]}});
+        assert_eq!(smallest_endpoint_window(&body), Some(200_000));
+        assert_eq!(
+            smallest_endpoint_window(&serde_json::json!({ "data": {} })),
+            None
+        );
+    }
+
+    // ── the tiered catalogue, measured against a real local model ──
+    //
+    // Not a unit test: it spends a real model's time. Enable with
+    //   KRONN_OLLAMA_BENCH=1 cargo test --lib bench_tiered_catalogue -- --ignored --nocapture
+    // and optionally KRONN_BENCH_MODEL / KRONN_BENCH_OLLAMA.
+
+    struct BenchTools {
+        catalogue: Vec<serde_json::Value>,
+        seen: Arc<Mutex<Vec<String>>>,
+        /// Workspace `read_file` reads from, when the run points at a doc
+        /// instead of carrying it.
+        root: Option<std::path::PathBuf>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::agents::tools::ToolExecutor for BenchTools {
+        fn catalogue(&self) -> Vec<serde_json::Value> {
+            self.catalogue.clone()
+        }
+
+        async fn execute(
+            &self,
+            call: &crate::agents::tools::ToolCall,
+        ) -> crate::agents::tools::ToolOutcome {
+            self.seen
+                .lock()
+                .unwrap()
+                .push(match call.arguments["family"].as_str() {
+                    Some(family) => format!("{}({family})", call.name),
+                    // `tools_load` with a family that is not a string is a call
+                    // that does not match its declaration — record what it
+                    // actually sent, because that is the bug. Every other tool
+                    // is recorded by name.
+                    None if call.name == "tools_load" => {
+                        format!("{}[args={}]", call.name, call.arguments)
+                    }
+                    None => call.name.clone(),
+                });
+            let content = match call.name.as_str() {
+                "tools_load" => {
+                    // Mirror the real executor: a call with no family, or one
+                    // Kronn does not know, is answered with the families that
+                    // exist. Swallowing it here measured a behaviour Kronn does
+                    // not have, and cost a model a turn it would not have lost.
+                    let family = call.arguments["family"].as_str().unwrap_or_default();
+                    let declarations = crate::api::agent_tools::declarations_for_family(family);
+                    if declarations.is_empty() {
+                        return crate::agents::tools::ToolOutcome {
+                            call: call.clone(),
+                            content: serde_json::json!({
+                                "families": crate::api::agent_tools::TOOL_FAMILIES
+                                    .iter()
+                                    .map(|(id, what, _)| serde_json::json!({
+                                        "family": id, "brings": what
+                                    }))
+                                    .collect::<Vec<_>>(),
+                                "note": "Call `tools_load` again with one of these as `family`.",
+                            }),
+                            ok: true,
+                        };
+                    }
+                    let names: Vec<&str> = declarations
+                        .iter()
+                        .filter_map(|tool| tool["function"]["name"].as_str())
+                        .collect();
+                    serde_json::json!({
+                        "family": family,
+                        "loaded": names,
+                        "note": "These tools are now declared for the rest of this run.",
+                        "__kronn_tools_add": declarations,
+                    })
+                }
+                "plan_get" => serde_json::json!({
+                    "active": [
+                        {"reference": "KT-101", "title": "Relire la page d'accueil", "status": "todo", "actionable": true},
+                        {"reference": "KT-102", "title": "Corriger le lien RSS", "status": "in_progress", "actionable": false}
+                    ]
+                }),
+                "media_generate" => serde_json::json!({
+                    "job_id": "job-bench-1", "status": "pending", "modality": "image"
+                }),
+                "agent_list" => serde_json::json!({
+                    "workers": [{"agent": "Codex", "connection_id": "conn-1"}]
+                }),
+                "read_file" => {
+                    let path = call.arguments["path"].as_str().unwrap_or_default();
+                    match self.root.as_ref().map(|root| root.join(path)) {
+                        Some(full) => match std::fs::read_to_string(&full) {
+                            Ok(content) => serde_json::json!({"path": path, "content": content}),
+                            Err(err) => serde_json::json!({"error": err.to_string()}),
+                        },
+                        None => serde_json::json!({"error": "no workspace"}),
+                    }
+                }
+                _ => serde_json::json!({"ok": true}),
+            };
+            crate::agents::tools::ToolOutcome {
+                call: call.clone(),
+                content,
+                ok: true,
+            }
+        }
+    }
+
+    /// A stateful executor over a real repository, for a job that takes more
+    /// turns than a model can hold in its head. The point is the state: a DoD
+    /// item ticked on turn 3 is still ticked on turn 9, so the model can put
+    /// down what it has done and pick it up again instead of carrying it.
+    /// Reads are real; nothing is ever written to the repository.
+    #[derive(Default)]
+    struct WorkLog {
+        dod: Vec<(String, String, bool)>,
+        task_title: String,
+        /// Each read: the normalised path, and the text actually handed back.
+        /// Opening a file is not receiving a value — a slice can be empty, or
+        /// land past the line that carried it.
+        files_read: Vec<(String, String)>,
+        wrote: Vec<(String, String)>,
+        calls: Vec<String>,
+    }
+
+    /// One spelling per file. `./src/X.php`, `src/X.php` and an absolute path
+    /// are the same unit; a stem alone is not — `src/Admin/User.php` and
+    /// `src/Public/User.php` are two files.
+    ///
+    /// An absolute path is kept absolute. Stripping its leading slash and
+    /// joining it to the root produced `<root>/<root>/src/X.php`, so the same
+    /// file had two keys depending on how it was named.
+    fn relative_to(root: &std::path::Path, raw: &str) -> String {
+        let candidat = std::path::Path::new(raw);
+        let joined = if candidat.is_absolute() {
+            candidat.to_path_buf()
+        } else {
+            root.join(candidat)
+        };
+        let resolved = joined.canonicalize().unwrap_or(joined);
+        resolved
+            .strip_prefix(root)
+            .unwrap_or(&resolved)
+            .to_string_lossy()
+            .to_string()
+    }
+
+    struct WorkTools {
+        catalogue: Vec<serde_json::Value>,
+        root: std::path::PathBuf,
+        log: Arc<Mutex<WorkLog>>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::agents::tools::ToolExecutor for WorkTools {
+        fn catalogue(&self) -> Vec<serde_json::Value> {
+            self.catalogue.clone()
+        }
+
+        async fn execute(
+            &self,
+            call: &crate::agents::tools::ToolCall,
+        ) -> crate::agents::tools::ToolOutcome {
+            let mut log = self.log.lock().unwrap();
+            log.calls.push(call.name.clone());
+            let args = &call.arguments;
+            let safe = |root: &std::path::Path, raw: &str| -> Option<std::path::PathBuf> {
+                let joined = root.join(raw.trim_start_matches('/'));
+                joined.canonicalize().ok().filter(|p| p.starts_with(root))
+            };
+            let content = match call.name.as_str() {
+                "tools_load" => {
+                    let family = args["family"].as_str().unwrap_or_default();
+                    let declarations = crate::api::agent_tools::declarations_for_family(family);
+                    if declarations.is_empty() {
+                        serde_json::json!({
+                            "families": crate::api::agent_tools::TOOL_FAMILIES
+                                .iter()
+                                .map(|(id, what, _)| serde_json::json!({"family": id, "brings": what}))
+                                .collect::<Vec<_>>(),
+                        })
+                    } else {
+                        let names: Vec<&str> = declarations
+                            .iter()
+                            .filter_map(|t| t["function"]["name"].as_str())
+                            .collect();
+                        serde_json::json!({
+                            "family": family, "loaded": names,
+                            "__kronn_tools_add": declarations,
+                        })
+                    }
+                }
+                "task_create" => {
+                    log.task_title = args["title"].as_str().unwrap_or_default().to_string();
+                    log.dod = args["definition_of_done"]
+                        .as_array()
+                        .map(|items| {
+                            items
+                                .iter()
+                                .enumerate()
+                                .map(|(n, item)| {
+                                    let text =
+                                        item.as_str().map(str::to_string).unwrap_or_else(|| {
+                                            item["text"].as_str().unwrap_or("?").to_string()
+                                        });
+                                    (format!("dod-{}", n + 1), text, false)
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    serde_json::json!({
+                        "task_id": "KT-BENCH",
+                        "title": log.task_title,
+                        "definition_of_done": log.dod.iter()
+                            .map(|(id, text, done)| serde_json::json!({
+                                "dod_id": id, "text": text, "completed": done
+                            }))
+                            .collect::<Vec<_>>(),
+                    })
+                }
+                "task_get" | "task_list" => serde_json::json!({
+                    "task_id": "KT-BENCH",
+                    "title": log.task_title,
+                    "definition_of_done": log.dod.iter()
+                        .map(|(id, text, done)| serde_json::json!({
+                            "dod_id": id, "text": text, "completed": done
+                        }))
+                        .collect::<Vec<_>>(),
+                    "remaining": log.dod.iter().filter(|(_, _, done)| !done).count(),
+                }),
+                "task_update_dod" => {
+                    let wanted = args["dod_id"].as_str().unwrap_or_default().to_string();
+                    let completed = args["completed"].as_bool().unwrap_or(true);
+                    let mut found = false;
+                    for (id, _, done) in log.dod.iter_mut() {
+                        if *id == wanted {
+                            *done = completed;
+                            found = true;
+                        }
+                    }
+                    if !found {
+                        serde_json::json!({
+                            "error": format!("no dod item `{wanted}` on this task"),
+                            "known": log.dod.iter().map(|(id, _, _)| id.clone()).collect::<Vec<_>>(),
+                        })
+                    } else {
+                        serde_json::json!({
+                            "dod_id": wanted,
+                            "completed": completed,
+                            "remaining": log.dod.iter().filter(|(_, _, d)| !d).count(),
+                        })
+                    }
+                }
+                "read_file" => {
+                    // The real tool, not an approximation of it. A bench that
+                    // silently cut at 8 000 characters and ignored
+                    // `offset`/`limit` penalised the models that honour the
+                    // contract and read a large file in slices.
+                    let raw = args["path"].as_str().unwrap_or_default();
+                    let count = |field: &str| -> Option<usize> {
+                        args[field].as_u64().map(|n| n as usize).or_else(|| {
+                            args[field]
+                                .as_str()
+                                .and_then(|s| s.trim().parse::<usize>().ok())
+                        })
+                    };
+                    match crate::api::agent_workspace_tools::read_file_payload(
+                        &self.root,
+                        raw,
+                        count("offset"),
+                        count("limit"),
+                    ) {
+                        Ok(payload) => {
+                            if payload["found"].as_bool().unwrap_or(false) {
+                                log.files_read.push((
+                                    relative_to(&self.root, raw),
+                                    payload["text"].as_str().unwrap_or_default().to_string(),
+                                ));
+                            }
+                            payload
+                        }
+                        Err(message) => serde_json::json!({"error": message}),
+                    }
+                }
+                "list_files" => {
+                    let raw = args["path"].as_str().unwrap_or(".");
+                    match safe(&self.root, raw) {
+                        Some(dir) => {
+                            let mut names: Vec<String> = std::fs::read_dir(&dir)
+                                .map(|entries| {
+                                    entries
+                                        .filter_map(Result::ok)
+                                        .map(|e| e.file_name().to_string_lossy().to_string())
+                                        .filter(|n| !n.starts_with('.'))
+                                        .collect()
+                                })
+                                .unwrap_or_default();
+                            names.sort();
+                            names.truncate(60);
+                            serde_json::json!({"path": raw, "entries": names})
+                        }
+                        None => serde_json::json!({"error": format!("no directory `{raw}`")}),
+                    }
+                }
+                "find_files" | "search_text" => {
+                    let needle = args["pattern"]
+                        .as_str()
+                        .or_else(|| args["query"].as_str())
+                        .or_else(|| args["text"].as_str())
+                        .unwrap_or_default();
+                    let mut hits = Vec::new();
+                    for entry in std::fs::read_dir(&self.root)
+                        .into_iter()
+                        .flatten()
+                        .flatten()
+                    {
+                        let name = entry.file_name().to_string_lossy().to_string();
+                        if name.contains(needle.trim_matches(['*', '.'])) {
+                            hits.push(name);
+                        }
+                    }
+                    hits.truncate(30);
+                    serde_json::json!({"pattern": needle, "matches": hits})
+                }
+                "write_file" => {
+                    // Recorded, never written: this is somebody's repository.
+                    // The path is normalised so that the last write to the
+                    // deliverable can be found whatever spelling led to it.
+                    let path = args["path"].as_str().unwrap_or_default().to_string();
+                    let body = args["content"].as_str().unwrap_or_default().to_string();
+                    log.wrote.push((relative_to(&self.root, &path), body));
+                    serde_json::json!({"path": path, "written": true})
+                }
+                _ => serde_json::json!({"ok": true}),
+            };
+            crate::agents::tools::ToolOutcome {
+                call: call.clone(),
+                content,
+                ok: true,
+            }
+        }
+    }
+
+    struct BenchRun {
+        label: &'static str,
+        tools_declared: usize,
+        catalogue_bytes: usize,
+        first_prompt_tokens: u64,
+        total_prompt_tokens: u64,
+        turns: usize,
+        calls: Vec<String>,
+        answer: String,
+        seconds: f64,
+    }
+
+    async fn bench_run(
+        label: &'static str,
+        prompt: &str,
+        catalogue: Vec<serde_json::Value>,
+    ) -> BenchRun {
+        let base =
+            std::env::var("KRONN_BENCH_OLLAMA").unwrap_or_else(|_| "http://127.0.0.1:11434".into());
+        let model = std::env::var("KRONN_BENCH_MODEL").unwrap_or_else(|_| "qwen3.8:27b-mlx".into());
+        let catalogue_bytes = serde_json::to_string(&catalogue).unwrap().len();
+        let tools_declared = catalogue.len();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let started = std::time::Instant::now();
+        let mut process = start_ollama_http(
+            &AgentType::Ollama,
+            prompt,
+            "Tu es un agent Kronn dans une discussion. Utilise les outils quand ils servent.",
+            &model,
+            None,
+            Some(&base),
+            None,
+            Some(std::sync::Arc::new(BenchTools {
+                catalogue,
+                seen: seen.clone(),
+                root: None,
+            })),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("ollama start");
+        let mut answer = String::new();
+        while let Some(line) = process.next_line().await {
+            answer.push_str(&line);
+        }
+        let _ = process.child.wait().await;
+        let stderr = process.captured_stderr_flushed().await;
+        let turns = parse_http_turn_telemetry(&stderr);
+        let calls = seen.lock().unwrap().clone();
+        BenchRun {
+            label,
+            tools_declared,
+            catalogue_bytes,
+            first_prompt_tokens: turns.first().map(|turn| turn.prompt_tokens).unwrap_or(0),
+            total_prompt_tokens: turns.iter().map(|turn| turn.prompt_tokens).sum(),
+            turns: turns.len(),
+            calls,
+            answer: answer.chars().take(160).collect(),
+            seconds: started.elapsed().as_secs_f64(),
+        }
+    }
+
+    /// One run through the REAL prompt builder, project and all, so the doc
+    /// injection and the tools notice are part of what is measured. `bench_run`
+    /// goes straight to the transport with a hand-written system context and
+    /// sees neither.
+    async fn bench_doc_run(
+        label: &'static str,
+        project: &std::path::Path,
+        prompt: &str,
+        catalogue: Vec<serde_json::Value>,
+    ) -> BenchRun {
+        // The doc pointer and the tools notice are shared by every HTTP agent,
+        // not just Ollama, so the same scenario runs against an OpenAI-wire
+        // provider when one is configured for the bench.
+        let external = std::env::var("KRONN_BENCH_HTTP_ENDPOINT")
+            .ok()
+            .map(|endpoint| ExternalHttpRuntime {
+                display_name: "Bench".into(),
+                mention_alias: "bench".into(),
+                endpoint,
+                api_key: std::env::var("KRONN_BENCH_HTTP_KEY").ok(),
+            });
+        let agent = match external {
+            Some(_) => AgentType::Custom,
+            None => AgentType::Ollama,
+        };
+        let model = std::env::var("KRONN_BENCH_MODEL").unwrap_or_else(|_| "gemma4:e4b".into());
+        let catalogue_bytes = serde_json::to_string(&catalogue).unwrap().len();
+        let tools_declared = catalogue.len();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let tokens = TokensConfig {
+            anthropic: None,
+            openai: None,
+            google: None,
+            keys: Vec::new(),
+            disabled_overrides: Vec::new(),
+        };
+        let started = std::time::Instant::now();
+        let mut process = start_agent_with_config(AgentStartConfig {
+            model_override: Some(&model),
+            external_http: external.as_ref(),
+            tools: Some(std::sync::Arc::new(BenchTools {
+                catalogue,
+                seen: seen.clone(),
+                root: Some(project.to_path_buf()),
+            })),
+            ..AgentStartConfig::new(&agent, project.to_str().unwrap(), prompt, &tokens)
+        })
+        .await
+        .expect("ollama start");
+        let mut answer = String::new();
+        while let Some(line) = process.next_line().await {
+            answer.push_str(&line);
+        }
+        let _ = process.child.wait().await;
+        let stderr = process.captured_stderr_flushed().await;
+        let turns = parse_http_turn_telemetry(&stderr);
+        let calls = seen.lock().unwrap().clone();
+        BenchRun {
+            label,
+            tools_declared,
+            catalogue_bytes,
+            first_prompt_tokens: turns.first().map(|turn| turn.prompt_tokens).unwrap_or(0),
+            total_prompt_tokens: turns.iter().map(|turn| turn.prompt_tokens).sum(),
+            turns: turns.len(),
+            calls,
+            answer,
+            seconds: started.elapsed().as_secs_f64(),
+        }
+    }
+
+    /// The project doc used to be copied into every request because an HTTP
+    /// agent had no filesystem. It reads files now, so the prompt points at the
+    /// doc instead. The trade is measured here: the pointer is cheaper by
+    /// construction, and what has to hold is that the model still goes and
+    /// opens it. A model that answers without the fact is a model that needs
+    /// `KRONN_INLINE_PROJECT_DOC=1`.
+    ///
+    ///   KRONN_OLLAMA_BENCH=1 KRONN_BENCH_MODELS="a,b" cargo test --lib \
+    ///     bench_project_doc_inline_against_pointer -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore = "spends a real local model's time; KRONN_OLLAMA_BENCH=1"]
+    async fn bench_project_doc_inline_against_pointer() {
+        if std::env::var("KRONN_OLLAMA_BENCH").as_deref() != Ok("1") {
+            eprintln!("skipped: set KRONN_OLLAMA_BENCH=1");
+            return;
+        }
+        // The fact lives ONLY in the doc, so an answer carrying it proves the
+        // doc was read rather than guessed from the model's own knowledge.
+        // Pointed at a real project, the bench reads ITS doc and asks a question
+        // only that doc answers — a repository nobody wrote for this test, with
+        // its own tree for the model to get lost in.
+        //   KRONN_BENCH_PROJECT=/path KRONN_BENCH_MARKER=... KRONN_BENCH_QUESTION=...
+        let real_project = std::env::var("KRONN_BENCH_PROJECT")
+            .ok()
+            .filter(|p| !p.is_empty());
+        const MARKER: &str = "kronn-registry-7731";
+        let marker = std::env::var("KRONN_BENCH_MARKER").unwrap_or_else(|_| MARKER.to_string());
+        let marker = marker.as_str();
+        let project = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(project.path().join("docs")).expect("docs dir");
+        // Kronn's own doc, so the inline arm pays what it really costs. A
+        // fixture of a few hundred bytes would make both arms look alike and
+        // measure nothing.
+        if real_project.is_none() {
+            let real_doc = std::fs::read_to_string(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../docs/AGENTS.md"),
+            )
+            .expect("the project's own docs/AGENTS.md");
+            std::fs::write(
+                project.path().join("docs/AGENTS.md"),
+                format!(
+                    "{real_doc}\n\n## Registre des versions\n\n\
+                     Le registre de versions de ce projet s'appelle `{MARKER}`. Toute release \
+                     doit y être déclarée avant d'être taguée.\n"
+                ),
+            )
+            .expect("write doc");
+        }
+        // Nothing is ever written into a real project: the bench only reads.
+        let project_path: std::path::PathBuf = match real_project.as_deref() {
+            Some(path) => std::path::PathBuf::from(path),
+            None => project.path().to_path_buf(),
+        };
+        println!(
+            "\nproject: {}  doc: {} bytes",
+            project_path.display(),
+            std::fs::metadata(project_path.join("docs/AGENTS.md"))
+                .map(|m| m.len())
+                .unwrap_or(0)
+        );
+
+        // Two shapes of turn, because they trade in opposite directions: one
+        // that needs the doc (the pointer pays a turn AND still carries the doc
+        // back as a tool result) and one that does not (inlining pays for a
+        // document the turn never uses).
+        let default_question = "Comment s'appelle le registre de versions de ce projet ? \
+                                 Réponds avec son nom exact, tel qu'il est écrit dans la \
+                                 documentation.";
+        let question =
+            std::env::var("KRONN_BENCH_QUESTION").unwrap_or_else(|_| default_question.to_string());
+        let needs_doc = question.as_str();
+        let ignores_doc = "Dis bonjour en une phrase, sans utiliser d'outil.";
+        let catalogue =
+            crate::api::agent_tools::tiered(crate::api::agent_tools::full_discussion_catalogue());
+
+        let models = std::env::var("KRONN_BENCH_MODELS").unwrap_or_else(|_| "gemma4:e4b".into());
+        println!(
+            "\n{:<18} {:<12} {:>9} {:>6} {:>9} {:>6}  {:<7} {:<7}",
+            "model", "turn", "inline tk", "turns", "ptr tk", "turns", "inline", "pointer"
+        );
+        for model in models.split(',').map(str::trim).filter(|m| !m.is_empty()) {
+            std::env::set_var("KRONN_BENCH_MODEL", model);
+            for (scenario, prompt, grounded) in [
+                ("needs doc", needs_doc, true),
+                ("ignores doc", ignores_doc, false),
+            ] {
+                std::env::set_var("KRONN_INLINE_PROJECT_DOC", "1");
+                let inline =
+                    bench_doc_run("doc · inline", &project_path, prompt, catalogue.clone()).await;
+                std::env::remove_var("KRONN_INLINE_PROJECT_DOC");
+                let pointer =
+                    bench_doc_run("doc · pointer", &project_path, prompt, catalogue.clone()).await;
+
+                // Only the doc-dependent turn has a fact to carry; the other is
+                // measured on cost alone.
+                let verdict = |run: &BenchRun| match (grounded, run.answer.contains(marker)) {
+                    (false, _) => "n/a",
+                    (true, true) => "ok",
+                    (true, false) => "MISSED",
+                };
+                println!(
+                    "{:<18} {:<12} {:>9} {:>6} {:>9} {:>6}  {:<7} {:<7}",
+                    model,
+                    scenario,
+                    inline.total_prompt_tokens,
+                    inline.turns,
+                    pointer.total_prompt_tokens,
+                    pointer.turns,
+                    verdict(&inline),
+                    verdict(&pointer),
+                );
+                println!("    pointer calls {:?}", pointer.calls);
+            }
+        }
+    }
+
+    /// One family is the easy case. A run that needs two has to ask twice, and
+    /// the window it was given at the start has to still hold the catalogue it
+    /// ends up with — the reason sizing looks at what a run can reach rather
+    /// than what it has.
+    ///
+    ///   KRONN_OLLAMA_BENCH=1 KRONN_BENCH_MODELS="a,b" cargo test --lib \
+    ///     bench_two_families_in_one_run -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore = "spends a real local model's time; KRONN_OLLAMA_BENCH=1"]
+    async fn bench_two_families_in_one_run() {
+        if std::env::var("KRONN_OLLAMA_BENCH").as_deref() != Ok("1") {
+            eprintln!("skipped: set KRONN_OLLAMA_BENCH=1");
+            return;
+        }
+        let tiered =
+            crate::api::agent_tools::tiered(crate::api::agent_tools::full_discussion_catalogue());
+        let full = crate::api::agent_tools::full_discussion_catalogue();
+        let prompt = "Deux choses, dans cet ordre. D'abord génère une image d'un phare au lever \
+                      du jour, format carré. Ensuite écris un fichier `notes.md` à la racine du \
+                      workspace qui dit en une phrase quelle image tu as lancée. Utilise les \
+                      outils de Kronn pour les deux.";
+        let models = std::env::var("KRONN_BENCH_MODELS").unwrap_or_else(|_| "gemma4:e4b".into());
+        println!(
+            "\n{:<18} {:>9} {:>6} {:<6} {:<6} {:>9} {:>6} {:<6} {:<6}",
+            "model", "full tk", "turns", "image", "file", "tiered tk", "turns", "image", "file"
+        );
+        println!(
+            "{:<18} {:>9} {:>6} {:>9} {:>6}",
+            "", "full s", "", "tiered s", ""
+        );
+        for model in models.split(',').map(str::trim).filter(|m| !m.is_empty()) {
+            std::env::set_var("KRONN_BENCH_MODEL", model);
+            let full_run = bench_run("two · full", prompt, full.clone()).await;
+            let tiered_run = bench_run("two · tiered", prompt, tiered.clone()).await;
+            // Both modes are scored. Scoring only the tiered one made the
+            // table look like the full catalogue always succeeded.
+            let did = |run: &BenchRun, tool: &str| {
+                if reached(run, tool) {
+                    "ok"
+                } else {
+                    "MISSED"
+                }
+            };
+            println!(
+                "{:<18} {:>9} {:>6} {:<6} {:<6} {:>9} {:>6} {:<6} {:<6}",
+                model,
+                full_run.total_prompt_tokens,
+                full_run.turns,
+                did(&full_run, "media_generate"),
+                did(&full_run, "write_file"),
+                tiered_run.total_prompt_tokens,
+                tiered_run.turns,
+                did(&tiered_run, "media_generate"),
+                did(&tiered_run, "write_file"),
+            );
+            // Time matters as much as tokens here: the declared catalogue sits
+            // at the front of the prompt and is prefix-cached, so loading a
+            // family mid-run changes that prefix and costs the cache.
+            println!(
+                "{:<18} {:>9} {:>6} {:>9} {:>6}",
+                "",
+                format!("{:.1}s", full_run.seconds),
+                "",
+                format!("{:.1}s", tiered_run.seconds),
+                ""
+            );
+            println!("    full   {:?}", full_run.calls);
+            println!("    tiered {:?}", tiered_run.calls);
+            // A run that called nothing has an answer worth reading: it says
+            // whether the model refused, misunderstood, or simply replied.
+            if tiered_run.calls.is_empty() || !reached(&tiered_run, "write_file") {
+                println!(
+                    "    tiered said: {}",
+                    tiered_run.answer.chars().take(400).collect::<String>()
+                );
+            }
+        }
+    }
+    /// One thing a deliverable is supposed to contain, and the files that
+    /// establish it.
+    struct Unite {
+        /// What the scored text must name.
+        etiquette: String,
+        /// Paths whose content establishes it.
+        preuves: Vec<String>,
+        /// When set, a read of a proof file only counts if the text handed
+        /// back actually contained this. Opening `composer.json` at line 400
+        /// is not receiving the PHP version. `None` for the inventory job,
+        /// where opening the file IS the evidence.
+        valeur_attendue: Option<String>,
+    }
+
+    /// Two numbers that are never merged, from ONE scored text and the reads
+    /// that were observed. Pure, so the awkward cases are testable without a
+    /// model: a value present only outside the returned slice, a read past the
+    /// end of the file, a unit named with no read at all.
+    fn compter(unites: &[Unite], texte: &str, lectures: &[(String, String)]) -> (usize, usize) {
+        let texte = texte.to_lowercase();
+        let nomme = |u: &Unite| texte.contains(&u.etiquette.to_lowercase());
+        let preuve_lue = |u: &Unite| {
+            lectures.iter().any(|(chemin, rendu)| {
+                u.preuves.iter().any(|p| p.eq_ignore_ascii_case(chemin))
+                    && match &u.valeur_attendue {
+                        Some(valeur) => rendu.to_lowercase().contains(&valeur.to_lowercase()),
+                        None => true,
+                    }
+            })
+        };
+        let couvert = unites.iter().filter(|u| nomme(u) && preuve_lue(u)).count();
+        let sans_lecture = unites.iter().filter(|u| nomme(u) && !preuve_lue(u)).count();
+        (couvert, sans_lecture)
+    }
+
+    /// Files under `root` whose content carries `valeur`, as normalised relative
+    /// paths. Ties a fact to its source without hard-coding a repository's
+    /// layout — and without the earlier nonsense of looking for `8.2` inside a
+    /// file PATH, which no path contains.
+    fn fichiers_portant(root: &std::path::Path, valeur: &str) -> Vec<String> {
+        const IGNORES: [&str; 8] = [
+            ".git",
+            "vendor",
+            "node_modules",
+            "target",
+            "var",
+            "build",
+            "dist",
+            "public",
+        ];
+        fn descendre(
+            dir: &std::path::Path,
+            root: &std::path::Path,
+            valeur: &str,
+            out: &mut Vec<String>,
+            reste: usize,
+        ) {
+            if reste == 0 || out.len() >= 40 {
+                return;
+            }
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries.filter_map(Result::ok) {
+                let nom = entry.file_name().to_string_lossy().to_string();
+                if nom.starts_with('.') || IGNORES.contains(&nom.as_str()) {
+                    continue;
+                }
+                let path = entry.path();
+                if path.is_dir() {
+                    descendre(&path, root, valeur, out, reste - 1);
+                } else if path.metadata().is_ok_and(|m| m.len() < 2 * 1024 * 1024)
+                    && std::fs::read_to_string(&path).is_ok_and(|texte| texte.contains(valeur))
+                {
+                    out.push(
+                        path.strip_prefix(root)
+                            .unwrap_or(&path)
+                            .to_string_lossy()
+                            .to_string(),
+                    );
+                }
+            }
+        }
+        let mut trouves = Vec::new();
+        descendre(root, root, valeur, &mut trouves, 5);
+        trouves
+    }
+
+    /// Three spellings of one file are one unit, and one stem shared by two
+    /// files is two units.
+    #[test]
+    fn one_file_has_one_identity_whatever_spelling_names_it() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path().canonicalize().unwrap();
+        std::fs::create_dir_all(root.join("src/Admin")).unwrap();
+        std::fs::create_dir_all(root.join("src/Public")).unwrap();
+        std::fs::write(root.join("src/Admin/User.php"), "<?php").unwrap();
+        std::fs::write(root.join("src/Public/User.php"), "<?php").unwrap();
+
+        let absolu = root.join("src/Admin/User.php").display().to_string();
+        for graphie in ["src/Admin/User.php", "./src/Admin/User.php", &absolu] {
+            assert_eq!(
+                relative_to(&root, graphie),
+                "src/Admin/User.php",
+                "graphie `{graphie}`"
+            );
+        }
+        assert_ne!(
+            relative_to(&root, "src/Admin/User.php"),
+            relative_to(&root, "src/Public/User.php"),
+            "deux fichiers, un seul radical, deux unités"
+        );
+    }
+
+    /// Opening a file is not receiving a value. A slice that stops before the
+    /// line carrying it proves nothing, and the bench used to count it.
+    #[test]
+    fn a_value_outside_the_returned_slice_is_not_a_proof() {
+        let unites = vec![Unite {
+            etiquette: "8.2".into(),
+            preuves: vec!["composer.json".into()],
+            valeur_attendue: Some("8.2".into()),
+        }];
+        let lectures = vec![(
+            "composer.json".to_string(),
+            "{\"name\": \"acme/site\"}".to_string(),
+        )];
+        assert_eq!(
+            compter(&unites, "PHP 8.2", &lectures),
+            (0, 1),
+            "nommé, mais la valeur n'a jamais été rendue"
+        );
+    }
+
+    /// Same for a read past the end of the file: found, and empty.
+    #[test]
+    fn a_read_past_the_end_of_a_file_is_not_a_proof() {
+        let unites = vec![Unite {
+            etiquette: "7.3".into(),
+            preuves: vec!["composer.json".into()],
+            valeur_attendue: Some("7.3".into()),
+        }];
+        let lectures = vec![("composer.json".to_string(), String::new())];
+        assert_eq!(compter(&unites, "Symfony 7.3", &lectures), (0, 1));
+    }
+
+    /// And when the value IS handed back, it counts.
+    #[test]
+    fn a_value_present_in_what_was_returned_is_a_proof() {
+        let unites = vec![Unite {
+            etiquette: "8.2".into(),
+            preuves: vec!["composer.json".into()],
+            valeur_attendue: Some("8.2".into()),
+        }];
+        let lectures = vec![(
+            "composer.json".to_string(),
+            "{\"require\": {\"php\": \">=8.2\"}}".to_string(),
+        )];
+        assert_eq!(compter(&unites, "PHP 8.2", &lectures), (1, 0));
+    }
+
+    /// For the inventory the deliverable names a PATH, which the file's own
+    /// text never contains — opening it is the evidence.
+    #[test]
+    fn opening_the_file_is_the_proof_when_the_unit_is_a_path() {
+        let unites = vec![Unite {
+            etiquette: "src/Admin/User.php".into(),
+            preuves: vec!["src/Admin/User.php".into()],
+            valeur_attendue: None,
+        }];
+        let lectures = vec![("src/Admin/User.php".to_string(), "<?php class User".into())];
+        assert_eq!(
+            compter(&unites, "- src/Admin/User.php : utilisateurs", &lectures),
+            (1, 0)
+        );
+    }
+
+    /// A unit named with no read at all is an assertion without an observed
+    /// read — the second number, never merged into the first.
+    #[test]
+    fn naming_a_unit_with_no_read_at_all_is_an_assertion_without_a_read() {
+        let unites = vec![Unite {
+            etiquette: "src/Admin/User.php".into(),
+            preuves: vec!["src/Admin/User.php".into()],
+            valeur_attendue: None,
+        }];
+        assert_eq!(
+            compter(&unites, "- src/Admin/User.php : utilisateurs", &[]),
+            (0, 1)
+        );
+    }
+
+    /// The repository the bench works in, or `None` when the operator did not
+    /// name one.
+    fn depot_du_banc() -> Option<std::path::PathBuf> {
+        if std::env::var("KRONN_OLLAMA_BENCH").as_deref() != Ok("1") {
+            eprintln!("skipped: set KRONN_OLLAMA_BENCH=1");
+            return None;
+        }
+        let Ok(project) = std::env::var("KRONN_BENCH_PROJECT") else {
+            eprintln!("skipped: set KRONN_BENCH_PROJECT to a repository to work in");
+            return None;
+        };
+        Some(
+            std::path::PathBuf::from(&project)
+                .canonicalize()
+                .expect("the repository must exist"),
+        )
+    }
+
+    /// Run one job on one repository, over every model in `KRONN_BENCH_MODELS`,
+    /// and score **what the run delivered** — the final content of `livrable`,
+    /// or, when the model never wrote it, its final answer. One source, never
+    /// the union of both: summing the answer and every written body scored text
+    /// the reader of the deliverable would never see. The row says which.
+    ///
+    /// Three numbers, never merged:
+    ///
+    /// * **couverture avec lecture observée** — the unit is named in the scored
+    ///   text AND one of its proof files was read during the run;
+    /// * **affirmation sans lecture observée** — named without any proof read.
+    ///   Not "fabrication": the evidence may come from the initial context, an
+    ///   earlier turn, or a read this bench does not attribute;
+    /// * **exactitude** — NOT measured. Nothing here checks what a line says,
+    ///   only that it names a unit whose file was opened.
+    async fn bench_deliverable_job(
+        root: &std::path::Path,
+        job: &str,
+        livrable: &str,
+        unites: &[Unite],
+    ) {
+        let sans_preuve = unites.iter().filter(|u| u.preuves.is_empty()).count();
+        if sans_preuve > 0 {
+            println!(
+                "WARNING: {sans_preuve}/{} unité(s) n'ont aucun fichier de preuve dans ce dépôt — \
+                 elles ne pourront jamais compter comme couvertes.",
+                unites.len()
+            );
+        }
+        let catalogue =
+            crate::api::agent_tools::tiered(crate::api::agent_tools::full_discussion_catalogue());
+        let models = std::env::var("KRONN_BENCH_MODELS").unwrap_or_else(|_| "gemma4:e4b".into());
+        println!("\nrepository: {}", root.display());
+        println!(
+            "{:<18} {:>6} {:>7} {:>7} {:>5} {:>5} {:>6} {:>7} {:>7} {:>7} {:>9}",
+            "model",
+            "turns",
+            "tokens",
+            "seconds",
+            "task",
+            "dod",
+            "reread",
+            "files",
+            "couvert",
+            "sans-lu",
+            "scoré sur"
+        );
+        for model in models.split(',').map(str::trim).filter(|m| !m.is_empty()) {
+            std::env::set_var("KRONN_BENCH_MODEL", model);
+            let external = std::env::var("KRONN_BENCH_HTTP_ENDPOINT")
+                .ok()
+                .map(|endpoint| ExternalHttpRuntime {
+                    display_name: "Bench".into(),
+                    mention_alias: "bench".into(),
+                    endpoint,
+                    api_key: std::env::var("KRONN_BENCH_HTTP_KEY").ok(),
+                });
+            let agent_type = match external {
+                Some(_) => AgentType::Custom,
+                None => AgentType::Ollama,
+            };
+            let log = Arc::new(Mutex::new(WorkLog::default()));
+            let tokens = TokensConfig {
+                anthropic: None,
+                openai: None,
+                google: None,
+                keys: Vec::new(),
+                disabled_overrides: Vec::new(),
+            };
+            let agent = agent_type;
+            let started = std::time::Instant::now();
+            let mut process = start_agent_with_config(AgentStartConfig {
+                model_override: Some(model),
+                external_http: external.as_ref(),
+                tools: Some(std::sync::Arc::new(WorkTools {
+                    catalogue: catalogue.clone(),
+                    root: root.to_path_buf(),
+                    log: log.clone(),
+                })),
+                ..AgentStartConfig::new(&agent, root.to_str().unwrap(), job, &tokens)
+            })
+            .await
+            .expect("ollama start");
+            let mut answer = String::new();
+            while let Some(line) = process.next_line().await {
+                answer.push_str(&line);
+            }
+            let _ = process.child.wait().await;
+            let stderr = process.captured_stderr_flushed().await;
+            let turns = parse_http_turn_telemetry(&stderr);
+            let seconds = started.elapsed().as_secs_f64();
+
+            let log = log.lock().unwrap();
+            // The deliverable as it stands at the end of the run: the LAST
+            // write to that path, not every body the run ever produced. When
+            // the model never wrote it, the fallback is EVERY line the process
+            // emitted — not its final answer, which this stream does not
+            // delimit. The column says so rather than pretending otherwise.
+            let vise = relative_to(root, livrable);
+            let (source, texte) = match log.wrote.iter().rev().find(|(path, _)| *path == vise) {
+                Some((_, body)) => (livrable, body.clone()),
+                None => ("texte émis", answer.clone()),
+            };
+            let (couvert, sans_lecture) = compter(unites, &texte, &log.files_read);
+            let total = unites.len();
+            let distinct: std::collections::BTreeSet<&str> = log
+                .files_read
+                .iter()
+                .map(|(chemin, _)| chemin.as_str())
+                .collect();
+            println!(
+                "{:<18} {:>6} {:>7} {:>7} {:>5} {:>5} {:>6} {:>7} {:>7} {:>7} {:>9}",
+                model,
+                turns.len(),
+                turns.iter().map(|t| t.prompt_tokens).sum::<u64>(),
+                format!("{seconds:.0}s"),
+                if log.dod.is_empty() { "no" } else { "yes" },
+                format!(
+                    "{}/{}",
+                    log.dod.iter().filter(|(_, _, done)| *done).count(),
+                    log.dod.len()
+                ),
+                log.calls.iter().filter(|c| *c == "task_get").count(),
+                format!("{}/{}", distinct.len(), log.files_read.len()),
+                format!("{couvert}/{total}"),
+                sans_lecture,
+                source,
+            );
+            if sans_lecture > 0 {
+                println!(
+                    "    {sans_lecture} unité(s) nommée(s) sans qu'une lecture de leur source \
+                     ait été observée"
+                );
+            }
+            let en_minuscules = texte.to_lowercase();
+            let absents: Vec<&str> = unites
+                .iter()
+                .filter(|u| !en_minuscules.contains(&u.etiquette.to_lowercase()))
+                .map(|u| u.etiquette.as_str())
+                .collect();
+            if !absents.is_empty() {
+                println!(
+                    "    absentes du livrable ({}) {:?}",
+                    absents.len(),
+                    &absents[..absents.len().min(8)]
+                );
+            }
+            println!("    calls {:?}", log.calls);
+            // Turns without a tool call are where a long job leaks: the run
+            // keeps paying for the whole prompt and produces nothing.
+            let notable: Vec<&str> = stderr
+                .iter()
+                .map(String::as_str)
+                .filter(|l| {
+                    l.contains("kronn_ceiling:")
+                        || l.contains("repeated")
+                        || l.contains("refus")
+                        || l.contains("ceiling")
+                        || l.contains("identical")
+                })
+                .take(6)
+                .collect();
+            if !notable.is_empty() {
+                println!("    stderr {notable:?}");
+            }
+        }
+    }
+
+    /// The long job: every PHP file under `src/`, one line each, on a repository
+    /// nobody wrote for this test. It does not fit in one window, which is the
+    /// only condition under which putting progress down can pay for itself.
+    ///
+    /// The line must start with the file's relative path. A class NAME is not an
+    /// identifier — `src/Admin/User.php` and `src/Public/User.php` are two
+    /// files with one stem, and scoring on the stem merged them.
+    ///
+    ///   KRONN_OLLAMA_BENCH=1 KRONN_BENCH_PROJECT=/path/to/repo \
+    ///   KRONN_BENCH_MODELS="a,b" cargo test --lib bench_inventory_of_a_repository \
+    ///     -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore = "spends a real local model's time; KRONN_OLLAMA_BENCH=1"]
+    async fn bench_inventory_of_a_repository() {
+        let Some(root) = depot_du_banc() else {
+            return;
+        };
+        let sources: Vec<String> = {
+            fn walk(dir: &std::path::Path, root: &std::path::Path, out: &mut Vec<String>) {
+                let Ok(entries) = std::fs::read_dir(dir) else {
+                    return;
+                };
+                for entry in entries.filter_map(Result::ok) {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        walk(&path, root, out);
+                    } else if path.extension().is_some_and(|e| e == "php") {
+                        out.push(
+                            path.strip_prefix(root)
+                                .unwrap_or(&path)
+                                .to_string_lossy()
+                                .to_string(),
+                        );
+                    }
+                }
+            }
+            let mut found = Vec::new();
+            walk(&root.join("src"), &root, &mut found);
+            found.sort();
+            found
+        };
+        if sources.is_empty() {
+            eprintln!("skipped: no PHP file under `src/` in {}", root.display());
+            return;
+        }
+        let job = format!(
+            "Tu travailles sur ce dépôt. Sous `src/` il y a {} fichiers PHP. Produis \
+             `inventaire.md` avec UNE ligne par fichier. Chaque ligne COMMENCE par le chemin \
+             relatif du fichier (par exemple `src/Controller/HomeController.php`), puis le nom \
+             de la classe, puis en quelques mots ce qu'elle fait. Lis chaque fichier avant \
+             d'écrire sa ligne, n'en invente aucune, et n'en oublie aucun.",
+            sources.len()
+        );
+        let unites: Vec<Unite> = sources
+            .iter()
+            .map(|chemin| Unite {
+                etiquette: chemin.clone(),
+                preuves: vec![chemin.clone()],
+                // Opening the file IS the evidence here: the deliverable names
+                // a path, which the file's own text never contains.
+                valeur_attendue: None,
+            })
+            .collect();
+        bench_deliverable_job(&root, &job, "inventaire.md", &unites).await;
+    }
+
+    /// The short job: four facts, each written somewhere in the repository, then
+    /// a deliverable. It fits in a window, so holding everything in the
+    /// conversation works and a task is pure ceremony — which is exactly what
+    /// makes it the control for the long one.
+    ///
+    /// Each fact's proof files are found by SEARCHING THE REPOSITORY for the
+    /// value. The values default to this project's, and
+    /// `KRONN_BENCH_FACTS="label=value,..."` replaces them for another one.
+    ///
+    ///   KRONN_OLLAMA_BENCH=1 KRONN_BENCH_PROJECT=/path/to/repo \
+    ///   KRONN_BENCH_MODELS="a,b" cargo test --lib bench_four_facts_from_a_repository \
+    ///     -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore = "spends a real local model's time; KRONN_OLLAMA_BENCH=1"]
+    async fn bench_four_facts_from_a_repository() {
+        let Some(root) = depot_du_banc() else {
+            return;
+        };
+        let declares = std::env::var("KRONN_BENCH_FACTS").unwrap_or_else(|_| {
+            "version de PHP=8.2,version de Symfony=7.3,\
+             image du serveur applicatif=frankenphp:1.8-php8.4-alpine,outil de test=phpunit"
+                .into()
+        });
+        let faits: Vec<(String, String)> = declares
+            .split(',')
+            .filter_map(|pair| pair.split_once('='))
+            .map(|(label, valeur)| (label.trim().to_string(), valeur.trim().to_string()))
+            .collect();
+        let job = format!(
+            "Tu travailles sur ce dépôt. Produis un fichier `inventaire.md` qui donne, pour \
+             chacun des {} points suivants, la valeur EXACTE lue dans le dépôt et le fichier \
+             d'où elle vient : {}. Toutes les valeurs sont dans le dépôt, va les chercher avec \
+             tes outils avant de répondre.",
+            faits.len(),
+            faits
+                .iter()
+                .map(|(label, _)| label.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        let unites: Vec<Unite> = faits
+            .iter()
+            .map(|(label, valeur)| {
+                let preuves = fichiers_portant(&root, valeur);
+                println!(
+                    "  {label} = {valeur} — {} fichier(s) le portent",
+                    preuves.len()
+                );
+                Unite {
+                    etiquette: valeur.clone(),
+                    preuves,
+                    // Here the file must have HANDED BACK the value: a slice
+                    // that stops before it proves nothing.
+                    valeur_attendue: Some(valeur.clone()),
+                }
+            })
+            .collect();
+        bench_deliverable_job(&root, &job, "inventaire.md", &unites).await;
+    }
+
+    /// what the bench measured, pinned without a model: a family the
+    /// agent asks for is declared on the next turn, and asking twice is named
+    /// rather than served again as if it were new.
+    #[tokio::test]
+    async fn a_loaded_family_is_declared_for_the_rest_of_the_run() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let requests = std::sync::Arc::new(Mutex::new(Vec::<Vec<String>>::new()));
+        let seen_by_mock = requests.clone();
+        let round = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(move |request: &wiremock::Request| {
+                let body: serde_json::Value =
+                    serde_json::from_slice(&request.body).unwrap_or(serde_json::Value::Null);
+                let declared: Vec<String> = body["tools"]
+                    .as_array()
+                    .map(|tools| {
+                        tools
+                            .iter()
+                            .filter_map(|tool| tool["function"]["name"].as_str())
+                            .map(str::to_string)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                seen_by_mock.lock().unwrap().push(declared.clone());
+                let n = round.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let call = |id: &str, name: &str, args: &str| {
+                    ResponseTemplate::new(200).set_body_string(sse(&[&format!(
+                        r#"{{"choices":[{{"index":0,"delta":{{"tool_calls":[{{"index":0,"id":"{id}","function":{{"name":"{name}","arguments":"{args}"}}}}]}}}}]}}"#
+                    )]))
+                };
+                match n {
+                    // Ask for the family, then ask again — the second time
+                    // teaches nothing and must be told so.
+                    0 => call("c0", "tools_load", r#"{\"family\":\"media\"}"#),
+                    1 => call("c1", "tools_load", r#"{\"family\":\"media\"}"#),
+                    2 => call("c2", "media_generate", r#"{\"prompt\":\"a lighthouse\"}"#),
+                    _ => ResponseTemplate::new(200).set_body_string(sse(&[
+                        r#"{"choices":[{"index":0,"delta":{"content":"image lancée"}}]}"#,
+                    ])),
+                }
+            })
+            .mount(&server)
+            .await;
+
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let core =
+            crate::api::agent_tools::tiered(crate::api::agent_tools::full_discussion_catalogue());
+        assert!(
+            !core
+                .iter()
+                .any(|tool| tool["function"]["name"] == "media_generate"),
+            "the core must not declare a family's tools"
+        );
+        let mut process = start_ollama_http(
+            &AgentType::LiteLlm,
+            "génère une image",
+            "",
+            "test-model",
+            None,
+            Some(&server.uri()),
+            None,
+            Some(std::sync::Arc::new(BenchTools {
+                catalogue: core,
+                seen: seen.clone(),
+                root: None,
+            })),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("start");
+        let mut answer = String::new();
+        while let Some(line) = process.next_line().await {
+            answer.push_str(&line);
+        }
+        let _ = process.child.wait().await;
+
+        let calls = seen.lock().unwrap().clone();
+        assert_eq!(
+            calls,
+            vec![
+                "tools_load(media)".to_string(),
+                "media_generate".to_string()
+            ],
+            "the family's tool must become callable, and the second identical \
+             load must not be executed again"
+        );
+        let declared = requests.lock().unwrap().clone();
+        assert!(
+            !declared[0].contains(&"media_generate".to_string()),
+            "turn 1"
+        );
+        assert!(
+            declared[1].contains(&"media_generate".to_string()),
+            "the family joins the catalogue for the next turn: {:?}",
+            declared[1]
+        );
+        // Loaded once, not once per request.
+        assert_eq!(
+            declared[2]
+                .iter()
+                .filter(|name| *name == "media_generate")
+                .count(),
+            1,
+            "a second load must not duplicate the declaration"
+        );
+        assert!(
+            declared[2].contains(&"tools_load".to_string()),
+            "the index stays available for another family"
+        );
+        assert!(answer.contains("image lancée"));
+    }
+
+    /// Did the run reach the capability the task needed?
+    fn reached(run: &BenchRun, tool: &str) -> bool {
+        run.calls.iter().any(|call| call.starts_with(tool))
+    }
+
+    #[tokio::test]
+    #[ignore = "spends a real local model's time; KRONN_OLLAMA_BENCH=1"]
+    async fn bench_tiered_catalogue_across_models() {
+        // the whole point: a wording that helps the weakest model
+        // must not cost the strongest one. Every change is measured across
+        // the range, not on one model.
+        //   KRONN_OLLAMA_BENCH=1 KRONN_BENCH_MODELS="a,b,c" cargo test --lib \
+        //     bench_tiered_catalogue_across_models -- --ignored --nocapture
+        if std::env::var("KRONN_OLLAMA_BENCH").as_deref() != Ok("1") {
+            eprintln!("skipped: set KRONN_OLLAMA_BENCH=1");
+            return;
+        }
+        let models = std::env::var("KRONN_BENCH_MODELS").unwrap_or_else(|_| {
+            "qwen3.5:2b,gemma4:e2b,qwen3.5:4b,gemma4:e4b,gemma4:12b-mlx,qwen3.8:27b-mlx".into()
+        });
+        let full = crate::api::agent_tools::full_discussion_catalogue();
+        let tiered = crate::api::agent_tools::tiered(full.clone());
+        let media_prompt =
+            "Génère une image d'un phare au lever du jour, format carré. Utilise les outils de Kronn.";
+        // Both paths are printed: the tiered catalogue saves tokens per turn but
+        // can cost a turn, and only the two side by side say which one won.
+        println!(
+            "\n{:<18} {:>9} {:>6} {:>9} {:>6}  {:<7} {:<7}",
+            "model", "full tk", "turns", "tiered tk", "turns", "full", "tiered"
+        );
+        for model in models.split(',').map(str::trim).filter(|m| !m.is_empty()) {
+            std::env::set_var("KRONN_BENCH_MODEL", model);
+            let full_run = bench_run("media · full", media_prompt, full.clone()).await;
+            let tiered_run = bench_run("media · tiered", media_prompt, tiered.clone()).await;
+            println!(
+                "{:<18} {:>9} {:>6} {:>9} {:>6}  {:<7} {:<7}",
+                model,
+                full_run.total_prompt_tokens,
+                full_run.turns,
+                tiered_run.total_prompt_tokens,
+                tiered_run.turns,
+                if reached(&full_run, "media_generate") {
+                    "ok"
+                } else {
+                    "MISSED"
+                },
+                if reached(&tiered_run, "media_generate") {
+                    "ok"
+                } else {
+                    "MISSED"
+                },
+            );
+            println!("    full   {:?}", full_run.calls);
+            println!("    tiered {:?}", tiered_run.calls);
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "spends a real local model's time; KRONN_OLLAMA_BENCH=1"]
+    async fn bench_tiered_catalogue_against_full() {
+        if std::env::var("KRONN_OLLAMA_BENCH").as_deref() != Ok("1") {
+            eprintln!("skipped: set KRONN_OLLAMA_BENCH=1");
+            return;
+        }
+        let full = crate::api::agent_tools::full_discussion_catalogue();
+        let tiered = crate::api::agent_tools::tiered(full.clone());
+        let plan_prompt =
+            "Lis le plan de cette discussion et dis-moi en une phrase quelle tâche est prête à être prise.";
+        let media_prompt =
+            "Génère une image d'un phare au lever du jour, format carré. Utilise les outils de Kronn.";
+
+        let runs = vec![
+            bench_run("plan · full", plan_prompt, full.clone()).await,
+            bench_run("plan · tiered", plan_prompt, tiered.clone()).await,
+            bench_run("media · full", media_prompt, full).await,
+            bench_run("media · tiered", media_prompt, tiered).await,
+        ];
+        println!("\n=== Tiered catalogue measurements ===");
+        for run in &runs {
+            println!(
+                "{:<16} tools={:<3} catalogue={:>6} B  first_prompt={:>6} tk  total_prompt={:>7} tk  turns={}  {:.1}s\n    calls: {:?}\n    answer: {}",
+                run.label,
+                run.tools_declared,
+                run.catalogue_bytes,
+                run.first_prompt_tokens,
+                run.total_prompt_tokens,
+                run.turns,
+                run.seconds,
+                run.calls,
+                run.answer.replace('\n', " ")
+            );
+        }
+    }
+
+    // ─── Ce que Kronn demande au serveur Ollama lui-même ─────────────────────
+
+    /// La version du serveur décide si les mitigations MLX s'appliquent. Une
+    /// panne de transport ne doit pas être mise en cache comme une réponse :
+    /// un serveur qui revient doit être revu.
+    #[tokio::test]
+    #[serial]
+    async fn the_server_version_is_read_once_and_a_failure_is_not_an_answer() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        // Wiremock reuses pooled server addresses, while the production
+        // version cache lives for the process. Another fixture can leave its
+        // 0.18 answer under this address. Give this test its own cache key.
+        let prefix = format!("/version-cache-{}", uuid::Uuid::new_v4());
+        let endpoint = format!("{}{prefix}", server.uri());
+        Mock::given(method("GET"))
+            .and(path(format!("{prefix}/api/version")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "version": "0.34.2"
+            })))
+            .expect(1) // la seconde lecture vient du cache
+            .mount(&server)
+            .await;
+
+        assert_eq!(ollama_server_version(&endpoint).await, Some((0, 34)));
+        assert_eq!(ollama_server_version(&endpoint).await, Some((0, 34)));
+        assert!(mlx_prefix_cache_reused(
+            ollama_server_version(&endpoint).await
+        ));
+
+        // Un serveur injoignable : pas de réponse, et rien de mémorisé.
+        let dead = "http://127.0.0.1:1";
+        assert_eq!(ollama_server_version(dead).await, None);
+        assert_eq!(ollama_server_version(dead).await, None);
+        // Inconnu ⇒ la mitigation reste en place plutôt que d'être levée.
+        assert!(!mlx_prefix_cache_reused(None));
+    }
+
+    /// Le poids d'un modèle sert à borner la fenêtre que la machine peut tenir.
+    /// `/api/show` ne le donne pas, `/api/tags` si.
+    #[tokio::test]
+    #[serial]
+    async fn a_model_weight_comes_from_the_server_that_pulled_it() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/tags"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "models": [
+                    {"name": "gemma4:e4b", "size": 9_611_383_929u64},
+                    {"name": "qwen3.5:2b", "size": 2_740_000_000u64},
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        assert_eq!(
+            ollama_model_size_bytes(&server.uri(), "gemma4:e4b").await,
+            Some(9_611_383_929)
+        );
+        // Un modèle que le serveur ne liste pas n'a pas de poids inventé.
+        assert_eq!(
+            ollama_model_size_bytes(&server.uri(), "jamais-tiré:1b").await,
+            None
+        );
+    }
+
+    /// Ce qu'un token de contexte coûte est MESURÉ, pas calculé : la forme de
+    /// l'attention ne dit pas ce que le cache pèse, et l'arithmétique évidente
+    /// se trompe d'un facteur dix sur une attention à fenêtre glissante. Deux
+    /// fenêtres observées donnent la pente.
+    #[tokio::test]
+    #[serial]
+    async fn a_token_of_context_is_priced_from_two_observed_windows() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let round = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        Mock::given(method("GET"))
+            .and(path("/api/ps"))
+            .respond_with(move |_: &wiremock::Request| {
+                // Mesuré sur gemma4:e4b : ~12 Ko par token de contexte.
+                let n = round.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let (ctx, size) = if n == 0 {
+                    (4_096u64, 9_473_338_899u64)
+                } else {
+                    (65_536u64, 10_206_010_408u64)
+                };
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "models": [{
+                        "name": "measured:model",
+                        "context_length": ctx,
+                        "size": size,
+                    }]
+                }))
+            })
+            .mount(&server)
+            .await;
+
+        // Une seule fenêtre observée : une position, pas une pente.
+        sample_ollama_memory(&server.uri(), "measured:model").await;
+        assert_eq!(
+            measured_kv_bytes_per_token(&server.uri(), "measured:model"),
+            None
+        );
+
+        sample_ollama_memory(&server.uri(), "measured:model").await;
+        let cost = measured_kv_bytes_per_token(&server.uri(), "measured:model")
+            .expect("deux fenêtres observées donnent la pente");
+        assert!(
+            (11_000..13_000).contains(&cost),
+            "{cost} octets par token ne sont pas les ~12 Ko mesurés"
+        );
+    }
+
+    /// Le pointeur vers la doc est prouvé sur six modèles, mais l'opérateur
+    /// peut remettre le doc en entier pour un modèle qui n'irait pas le lire.
+    #[test]
+    #[serial]
+    fn an_operator_can_put_the_whole_project_doc_back() {
+        std::env::remove_var("KRONN_INLINE_PROJECT_DOC");
+        assert!(!inline_project_doc_forced());
+        assert!(http_agent_reads_its_own_files(true, true));
+
+        std::env::set_var("KRONN_INLINE_PROJECT_DOC", "1");
+        assert!(inline_project_doc_forced());
+        assert!(
+            !http_agent_reads_its_own_files(true, true),
+            "forcé, l'agent reçoit le doc entier même s'il sait lire"
+        );
+
+        // Une valeur qui n'est pas `1` ne force rien.
+        std::env::set_var("KRONN_INLINE_PROJECT_DOC", "oui");
+        assert!(!inline_project_doc_forced());
+        std::env::remove_var("KRONN_INLINE_PROJECT_DOC");
+    }
+
+    /// Vider les caches ne suffisait pas : la garde anti-répétition RETIRE un
+    /// outil refusé deux fois, donc un agent qui demandait trois fois où il en
+    /// était avant de changer quoi que ce soit avait déjà perdu l'outil. Une
+    /// mutation le rend — mais elle ne défait que la répétition.
+    #[test]
+    fn a_task_change_gives_back_a_reader_withdrawn_for_repeating_itself() {
+        use crate::agents::tools::ToolRunMode;
+        let mode = ToolRunMode::General;
+        let withdrawn: std::collections::HashSet<String> = ["task_get", "plan_get", "read_file"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        let no_circuit = std::collections::HashSet::new();
+        let few_calls = std::collections::HashMap::new();
+
+        let granted = crate::agents::tools::CeilingAllowance::default();
+        let mut back =
+            progress_readers_to_restore(&withdrawn, &no_circuit, &few_calls, mode, &granted);
+        back.sort();
+        assert_eq!(
+            back,
+            vec!["plan_get".to_string(), "task_get".to_string()],
+            "les lecteurs de progression reviennent, pas les autres outils"
+        );
+    }
+
+    /// Un retrait qui vient d'un plafond d'appels ou d'un circuit d'erreur
+    /// n'est pas une répétition : changer une tâche ne doit pas le défaire.
+    #[test]
+    fn a_task_change_does_not_undo_a_ceiling_or_an_open_circuit() {
+        use crate::agents::tools::ToolRunMode;
+        let mode = ToolRunMode::General;
+        let withdrawn: std::collections::HashSet<String> = ["task_get", "plan_get"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+
+        // Circuit ouvert sur task_get : il reste dehors.
+        let circuit: std::collections::HashSet<String> =
+            ["task_get".to_string()].into_iter().collect();
+        let granted = crate::agents::tools::CeilingAllowance::default();
+        let back = progress_readers_to_restore(
+            &withdrawn,
+            &circuit,
+            &std::collections::HashMap::new(),
+            mode,
+            &granted,
+        );
+        assert_eq!(back, vec!["plan_get".to_string()]);
+
+        // Plafond atteint sur plan_get : il reste dehors aussi.
+        let spent: std::collections::HashMap<String, usize> =
+            [("plan_get".to_string(), max_calls_for_tool("plan_get", mode))]
+                .into_iter()
+                .collect();
+        let back = progress_readers_to_restore(
+            &withdrawn,
+            &std::collections::HashSet::new(),
+            &spent,
+            mode,
+            &granted,
+        );
+        assert_eq!(back, vec!["task_get".to_string()]);
+    }
+
+    /// Lier une tâche à la discussion change ce que `plan_get` répondrait.
+    /// L'oublier laissait rejouer le plan d'avant le lien.
+    #[test]
+    fn linking_a_task_to_the_room_changes_what_the_plan_says() {
+        for mutator in [
+            "task_create",
+            "task_update",
+            "task_update_dod",
+            "task_add_blocker",
+            "task_remove_blocker",
+            "task_link_discussion",
+            "task_unlink_discussion",
+        ] {
+            assert!(
+                is_progress_mutation_tool(mutator),
+                "`{mutator}` change le plan et doit invalider ses lecteurs"
+            );
+        }
+        // Lire n'est pas muter.
+        for reader in ["plan_get", "task_get", "task_list", "read_file"] {
+            assert!(!is_progress_mutation_tool(reader), "{reader}");
+        }
+    }
+
+    /// Un humain qui a accordé des appels supplémentaires ne doit pas voir sa
+    /// décision annulée par une comparaison au plafond de base.
+    #[test]
+    fn a_granted_allowance_counts_when_giving_a_reader_back() {
+        use crate::agents::tools::{CeilingAllowance, ToolRunMode};
+        let mode = ToolRunMode::General;
+        let withdrawn: std::collections::HashSet<String> =
+            ["task_get".to_string()].into_iter().collect();
+        let spent: std::collections::HashMap<String, usize> =
+            [("task_get".to_string(), max_calls_for_tool("task_get", mode))]
+                .into_iter()
+                .collect();
+
+        // Sans accord, le plafond est atteint : il reste dehors.
+        let none = CeilingAllowance::default();
+        assert!(progress_readers_to_restore(
+            &withdrawn,
+            &std::collections::HashSet::new(),
+            &spent,
+            mode,
+            &none
+        )
+        .is_empty());
+
+        // Avec des appels accordés, il revient.
+        let mut granted = CeilingAllowance::default();
+        granted.extra_calls.insert("task_get".to_string(), 5);
+        assert_eq!(
+            progress_readers_to_restore(
+                &withdrawn,
+                &std::collections::HashSet::new(),
+                &spent,
+                mode,
+                &granted
+            ),
+            vec!["task_get".to_string()]
+        );
+    }
+
+    /// Retirer le nom de la liste des outils confisqués ne suffit pas : la
+    /// déclaration elle-même a été SUPPRIMÉE de la requête. Sans elle, le
+    /// modèle ne voit toujours pas l'outil.
+    #[test]
+    fn giving_a_reader_back_puts_its_declaration_in_the_request() {
+        let catalogue =
+            crate::api::agent_tools::tiered(crate::api::agent_tools::full_discussion_catalogue());
+        let readers = progress_reader_declarations(&catalogue);
+        assert!(
+            readers.iter().any(|t| t["function"]["name"] == "task_get"),
+            "les lecteurs de progression doivent être capturés au départ"
+        );
+
+        let mut body = serde_json::json!({"tools": []});
+        restore_tool_declarations(&mut body, &readers);
+        let declared = declared_tool_names(&body);
+        assert!(declared.contains("task_get"), "{declared:?}");
+
+        // Rappeler la restauration n'élargit pas le catalogue.
+        let before = body["tools"].as_array().unwrap().len();
+        restore_tool_declarations(&mut body, &readers);
+        assert_eq!(body["tools"].as_array().unwrap().len(), before);
+    }
+
+    /// Un exécuteur de plan minimal : `task_get` rend un numéro de révision,
+    /// `task_update_dod` l'incrémente. Assez pour prouver qu'une lecture
+    /// d'après-mutation rapporte bien la nouvelle valeur.
+    struct PlanTools {
+        seen: Arc<Mutex<Vec<String>>>,
+        revision: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::agents::tools::ToolExecutor for PlanTools {
+        fn catalogue(&self) -> Vec<serde_json::Value> {
+            ["task_get", "task_update_dod"]
+                .into_iter()
+                .map(|name| {
+                    serde_json::json!({
+                        "type": "function",
+                        "function": {
+                            "name": name,
+                            "description": "plan",
+                            "parameters": {"type": "object", "properties": {}},
+                        },
+                    })
+                })
+                .collect()
+        }
+
+        async fn execute(
+            &self,
+            call: &crate::agents::tools::ToolCall,
+        ) -> crate::agents::tools::ToolOutcome {
+            self.seen.lock().unwrap().push(call.name.clone());
+            if call.name == "task_update_dod" {
+                self.revision
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            let revision = self.revision.load(std::sync::atomic::Ordering::SeqCst);
+            crate::agents::tools::ToolOutcome {
+                call: call.clone(),
+                content: serde_json::json!({"revision": revision}),
+                ok: true,
+            }
+        }
+    }
+
+    /// La séquence complète, dans la vraie boucle : lire trois fois, changer la
+    /// tâche, relire. Le troisième `task_get` identique fait retirer l'outil, et
+    /// la DÉCLARATION est supprimée de la requête — pas seulement marquée. Sans
+    /// la restauration des déclarations, le modèle ne revoit jamais `task_get`
+    /// et la valeur d'après-mutation ne lui parvient pas.
+    #[tokio::test]
+    #[serial]
+    async fn a_reader_withdrawn_for_repeating_is_declared_again_after_a_task_changes() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let round = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let round_for_mock = round.clone();
+        // Ce que le fournisseur a REÇU comme résultat de la dernière lecture.
+        // Le compteur local dirait seulement que la mutation a incrémenté.
+        let livree: Arc<Mutex<Option<serde_json::Value>>> = Arc::new(Mutex::new(None));
+        let livree_for_mock = livree.clone();
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(move |request: &wiremock::Request| {
+                let n = round_for_mock.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let body: serde_json::Value =
+                    serde_json::from_slice(&request.body).unwrap_or(serde_json::Value::Null);
+                if let Some(resultat) = body["messages"].as_array().and_then(|messages| {
+                    messages.iter().find(|m| {
+                        m["role"] == "tool" && m["tool_call_id"] == "c4"
+                    })
+                }) {
+                    let contenu = resultat["content"].as_str().unwrap_or_default();
+                    *livree_for_mock.lock().unwrap() =
+                        Some(serde_json::from_str(contenu).unwrap_or(serde_json::Value::Null));
+                }
+                let declared = |name: &str| {
+                    body["tools"].as_array().is_some_and(|tools| {
+                        tools.iter().any(|tool| tool["function"]["name"] == name)
+                    })
+                };
+                // Trois lectures identiques, puis la mutation, puis une dernière
+                // lecture — mais seulement si Kronn la déclare encore. Demander
+                // un outil non déclaré ferait passer le test sans le correctif.
+                let call = match n {
+                    0..=2 if declared("task_get") => {
+                        Some(("task_get", r#"{\"task_id\":\"KT-1\"}"#))
+                    }
+                    3 if declared("task_update_dod") => Some((
+                        "task_update_dod",
+                        r#"{\"task_id\":\"KT-1\",\"dod_id\":\"d1\",\"completed\":true}"#,
+                    )),
+                    4 if declared("task_get") => {
+                        Some(("task_get", r#"{\"task_id\":\"KT-1\"}"#))
+                    }
+                    _ => None,
+                };
+                match call {
+                    Some((tool, args)) => ResponseTemplate::new(200).set_body_string(sse(&[
+                        &format!(
+                            r#"{{"choices":[{{"index":0,"delta":{{"tool_calls":[{{"index":0,"id":"c{n}","function":{{"name":"{tool}","arguments":"{args}"}}}}]}}}}]}}"#
+                        ),
+                    ])),
+                    None => ResponseTemplate::new(200).set_body_string(sse(&[
+                        r#"{"choices":[{"index":0,"delta":{"content":"fini"}}]}"#,
+                    ])),
+                }
+            })
+            .mount(&server)
+            .await;
+
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let revision = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut process = start_ollama_http(
+            &AgentType::LiteLlm,
+            "où en suis-je",
+            "",
+            "test-model",
+            None,
+            Some(&server.uri()),
+            None,
+            Some(std::sync::Arc::new(PlanTools {
+                seen: seen.clone(),
+                revision: revision.clone(),
+            })),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("start");
+
+        while process.next_line().await.is_some() {}
+        process.child.wait().await.expect("lifeline");
+
+        let calls = seen.lock().unwrap().clone();
+        assert!(
+            calls.iter().any(|name| name == "task_update_dod"),
+            "la mutation doit avoir eu lieu: {calls:?}"
+        );
+        // Deux lectures RÉELLEMENT exécutées : la première, puis celle d'après
+        // la mutation. Les rejeux et refus n'atteignent pas l'exécuteur.
+        let reads = calls.iter().filter(|name| *name == "task_get").count();
+        assert_eq!(
+            reads, 2,
+            "une lecture avant, une après la mutation: {calls:?}"
+        );
+        assert_eq!(
+            revision.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "la mutation a bien incrémenté l'état"
+        );
+        // Et surtout : le résultat de cette dernière lecture est PARVENU au
+        // fournisseur, avec la valeur d'après-mutation. Sans requête suivante,
+        // `livree` reste None et l'assertion tombe.
+        let livree = livree
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("une requête suit la dernière lecture, avec son résultat");
+        assert_eq!(
+            livree["revision"], 1,
+            "le message d'outil c4 renvoyé au modèle porte la révision d'après-mutation: {livree}"
+        );
     }
 }

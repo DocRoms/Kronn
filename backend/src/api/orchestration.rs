@@ -11428,6 +11428,7 @@ mod tests {
             default_profile_id: None,
             briefing_notes: None,
             linked_repos: vec![],
+            workspace: None,
             created_at: now,
             updated_at: now,
         }
@@ -13037,11 +13038,13 @@ mod tests {
             None,
         );
 
-        let launch_tool = exec
-            .catalogue()
+        // delegation is a family now: the declaration is the same,
+        // it simply arrives when the agent asks for it.
+        let launch_tool = crate::api::agent_tools::declarations_for_family("delegation")
             .into_iter()
             .find(|tool| tool["function"]["name"] == "task_exec_launch")
             .expect("task_exec_launch must be in the native catalogue");
+        let _ = exec.catalogue();
         let items = &launch_tool["function"]["parameters"]["properties"]["validations"]["items"];
         assert_eq!(
             items["properties"]["command"]["minLength"], 1,
@@ -13140,8 +13143,7 @@ mod tests {
             start_line: 1,
             end_line: 1,
         };
-        let launch_tool = principal
-            .catalogue()
+        let launch_tool = crate::api::agent_tools::declarations_for_family("delegation")
             .into_iter()
             .find(|tool| tool["function"]["name"] == "task_exec_launch")
             .expect("task_exec_launch schema");

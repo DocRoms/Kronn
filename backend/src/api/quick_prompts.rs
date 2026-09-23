@@ -638,6 +638,7 @@ pub async fn batch_run(
         Err(e) => {
             let now = Utc::now();
             let run = crate::models::SharedRun {
+                exec_details: None,
                 id: Uuid::new_v4().to_string(),
                 kind: crate::models::SharedRunKind::QuickPrompt,
                 source_id: qp_id.clone(),
@@ -680,6 +681,7 @@ pub async fn batch_run(
     for discussion_id in &outcome.discussion_ids {
         let now = Utc::now();
         let run = crate::models::SharedRun {
+            exec_details: None,
             id: Uuid::new_v4().to_string(),
             kind: crate::models::SharedRunKind::QuickPrompt,
             source_id: qp_id.clone(),
@@ -1002,6 +1004,7 @@ pub async fn compare_agents(
         Err(e) => {
             let now = Utc::now();
             let run = crate::models::SharedRun {
+                exec_details: None,
                 id: Uuid::new_v4().to_string(),
                 kind: crate::models::SharedRunKind::QuickPrompt,
                 source_id: qp_id.clone(),
@@ -1043,6 +1046,7 @@ pub async fn compare_agents(
     for discussion_id in &outcome.discussion_ids {
         let now = Utc::now();
         let run = crate::models::SharedRun {
+            exec_details: None,
             id: Uuid::new_v4().to_string(),
             kind: crate::models::SharedRunKind::QuickPrompt,
             source_id: qp_id.clone(),

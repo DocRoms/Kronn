@@ -3,10 +3,13 @@
   "identifier": "main-local",
   "description": "Minimal bootstrap permissions for Kronn's bundled main window.",
   "local": true,
-  "windows": ["main"],
+  "windows": [
+    "main"
+  ],
   "permissions": [
     "core:default",
     "allow-wait-for-backend",
-    "allow-restart-app"
+    "allow-restart-app",
+    "allow-pick-folders"
   ]
 }

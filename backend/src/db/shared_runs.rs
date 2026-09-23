@@ -70,7 +70,18 @@ fn timestamp(r: &Row<'_>, index: usize) -> rusqlite::Result<Option<DateTime<Utc>
 }
 fn row(r: &Row<'_>) -> rusqlite::Result<SharedRun> {
     let result: Option<String> = r.get(9)?;
+    let exec_details: Option<String> = r.get(13)?;
     Ok(SharedRun {
+        exec_details: exec_details
+            .map(|value| serde_json::from_str(&value))
+            .transpose()
+            .map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    13,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })?,
         id: r.get(0)?,
         kind: parse_kind(r.get(1)?)?,
         source_id: r.get(2)?,
@@ -92,8 +103,8 @@ fn row(r: &Row<'_>) -> rusqlite::Result<SharedRun> {
 }
 pub fn upsert(conn: &Connection, run: &SharedRun) -> Result<()> {
     conn.execute(
-        "INSERT INTO shared_runs(id,kind,source_id,project_id,discussion_id,status,started_at,finished_at,duration_ms,result_json,diagnostic,created_at,updated_at)
-         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)
+        "INSERT INTO shared_runs(id,kind,source_id,project_id,discussion_id,status,started_at,finished_at,duration_ms,result_json,diagnostic,created_at,updated_at,exec_details_json)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)
          ON CONFLICT(id) DO UPDATE SET
              project_id=excluded.project_id,
              discussion_id=excluded.discussion_id,
@@ -103,7 +114,8 @@ pub fn upsert(conn: &Connection, run: &SharedRun) -> Result<()> {
              duration_ms=excluded.duration_ms,
              result_json=excluded.result_json,
              diagnostic=excluded.diagnostic,
-             updated_at=excluded.updated_at",
+             updated_at=excluded.updated_at,
+             exec_details_json=excluded.exec_details_json",
         params![
             run.id,
             kind(&run.kind),
@@ -118,17 +130,42 @@ pub fn upsert(conn: &Connection, run: &SharedRun) -> Result<()> {
             run.diagnostic,
             run.created_at.to_rfc3339(),
             run.updated_at.to_rfc3339(),
+            run.exec_details.as_ref().map(serde_json::to_string).transpose()?,
         ],
     )?;
     Ok(())
 }
 pub fn get(conn: &Connection, id: &str) -> Result<Option<SharedRun>> {
     let mut s = conn.prepare(
-        "SELECT id,kind,source_id,project_id,discussion_id,status,started_at,finished_at,duration_ms,result_json,diagnostic,created_at,updated_at
+        "SELECT id,kind,source_id,project_id,discussion_id,status,started_at,finished_at,duration_ms,result_json,diagnostic,created_at,updated_at,exec_details_json
          FROM shared_runs WHERE id=?1",
     )?;
     Ok(s.query_row([id], row).optional()?)
 }
+/// Action reconciliation needs lifecycle metadata, never the potentially large
+/// result or stderr. Keep those columns out of the writer's read path.
+pub(crate) struct SharedRunLifecycle {
+    pub status: SharedRunStatus,
+    pub diagnostic: Option<String>,
+    pub finished_at: Option<DateTime<Utc>>,
+}
+
+pub(crate) fn lifecycle(conn: &Connection, id: &str) -> Result<Option<SharedRunLifecycle>> {
+    Ok(conn
+        .query_row(
+            "SELECT status, diagnostic, finished_at FROM shared_runs WHERE id=?1",
+            [id],
+            |row| {
+                Ok(SharedRunLifecycle {
+                    status: parse_status(row.get(0)?)?,
+                    diagnostic: row.get(1)?,
+                    finished_at: timestamp(row, 2)?,
+                })
+            },
+        )
+        .optional()?)
+}
+
 /// Blanks every step's `output` inside SQLite, leaving `progress` and each
 /// step's name, status and timings intact.
 ///
@@ -162,7 +199,7 @@ pub fn list(
     offset: u32,
 ) -> Result<Vec<SharedRun>> {
     let mut statement = conn.prepare(&format!(
-        "SELECT id,kind,source_id,project_id,discussion_id,status,started_at,finished_at,duration_ms,{RESULT_WITHOUT_STEP_OUTPUTS},diagnostic,created_at,updated_at
+        "SELECT id,kind,source_id,project_id,discussion_id,status,started_at,finished_at,duration_ms,{RESULT_WITHOUT_STEP_OUTPUTS},diagnostic,created_at,updated_at,exec_details_json
          FROM shared_runs
          WHERE (?1 IS NULL OR kind=?1) AND (?2 IS NULL OR source_id=?2)
            AND (?3 IS NULL OR project_id=?3) AND (?4 IS NULL OR discussion_id=?4)
@@ -249,6 +286,7 @@ pub fn sync_workflow(conn: &Connection, run: &crate::models::WorkflowRun) -> Res
         })
         .map(|step| step.step_name.clone());
     let shared = SharedRun {
+        exec_details: None,
         id: run.id.clone(),
         kind: SharedRunKind::Workflow,
         source_id: run.workflow_id.clone(),
@@ -320,6 +358,7 @@ pub fn media_run(job: &crate::db::media_jobs::MediaJob) -> SharedRun {
 
     let now = Utc::now();
     SharedRun {
+        exec_details: None,
         id: job.id.clone(),
         kind: SharedRunKind::Media,
         // No persisted media template exists yet, so the connection is the
@@ -349,11 +388,24 @@ pub fn sync_media(conn: &Connection, job: &crate::db::media_jobs::MediaJob) -> R
 mod tests {
     use super::*;
 
+    #[test]
+    fn lifecycle_projection_does_not_require_result_or_stderr_columns() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE shared_runs(id TEXT PRIMARY KEY,status TEXT,diagnostic TEXT,finished_at TEXT); INSERT INTO shared_runs VALUES ('run','failed','échec mesuré','2026-09-22T00:00:00Z');").unwrap();
+        let state = lifecycle(&conn, "run").unwrap().unwrap();
+        assert!(matches!(state.status, SharedRunStatus::Failed));
+        assert_eq!(state.diagnostic.as_deref(), Some("échec mesuré"));
+        assert!(state.finished_at.is_some());
+        assert!(lifecycle(&conn, "missing").unwrap().is_none());
+    }
+
     fn runs_conn() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch("CREATE TABLE discussions(id TEXT PRIMARY KEY); CREATE TABLE projects(id TEXT PRIMARY KEY);")
             .unwrap();
         conn.execute_batch(include_str!("sql/155_shared_runs.sql"))
+            .unwrap();
+        conn.execute_batch(include_str!("sql/187_shared_run_exec_details.sql"))
             .unwrap();
         conn
     }
@@ -361,6 +413,7 @@ mod tests {
     fn workflow_run_row(id: &str, output: &str) -> SharedRun {
         let now = Utc::now();
         SharedRun {
+            exec_details: None,
             id: id.into(),
             kind: SharedRunKind::Workflow,
             source_id: "wf-1".into(),
@@ -502,8 +555,11 @@ mod tests {
             .unwrap();
         conn.execute_batch(include_str!("sql/155_shared_runs.sql"))
             .unwrap();
+        conn.execute_batch(include_str!("sql/187_shared_run_exec_details.sql"))
+            .unwrap();
         let now = Utc::now();
         let expected = SharedRun {
+            exec_details: None,
             id: "run-1".into(),
             kind: SharedRunKind::QuickApi,
             source_id: "qa-1".into(),
@@ -525,6 +581,61 @@ mod tests {
         assert_eq!(actual.result, expected.result);
     }
 
+    #[test]
+    fn exec_diagnostics_survive_migration_and_read_without_changing_business_data() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE discussions(id TEXT PRIMARY KEY); CREATE TABLE projects(id TEXT PRIMARY KEY);")
+            .unwrap();
+        conn.execute_batch(include_str!("sql/155_shared_runs.sql"))
+            .unwrap();
+        conn.execute_batch(
+            "INSERT INTO shared_runs(id,kind,source_id,status,result_json,created_at,updated_at)
+             VALUES ('old-qe','quick_exec','qe-1','success','{\"count\":12}',
+                     '2026-01-01T00:00:00Z','2026-01-01T00:00:00Z');",
+        )
+        .unwrap();
+        conn.execute_batch(include_str!("sql/187_shared_run_exec_details.sql"))
+            .unwrap();
+        let mut run = get(&conn, "old-qe").unwrap().unwrap();
+        assert!(run.exec_details.is_none());
+        assert!(serde_json::to_value(&run)
+            .unwrap()
+            .get("exec_details")
+            .is_none());
+        assert_eq!(run.result, Some(serde_json::json!({"count":12})));
+
+        run.exec_details = Some(crate::models::QuickExecDiagnostics {
+            exit_code: Some(7),
+            stderr: Some("Access denied — accès refusé ☀".into()),
+        });
+        upsert(&conn, &run).unwrap();
+        for loaded in [
+            get(&conn, &run.id).unwrap().unwrap(),
+            list(&conn, Some("quick_exec"), None, None, None, 10, 0)
+                .unwrap()
+                .remove(0),
+        ] {
+            assert_eq!(loaded.result, run.result);
+            let details = loaded.exec_details.unwrap();
+            assert_eq!(details.exit_code, Some(7));
+            assert_eq!(
+                details.stderr.as_deref(),
+                Some("Access denied — accès refusé ☀")
+            );
+        }
+        run.exec_details.as_mut().unwrap().exit_code = None;
+        upsert(&conn, &run).unwrap();
+        assert_eq!(
+            get(&conn, &run.id)
+                .unwrap()
+                .unwrap()
+                .exec_details
+                .unwrap()
+                .exit_code,
+            None
+        );
+    }
+
     /// The CHECK constraint on `kind` previously excluded `workflow` (a real
     /// bug: a Workflow SharedRun write would fail while QP/QA/QE succeeded).
     /// Round-trip every kind so a future migration regression on any one of
@@ -535,6 +646,8 @@ mod tests {
         conn.execute_batch("CREATE TABLE discussions(id TEXT PRIMARY KEY); CREATE TABLE projects(id TEXT PRIMARY KEY);")
             .unwrap();
         conn.execute_batch(include_str!("sql/155_shared_runs.sql"))
+            .unwrap();
+        conn.execute_batch(include_str!("sql/187_shared_run_exec_details.sql"))
             .unwrap();
         let now = Utc::now();
         for (i, kind) in [
@@ -548,6 +661,7 @@ mod tests {
         {
             let id = format!("run-kind-{i}");
             let run = SharedRun {
+                exec_details: None,
                 id: id.clone(),
                 kind: kind.clone(),
                 source_id: "source-1".into(),
@@ -578,6 +692,8 @@ mod tests {
         conn.execute_batch("CREATE TABLE discussions(id TEXT PRIMARY KEY); CREATE TABLE projects(id TEXT PRIMARY KEY);").unwrap();
         conn.execute_batch(include_str!("sql/155_shared_runs.sql"))
             .unwrap();
+        conn.execute_batch(include_str!("sql/187_shared_run_exec_details.sql"))
+            .unwrap();
         conn.execute_batch("PRAGMA ignore_check_constraints=ON; INSERT INTO shared_runs(id,kind,source_id,status,created_at,updated_at) VALUES('bad','mystery','x','unknown','not-a-date','not-a-date');").unwrap();
         assert!(get(&conn, "bad").is_err());
     }
@@ -585,6 +701,7 @@ mod tests {
     fn run(id: &str, project_id: Option<&str>, discussion_id: Option<&str>) -> SharedRun {
         let now = Utc::now();
         SharedRun {
+            exec_details: None,
             id: id.into(),
             kind: SharedRunKind::QuickApi,
             source_id: "qa-1".into(),
@@ -609,6 +726,8 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch("CREATE TABLE discussions(id TEXT PRIMARY KEY); CREATE TABLE projects(id TEXT PRIMARY KEY);").unwrap();
         conn.execute_batch(include_str!("sql/155_shared_runs.sql"))
+            .unwrap();
+        conn.execute_batch(include_str!("sql/187_shared_run_exec_details.sql"))
             .unwrap();
         conn.execute("INSERT INTO projects(id) VALUES('proj-a'),('proj-b')", [])
             .unwrap();
@@ -655,6 +774,8 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch("CREATE TABLE discussions(id TEXT PRIMARY KEY); CREATE TABLE projects(id TEXT PRIMARY KEY);").unwrap();
         conn.execute_batch(include_str!("sql/155_shared_runs.sql"))
+            .unwrap();
+        conn.execute_batch(include_str!("sql/187_shared_run_exec_details.sql"))
             .unwrap();
         // Simulate a real outage/corruption case: the table is gone.
         conn.execute_batch("DROP TABLE shared_runs;").unwrap();

@@ -121,15 +121,15 @@ TOOLS = [
     {
         "name": "tool_manual",
         "description": (
-            "On-demand authoring guide for one Kronn tool. Call it when that "
-            "tool's description points here; omit `tool` to list manuals."
+            "Read one tool's contract, or `signals` for proposal schemas and UI "
+            "actions. Omit `tool` to list manuals."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "tool": {
                     "type": "string",
-                    "description": "Tool name.",
+                    "description": "Tool name or signals.",
                 }
             },
         },
@@ -750,6 +750,22 @@ TOOLS = [
                 },
             },
             "required": ["from_disc_id", "confirm_transfer"],
+        },
+    },
+    {
+        "name": "disc_update",
+        "description": (
+            "Rename the bound disc, pin it or archive it. Routing and authority "
+            "stay human: `tool_manual({tool: \"disc_update\"})`."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "disc_id": {"type": "string", "description": "Defaults to the bound disc."},
+                "title": {"type": "string", "maxLength": 200},
+                "pinned": {"type": "boolean"},
+                "archived": {"type": "boolean"},
+            },
         },
     },
     {
@@ -2207,11 +2223,11 @@ TOOLS = [
             "properties": {
                 "project_id": {
                     "type": "string",
-                    "description": "Optional explicit project scope. Usually unnecessary — server resolves from `api_config_id`'s project_ids. Set only when calling a global config and you want to attribute the call to a specific project, OR to override the disc-derived scope.",
+                    "description": "Explicit project scope. Rarely needed: the server resolves it. Rules in `tool_manual`.",
                 },
                 "api_plugin_slug": {
                     "type": "string",
-                    "description": "Plugin slug from `mcp_list.servers_with_api[].id` (e.g. `mcp-atlassian`, `custom-didomi-27c67bd7`). Either this+`api_config_id`, or `quick_api_id`, MUST be provided.",
+                    "description": "Plugin slug from `mcp_list.servers_with_api[].id`. Pass this + `api_config_id`, or `quick_api_id`.",
                 },
                 "api_config_id": {
                     "type": "string",
@@ -2219,15 +2235,15 @@ TOOLS = [
                 },
                 "quick_api_id": {
                     "type": "string",
-                    "description": "Alternative to plugin_slug+config_id: a saved Quick API id (from `qa_list`). Convenient when the user already pinned an endpoint + params.",
+                    "description": "A saved Quick API id (from `qa_list`), instead of `api_plugin_slug` + `api_config_id`.",
                 },
                 "endpoint_path": {
                     "type": "string",
-                    "description": "Endpoint path as declared in the plugin's ApiSpec (e.g. `/rest/api/3/issue/{{issue_key}}` or `/widgets/notices`). The executor's allowlist refuses anything not in the spec.",
+                    "description": "Endpoint path exactly as the plugin's ApiSpec declares it (e.g. `/rest/api/3/issue/{{issue_key}}`); anything else is refused.",
                 },
                 "method": {
                     "type": "string",
-                    "description": "HTTP method override. Defaults to the method declared in the plugin spec. Uppercase: `GET | POST | PUT | PATCH | DELETE`.",
+                    "description": "Method override; defaults to the spec's. Uppercase: `GET | POST | PUT | PATCH | DELETE`.",
                 },
                 "path_params": {
                     "type": "object",
@@ -2246,7 +2262,7 @@ TOOLS = [
                 },
                 "extract": {
                     "type": "object",
-                    "description": "Optional JSONPath extract: `{ \"path\": \"$.items[0]\", \"fail_on_empty\": false }`. When omitted, the full response is returned in `data`.",
+                    "description": "JSONPath extract: `{ \"path\": \"$.items[0]\" }`. Omitted, `data` carries the whole response.",
                 },
             },
             "required": ["endpoint_path"],
@@ -2277,7 +2293,7 @@ TOOLS = [
             "properties": {
                 "connection_id": {
                     "type": "string",
-                    "description": "Connection id (`mcp_list` or settings).",
+                    "description": "Optional, from `agent_list`; omitted, the only one.",
                 },
                 "modality": {
                     "type": "string",
@@ -2337,7 +2353,7 @@ TOOLS = [
                     "description": "Block until the media is delivered. Default false — see the description.",
                 },
             },
-            "required": ["connection_id", "modality", "prompt"],
+            "required": ["modality", "prompt"],
         },
     },
     {
@@ -6079,6 +6095,34 @@ def call_task_exec_review(args):
     }))
 
 
+def call_disc_update(args):
+    # Expose metadata edits only; provider, project and instruction bindings remain
+    # human-controlled even though the underlying route accepts them.
+    disc_id = args.get("disc_id") or _disc_id()
+    payload = {}
+    if "title" in args and args["title"] is not None:
+        title = args["title"]
+        if not isinstance(title, str) or not title.strip():
+            raise RuntimeError("disc_update: title must be a non-empty string")
+        title = title.strip()
+        if len(title) > 200:
+            raise RuntimeError("disc_update: title is limited to 200 characters")
+        payload["title"] = title
+    for flag in ("pinned", "archived"):
+        if flag in args and args[flag] is not None:
+            if not isinstance(args[flag], bool):
+                raise RuntimeError(f"disc_update: {flag} must be true or false")
+            payload[flag] = args[flag]
+    if not payload:
+        raise RuntimeError(
+            "disc_update: nothing to change — pass title, pinned or archived"
+        )
+    _unwrap(_http("PATCH", f"/api/discussions/{disc_id}", payload))
+    # The route answers with no body; echo what was asked so the transcript
+    # of the call says what changed.
+    return {"disc_id": disc_id, "changed": payload}
+
+
 def call_disc_unlink(args):
     # KT-85 — release THIS session's binding, never the whole room's. A shared
     # discussion carries one binding per joined CLI, so the unscoped call would
@@ -8288,7 +8332,7 @@ def call_media_generate(args):
     in the discussion by itself. Waiting is for the case where the media must
     appear in the answer being written right now.
     """
-    for field in ("connection_id", "modality", "prompt"):
+    for field in ("modality", "prompt"):
         if not args.get(field):
             raise RuntimeError(f"media_generate: missing required '{field}'")
     modality = args["modality"]
@@ -8300,11 +8344,14 @@ def call_media_generate(args):
     discussion_id = args.get("discussion_id") or _disc_id()
 
     body = {
-        "connection_id": args["connection_id"],
         "modality": modality,
         "prompt": args["prompt"],
         "discussion_id": discussion_id,
     }
+    # Omit an absent connection so the server can select the sole eligible provider.
+    # Ambiguous providers are returned to the caller instead of selected here.
+    if args.get("connection_id"):
+        body["connection_id"] = args["connection_id"]
     for key in ("duration_secs", "resolution", "aspect_ratio"):
         if args.get(key) is not None:
             body[key] = args[key]
@@ -8838,370 +8885,8 @@ def call_directive_delete(args):
 
 
 def call_workflow_step_schema(_args):
-    """Canonical WorkflowStep schema, returned as a tool RESULT (untruncatable).
-
-    The `workflow_create_draft` description carries the same info, but some MCP
-    clients truncate long tool descriptions mid-text — so the run-breaking bits
-    (the SubWorkflow foreach contract in particular) can get cut before the
-    agent ever sees them. A tool result is never truncated, so this is the
-    authoritative, on-demand source for the step schema."""
-    return {
-        "shape": (
-            "Each step's type-specific fields sit at the TOP LEVEL (never under a "
-            "sub-object); `name` is required on every step. BUT `step_type` is a "
-            "TAGGED OBJECT `{\"type\":\"Agent\"}`, NOT a bare string (serde "
-            "internally-tagged); same for `output_format` (`{\"type\":\"Structured\"}`) "
-            "and the workflow `trigger` (`{\"type\":\"Manual\"}`). "
-            "`workflow_create_draft`/`workflow_update` also accept a bare-string "
-            "`step_type` and wrap it, but the canonical form `workflow_get` returns "
-            "is the tagged object."
-        ),
-        "step_types_closed_set": [
-            "Agent",
-            "ApiCall",
-            "BatchApiCall",
-            "BatchQuickPrompt",
-            "Exec",
-            "Gate",
-            "Notify",
-            "JsonData",
-            "CollectApiData",
-            "TransformData",
-            "PublishPageData",
-            "SubWorkflow",
-        ],
-        "fields_by_type": {
-            "Agent": {
-                "required": ["agent", "prompt_template"],
-                "optional": [
-                    "output_format (FreeText | {type:Structured} | {type:TypedSchema, schema:{...}})",
-                    "skill_ids",
-                    "profile_ids",
-                    "directive_ids",
-                    "multi_agent_review (bool — second agent debates the output)",
-                ],
-                "OUTPUT_PIPING": (
-                    "With output_format {type:TypedSchema,schema:{...}} (or Structured), the "
-                    "agent's emitted JSON is captured as `{{steps.<name>.data}}`, with nested "
-                    "access `{{steps.<name>.data.<field>}}` / `{{steps.<name>.data.arr.0.k}}` "
-                    "(`data_json.<field>` works identically). THIS is how you feed a "
-                    "deterministic ApiCall/Exec step from an LLM step. TYPED INJECTION in an "
-                    "api_body: a field whose value is EXACTLY one placeholder is replaced by the "
-                    "REAL typed JSON (arrays/objects preserved, not stringified) — write it "
-                    "QUOTED as a normal string leaf. E.g. a review step emits "
-                    "{verdict, generalComment, inlineComments[]} and the next ApiCall posts "
-                    "api_body = {\"event\":\"{{steps.review.data.verdict}}\", "
-                    "\"body\":\"{{steps.review.data.generalComment}}\", "
-                    "\"comments\":\"{{steps.review.data.inlineComments}}\"} — `comments` arrives "
-                    "as a real array. (A placeholder embedded in surrounding text, e.g. "
-                    "\"PR #{{n}}\", stays a string.) To run a Quick Prompt's logic in a PIPEABLE "
-                    "way, put its `quick_prompt_id` on an Agent step with TypedSchema — NOT "
-                    "BatchQuickPrompt (see its note)."
-                ),
-                "example": {
-                    "name": "Triage",
-                    "step_type": {"type": "Agent"},
-                    "agent": "ClaudeCode",
-                    "prompt_template": "Analyse {{previous_step.output}}",
-                    "output_format": {"type": "Structured"},
-                },
-            },
-            "PublishPageData": {
-                "required": ["page_publish.page_id", "page_publish.writes"],
-                "optional": [],
-                "note": (
-                    "Typed, zero-token sink for Kronn Live Pages. Each write requires "
-                    "dataset, operation (replace|append|upsert), and value_from as one "
-                    "typed context path such as steps.fetch.data.series. Upsert also "
-                    "requires key_field; append is idempotent per workflow run by default."
-                ),
-                "example": {
-                    "name": "publish-report",
-                    "step_type": {"type": "PublishPageData"},
-                    "page_publish": {
-                        "page_id": "<id from page_list or page_create>",
-                        "writes": [{
-                            "dataset": "summary",
-                            "operation": "replace",
-                            "value_from": "steps.shape-report.data",
-                        }],
-                    },
-                },
-            },
-            "CollectApiData": {
-                "required": ["collect_api_data.sources"],
-                "optional": ["collect_api_data.concurrent_limit (default 5, max 20)"],
-                "note": (
-                    "Runs independent Quick APIs and shell-free CLI commands concurrently. Every "
-                    "source requires a unique alias, optional required flag/variables map, and "
-                    "exactly one of quick_api_id, quick_exec_id or inline quick_exec. Prefer a "
-                    "saved quick_exec_id from qe_list. Inline quick_exec is "
-                    "{command,args,timeout_secs?,output_format}; command must be a bare binary in "
-                    "workflow exec_allowlist, shell binaries are rejected, args stay literal, and "
-                    "output_format is json|csv|text|lines; CSV becomes an array of objects and "
-                    "each stream is capped at 1 MiB. Output "
-                    "is {sources:{alias:<typed extracted data>},meta:{...}}. Source variables "
-                    "may use run-anchored time expressions such as "
-                    "{{time.now|shift:-24h|floor:hour|fmt:rfc3339}}; every parallel source "
-                    "shares the same anchor. Optional failures yield PARTIAL; required failures "
-                    "stop the workflow."
-                ),
-                "example": {
-                    "name": "collect-sources",
-                    "step_type": {"type": "CollectApiData"},
-                    "collect_api_data": {
-                        "concurrent_limit": 5,
-                        "sources": [
-                            {
-                                "alias": "analytics",
-                                "quick_api_id": "<id from qa_list>",
-                                "required": True,
-                                "variables": {"host": "fr.example.com"},
-                            },
-                            {
-                                "alias": "cloudwatch",
-                                "quick_api_id": "",
-                                "quick_exec_id": "<id from qe_list>",
-                                "required": False,
-                            },
-                        ],
-                    },
-                },
-            },
-            "TransformData": {
-                "required": ["transform_data.input_from", "transform_data.fields"],
-                "optional": [],
-                "note": (
-                    "Deterministic zero-token JSON shaping. input_from is one typed context path; "
-                    "each field has target, RFC 9535 JSONPath source, operation "
-                    "(copy|count|sum|average|min|max|first|last), optional fallback and optional "
-                    "value_type (string|number|boolean)."
-                ),
-                "example": {
-                    "name": "shape-report",
-                    "step_type": {"type": "TransformData"},
-                    "transform_data": {
-                        "input_from": "steps.collect-sources.data",
-                        "fields": [
-                            {
-                                "target": "metrics.total",
-                                "source": "$.sources.analytics.total",
-                                "operation": "copy",
-                                "fallback": 0,
-                                "value_type": "number",
-                            }
-                        ],
-                    },
-                },
-            },
-            "ApiCall": {
-                "required": ["api_plugin_slug", "api_config_id", "api_endpoint_path"],
-                "optional": ["api_method (default GET)", "api_query", "api_body", "api_extract"],
-                "note": "plugin_slug + config_id MUST exist in mcp_list. endpoint_path is INDICATIVE — any valid path on the API works; set api_method explicitly for a non-GET on an unlisted path.",
-                "example": {
-                    "name": "Fetch",
-                    "step_type": {"type": "ApiCall"},
-                    "api_plugin_slug": "mcp-atlassian",
-                    "api_config_id": "<id from mcp_list>",
-                    "api_endpoint_path": "/rest/api/2/search",
-                    "api_method": "GET",
-                    "api_query": {"jql": "..."},
-                },
-            },
-            "Exec": {
-                "required": ["exec_command"],
-                "optional": [
-                    "exec_args",
-                    "exec_timeout_secs",
-                    "exec_stdin (piped to stdin — use for LARGE input instead of a huge arg, no argv size limit)",
-                ],
-                "note": "exec_command binary MUST be in the workflow `exec_allowlist`.",
-                "example": {
-                    "name": "Tests",
-                    "step_type": {"type": "Exec"},
-                    "exec_command": "make",
-                    "exec_args": ["test"],
-                    "exec_timeout_secs": 600,
-                    "exec_stdin": "{{steps.fetch.data_json}}",
-                },
-            },
-            "Gate": {
-                "required": ["gate_message"],
-                "optional": [
-                    "gate_request_changes_target (step name to loop back to on 'request changes')",
-                    "gate_checkpoint_before (auto-commit before the gate)",
-                    "gate_auto_approve_secs",
-                ],
-                "example": {
-                    "name": "Validate",
-                    "step_type": {"type": "Gate"},
-                    "gate_message": "Approve?",
-                    "gate_request_changes_target": "Implement",
-                },
-            },
-            "Notify": {
-                "required": ["notify_config"],
-                "example": {"name": "Done", "step_type": {"type": "Notify"}, "notify_config": {}},
-            },
-            "BatchQuickPrompt": {
-                "required": ["batch_quick_prompt_id", "batch_items_from"],
-                "optional": [
-                    "batch_wait_for_completion",
-                    "batch_max_items",
-                    "batch_concurrent_limit",
-                    "batch_workspace_mode",
-                    "batch_chain_prompt_ids",
-                ],
-                "OUTPUT_PIPING": (
-                    "When batch_wait_for_completion=true, `{{steps.<name>.data.results}}` "
-                    "is an ordered array of `{index, discussion_id, item, output, "
-                    "tokens_used, tokens_status}`. `output` is the complete final Agent "
-                    "message from that child discussion (not truncated), so an Exec/ApiCall "
-                    "can consume the fan-out deterministically without an Agent collector. "
-                    "The data envelope also carries aggregate `tokens_used` plus "
-                    "`tokens_status` (`measured`, `partial`, or "
-                    "`unavailable_children_not_measured`). Fire-and-forget mode returns "
-                    "results=[] and tokens_status=pending because children are still running."
-                ),
-                "example": {
-                    "name": "Fan out",
-                    "step_type": {"type": "BatchQuickPrompt"},
-                    "batch_quick_prompt_id": "<qp id>",
-                    "batch_items_from": "{{previous_step.data}}",
-                    "batch_wait_for_completion": True,
-                },
-            },
-            "BatchApiCall": {
-                "required": ["batch_items_from", "api_plugin_slug", "api_config_id", "api_endpoint_path"],
-                "optional": ["api_method"],
-                "note": "fan one ApiCall over a list without starting a model.",
-                "PER_ITEM_VARS": (
-                    "Each item's fields are templatable in api_endpoint_path AND api_body/"
-                    "api_query as `{{batch.item.<field>}}` (canonical), `{{item.<field>}}` "
-                    "(alias), and bare `{{<field>}}`. So a per-item path works: "
-                    "`/comments/{{batch.item.commentId}}/reactions`. Also `{{batch.index}}` "
-                    "(0-based) and `{{batch.item}}` (whole item as JSON). NOTE: this is a "
-                    "DIFFERENT name from the SubWorkflow-foreach item (`current_task.*`) — "
-                    "batch fan-out uses `batch.item.*`/`item.*`."
-                ),
-                "example": {
-                    "name": "Bulk",
-                    "step_type": {"type": "BatchApiCall"},
-                    "batch_items_from": "{{previous_step.data}}",
-                    "api_plugin_slug": "…",
-                    "api_config_id": "…",
-                    "api_endpoint_path": "/repos/o/r/pulls/comments/{{batch.item.commentId}}/reactions",
-                    "api_method": "POST",
-                    "api_body": {"content": "{{batch.item.reaction}}"},
-                },
-            },
-            "JsonData": {
-                "required": ["json_data_payload"],
-                "note": "deterministic data source that starts no model — feeds {{steps.<name>.data}}.",
-                "example": {"name": "Seed", "step_type": {"type": "JsonData"}, "json_data_payload": "[{...}]"},
-            },
-            "SubWorkflow": {
-                "required": ["sub_workflow_id"],
-                "optional": ["sub_workflow_foreach_file (workspace-relative JSON array → child runs once per item)"],
-                "FOREACH_RUNTIME_CONTRACT": (
-                    "RUN-BREAKING. `sub_workflow_foreach_file` is YOUR source list "
-                    "(any name, e.g. .kronn/prs.json). Before each child run the "
-                    "engine exposes the CURRENT item to the child TWO ways: "
-                    "(1) TEMPLATE VARS — each top-level field as `{{current_task.<field>}}` "
-                    "(e.g. an ApiCall path `/repos/o/r/pulls/{{current_task.number}}/reviews`, "
-                    "a worktree `.kronn/pr-{{current_task.number}}`); scalars stringify, "
-                    "null→\"\", nested arrays/objects render as compact JSON, and the whole "
-                    "item is `{{current_task}}`. The accessor name is FIXED `current_task.*` "
-                    "(it mirrors the file, NOT the source-file name; it is NOT `{{item.*}}` "
-                    "or `{{foreach.*}}`). (2) FILE — the same item is written to the FIXED "
-                    "path `.kronn/current_task.json` in the shared worktree, for an Agent/Exec "
-                    "step that needs the full object. Bookkeeping vars `{{__subwf_item_id__}}` "
-                    "(=item `id`) and `{{__subwf_item__}}` (index) are also set."
-                ),
-                "FOREACH_CONCURRENCY": (
-                    "SubWorkflow foreach is intentionally SEQUENTIAL in the shared parent "
-                    "worktree. Workflow-level `concurrency_limit` controls overlapping FULL "
-                    "workflow runs (Cron/Tracker); it does not parallelize foreach items, and "
-                    "values above 1 are rejected when foreach is present so this cannot be "
-                    "mistaken for an ignored worker count. "
-                    "Use BatchQuickPrompt for parallel agent fan-out. Parallel SubWorkflow "
-                    "children would require isolated worktrees plus deterministic merge and "
-                    "is not silently enabled by any current field."
-                ),
-                "example": {
-                    "name": "Implement",
-                    "step_type": {"type": "SubWorkflow"},
-                    "sub_workflow_id": "<child workflow id>",
-                    "sub_workflow_foreach_file": ".kronn/tasks.json",
-                },
-            },
-        },
-        "discovery_rule": (
-            "Do NOT infer the available step types from one workflow you opened — "
-            "it may use only Agent steps. This 12-set IS the whole taxonomy. For a "
-            "rich real example to adapt, workflow_get/workflow_clone the AutoPilot "
-            "workflow (multi-step), not a single-Agent one."
-        ),
-        "template_vars": {
-            "syntax": (
-                "`{{namespace.path}}` in any string field (prompt_template, "
-                "api_endpoint_path, api_query/api_body values, exec_args/exec_stdin, "
-                "gate_message, notify_config, …). Dotted nested access works incl. "
-                "array index: `{{steps.plan.data.subtasks.0.title}}`. An UNKNOWN ref "
-                "is left VERBATIM in previews and rejected before execution, so a typo "
-                "never reaches an agent, command or external API."
-            ),
-            "namespaces": {
-                "steps.<name>.output": "raw text the step produced (FreeText).",
-                "steps.<name>.data": "structured payload (Structured/TypedSchema agent, ApiCall/Exec/JsonData envelope). Nested fields: `steps.<name>.data.<field>` (incl. array index). Strings unwrapped for clean interpolation. In an api_body, a field whose value is EXACTLY one such placeholder is injected as the REAL typed JSON (array/object preserved) — write it quoted, e.g. `\"comments\": \"{{steps.review.data.inlineComments}}\"`.",
-                "steps.<name>.data_json": "same payload; `data_json.<field>` resolves identically to `data.<field>` (alias). In a prompt/string it renders verbatim JSON; in an api_body whole-placeholder field it injects typed JSON just like `data`.",
-                "steps.<name>.summary / .status": "the envelope summary line / OK|… status.",
-                "previous_step.{output,data,data_json,summary,status}": "shorthand for the immediately preceding step.",
-                "batch.item.<field> / item.<field> / <field>": "the current item inside a BatchApiCall / BatchQuickPrompt fan-out (templatable in api_endpoint_path + body/query). `{{batch.index}}` = 0-based index, `{{batch.item}}` = whole item JSON.",
-                "current_task / current_task.<field>": "the current item inside a SubWorkflow foreach child (DIFFERENT name from batch fan-out's `batch.item.*`; see SubWorkflow.FOREACH_RUNTIME_CONTRACT).",
-                "state.<key>": "run state written by a step via a `---STATE:<k>=<v>---` line; persists across Gate pauses + Goto loops.",
-                "artifacts.<name>": "content a step emitted via a `---ARTIFACT:<name>---` block.",
-                "issue.{title,body,number,url,labels}": "tracker-trigger fields (Cron/Tracker workflows).",
-                "time.now / now": "one timestamp captured at run start and reused by all steps and parallel CollectApiData sources, including after resume. `now` is shorthand unless a static/launch variable named `now` exists.",
-                "<launch_var>": "any `variables[].name` is referenced bare as `{{name}}`. Its source is user_input (default), project_env with source_ref `<env.NAME>`, or kronn_context with `<context.key>`. References resolve at run start; never store the resolved value.",
-            },
-            "time_expressions": {
-                "canonical": "{{time.now|shift:-24h|tz:Europe/Paris|floor:hour|fmt:local_iso_ms}}",
-                "shorthand": "{{now-24h|floor:hour}} (UTC + rfc3339 defaults)",
-                "filters": {
-                    "shift": "+/- fixed duration; units s, m, h, d, w; 10-year safety limit",
-                    "tz": "IANA timezone such as Europe/Paris; UTC by default",
-                    "floor": "minute | hour | day; day boundaries use the selected timezone",
-                    "fmt": "rfc3339 | local_iso_ms | date | unix | unix_ms",
-                },
-                "vendor_neutrality": "Do not use plugin/vendor names such as fmt:adobe. Adobe's YYYY-MM-DDTHH:mm:ss.SSS without Z is fmt:local_iso_ms; GitHub uses rfc3339; Jira day parameters use date; epoch APIs use unix or unix_ms.",
-                "ordering": "Filter order is declarative: Kronn applies the shift to the run anchor, converts to the requested timezone, floors there, then formats.",
-            },
-            "batch_quick_prompt_results": (
-                "`steps.<name>.data.results` is the ordered, complete BatchQuickPrompt "
-                "payload list after completion; use `data.results` / `data_json.results` "
-                "for deterministic downstream piping."
-            ),
-        },
-        "data_pipeline_contract": {
-            "normal_path": "CollectApiData -> TransformData -> PublishPageData",
-            "discovery_order": [
-                "qa_list/qe_list: prefer and resolve saved Quick APIs or Quick Execs; keep inline quick_exec for one-offs and add each CLI binary to exec_allowlist",
-                "page_list: reuse a matching shared Page; otherwise page_create",
-                "workflow_step_schema: compose the three typed configs",
-                "workflow_create_draft: save disabled for human review",
-            ],
-            "direct_publish": (
-                "TransformData is optional when the Page intentionally consumes the complete "
-                "lossless collector envelope. Then bind value_from directly to "
-                "steps.<collect-name>.data."
-            ),
-            "page_contract": (
-                "A Page is shared and is not owned by one workflow. page_publish.page_id "
-                "stores the configured link; several workflows may target the same Page."
-            ),
-        },
-    }
+    """Read the same canonical schema used by native HTTP agents."""
+    return _unwrap(_http("GET", "/api/workflows/step-schema"))
 
 
 # ─── Audit tools (0.8.12 PR A) ─────────────────────────────────────────────
@@ -10029,6 +9714,24 @@ TOOL_MANUALS = {
 
 # Launch deliberately shares the prepare guide: both calls form one typed,
 # preflight-bound contract and duplicating the text would invite drift.
+TOOL_MANUALS["disc_update"] = (
+    "**What it changes** — `title` (rename), `pinned`, `archived`. Nothing "
+    "else. Every field is optional; at least one must be present.\n\n"
+    "**What it deliberately does not change** — the agent that answers, the "
+    "model tier, the external connection, the project, and the skills, "
+    "profiles and directives bound to the room. Those decide WHO answers, "
+    "with WHICH credentials and under WHICH instructions: an agent that could "
+    "set them would be rewriting its own mandate. They stay in the Kronn UI, "
+    "or in a human's hands through the REST API.\n\n"
+    "**Reversible and visible** — a rename, a pin and an archive all show in "
+    "the discussion list and can be undone there. Archiving does not delete a "
+    "thing: the transcript, its files and its tasks stay.\n\n"
+    "**Ask before renaming a room you did not open.** A title is how a human "
+    "finds their thread again; renaming it under them is disorienting even "
+    "when the new one is better."
+)
+
+
 TOOL_MANUALS["disc_create_room"] = (
     "The room has no native Kronn principal by default: messages posted by joined MCP peers do NOT auto-launch the discussion's placeholder agent. Only the explicitly joined peers answer.\n\nThis tool never switches your current bridge binding, on purpose — a silent context switch would risk losing the thread of the conversation that asked for the room. After the call, decide explicitly:\n  (a) stay where you are → share `instruction_text` with the user, who pastes it in another CLI to bring that agent in;\n  (b) move your own bridge to the new room → `disc_join({token})` with the returned token. Your previous binding is replaced; `disc_leave` first is cleanest if you want to leave formally.\n\n`next_step` is a plain-text hint about what makes sense given the current context. Follow it, or diverge explicitly with a one-line rationale so the user knows what is happening."
 )
@@ -10045,11 +9748,13 @@ TOOL_MANUALS["workflow_trigger"] = (
 )
 TOOL_MANUALS["task_exec_launch"] = TOOL_MANUALS["task_exec_prepare"]
 TOOL_MANUALS["media_generate"] = (
-    "Which connection. `connection_id` is the `worker.connection_id` of an "
-    "`agent_list` entry whose `media` has the modality you want; `agent_list` "
-    "answers in every discussion. The connection's alias (`openrouter`) or display "
-    "name are accepted too. A refusal lists the connections that can generate that "
-    "modality, with their ids: retry with one of them rather than guessing.\n\n"
+    "Which connection. `connection_id` is OPTIONAL: leave it out and Kronn uses "
+    "the only connection configured for the modality you asked for. Never ask a "
+    "human for it. When several can serve it, the refusal names them and you "
+    "retry with one. To name one yourself, take `worker.connection_id` from an "
+    "`agent_list` entry whose `media` has that modality — `agent_list` answers in "
+    "every discussion — or pass its alias (`openrouter`) or display name. The "
+    "answer says which connection was billed.\n\n"
     "Parameters come from the model, not from habit. `agent_list` returns one "
     "entry per configured media slot, each carrying the `capabilities` the "
     "provider advertises: `durations_secs`, `resolutions`, `aspect_ratios`, "
@@ -10086,17 +9791,19 @@ def call_tool_manual(args):
     name = (args or {}).get("tool")
     if not isinstance(name, str) or not name.strip():
         return {
-            "available": sorted(TOOL_MANUALS),
+            "available": sorted([*TOOL_MANUALS, "signals"]),
             "hint": "Pass `tool` to read one of these.",
         }
     name = name.strip()
+    if name == "signals":
+        return {"tool": name, "catalogue": _unwrap(_http("GET", "/api/signals/catalog"))}
     manual = TOOL_MANUALS.get(name)
     if manual is None:
         # Naming the alternatives beats a bare "unknown": a caller that guessed
         # the name is one hop from the right one.
         return {
             "error": f"No manual for {name!r}.",
-            "available": sorted(TOOL_MANUALS),
+            "available": sorted([*TOOL_MANUALS, "signals"]),
             "hint": (
                 "Only tools whose description points at `tool_manual` have one. "
                 "For everything else the description IS the whole contract."
@@ -10538,6 +10245,7 @@ DISPATCH = {
     "task_exec_commit": call_task_exec_commit,
     "task_exec_deliver": call_task_exec_deliver,
     "task_exec_review": call_task_exec_review,
+    "disc_update": call_disc_update,
     "disc_unlink": call_disc_unlink,
     "disc_workspace_get": call_disc_workspace_get,
     "disc_workspace_set": call_disc_workspace_set,

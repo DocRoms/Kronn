@@ -55,6 +55,21 @@ pub enum ToolRunMode {
     Worker,
 }
 
+/// Human-granted discussion budgets. Only call and round counters change; repeat,
+/// response-digest, error-circuit and timeout guards remain enforced.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CeilingAllowance {
+    /// Extra calls for one tool, for this run only.
+    pub extra_calls: std::collections::HashMap<String, usize>,
+    /// Tools whose call counter is lifted for the rest of the discussion.
+    pub unlimited_tools: std::collections::HashSet<String>,
+    /// Extra tool rounds, for this run only.
+    pub extra_rounds: usize,
+    /// Whether a ceiling this run reaches may be put to a human. True only
+    /// where one can answer: a discussion, not a workflow step or a worker.
+    pub ask_on_ceiling: bool,
+}
+
 /// Executes Kronn primitives on behalf of an HTTP agent.
 #[async_trait::async_trait]
 pub trait ToolExecutor: Send + Sync {
@@ -74,6 +89,13 @@ pub trait ToolExecutor: Send + Sync {
     /// first provider request; model prose can never broaden it.
     fn worker_scope(&self) -> Option<TaskWorkerScope> {
         None
+    }
+
+    /// Read once, before the first provider request. The default keeps every
+    /// existing executor and test fixture on the plain ceilings, with nobody
+    /// to ask when one is reached.
+    async fn ceiling_allowance(&self) -> CeilingAllowance {
+        CeilingAllowance::default()
     }
 
     /// Run one call. Implementations must not panic: a tool failure is

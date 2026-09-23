@@ -73,12 +73,8 @@ const WORKER_DELIVERY_ITERATIONS: usize = 3;
 // catalogue, then fail explicitly instead of accepting prose without a commit
 // and DeliveryManifest or spending an open-ended local-model loop.
 const WORKER_PROSE_ONLY_ITERATIONS: usize = 2;
-// Ollama's MLX engine in 0.32.14 does not reuse the shared prompt prefix
-// between `/api/chat` turns (ollama/ollama#17829) and retains cache memory
-// across requests (#17875). A real qwen3.8:27b-mlx worker stayed fast through
-// turn 32, then each observation grew to 1-6 minutes. Give that engine an
-// earlier delivery boundary; this is a documented mitigation, not a claim
-// that every MLX implementation has the same limitation.
+// Older Ollama MLX servers lack prompt-prefix reuse and retain cache memory
+// (ollama/ollama#17829, #17875). Apply the delivery boundary below 0.34.
 const MLX_WORKER_EXPLORATION_ITERATIONS: usize = 32;
 // A scoped local subtask must turn repository evidence into a mutation instead
 // of paying for an open-ended repository tour. V15 of KT-404 had found the
@@ -86,13 +82,8 @@ const MLX_WORKER_EXPLORATION_ITERATIONS: usize = 32;
 // the workspace. Bound that exact signal for MLX only; finalization still
 // grants three exact CAS refreshes before its one-shot repair path.
 const MLX_WORKER_MAX_OBSERVATIONS_WITHOUT_MUTATION: usize = 12;
-// The original 50% boundary was introduced while native MLX workers could
-// still allocate the configured 65K slot: it moved finalization near 32K. Now
-// that the whole run is capped at 32K, retaining 50% would compound the two
-// mitigations and narrow the catalogue near 16K — a real KT-410 run crossed it
-// on its very first tool call. Keep 25% for reply/tool-result headroom instead.
-const MLX_WORKER_CONTEXT_PRESSURE_PERCENT: u64 = 75;
-const DEFAULT_WORKER_CONTEXT_PRESSURE_PERCENT: u64 = 75;
+// Reserve a quarter of the context window for replies and tool results.
+const WORKER_CONTEXT_PRESSURE_PERCENT: u64 = 75;
 // MLX fixes the slot when the model is loaded: a later request for 16K still
 // used a live 8K slot, while a cold 32K request loaded the real qwen3.8 model
 // in under eight seconds. The nominal 65K slot instead cost 31 GB and produced
@@ -183,6 +174,7 @@ fn worker_exploration_policy(
     model: &str,
     storage_format: Option<&str>,
     is_openai_wire: bool,
+    prefix_cache_reused: bool,
 ) -> WorkerExplorationPolicy {
     // A custom Ollama alias can hide the original `-mlx` tag. The native MLX
     // artefacts currently exposed by `/api/show` use safetensors, whereas the
@@ -198,11 +190,14 @@ fn worker_exploration_policy(
         None
     };
     let mlx_mitigation = mlx_detection_source.is_some();
-    if mlx_mitigation {
+    // The window stays capped either way: MLX fixes the slot when the model
+    // loads, and that is a memory bound, not a latency one. Only the shortened
+    // exploration depends on the prefix bug being present.
+    if mlx_mitigation && !prefix_cache_reused {
         WorkerExplorationPolicy {
             max_iterations: MLX_WORKER_EXPLORATION_ITERATIONS,
             max_observations_without_mutation: Some(MLX_WORKER_MAX_OBSERVATIONS_WITHOUT_MUTATION),
-            context_pressure_percent: MLX_WORKER_CONTEXT_PRESSURE_PERCENT,
+            context_pressure_percent: WORKER_CONTEXT_PRESSURE_PERCENT,
             mlx_mitigation,
             mlx_detection_source,
         }
@@ -210,7 +205,7 @@ fn worker_exploration_policy(
         WorkerExplorationPolicy {
             max_iterations: WORKER_EXPLORATION_ROUNDS,
             max_observations_without_mutation: None,
-            context_pressure_percent: DEFAULT_WORKER_CONTEXT_PRESSURE_PERCENT,
+            context_pressure_percent: WORKER_CONTEXT_PRESSURE_PERCENT,
             mlx_mitigation,
             mlx_detection_source,
         }
@@ -702,6 +697,106 @@ fn is_workspace_progress_tool(name: &str) -> bool {
             | "git_commit"
             | "task_exec_deliver"
     )
+}
+
+/// Task mutations invalidate these readers even when their arguments are unchanged.
+fn is_progress_observation_tool(name: &str) -> bool {
+    matches!(name, "task_get" | "task_list" | "plan_get")
+}
+
+/// Mutations that invalidate task progress, including room-plan membership changes.
+fn is_progress_mutation_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "task_create"
+            | "task_update"
+            | "task_update_dod"
+            | "task_add_blocker"
+            | "task_remove_blocker"
+            | "task_link_discussion"
+            | "task_unlink_discussion"
+    )
+}
+
+/// Restore readers withdrawn for repetition after a task mutation. Readers blocked
+/// by their call ceiling or an open error circuit remain withdrawn.
+pub(crate) fn progress_readers_to_restore(
+    withdrawn: &std::collections::HashSet<String>,
+    open_circuits: &std::collections::HashSet<String>,
+    calls_per_tool: &std::collections::HashMap<String, usize>,
+    run_mode: crate::agents::tools::ToolRunMode,
+    allowance: &crate::agents::tools::CeilingAllowance,
+) -> Vec<String> {
+    withdrawn
+        .iter()
+        .filter(|name| is_progress_observation_tool(name))
+        .filter(|name| !open_circuits.contains(*name))
+        .filter(|name| {
+            // Include human grants when checking the enforced call ceiling.
+            let limit = if allowance.unlimited_tools.contains(*name) {
+                usize::MAX
+            } else {
+                max_calls_for_tool(name, run_mode)
+                    .saturating_add(allowance.extra_calls.get(*name).copied().unwrap_or(0))
+            };
+            calls_per_tool.get(*name).copied().unwrap_or_default() < limit
+        })
+        .cloned()
+        .collect()
+}
+
+/// Preserve original reader declarations so a withdrawn reader can be restored
+/// without adding tools that were absent from the initial catalogue.
+fn progress_reader_declarations(catalogue: &[serde_json::Value]) -> Vec<serde_json::Value> {
+    catalogue
+        .iter()
+        .filter(|tool| {
+            tool.pointer("/function/name")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(is_progress_observation_tool)
+        })
+        .cloned()
+        .collect()
+}
+
+/// Put back declarations the model can no longer see. Never widens the
+/// catalogue: a declaration already present is left alone.
+fn restore_tool_declarations(body: &mut serde_json::Value, restored: &[serde_json::Value]) {
+    if restored.is_empty() {
+        return;
+    }
+    let declared: std::collections::HashSet<String> = declared_tool_names(body);
+    let missing: Vec<serde_json::Value> = restored
+        .iter()
+        .filter(|tool| {
+            tool.pointer("/function/name")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|name| !declared.contains(name))
+        })
+        .cloned()
+        .collect();
+    if missing.is_empty() {
+        return;
+    }
+    match body["tools"].as_array_mut() {
+        Some(tools) => tools.extend(missing),
+        None => body["tools"] = serde_json::Value::Array(missing),
+    }
+}
+
+fn invalidate_progress_observation_cache(
+    seen_calls: &mut std::collections::HashMap<String, (bool, serde_json::Value)>,
+    repeated_calls: &mut std::collections::HashMap<String, usize>,
+    results_seen: &mut std::collections::HashMap<(String, u64), String>,
+) {
+    let is_progress_signature = |signature: &str| {
+        signature
+            .split_once('|')
+            .is_some_and(|(name, _)| is_progress_observation_tool(name))
+    };
+    seen_calls.retain(|signature, _| !is_progress_signature(signature));
+    repeated_calls.retain(|signature, _| !is_progress_signature(signature));
+    results_seen.retain(|(name, _), _| !is_progress_observation_tool(name));
 }
 
 fn is_worker_finalization_tool(name: &str) -> bool {
@@ -2411,9 +2506,13 @@ pub struct AgentStartConfig<'a> {
     /// KT-646 — explicit per-step / per-QP reasoning-effort override, from
     /// `AgentSettings.reasoning_effort`. Wins over the tier's configured
     /// preset unconditionally (see `effective_reasoning_effort`). `None`
-    /// falls back to the tier preset, then to no flag at all. Ignored for
-    /// every agent `agent_supports_reasoning_effort` returns false for.
+    /// falls back to the tier preset, then to no flag at all for supported CLI
+    /// agents. HTTP forwards an explicit override through its own wire format;
+    /// unsupported transports refuse explicit controls.
     pub reasoning_effort_override: Option<&'a str>,
+    /// Explicit saved generation limit. HTTP maps it to its wire field;
+    /// unsupported CLI transports refuse it instead of silently dropping it.
+    pub max_tokens_override: Option<u64>,
     /// KT-405 — persistent per-model context overrides (`ServerConfig`), keyed
     /// by exact model tag. `None` is reserved for callers with no server config
     /// in scope (mainly isolated tests); discussions and workflows pass it.
@@ -2487,6 +2586,7 @@ impl<'a> AgentStartConfig<'a> {
             ollama_format: None,
             model_override: None,
             reasoning_effort_override: None,
+            max_tokens_override: None,
             ollama_context_overrides: None,
             http_request_timeout: None,
             cancel_token: None,
@@ -2513,39 +2613,32 @@ pub struct ExternalHttpRuntime {
 /// access is absent either way.
 pub(crate) fn http_agent_tools_notice(has_tools: bool) -> &'static str {
     if has_tools {
+        // Keep only rules here; tool descriptions travel in the request catalogue.
         "=== TOOLS ===\n\nYou have executable Kronn-native tools declared with \
-         this request; use ONLY the ones declared. You have no shell and no MCP \
-         server. You have a workspace: `find_files` with a glob (e.g. `**/*.rs`) to locate files in ONE call, \
-         `list_files` to inspect a directory (pass `recursive` to walk it), \
-         `search_text` to find a literal string across files by path and line — \
-         prefer it to reading whole files. `read_file` reads one, sliced with \
-         `offset`/`limit` for a large file. To CHANGE a file you have read: \
-         `edit_file`/`edit_lines` replace an exact region (never guess an \
-         edit you have not anchored to what you actually read); \
-         `insert_after_line` preserves its anchor mechanically; `write_file` \
-         creates a NEW file, or overwrites an existing one only with the exact \
-         receipt (`expected_sha256` or equivalent) proving you read it first — \
-         both refuse and tell you why on a path that escapes the workspace or a \
-         stale/missing receipt. Never claim to have read, edited or written a \
-         file you did not obtain through those tools. `disc_list` and `disc_read` read the OTHER discussions of this project (read-only, \
-         and only this project: what you read leaves for whoever hosts this model). \
-         `git_status`, `git_diff` and `git_log` read this workspace's repository, so you \
-         can see WHAT changed instead of asking for a pasted diff; `truncated` marks a \
-         diff too large to return whole. `git_commit` commits your own changes to the \
-         local branch — no push, no merge — once the DoD is met, right before you \
-         deliver. `web_fetch` retrieves an http(s) URL \
-         server-side; private and loopback addresses are refused, and a `truncated` \
-         flag tells you when you are seeing only part of a document — say so rather \
-         than concluding from a partial read. Configured REST APIs are NOT MCP \
-         servers: discover them with `mcp_list` (legacy name), inspect one with \
-         `api_endpoints`, then execute it with `api_call`, or use `qa_list`/`qa_run` \
-         for a saved Quick API. Do not search for or invent a vendor MCP when one of \
-         those tools lists the requested API. When the answer depends on data you \
-         were not given, CALL the matching tool instead of guessing or saying you \
-         cannot. And a tool's output is something you RECEIVE, never something you \
-         compose: never present, quote or summarise a result before the call has \
-         returned it. Call, wait, then report what actually came back — a fabricated \
-         result that merely has the right shape is worse than admitting you have not \
+         this request; use ONLY the ones declared, and load a family from the \
+         index when the request calls for one. You have no shell and no MCP \
+         server. You have a workspace: `find_files`, `list_files`, \
+         `search_text` and `read_file` read it, `git_status`, `git_diff` and \
+         `git_log` read its repository, and `web_fetch` retrieves an http(s) \
+         URL server-side. Changing a file (`write_file`, `edit_file`, \
+         `edit_lines`, `insert_after_line`) and committing it (`git_commit`) \
+         come with the `edit` family, which you load when the task needs them. \
+         Every tool carries its own description: read it instead of \
+         assuming what it does or what it needs. Never claim to have read, \
+         edited or written a file you did not obtain through those tools, and \
+         never guess an edit you have not anchored to what you actually read. \
+         Reading another discussion of this project is read-only, and what you \
+         read there leaves for whoever hosts this model. Configured REST APIs \
+         are NOT MCP servers: discover them with `mcp_list` (legacy name), \
+         inspect one with `api_endpoints`, then execute it with `api_call`, or \
+         use `qa_list`/`qa_run` for a saved Quick API. Do not search for or \
+         invent a vendor MCP when one of those tools lists the requested API. \
+         When the answer depends on data you were not given, CALL the matching \
+         tool instead of guessing or saying you cannot. And a tool's output is \
+         something you RECEIVE, never something you compose: never present, \
+         quote or summarise a result before the call has returned it. Call, \
+         wait, then report what actually came back — a fabricated result that \
+         merely has the right shape is worse than admitting you have not \
          looked yet."
     } else {
         "=== TOOLS ===\n\nYou have NO executable tools and NO file access in this \
@@ -2929,6 +3022,11 @@ pub async fn start_agent(
 
 /// Start an agent process with full configuration.
 pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<AgentProcess, String> {
+    super::generation_settings::validate(
+        config.agent_type,
+        config.reasoning_effort_override,
+        config.max_tokens_override,
+    )?;
     // Read MCP context: use override if provided (general discussions),
     // otherwise read from project filesystem.
     let mcp_context = if let Some(override_ctx) = config.mcp_context_override {
@@ -3072,6 +3170,17 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
             .and_then(|executor| executor.worker_scope())
             .is_some();
 
+    // Workspace access controls project-doc and memory guidance, regardless of transport.
+    let http_agent_reads_files = http_agent_reads_its_own_files(
+        is_http_chat_agent(config.agent_type),
+        config.tools.as_ref().is_some_and(|executor| {
+            executor
+                .catalogue()
+                .iter()
+                .any(|tool| tool["function"]["name"] == "read_file")
+        }),
+    );
+
     // 0.7.1 — user-scoped cross-project context : the `~/.kronn/user-context/`
     // markdown directory. Universal across all CLIs (no per-tool format
     // proliferation), opt-in (user creates the files), and stable for
@@ -3119,19 +3228,33 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
             config.context_files_prompt
         ));
     }
-    // HTTP agents have no filesystem. Two consequences the CLI agents don't:
-    //  1. CLI agents read `docs/AGENTS.md` themselves from the project CWD —
-    //     an HTTP model can't, so inject the doc inline (capped) or it
-    //     answers with zero project grounding.
-    //  2. Never describe tools in prose here. Doing so taught the model to
-    //     HALLUCINATE calls (2026-07-01: it presented `fastly_execute` as its
-    //     own capability). Tools are DECLARED instead, on the request's
-    //     `tools` field — see `agents::tools`.
+    // Never describe tools in prose here. Doing so taught the model to
+    // HALLUCINATE calls (2026-07-01: it presented `fastly_execute` as its own
+    // capability). Tools are DECLARED instead, on the request's `tools` field —
+    // see `agents::tools`.
     if is_http_chat_agent(config.agent_type) {
         if project_has_agents_md && !prelocalized_http_worker {
-            if let Ok(mut doc) = std::fs::read_to_string(
+            if http_agent_reads_files {
+                // Inline section headings to guide discovery; file-capable agents read the full
+                // entry document on demand.
+                let index = std::fs::read_to_string(
+                    std::path::Path::new(config.project_path).join("docs/AGENTS.md"),
+                )
+                .map(|doc| doc_section_index(&doc))
+                .unwrap_or_default();
+                parts.push(format!(
+                    "=== PROJECT DOCUMENTATION ===\n\nThis project documents itself for agents \
+                     in `docs/AGENTS.md`. Call `read_file` on exactly that path, in ONE call, \
+                     before working on the project. The file is there: do not go looking for it \
+                     with `list_files`, `find_files` or `git_log`. It covers:\n\n{index}\n\n\
+                     Open the files it points to the same way. Never describe this project from \
+                     memory when the doc can be read."
+                ));
+            } else if let Ok(mut doc) = std::fs::read_to_string(
                 std::path::Path::new(config.project_path).join("docs/AGENTS.md"),
             ) {
+                // No workspace tools: inlining the entry doc is the only project
+                // grounding this agent can get.
                 const MAX_INLINE_DOC: usize = 24_000;
                 if doc.len() > MAX_INLINE_DOC {
                     let mut cut = MAX_INLINE_DOC;
@@ -3170,10 +3293,10 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
             directives_prompt
         ));
     }
-    // The memory prelude tells agents to WRITE learnings back into docs/ —
-    // meaningless for Ollama (no file access) and actively harmful: it made the
-    // model claim "I can modify docs/ files" (observed 2026-07-01).
-    if !is_http_chat_agent(config.agent_type) {
+    // The memory prelude tells agents to WRITE learnings back into docs/. It is
+    // withheld from an agent that cannot reach the workspace: it once made such
+    // a model claim "I can modify docs/ files" (observed 2026-07-01).
+    if !is_http_chat_agent(config.agent_type) || http_agent_reads_files {
         parts.push(format!(
             "=== PROJECT MEMORY (write back what you learn) ===\n\n{}",
             memory_prelude
@@ -3301,6 +3424,8 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
             config.ollama_context_overrides,
             config.http_request_timeout,
             config.cancel_token.as_ref(),
+            config.reasoning_effort_override,
+            config.max_tokens_override,
         )
         .await;
     }
@@ -4397,16 +4522,32 @@ pub(crate) fn disc_introspection_mcp_path_for_shared_config() -> Option<String> 
 /// CPU (measured 0.2 tok/s vs 12.5 at 8K, 100% GPU). We therefore cap the
 /// window and never let a local step silently request a giant one.
 ///
-/// The 8192 default is CPU-safe/portable. On a GPU box with RAM headroom a
-/// larger window helps big-context steps (multi-file review, long docs) with no
-/// CPU cliff — so the cap is overridable via `KRONN_OLLAMA_NUM_CTX_CAP`
-/// (clamped to at least the floor; a bad value falls back to the default).
-const OLLAMA_NUM_CTX_CAP: u64 = 8192;
+/// Fallback when Ollama reports no context size. Bound by available memory and
+/// overridable through KRONN_OLLAMA_NUM_CTX_CAP.
+const OLLAMA_NUM_CTX_CAP: u64 = 16_384;
 pub(crate) const OLLAMA_NUM_CTX_FLOOR: u64 = 2048;
+/// Tenths of a byte per token. Keep estimates below the measured prose and JSON
+/// ratios so the context guard retains headroom; see docs/research/.
+const PROSE_TENTHS_PER_TOKEN: u64 = 45;
+const TOOLS_TENTHS_PER_TOKEN: u64 = 35;
+/// What a reply needs on top of the prompt.
+const REPLY_HEADROOM_TOKENS: u64 = 2048;
+
+/// Tokens a prompt of `messages_bytes` of text plus `tools_bytes` of declared
+/// catalogue is worth, with the room a reply needs.
+pub(crate) fn estimated_prompt_tokens(messages_bytes: usize, tools_bytes: usize) -> u64 {
+    (messages_bytes as u64 * 10 / PROSE_TENTHS_PER_TOKEN)
+        + (tools_bytes as u64 * 10 / TOOLS_TENTHS_PER_TOKEN)
+        + REPLY_HEADROOM_TOKENS
+}
 /// Persistent Settings overrides are bounded against accidental values that
 /// would allocate an absurd KV cache. The process-global env override remains
 /// the deliberately unbounded break-glass path.
 pub(crate) const OLLAMA_NUM_CTX_OVERRIDE_MAX: u64 = 1_048_576;
+/// Default output cap: one quarter of the context window. Override with
+/// KRONN_OLLAMA_NUM_PREDICT; a nonpositive value removes the cap.
+const OLLAMA_NUM_PREDICT_FLOOR: u64 = 1_024;
+const OLLAMA_NUM_PREDICT_CEIL: u64 = 8_192;
 
 /// Fallback ceiling when the machine's memory cannot be read. RAM-blind, so it
 /// is the conservative figure that was the flat ceiling before KT-401.
@@ -4546,21 +4687,6 @@ pub(crate) fn parse_num_ctx_cap(raw: Option<String>) -> Option<u64> {
     }
 }
 
-/// Effective ctx cap (0.11.0 — product default, zero configuration):
-///   1. `KRONN_OLLAMA_NUM_CTX_CAP` env — explicit operator override, wins.
-///   2. The MODEL's own trained context (from `/api/show`), clamped to what
-///      this machine's memory can hold — a user who pulled qwen3:32b gets its
-///      real window automatically instead of a silent 8K truncation, and is
-///      TOLD when the clamp is what decided the number.
-///   3. Legacy portable default (8192) when Ollama can't be asked.
-pub(crate) fn resolve_ctx_cap(env_raw: Option<String>, model_limit: Option<u64>) -> CtxCap {
-    resolve_ctx_cap_within(
-        env_raw,
-        model_limit,
-        ram_derived_ceiling(total_system_memory_bytes()),
-    )
-}
-
 /// `resolve_ctx_cap`, with the persistent per-model override inserted between
 /// the env break-glass and the auto-derived cap — see `CtxCapOrigin` for the
 /// full precedence. `overrides` is the whole config map so ONE call resolves
@@ -4615,10 +4741,107 @@ pub(crate) fn resolve_ctx_cap_within(
                 },
             }
         }
+        // Bound the fallback by host memory.
         None => CtxCap {
-            value: OLLAMA_NUM_CTX_CAP,
+            value: OLLAMA_NUM_CTX_CAP.min(ceiling.max(OLLAMA_NUM_CTX_FLOOR)),
             origin: CtxCapOrigin::PortableFallback,
         },
+    }
+}
+
+/// Resident context size and memory from /api/ps. Attention-shape arithmetic
+/// cannot reliably price the cache for sliding-window models.
+async fn sample_ollama_memory(base: &str, model: &str) {
+    let sample = async {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(3))
+            .build()
+            .ok()?;
+        let body = client
+            .get(format!("{}/api/ps", base.trim_end_matches('/')))
+            .send()
+            .await
+            .ok()?
+            .json::<serde_json::Value>()
+            .await
+            .ok()?;
+        body["models"].as_array()?.iter().find_map(|entry| {
+            if entry["name"].as_str()? != model {
+                return None;
+            }
+            Some((entry["context_length"].as_u64()?, entry["size"].as_u64()?))
+        })
+    }
+    .await;
+    let Some((context_length, size)) = sample else {
+        return;
+    };
+    if let Ok(mut samples) = ollama_memory_samples().lock() {
+        samples
+            .entry(format!("{base}|{model}"))
+            .or_default()
+            .insert(context_length, size);
+    }
+}
+
+type OllamaMemorySamples =
+    std::sync::Mutex<std::collections::HashMap<String, std::collections::BTreeMap<u64, u64>>>;
+
+fn ollama_memory_samples() -> &'static OllamaMemorySamples {
+    static SAMPLES: std::sync::OnceLock<OllamaMemorySamples> = std::sync::OnceLock::new();
+    SAMPLES.get_or_init(Default::default)
+}
+
+/// The slope between the narrowest and widest window this model has been seen
+/// loaded at: what one token of its context actually costs, in bytes. `None`
+/// until two different windows have been observed, because one point gives a
+/// position and not a slope.
+pub(crate) fn kv_bytes_per_token_from_samples(
+    samples: &std::collections::BTreeMap<u64, u64>,
+) -> Option<u64> {
+    let (&narrow, &small) = samples.iter().next()?;
+    let (&wide, &large) = samples.iter().next_back()?;
+    let tokens = wide.checked_sub(narrow)?;
+    let bytes = large.checked_sub(small)?;
+    (tokens > 0 && bytes > 0).then(|| bytes / tokens)
+}
+
+fn measured_kv_bytes_per_token(base: &str, model: &str) -> Option<u64> {
+    ollama_memory_samples()
+        .lock()
+        .ok()?
+        .get(&format!("{base}|{model}"))
+        .and_then(kv_bytes_per_token_from_samples)
+}
+
+/// How much of the machine a resident model and its cache may take. The rest is
+/// for everything else running on it, the agent's own process included.
+const RAM_SHARE_FOR_MODEL: u64 = 70;
+
+/// The largest window this machine can actually hold for this model: what is
+/// left of its memory share once the weights are resident, divided by what a
+/// token of cache costs. `None` when either is unknown, and the coarse band
+/// stands in.
+pub(crate) fn window_the_machine_can_hold(
+    total_ram_bytes: Option<u64>,
+    model_bytes: Option<u64>,
+    kv_bytes_per_token: Option<u64>,
+) -> Option<u64> {
+    let budget = total_ram_bytes? * RAM_SHARE_FOR_MODEL / 100;
+    let for_cache = budget.checked_sub(model_bytes?)?;
+    Some(for_cache / kv_bytes_per_token?.max(1))
+}
+
+/// Bound the context by the model weights and measured cache cost. Use coarse
+/// memory bands until both are known; fit_ollama_num_ctx sizes each actual run.
+pub(crate) fn ram_ceiling_for_model(
+    total_ram_bytes: Option<u64>,
+    model_bytes: Option<u64>,
+    kv_bytes_per_token: Option<u64>,
+) -> u64 {
+    match window_the_machine_can_hold(total_ram_bytes, model_bytes, kv_bytes_per_token) {
+        Some(exact) => exact.max(OLLAMA_NUM_CTX_FLOOR),
+        None => ram_derived_ceiling(total_ram_bytes),
     }
 }
 
@@ -4718,6 +4941,112 @@ async fn ollama_model_profile(base: &str, model: &str) -> Option<OllamaModelProf
     }
 }
 
+/// An Ollama server's `(major, minor)`, or `None` when it did not say.
+type OllamaVersion = Option<(u64, u64)>;
+
+/// What each pulled model weighs, from `/api/tags`, cached per endpoint. The
+/// window a machine can hold depends on it, and `/api/show` does not carry it.
+pub(crate) async fn ollama_model_size_bytes(base: &str, model: &str) -> Option<u64> {
+    type SizeCache = std::sync::Mutex<std::collections::HashMap<String, HashMap<String, u64>>>;
+    use std::collections::HashMap;
+    static CACHE: std::sync::OnceLock<SizeCache> = std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(Default::default);
+    if let Some(hit) = cache
+        .lock()
+        .ok()
+        .and_then(|c| c.get(base).and_then(|sizes| sizes.get(model)).copied())
+    {
+        return Some(hit);
+    }
+    let fetched = async {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .map_err(|_| ())?;
+        let body = client
+            .get(format!("{}/api/tags", base.trim_end_matches('/')))
+            .send()
+            .await
+            .map_err(|_| ())?
+            .error_for_status()
+            .map_err(|_| ())?
+            .json::<serde_json::Value>()
+            .await
+            .map_err(|_| ())?;
+        Ok::<_, ()>(
+            body["models"]
+                .as_array()
+                .map(|models| {
+                    models
+                        .iter()
+                        .filter_map(|entry| {
+                            Some((entry["name"].as_str()?.to_string(), entry["size"].as_u64()?))
+                        })
+                        .collect::<HashMap<String, u64>>()
+                })
+                .unwrap_or_default(),
+        )
+    }
+    .await;
+    // A transport failure is not an answer: no guess, and nothing cached.
+    let Ok(sizes) = fetched else { return None };
+    let found = sizes.get(model).copied();
+    if let Ok(mut c) = cache.lock() {
+        c.insert(base.to_string(), sizes);
+    }
+    found
+}
+
+/// The Ollama server's own `(major, minor)`, cached per endpoint. Used to scope
+/// the MLX worker mitigations to the versions that still need them.
+pub(crate) async fn ollama_server_version(base: &str) -> Option<(u64, u64)> {
+    type ServerVersionCache = std::sync::Mutex<std::collections::HashMap<String, OllamaVersion>>;
+    static CACHE: std::sync::OnceLock<ServerVersionCache> = std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(Default::default);
+    if let Some(hit) = cache.lock().ok().and_then(|c| c.get(base).copied()) {
+        return hit;
+    }
+    let fetched = async {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(3))
+            .build()
+            .map_err(|_| ())?;
+        let body = client
+            .get(format!("{}/api/version", base.trim_end_matches('/')))
+            .send()
+            .await
+            .map_err(|_| ())?
+            .error_for_status()
+            .map_err(|_| ())?
+            .json::<serde_json::Value>()
+            .await
+            .map_err(|_| ())?;
+        Ok::<_, ()>(body["version"].as_str().and_then(parse_ollama_version))
+    }
+    .await;
+    // A transport failure is not an answer: leave it uncached so a server that
+    // comes back is seen.
+    let Ok(parsed) = fetched else { return None };
+    if let Ok(mut c) = cache.lock() {
+        c.insert(base.to_string(), parsed);
+    }
+    parsed
+}
+
+/// `"0.34.2"` → `(0, 34)`. Anything else is no answer rather than a guess.
+pub(crate) fn parse_ollama_version(raw: &str) -> Option<(u64, u64)> {
+    let mut parts = raw.trim().trim_start_matches('v').split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    Some((major, minor))
+}
+
+/// Whether this server reuses the prompt prefix between MLX turns. Measured on
+/// 0.34.2: a second turn reused 9428 of its 9500 tokens.
+pub(crate) fn mlx_prefix_cache_reused(version: Option<(u64, u64)>) -> bool {
+    version.is_some_and(|version| version >= (0, 34))
+}
+
 /// Ask Ollama for `model`'s trained context length. This compatibility wrapper
 /// shares the full `/api/show` profile cache with the HTTP worker policy.
 pub(crate) async fn ollama_model_ctx_limit(base: &str, model: &str) -> Option<u64> {
@@ -4726,12 +5055,128 @@ pub(crate) async fn ollama_model_ctx_limit(base: &str, model: &str) -> Option<u6
         .and_then(|profile| profile.context_length)
 }
 
-/// Size the context window to the prompt, bounded by [FLOOR, cap]. Coarse on
-/// purpose (~3 chars/token + output headroom): this is a memory guard, not
-/// fine-grained sizing.
+/// Size the context window to the prompt, bounded by [FLOOR, cap]. Text only:
+/// `fit_ollama_num_ctx` is what sizes a request that also carries tools.
 pub(crate) fn ollama_num_ctx(system_context: &str, user_prompt: &str, ctx_cap: u64) -> u64 {
-    let est = ((system_context.len() + user_prompt.len()) as u64 / 3) + 2048;
+    let est = estimated_prompt_tokens(system_context.len() + user_prompt.len(), 0);
     est.clamp(OLLAMA_NUM_CTX_FLOOR, ctx_cap.max(OLLAMA_NUM_CTX_FLOOR))
+}
+
+/// Everything this run could end up declaring: what is on the wire now, plus
+/// the families `tools_load` can still bring in. The window is sized for the
+/// maximum once, never grown later.
+pub(crate) fn reachable_tools_bytes(body: &serde_json::Value) -> usize {
+    let declared = body.get("tools").map_or(0, |tools| tools.to_string().len());
+    let names: std::collections::HashSet<&str> = body["tools"]
+        .as_array()
+        .map(|tools| {
+            tools
+                .iter()
+                .filter_map(|tool| tool["function"]["name"].as_str())
+                .collect()
+        })
+        .unwrap_or_default();
+    if !names.contains("tools_load") {
+        return declared;
+    }
+    declared
+        + crate::api::agent_tools::TOOL_FAMILIES
+            .iter()
+            .flat_map(|(family, _, _)| crate::api::agent_tools::declarations_for_family(family))
+            .filter(|tool| {
+                tool["function"]["name"]
+                    .as_str()
+                    .is_none_or(|name| !names.contains(name))
+            })
+            // The existing JSON array is nonempty (it contains tools_load).
+            // Every appended declaration also contributes a comma.
+            .map(|tool| tool.to_string().len() + 1)
+            .sum::<usize>()
+}
+
+/// Size once for messages and all reachable tool declarations. Omitting tools
+/// risks silent prompt truncation; changing num_ctx mid-run reloads the model.
+pub(crate) fn fit_ollama_num_ctx(body: &mut serde_json::Value, ctx_cap: u64) {
+    let messages = body["messages"].to_string().len();
+    let tools = reachable_tools_bytes(body);
+    let est = estimated_prompt_tokens(messages, tools);
+    let ceiling = ctx_cap.max(OLLAMA_NUM_CTX_FLOOR);
+    if est > ceiling {
+        tracing::warn!(
+            target: "kronn::agent::context",
+            needed = est, window = ceiling, tools_bytes = tools, messages_bytes = messages,
+            "the request does not fit its context window; Ollama will drop the overflow"
+        );
+    }
+    let num_ctx = est.clamp(OLLAMA_NUM_CTX_FLOOR, ceiling);
+    body["options"]["num_ctx"] = serde_json::json!(num_ctx);
+    if let Some(num_predict) = ollama_num_predict(num_ctx) {
+        body["options"]["num_predict"] = serde_json::json!(num_predict);
+    }
+}
+
+/// How many tokens one turn may generate, or `None` when the operator lifted
+/// the cap. Pure so the rule can be tested without touching the process env.
+pub(crate) fn num_predict_for(num_ctx: u64, raw_override: Option<String>) -> Option<i64> {
+    if let Some(raw) = raw_override {
+        let raw = raw.trim();
+        if !raw.is_empty() {
+            return match raw.parse::<i64>() {
+                Ok(n) if n <= 0 => None,
+                Ok(n) => Some(n),
+                // A typo must not silently remove the guard.
+                Err(_) => Some(default_num_predict(num_ctx)),
+            };
+        }
+    }
+    Some(default_num_predict(num_ctx))
+}
+
+fn default_num_predict(num_ctx: u64) -> i64 {
+    (num_ctx / 4).clamp(OLLAMA_NUM_PREDICT_FLOOR, OLLAMA_NUM_PREDICT_CEIL) as i64
+}
+
+pub(crate) fn ollama_num_predict(num_ctx: u64) -> Option<i64> {
+    num_predict_for(num_ctx, std::env::var("KRONN_OLLAMA_NUM_PREDICT").ok())
+}
+
+/// Shorten large JSON fields while preserving small scalars and valid structure.
+/// Return None for non-JSON input or when no space is saved.
+fn compact_tool_result(raw: &str, allowance: usize) -> Option<String> {
+    let parsed = serde_json::from_str::<serde_json::Value>(raw).ok()?;
+    let mut facts = Vec::new();
+    let mut excerpts = Vec::new();
+    let mut visited = 0;
+    collect_checkpoint_json_facts(&parsed, "", &mut facts, &mut excerpts, &mut visited);
+    if facts.is_empty() && excerpts.is_empty() {
+        return None;
+    }
+    let render = |facts: &[serde_json::Value], excerpts: &[serde_json::Value]| {
+        serde_json::json!({
+            "kronn_shortened": true,
+            "original_bytes": raw.len(),
+            "kept": facts,
+            "excerpts": excerpts,
+            // Never invite the same call again: it returns the same result and
+            // it is shortened the same way, so the turn is spent for nothing.
+            "note": "Shortened to fit the context window. Calling this again returns the same \
+                     result, shortened the same way. Work from what is here, or ask for a part \
+                     you have not seen yet.",
+        })
+        .to_string()
+    };
+    let mut rendered = render(&facts, &excerpts);
+    // Give up the biggest excerpts first, then the least protocol-critical
+    // facts, rather than cutting the middle of the JSON.
+    while rendered.len() > allowance && !excerpts.is_empty() {
+        excerpts.pop();
+        rendered = render(&facts, &excerpts);
+    }
+    while rendered.len() > allowance && facts.len() > 1 {
+        facts.pop();
+        rendered = render(&facts, &excerpts);
+    }
+    (rendered.len() < raw.len()).then_some(rendered)
 }
 
 /// Keep the messages within what `ctx_cap` can actually hold. Re-sizing the
@@ -4943,11 +5388,23 @@ fn collection_replacement(
     (low < snapshot.total && replacement.len() < current_len).then_some(replacement)
 }
 
-fn is_protected_checkpoint_tool_result(message: &serde_json::Value) -> bool {
+fn is_protected_protocol_tool_result(message: &serde_json::Value) -> bool {
+    // An authoring schema is a contract, not a prose excerpt. Cutting it can
+    // delete a required field or leave invalid JSON, then make retries return
+    // the same broken contract until the repeated-call guard withdraws it.
+    // Keep it whole; the following resize still respects the model's cap.
+    if message["name"] == "workflow_step_schema" {
+        return true;
+    }
     message["content"]
         .as_str()
         .and_then(|content| serde_json::from_str::<serde_json::Value>(content).ok())
-        .is_some_and(|content| content["kronn_checkpoint_compacted"] == true)
+        .is_some_and(|content| {
+            content["kronn_checkpoint_compacted"] == true
+                || (message["name"] == "tool_manual"
+                    && content["tool"] == "signals"
+                    && content["catalogue"]["schema_version"].is_u64())
+        })
 }
 
 pub(crate) fn clamp_ollama_tool_results(body: &mut serde_json::Value, ctx_cap: u64) {
@@ -5025,7 +5482,7 @@ pub(crate) fn clamp_ollama_tool_results(body: &mut serde_json::Value, ctx_cap: u
             // These envelopes are already bounded, valid JSON and carry the
             // only retained CAS receipt. Blind truncation would corrupt the
             // very protocol state the checkpoint was designed to preserve.
-            .filter(|(_, m)| !is_protected_checkpoint_tool_result(m))
+            .filter(|(_, m)| !is_protected_protocol_tool_result(m))
             .map(|(i, m)| (i, m["content"].as_str().map_or(0, str::len)))
             .filter(|(_, len)| *len > MIN_KEPT)
             .max_by_key(|(_, len)| *len);
@@ -5037,24 +5494,30 @@ pub(crate) fn clamp_ollama_tool_results(body: &mut serde_json::Value, ctx_cap: u
             .as_str()
             .unwrap_or_default()
             .to_string();
+        // The tool content is itself a JSON string inside `messages`, so its
+        // quotes and escapes cost more than its raw byte length. Derive the
+        // exact encoded allowance; subtracting `over` from raw `len` can
+        // otherwise decide that zero items fit when a compact list does.
+        let body_len = budget + over;
+        let encoded_content_len = serde_json::to_string(&content).map_or(len, |v| v.len());
+        let other_messages_len = body_len.saturating_sub(encoded_content_len);
+        let max_encoded_len = budget.saturating_sub(other_messages_len);
         if let Some(snapshot) = collections.get(&idx) {
-            // The tool content is itself a JSON string inside `messages`, so its
-            // quotes and escapes cost more than its raw byte length. Derive the
-            // exact encoded allowance; subtracting `over` from raw `len` can
-            // otherwise decide that zero items fit when a compact list does.
-            let body_len = budget + over;
-            let encoded_content_len = serde_json::to_string(&content).map_or(len, |v| v.len());
-            let other_messages_len = body_len.saturating_sub(encoded_content_len);
-            let max_encoded_len = budget.saturating_sub(other_messages_len);
             if let Some(replacement) = collection_replacement(snapshot, max_encoded_len, len) {
                 messages[idx]["content"] = serde_json::json!(replacement);
                 continue;
             }
         }
+        // Compact before truncating so retrying cannot keep returning the same cut result.
+        if let Some(shortened) = compact_tool_result(&content, max_encoded_len) {
+            messages[idx]["content"] = serde_json::json!(shortened);
+            continue;
+        }
         let note = |dropped: usize| {
             format!(
                 "\n\n[truncated by Kronn: {dropped} bytes dropped so this result fits the \
-                 context window. Ask for a narrower range if you need the rest.]"
+                 context window. Calling the same tool again returns the same result, cut the \
+                 same way — ask for a part you have not seen instead.]"
             )
         };
         // The note itself costs bytes, so it has to come out of the budget too —
@@ -5094,6 +5557,38 @@ pub(crate) fn resize_ollama_num_ctx(body: &mut serde_json::Value, ctx_cap: u64) 
         return;
     }
     body["options"]["num_ctx"] = serde_json::json!(sized);
+}
+
+/// Point file-capable agents at the project document; inline it otherwise.
+pub(crate) fn http_agent_reads_its_own_files(is_http: bool, declares_read_file: bool) -> bool {
+    is_http && declares_read_file && !inline_project_doc_forced()
+}
+
+/// The doc's own section headings, so an agent knows what is in the file it is
+/// pointed at instead of exploring the repository to find out.
+pub(crate) fn doc_section_index(doc: &str) -> String {
+    doc.lines()
+        .filter_map(|line| line.strip_prefix("## "))
+        .map(|heading| format!("- {}", heading.trim()))
+        .take(24)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Put the whole project doc back in every request, for a model that will not
+/// go and open it. `KRONN_INLINE_PROJECT_DOC=1`.
+pub(crate) fn inline_project_doc_forced() -> bool {
+    std::env::var("KRONN_INLINE_PROJECT_DOC")
+        .as_deref()
+        .map(str::trim)
+        == Ok("1")
+}
+
+/// `think:false` is honoured from Ollama 0.19. Before that the control token in
+/// the prompt was the only way, and a server that will not say its version keeps
+/// it rather than silently paying for reasoning nobody reads.
+pub(crate) fn needs_no_think_token(server_version: Option<(u64, u64)>) -> bool {
+    !server_version.is_some_and(|version| version >= (0, 19))
 }
 
 /// qwen3 models are hybrid-reasoning; a step pays for every thinking token and
@@ -5149,9 +5644,10 @@ pub(crate) fn build_ollama_chat_body(
     user_prompt: &str,
     format: Option<&serde_json::Value>,
     ctx_cap: u64,
+    server_version: Option<(u64, u64)>,
 ) -> serde_json::Value {
     let mut messages = Vec::new();
-    if ollama_disables_thinking(model) {
+    if ollama_disables_thinking(model) && needs_no_think_token(server_version) {
         messages.push(serde_json::json!({ "role": "system", "content": "/no_think" }));
     }
     if !system_context.is_empty() {
@@ -5159,6 +5655,7 @@ pub(crate) fn build_ollama_chat_body(
     }
     messages.push(serde_json::json!({ "role": "user", "content": user_prompt }));
 
+    let num_ctx = ollama_num_ctx(system_context, user_prompt, ctx_cap);
     let mut body = serde_json::json!({
         "model": model,
         "messages": messages,
@@ -5168,9 +5665,12 @@ pub(crate) fn build_ollama_chat_body(
             "temperature": 0,
             "top_k": 1,
             "seed": 42,
-            "num_ctx": ollama_num_ctx(system_context, user_prompt, ctx_cap),
+            "num_ctx": num_ctx,
         },
     });
+    if let Some(num_predict) = ollama_num_predict(num_ctx) {
+        body["options"]["num_predict"] = serde_json::json!(num_predict);
+    }
     if let Some(fmt) = format {
         body["format"] = fmt.clone();
     }
@@ -5192,6 +5692,163 @@ pub(crate) fn build_ollama_chat_body(
 pub(crate) struct TokenTally {
     prompt: u64,
     eval: u64,
+}
+
+/// Cumulative ceiling telemetry carried in stderr; the last marker wins.
+pub(crate) const CEILING_TRACE_PREFIX: &str = "kronn_ceiling:";
+/// Enough refused calls to show what is missing, not a dump of the loop.
+const MAX_REFUSED_CALLS_REPORTED: usize = 5;
+const MAX_REFUSED_CALL_CHARS: usize = 160;
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct CeilingReport {
+    pub version: u8,
+    #[serde(default)]
+    pub tools: Vec<ToolCeilingHit>,
+    /// The round ceiling this run reached, when it did.
+    #[serde(default)]
+    pub rounds: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct ToolCeilingHit {
+    pub tool: String,
+    pub limit: usize,
+    pub refused: usize,
+    /// What the first refused calls asked for, so a reader sees what the
+    /// answer could not cover.
+    #[serde(default)]
+    pub refused_calls: Vec<String>,
+}
+
+impl CeilingReport {
+    fn record_tool_refusal(
+        &mut self,
+        tool: &str,
+        limit: usize,
+        call: &crate::agents::tools::ToolCall,
+    ) {
+        let hit = match self.tools.iter_mut().position(|hit| hit.tool == tool) {
+            Some(index) => &mut self.tools[index],
+            None => {
+                self.tools.push(ToolCeilingHit {
+                    tool: tool.to_string(),
+                    limit,
+                    refused: 0,
+                    refused_calls: Vec::new(),
+                });
+                self.tools.last_mut().expect("just pushed")
+            }
+        };
+        hit.refused += 1;
+        if hit.refused_calls.len() < MAX_REFUSED_CALLS_REPORTED {
+            hit.refused_calls
+                .push(refused_call_summary(&call.arguments));
+        }
+    }
+
+    fn publish(&mut self, capture: &Arc<Mutex<Vec<String>>>) {
+        self.version = 1;
+        if let (Ok(encoded), Ok(mut lines)) = (serde_json::to_string(self), capture.lock()) {
+            lines.push(format!("{CEILING_TRACE_PREFIX}{encoded}"));
+        }
+    }
+}
+
+/// `url=https://…/issues/119`, bounded: what a refused call was after.
+fn refused_call_summary(arguments: &serde_json::Value) -> String {
+    let summary = match arguments.as_object() {
+        Some(map) => map
+            .iter()
+            .map(|(key, value)| match value {
+                serde_json::Value::String(text) => format!("{key}={text}"),
+                other => format!("{key}={other}"),
+            })
+            .collect::<Vec<_>>()
+            .join(", "),
+        None => arguments.to_string(),
+    };
+    if summary.chars().count() > MAX_REFUSED_CALL_CHARS {
+        let cut: String = summary.chars().take(MAX_REFUSED_CALL_CHARS).collect();
+        format!("{cut}…")
+    } else {
+        summary
+    }
+}
+
+pub(crate) fn parse_ceiling_report(stderr_lines: &[String]) -> Option<CeilingReport> {
+    stderr_lines
+        .iter()
+        .rev()
+        .find_map(|line| line.trim_start().strip_prefix(CEILING_TRACE_PREFIX))
+        .and_then(|raw| serde_json::from_str::<CeilingReport>(raw).ok())
+        .filter(|report| {
+            report.version == 1 && (!report.tools.is_empty() || report.rounds.is_some())
+        })
+}
+
+/// Scale discussion tool rounds with the context window; keep the default when unknown.
+pub(crate) fn round_cap_for_window(window_tokens: Option<u64>) -> usize {
+    match window_tokens {
+        Some(0) | None => crate::agents::tools::MAX_TOOL_ITERATIONS,
+        Some(tokens) if tokens <= 32_768 => 50,
+        Some(tokens) if tokens <= 65_536 => 80,
+        Some(tokens) if tokens <= 131_072 => crate::agents::tools::MAX_TOOL_ITERATIONS,
+        Some(_) => 250,
+    }
+}
+
+/// Cache the smallest advertised OpenRouter endpoint window. Other compatible
+/// providers leave the window unknown when they publish no capacity.
+type RemoteWindowCache = std::collections::HashMap<String, (Instant, Option<u64>)>;
+
+async fn remote_context_window(base: &str, model: &str, auth_key: Option<&str>) -> Option<u64> {
+    static CACHE: std::sync::OnceLock<Mutex<RemoteWindowCache>> = std::sync::OnceLock::new();
+    const TTL: Duration = Duration::from_secs(3_600);
+    if !base.contains("openrouter.ai") || model.trim().is_empty() {
+        return None;
+    }
+    let key = format!("{base}|{model}");
+    let cache = CACHE.get_or_init(Default::default);
+    if let Some((at, window)) = cache.lock().ok().and_then(|map| map.get(&key).copied()) {
+        if at.elapsed() < TTL {
+            return window;
+        }
+    }
+    let url = format!(
+        "{}/models/{}/endpoints",
+        base.trim_end_matches('/'),
+        model.trim()
+    );
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(3))
+        .build()
+        .ok()?;
+    let mut request = client.get(&url);
+    if let Some(key) = auth_key {
+        request = request.bearer_auth(key);
+    }
+    let window = match request.send().await {
+        Ok(response) if response.status().is_success() => response
+            .json::<serde_json::Value>()
+            .await
+            .ok()
+            .and_then(|body| smallest_endpoint_window(&body)),
+        _ => None,
+    };
+    if let Ok(mut map) = cache.lock() {
+        map.insert(key, (Instant::now(), window));
+    }
+    window
+}
+
+fn smallest_endpoint_window(body: &serde_json::Value) -> Option<u64> {
+    body["data"]["endpoints"]
+        .as_array()?
+        .iter()
+        .filter_map(|endpoint| endpoint["context_length"].as_u64())
+        .filter(|tokens| *tokens > 0)
+        .min()
 }
 
 const HTTP_TURN_TRACE_PREFIX: &str = "kronn_http_turn:";
@@ -5759,6 +6416,8 @@ async fn start_ollama_http(
     ollama_context_overrides: Option<&std::collections::HashMap<String, u64>>,
     http_request_timeout: Option<std::time::Duration>,
     parent_cancel: Option<&tokio_util::sync::CancellationToken>,
+    reasoning_effort: Option<&str>,
+    max_tokens: Option<u64>,
 ) -> Result<AgentProcess, String> {
     let identity_context = http_agent_identity_context(agent_type, model);
     let system_context = if system_context.trim().is_empty() {
@@ -5814,24 +6473,39 @@ async fn start_ollama_http(
             let model_storage_format = model_profile
                 .as_ref()
                 .and_then(|profile| profile.storage_format.clone());
+            // Bound this model by resident weights and observed cache cost when available.
+            sample_ollama_memory(&base, model).await;
+            let machine_ceiling = ram_ceiling_for_model(
+                total_system_memory_bytes(),
+                ollama_model_size_bytes(&base, model).await,
+                measured_kv_bytes_per_token(&base, model),
+            );
             let cap = match ollama_context_overrides {
                 Some(overrides) => resolve_ctx_cap_for_model(
                     std::env::var("KRONN_OLLAMA_NUM_CTX_CAP").ok(),
                     model,
                     overrides,
                     model_limit,
-                    ram_derived_ceiling(total_system_memory_bytes()),
+                    machine_ceiling,
                 ),
-                None => {
-                    resolve_ctx_cap(std::env::var("KRONN_OLLAMA_NUM_CTX_CAP").ok(), model_limit)
-                }
+                None => resolve_ctx_cap_within(
+                    std::env::var("KRONN_OLLAMA_NUM_CTX_CAP").ok(),
+                    model_limit,
+                    machine_ceiling,
+                ),
             };
             let ctx_cap = cap.value;
             ctx_notice = cap.throttle_notice(model);
             if let Some(notice) = ctx_notice.as_deref() {
                 tracing::warn!(target: "kronn::ollama", model = %model, ctx_cap, "{notice}");
             }
-            let est = ((system_context.len() + user_prompt.len()) as u64 / 3) + 2048;
+            // Include tool declarations in the prompt estimate.
+            let tools_bytes = executor
+                .as_ref()
+                .map(|exec| serde_json::Value::Array(exec.catalogue()).to_string().len())
+                .unwrap_or(0);
+            let est =
+                estimated_prompt_tokens(system_context.len() + user_prompt.len(), tools_bytes);
             if est > ctx_cap {
                 // KT-382 — refuse, do not announce and send anyway. Ollama does not
                 // reject an oversized prompt: it silently drops the head of the
@@ -5879,6 +6553,7 @@ async fn start_ollama_http(
                     target: "kronn::ollama",
                     model = %model,
                     estimated_tokens = est,
+                    tools_bytes = tools_bytes,
                     ctx_cap = ctx_cap,
                     model_limit = ?model_limit,
                     "refusing an oversized prompt rather than letting Ollama truncate it"
@@ -5889,7 +6564,14 @@ async fn start_ollama_http(
                  from the remainder, so Kronn refuses instead: {remedy}."
                 ));
             }
-            let body = build_ollama_chat_body(model, &system_context, user_prompt, format, ctx_cap);
+            let body = build_ollama_chat_body(
+                model,
+                &system_context,
+                user_prompt,
+                format,
+                ctx_cap,
+                ollama_server_version(&base).await,
+            );
             (
                 base,
                 body,
@@ -5948,13 +6630,26 @@ async fn start_ollama_http(
             "{backend} refused a worker_scope outside a durable worker execution room"
         ));
     }
-    let worker_policy =
-        worker_exploration_policy(model, model_storage_format.as_deref(), is_openai_wire);
+    // Probed once per endpoint, and only for the wire that can be MLX.
+    let prefix_cache_reused = if is_openai_wire {
+        false
+    } else {
+        mlx_prefix_cache_reused(ollama_server_version(&base).await)
+    };
+    let worker_policy = worker_exploration_policy(
+        model,
+        model_storage_format.as_deref(),
+        is_openai_wire,
+        prefix_cache_reused,
+    );
     let configured_ctx_cap = ctx_cap;
     let ctx_cap = worker_effective_ctx_cap(configured_ctx_cap, tool_run_mode, worker_policy);
     let mut worker_original_catalogue_seed = Vec::new();
+    // Keep reader declarations for restoration in every run mode.
+    let mut progress_reader_seed: Vec<serde_json::Value> = Vec::new();
     if let Some(exec) = executor.as_ref() {
         let catalogue = exec.catalogue();
+        progress_reader_seed = progress_reader_declarations(&catalogue);
         if tool_run_mode == crate::agents::tools::ToolRunMode::Worker {
             worker_original_catalogue_seed = catalogue.clone();
         }
@@ -5967,6 +6662,27 @@ async fn start_ollama_http(
         constrain_prelocalized_read_tool(&mut body, &worker_original_catalogue_seed, scope);
         tools_declared = body["tools"].as_array().map(Vec::len).unwrap_or(0);
     }
+    if !is_openai_wire {
+        fit_ollama_num_ctx(&mut body, ctx_cap);
+    }
+    // Read discussion grants once; bounded workers cannot request them.
+    let ceiling_allowance = match executor.as_ref() {
+        Some(exec) if tool_run_mode == crate::agents::tools::ToolRunMode::General => {
+            exec.ceiling_allowance().await
+        }
+        _ => crate::agents::tools::CeilingAllowance::default(),
+    };
+    let round_cap = if tool_run_mode == crate::agents::tools::ToolRunMode::Worker {
+        crate::agents::tools::MAX_TOOL_ITERATIONS
+    } else {
+        let window = if is_openai_wire {
+            remote_context_window(&base, model, auth_key.as_deref()).await
+        } else {
+            Some(ctx_cap)
+        };
+        round_cap_for_window(window)
+    }
+    .saturating_add(ceiling_allowance.extra_rounds);
     // A turn that declares tools will grow by whatever they return, and Ollama
     // fixes the window when it loads the model — it does not grow mid-run. Sizing
     // it on the prompt alone gives a one-line question a tiny slot that the first
@@ -5991,6 +6707,7 @@ async fn start_ollama_http(
             );
         }
     }
+    super::generation_settings::apply_http(&mut body, agent_type, reasoning_effort, max_tokens)?;
     tracing::info!(
         target: "kronn::agent::tools",
         backend, model = %model, tools_declared,
@@ -6118,7 +6835,6 @@ async fn start_ollama_http(
         }
         use crate::agents::tools::{
             assistant_tool_call_message, tool_result_message, trace_line, ToolCallAccumulator,
-            MAX_TOOL_ITERATIONS,
         };
         use futures::StreamExt;
         let mut response = response;
@@ -6186,6 +6902,9 @@ async fn start_ollama_http(
         let mut consecutive_error_only_rounds = 0usize;
         let mut useful_tool_results = 0usize;
         let mut forced_synthesis = false;
+        // Collect reached ceilings only where a human can answer.
+        let mut ceiling_report = CeilingReport::default();
+        let mut round_ceiling_reached = false;
         // A worker gets one bounded exploration phase and then a small
         // finalization phase. The boundary adapts to the provider engine and
         // context pressure, turning the old 50th-turn crash into a bounded
@@ -7074,12 +7793,23 @@ async fn start_ollama_http(
                 consecutive_errors_per_tool.remove("read_file");
                 open_tool_circuits.remove("read_file");
                 withdrawn_tools.remove("read_file");
-            } else if turn > MAX_TOOL_ITERATIONS {
+            } else if turn > round_cap && ceiling_allowance.ask_on_ceiling {
+                // A discussion ceiling ends with a partial answer and a human budget decision.
+                if !round_ceiling_reached {
+                    round_ceiling_reached = true;
+                    ceiling_report.rounds = Some(round_cap);
+                    ceiling_report.publish(&stderr_clone);
+                    tracing::info!(
+                        target: "kronn::agent::tools",
+                        turn, round_cap,
+                        "round ceiling reached — requesting synthesis and asking the human"
+                    );
+                }
+            } else if turn > round_cap {
                 // Refusing to converge is a failure, not a silent
                 // truncation: surface it so the step fails with a reason.
-                let msg = format!(
-                    "{backend} kept requesting tools after {MAX_TOOL_ITERATIONS} rounds — giving up"
-                );
+                let msg =
+                    format!("{backend} kept requesting tools after {round_cap} rounds — giving up");
                 tracing::warn!(target: "kronn::agent::tools", "{}", msg);
                 if let Ok(mut se) = stderr_clone.lock() {
                     se.push(msg);
@@ -7098,6 +7828,28 @@ async fn start_ollama_http(
             let mut repair_read_succeeded = false;
             let mut repair_edit_succeeded = false;
             for call in &calls {
+                if round_ceiling_reached {
+                    *refusals_per_tool.entry(call.name.clone()).or_insert(0) += 1;
+                    let refusal = crate::agents::tools::ToolOutcome {
+                        call: call.clone(),
+                        ok: false,
+                        content: serde_json::json!({
+                            "round_ceiling_reached": true,
+                            "note": format!(
+                                "This run reached its ceiling of {round_cap} tool rounds. No tool \
+                                 will run again in it. Answer now with what you already have, \
+                                 and say plainly what is still missing: the human is asked \
+                                 whether to grant more rounds."
+                            ),
+                        }),
+                    };
+                    if let Ok(mut se) = stderr_clone.lock() {
+                        se.push(trace_line(&refusal));
+                    }
+                    results.push(refusal);
+                    budget_refusals += 1;
+                    continue;
+                }
                 if !declared_tools_for_turn.contains(&call.name) {
                     if worker_run
                         && worker_finalization_phase
@@ -7332,10 +8084,24 @@ async fn start_ollama_http(
                     budget_refusals += 1;
                     continue;
                 }
-                let tool_limit = max_calls_for_tool(&call.name, tool_run_mode);
+                let tool_limit = if ceiling_allowance.unlimited_tools.contains(&call.name) {
+                    usize::MAX
+                } else {
+                    max_calls_for_tool(&call.name, tool_run_mode).saturating_add(
+                        ceiling_allowance
+                            .extra_calls
+                            .get(&call.name)
+                            .copied()
+                            .unwrap_or(0),
+                    )
+                };
                 if *used > tool_limit {
                     *refusals_per_tool.entry(call.name.clone()).or_insert(0) += 1;
                     withdrawn_tools.insert(call.name.clone());
+                    if ceiling_allowance.ask_on_ceiling {
+                        ceiling_report.record_tool_refusal(&call.name, tool_limit, call);
+                        ceiling_report.publish(&stderr_clone);
+                    }
                     tracing::warn!(
                         target: "kronn::agent::tools",
                         tool = %call.name, turn, used = *used,
@@ -7570,6 +8336,46 @@ async fn start_ollama_http(
                             tool_limit,
                             &mut results_seen_per_tool,
                         );
+                        // Invalidate progress readers after mutations in every run mode.
+                        if is_progress_mutation_tool(&call.name) {
+                            invalidate_progress_observation_cache(
+                                &mut seen_calls,
+                                &mut repeated_calls,
+                                &mut results_seen_per_tool,
+                            );
+                            // Restore readers withdrawn for repetition only; call ceilings and error
+                            // circuits remain enforced.
+                            let restorable = progress_readers_to_restore(
+                                &withdrawn_tools,
+                                &open_tool_circuits,
+                                &calls_per_tool,
+                                tool_run_mode,
+                                &ceiling_allowance,
+                            );
+                            for name in &restorable {
+                                withdrawn_tools.remove(name);
+                            }
+                            if !restorable.is_empty() {
+                                // Restore the declaration as well as removing the withdrawn flag.
+                                let give_back: Vec<serde_json::Value> = progress_reader_seed
+                                    .iter()
+                                    .filter(|tool| {
+                                        tool.pointer("/function/name")
+                                            .and_then(serde_json::Value::as_str)
+                                            .is_some_and(|name| {
+                                                restorable.iter().any(|r| r == name)
+                                            })
+                                    })
+                                    .cloned()
+                                    .collect();
+                                restore_tool_declarations(&mut body, &give_back);
+                                tracing::info!(
+                                    target: "kronn::agent::tools",
+                                    turn, tools = ?restorable,
+                                    "task changed: its readers are declared again"
+                                );
+                            }
+                        }
                         if worker_run && is_workspace_observation_tool(&call.name) {
                             explored_without_progress += 1;
                             annotate_worker_exploration(&mut outcome, explored_without_progress);
@@ -7858,6 +8664,64 @@ async fn start_ollama_http(
                 }
             }
 
+            // Move loaded declarations from the tool result into the next request catalogue
+            // so the model receives them only once.
+            let mut loaded_declarations: Vec<serde_json::Value> = Vec::new();
+            for outcome in &mut results {
+                let Some(map) = outcome.content.as_object_mut() else {
+                    continue;
+                };
+                // Asking for the same family twice never reaches the executor:
+                // the identical-call guard replays the first answer, which
+                // already says the tools are ready.
+                if let Some(serde_json::Value::Array(tools)) = map.remove("__kronn_tools_add") {
+                    loaded_declarations.extend(tools);
+                }
+            }
+            if !loaded_declarations.is_empty() {
+                let declared: std::collections::HashSet<String> = body["tools"]
+                    .as_array()
+                    .map(|tools| {
+                        tools
+                            .iter()
+                            .filter_map(|tool| tool["function"]["name"].as_str())
+                            .map(str::to_string)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let fresh: Vec<serde_json::Value> = loaded_declarations
+                    .into_iter()
+                    .filter(|tool| {
+                        tool["function"]["name"]
+                            .as_str()
+                            .is_some_and(|name| !declared.contains(name))
+                    })
+                    .collect();
+                if !fresh.is_empty() {
+                    let names: Vec<String> = fresh
+                        .iter()
+                        .filter_map(|tool| tool["function"]["name"].as_str())
+                        .map(str::to_string)
+                        .collect();
+                    match body["tools"].as_array_mut() {
+                        Some(tools) => tools.extend(fresh),
+                        None => body["tools"] = serde_json::Value::Array(fresh),
+                    }
+                    tracing::info!(
+                        target: "kronn::agent::tools",
+                        turn, tools = ?names,
+                        "tool family loaded into the run's catalogue"
+                    );
+                    if let Ok(mut se) = stderr_clone.lock() {
+                        se.push(format!(
+                            "{backend} loaded {} tool(s) on request: {}",
+                            names.len(),
+                            names.join(", ")
+                        ));
+                    }
+                }
+            }
+
             if let Some(messages) = body["messages"].as_array_mut() {
                 // OpenAI wants JSON-encoded arguments; Ollama wants a real object.
                 messages.push(assistant_tool_call_message(&calls, is_openai_wire));
@@ -8021,7 +8885,26 @@ async fn start_ollama_http(
             // a change to write and a commit to make. When the offending tool was
             // the only one, the catalogue empties and this fires exactly as before.
             let nothing_left_to_call = body.get("tools").is_none();
-            if (budget_refusals > 0 && budget_refusals == calls.len() && nothing_left_to_call)
+            if round_ceiling_reached && !forced_synthesis {
+                // Give the model one tool-free turn to summarize its partial result.
+                if let Some(map) = body.as_object_mut() {
+                    map.remove("tools");
+                }
+                if let Some(messages) = body["messages"].as_array_mut() {
+                    messages.push(serde_json::json!({
+                        "role": "user",
+                        "content": format!(
+                            "This run reached its ceiling of {round_cap} tool rounds. Do not \
+                             call any more tools. Answer now with the evidence already \
+                             obtained, and say plainly what is still missing: the human is \
+                             asked whether to grant more rounds."
+                        ),
+                    }));
+                }
+                forced_synthesis = true;
+            } else if (budget_refusals > 0
+                && budget_refusals == calls.len()
+                && nothing_left_to_call)
                 || error_loop_exhausted
             {
                 if let Some(map) = body.as_object_mut() {

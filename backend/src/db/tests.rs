@@ -220,6 +220,7 @@ fn sample_project(id: &str, name: &str) -> Project {
         default_profile_id: None,
         briefing_notes: None,
         linked_repos: vec![],
+        workspace: None,
         created_at: now,
         updated_at: now,
     }
@@ -3547,6 +3548,158 @@ fn assigned_batch_identity_persists_template_without_resolved_secret() {
         .unwrap();
     assert_eq!(stored, "Analyse {{ticket}} en profondeur");
     assert!(!stored.contains("small-secret"));
+}
+
+/// A comparison target must not inherit an incompatible Quick Prompt connection.
+#[test]
+fn an_http_quick_prompt_compared_on_other_agents_sends_them_no_connection() {
+    let conn = test_db();
+    for (id, alias) in [("conn-openrouter", "router"), ("conn-litellm", "litellm")] {
+        conn.execute(
+            "INSERT INTO external_api_connections (
+                id, display_name, mention_alias, endpoint, credential_slug, origin_preset,
+                economy_model, default_model, reasoning_model
+             ) VALUES (?1, ?2, ?2, 'https://example.test/api', ?1, 'open_router',
+                       'eco', 'default', 'reasoning')",
+            rusqlite::params![id, alias],
+        )
+        .unwrap();
+    }
+    let mut qp = sample_qp_for_batch("qp-http-compare");
+    qp.agent = crate::models::AgentType::Custom;
+    qp.connection_id = Some("conn-openrouter".into());
+    crate::db::quick_prompts::insert_quick_prompt(&conn, &qp).unwrap();
+    let target = |agent: crate::models::AgentType, connection: Option<&str>| {
+        crate::db::workflows::BatchAgentOverride {
+            agent,
+            tier: crate::models::ModelTier::Default,
+            connection_id: connection.map(str::to_string),
+            model: None,
+        }
+    };
+    let item = |title: &str, agent_override: Option<crate::db::workflows::BatchAgentOverride>| {
+        crate::db::workflows::BatchItemInput {
+            title: title.into(),
+            prompt: "same prompt".into(),
+            agent_override,
+        }
+    };
+
+    let outcome = crate::db::workflows::create_batch_run(
+        &conn,
+        crate::db::workflows::CreateBatchRunInput {
+            quick_prompt: &qp,
+            items: vec![
+                item(
+                    "OpenRouter",
+                    Some(target(
+                        crate::models::AgentType::Custom,
+                        Some("conn-openrouter"),
+                    )),
+                ),
+                item(
+                    "Claude Code",
+                    Some(target(crate::models::AgentType::ClaudeCode, None)),
+                ),
+                item(
+                    "Ollama",
+                    Some(target(crate::models::AgentType::Ollama, None)),
+                ),
+                item(
+                    "Another connection",
+                    Some(target(
+                        crate::models::AgentType::Custom,
+                        Some("conn-litellm"),
+                    )),
+                ),
+                item("Classic batch", None),
+            ],
+            batch_name: Some("Compare".into()),
+            project_id: None,
+            parent_run_id: None,
+            author_pseudo: None,
+            author_avatar_email: None,
+            language: "fr".into(),
+            workspace_mode: "Direct".into(),
+            chain_prompt_ids: Vec::new(),
+            chain_batch_items: Vec::new(),
+            group_concurrency_limit: None,
+        },
+    )
+    .unwrap();
+
+    let expected = [
+        Some("conn-openrouter"),
+        None,
+        None,
+        Some("conn-litellm"),
+        // No target of its own: the classic batch runs the QP's agent, so it
+        // keeps the QP's connection.
+        Some("conn-openrouter"),
+    ];
+    for (index, wanted) in expected.iter().enumerate() {
+        let disc_id = &outcome.discussion_ids[index];
+        let disc = crate::db::discussions::get_discussion(&conn, disc_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(disc.connection_id.as_deref(), *wanted, "discussion {index}");
+        let dispatch = crate::db::agent_dispatch::find_active_for_discussion(&conn, disc_id)
+            .unwrap()
+            .expect("a dispatch job");
+        assert_eq!(
+            dispatch.connection_id.as_deref(),
+            *wanted,
+            "dispatch of item {index} must carry the target's connection, not the QP's"
+        );
+    }
+}
+
+#[test]
+fn the_target_decides_which_connection_a_batch_item_runs_through() {
+    use crate::db::workflows::{connection_for_batch_item, BatchAgentOverride};
+    use crate::models::{AgentType, ModelTier};
+    let target = |agent: AgentType, connection: Option<&str>| BatchAgentOverride {
+        agent,
+        tier: ModelTier::Default,
+        connection_id: connection.map(str::to_string),
+        model: None,
+    };
+    let qp_agent = AgentType::Custom;
+    let qp_connection = Some("conn-openrouter");
+
+    // A classic batch runs the QP itself: it keeps the QP's connection.
+    assert_eq!(
+        connection_for_batch_item(&qp_agent, qp_connection, None).as_deref(),
+        Some("conn-openrouter")
+    );
+    // A row naming its own connection uses it.
+    assert_eq!(
+        connection_for_batch_item(
+            &qp_agent,
+            qp_connection,
+            Some(&target(AgentType::Custom, Some("conn-litellm")))
+        )
+        .as_deref(),
+        Some("conn-litellm")
+    );
+    // A row on the QP's own agent with no connection of its own inherits it.
+    assert_eq!(
+        connection_for_batch_item(
+            &qp_agent,
+            qp_connection,
+            Some(&target(AgentType::Custom, None))
+        )
+        .as_deref(),
+        Some("conn-openrouter")
+    );
+    // A row on another agent gets none: this is what used to be refused.
+    for agent in [AgentType::ClaudeCode, AgentType::Codex, AgentType::Ollama] {
+        assert_eq!(
+            connection_for_batch_item(&qp_agent, qp_connection, Some(&target(agent.clone(), None))),
+            None,
+            "{agent:?}"
+        );
+    }
 }
 
 #[test]

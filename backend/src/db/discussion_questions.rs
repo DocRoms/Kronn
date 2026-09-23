@@ -370,6 +370,9 @@ fn publish_human_resolution(
     now: chrono::DateTime<Utc>,
     author_pseudo: &str,
     author_avatar_email: Option<&str>,
+    // False when the decision leaves the asker nothing to do: keeping a
+    // partial answer after a ceiling must not buy one more turn.
+    dispatch: bool,
 ) -> Result<(), AnswerError> {
     let message = crate::models::DiscussionMessage {
         id: message_id.to_string(),
@@ -395,6 +398,9 @@ fn publish_human_resolution(
         lint_report: None,
     };
     let sort_order = super::discussions::insert_message(conn, discussion_id, &message)?;
+    if !dispatch {
+        return Ok(());
+    }
     let cli_target = super::discussions::message_cli_author_target(
         conn,
         discussion_id,
@@ -551,6 +557,13 @@ fn decline_inner(
                         sans elle, ou reformule-la si la décision reste nécessaire."
         )
     );
+    // Refusing a ceiling question is keeping the partial answer.
+    let ceiling = super::discussion_ceiling_requests::decide(
+        conn,
+        discussion_id,
+        &question.key,
+        &[super::discussion_ceiling_requests::OPTION_STOP.to_string()],
+    )?;
     publish_human_resolution(
         conn,
         discussion_id,
@@ -561,6 +574,7 @@ fn decline_inner(
         now,
         author_pseudo,
         author_avatar_email,
+        ceiling == super::discussion_ceiling_requests::Answered::NotACeiling,
     )?;
     conn.execute(
         "UPDATE discussion_questions SET state='declined', answer_json=?2, \
@@ -690,7 +704,7 @@ fn answer_inner(
         .map(|o| format!("- {}", o.label))
         .collect::<Vec<_>>()
         .join("\n");
-    let content = format!(
+    let mut content = format!(
         "Décision humaine — {}\n\n{}{}{}",
         question.question,
         labels,
@@ -701,6 +715,19 @@ fn answer_inner(
         },
         text.as_deref().unwrap_or("")
     );
+    let ceiling =
+        super::discussion_ceiling_requests::decide(conn, discussion_id, &question.key, &selected)?;
+    if let super::discussion_ceiling_requests::Answered::Decided(
+        super::discussion_ceiling_requests::Decision::Grant
+        | super::discussion_ceiling_requests::Decision::Unlimited,
+    ) = ceiling
+    {
+        content.push_str(
+            "\n\nKronn a relevé le plafond pour ton prochain tour. Reprends là où ta réponse \
+             précédente s'est arrêtée, en commençant par ce qu'elle dit manquer : ne refais pas \
+             ce qui y est déjà établi.",
+        );
+    }
     publish_human_resolution(
         conn,
         discussion_id,
@@ -711,6 +738,10 @@ fn answer_inner(
         now,
         author_pseudo,
         author_avatar_email,
+        ceiling
+            != super::discussion_ceiling_requests::Answered::Decided(
+                super::discussion_ceiling_requests::Decision::Stop,
+            ),
     )?;
     conn.execute("UPDATE discussion_questions SET state='answered', answer_json=?2, answer_idempotency_key=?3, updated_at=?4 WHERE id=?1 AND state='pending'",
         params![question_id, serde_json::to_string(&answer).map_err(anyhow::Error::from)?, request.idempotency_key, answer.answered_at])

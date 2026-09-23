@@ -470,7 +470,12 @@ pub async fn create(
             let conn = &tx;
             crate::db::discussions::insert_discussion(conn, &disc)?;
             if let Some((qp, _)) = &launch_qp {
-                crate::db::discussion_effort::capture(conn, &disc, qp, &launch_model_tiers)?;
+                crate::db::discussion_launch_settings::capture(
+                    conn,
+                    &disc,
+                    qp,
+                    &launch_model_tiers,
+                )?;
             }
             crate::db::discussions::insert_message(conn, &disc.id, &msg)?;
             // The card has a foreign key to the discussion through the messages
@@ -568,9 +573,15 @@ pub async fn create(
 
             Json(ApiResponse::ok(discussion))
         }
-        Err(e) if e.is::<crate::db::discussion_effort::UnresolvedQuickPromptEffort>() => Json(
-            ApiResponse::err_coded(ApiErrorCode::Validation, e.to_string()),
-        ),
+        Err(e)
+            if e.is::<crate::db::discussion_effort::UnresolvedQuickPromptEffort>()
+                || e.is::<crate::db::discussion_launch_settings::InvalidLaunchSettings>() =>
+        {
+            Json(ApiResponse::err_coded(
+                ApiErrorCode::Validation,
+                e.to_string(),
+            ))
+        }
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
     }
 }

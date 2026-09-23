@@ -176,7 +176,7 @@ pub(crate) fn reconcile(
         }
         return Ok(());
     };
-    let Some(run) = crate::db::shared_runs::get(conn, &run_id)? else {
+    let Some(run) = crate::db::shared_runs::lifecycle(conn, &run_id)? else {
         return Ok(());
     };
     use crate::models::SharedRunStatus;

@@ -111,6 +111,21 @@ fn workflow_timeout_deadline(
 /// exception: workflows authored before the flag existed used the presence of
 /// hooks to request a worktree, so dropping them would silently change their
 /// behaviour.
+/// what a worktree of this run is prepared with: the project's
+/// recipe, with the workflow's own hooks taking precedence field by field.
+/// `None` when neither declares anything, which is exactly today's behaviour.
+fn resolved_workspace_hooks(
+    project: Option<&crate::models::WorkspaceHooks>,
+    workflow: Option<&WorkspaceConfig>,
+) -> Option<crate::models::WorkspaceHooks> {
+    let workflow_hooks = workflow.map(|config| &config.hooks);
+    let merged = match project {
+        Some(project) => crate::models::WorkspaceHooks::inherit(project, workflow_hooks),
+        None => workflow_hooks.cloned().unwrap_or_default(),
+    };
+    (!merged.is_empty()).then_some(merged)
+}
+
 fn workflow_requests_workspace(config: Option<&WorkspaceConfig>) -> bool {
     config.is_some_and(|config| {
         config.require_isolation
@@ -449,15 +464,26 @@ async fn execute_run_with_notify_policy(
     // Agent step in this run pays for the DB hit exactly once instead
     // of N times. The helper returns an empty string when there's
     // nothing to inject (no project bound, no companions registered).
-    let project_path = if let Some(ref pid) = workflow.project_id {
+    // the same read also carries how this project prepares a
+    // worktree. A worktree is invisible to containers mounted on the main
+    // checkout, so a validation run in one reads the wrong code and passes;
+    // the recipe that fixes that belongs to the project, not to each of its
+    // workflows.
+    let (project_path, project_hooks) = if let Some(ref pid) = workflow.project_id {
         let pid_clone = pid.clone();
         let db3 = db.clone();
         let project_opt = db3
             .with_conn(move |conn| crate::db::projects::get_project(conn, &pid_clone))
             .await?;
-        project_opt.map(|p| p.path).unwrap_or_default()
+        match project_opt {
+            Some(project) => (
+                project.path,
+                project.workspace.map(|workspace| workspace.hooks),
+            ),
+            None => (String::new(), None),
+        }
     } else {
-        String::new()
+        (String::new(), None)
     };
     let agent_extra_context =
         crate::api::projects::compute_companion_context(&state, workflow.project_id.as_deref())
@@ -490,7 +516,12 @@ async fn execute_run_with_notify_policy(
     let workspace = if !project_path.is_empty() {
         let repo_path = crate::core::scanner::resolve_host_path(&project_path);
         if repo_path.exists() {
-            let hooks = workflow.workspace_config.as_ref().map(|c| c.hooks.clone());
+            // The workflow's own hooks win field by field; the rest comes
+            // from the project.
+            let hooks = resolved_workspace_hooks(
+                project_hooks.as_ref(),
+                workflow.workspace_config.as_ref(),
+            );
             if let Some(inh) = inherited_workspace
                 .as_ref()
                 .map(std::path::PathBuf::from)
@@ -2749,15 +2780,24 @@ pub async fn resume_run(
         // Cleanup workspace if it exists.
         if let Some(ws_path) = run.workspace_path.as_ref().map(std::path::PathBuf::from) {
             if ws_path.exists() {
-                let project_path = if let Some(ref pid) = workflow.project_id {
+                // `before_remove` is a hook like the others: the
+                // project's recipe applies here too, or a teardown declared
+                // once would only run for the workflows that repeated it.
+                let (project_path, project_hooks) = if let Some(ref pid) = workflow.project_id {
                     let pid = pid.clone();
                     let db2 = state.db.clone();
                     let project = db2
                         .with_conn(move |conn| crate::db::projects::get_project(conn, &pid))
                         .await?;
-                    project.map(|p| p.path).unwrap_or_default()
+                    match project {
+                        Some(project) => (
+                            project.path,
+                            project.workspace.map(|workspace| workspace.hooks),
+                        ),
+                        None => (String::new(), None),
+                    }
                 } else {
-                    String::new()
+                    (String::new(), None)
                 };
                 if !project_path.is_empty() {
                     let repo_path = crate::core::scanner::resolve_host_path(&project_path);
@@ -2766,7 +2806,10 @@ pub async fn resume_run(
                         repo_path,
                         &workflow.name,
                         &run.id,
-                        workflow.workspace_config.as_ref().map(|c| c.hooks.clone()),
+                        resolved_workspace_hooks(
+                            project_hooks.as_ref(),
+                            workflow.workspace_config.as_ref(),
+                        ),
                     );
                     match ws.cleanup().await {
                         Ok(outcome) => {
@@ -3313,6 +3356,93 @@ mod tests {
         state.insert("last_human_feedback".to_string(), "   ".to_string());
         assert!(!inject_and_consume_gate_feedback(&mut prompt, &mut state));
         assert_eq!(prompt, "do work");
+    }
+
+    // ─── a project prepares its own worktrees ──────────────────
+
+    fn hooks(
+        after_create: Option<&str>,
+        before_run: Option<&str>,
+    ) -> crate::models::WorkspaceHooks {
+        crate::models::WorkspaceHooks {
+            after_create: after_create.map(str::to_string),
+            before_run: before_run.map(str::to_string),
+            after_run: None,
+            before_remove: None,
+        }
+    }
+
+    #[test]
+    fn a_workflow_inherits_the_project_recipe_and_overrides_it_field_by_field() {
+        let project = hooks(Some("make worktree-up"), Some("make deps"));
+
+        // An unspecified workflow hook inherits the project hook.
+        let inherited = resolved_workspace_hooks(
+            Some(&project),
+            Some(&WorkspaceConfig {
+                hooks: crate::models::WorkspaceHooks::default(),
+                require_isolation: true,
+            }),
+        )
+        .expect("hooks");
+        assert_eq!(inherited.after_create.as_deref(), Some("make worktree-up"));
+        assert_eq!(inherited.before_run.as_deref(), Some("make deps"));
+
+        // Knows better for one field, keeps the rest.
+        let overridden = resolved_workspace_hooks(
+            Some(&project),
+            Some(&WorkspaceConfig {
+                hooks: hooks(Some("./scripts/one-off.sh"), None),
+                require_isolation: true,
+            }),
+        )
+        .expect("hooks");
+        assert_eq!(
+            overridden.after_create.as_deref(),
+            Some("./scripts/one-off.sh")
+        );
+        assert_eq!(
+            overridden.before_run.as_deref(),
+            Some("make deps"),
+            "the rest is inherited"
+        );
+    }
+
+    #[test]
+    fn a_project_without_a_recipe_changes_nothing() {
+        // No project section, no workflow hooks: exactly what the runner
+        // passed before this existed.
+        assert!(resolved_workspace_hooks(None, None).is_none());
+        assert!(resolved_workspace_hooks(
+            None,
+            Some(&WorkspaceConfig {
+                hooks: crate::models::WorkspaceHooks::default(),
+                require_isolation: true,
+            })
+        )
+        .is_none());
+        // And a workflow that declares its own keeps them untouched.
+        let own = resolved_workspace_hooks(
+            None,
+            Some(&WorkspaceConfig {
+                hooks: hooks(Some("./prepare.sh"), None),
+                require_isolation: false,
+            }),
+        )
+        .expect("hooks");
+        assert_eq!(own.after_create.as_deref(), Some("./prepare.sh"));
+    }
+
+    #[test]
+    fn a_project_recipe_does_not_force_a_worktree_on_a_workflow_that_wants_none() {
+        // Isolation stays the workflow's decision: inheriting a recipe must
+        // not turn a read-only fan-out into an isolated run.
+        let project = hooks(Some("make worktree-up"), None);
+        assert!(!workflow_requests_workspace(Some(&WorkspaceConfig {
+            hooks: crate::models::WorkspaceHooks::default(),
+            require_isolation: false,
+        })));
+        assert!(resolved_workspace_hooks(Some(&project), None).is_some());
     }
 
     // ─── SharedBudget (Phase 1b-ii) ─────────────────────────────────────

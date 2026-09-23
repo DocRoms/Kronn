@@ -667,6 +667,7 @@ pub struct RunQuickExecResponse {
     pub run_id: String,
     pub success: bool,
     pub duration_ms: u64,
+    pub exit_code: Option<i32>,
     #[ts(type = "any")]
     pub data: Option<serde_json::Value>,
     pub stdout: Option<String>,

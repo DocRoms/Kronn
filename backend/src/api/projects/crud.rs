@@ -264,6 +264,7 @@ pub async fn create(
         default_profile_id: None,
         briefing_notes: None,
         linked_repos: vec![],
+        workspace: None,
         created_at: now,
         updated_at: now,
     };
@@ -431,6 +432,7 @@ pub async fn add_folder(
         default_profile_id: None,
         briefing_notes: None,
         linked_repos: vec![],
+        workspace: None,
         created_at: now,
         updated_at: now,
     };
@@ -595,6 +597,62 @@ pub async fn set_default_skills(
         }
         Ok(false) => Json(ApiResponse::err("Project not found")),
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
+    }
+}
+
+/// GET/PUT /api/projects/{id}/workspace. A null body clears the inherited
+/// worktree preparation hooks.
+pub async fn get_project_workspace(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Json<ApiResponse<Option<crate::models::ProjectWorkspace>>> {
+    match state
+        .db
+        .with_read_conn(move |conn| crate::db::projects::get_project(conn, &id))
+        .await
+    {
+        Ok(Some(project)) => Json(ApiResponse::ok(project.workspace)),
+        Ok(None) => Json(ApiResponse::err("Project not found")),
+        Err(e) => Json(ApiResponse::err(format!("DB error: {e}"))),
+    }
+}
+
+pub async fn set_project_workspace(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(payload): Json<Option<crate::models::ProjectWorkspace>>,
+) -> Json<ApiResponse<bool>> {
+    // A hook runs a shell command on the host, exactly like a workflow hook
+    // does. Bounded here for the same reason the prompt prelude is bounded:
+    // one recipe, not a script pasted into a field.
+    const MAX_HOOK_BYTES: usize = 4_000;
+    if let Some(workspace) = payload.as_ref() {
+        for (name, command) in [
+            ("after_create", &workspace.hooks.after_create),
+            ("before_run", &workspace.hooks.before_run),
+            ("after_run", &workspace.hooks.after_run),
+            ("before_remove", &workspace.hooks.before_remove),
+        ] {
+            if command
+                .as_deref()
+                .is_some_and(|value| value.len() > MAX_HOOK_BYTES)
+            {
+                return Json(ApiResponse::err(format!(
+                    "`{name}` is limited to {MAX_HOOK_BYTES} characters; put a long recipe in a script the hook calls."
+                )));
+            }
+        }
+    }
+    let stored = payload.filter(|workspace| !workspace.hooks.is_empty());
+    match state
+        .db
+        .with_conn(move |conn| {
+            crate::db::projects::update_project_workspace(conn, &id, stored.as_ref())
+        })
+        .await
+    {
+        Ok(()) => Json(ApiResponse::ok(true)),
+        Err(e) => Json(ApiResponse::err(format!("DB error: {e}"))),
     }
 }
 
@@ -1141,6 +1199,7 @@ mod bidirectional_link_tests {
             default_profile_id: None,
             briefing_notes: None,
             linked_repos: vec![],
+            workspace: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         }

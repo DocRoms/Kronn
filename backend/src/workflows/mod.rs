@@ -443,7 +443,7 @@ mod tests {
     // so a new variant forces updating this test, which then fails until the
     // sidecar is updated too.
     #[test]
-    fn python_sidecar_step_types_match_rust_enum() {
+    fn shared_authoring_schema_step_types_match_rust_enum() {
         // Exhaustive by construction: a new StepType variant is a compile error
         // here until named.
         fn variant_name(t: &StepType) -> &'static str {
@@ -480,27 +480,19 @@ mod tests {
         .map(variant_name)
         .collect();
 
-        let py_path = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/scripts/disc-introspection-mcp.py"
-        );
-        let py = std::fs::read_to_string(py_path).expect("read sidecar script");
-        let start = py
-            .find("\"step_types_closed_set\"")
-            .expect("step_types_closed_set present in sidecar");
-        let arr = &py[start..];
-        let open = arr.find('[').expect("[");
-        let close = arr[open..].find(']').expect("]") + open;
-        let py_types: std::collections::BTreeSet<&str> = arr[open + 1..close]
-            .split(',')
-            .map(|s| s.trim().trim_matches('"'))
-            .filter(|s| !s.is_empty())
+        let schema: serde_json::Value =
+            serde_json::from_str(include_str!("../api/workflow_step_schema.json")).unwrap();
+        let schema_types: std::collections::BTreeSet<&str> = schema["step_types_closed_set"]
+            .as_array()
+            .expect("canonical closed set")
+            .iter()
+            .map(|name| name.as_str().expect("step type name"))
             .collect();
 
         assert_eq!(
-            rust, py_types,
-            "StepType enum and the Python sidecar's step_types_closed_set have drifted — \
-             update scripts/disc-introspection-mcp.py to match the Rust enum."
+            rust, schema_types,
+            "StepType enum and the shared authoring schema's step_types_closed_set have drifted — \
+             update api/workflow_step_schema.json to match the Rust enum."
         );
     }
 

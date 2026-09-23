@@ -401,6 +401,23 @@ pub fn delete_batch_run_with_discussions(
 
 // ─── Batch run creation (pure, reusable from HTTP + workflow runner) ───────
 
+/// Resolve the connection from the comparison target. Inherit the Quick Prompt
+/// connection only when running its own agent without an explicit override.
+pub(crate) fn connection_for_batch_item(
+    qp_agent: &crate::models::AgentType,
+    qp_connection_id: Option<&str>,
+    target: Option<&BatchAgentOverride>,
+) -> Option<String> {
+    match target {
+        Some(target) => target.connection_id.clone().or_else(|| {
+            (&target.agent == qp_agent)
+                .then(|| qp_connection_id.map(str::to_string))
+                .flatten()
+        }),
+        None => qp_connection_id.map(str::to_string),
+    }
+}
+
 /// Per-item execution target used by Compare mode. Keeping the tier next to
 /// the agent is important: two rows may intentionally run the same agent at
 /// different model tiers.
@@ -491,6 +508,25 @@ pub fn create_batch_run_with_identities(
     input: CreateBatchRunInput,
     assigned_run_id: Option<String>,
     assigned_discussion_ids: &[String],
+) -> Result<CreateBatchRunOutput> {
+    create_batch_run_with_launch_settings(
+        conn,
+        input,
+        assigned_run_id,
+        assigned_discussion_ids,
+        None,
+    )
+}
+
+/// The single-QP launch captures provider controls in the same transaction as
+/// its child discussion and dispatch job. Legacy/compare batch callers retain
+/// their own target resolution instead of inheriting the QP's controls.
+pub(crate) fn create_batch_run_with_launch_settings(
+    conn: &Connection,
+    input: CreateBatchRunInput,
+    assigned_run_id: Option<String>,
+    assigned_discussion_ids: &[String],
+    model_tiers: Option<&crate::models::ModelTiersConfig>,
 ) -> Result<CreateBatchRunOutput> {
     let batch_total = input.items.len() as u32;
     let run_id = assigned_run_id.unwrap_or_else(|| Uuid::new_v4().to_string());
@@ -594,14 +630,13 @@ pub fn create_batch_run_with_identities(
                 .as_ref()
                 .map(|target| target.tier)
                 .unwrap_or(qp.tier);
-            // KT-545 — Compare targets carry their own connection; classic
-            // batches fall back to the QP's own connection, so the child
-            // discussion's ordinary replies keep resolving through it.
-            let effective_connection_id = item
-                .agent_override
-                .as_ref()
-                .and_then(|target| target.connection_id.clone())
-                .or_else(|| qp.connection_id.clone());
+            // the target decides which connection the
+            // child discussion runs through.
+            let effective_connection_id = connection_for_batch_item(
+                &qp.agent,
+                qp.connection_id.as_deref(),
+                item.agent_override.as_ref(),
+            );
             let discussion = Discussion {
                 connection_id: effective_connection_id,
                 awaiting_agent: false,
@@ -676,6 +711,10 @@ pub fn create_batch_run_with_identities(
         insert_run(conn, &run)?;
         for (index, (disc, msg, batch_item)) in discussions.iter().enumerate() {
             crate::db::discussions::insert_discussion(conn, disc)?;
+            if let Some(tiers) = model_tiers.filter(|_| input.items[index].agent_override.is_none())
+            {
+                crate::db::discussion_launch_settings::capture(conn, disc, qp, tiers)?;
+            }
             let trigger_sort_order = crate::db::discussions::insert_message(conn, &disc.id, msg)?;
             let context_link = if let Some(parent_id) = input.parent_run_id.as_deref() {
                 ("workflow", parent_id)
@@ -720,11 +759,12 @@ pub fn create_batch_run_with_identities(
                     group_id: Some(&run_id),
                     group_concurrency_limit: input.group_concurrency_limit,
                 },
-                input.items[index]
-                    .agent_override
-                    .as_ref()
-                    .and_then(|target| target.connection_id.as_deref())
-                    .or(qp.connection_id.as_deref()),
+                connection_for_batch_item(
+                    &qp.agent,
+                    qp.connection_id.as_deref(),
+                    input.items[index].agent_override.as_ref(),
+                )
+                .as_deref(),
             )?;
             // Every batch child is owed an agent run. Mark it so a
             // restart before the agent starts (queued, or the HTTP path's

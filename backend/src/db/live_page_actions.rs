@@ -622,23 +622,93 @@ pub fn latest_launches_for_live_page(
     Ok(launches)
 }
 
+/// Per (Page, action_ref), across all row bindings and revisions. Active
+/// launches are never evicted; their result/discussion rows have their own life.
+const MAX_RETAINED_TERMINAL_LAUNCHES: i64 = 1_000;
+
+fn declaration_for_launch(conn: &Connection, id: &str) -> Result<Option<String>> {
+    Ok(conn
+        .query_row(
+            "SELECT action_id FROM live_page_action_launches WHERE id=?1",
+            [id],
+            |row| row.get(0),
+        )
+        .optional()?)
+}
+
+/// Called only inside a write transaction/savepoint, never from Page polling.
+fn retain_launch_history(conn: &Connection, action_id: &str, keep_id: &str) -> Result<()> {
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM live_page_action_launches WHERE action_id=?1",
+        [action_id],
+        |row| row.get(0),
+    )?;
+    if count <= MAX_RETAINED_TERMINAL_LAUNCHES {
+        return Ok(());
+    }
+    // Projected GETs intentionally do not persist terminal states. Reconcile
+    // those rows here, or completed asynchronous runs would evade retention.
+    // Only metadata is read: no snapshots, step outputs or stderr payloads.
+    let mut statement = conn.prepare("SELECT id,state,shared_run_id,result_discussion_id,diagnostic,launched_at,finished_at,updated_at FROM live_page_action_launches WHERE action_id=?1 AND state IN ('launching','running')")?;
+    let active = statement
+        .query_map([action_id], |row| {
+            Ok(kronn_action_engine::ActionCore {
+                id: row.get(0)?,
+                state: if row.get::<_, String>(1)? == "launching" {
+                    DiscussionActionState::Launching
+                } else {
+                    DiscussionActionState::Running
+                },
+                values: Vec::new(),
+                shared_run_id: row.get(2)?,
+                result_discussion_id: row.get(3)?,
+                diagnostic: row.get(4)?,
+                launched_at: row.get(5)?,
+                finished_at: row.get(6)?,
+                updated_at: row.get(7)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(statement);
+    for mut core in active {
+        kronn_action_engine::reconcile(
+            conn,
+            ActionTable::LivePageLaunch,
+            &mut core,
+            kronn_action_engine::Reconcile::Persisted,
+        )?;
+    }
+    conn.execute(
+        "DELETE FROM live_page_action_launches WHERE id IN (
+            SELECT id FROM live_page_action_launches
+            WHERE action_id=?1 AND state IN ('succeeded','failed','cancelled','preflight_failed')
+            ORDER BY (id=?2) DESC, julianday(COALESCE(finished_at,updated_at,created_at)) DESC, created_at DESC, id DESC
+            LIMIT -1 OFFSET ?3
+        )",
+        params![action_id,keep_id,MAX_RETAINED_TERMINAL_LAUNCHES],
+    )?;
+    Ok(())
+}
+
 /// Declining an offer is an act like launching it, and just as much a
 /// per-click one: it is recorded as its own cancelled launch. The declaration
 /// is left alone, so the other rows — and this one, on the next click — stay
 /// armed. Cancelling a launch handle is the engine's idempotent no-op.
 pub fn cancel(conn: &Connection, id: &str) -> Result<Option<LivePageAction>> {
-    if launch_by_id(kronn_action_engine::Reconcile::Persisted, conn, id)?.is_some() {
-        kronn_action_engine::cancel(conn, ActionTable::LivePageLaunch, id)?;
-        return launch_by_id(kronn_action_engine::Reconcile::Persisted, conn, id);
+    let transaction = conn.unchecked_transaction()?;
+    if let Some(action_id) = declaration_for_launch(&transaction, id)? {
+        kronn_action_engine::cancel(&transaction, ActionTable::LivePageLaunch, id)?;
+        retain_launch_history(&transaction, &action_id, id)?;
+        let action = launch_by_id(kronn_action_engine::Reconcile::Persisted, &transaction, id)?;
+        transaction.commit()?;
+        return Ok(action);
     }
-    let Some(declaration) = declaration_by_id(conn, id)? else {
+    let Some(declaration) = declaration_by_id(&transaction, id)? else {
         return Ok(None);
     };
-    let transaction = conn.unchecked_transaction()?;
     let now = Utc::now().to_rfc3339();
     let launch_id = format!("page-launch:{}", uuid::Uuid::new_v4());
-    // The binding is unknown here — a decline carries no row selector — and it
-    // does not matter: a cancelled launch never enters the in-flight guard.
+    // Unknown binding: a decline carries no selector and is never in flight.
     insert_launch(
         &transaction,
         &launch_id,
@@ -647,8 +717,14 @@ pub fn cancel(conn: &Connection, id: &str) -> Result<Option<LivePageAction>> {
         DiscussionActionState::Cancelled,
         &now,
     )?;
+    retain_launch_history(&transaction, &declaration.id, &launch_id)?;
+    let action = launch_by_id(
+        kronn_action_engine::Reconcile::Persisted,
+        &transaction,
+        &launch_id,
+    )?;
     transaction.commit()?;
-    launch_by_id(kronn_action_engine::Reconcile::Persisted, conn, &launch_id)
+    Ok(action)
 }
 
 /// Open a launch row from its declaration, copying what it runs against so
@@ -956,6 +1032,7 @@ pub fn claim_launch(
         &resolved_supplied,
         target_still_exists,
     )?;
+    retain_launch_history(&transaction, &action.id, &launch_id)?;
     action.id = launch_id;
     action.binding_key = Some(binding_key);
     action.created_at = now;
@@ -976,7 +1053,27 @@ pub fn complete(
     id: &str,
     completion: kronn_action_engine::ActionCompletion,
 ) -> Result<()> {
-    kronn_action_engine::complete(conn, ActionTable::LivePageLaunch, id, completion)
+    // complete_quick_prompt already owns a transaction. A savepoint composes
+    // with it and also makes standalone completion + retention atomic.
+    conn.execute_batch("SAVEPOINT complete_page_action")?;
+    let result = (|| -> Result<()> {
+        kronn_action_engine::complete(conn, ActionTable::LivePageLaunch, id, completion)?;
+        if let Some(action_id) = declaration_for_launch(conn, id)? {
+            retain_launch_history(conn, &action_id, id)?;
+        }
+        Ok(())
+    })();
+    match result {
+        Ok(()) => {
+            conn.execute_batch("RELEASE complete_page_action")?;
+            Ok(())
+        }
+        Err(error) => {
+            let _ = conn
+                .execute_batch("ROLLBACK TO complete_page_action; RELEASE complete_page_action");
+            Err(error)
+        }
+    }
 }
 
 /// Record a Page-authored QP's result discussion and register it on the Page,
@@ -1014,6 +1111,10 @@ pub fn complete_quick_prompt(
 }
 
 #[cfg(test)]
+#[path = "live_page_action_retention_tests.rs"]
+mod retention_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::models::{
@@ -1021,7 +1122,7 @@ mod tests {
         QuickApi, QuickExec, QuickPrompt,
     };
 
-    fn connection() -> Connection {
+    pub(super) fn connection() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
         crate::db::migrations::run(&conn).unwrap();
         conn
@@ -1122,7 +1223,7 @@ mod tests {
         );
     }
 
-    fn insert_page(conn: &Connection, page_id: &str, revision_id: &str, html: &str) {
+    pub(super) fn insert_page(conn: &Connection, page_id: &str, revision_id: &str, html: &str) {
         let now = Utc::now().to_rfc3339();
         conn.execute(
             "INSERT INTO live_pages (
@@ -1179,14 +1280,14 @@ mod tests {
         .unwrap();
     }
 
-    fn action_block(action_ref: &str, json: &str) -> String {
+    pub(super) fn action_block(action_ref: &str, json: &str) -> String {
         format!(
             r#"<div><button data-kronn-action="{action_ref}">Go</button>
 <script type="application/kronn-action" data-action-id="{action_ref}">{json}</script></div>"#
         )
     }
 
-    fn insert_target(conn: &Connection) {
+    pub(super) fn insert_target(conn: &Connection) {
         let now = Utc::now();
         crate::db::quick_execs::insert_quick_exec(
             conn,

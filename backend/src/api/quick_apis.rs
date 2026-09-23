@@ -202,14 +202,17 @@ pub async fn delete(
         .await
     {
         Ok(()) => Json(ApiResponse::ok(())),
+        Err(e) if e.is::<crate::db::quick_apis::QuickApiInUse>() => Json(ApiResponse::err_coded(
+            ApiErrorCode::Conflict,
+            e.to_string(),
+        )),
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
     }
 }
 
 /// GET /api/quick-apis/:id/usage
 ///
-/// How many workflow steps name it — said before a deletion is confirmed,
-/// because those steps fail on their next run, not at deletion time.
+/// How many workflow steps name it and must be updated before deletion.
 pub async fn usage(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -361,6 +364,7 @@ pub async fn run_qa(
     let run_id = Uuid::new_v4().to_string();
     let created_at = Utc::now();
     let queued = crate::models::SharedRun {
+        exec_details: None,
         id: run_id.clone(),
         kind: crate::models::SharedRunKind::QuickApi,
         source_id: id.clone(),
@@ -596,6 +600,7 @@ pub async fn run_qa(
     };
     let running_at = Utc::now();
     let running = crate::models::SharedRun {
+        exec_details: None,
         id: run_id.clone(),
         kind: crate::models::SharedRunKind::QuickApi,
         source_id: id.clone(),
@@ -714,6 +719,7 @@ async fn persist_quick_api_terminal(
 ) -> anyhow::Result<()> {
     let now = Utc::now();
     let run = crate::models::SharedRun {
+        exec_details: None,
         id: response.run_id.clone(),
         kind: crate::models::SharedRunKind::QuickApi,
         source_id: source_id.into(),
@@ -746,6 +752,7 @@ pub async fn batch_run_qa(
     let run_id = Uuid::new_v4().to_string();
     let created_at = Utc::now();
     let queued = crate::models::SharedRun {
+        exec_details: None,
         id: run_id.clone(),
         kind: crate::models::SharedRunKind::QuickApi,
         source_id: id.clone(),
@@ -1019,6 +1026,7 @@ pub async fn batch_run_qa(
     }
     let running_at = Utc::now();
     let running = crate::models::SharedRun {
+        exec_details: None,
         id: run_id.clone(),
         kind: crate::models::SharedRunKind::QuickApi,
         source_id: id.clone(),
@@ -1140,6 +1148,7 @@ async fn persist_batch_qa_terminal(
 ) -> anyhow::Result<()> {
     let now = Utc::now();
     let run = crate::models::SharedRun {
+        exec_details: None,
         id: response.run_id.clone(),
         kind: crate::models::SharedRunKind::QuickApi,
         source_id: source_id.into(),

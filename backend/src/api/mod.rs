@@ -60,6 +60,7 @@ pub mod rtk;
 pub mod rtk_state;
 pub mod setup;
 pub mod shared_runs;
+pub mod signal_catalog;
 pub mod skills;
 pub mod stats;
 pub mod themes;

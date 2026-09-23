@@ -40,6 +40,24 @@ mod tests {
         AppState::new_defaults(config_arc, db, DEFAULT_MAX_CONCURRENT_AGENTS)
     }
 
+    #[tokio::test]
+    async fn workflow_step_schema_route_returns_the_shared_contract() {
+        let (status, body) = send(
+            test_state(),
+            false,
+            Request::builder()
+                .uri("/api/workflows/step-schema")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["success"], true);
+        let expected: Value =
+            serde_json::from_str(include_str!("api/workflow_step_schema.json")).unwrap();
+        assert_eq!(body["data"], expected);
+    }
+
     /// Build a test AppState with a specific auth token configured.
     fn test_state_with_token(token: &str) -> AppState {
         let db = Arc::new(Database::open_in_memory().expect("in-memory DB"));
@@ -238,6 +256,276 @@ mod tests {
                 StatusCode::UNAUTHORIZED
             );
         }
+    }
+
+    /// Project worktree hooks round-trip through the API and storage.
+    #[tokio::test]
+    async fn a_project_declares_once_how_its_worktrees_are_prepared() {
+        let state = test_state();
+        state
+            .db
+            .with_conn(|conn| {
+                conn.execute(
+                    "INSERT INTO projects (id, name, path, ai_config_json, created_at, updated_at, default_skill_ids_json) \
+                     VALUES ('p-1', 'Front', '/tmp/front', '{\"detected\":false,\"configs\":[]}', '2026-09-20T00:00:00Z', '2026-09-20T00:00:00Z', '[]')",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let put = |body: serde_json::Value| {
+            Request::builder()
+                .method("PUT")
+                .uri("/api/projects/p-1/workspace")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap()
+        };
+        let read = || {
+            Request::builder()
+                .uri("/api/projects/p-1/workspace")
+                .body(Body::empty())
+                .unwrap()
+        };
+
+        // Nothing declared: the project behaves exactly as before.
+        let (_, empty) = send(state.clone(), false, read()).await;
+        assert_eq!(empty["data"], serde_json::Value::Null, "{empty}");
+
+        let recipe = serde_json::json!({
+            "hooks": {
+                "after_create": "make worktree-up",
+                "before_run": "make deps",
+                "before_remove": "make worktree-down"
+            }
+        });
+        let (status, stored) = send(state.clone(), false, put(recipe.clone())).await;
+        assert_eq!(status, StatusCode::OK, "{stored}");
+        let (_, back) = send(state.clone(), false, read()).await;
+        assert_eq!(back["data"]["hooks"]["after_create"], "make worktree-up");
+        assert_eq!(back["data"]["hooks"]["before_remove"], "make worktree-down");
+
+        // A hook is a shell command, not a script pasted into a field.
+        let (_, refused) = send(
+            state.clone(),
+            false,
+            put(serde_json::json!({"hooks": {"after_create": "x".repeat(4_001)}})),
+        )
+        .await;
+        assert_eq!(refused["success"], false);
+        assert!(
+            refused["error"]
+                .as_str()
+                .unwrap()
+                .contains("4000 characters"),
+            "{refused}"
+        );
+
+        // Cleared, the project goes back to the default behaviour.
+        let (_, cleared) = send(state.clone(), false, put(serde_json::Value::Null)).await;
+        assert_eq!(cleared["success"], true);
+        let (_, gone) = send(state, false, read()).await;
+        assert_eq!(gone["data"], serde_json::Value::Null);
+    }
+
+    /// End to end: a run stops on a ceiling, Kronn asks, the human
+    /// grants, and the agent is woken with the budget raised — once.
+    #[tokio::test]
+    async fn a_granted_ceiling_wakes_the_agent_with_a_raised_budget() {
+        let state = test_state();
+        insert_test_discussion(&state, "ceiling-room", "Analyse").await;
+        let report = crate::agents::runner::CeilingReport {
+            version: 1,
+            tools: vec![crate::agents::runner::ToolCeilingHit {
+                tool: "web_fetch".into(),
+                limit: 120,
+                refused: 6,
+                refused_calls: vec!["url=https://example.test/issues/119".into()],
+            }],
+            rounds: None,
+        };
+        let asked = crate::api::discussions::ceilings::ceiling_question(&report, "fr");
+        insert_test_message(
+            &state,
+            "ceiling-room",
+            "Agent",
+            &format!("Voici ce que j'ai pu lire.{}", asked.markdown),
+        )
+        .await;
+        // What Kronn asked, recorded with the message that carries it.
+        let (key, ceilings) = (asked.key.clone(), asked.ceilings.clone());
+        state
+            .db
+            .with_conn(move |conn| {
+                crate::db::discussion_ceiling_requests::record(
+                    conn,
+                    "ceiling-room",
+                    &key,
+                    "ClaudeCode",
+                    &ceilings,
+                )
+            })
+            .await
+            .unwrap();
+
+        let get = |uri: &str| Request::builder().uri(uri).body(Body::empty()).unwrap();
+        let (_, list) = send(
+            state.clone(),
+            false,
+            get("/api/discussions/ceiling-room/questions"),
+        )
+        .await;
+        assert_eq!(list["data"]["pending_count"], 1, "{list}");
+        let question = &list["data"]["questions"][0];
+        assert_eq!(question["key"], asked.key);
+        let id = question["id"].as_str().unwrap().to_string();
+
+        let answer = |option: &str, key: &str| {
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/discussions/ceiling-room/questions/{id}/answer"
+                ))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "selected_option_ids": [option],
+                        "idempotency_key": key,
+                    })
+                    .to_string(),
+                ))
+                .unwrap()
+        };
+        let (status, answered) = send(state.clone(), false, answer("grant", "grant-1")).await;
+        assert_eq!(status, StatusCode::OK, "{answered}");
+        assert_eq!(answered["data"]["state"], "answered");
+
+        // The agent is woken, and its next run gets the raised budget once.
+        let woken: i64 = state
+            .db
+            .with_read_conn(|conn| {
+                Ok(conn.query_row(
+                    "SELECT COUNT(*) FROM agent_dispatch_jobs WHERE discussion_id = 'ceiling-room'",
+                    [],
+                    |row| row.get(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(woken, 1, "a grant is worth a turn");
+        let allowance = state
+            .db
+            .with_conn(|conn| {
+                crate::db::discussion_ceiling_requests::take_allowance(
+                    conn,
+                    "ceiling-room",
+                    "ClaudeCode",
+                )
+            })
+            .await
+            .unwrap();
+        assert_eq!(allowance.extra_calls.get("web_fetch"), Some(&50));
+        assert!(allowance.ask_on_ceiling);
+        let spent = state
+            .db
+            .with_conn(|conn| {
+                crate::db::discussion_ceiling_requests::take_allowance(
+                    conn,
+                    "ceiling-room",
+                    "ClaudeCode",
+                )
+            })
+            .await
+            .unwrap();
+        assert!(spent.extra_calls.is_empty(), "the grant is for one run");
+    }
+
+    /// The other half of the same decision: keeping the partial answer costs
+    /// nothing at all — no turn, no budget.
+    #[tokio::test]
+    async fn keeping_the_partial_answer_wakes_nobody() {
+        let state = test_state();
+        insert_test_discussion(&state, "ceiling-stop", "Analyse").await;
+        let report = crate::agents::runner::CeilingReport {
+            version: 1,
+            tools: Vec::new(),
+            rounds: Some(150),
+        };
+        let asked = crate::api::discussions::ceilings::ceiling_question(&report, "fr");
+        insert_test_message(&state, "ceiling-stop", "Agent", &asked.markdown).await;
+        let (key, ceilings) = (asked.key.clone(), asked.ceilings.clone());
+        state
+            .db
+            .with_conn(move |conn| {
+                crate::db::discussion_ceiling_requests::record(
+                    conn,
+                    "ceiling-stop",
+                    &key,
+                    "ClaudeCode",
+                    &ceilings,
+                )
+            })
+            .await
+            .unwrap();
+        let (_, list) = send(
+            state.clone(),
+            false,
+            Request::builder()
+                .uri("/api/discussions/ceiling-stop/questions")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        let id = list["data"]["questions"][0]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let (status, _) = send(
+            state.clone(),
+            false,
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/discussions/ceiling-stop/questions/{id}/answer"
+                ))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "selected_option_ids": ["stop"],
+                        "idempotency_key": "stop-1",
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let woken: i64 = state
+            .db
+            .with_read_conn(|conn| {
+                Ok(conn.query_row(
+                    "SELECT COUNT(*) FROM agent_dispatch_jobs WHERE discussion_id = 'ceiling-stop'",
+                    [],
+                    |row| row.get(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(woken, 0, "nothing is run again");
+        let allowance = state
+            .db
+            .with_conn(|conn| {
+                crate::db::discussion_ceiling_requests::take_allowance(
+                    conn,
+                    "ceiling-stop",
+                    "ClaudeCode",
+                )
+            })
+            .await
+            .unwrap();
+        assert_eq!(allowance.extra_rounds, 0);
     }
 
     #[tokio::test]
@@ -1359,6 +1647,7 @@ mod tests {
                     default_profile_id: None,
                     briefing_notes: None,
                     linked_repos: vec![],
+                    workspace: None,
                     created_at: now,
                     updated_at: now,
                 };
@@ -3344,6 +3633,7 @@ mod tests {
                     default_profile_id: None,
                     briefing_notes: None,
                     linked_repos: vec![],
+                    workspace: None,
                     created_at: now,
                     updated_at: now,
                 };
@@ -3403,6 +3693,7 @@ mod tests {
                     default_profile_id: None,
                     briefing_notes: None,
                     linked_repos: vec![],
+                    workspace: None,
                     created_at: now,
                     updated_at: now,
                 };
@@ -3474,6 +3765,7 @@ mod tests {
                     default_profile_id: None,
                     briefing_notes: None,
                     linked_repos: vec![],
+                    workspace: None,
                     created_at: now,
                     updated_at: now,
                 };
@@ -3537,6 +3829,7 @@ mod tests {
                     default_profile_id: None,
                     briefing_notes: None,
                     linked_repos: vec![],
+                    workspace: None,
                     created_at: now,
                     updated_at: now,
                 };
@@ -3678,6 +3971,7 @@ mod tests {
                     default_profile_id: None,
                     briefing_notes: None,
                     linked_repos: vec![],
+                    workspace: None,
                     created_at: now,
                     updated_at: now,
                 };
@@ -4685,6 +4979,7 @@ mod tests {
             default_profile_id: None,
             briefing_notes: None,
             linked_repos: vec![],
+            workspace: None,
             created_at: now,
             updated_at: now,
         };
@@ -4767,6 +5062,7 @@ mod tests {
             default_profile_id: None,
             briefing_notes: None,
             linked_repos: vec![],
+            workspace: None,
             created_at: now,
             updated_at: now,
         };
@@ -5469,6 +5765,17 @@ mod tests {
             .iter()
             .filter_map(|tool| tool["function"]["name"].as_str())
             .collect();
+        // declared from the start, or one `tools_load` away. What a
+        // discussion must never be is unable to reach them.
+        let family_names: Vec<String> = crate::api::agent_tools::TOOL_FAMILIES
+            .iter()
+            .flat_map(|(_, _, tools)| tools.iter().map(|tool| tool.to_string()))
+            .collect();
+        let reachable = |tool: &str| {
+            native_names.contains(&tool)
+                || (native_names.contains(&"tools_load")
+                    && family_names.iter().any(|name| name == tool))
+        };
         for lifecycle in [
             "agent_list",
             "task_exec_prepare",
@@ -5480,8 +5787,8 @@ mod tests {
             "task_exec_reassign",
         ] {
             assert!(
-                native_names.contains(&lifecycle),
-                "native discussion catalogue is missing {lifecycle}: {native_names:?}"
+                reachable(lifecycle),
+                "a discussion agent cannot reach {lifecycle}: {native_names:?}"
             );
         }
         for continuation in [
@@ -5491,8 +5798,8 @@ mod tests {
             "agent_resume_cancel",
         ] {
             assert!(
-                native_names.contains(&continuation),
-                "native discussion catalogue is missing {continuation}: {native_names:?}"
+                reachable(continuation),
+                "a discussion agent cannot reach {continuation}: {native_names:?}"
             );
         }
 
@@ -5825,12 +6132,22 @@ mod tests {
             .filter_map(|tool| tool["function"]["name"].as_str().map(str::to_string))
             .collect();
 
-        for present in ["task_list", "plan_get", "task_exec_launch"] {
+        for present in ["task_list", "plan_get"] {
             assert!(
                 names.iter().any(|name| name == present),
                 "an ordinary discussion keeps {present}: {names:?}"
             );
         }
+        // Full declarations are the default. Explicit tiering keeps delegation
+        // reachable through tools_load; neither mode applies worker narrowing.
+        assert!(names
+            .iter()
+            .any(|name| name == "task_exec_launch" || name == "tools_load"));
+        assert!(
+            crate::api::agent_tools::declarations_for_family("delegation")
+                .iter()
+                .any(|tool| tool["function"]["name"] == "task_exec_launch")
+        );
     }
 
     #[tokio::test]
@@ -6026,6 +6343,7 @@ mod tests {
                         default_profile_id: None,
                         briefing_notes: None,
                         linked_repos: vec![],
+                        workspace: None,
                         created_at: now,
                         updated_at: now,
                     };
@@ -6069,6 +6387,7 @@ mod tests {
                 move |conn| {
                     let now = chrono::Utc::now();
                     let run = crate::models::SharedRun {
+                        exec_details: None,
                         id,
                         kind,
                         source_id: "qa-kt243".into(),

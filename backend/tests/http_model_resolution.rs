@@ -80,7 +80,7 @@ async fn chat_models(server: &MockServer) -> Vec<String> {
         .await
         .unwrap()
         .into_iter()
-        .filter(|request| request.url.path() != "/api/show")
+        .filter(|request| matches!(request.url.path(), "/api/chat" | "/v1/chat/completions"))
         .map(|request| {
             let body: Value = serde_json::from_slice(&request.body).unwrap();
             body["model"].as_str().unwrap().to_string()

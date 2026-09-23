@@ -75,6 +75,7 @@ pub async fn get_status(State(state): State<AppState>) -> Json<ApiResponse<Setup
             scan_paths_set: true,
             repos_detected: vec![], // Skip scan — projects page will load them
             default_scan_path: default_scan_path(),
+            scan_paths_explored: config.scan.paths.clone(),
         }));
     }
 
@@ -137,6 +138,7 @@ pub async fn get_status(State(state): State<AppState>) -> Json<ApiResponse<Setup
         scan_paths_set,
         repos_detected,
         default_scan_path: default_scan_path(),
+        scan_paths_explored: scan_paths,
     }))
 }
 
@@ -2376,11 +2378,436 @@ pub async fn open_url(Json(req): Json<OpenUrlRequest>) -> Json<ApiResponse<()>> 
     }
 }
 
+// ─── Directory browser ───────────────────────────────────────────
+
+/// Browse paths reachable by the server; browser folder inputs provide only
+/// relative names and cannot describe container mounts.
+const BROWSE_MAX_ENTRIES: usize = 500;
+
+/// Top-level directories that hold an operating system, never somebody's
+/// repositories. Browsing does not offer them, and does not walk into them.
+#[cfg(unix)]
+const SYSTEM_TOP_LEVEL: &[&str] = &[
+    "Applications",
+    "Library",
+    "System",
+    "bin",
+    "boot",
+    "cores",
+    "dev",
+    "etc",
+    "lib",
+    "lib32",
+    "lib64",
+    "libx32",
+    "lost+found",
+    "private",
+    "proc",
+    "root",
+    "run",
+    "sbin",
+    "snap",
+    "sys",
+    "tmp",
+    "usr",
+    "var",
+];
+
+/// Whether a top-level directory belongs to the operating system rather than to
+/// somebody's work. What is left is exactly what a mount shows up as:
+/// `/workspace`, `/mnt`, `/media`, `/data`.
+#[cfg(unix)]
+fn is_system_top_level(name: &str) -> bool {
+    name.starts_with('.') || SYSTEM_TOP_LEVEL.contains(&name)
+}
+
+/// Where browsing may start: the user's home, what Docker mounted, whatever is
+/// already configured, and every top-level directory that is not the system's.
+/// `/workspace` becomes reachable this way without anyone typing it.
+///
+/// Every root is expressed as Kronn reaches it, so a container path is what
+/// comes back and what gets stored — `resolve_host_path` leaves it alone.
+pub fn browse_roots(configured: &[String]) -> Vec<BrowseRoot> {
+    let mut roots: Vec<BrowseRoot> = Vec::new();
+    let mut push = |label: &str, path: std::path::PathBuf| {
+        let Ok(resolved) = path.canonicalize() else {
+            return;
+        };
+        if !resolved.is_dir() {
+            return;
+        }
+        let as_text = resolved.display().to_string();
+        if roots.iter().any(|r: &BrowseRoot| r.path == as_text) {
+            return;
+        }
+        roots.push(BrowseRoot {
+            label: label.to_string(),
+            path: as_text,
+        });
+    };
+
+    if let Some(home) = directories::UserDirs::new() {
+        push("Dossier personnel", home.home_dir().to_path_buf());
+    }
+    if let Ok(host_home) = std::env::var("KRONN_HOST_HOME") {
+        push(
+            "Dossier personnel (hôte)",
+            crate::core::scanner::resolve_host_path(&host_home),
+        );
+    }
+    for path in configured {
+        push(
+            "Déjà configuré",
+            crate::core::scanner::resolve_host_path(path),
+        );
+    }
+
+    #[cfg(unix)]
+    {
+        // What is actually mounted shows up here: under Docker, `/workspace`
+        // and `/host-home` are top-level entries like any other.
+        if let Ok(entries) = std::fs::read_dir("/") {
+            let mut tops: Vec<std::path::PathBuf> = entries
+                .filter_map(Result::ok)
+                .filter(|e| !is_system_top_level(&e.file_name().to_string_lossy()))
+                .map(|e| e.path())
+                .filter(|p| p.is_dir())
+                .collect();
+            tops.sort();
+            for top in tops {
+                let label = top
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                push(&label, top);
+            }
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        for letter in b'A'..=b'Z' {
+            push(
+                &format!("{}:", letter as char),
+                std::path::PathBuf::from(format!("{}:\\", letter as char)),
+            );
+        }
+        for wsl_home in crate::api::projects::discover_wsl_homes() {
+            push("WSL", std::path::PathBuf::from(wsl_home));
+        }
+    }
+
+    roots
+}
+
+/// A path is browsable only inside one of the roots. Comparison happens after
+/// canonicalization, so a symlink or a `..` cannot walk out of one.
+fn inside_a_root(path: &std::path::Path, roots: &[BrowseRoot]) -> bool {
+    roots.iter().any(|root| {
+        let root = std::path::Path::new(&root.path);
+        path == root || path.starts_with(root)
+    })
+}
+
+#[derive(serde::Deserialize)]
+pub struct BrowseQuery {
+    pub path: Option<String>,
+}
+
+/// The listing itself, independent of any server state so it can be tested
+/// without one. Refusals come back as a message the wizard can show as is.
+pub fn listing_for(requested: &str, roots: Vec<BrowseRoot>) -> Result<BrowseListing, String> {
+    let mapped = crate::core::scanner::resolve_host_path(requested);
+    let resolved = mapped
+        .canonicalize()
+        .map_err(|_| format!("Kronn ne trouve pas `{requested}`"))?;
+    if !resolved.is_dir() {
+        return Err(format!("`{requested}` n'est pas un dossier"));
+    }
+    // After canonicalization, so neither a symlink nor a `..` walks out.
+    if !inside_a_root(&resolved, &roots) {
+        return Err(format!(
+            "`{requested}` est hors des dossiers que Kronn peut explorer"
+        ));
+    }
+
+    let unreadable = |error| format!("Kronn ne peut pas lire `{requested}` : {error}");
+    let mut names: Vec<std::path::PathBuf> = std::fs::read_dir(&resolved)
+        .map_err(unreadable)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(unreadable)?
+        .into_iter()
+        .filter(|e| !e.file_name().to_string_lossy().starts_with('.'))
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    names.sort();
+    let truncated = names.len() > BROWSE_MAX_ENTRIES;
+    names.truncate(BROWSE_MAX_ENTRIES);
+    let entries: Vec<BrowseEntry> = names
+        .into_iter()
+        .map(|path| BrowseEntry {
+            name: path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default(),
+            is_repository: path.join(".git").exists(),
+            path: path.display().to_string(),
+        })
+        .collect();
+
+    let parent = resolved
+        .parent()
+        .filter(|p| inside_a_root(p, &roots))
+        .map(|p| p.display().to_string());
+
+    Ok(BrowseListing {
+        path: resolved.display().to_string(),
+        parent,
+        roots,
+        entries,
+        truncated,
+    })
+}
+
+/// GET /api/setup/browse[?path=...]
+///
+/// Without a path: the roots alone. With one: its subdirectories, one level,
+/// capped, and refused outright when it falls outside every root.
+pub async fn browse(
+    State(state): State<AppState>,
+    axum::extract::Query(query): axum::extract::Query<BrowseQuery>,
+) -> Json<ApiResponse<BrowseListing>> {
+    let configured = state.config.read().await.scan.paths.clone();
+    let roots = browse_roots(&configured);
+
+    let Some(requested) = query
+        .path
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty())
+    else {
+        return Json(ApiResponse::ok(BrowseListing {
+            path: String::new(),
+            parent: None,
+            roots,
+            entries: Vec::new(),
+            truncated: false,
+        }));
+    };
+
+    match listing_for(&requested, roots) {
+        Ok(listing) => Json(ApiResponse::ok(listing)),
+        Err(message) => Json(ApiResponse::err(message)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::core::config;
     use serial_test::serial;
+
+    // ─── Directory browser ──────────────────────────────────────
+
+    /// A mount is a top-level directory like any other. This is what makes
+    /// `/workspace` reachable in a Docker install without anyone typing it,
+    /// while the operating system's own directories stay out of the way.
+    #[cfg(unix)]
+    #[test]
+    fn a_mount_point_is_offered_and_the_system_is_not() {
+        for monte in [
+            "workspace",
+            "mnt",
+            "media",
+            "data",
+            "srv",
+            "host-home",
+            "Users",
+        ] {
+            assert!(!is_system_top_level(monte), "`{monte}` doit être proposé");
+        }
+        for systeme in [
+            "etc", "usr", "proc", "sys", "dev", "System", "private", ".Trash",
+        ] {
+            assert!(
+                is_system_top_level(systeme),
+                "`{systeme}` ne doit pas être proposé"
+            );
+        }
+    }
+
+    fn racine(chemin: &std::path::Path) -> Vec<BrowseRoot> {
+        vec![BrowseRoot {
+            label: "test".into(),
+            path: chemin.canonicalize().unwrap().display().to_string(),
+        }]
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_directory_is_an_error_not_an_empty_listing() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // Root bypasses permission bits, so this fixture cannot deny it access.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let denied = root.path().join("unreadable");
+        std::fs::create_dir(&denied).unwrap();
+        let permissions = std::fs::metadata(&denied).unwrap().permissions();
+        std::fs::set_permissions(&denied, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let result = listing_for(&denied.display().to_string(), racine(root.path()));
+        // Restore access even if the assertion below fails, so TempDir can clean up.
+        std::fs::set_permissions(&denied, permissions).unwrap();
+        let error = result.expect_err("a permission failure must remain visible");
+        assert!(error.contains("ne peut pas lire"), "{error}");
+        assert!(error.contains("unreadable"), "{error}");
+    }
+
+    /// The shape that started the ticket: repositories under
+    /// `<racine>/git/<organisation>/<dépôt>`, nowhere near a home directory.
+    #[test]
+    fn browsing_names_the_repositories_it_sees() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("git/agaches/depot/.git")).unwrap();
+        std::fs::create_dir_all(root.path().join("git/onepoint")).unwrap();
+
+        let listing = listing_for(
+            &root.path().join("git").display().to_string(),
+            racine(root.path()),
+        )
+        .expect("le dossier est dans la racine");
+        let noms: Vec<&str> = listing.entries.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(noms, vec!["agaches", "onepoint"]);
+        assert!(!listing.entries[0].is_repository, "agaches est un dossier");
+
+        let dedans = listing_for(&listing.entries[0].path, racine(root.path())).unwrap();
+        assert_eq!(dedans.entries.len(), 1);
+        assert!(
+            dedans.entries[0].is_repository,
+            "depot porte un .git: {:?}",
+            dedans.entries
+        );
+    }
+
+    /// A root is a directory, not a text prefix: `/work` does not open
+    /// `/workspace`. `Path::starts_with` compares components, and this pins it
+    /// so a later rewrite in terms of strings fails here.
+    #[test]
+    fn a_shared_name_prefix_is_not_a_root() {
+        let parent = tempfile::tempdir().unwrap();
+        let court = parent.path().join("work");
+        let long = parent.path().join("workspace");
+        std::fs::create_dir_all(court.join("rien")).unwrap();
+        std::fs::create_dir_all(long.join("depot/.git")).unwrap();
+
+        let refus = listing_for(&long.display().to_string(), racine(&court))
+            .expect_err("`workspace` n'est pas dans `work`");
+        assert!(refus.contains("hors des dossiers"), "{refus}");
+    }
+
+    /// Browsing stops at the roots. A path outside them is refused with a
+    /// message, not served.
+    #[test]
+    fn a_path_outside_every_root_is_refused() {
+        let dedans = tempfile::tempdir().unwrap();
+        let dehors = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dehors.path().join("secret")).unwrap();
+
+        let refus = listing_for(&dehors.path().display().to_string(), racine(dedans.path()))
+            .expect_err("hors racine");
+        assert!(refus.contains("hors des dossiers"), "{refus}");
+    }
+
+    /// And a symlink is not a way around it: the check happens after
+    /// canonicalization, so the link's target is what is judged.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_does_not_walk_out_of_a_root() {
+        let dedans = tempfile::tempdir().unwrap();
+        let dehors = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dehors.path().join("secret")).unwrap();
+        std::os::unix::fs::symlink(dehors.path(), dedans.path().join("evasion")).unwrap();
+
+        let refus = listing_for(
+            &dedans.path().join("evasion").display().to_string(),
+            racine(dedans.path()),
+        )
+        .expect_err("le lien sort de la racine");
+        assert!(refus.contains("hors des dossiers"), "{refus}");
+    }
+
+    /// `..` likewise: it resolves before the check.
+    #[cfg(unix)]
+    #[test]
+    fn a_parent_reference_does_not_walk_out_of_a_root() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("git")).unwrap();
+
+        let refus = listing_for(
+            &root.path().join("git/../../..").display().to_string(),
+            racine(root.path()),
+        )
+        .expect_err("remonte au-dessus de la racine");
+        assert!(
+            refus.contains("hors des dossiers") || refus.contains("ne trouve pas"),
+            "{refus}"
+        );
+    }
+
+    /// A directory with more entries than the cap is served cut, and says so.
+    #[test]
+    fn a_very_wide_directory_is_capped_and_says_so() {
+        let root = tempfile::tempdir().unwrap();
+        for n in 0..BROWSE_MAX_ENTRIES + 10 {
+            std::fs::create_dir(root.path().join(format!("d{n:04}"))).unwrap();
+        }
+
+        let listing = listing_for(&root.path().display().to_string(), racine(root.path())).unwrap();
+        assert_eq!(listing.entries.len(), BROWSE_MAX_ENTRIES);
+        assert!(listing.truncated, "la coupe doit être annoncée");
+    }
+
+    /// The parent is offered only while it stays inside a root, so the wizard
+    /// cannot climb out by following it.
+    #[test]
+    fn the_parent_is_offered_only_inside_a_root() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("git/agaches")).unwrap();
+
+        let profond = listing_for(
+            &root.path().join("git/agaches").display().to_string(),
+            racine(root.path()),
+        )
+        .unwrap();
+        assert!(profond.parent.is_some(), "on peut remonter vers git/");
+
+        let sommet = listing_for(&root.path().display().to_string(), racine(root.path())).unwrap();
+        assert!(
+            sommet.parent.is_none(),
+            "la racine n'a pas de parent offert"
+        );
+    }
+
+    /// A path the user already configured is a root, whatever it is — that is
+    /// how somebody who typed `/workspace` once keeps browsing it.
+    #[test]
+    fn a_configured_path_becomes_a_root() {
+        let ailleurs = tempfile::tempdir().unwrap();
+        let attendu = ailleurs
+            .path()
+            .canonicalize()
+            .unwrap()
+            .display()
+            .to_string();
+
+        let roots = browse_roots(&[ailleurs.path().display().to_string()]);
+        assert!(
+            roots.iter().any(|r| r.path == attendu),
+            "le chemin configuré est proposé: {roots:?}"
+        );
+    }
 
     // ─── db-usage: where the weight actually is ──────────────────────────
 

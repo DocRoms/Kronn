@@ -607,11 +607,128 @@ async fn quick_exec_crud_and_csv_run_round_trip() {
     assert_eq!(run["data"]["data"][0]["name"], "Paris");
     assert_eq!(run["data"]["data"][0]["total"], "12");
     assert_eq!(run["data"]["data"][1]["name"], "London");
+    assert_eq!(run["data"]["exit_code"], 0);
+    let run_id = run["data"]["run_id"].as_str().unwrap();
+    let (_, saved) = get_json(app.clone(), &format!("/api/runs/{run_id}")).await;
+    assert_eq!(saved["data"]["result"], run["data"]["data"]);
+    assert_eq!(saved["data"]["exec_details"]["exit_code"], 0);
+    assert_eq!(saved["data"]["exec_details"]["stderr"], "");
 
     let (_, deleted) = delete_json(app.clone(), &format!("/api/quick-execs/{id}")).await;
     assert_eq!(deleted["success"], true);
     let (_, empty) = get_json(app, "/api/quick-execs").await;
     assert!(empty["data"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn quick_exec_failures_keep_measured_process_diagnostics_on_reload() {
+    let state = test_state();
+    let app = build_router_with_auth(state.clone(), false);
+    for (command, args, format, measured_code) in [
+        ("git", vec!["--kronn-unknown-option"], "text", Some(false)),
+        ("echo", vec!["this is not json"], "json", Some(true)),
+        ("kronn_nonexistent_test_binary", vec![], "text", None),
+    ] {
+        let (_, created) = post_json(
+            app.clone(),
+            "/api/quick-execs",
+            serde_json::json!({
+                "name":"Diagnostics fixture", "command":command, "args":args,
+                "timeout_secs":10, "output_format":format, "variables":[]
+            }),
+        )
+        .await;
+        assert_eq!(created["success"], true, "{created}");
+        let id = created["data"]["id"].as_str().unwrap();
+        let (_, response) = post_json(
+            app.clone(),
+            &format!("/api/quick-execs/{id}/run"),
+            serde_json::json!({"variables":{}}),
+        )
+        .await;
+        assert_eq!(response["success"], true, "{response}");
+        let result = &response["data"];
+        assert_eq!(result["success"], false, "{response}");
+        match measured_code {
+            Some(true) => {
+                assert_eq!(result["exit_code"], 0);
+                assert!(result["error"].as_str().unwrap().contains("not valid JSON"));
+            }
+            Some(false) => {
+                assert!(result["exit_code"].as_i64().unwrap() > 0, "{response}");
+                assert!(!result["stderr"].as_str().unwrap().is_empty(), "{response}");
+            }
+            None => {
+                assert!(result["exit_code"].is_null(), "{response}");
+                assert!(result["stderr"].is_null(), "{response}");
+            }
+        }
+        // A fresh HTTP router reads the durable row, not the launch response.
+        let run_id = result["run_id"].as_str().unwrap();
+        let (_, saved) = get_json(
+            build_router_with_auth(state.clone(), false),
+            &format!("/api/runs/{run_id}"),
+        )
+        .await;
+        assert_eq!(saved["data"]["status"], "failed");
+        assert_eq!(saved["data"]["diagnostic"], result["error"]);
+        if measured_code.is_some() {
+            assert_eq!(
+                saved["data"]["exec_details"]["exit_code"],
+                result["exit_code"]
+            );
+            assert_eq!(saved["data"]["exec_details"]["stderr"], result["stderr"]);
+        } else {
+            assert!(saved["data"].get("exec_details").is_none(), "{saved}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn quick_exec_failed_stdout_remains_in_the_saved_diagnostic() {
+    let directory = tempfile::tempdir().unwrap();
+    let before = directory.path().join("before.txt");
+    let after = directory.path().join("after.txt");
+    std::fs::write(&before, "before-only-diagnostic\n").unwrap();
+    std::fs::write(&after, "after-only-diagnostic\n").unwrap();
+    let app = test_app();
+    let (_, created) = post_json(
+        app.clone(),
+        "/api/quick-execs",
+        serde_json::json!({
+            "name":"Different files", "command":"git",
+            "args":["diff", "--no-index", before.to_str().unwrap(), after.to_str().unwrap()],
+            "timeout_secs":10, "output_format":"text", "variables":[]
+        }),
+    )
+    .await;
+    assert_eq!(created["success"], true, "{created}");
+    let id = created["data"]["id"].as_str().unwrap();
+    let (_, response) = post_json(
+        app.clone(),
+        &format!("/api/quick-execs/{id}/run"),
+        serde_json::json!({"variables":{}}),
+    )
+    .await;
+    let result = &response["data"];
+    assert_eq!(result["success"], false, "{response}");
+    assert_eq!(result["exit_code"], 1, "{response}");
+    assert_eq!(result["stderr"], "", "{response}");
+    assert!(result["stdout"]
+        .as_str()
+        .unwrap()
+        .contains("after-only-diagnostic"));
+    let run_id = result["run_id"].as_str().unwrap();
+    let (_, saved) = get_json(app, &format!("/api/runs/{run_id}")).await;
+    assert!(
+        saved["data"]["diagnostic"]
+            .as_str()
+            .unwrap()
+            .contains("after-only-diagnostic"),
+        "{saved}"
+    );
+    assert_eq!(saved["data"]["exec_details"]["exit_code"], 1);
+    assert_eq!(saved["data"]["exec_details"]["stderr"], "");
 }
 
 async fn wait_for_terminal_action(app: Router, action_id: &str) -> Value {
@@ -736,6 +853,12 @@ async fn discussion_action_http_contract_is_durable_and_idempotent() {
 async fn discussion_action_ingests_all_four_target_families_through_the_real_message_transaction() {
     let state = test_state();
     let app = build_router_with_auth(state.clone(), false);
+    let (status, catalogue) = get_json(app.clone(), "/api/signals/catalog").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(catalogue["data"]["schema_version"], 1);
+    let signal = &catalogue["data"]["signals"][0];
+    assert_eq!(signal["name"], "kronn-action");
+    assert_eq!(signal["human_approval_required"], true);
     let (_, qp) = post_json(
         app.clone(),
         "/api/quick-prompts",
@@ -815,6 +938,26 @@ async fn discussion_action_ingests_all_four_target_families_through_the_real_mes
         kinds,
         vec!["quick_prompt", "quick_api", "quick_exec", "workflow"],
         "{listed}"
+    );
+    let mut advertised: Vec<&str> = signal["payload_schema"]["properties"]["kind"]["enum"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|kind| kind.as_str().unwrap())
+        .collect();
+    advertised.sort_unstable();
+    let mut accepted = kinds.clone();
+    accepted.sort_unstable();
+    assert_eq!(
+        advertised, accepted,
+        "every advertised family must persist a real proposal"
+    );
+    let launches = state.db.with_conn(|conn| {
+        conn.query_row("SELECT (SELECT COUNT(*) FROM shared_runs) + (SELECT COUNT(*) FROM agent_dispatch_jobs)", [], |row| row.get::<_, i64>(0)).map_err(Into::into)
+    }).await.unwrap();
+    assert_eq!(
+        launches, 0,
+        "catalogue reads and message ingestion never launch"
     );
     assert!(
         listed["data"]
@@ -1198,6 +1341,74 @@ async fn automation_quick_items_share_a_persistent_favorite_patch() {
     // version. The initial insert remains the only snapshot after pinning.
     let (_, history) = get_json(app, &format!("/api/quick-prompts/{prompt_id}/history")).await;
     assert_eq!(history["data"].as_array().unwrap().len(), 1, "{history}");
+}
+
+#[tokio::test]
+async fn quick_api_delete_refuses_workflow_references_with_actionable_names() {
+    let state = test_state();
+    let app = build_router_with_auth(state.clone(), false);
+    let (_, created) = post_json(
+        app.clone(),
+        "/api/quick-apis",
+        serde_json::json!({
+            "name": "Weather", "api_plugin_slug": "demo", "api_config_id": "cfg",
+            "api_endpoint_path": "/weather", "variables": []
+        }),
+    )
+    .await;
+    assert_eq!(created["success"], true, "{created}");
+    let id = created["data"]["id"].as_str().unwrap().to_owned();
+    let referenced_id = id.clone();
+    state
+        .db
+        .with_conn(move |conn| {
+            conn.execute(
+                "INSERT INTO workflows (id, name, trigger_json, steps_json, created_at, updated_at)
+             VALUES ('wf-qa-delete', 'Morning forecast', '{}', ?1, '2026-01-01', '2026-01-01')",
+                [serde_json::json!([{
+                    "name":"Collect weather", "collect_api_data":{"sources":[
+                        {"alias":"weather", "quick_api_id":referenced_id}
+                    ]}
+                }])
+                .to_string()],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    let (_, usage) = get_json(app.clone(), &format!("/api/quick-apis/{id}/usage")).await;
+    assert_eq!(usage["data"], 1);
+    let (_, rejected) = delete_json(app.clone(), &format!("/api/quick-apis/{id}")).await;
+    assert_eq!(rejected["success"], false, "{rejected}");
+    assert_eq!(rejected["error_code"], "conflict", "{rejected}");
+    let message = rejected["error"].as_str().unwrap();
+    for name in [&*id, "Morning forecast", "Collect weather"] {
+        assert!(message.contains(name), "{message}");
+    }
+    let (_, listed) = get_json(app.clone(), "/api/quick-apis").await;
+    assert!(listed["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|api| api["id"] == id));
+
+    state
+        .db
+        .with_conn(|conn| {
+            conn.execute("DELETE FROM workflows WHERE id = 'wf-qa-delete'", [])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let (_, deleted) = delete_json(app.clone(), &format!("/api/quick-apis/{id}")).await;
+    assert_eq!(deleted["success"], true, "{deleted}");
+    let (_, listed) = get_json(app, "/api/quick-apis").await;
+    assert!(!listed["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|api| api["id"] == id));
 }
 
 #[tokio::test]
@@ -1715,6 +1926,86 @@ async fn live_page_action_routes_persist_and_fail_closed_for_an_unknown_target()
 }
 
 #[tokio::test]
+async fn live_page_action_retention_prunes_on_write_and_old_handles_fail_closed() {
+    let state = test_state();
+    let app = build_router_with_auth(state.clone(), false);
+    let (_, qe) = post_json(
+        app.clone(),
+        "/api/quick-execs",
+        serde_json::json!({
+            "name":"Retention fixture", "command":"echo", "args":["unused"],
+            "timeout_secs":10, "output_format":"text", "variables":[]
+        }),
+    )
+    .await;
+    assert_eq!(qe["success"], true, "{qe}");
+    let proposal = serde_json::json!({"kind":"quick_exec","target_id":qe["data"]["id"]});
+    let (_, page) = post_json(app.clone(), "/api/pages", serde_json::json!({
+        "title":"Retention", "html":format!("<button data-kronn-action=\"run\">Run</button><script type=\"application/kronn-action\" data-action-id=\"run\">{proposal}</script>"), "datasets":[]
+    })).await;
+    assert_eq!(page["success"], true, "{page}");
+    let page_id = page["data"]["id"].as_str().unwrap();
+    let (_, listed) = get_json(app.clone(), &format!("/api/pages/{page_id}/actions")).await;
+    let declaration = listed["data"][0]["id"].as_str().unwrap();
+    let (_, first) = post_json(
+        app.clone(),
+        &format!("/api/live-page-actions/{declaration}/cancel"),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(first["data"]["state"], "cancelled", "{first}");
+    let first_id = first["data"]["id"].as_str().unwrap().to_owned();
+    state.db.with_conn({let first_id=first_id.clone(); move |conn| {
+        conn.execute("WITH RECURSIVE numbers(n) AS (VALUES(0) UNION ALL SELECT n+1 FROM numbers WHERE n<1001)
+            INSERT INTO live_page_action_launches(id,action_id,binding_key,live_page_revision_id,kind,target_id,target_name,state,values_json,finished_at,created_at,updated_at)
+            SELECT 'page-launch:expired-' || printf('%04d',n),action_id,'row-'||n,live_page_revision_id,kind,target_id,target_name,'cancelled',values_json,'2020-01-01T00:00:00Z','2020-01-01T00:00:00Z','2020-01-01T00:00:00Z'
+            FROM numbers CROSS JOIN live_page_action_launches WHERE id=?1",[first_id])?;
+        Ok(())
+    }}).await.unwrap();
+    let (_, read) = get_json(app.clone(), &format!("/api/live-page-actions/{first_id}")).await;
+    assert_eq!(read["data"]["state"], "cancelled");
+    let before: i64 = state
+        .db
+        .with_conn(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM live_page_action_launches",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+        })
+        .await
+        .unwrap();
+    assert_eq!(before, 1003, "a GET must not perform retention");
+    let (_, latest) = post_json(
+        app.clone(),
+        &format!("/api/live-page-actions/{declaration}/cancel"),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(latest["data"]["state"], "cancelled", "{latest}");
+    let (_, expired) = get_json(
+        app.clone(),
+        "/api/live-page-actions/page-launch:expired-0000",
+    )
+    .await;
+    assert_eq!(expired["error_code"], "not_found", "{expired}");
+    let (_, replay) = post_json(
+        app,
+        "/api/live-page-actions/page-launch:expired-0000/launch",
+        serde_json::json!({"variables":{}}),
+    )
+    .await;
+    assert_eq!(replay["error_code"], "not_found", "{replay}");
+    let (retained,runs): (i64,i64) = state.db.with_conn(|conn| conn.query_row("SELECT (SELECT COUNT(*) FROM live_page_action_launches),(SELECT COUNT(*) FROM shared_runs)",[],|row|Ok((row.get(0)?,row.get(1)?))).map_err(Into::into)).await.unwrap();
+    assert_eq!(retained, 1000);
+    assert_eq!(
+        runs, 0,
+        "neither declining nor an expired handle may execute the QE"
+    );
+}
+
+#[tokio::test]
 async fn live_page_library_state_discussion_link_and_delete_round_trip() {
     let state = test_state();
     state
@@ -2169,6 +2460,193 @@ fn test_state() -> AppState {
     cfg.server.auth_token = None; // Disable auth for tests
     let config = Arc::new(RwLock::new(cfg));
     AppState::new_defaults(config, db, DEFAULT_MAX_CONCURRENT_AGENTS)
+}
+
+// #213: exercise the real HTTP launcher, encrypted snapshot and runner.
+// The old build_manual_trigger_obj unit test alone cannot cover this path.
+async fn optional_variable_http_run(
+    supplied: HashMap<String, String>,
+    step: kronn::models::WorkflowStep,
+) -> (kronn::models::WorkflowRun, HashMap<String, String>) {
+    let state = test_state();
+    let secret = kronn::core::crypto::generate_secret();
+    state.config.write().await.encryption_secret = Some(secret.clone());
+    let directory = tempfile::tempdir().unwrap();
+    let project_path = directory.path().to_string_lossy().into_owned();
+    let now = chrono::Utc::now();
+    let workflow = kronn::models::Workflow {
+        id: "optional-input-workflow".into(),
+        name: "Optional input".into(),
+        project_id: Some("optional-input-project".into()),
+        trigger: kronn::models::WorkflowTrigger::Manual,
+        steps: vec![step],
+        actions: vec![],
+        safety: kronn::models::WorkflowSafety {
+            sandbox: false,
+            max_files: None,
+            max_lines: None,
+            require_approval: false,
+        },
+        workspace_config: None,
+        concurrency_limit: None,
+        guards: None,
+        artifacts: HashMap::new(),
+        on_failure: vec![],
+        exec_allowlist: vec!["cat".into()],
+        variables: vec![kronn::models::PromptVariable {
+            name: "foo".into(),
+            label: "Foo".into(),
+            placeholder: String::new(),
+            description: None,
+            required: false,
+            pattern: None,
+            source: None,
+            source_ref: None,
+            allow_manual_override: false,
+            control: None,
+        }],
+        enabled: true,
+        pinned: false,
+        created_at: now,
+        updated_at: now,
+    };
+    state.db.with_conn(move |conn| {
+        conn.execute("INSERT INTO projects (id,name,path,created_at,updated_at) VALUES ('optional-input-project','Optional input',?1,?2,?2)", rusqlite::params![project_path, now.to_rfc3339()])?;
+        kronn::db::workflows::insert_workflow(conn, &workflow)
+    }).await.unwrap();
+    let response = build_router_with_auth(state.clone(), false)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/workflows/optional-input-workflow/trigger")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({"variables": supplied}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        response.into_body().collect(),
+    )
+    .await
+    .expect("workflow SSE must terminate")
+    .unwrap()
+    .to_bytes();
+    let events = String::from_utf8(bytes.to_vec()).unwrap();
+    let run_id = events
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .filter_map(|data| serde_json::from_str::<Value>(data).ok())
+        .find_map(|event| event["run_id"].as_str().map(str::to_owned))
+        .unwrap_or_else(|| panic!("missing run_start: {events}"));
+    let key = kronn::core::crypto::parse_secret(&secret).unwrap();
+    state
+        .db
+        .with_conn(move |conn| {
+            let run = kronn::db::workflows::get_run(conn, &run_id)?.expect("persisted run");
+            let values = kronn::db::execution_variable_snapshots::load_values(
+                conn,
+                "workflow",
+                &run_id,
+                &key,
+                chrono::Utc::now(),
+            )?
+            .expect("encrypted snapshot");
+            assert!(
+                run.trigger_context.as_ref().unwrap().get("foo").is_none(),
+                "variables must stay out of plaintext trigger metadata"
+            );
+            Ok((run, values))
+        })
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn workflow_http_optional_input_preserves_empty_value_in_gate() {
+    for supplied in [
+        HashMap::new(),
+        HashMap::from([("foo".into(), String::new())]),
+    ] {
+        let (run, values) = optional_variable_http_run(
+            supplied,
+            kronn::models::WorkflowStep {
+                name: "Review".into(),
+                step_type: kronn::models::StepType::Gate,
+                gate_message: Some("Optional: [{{foo}}]".into()),
+                ..Default::default()
+            },
+        )
+        .await;
+        assert_eq!(
+            run.status,
+            kronn::models::RunStatus::WaitingApproval,
+            "{:?}",
+            run.step_results
+        );
+        assert_eq!(run.step_results[0].output, "Optional: []");
+        assert_eq!(values.get("foo").map(String::as_str), Some(""));
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn workflow_http_optional_input_preserves_empty_value_in_exec_stdin() {
+    for supplied in [
+        HashMap::new(),
+        HashMap::from([("foo".into(), String::new())]),
+    ] {
+        let (run, values) = optional_variable_http_run(
+            supplied,
+            kronn::models::WorkflowStep {
+                name: "ParseIncludedUrls".into(),
+                step_type: kronn::models::StepType::Exec,
+                exec_command: Some("cat".into()),
+                exec_stdin: Some("[{{foo}}]".into()),
+                ..Default::default()
+            },
+        )
+        .await;
+        assert_eq!(
+            run.status,
+            kronn::models::RunStatus::Success,
+            "{:?}",
+            run.step_results
+        );
+        let envelope =
+            kronn::workflows::template::extract_step_envelope(&run.step_results[0].output)
+                .expect("Exec output envelope");
+        let data: Value = serde_json::from_str(&envelope.data).unwrap();
+        assert_eq!(data["stdout"], "[]");
+        assert_eq!(data["exit_code"], 0);
+        assert_eq!(values.get("foo").map(String::as_str), Some(""));
+    }
+}
+
+#[tokio::test]
+async fn workflow_http_optional_input_does_not_hide_unknown_template_variables() {
+    let (run, _) = optional_variable_http_run(
+        HashMap::new(),
+        kronn::models::WorkflowStep {
+            name: "Review".into(),
+            step_type: kronn::models::StepType::Gate,
+            gate_message: Some("{{unknown}}".into()),
+            ..Default::default()
+        },
+    )
+    .await;
+    assert_eq!(run.status, kronn::models::RunStatus::Failed);
+    assert!(
+        run.step_results[0]
+            .output
+            .contains("Unknown workflow template variable `unknown`"),
+        "{:?}",
+        run.step_results
+    );
 }
 
 /// Build a test router backed by an in-memory database (auth disabled).
@@ -7074,6 +7552,7 @@ async fn bootstrap_find_common_parent_logic() {
             default_profile_id: None,
             briefing_notes: None,
             linked_repos: vec![],
+            workspace: None,
             created_at: now,
             updated_at: now,
         };
@@ -7789,6 +8268,7 @@ async fn exec_returns_expected_fields() {
         default_profile_id: None,
         briefing_notes: None,
         linked_repos: vec![],
+        workspace: None,
         created_at: now,
         updated_at: now,
     };
@@ -8846,6 +9326,7 @@ async fn source_browser_lists_reads_and_searches_project_code() {
         default_profile_id: None,
         briefing_notes: None,
         linked_repos: vec![],
+        workspace: None,
         created_at: now,
         updated_at: now,
     };
@@ -13106,6 +13587,7 @@ async fn audit_runs_cleanup_flips_running_to_interrupted() {
         default_profile_id: None,
         briefing_notes: None,
         linked_repos: vec![],
+        workspace: None,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };
@@ -14707,6 +15189,7 @@ mod cold_api_handlers_tests {
             default_profile_id: None,
             briefing_notes: None,
             linked_repos: vec![],
+            workspace: None,
             created_at: now,
             updated_at: now,
         };
@@ -14935,6 +15418,7 @@ mod cold_api_handlers_tests {
             default_profile_id: None,
             briefing_notes: None,
             linked_repos: vec![],
+            workspace: None,
             created_at: now,
             updated_at: now,
         };
@@ -16945,6 +17429,7 @@ mod cold_api_handlers_tests {
             default_profile_id: None,
             briefing_notes: None,
             linked_repos: vec![],
+            workspace: None,
             created_at: now,
             updated_at: now,
         };

@@ -39,7 +39,10 @@ pub struct GenerateMediaRequest {
     /// instead of scheduling a second billable provider call.
     #[serde(default)]
     pub idempotency_key: Option<String>,
-    pub connection_id: String,
+    /// Omitted: select the sole connection supporting this modality. Refuse ambiguous
+    /// choices rather than selecting which provider budget to spend.
+    #[serde(default)]
+    pub connection_id: Option<String>,
     pub modality: MediaModality,
     pub prompt: String,
     /// Discussion the asset gets attached to. When absent, one is created with
@@ -91,6 +94,10 @@ pub struct GenerateMediaResponse {
     /// Fresh message dedicated to this launch. The placeholder and eventual
     /// asset both render at this durable transcript slot.
     pub message_id: String,
+    /// The connection this generation is billed on. Named because the caller
+    /// may not have chosen it.
+    pub connection_id: String,
+    pub connection_name: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -137,27 +144,34 @@ pub async fn generate(
         }
     }
 
-    let lookup = req.connection_id.clone();
+    let named = req
+        .connection_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let lookup = named.clone();
     let resolved = state
         .db
         .with_read_conn(move |conn| {
-            Ok((
-                crate::db::external_api_connections::resolve(conn, &lookup)?,
-                crate::db::external_api_connections::list(conn)?,
-            ))
+            let reference = match lookup.as_deref() {
+                Some(value) => Some(crate::db::external_api_connections::resolve(conn, value)?),
+                None => None,
+            };
+            Ok((reference, crate::db::external_api_connections::list(conn)?))
         })
         .await;
     use crate::db::external_api_connections::ConnectionReference;
     let (connection, all_connections) = match resolved {
-        Ok((ConnectionReference::Found(connection), all)) => (*connection, all),
-        Ok((ConnectionReference::Missing, all)) => {
+        Ok((Some(ConnectionReference::Found(connection)), all)) => (*connection, all),
+        Ok((Some(ConnectionReference::Missing), all)) => {
             return Json(ApiResponse::err(format!(
                 "unknown connection `{}`. {}",
-                req.connection_id.trim(),
+                named.unwrap_or_default(),
                 usable_connections(&all, req.modality)
             )))
         }
-        Ok((ConnectionReference::Ambiguous(candidates), _)) => {
+        Ok((Some(ConnectionReference::Ambiguous(candidates)), _)) => {
             let ids = candidates
                 .iter()
                 .map(|candidate| format!("`{}` ({})", candidate.id, candidate.display_name))
@@ -165,8 +179,25 @@ pub async fn generate(
                 .join(", ");
             return Json(ApiResponse::err(format!(
                 "`{}` names several connections; pass one of their ids: {ids}",
-                req.connection_id.trim()
+                named.unwrap_or_default()
             )));
+        }
+        // Select only an unambiguous provider, as for name-based resolution.
+        Ok((None, all)) => {
+            let mut candidates = all
+                .iter()
+                .filter(|connection| media_slot(connection, req.modality).is_some());
+            match (candidates.next().cloned(), candidates.next()) {
+                (Some(only), None) => (only, all),
+                (Some(_), Some(_)) => {
+                    return Json(ApiResponse::err(format!(
+                        "several connections can generate a {}; name the one to use. {}",
+                        req.modality.as_str(),
+                        usable_connections(&all, req.modality)
+                    )))
+                }
+                _ => return Json(ApiResponse::err(usable_connections(&all, req.modality))),
+            }
         }
         Err(e) => return Json(ApiResponse::err(format!("failed to read connection: {e}"))),
     };
@@ -245,6 +276,7 @@ pub async fn generate(
                 return Json(idempotent_response(
                     &existing,
                     &connection.id,
+                    &connection.display_name,
                     req.modality,
                     &model,
                     &prompt,
@@ -293,6 +325,7 @@ pub async fn generate(
                     return Json(idempotent_response(
                         &existing,
                         &connection.id,
+                        &connection.display_name,
                         req.modality,
                         &model,
                         &prompt,
@@ -322,6 +355,8 @@ pub async fn generate(
         model,
         discussion_id,
         message_id: anchor,
+        connection_id: connection.id.clone(),
+        connection_name: connection.display_name.clone(),
     }))
 }
 
@@ -387,9 +422,11 @@ pub(crate) fn idempotent_job_id(connection_id: &str, key: &str) -> String {
     format!("media-{hex}")
 }
 
+#[allow(clippy::too_many_arguments)]
 fn idempotent_response(
     existing: &media_jobs::MediaJob,
     connection_id: &str,
+    connection_name: &str,
     modality: MediaModality,
     model: &str,
     prompt: &str,
@@ -420,6 +457,8 @@ fn idempotent_response(
         model: existing.model.clone(),
         discussion_id,
         message_id,
+        connection_id: existing.connection_id.clone(),
+        connection_name: connection_name.to_string(),
     })
 }
 
@@ -915,6 +954,107 @@ mod tests {
             Some("openai/gpt-image-2"),
             Some("google/veo-3.1-lite"),
         )
+    }
+
+    /// An omitted connection resolves through the sole eligible provider.
+    fn ask_without_a_connection(modality: &str) -> GenerateMediaRequest {
+        serde_json::from_value(serde_json::json!({
+            "modality": modality,
+            "prompt": "a man is handed a pair of earrings in the street",
+            "discussion_id": "disc-1",
+        }))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn no_connection_named_uses_the_only_one_that_can_serve_the_modality() {
+        let state = media_state(vec![
+            openrouter(),
+            connection("text-only", "Text only", "textonly", None, None),
+        ])
+        .await;
+        let Json(queued) = generate(State(state), Json(ask_without_a_connection("image"))).await;
+        let data = queued.data.expect("queued");
+        assert_eq!(data.connection_id, OPENROUTER);
+        // The answer names what is billed: the caller did not choose it.
+        assert_eq!(data.connection_name, "OpenRouter");
+        assert_eq!(data.model, "openai/gpt-image-2");
+    }
+
+    #[tokio::test]
+    async fn no_connection_named_and_several_can_serve_it_refuses_with_their_names() {
+        let second = connection(
+            "1b0f5a7c-0000-4000-8000-000000000001",
+            "Fal",
+            "fal",
+            Some("fal/flux"),
+            None,
+        );
+        let state = media_state(vec![openrouter(), second]).await;
+        let Json(refused) = generate(
+            State(state.clone()),
+            Json(ask_without_a_connection("image")),
+        )
+        .await;
+        let error = refused.error.expect("refused");
+        assert!(error.contains("several connections"), "{error}");
+        assert!(
+            error.contains("OpenRouter") && error.contains("Fal"),
+            "{error}"
+        );
+        // Nothing durable, nothing billed: no job and no message.
+        let jobs: i64 = state
+            .db
+            .with_read_conn(|conn| {
+                Ok(conn.query_row("SELECT COUNT(*) FROM media_jobs", [], |row| row.get(0))?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(jobs, 0);
+    }
+
+    #[tokio::test]
+    async fn no_connection_named_and_none_can_serve_it_says_where_to_configure_one() {
+        let state = media_state(vec![connection(
+            "text-only",
+            "Text only",
+            "textonly",
+            None,
+            None,
+        )])
+        .await;
+        let Json(refused) = generate(State(state), Json(ask_without_a_connection("video"))).await;
+        let error = refused.error.expect("refused");
+        assert!(error.contains("No connection has a video model"), "{error}");
+        assert!(error.contains("Config > Agents"), "{error}");
+    }
+
+    /// The money test: omitting the connection and naming it are the same
+    /// intention, so they must be the same job. The v2 idempotency digest
+    /// deliberately excludes the connection for exactly this reason.
+    #[tokio::test]
+    async fn omitting_the_connection_or_naming_it_produces_one_job() {
+        let state = media_state(vec![openrouter()]).await;
+        let mut implicit = ask_without_a_connection("image");
+        implicit.idempotency_key = Some("same-intention".into());
+        let Json(first) = generate(State(state.clone()), Json(implicit)).await;
+        let first = first.data.expect("queued");
+
+        let mut explicit = ask(OPENROUTER, "image");
+        explicit.idempotency_key = Some("same-intention".into());
+        let Json(second) = generate(State(state.clone()), Json(explicit)).await;
+        let second = second.data.expect("replayed");
+
+        assert_eq!(first.job_id, second.job_id, "one intention, one job");
+        assert_eq!(second.connection_id, OPENROUTER);
+        let jobs: i64 = state
+            .db
+            .with_read_conn(|conn| {
+                Ok(conn.query_row("SELECT COUNT(*) FROM media_jobs", [], |row| row.get(0))?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(jobs, 1, "the second call must not buy a second generation");
     }
 
     /// The shape seen on a live instance: an agent tried three spellings of
