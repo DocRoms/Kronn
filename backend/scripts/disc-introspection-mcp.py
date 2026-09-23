@@ -1267,11 +1267,11 @@ TOOLS = [
         "name": "disc_wait_for_peer",
         "description": (
             "Between real steps use `max_total_secs: 20`; unbounded waits are for idle rooms. "
-            "Omit `since_sort_order`: the bridge keeps a durable cursor. An override reuses `latest_sort_order` "
-            "from a WAIT, never `last_sort_order` returned by an append. Each item has a "
+            "Omit `since_sort_order`: the bridge keeps a durable cursor. Override with a WAIT's "
+            "`latest_sort_order`, never `last_sort_order` returned by an append. Each item has a "
             "`message_id`; reply with its exact `reply_to_message_id`. A wait moved to the background "
-            "stays active: DO NOT start another wait before its terminal result. "
-            "Quiet or interruption is not departure; continue work/listening. Routing: "
+            "lasts to its terminal result or your next Kronn call: DO NOT start another wait; "
+            "re-arm. Quiet or interruption is not departure. Routing: "
             "`tool_manual({tool: \"disc_wait_for_peer\"})`."
         ),
         "inputSchema": {
@@ -6905,7 +6905,7 @@ def _wait_abort_reason():
 
 
 def _wait_sleep(delay, polls, started):
-    """Sleep `delay` seconds in short slices; True if aborted mid-sleep.
+    """Sleep `delay` seconds in short slices; the abort reason, else None.
 
     Emits a progress heartbeat every ~10 s so a client never sees a
     silent gap approaching its tool-call timeout during long pacing.
@@ -6913,13 +6913,35 @@ def _wait_sleep(delay, polls, started):
     end = time.monotonic() + max(0, delay)
     next_progress = time.monotonic() + _WAIT_PROGRESS_SLICE_SECS
     while time.monotonic() < end:
-        if _wait_abort_reason():
-            return True
+        reason = _wait_abort_reason()
+        if reason:
+            return reason
         if time.monotonic() >= next_progress:
             _emit_wait_progress(polls, int(time.monotonic() - started))
             next_progress = time.monotonic() + _WAIT_PROGRESS_SLICE_SECS
         time.sleep(min(1.0, max(0.0, end - time.monotonic())))
-    return _wait_abort_reason() is not None
+    return _wait_abort_reason()
+
+
+# A wait ended by a queued tools/call: the host may have backgrounded it and
+# still believe it listens. Reported once, on the result of the call that ended it.
+_WAIT_PREEMPTED = {"notice": None}
+_WAIT_PREEMPTED_NOTICE = {
+    "listening": False,
+    "reason": "new_request",
+    "action": (
+        "Your disc_wait_for_peer ended when this call reached the bridge; no wait "
+        "is armed now. Re-arm disc_wait_for_peer once this step is done."
+    ),
+}
+
+
+def _mark_wait_interrupted(result, reason):
+    """Record the exact interruption reason on the wait's own result."""
+    result["interrupted"] = reason
+    if reason == "new_request":
+        _WAIT_PREEMPTED["notice"] = dict(_WAIT_PREEMPTED_NOTICE)
+    return result
 
 
 # KT-190 — this bridge reports its OWN token cost.
@@ -7129,6 +7151,7 @@ def call_disc_wait_for_peer(args):
                 quiet["hint"] = _wait_budget_hint(started, polls + 1)
             elif aborted.reason != "cancelled":
                 quiet["hint"] = interrupted_hint
+                _mark_wait_interrupted(quiet, aborted.reason)
             return _carry_withheld_total(quiet, withheld_total)
         except Exception:
             # Terminal return can invalidate the child membership while this
@@ -7170,7 +7193,7 @@ def call_disc_wait_for_peer(args):
             return result
         if reason is not None:
             result["hint"] = interrupted_hint
-            return result
+            return _mark_wait_interrupted(result, reason)
         if deadline is not None and time.monotonic() >= deadline:
             result["hint"] = _wait_budget_hint(started, polls)
             return result
@@ -7185,9 +7208,11 @@ def call_disc_wait_for_peer(args):
             delay = 0
         if deadline is not None:
             delay = min(delay, max(0, int(deadline - time.monotonic())))
-        if delay and _wait_sleep(delay, polls, started):
-            if _wait_abort_reason() != "cancelled":
+        sleep_reason = _wait_sleep(delay, polls, started) if delay else None
+        if sleep_reason:
+            if sleep_reason != "cancelled":
                 result["hint"] = interrupted_hint
+                _mark_wait_interrupted(result, sleep_reason)
             return result
         # Resume from what this poll actually observed so replays stay exact.
         latest = result.get("latest_sort_order")
@@ -9318,9 +9343,9 @@ ROOM_WORK_PROTOCOL = (
     "Read `attention_required` on any tool result immediately; `awareness` and "
     "`kronn_room.context` are context, not your turns. Answer addressed turns using the exact "
     "`reply_to_message_id` and CLI target, never a native fallback for an unreachable CLI. "
-    "A wait moved to the background remains active: DO NOT start another wait or end on "
-    "a summary before its terminal result. A queued request can cause an interruption; "
-    "handle that request then resume this loop. A human gate pauses only its affected lot. "
+    "A wait moved to the background stays active until its terminal result: DO NOT start "
+    "another wait or end on a summary meanwhile. Any other Kronn call is an interruption "
+    "that ends it: handle it, then re-arm. A human gate pauses only its affected lot. "
     "Omit `since_sort_order`: the bridge owns the durable read cursor; an append receipt "
     "is not a read. Keep plan writes event-driven; host compliance is not guaranteed."
 )
@@ -10926,6 +10951,7 @@ def _handle(req):
         # already ran MUST keep its terminal receipt — silently dropping it
         # would invite a duplicating retry.
         suppress_response_on_cancel = name == "disc_wait_for_peer"
+        preempted = None
         this_call_sequence = None
         was_cancelled = False
         try:
@@ -10942,6 +10968,11 @@ def _handle(req):
             _CURRENT_PROGRESS_TOKEN["token"] = (
                 meta.get("progressToken") if isinstance(meta, dict) else None
             )
+            # Re-arming is listening again: the notice no longer applies.
+            preempted = _WAIT_PREEMPTED["notice"]
+            _WAIT_PREEMPTED["notice"] = None
+            if name == "disc_wait_for_peer":
+                preempted = None
             try:
                 data = fn(args)
             finally:
@@ -10964,20 +10995,18 @@ def _handle(req):
                 room = _room_peek_for_tool_result(name)
                 if room:
                     data["kronn_room"] = room
-            return {
+            return _with_wait_preempted({
                 "jsonrpc": "2.0",
                 "id": rid,
-                "result": {
-                    "content": [{
-                        "type": "text",
-                        "text": json.dumps(data, ensure_ascii=False, indent=2),
-                    }],
-                },
-            }
+                "result": {"content": [{
+                    "type": "text",
+                    "text": json.dumps(data, ensure_ascii=False, indent=2),
+                }]},
+            }, preempted)
         except BridgeStaleError as e:
             if was_cancelled and suppress_response_on_cancel:
                 return None
-            return _bridge_stale_result(rid, name, e)
+            return _with_wait_preempted(_bridge_stale_result(rid, name, e), preempted)
         except Exception as e:
             # The inner finally already consumed the cancellation and purged
             # this call's staged cursors; only the response decision remains.
@@ -10985,14 +11014,14 @@ def _handle(req):
                 return None
             # Surface a structured error so the agent can either retry
             # with different args or fall back to asking the user.
-            return {
+            return _with_wait_preempted({
                 "jsonrpc": "2.0",
                 "id": rid,
                 "result": {
                     "isError": True,
                     "content": [{"type": "text", "text": f"kronn-internal error: {e}"}],
                 },
-            }
+            }, preempted)
     # Unknown method
     if rid is not None:
         return {
@@ -11001,6 +11030,17 @@ def _handle(req):
             "error": {"code": -32601, "message": f"Method not found: {method}"},
         }
     return None
+
+
+def _with_wait_preempted(response, notice):
+    # A separate block leaves the tool's own payload shape untouched, on every
+    # response path that consumed the notice.
+    if notice:
+        response["result"]["content"].append({
+            "type": "text",
+            "text": json.dumps({"wait_preempted": notice}, ensure_ascii=False),
+        })
+    return response
 
 
 def main():

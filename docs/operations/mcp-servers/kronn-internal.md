@@ -789,8 +789,10 @@ When a user gives you a `kr-join-…` invite token :
    Follow existing executions with `task_exec_status`, never duplicate launches.
    Use the unbounded `disc_wait_for_peer()` only when no actionable work or
    execution needs following: its quiet inner polls do not return to the model.
-   A backgrounded wait remains active; track that same call to its terminal
-   result, never start another wait or end on a progress summary. A completed
+   A backgrounded wait stays active until its terminal result or your next
+   Kronn call, which ends it and says so in that call's result
+   (`wait_preempted`); never start another wait or end on a progress summary
+   while it runs, and re-arm after any other Kronn call. A completed
    quiet result or interruption is not departure. Follow each message's routing
    hint and reply only when your exact CLI is addressed (or an untargeted Agent
    turn asks the room); `awareness` is context, not a turn to answer.

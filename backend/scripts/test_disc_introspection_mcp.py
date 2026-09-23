@@ -10907,8 +10907,94 @@ class WaitOutsideLlmLoopTests(unittest.TestCase):
             result = self.mod.call_disc_wait_for_peer({})
 
         self.assertIn("interrupted", result["hint"])
+        self.assertEqual(result["interrupted"], "new_request")
+        self.assertTrue(result["timed_out"], "additive: existing readers are unchanged")
         # The preempting request stays queued for the main loop, unconsumed.
         self.assertEqual(self.mod._REQUEST_QUEUE.get_nowait()["id"], 12)
+        self.assertEqual(self.mod._WAIT_PREEMPTED["notice"]["listening"], False)
+        self.mod._WAIT_PREEMPTED["notice"] = None
+
+    def test_interruption_during_pacing_sleep_keeps_its_captured_reason(self):
+        def fake_wait_once(args):
+            self.now[0] += 60
+            return self._quiet(delay=30)
+
+        def queue_during_sleep(_seconds):
+            self.now[0] += 1
+            if self.mod._REQUEST_QUEUE.empty():
+                self.mod._REQUEST_QUEUE.put({"method": "tools/call", "id": 13,
+                                             "params": {"name": "disc_meta", "arguments": {}}})
+
+        with mock.patch.object(self.mod, "_wait_once", fake_wait_once), \
+             mock.patch.object(self.mod.time, "sleep", queue_during_sleep):
+            result = self.mod.call_disc_wait_for_peer({})
+
+        self.assertEqual(result["interrupted"], "new_request")
+        self.assertEqual(self.mod._REQUEST_QUEUE.get_nowait()["id"], 13)
+        self.mod._WAIT_PREEMPTED["notice"] = None
+
+    def _call(self, rid, name, fn):
+        with mock.patch.dict(self.mod.DISPATCH, {name: fn}), \
+             mock.patch.object(self.mod, "_room_peek_for_tool_result", return_value=None):
+            return self.mod._handle({"jsonrpc": "2.0", "id": rid, "method": "tools/call",
+                                     "params": {"name": name, "arguments": {}}})
+
+    def test_preempting_call_result_says_once_that_no_wait_is_armed(self):
+        self.mod._WAIT_PREEMPTED["notice"] = dict(self.mod._WAIT_PREEMPTED_NOTICE)
+        first = self._call(21, "disc_meta", lambda _args: {"id": "d"})
+        blocks = first["result"]["content"]
+        self.assertEqual(json.loads(blocks[0]["text"]), {"id": "d"}, "payload shape unchanged")
+        self.assertFalse(json.loads(blocks[1]["text"])["wait_preempted"]["listening"])
+
+        second = self._call(22, "disc_meta", lambda _args: {"id": "d"})
+        self.assertEqual(len(second["result"]["content"]), 1, "reported once")
+
+    def test_preemption_notice_rides_on_list_and_error_results_too(self):
+        self.mod._WAIT_PREEMPTED["notice"] = dict(self.mod._WAIT_PREEMPTED_NOTICE)
+        listed = self._call(23, "disc_list", lambda _args: [{"id": "a"}])
+        self.assertEqual(json.loads(listed["result"]["content"][0]["text"]), [{"id": "a"}])
+        self.assertIn("wait_preempted", listed["result"]["content"][1]["text"])
+
+        def boom(_args):
+            raise RuntimeError("backend down")
+
+        self.mod._WAIT_PREEMPTED["notice"] = dict(self.mod._WAIT_PREEMPTED_NOTICE)
+        failed = self._call(24, "disc_meta", boom)
+        self.assertTrue(failed["result"]["isError"])
+        self.assertIn("wait_preempted", failed["result"]["content"][1]["text"])
+
+    def test_preemption_notice_survives_a_stale_bridge_after_dispatch(self):
+        def stale(_args):
+            raise self.mod.BridgeStaleError("catalogue changed")
+
+        self.mod._WAIT_PREEMPTED["notice"] = dict(self.mod._WAIT_PREEMPTED_NOTICE)
+        with mock.patch.object(self.mod, "_schedule_bridge_reload",
+                               return_value={"status": "failed", "error": "simulated"}):
+            response = self._call(26, "disc_meta", stale)
+        blocks = response["result"]["content"]
+        self.assertEqual(json.loads(blocks[0]["text"])["error_code"], "bridge_stale")
+        self.assertIn("wait_preempted", blocks[1]["text"])
+        self.assertIsNone(self.mod._WAIT_PREEMPTED["notice"])
+
+    def test_stale_guard_before_dispatch_keeps_the_notice_for_the_next_call(self):
+        guarded = next(iter(self.mod._GUARDED_ORCHESTRATION_TOOLS))
+        self.mod._WAIT_PREEMPTED["notice"] = dict(self.mod._WAIT_PREEMPTED_NOTICE)
+        with mock.patch.object(self.mod, "_require_fresh_bridge",
+                               side_effect=self.mod.BridgeStaleError("stale")), \
+             mock.patch.object(self.mod, "_schedule_bridge_reload",
+                               return_value={"status": "failed", "error": "simulated"}):
+            refused = self._call(27, guarded, lambda _args: {})
+        self.assertEqual(len(refused["result"]["content"]), 1)
+        self.assertIsNotNone(self.mod._WAIT_PREEMPTED["notice"], "not consumed, not lost")
+        later = self._call(28, "disc_meta", lambda _args: {"id": "d"})
+        self.assertIn("wait_preempted", later["result"]["content"][1]["text"])
+
+    def test_re_arming_the_wait_clears_the_preemption_notice(self):
+        self.mod._WAIT_PREEMPTED["notice"] = dict(self.mod._WAIT_PREEMPTED_NOTICE)
+        rearmed = self._call(25, "disc_wait_for_peer",
+                             lambda _args: {"timed_out": True, "messages": []})
+        self.assertEqual(len(rearmed["result"]["content"]), 1)
+        self.assertIsNone(self.mod._WAIT_PREEMPTED["notice"])
 
     def test_ping_and_tools_list_are_serviced_without_waking_the_model(self):
         # Codex review P0: control traffic must be answered inline; only a

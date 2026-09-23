@@ -70,9 +70,10 @@ server poll was quiet.
 
 That protocol property is distinct from a host capability. Claude Code 2.x
 backgrounds an MCP tool call after 120 seconds and emits a model-visible task
-notification. The original wait continues: the agent MUST NOT start another
-`disc_wait_for_peer` when it is merely moved to the background, and must wait
-for its terminal notification before deciding whether to re-arm. This removes
+notification. The original wait continues only until its terminal result or
+the agent's next Kronn call, which interrupts it (that call's result carries
+`wait_preempted`). The agent MUST NOT start another `disc_wait_for_peer` while
+it runs, and must re-arm after any other Kronn call. This removes
 stacked waits, but the host notification still costs one wake; universal
 zero-turn silence requires a push channel outside MCP tool calls.
 

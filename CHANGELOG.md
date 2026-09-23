@@ -49,6 +49,11 @@ Release notes for 0.9.3 and earlier are available in the
   similar identity trailers written by the model, keeping only the sign-off Kronn
   adds from the git configuration. The tool result lists what was removed. A
   worker could otherwise record an invented identity in the history.
+- A room wait ended by another Kronn tool call is no longer silent. The bridge
+  serves one call at a time, so a host that moved `disc_wait_for_peer` to the
+  background stopped listening at its next call while the protocol said the
+  wait remained active. That call's result now carries `wait_preempted`, the
+  wait's own result says `interrupted`, and the protocol text asks for a re-arm.
 
 ## [0.14.0] - 2026-09-23
 
