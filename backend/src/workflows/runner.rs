@@ -28,7 +28,7 @@ pub enum RunEvent {
     /// Partial output from the agent (streamed in real-time).
     StepProgress { text: String },
     /// A step has finished executing.
-    StepDone { step_result: StepResult },
+    StepDone { step_result: Box<StepResult> },
     /// 0.7.0 — A `WorkflowGuards` limit was hit and the run was halted.
     /// Distinct from `RunDone { Failed }`: the frontend uses this to
     /// render the orange shield "Stoppé par garde-fou" badge instead of
@@ -598,6 +598,7 @@ async fn execute_run_with_notify_policy(
                                 step_api_endpoint_path: None,
                                 is_rollback: false,
                                 child_run_id: None,
+                                agent_provenance: None,
                                 native_tool_calls: Box::default(),
                                 step_agent: None,
                                 step_model: None,
@@ -651,6 +652,7 @@ async fn execute_run_with_notify_policy(
                     step_api_endpoint_path: None,
                     is_rollback: false,
                     child_run_id: None,
+                    agent_provenance: None,
                     native_tool_calls: Box::default(),
                     step_agent: None,
                     step_model: None,
@@ -826,6 +828,7 @@ async fn execute_run_with_notify_policy(
                     step_api_endpoint_path: None,
                     is_rollback: false,
                     child_run_id: None,
+                    agent_provenance: None,
                     native_tool_calls: Box::default(),
                     step_agent: None,
                     step_model: None,
@@ -905,6 +908,7 @@ async fn execute_run_with_notify_policy(
                     step_api_endpoint_path: None,
                     is_rollback: false,
                     child_run_id: None,
+                    agent_provenance: None,
                     native_tool_calls: Box::default(),
                     step_agent: None,
                     step_model: None,
@@ -986,6 +990,7 @@ async fn execute_run_with_notify_policy(
                 step_api_endpoint_path: None,
                 is_rollback: false,
                 child_run_id: None,
+                agent_provenance: None,
                 native_tool_calls: Box::default(),
             });
             all_success = false;
@@ -1014,6 +1019,7 @@ async fn execute_run_with_notify_policy(
                 step_api_endpoint_path: None,
                 is_rollback: false,
                 child_run_id: None,
+                    agent_provenance: None,
                     native_tool_calls: Box::default(),
             });
             break;
@@ -1056,6 +1062,7 @@ async fn execute_run_with_notify_policy(
                 step_api_endpoint_path: None,
                 is_rollback: false,
                 child_run_id: None,
+                agent_provenance: None,
                 native_tool_calls: Box::default(),
             });
             stopped_by_guard = true;
@@ -1097,6 +1104,7 @@ async fn execute_run_with_notify_policy(
                 step_api_endpoint_path: None,
                 is_rollback: false,
                 child_run_id: None,
+                agent_provenance: None,
                 native_tool_calls: Box::default(),
             });
             stopped_by_guard = true;
@@ -1153,6 +1161,7 @@ async fn execute_run_with_notify_policy(
                 step_api_endpoint_path: None,
                 is_rollback: false,
                 child_run_id: None,
+                agent_provenance: None,
                 native_tool_calls: Box::default(),
             });
             stopped_by_guard = true;
@@ -1211,6 +1220,7 @@ async fn execute_run_with_notify_policy(
             step_api_endpoint_path: None,
             is_rollback: false,
             child_run_id: None,
+            agent_provenance: None,
             native_tool_calls: Box::default(),
         };
         apply_step_snapshot(
@@ -1347,6 +1357,7 @@ async fn execute_run_with_notify_policy(
                                 step_api_endpoint_path: None,
                                 is_rollback: false,
                                 child_run_id: None,
+                                agent_provenance: None,
                                 native_tool_calls: Box::default(),
                             },
                             condition_action: None,
@@ -1671,6 +1682,7 @@ async fn execute_run_with_notify_policy(
                         step_api_endpoint_path: None,
                         is_rollback: false,
                         child_run_id: None,
+                        agent_provenance: None,
                         native_tool_calls: Box::default(),
                     },
                     condition_action: None,
@@ -1726,6 +1738,7 @@ async fn execute_run_with_notify_policy(
                         step_api_endpoint_path: None,
                         is_rollback: false,
                         child_run_id: None,
+                        agent_provenance: None,
                         native_tool_calls: Box::default(),
                     },
                     condition_action: None,
@@ -1829,7 +1842,7 @@ async fn execute_run_with_notify_policy(
 
         // Emit step done event
         emit(RunEvent::StepDone {
-            step_result: outcome.result.clone(),
+            step_result: Box::new(outcome.result.clone()),
         });
         // 0.8.2 — cross-tab live update. status reflects the new state
         // (WaitingApproval if the step was a Gate, else still Running).
@@ -2515,7 +2528,7 @@ async fn execute_run_with_notify_policy(
 
             let rb_failed = rb_outcome.result.status == RunStatus::Failed;
             emit(RunEvent::StepDone {
-                step_result: rb_outcome.result.clone(),
+                step_result: Box::new(rb_outcome.result.clone()),
             });
             run.step_results.push(rb_outcome.result);
 
@@ -3250,6 +3263,28 @@ pub(crate) fn apply_step_snapshot(
         StepType::SubWorkflow => "SubWorkflow",
     };
     result.step_kind = Some(kind.into());
+    if matches!(step.step_type, StepType::Agent) {
+        if let Some(provenance) = &result.agent_provenance {
+            let selected = provenance
+                .selected_attempt
+                .and_then(|id| provenance.attempts.iter().find(|attempt| attempt.id == id));
+            result.step_agent = selected.map(|attempt| attempt.agent.clone());
+            result.step_model = selected.and_then(|attempt| {
+                let model = if !attempt.observed_models.is_empty() {
+                    Some(attempt.observed_models.join(" / "))
+                } else if attempt.model_applied == Some(false) {
+                    None
+                } else {
+                    attempt.resolved_model.clone()
+                };
+                model.map(|model| match attempt.tier {
+                    crate::models::ModelTier::Default => model,
+                    tier => format!("{model} · {}", format!("{tier:?}").to_lowercase()),
+                })
+            });
+            return;
+        }
+    }
     result.step_agent = matches!(step.step_type, StepType::Agent).then(|| step.agent.clone());
     // 2026-06-13 — stamp the model/tier actually resolved for this Agent step
     // so the UI shows the real model on EVERY agent step (incl. per-item
@@ -3570,6 +3605,7 @@ mod tests {
             step_api_endpoint_path: None,
             is_rollback: false,
             child_run_id: None,
+            agent_provenance: None,
             native_tool_calls: Box::default(),
         }
     }
@@ -3908,6 +3944,7 @@ mod tests {
             step_api_endpoint_path: None,
             is_rollback: false,
             child_run_id: None,
+            agent_provenance: None,
             native_tool_calls: Box::default(),
         }
     }
@@ -4033,6 +4070,7 @@ mod tests {
             step_api_endpoint_path: None,
             is_rollback: false,
             child_run_id: None,
+            agent_provenance: None,
             native_tool_calls: Box::default(),
         }
     }

@@ -17744,6 +17744,7 @@ mod cold_api_handlers_tests {
             step_api_endpoint_path: None,
             is_rollback: false,
             child_run_id: None,
+            agent_provenance: None,
             native_tool_calls: Box::default(),
         };
         let run_for_update = run_id.clone();

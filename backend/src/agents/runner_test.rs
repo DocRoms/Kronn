@@ -1965,6 +1965,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await
         .expect("proxy must be reachable");
@@ -3109,6 +3110,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await;
 
@@ -3214,6 +3216,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await;
 
@@ -3269,6 +3272,7 @@ mod tests {
             Some(&server.uri()),
             None,
             Some(std::sync::Arc::new(WorkerTools { seen: seen.clone() })),
+            None,
             None,
             None,
             None,
@@ -3339,6 +3343,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await
         .expect("start");
@@ -3394,6 +3399,7 @@ mod tests {
             None,
             Some(std::time::Duration::from_secs(240 * 60)),
             Some(&parent_cancel),
+            None,
             None,
             None,
         );
@@ -3511,6 +3517,7 @@ mod tests {
                 drop_notify: drop_notify.clone(),
                 second_started: second_started.clone(),
             })),
+            None,
             None,
             None,
             None,
@@ -3639,6 +3646,7 @@ mod tests {
             Some(std::sync::Arc::new(ReadThenWriteTools {
                 seen: seen.clone(),
             })),
+            None,
             None,
             None,
             None,
@@ -3825,6 +3833,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .await
             .expect("an explicit unsupported format must recover before any tool runs");
@@ -3907,6 +3916,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .await
             {
@@ -3965,6 +3975,7 @@ mod tests {
             None,
             None,
             Some(&cancel),
+            None,
             None,
             None,
         );
@@ -4277,6 +4288,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await
         .expect("start");
@@ -4328,6 +4340,7 @@ mod tests {
             Some(&server.uri()),
             None,
             Some(std::sync::Arc::new(FakeTools { seen: seen.clone() })),
+            None,
             None,
             None,
             None,
@@ -4406,6 +4419,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await
         .expect("transient saturation must be replayed before returning the process");
@@ -4455,6 +4469,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await;
         let error = match started {
@@ -4488,6 +4503,7 @@ mod tests {
             "test-model",
             None,
             Some(&server.uri()),
+            None,
             None,
             None,
             None,
@@ -4583,6 +4599,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await
         .expect("initial request is accepted");
@@ -4660,6 +4677,7 @@ mod tests {
             Some(&base_url),
             None,
             Some(std::sync::Arc::new(FakeTools { seen: seen.clone() })),
+            None,
             None,
             None,
             None,
@@ -4771,6 +4789,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await;
 
@@ -4829,6 +4848,7 @@ mod tests {
             Some(std::sync::Arc::new(WorkerTools {
                 seen: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             })),
+            None,
             None,
             None,
             None,
@@ -4970,6 +4990,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await;
 
@@ -5097,6 +5118,7 @@ mod tests {
             Some(&base_url),
             None,
             Some(std::sync::Arc::new(WorkerTools { seen: seen.clone() })),
+            None,
             None,
             None,
             None,
@@ -5233,6 +5255,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await;
 
@@ -5305,6 +5328,7 @@ mod tests {
             Some(&server.uri()),
             None,
             Some(std::sync::Arc::new(FakeTools { seen: seen.clone() })),
+            None,
             None,
             None,
             None,
@@ -5537,6 +5561,7 @@ mod tests {
             Some(&server.uri()),
             None,
             Some(std::sync::Arc::new(WorkerTools { seen: seen.clone() })),
+            None,
             None,
             None,
             None,
@@ -5794,6 +5819,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .await
             .expect("start");
@@ -5889,6 +5915,7 @@ mod tests {
                     .into_iter()
                     .collect(),
             })),
+            None,
             None,
             None,
             None,
@@ -5996,6 +6023,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await
         .expect("start");
@@ -6053,6 +6081,7 @@ mod tests {
             Some(std::sync::Arc::new(IntermittentReadTools {
                 seen: seen.clone(),
             })),
+            None,
             None,
             None,
             None,
@@ -6125,6 +6154,7 @@ mod tests {
             Some(&server.uri()),
             None,
             Some(std::sync::Arc::new(FakeTools { seen: seen.clone() })),
+            None,
             None,
             None,
             None,
@@ -9973,6 +10003,7 @@ sleep 3600
             None,
             None,
             None,
+            None,
         )
         .await
         .expect("start");
@@ -10513,6 +10544,7 @@ sleep 3600
                 seen: seen.clone(),
                 root: None,
             })),
+            None,
             None,
             None,
             None,
@@ -11385,6 +11417,7 @@ sleep 3600
             None,
             None,
             None,
+            None,
         )
         .await
         .expect("start");
@@ -11944,6 +11977,7 @@ sleep 3600
                 seen: seen.clone(),
                 revision: revision.clone(),
             })),
+            None,
             None,
             None,
             None,

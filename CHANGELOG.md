@@ -11,6 +11,14 @@ Release notes for 0.9.3 and earlier are available in the
 
 ## [Unreleased]
 
+### Added
+
+- Workflow Agent results retain execution provenance for initial, repair,
+  escalation and debate attempts, including model resolution, structured
+  runtime model observations and format fallback. Compact agent/model badges
+  follow the retained output; historical runs keep their existing metadata.
+  See [workflow agent provenance](docs/operations/workflow-agent-provenance.md).
+
 ### Fixed
 
 - Workflow HTTP agents recover once from an explicit unsupported structured

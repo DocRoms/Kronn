@@ -21,6 +21,8 @@ use serde_json::Value;
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct ChatChunk {
     pub delta: Option<String>,
+    /// Provider-reported identity, independent of the requested model alias.
+    pub model: Option<String>,
     /// Why the provider stopped, when it says so. Surfaced because an empty reply
     /// is otherwise undiagnosable: `length` means the model spent its output budget
     /// (a reasoning model can burn it all thinking), `stop` means it chose to end.
@@ -66,7 +68,10 @@ impl ChatCodec for OllamaCodec {
             return None;
         }
         let json: Value = serde_json::from_str(line).ok()?;
-        let mut chunk = ChatChunk::default();
+        let mut chunk = ChatChunk {
+            model: json["model"].as_str().map(str::to_owned),
+            ..Default::default()
+        };
         // In-band error on a 200 stream (model crashed mid-generation).
         if let Some(err) = json["error"].as_str() {
             chunk.error = Some(err.to_string());
@@ -111,7 +116,10 @@ impl ChatCodec for OpenAiCodec {
             return Some(ChatChunk::done());
         }
         let json: Value = serde_json::from_str(payload).ok()?;
-        let mut chunk = ChatChunk::default();
+        let mut chunk = ChatChunk {
+            model: json["model"].as_str().map(str::to_owned),
+            ..Default::default()
+        };
         if let Some(err) = json["error"]["message"].as_str() {
             chunk.error = Some(err.to_string());
         }
@@ -184,6 +192,31 @@ pub(crate) fn build_openai_chat_body(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn provider_model_observations_survive_both_wire_formats() {
+        use super::ChatCodec;
+        assert_eq!(
+            super::OllamaCodec
+                .parse_line(r#"{"model":"served-local","done":true}"#)
+                .unwrap()
+                .model
+                .as_deref(),
+            Some("served-local")
+        );
+        assert_eq!(
+            super::OpenAiCodec
+                .parse_line(r#"data: {"model":"served-proxy","choices":[]}"#)
+                .unwrap()
+                .model
+                .as_deref(),
+            Some("served-proxy")
+        );
+        assert!(super::OpenAiCodec
+            .parse_line("data: [DONE]")
+            .unwrap()
+            .model
+            .is_none());
+    }
     use super::*;
 
     #[test]

@@ -26,6 +26,7 @@ pub mod media_capabilities;
 pub mod media_codec;
 pub mod media_runner;
 pub mod media_worker;
+pub mod provenance;
 pub mod runner;
 pub mod tools;
 

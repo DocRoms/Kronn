@@ -346,6 +346,8 @@ fn parse_config_options(result: &Value) -> Vec<AcpConfigOption> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AcpSessionEvent {
+    /// Model identifier from a structured runtime response, not configuration.
+    ModelObserved(String),
     /// Runtime-owned conversation identifier discovered after session
     /// creation. This is control metadata consumed by the runner, never text
     /// forwarded to the discussion or an agent-visible event payload.

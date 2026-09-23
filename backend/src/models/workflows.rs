@@ -1351,6 +1351,51 @@ pub struct NativeToolCallLog {
     pub ok: bool,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct WorkflowAgentProvenance {
+    pub attempts: Vec<WorkflowAgentAttempt>,
+    /// One-based attempt id whose output the step retained. Absent when no
+    /// attempt produced a retained output, including preflight failures.
+    pub selected_attempt: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub enum WorkflowAgentAttemptRole {
+    Initial,
+    Repair,
+    Escalation,
+    Review,
+    Author,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct WorkflowAgentAttempt {
+    pub id: u32,
+    pub role: WorkflowAgentAttemptRole,
+    /// One-based outer Agent retry; repair/debate retain their parent's number.
+    pub retry: u32,
+    pub agent: AgentType,
+    pub tier: ModelTier,
+    pub connection_id: Option<String>,
+    /// Explicit model override, before resolving connection/tier defaults.
+    pub requested_model: Option<String>,
+    /// Model resolved at the actual launch boundary. Not provider observation.
+    pub resolved_model: Option<String>,
+    /// Whether the transport applied that selection. None means unknown or no
+    /// selection; native ACP can explicitly retain its default (false).
+    pub model_applied: Option<bool>,
+    /// Distinct model identifiers reported by structured runtime responses.
+    /// Empty means unreported; never inferred from generated prose or config.
+    pub observed_models: Vec<String>,
+    pub format_fallback: bool,
+    pub started_at: DateTime<Utc>,
+    pub duration_ms: u64,
+    pub succeeded: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct StepResult {
@@ -1432,6 +1477,10 @@ pub struct StepResult {
     /// for legacy rows. The inverse of `WorkflowRun.parent_run_id`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub child_run_id: Option<String>,
+    /// Captured execution provenance. Older rows have no such information;
+    /// reading them must never manufacture attempts from today's config.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_provenance: Option<Box<WorkflowAgentProvenance>>,
     /// Bounded Kronn-native calls made by an HTTP Agent step (Ollama or
     /// LiteLLM). Only tool name + outcome are persisted; arguments/results
     /// stay in the provider round-trip and can never leak into run history.

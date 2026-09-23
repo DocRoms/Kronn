@@ -2940,7 +2940,7 @@ pub async fn test_step(
 
         let _ = tx
             .send(crate::workflows::runner::RunEvent::StepDone {
-                step_result: outcome.result.clone(),
+                step_result: Box::new(outcome.result.clone()),
             })
             .await;
 

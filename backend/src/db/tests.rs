@@ -2671,6 +2671,7 @@ fn listings_drop_step_outputs_but_keep_the_steps_themselves() {
             step_api_endpoint_path: None,
             is_rollback: false,
             child_run_id: None,
+            agent_provenance: None,
             native_tool_calls: Box::default(),
         },
         StepResult {
@@ -2689,6 +2690,7 @@ fn listings_drop_step_outputs_but_keep_the_steps_themselves() {
             step_api_endpoint_path: None,
             is_rollback: false,
             child_run_id: None,
+            agent_provenance: None,
             native_tool_calls: Box::default(),
         },
     ];
@@ -2801,6 +2803,7 @@ fn workflow_runs_update() {
         step_api_endpoint_path: None,
         is_rollback: false,
         child_run_id: None,
+        agent_provenance: None,
         native_tool_calls: Box::default(),
     }];
     crate::db::workflows::update_run(&conn, &run).unwrap();

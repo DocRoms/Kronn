@@ -6321,6 +6321,11 @@ is_rollback: boolean,
  */
 child_run_id?: string | null,
 /**
+ * Captured execution provenance. Older rows have no such information;
+ * reading them must never manufacture attempts from today's config.
+ */
+agent_provenance?: WorkflowAgentProvenance | null,
+/**
  * Bounded Kronn-native calls made by an HTTP Agent step (Ollama or
  * LiteLLM). Only tool name + outcome are persisted; arguments/results
  * stay in the provider round-trip and can never leak into run history.
@@ -7280,6 +7285,39 @@ variables?: Array<PromptVariable>, enabled: boolean,
 pinned: boolean, created_at: string, updated_at: string, };
 
 export type WorkflowAction = { "type": "CreatePr", title_template: string, body_template: string, branch_template: string, } | { "type": "CommentIssue", body_template: string, } | { "type": "UpdateTrackerStatus", status: string, } | { "type": "CreateIssue", title_template: string, body_template: string, };
+
+export type WorkflowAgentAttempt = { id: number, role: WorkflowAgentAttemptRole,
+/**
+ * One-based outer Agent retry; repair/debate retain their parent's number.
+ */
+retry: number, agent: AgentType, tier: ModelTier, connection_id: string | null,
+/**
+ * Explicit model override, before resolving connection/tier defaults.
+ */
+requested_model: string | null,
+/**
+ * Model resolved at the actual launch boundary. Not provider observation.
+ */
+resolved_model: string | null,
+/**
+ * Whether the transport applied that selection. None means unknown or no
+ * selection; native ACP can explicitly retain its default (false).
+ */
+model_applied: boolean | null,
+/**
+ * Distinct model identifiers reported by structured runtime responses.
+ * Empty means unreported; never inferred from generated prose or config.
+ */
+observed_models: Array<string>, format_fallback: boolean, started_at: string, duration_ms: number, succeeded: boolean, };
+
+export type WorkflowAgentAttemptRole = "Initial" | "Repair" | "Escalation" | "Review" | "Author";
+
+export type WorkflowAgentProvenance = { attempts: Array<WorkflowAgentAttempt>,
+/**
+ * One-based attempt id whose output the step retained. Absent when no
+ * attempt produced a retained output, including preflight failures.
+ */
+selected_attempt: number | null, };
 
 /**
  * Self-contained envelope produced by `GET /api/workflows/:id/export`.
