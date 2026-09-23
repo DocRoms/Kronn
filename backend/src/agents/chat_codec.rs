@@ -31,6 +31,9 @@ pub(crate) struct ChatChunk {
     pub done: bool,
     pub error: Option<String>,
     pub prompt_tokens: u64,
+    /// Share of `prompt_tokens` the provider served from its prompt cache.
+    /// `None` when the provider does not report it, which proves nothing.
+    pub cached_prompt_tokens: Option<u64>,
     pub eval_tokens: u64,
     /// Tool calls the model wants executed before it can answer. Ollama puts
     /// them on the terminal chunk; OpenAI streams them as indexed fragments
@@ -141,6 +144,11 @@ impl ChatCodec for OpenAiCodec {
         }
         if let Some(usage) = json.get("usage").filter(|u| !u.is_null()) {
             chunk.prompt_tokens = usage["prompt_tokens"].as_u64().unwrap_or(0);
+            // OpenAI's field; LiteLLM also fills it for Gemini and Anthropic and
+            // may pass Anthropic's own name through instead.
+            chunk.cached_prompt_tokens = usage["prompt_tokens_details"]["cached_tokens"]
+                .as_u64()
+                .or_else(|| usage["cache_read_input_tokens"].as_u64());
             chunk.eval_tokens = usage["completion_tokens"].as_u64().unwrap_or(0);
         }
         if let Some(reason) = choice["finish_reason"].as_str() {
@@ -275,7 +283,37 @@ mod tests {
             .parse_line(r#"data: {"choices":[],"usage":{"prompt_tokens":7,"completion_tokens":9}}"#)
             .unwrap();
         assert_eq!((u.prompt_tokens, u.eval_tokens), (7, 9));
+        assert_eq!(u.cached_prompt_tokens, None, "absent means not reported");
         assert_eq!(u.delta, None);
+    }
+
+    #[test]
+    fn openai_reads_cached_prompt_tokens_in_both_spellings() {
+        let openai = OpenAiCodec
+            .parse_line(
+                r#"data: {"choices":[],"usage":{"prompt_tokens":900,"completion_tokens":5,"prompt_tokens_details":{"cached_tokens":800}}}"#,
+            )
+            .unwrap();
+        assert_eq!(
+            (openai.prompt_tokens, openai.cached_prompt_tokens),
+            (900, Some(800))
+        );
+        let anthropic = OpenAiCodec
+            .parse_line(
+                r#"data: {"choices":[],"usage":{"prompt_tokens":900,"completion_tokens":5,"cache_read_input_tokens":700}}"#,
+            )
+            .unwrap();
+        assert_eq!(anthropic.cached_prompt_tokens, Some(700));
+        let reported_zero = OpenAiCodec
+            .parse_line(
+                r#"data: {"choices":[],"usage":{"prompt_tokens":900,"completion_tokens":5,"prompt_tokens_details":{"cached_tokens":0},"cache_read_input_tokens":700}}"#,
+            )
+            .unwrap();
+        assert_eq!(
+            reported_zero.cached_prompt_tokens,
+            Some(0),
+            "a reported zero is a measurement and wins over the fallback"
+        );
     }
 
     #[test]

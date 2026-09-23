@@ -22,6 +22,10 @@ Release notes for 0.9.3 and earlier are available in the
   reported or resolved model, format fallback, duration, outcome) and marks the
   one whose output was kept. A step with no recorded model shows "unknown
   model" instead of today's step configuration.
+- Task execution usage for HTTP agents records the prompt tokens a provider
+  served from its cache, when it reports them (`prompt_tokens_details.cached_tokens`
+  or `cache_read_input_tokens`). Turns that do not report it stay unknown and are
+  counted separately, so no cache rate is inferred for them.
 
 ### Fixed
 

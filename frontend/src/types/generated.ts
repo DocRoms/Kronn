@@ -6460,7 +6460,11 @@ export type TaskExecutionEvent = { id: string, task_execution_id: string, action
  */
 export type TaskExecutionHttpPhase = "read" | "mutation" | "commit" | "delivery" | "finalization" | "exploration" | "answer";
 
-export type TaskExecutionHttpPhaseUsage = { phase: TaskExecutionHttpPhase, turns: number, prompt_tokens: number, eval_tokens: number, duration_ms: number, };
+export type TaskExecutionHttpPhaseUsage = { phase: TaskExecutionHttpPhase, turns: number, prompt_tokens: number,
+/**
+ * Sum over the `cache_reported_turns` that reported a cached share only.
+ */
+cached_prompt_tokens: number, cache_reported_turns: number, eval_tokens: number, duration_ms: number, };
 
 export type TaskExecutionHttpToolUsage = { name: string, ok: boolean, };
 
@@ -6469,14 +6473,25 @@ export type TaskExecutionHttpToolUsage = { name: string, ok: boolean, };
  * bounded protocol identifiers; arguments, results, prompts and endpoints are
  * deliberately absent from this durable projection.
  */
-export type TaskExecutionHttpTurnUsage = { turn: number, dispatch_id?: string | null, provider: string, phase: TaskExecutionHttpPhase, prompt_tokens: number, eval_tokens: number, duration_ms: number, provider_ok: boolean, requested_tools: Array<string>, executed_tools: Array<TaskExecutionHttpToolUsage>, };
+export type TaskExecutionHttpTurnUsage = { turn: number, dispatch_id?: string | null, provider: string, phase: TaskExecutionHttpPhase, prompt_tokens: number,
+/**
+ * Share of `prompt_tokens` served from the provider's prompt cache. `None`
+ * when the provider does not report it, including every journal entry
+ * written before this field existed: unknown, not zero.
+ */
+cached_prompt_tokens?: number | null, eval_tokens: number, duration_ms: number, provider_ok: boolean, requested_tools: Array<string>, executed_tools: Array<TaskExecutionHttpToolUsage>, };
 
 /**
  * Aggregate across every dispatch/rework of one durable task execution. The
  * totals cover the complete journal while `recent_turns` is bounded for UI and
  * MCP payload safety.
  */
-export type TaskExecutionHttpUsage = { turns: number, prompt_tokens: number, eval_tokens: number, traffic_tokens: number, peak_context_tokens: number, duration_ms: number, phases: Array<TaskExecutionHttpPhaseUsage>, recent_turns: Array<TaskExecutionHttpTurnUsage>, };
+export type TaskExecutionHttpUsage = { turns: number, prompt_tokens: number,
+/**
+ * Sum over the `cache_reported_turns` that reported a cached share only;
+ * never a cache rate for turns that did not report one.
+ */
+cached_prompt_tokens: number, cache_reported_turns: number, eval_tokens: number, traffic_tokens: number, peak_context_tokens: number, duration_ms: number, phases: Array<TaskExecutionHttpPhaseUsage>, recent_turns: Array<TaskExecutionHttpTurnUsage>, };
 
 /**
  * A resolved TaskExecution + its lineage, answerable in one query (DoD-4):

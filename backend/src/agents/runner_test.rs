@@ -4117,6 +4117,93 @@ mod tests {
         assert_eq!(body["stream"], true);
     }
 
+    #[tokio::test]
+    async fn a_later_reported_zero_replaces_the_cached_count_and_absence_keeps_it() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(sse(&[
+                r#"{"choices":[],"usage":{"prompt_tokens":1000,"completion_tokens":1,"prompt_tokens_details":{"cached_tokens":800}}}"#,
+                r#"{"choices":[],"usage":{"prompt_tokens":1000,"completion_tokens":1,"prompt_tokens_details":{"cached_tokens":0}}}"#,
+                r#"{"choices":[],"usage":{"prompt_tokens":1000,"completion_tokens":1}}"#,
+                r#"{"choices":[{"index":0,"delta":{"content":"ok"}}]}"#,
+            ])))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let mut process = start_ollama_http(
+            &AgentType::LiteLlm,
+            "hello",
+            "",
+            "test-model",
+            None,
+            Some(&server.uri()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("mock proxy reachable");
+        while process.next_line().await.is_some() {}
+        assert!(process.child.wait().await.expect("lifeline").success());
+        let captured = process.stderr_capture.lock().unwrap().clone();
+        let turns = parse_http_turn_telemetry(&captured);
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].cached_prompt_tokens, Some(0));
+    }
+
+    #[tokio::test]
+    async fn cached_prompt_tokens_reach_the_turn_telemetry() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(sse(&[
+                r#"{"choices":[{"index":0,"delta":{"content":"ok"}}]}"#,
+                r#"{"choices":[],"usage":{"prompt_tokens":1000,"completion_tokens":1,"prompt_tokens_details":{"cached_tokens":800}}}"#,
+            ])))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let mut process = start_ollama_http(
+            &AgentType::LiteLlm,
+            "hello",
+            "",
+            "test-model",
+            None,
+            Some(&server.uri()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("mock proxy reachable");
+        while process.next_line().await.is_some() {}
+        assert!(process.child.wait().await.expect("lifeline").success());
+        let captured = process.stderr_capture.lock().unwrap().clone();
+        let turns = parse_http_turn_telemetry(&captured);
+        assert_eq!(turns.len(), 1);
+        assert_eq!(
+            (turns[0].prompt_tokens, turns[0].cached_prompt_tokens),
+            (1000, Some(800))
+        );
+    }
+
     /// The regression this pins (KT-337): the NVIDIA endpoint slot was declared
     /// on the spawn config and read by the runner, but written by no call site.
     /// A saved endpoint was therefore ignored and every run went to the public

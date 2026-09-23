@@ -5776,6 +5776,7 @@ pub(crate) fn build_ollama_chat_body(
 #[derive(Default)]
 pub(crate) struct TokenTally {
     prompt: u64,
+    cached_prompt: Option<u64>,
     eval: u64,
     provenance: Option<AgentProvenanceCapture>,
 }
@@ -5950,6 +5951,9 @@ struct HttpTurnTrace {
     provider: String,
     phase: crate::models::TaskExecutionHttpPhase,
     prompt_tokens: u64,
+    // Absent when unreported, and from traces written before it existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cached_prompt_tokens: Option<u64>,
     eval_tokens: u64,
     duration_ms: u64,
     provider_ok: bool,
@@ -6019,6 +6023,7 @@ pub(crate) fn parse_http_turn_telemetry(
                     provider: trace.provider,
                     phase: trace.phase,
                     prompt_tokens: trace.prompt_tokens,
+                    cached_prompt_tokens: trace.cached_prompt_tokens,
                     eval_tokens: trace.eval_tokens,
                     duration_ms: trace.duration_ms,
                     provider_ok: trace.provider_ok,
@@ -6252,6 +6257,9 @@ pub(crate) async fn forward_chat_line(
     }
     if chunk.prompt_tokens > 0 {
         tally.prompt = chunk.prompt_tokens;
+    }
+    if chunk.cached_prompt_tokens.is_some() {
+        tally.cached_prompt = chunk.cached_prompt_tokens;
     }
     if chunk.eval_tokens > 0 {
         tally.eval = chunk.eval_tokens;
@@ -7267,6 +7275,7 @@ async fn start_ollama_http(
                     provider: backend.to_ascii_lowercase(),
                     phase: current_http_phase,
                     prompt_tokens: tally.prompt,
+                    cached_prompt_tokens: tally.cached_prompt,
                     eval_tokens: tally.eval,
                     duration_ms: request_started_at
                         .elapsed()
