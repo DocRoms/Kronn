@@ -482,11 +482,49 @@ tts_voices?: Record<string, string>, disabled_agents: Array<AgentType>, };
  */
 export type AppendLintSummary = { fabricated_count: number, unsourced_count: number, note: string, };
 
+export type ArtifactBundle = { kind: string, version: number, exported_at: string, artifact: ArtifactBundlePage, referenced_artifacts: Array<ArtifactBundlePage>, referenced_workflows: Array<Workflow>, referenced_quick_prompts: Array<QuickPrompt>, referenced_quick_apis: Array<QuickApi>, referenced_quick_execs: Array<QuickExec>, };
+
+export type ArtifactBundleDataset = { name: string, kind: LivePageDatasetKind,
+/**
+ * Distinguishes a dataset that has never been populated from a JSON null.
+ */
+has_current: boolean, current: any, schema: any, max_points: number, max_age_days: number | null, updated_at: string, points: Array<ArtifactBundlePoint>, };
+
+export type ArtifactBundlePage = { id: string, title: string, slug: string, html: string, created_by_agent: string | null, datasets: Array<ArtifactBundleDataset>, };
+
+export type ArtifactBundlePoint = { observed_at: string, payload: any, dedupe_key: string | null, };
+
+export type ArtifactImportAction = "create" | "reuse";
+
+export type ArtifactImportChoice = { kind: ArtifactResourceKind, source_id: string, action: ArtifactImportAction, target_id: string | null, };
+
+export type ArtifactImportDisposition = "create" | "reuse" | "conflict";
+
+export type ArtifactImportEntry = { kind: ArtifactResourceKind, source_id: string, name: string, disposition: ArtifactImportDisposition, existing_id: string | null,
+/**
+ * UI translation key suffix: missing, identical, changed, retargeted, chosen.
+ */
+reason: string, };
+
+export type ArtifactImportPreview = { title: string, entries: Array<ArtifactImportEntry>, issues: Array<string>, warnings: Array<ArtifactImportWarning>, digest: string, can_import: boolean, };
+
+export type ArtifactImportRequest = { content: string, project_id?: string | null, choices?: Array<ArtifactImportChoice>,
+/**
+ * The preview digest is required at commit; stale decisions are rejected.
+ */
+preview_digest?: string | null, };
+
+export type ArtifactImportResult = { artifact: LivePage, entries: Array<ArtifactImportEntry>, };
+
+export type ArtifactImportWarning = { kind: string, id: string, };
+
 /**
  * Where the full streams were kept. Bytes are the real size on disk; `truncated`
  * says the process produced more than that.
  */
 export type ArtifactRef = { path: string, bytes: number, truncated: boolean, };
+
+export type ArtifactResourceKind = "artifact" | "workflow" | "quick_prompt" | "quick_api" | "quick_exec";
 
 /**
  * Declared artifact in a workflow. Phase-3 minimal model — only

@@ -41,15 +41,18 @@ const actionRelay = vi.hoisted(() => ({ onAction: null as ((intent: {
 }) => void) | null }));
 
 vi.mock('../../lib/api', () => ({
+  projects: { list: vi.fn().mockResolvedValue([]) },
   discussionActions: { get: vi.fn(), cancel: vi.fn(), launch: vi.fn() },
   docs: { generatePdf: vi.fn(), generateDocx: vi.fn(), generateCsv: vi.fn() },
   pages: {
     list: vi.fn(), get: vi.fn(), revisions: vi.fn(), workflows: vi.fn(), publications: vi.fn(), discussions: vi.fn(),
     actions: vi.fn(), actionLaunches: vi.fn(() => Promise.resolve([])), getAction: vi.fn(), cancelAction: vi.fn(), launchAction: vi.fn(),
     update: vi.fn(), delete: vi.fn(), updateHtml: vi.fn(),
+    exportArtifact: vi.fn(), previewImport: vi.fn(), importArtifact: vi.fn(),
   },
   workflows: { triggerStream: vi.fn() },
 }));
+vi.mock('../../lib/downloadBlob', () => ({ triggerDownload: vi.fn() }));
 vi.mock('../../lib/I18nContext', () => ({
   useT: () => ({
     locale: 'fr',
@@ -69,6 +72,7 @@ import { docs as docsApi, pages as pagesApi, workflows as workflowsApi } from '.
 import { requestRenderedPageHtml } from '../../lib/live-page-sandbox';
 import { HtmlRevisionDiff } from '../../components/HtmlCodeEditor';
 import { PagesPage } from '../PagesPage';
+import { triggerDownload } from '../../lib/downloadBlob';
 
 function getCanonicalPageRow(title: string): HTMLElement {
   const section = screen.getByText('pages.filter.active').closest('.disc-sidebar-section') as HTMLElement;
@@ -119,6 +123,30 @@ afterEach(() => {
 });
 
 describe('PagesPage', () => {
+  it('downloads the portable JSON bundle exactly once for synchronous clicks', async () => {
+    const bundle = { kind: 'kronn.artifact', version: 1, artifact: { html: '<h1>Équipe</h1>' } };
+    vi.mocked(pagesApi.exportArtifact).mockResolvedValue(bundle as never);
+    render(<PagesPage />);
+    await screen.findByTestId('live-page-frame');
+    fireEvent.click(screen.getByText('pages.export'));
+    const button = screen.getByRole('button', { name: 'pages.exportArtifact' });
+    act(() => { button.click(); button.click(); });
+    await waitFor(() => expect(triggerDownload).toHaveBeenCalled());
+    expect(pagesApi.exportArtifact).toHaveBeenCalledTimes(1);
+    expect(pagesApi.exportArtifact).toHaveBeenCalledWith(page.id);
+    const [filename, blob] = vi.mocked(triggerDownload).mock.calls.at(-1)!;
+    expect(filename).toBe('adobe-signals.kronn-artifact.json');
+    expect(JSON.parse(await blob.text())).toEqual(bundle);
+  });
+
+  it('offers an import even when no Artifact exists', async () => {
+    vi.mocked(pagesApi.list).mockResolvedValue([]);
+    render(<PagesPage />);
+    fireEvent.click(await screen.findByRole('button', { name: 'pages.import.title' }));
+    expect(await screen.findByRole('dialog', { name: 'pages.import.title' })).toBeInTheDocument();
+    expect(pagesApi.importArtifact).not.toHaveBeenCalled();
+  });
+
   it('opens the shared native action card from a sandbox intention', async () => {
     const pageAction: LivePageAction = {
       id: 'page-action:page-1:refresh', live_page_id: 'page-1', live_page_revision_id: 'rev-2',

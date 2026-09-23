@@ -11,6 +11,55 @@ label does not migrate or duplicate it. Historical code and documentation use
 [src: file: frontend/src/lib/i18n/locales/en.ts:55]
 [src: file: frontend/src/lib/live-page-navigation.ts:1]
 
+## Portable JSON bundles
+
+The Artifact export action downloads a `kronn.artifact` version-1 JSON bundle.
+It contains the current HTML, named dataset values (including JSON `null`
+distinct from an unpopulated snapshot), schemas, retention settings and every
+retained time-series point with its observation time and deduplication key.
+It follows parsed action targets and workflow dependencies transitively,
+including saved workflows that publish into the root Artifact, their failure
+steps, sub-workflows, Quick Prompts, Quick APIs, Quick Execs and secondary
+Artifacts. Secondary Artifacts do not pull in unrelated incoming publishers.
+Export uses one read transaction. Missing dependencies, unsupported bundles and
+bundles exceeding 16 MiB or 512 resources fail explicitly; nothing is silently
+truncated. Historical HTML revisions, run/publication history and discussion
+links are not included.
+[src: file: backend/src/models/artifact_portability.rs:1]
+[src: file: backend/src/api/artifact_portability.rs:1]
+
+Import is available in the library and in a workflow's publishing step before
+the library is activated. The user selects a project and reviews each planned
+creation, reuse or conflict before committing. Reuse requires a matching source
+identity (or a recorded earlier import) and definition; names alone never match.
+Changed definitions require an explicit local-version or new-copy choice.
+The root Artifact is always new. Publishers and action-bearing dependencies
+that need different destinations are copied, with typed references remapped;
+literal text, CSS and unrelated JavaScript are not rewritten. An explicit reuse
+that cannot target the new destination is rejected. New workflows are disabled;
+existing workflows keep their state and no automation is executed by import.
+[src: file: backend/src/api/artifact_portability/import.rs:1]
+[src: file: frontend/src/components/ArtifactImportDialog.tsx:1]
+
+Configured connections, their stored credentials, agent-library entries and
+local files are not bundled. Definitions retain those references; preview lists missing known
+plugin/model connections, skills, profiles and directives, and offers an
+explicit import-and-configure-later confirmation. File paths and endpoint
+availability are not checked. Copied webhook approval tokens are cleared.
+The selected project applies to newly created automation definitions and
+Artifact action scopes. A deliberately reused local definition is unchanged.
+[src: file: backend/src/api/artifact_portability/import.rs:1]
+
+`GET /api/pages/{id}/export`, `POST /api/pages/import/preview` and
+`POST /api/pages/import` retain the established Page API naming. Import requires
+the digest from the reviewed preview, recomputes it against current local
+definitions and import identities, and refuses stale decisions. All resources,
+datasets, points, origin mappings and the library activation commit in one
+SQLite transaction; an error rolls everything back. Origin mappings identify
+earlier imported copies without overwriting their source or local definitions.
+[src: file: backend/src/lib.rs:1]
+[src: file: backend/src/db/sql/188_artifact_import_origins.sql:1]
+
 ## Status
 
 Shipped in the first v0.10.0 vertical. Later phases may extend the rendering

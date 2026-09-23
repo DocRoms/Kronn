@@ -1,4 +1,5 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
+import { ArtifactImportDialog } from '../ArtifactImportDialog';
 import { buildBlankStep, jsonPathToTarget } from '../../lib/workflowUiUtils';
 import { useT } from '../../lib/I18nContext';
 import { workflows as workflowsApi, pages as pagesApi, skills as skillsApi, profiles as profilesApi, directives as directivesApi, quickPrompts as quickPromptsApi, quickApis as quickApisApi, quickExecs as quickExecsApi, mcps as mcpsApi, config as configApi } from '../../lib/api';
@@ -596,6 +597,8 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
   const [availablePages, setAvailablePages] = useState<LivePage[]>([]);
   const [pageDraftTitles, setPageDraftTitles] = useState<Record<number, string>>({});
   const [pageCreatingIndex, setPageCreatingIndex] = useState<number | null>(null);
+  const [pageImportIndex, setPageImportIndex] = useState<number | null>(null);
+  const closePageImport = useCallback(() => setPageImportIndex(null), []);
   const [transformPreviewSamples, setTransformPreviewSamples] = useState<Record<number, string>>({});
   const [transformPreviewResults, setTransformPreviewResults] = useState<Record<number, { value: unknown | null; error: string | null }>>({});
   const [transformPreviewingIndex, setTransformPreviewingIndex] = useState<number | null>(null);
@@ -1285,6 +1288,14 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
 
   return (
     <div className="wf-wizard-card" data-focused-step={focusedStepOnly}>
+      {pageImportIndex !== null && <ArtifactImportDialog initialProjectId={projectId} onClose={closePageImport} onImported={page => {
+        setAvailablePages(previous => [page, ...previous.filter(item => item.id !== page.id)]);
+        setSteps(previous => previous.map((step, index) => index === pageImportIndex ? {
+          ...step,
+          page_publish: { page_id: page.id, writes: step.page_publish?.writes ?? [] },
+        } : step));
+        closePageImport();
+      }} />}
       {!focusedStepOnly && <header className="wf-wizard-header">
         <div className="wf-wizard-heading">
           <span className="wf-wizard-heading-icon" aria-hidden="true"><Layers size={19} /></span>
@@ -3560,6 +3571,9 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                         >
                           {pageCreatingIndex === i ? <Loader2 size={13} className="spin" /> : <Plus size={13} />}
                           {t('wiz.publishPageCreate')}
+                        </button>
+                        <button type="button" className="wf-btn-secondary" onClick={() => setPageImportIndex(i)}>
+                          {t('pages.import.title')}
                         </button>
                       </div>
 

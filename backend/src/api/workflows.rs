@@ -1653,7 +1653,7 @@ pub(crate) fn sub_workflow_child_ids(steps: &[WorkflowStep]) -> Vec<String> {
         .collect()
 }
 
-fn workflow_sub_workflow_child_ids(workflow: &Workflow) -> Vec<String> {
+pub(crate) fn workflow_sub_workflow_child_ids(workflow: &Workflow) -> Vec<String> {
     sub_workflow_child_ids(&workflow.steps)
         .into_iter()
         .chain(sub_workflow_child_ids(&workflow.on_failure))
@@ -1661,17 +1661,17 @@ fn workflow_sub_workflow_child_ids(workflow: &Workflow) -> Vec<String> {
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
-struct WorkflowDependencyIds {
-    quick_prompts: std::collections::BTreeSet<String>,
-    quick_apis: std::collections::BTreeSet<String>,
-    quick_execs: std::collections::BTreeSet<String>,
-    pages: std::collections::BTreeSet<String>,
+pub(crate) struct WorkflowDependencyIds {
+    pub(crate) quick_prompts: std::collections::BTreeSet<String>,
+    pub(crate) quick_apis: std::collections::BTreeSet<String>,
+    pub(crate) quick_execs: std::collections::BTreeSet<String>,
+    pub(crate) pages: std::collections::BTreeSet<String>,
 }
 
 /// Collect every saved resource referenced by the complete workflow graph.
 /// Dynamic Page ids cannot be bundled because their destination only exists at
 /// run time; static ids/slugs are included and remapped during import.
-fn workflow_dependency_ids<'a>(
+pub(crate) fn workflow_dependency_ids<'a>(
     workflows: impl IntoIterator<Item = &'a Workflow>,
 ) -> WorkflowDependencyIds {
     let mut dependencies = WorkflowDependencyIds::default();
@@ -1909,7 +1909,7 @@ pub async fn export_workflow(
 /// Validate one workflow from an import bundle exactly like a fresh create
 /// (POST /api/workflows). Applied to the root AND every bundled child so a
 /// malformed child can't slip in. Returns a user-facing error string.
-fn validate_workflow_for_import(wf: &Workflow) -> Result<(), String> {
+pub(crate) fn validate_workflow_for_import(wf: &Workflow) -> Result<(), String> {
     if wf.steps.is_empty() {
         return Err("Workflow must have at least one step".into());
     }
@@ -1987,7 +1987,7 @@ fn rebind_quick_api_config(
     }
 }
 
-fn remap_workflow_step_dependencies(
+pub(crate) fn remap_workflow_step_dependencies(
     step: &mut WorkflowStep,
     quick_prompts: &std::collections::HashMap<String, String>,
     quick_apis: &std::collections::HashMap<String, String>,

@@ -3,7 +3,7 @@ import {
   Activity, Archive, CheckCircle2, CheckSquare2, ChevronDown, ChevronRight,
   Braces, Clock3, Database, Download, ExternalLink, FileCode2, FileDown, GitCompare,
   History, ListChecks, Loader2, MessageSquare, Pencil, Play, RefreshCw,
-  PanelsTopLeft, RotateCcw, Save, Star, Table2, Trash2, Workflow, X,
+  PanelsTopLeft, RotateCcw, Save, Star, Table2, Trash2, Upload, Workflow, X,
 } from 'lucide-react';
 import type {
   LivePage, LivePageDetail, LivePageDiscussionLink, LivePagePublication,
@@ -19,6 +19,8 @@ import {
   runtimeData,
 } from '../lib/live-page-sandbox';
 import { formatRelativeTime } from '../lib/relativeTime';
+import { ArtifactImportDialog } from '../components/ArtifactImportDialog';
+import { triggerDownload } from '../lib/downloadBlob';
 import { CopyIdPill } from '../components/CopyIdPill';
 import { RunStatusCard } from '../components/RunStatusCard';
 import { LivePageActionOverlay } from '../components/LivePageActionOverlay';
@@ -179,8 +181,21 @@ export function PagesPage({
     kind: 'success' | 'error';
     message: string;
   } | null>(null);
-  const [exportBusy, setExportBusy] = useState<'pdf' | 'docx' | null>(null);
+  const [exportBusy, setExportBusy] = useState<'pdf' | 'docx' | 'json' | null>(null);
   const [exportResult, setExportResult] = useState<{ url: string; filename: string } | null>(null);
+  const [importOpen, setImportOpen] = useState(false);
+  const closeImport = useCallback(() => setImportOpen(false), []);
+  const artifactExportInFlight = useRef(false);
+  const exportArtifact = async () => {
+    if (!detail || artifactExportInFlight.current) return;
+    artifactExportInFlight.current = true; setExportBusy('json');
+    try {
+      const bundle = await pagesApi.exportArtifact(detail.id);
+      triggerDownload(`${detail.slug}.kronn-artifact.json`, new Blob([JSON.stringify(bundle)], { type: 'application/json' }));
+      setError(null);
+    } catch (cause) { setError(userError(cause)); }
+    finally { artifactExportInFlight.current = false; setExportBusy(null); }
+  };
   const exportMenuRef = useDismissibleDetails<HTMLDetailsElement>();
   const refreshMenuRef = useDismissibleDetails<HTMLDetailsElement>();
   const mosaicMenuRef = useDismissibleDetails<HTMLDetailsElement>();
@@ -724,6 +739,7 @@ export function PagesPage({
               </>
             ) : (
               <>
+                <button type="button" className="disc-icon-btn" onClick={() => setImportOpen(true)} title={t('pages.import.title')} aria-label={t('pages.import.title')}><Upload size={16} /></button>
                 <button type="button" className="disc-icon-btn" onClick={() => setSelectionMode(true)} title={t('pages.bulk.start')} aria-label={t('pages.bulk.start')}><ListChecks size={16} /></button>
                 <button type="button" className="disc-icon-btn collection-shell-primary-action" onClick={() => void refresh()} title={t('pages.refresh')} aria-label={t('pages.refresh')}><RefreshCw size={15} className={loading ? 'spin' : undefined} /></button>
                 <CollectionSidebarCollapseButton label={t('collection.closeCollection')} onCollapse={() => setSidebarOpen(false)} />
@@ -913,6 +929,9 @@ export function PagesPage({
                 <details className="live-pages-export-menu" data-testid="live-page-export-menu" ref={exportMenuRef}>
                   <summary><Download size={13} />{t('pages.export')}<ChevronDown size={12} /></summary>
                   <div className="live-pages-export-popover">
+                    <button type="button" onClick={() => void exportArtifact()} disabled={exportBusy !== null}>
+                      {exportBusy === 'json' ? <Loader2 size={13} className="spin" /> : <Braces size={13} />}{t('pages.exportArtifact')}
+                    </button>
                     <button type="button" onClick={() => void exportPage('pdf')} disabled={exportBusy !== null}>
                       {exportBusy === 'pdf' ? <Loader2 size={13} className="spin" /> : <FileDown size={13} />} PDF
                     </button>
@@ -1211,6 +1230,11 @@ export function PagesPage({
           <div className="live-pages-empty">{t('pages.empty')}</div>
         )}
       </section>
+      {importOpen && <ArtifactImportDialog onClose={closeImport} onImported={page => {
+        setImportOpen(false);
+        setPages(previous => [...previous, page]);
+        void select(page);
+      }} />}
     </div>
   );
 }

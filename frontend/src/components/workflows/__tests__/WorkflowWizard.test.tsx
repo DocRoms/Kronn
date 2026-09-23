@@ -63,6 +63,7 @@ vi.mock('../../../lib/I18nContext', () => ({
 import { WorkflowWizard } from '../WorkflowWizard';
 import { jsonPathToTarget } from '../../../lib/workflowUiUtils';
 import { buildBlankStep } from '../../../lib/workflowUiUtils';
+import { pages as pagesApi, projects as projectsApi } from '../../../lib/api';
 
 // ── Fixtures ────────────────────────────────────────────────────────
 
@@ -116,6 +117,30 @@ const baseProps: ComponentProps<typeof WorkflowWizard> = {
 
 const renderWizard = (over: Partial<ComponentProps<typeof WorkflowWizard>> = {}) =>
   render(<WorkflowWizard {...baseProps} {...over} />);
+
+it('imports the first Artifact from the publisher step and preserves its writes', async () => {
+  const imported = { id: 'imported-artifact', title: 'Imported team', slug: 'imported-team' };
+  // Exercise the real import dialog and the wizard callback together.
+  pagesApi.previewImport = vi.fn().mockResolvedValue({ title: 'Imported team', entries: [], issues: [], warnings: [], digest: 'review', can_import: true });
+  pagesApi.importArtifact = vi.fn().mockResolvedValue({ artifact: imported, entries: [] });
+  vi.mocked(projectsApi.list).mockResolvedValue([mkProject()]);
+  renderWizard({ focusedStepOnly: true, initialStepId: 'publish-step', editWorkflow: mkWorkflow({ steps: [mkStep({
+    id: 'publish-step', name: 'publish', step_type: { type: 'PublishPageData' },
+    page_publish: { page_id: '', writes: [{ dataset: 'summary', operation: 'replace', value_from: 'trigger', observed_at: null, dedupe_key: null, key_field: null }] },
+  })] }) });
+  fireEvent.click(await screen.findByRole('button', { name: 'pages.import.title' }));
+  await waitFor(() => expect(screen.getByLabelText('pages.import.project')).toHaveValue('proj-1'));
+  const file = new File([JSON.stringify({ kind: 'kronn.artifact', version: 1 })], 'team.json', { type: 'application/json' });
+  fireEvent.change(screen.getByLabelText('pages.import.file'), { target: { files: [file] } });
+  await waitFor(() => expect(screen.getByRole('button', { name: 'pages.import.preview' })).toBeEnabled());
+  fireEvent.click(screen.getByRole('button', { name: 'pages.import.preview' }));
+  fireEvent.click(await screen.findByRole('button', { name: 'pages.import.confirm' }));
+  await waitFor(() => expect(screen.getByLabelText('wiz.publishPagePicker')).toHaveValue(imported.id));
+  expect(screen.getByLabelText('value_from')).toHaveValue('trigger');
+  expect(screen.getByLabelText('dataset')).toHaveValue('summary');
+  expect(pagesApi.importArtifact).toHaveBeenCalledWith(expect.objectContaining({ project_id: 'proj-1', preview_digest: 'review' }));
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+});
 
 beforeEach(() => {
   createMock.mockReset();

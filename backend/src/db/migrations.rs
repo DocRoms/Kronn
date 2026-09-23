@@ -719,6 +719,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "187_shared_run_exec_details",
         include_str!("sql/187_shared_run_exec_details.sql"),
     ),
+    (
+        "188_artifact_import_origins",
+        include_str!("sql/188_artifact_import_origins.sql"),
+    ),
 ];
 
 /// Apply one migration inside the caller-owned transaction.

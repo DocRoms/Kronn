@@ -40,6 +40,11 @@ Release notes for 0.9.3 and earlier are available in the
 - The discussion asset carousel has a copy button. Text, JSON and log files are
   copied whole (up to 2 MiB), images as PNG, and videos only where the browser
   accepts that type; otherwise the button says why it is unavailable.
+- Artifacts can be exported and imported as versioned JSON bundles containing
+  current HTML, retained data and linked automation definitions. Import previews
+  creation, reuse and conflicts, remaps references into a new Artifact and keeps
+  new workflows disabled. Missing local configuration is shown before import;
+  stale previews and failed imports leave no partial resources.
 
 ### Changed
 
