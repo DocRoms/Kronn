@@ -15,6 +15,17 @@ stack, not to start a task. Content verbatim.
 - Logs: `./kronn logs` or `make logs`.
 - Dev backend only: `make dev-backend` (watchexec with auto-reload).
 - Dev frontend only: `make dev-frontend` (Vite dev server on :5173).
+- The desktop app and native CLI share configuration, but the desktop's free
+  listener port is process-local (`ServerConfig.runtime_port`, excluded from
+  serialization). The persisted `server.port` remains the CLI preference;
+  network responses and desktop contact invitations use `listening_port()`.
+  Older desktop builds could save their temporary port and leave `start-dev`
+  waiting on 3140 until its readiness timeout. With all Kronn instances stopped,
+  back up `config.toml` and restore `server.port = 3140` for the standard dev
+  launcher; preserve all other settings and encryption keys. Install a fixed
+  desktop build before switching back to desktop mode.
+  [src: file: backend/src/models/setup.rs:71]
+  [src: file: desktop/src-tauri/src/main.rs:546]
 - After changing Rust models with `#[derive(TS)]`: run `make typegen` to regenerate `frontend/src/types/generated.ts`.
 - The project Docker tab reads the machine's hosts file to flag published
   domains that are missing or mapped away from loopback. `make start` snapshots

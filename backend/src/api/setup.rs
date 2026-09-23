@@ -805,7 +805,7 @@ pub async fn get_server_config(
     let config = state.config.read().await;
     Json(ApiResponse::ok(ServerConfigPublic {
         host: config.server.host.clone(),
-        port: config.server.port,
+        port: config.server.listening_port(),
         domain: config.server.domain.clone(),
         max_concurrent_agents: config.server.max_concurrent_agents,
         agent_stall_timeout_min: config.server.agent_stall_timeout_min,
@@ -961,7 +961,7 @@ pub async fn get_network_exposure(
 ) -> Json<ApiResponse<NetworkExposure>> {
     let (host, port) = {
         let config = state.config.read().await;
-        (config.server.host.clone(), config.server.port)
+        (config.server.host.clone(), config.server.listening_port())
     };
     let reachable_ips = crate::core::tailscale::detect_all_ips().await;
     Json(ApiResponse::ok(NetworkExposure {

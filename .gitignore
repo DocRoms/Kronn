@@ -13,6 +13,8 @@ desktop/src-tauri/icons/appx/
 desktop/node_modules/
 desktop/src-tauri/resources/docs-sidecar/*
 !desktop/src-tauri/resources/docs-sidecar/.gitkeep
+desktop/src-tauri/resources/mcp-sidecar/*
+!desktop/src-tauri/resources/mcp-sidecar/.gitkeep
 
 # Python — bytecode cache (regenerated on every MCP script run)
 __pycache__/

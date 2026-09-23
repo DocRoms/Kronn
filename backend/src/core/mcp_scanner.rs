@@ -250,7 +250,7 @@ pub fn write_mcp_json(project_path: &str, data: &McpJsonFile) -> Result<(), Stri
 /// previously-injected stale entry — better than leaving a broken
 /// command that breaks every host CLI invocation with `Broken pipe`.
 pub fn inject_kronn_internal(file: &mut McpJsonFile) -> bool {
-    let script = match crate::agents::runner::disc_introspection_mcp_path_for_shared_config() {
+    let launch = match crate::agents::runner::disc_introspection_mcp_command_for_shared_config() {
         Some(p) => p,
         None => {
             // Stale entry from a previous Kronn build that wrote the
@@ -260,10 +260,10 @@ pub fn inject_kronn_internal(file: &mut McpJsonFile) -> bool {
         }
     };
     let entry = McpServerEntry {
-        command: Some("python3".into()),
-        args: Some(vec![script]),
+        command: Some(launch.command),
+        args: Some(launch.args),
         url: None,
-        env: HashMap::new(),
+        env: launch.env,
     };
     file.mcp_servers.insert("kronn-internal".into(), entry);
     true
@@ -278,7 +278,7 @@ pub fn inject_kronn_internal(file: &mut McpJsonFile) -> bool {
 /// host `codex` CLI — same shared-path constraint as
 /// [`inject_kronn_internal`].
 fn inject_kronn_internal_codex(entries: &mut HashMap<String, CodexMcpEntry>) -> bool {
-    let script = match crate::agents::runner::disc_introspection_mcp_path_for_shared_config() {
+    let launch = match crate::agents::runner::disc_introspection_mcp_command_for_shared_config() {
         Some(p) => p,
         None => {
             entries.remove("kronn-internal");
@@ -288,9 +288,9 @@ fn inject_kronn_internal_codex(entries: &mut HashMap<String, CodexMcpEntry>) -> 
     entries.insert(
         "kronn-internal".into(),
         CodexMcpEntry {
-            command: "python3".into(),
-            args: vec![script],
-            env: HashMap::new(),
+            command: launch.command,
+            args: launch.args,
+            env: launch.env,
             env_vars: crate::agents::runner::KRONN_INTERNAL_CODEX_ENV_VARS
                 .iter()
                 .map(|value| (*value).to_string())
@@ -1716,14 +1716,15 @@ fn sync_vibe_project_config(
         entries.push(entry);
     }
 
-    if let Some(script) = crate::agents::runner::disc_introspection_mcp_path_for_shared_config() {
+    if let Some(launch) = crate::agents::runner::disc_introspection_mcp_command_for_shared_config()
+    {
         entries.push(VibeMcpEntry {
             name: "kronn-internal".into(),
             transport: "stdio".into(),
-            command: Some("python3".into()),
-            args: Some(vec![script]),
+            command: Some(launch.command),
+            args: Some(launch.args),
             url: None,
-            env: HashMap::new(),
+            env: launch.env,
         });
     }
 

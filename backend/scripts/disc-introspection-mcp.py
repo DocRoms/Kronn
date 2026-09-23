@@ -23,10 +23,9 @@ The script speaks the standard MCP JSON-RPC over stdin/stdout: handles
 `initialize`, `tools/list`, `tools/call`. Each tool call boils down to
 one HTTP request to the matching backend route.
 
-This is intentionally tiny (no MCP SDK dependency) so it can ship
-inside the Kronn install without pulling in npm/uv packages — the
-agent CLIs all run with system Python by virtue of vibe-runner.py
-already requiring it.
+The bridge uses Python's standard library without an MCP SDK dependency.
+Desktop builds freeze it together with its runtime; Docker and source
+installations run this script with Python.
 """
 
 import contextlib
@@ -10384,6 +10383,13 @@ def _send(payload):
 def _schedule_bridge_reload():
     """Preflight and schedule at most one self-reexec for this loaded process."""
     if _BRIDGE_RELOAD_STATE["status"] not in ("idle", "deferred_active_audit"):
+        return dict(_BRIDGE_RELOAD_STATE)
+    if getattr(sys, "frozen", False) or os.name == "nt":
+        _BRIDGE_RELOAD_STATE.update(
+            status="failed",
+            error="This bridge runtime cannot reload a script in place. "
+                  "Restart the MCP connection after updating Kronn.",
+        )
         return dict(_BRIDGE_RELOAD_STATE)
     with _AUDIT_LOCK:
         active_audits = sorted(project_id for project_id, entry in _AUDIT_STREAMS.items()

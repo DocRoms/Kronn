@@ -39,7 +39,8 @@
       "signingIdentity": "-"
     },
     "resources": {
-      "resources/docs-sidecar/": "sidecars/docs/"
+      "resources/docs-sidecar/": "sidecars/docs/",
+      "resources/mcp-sidecar/": "sidecars/mcp/"
     },
     "icon": [
       "icons/32x32.png",

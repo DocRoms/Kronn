@@ -279,6 +279,12 @@ from a dedicated output directory.
   the sidecar before Rust,
   verifies each DMG checksum, mounts it and strictly verifies the contained
   application signature.
+- The same desktop sidecar build freezes `kronn-mcp` and runs
+  `backend/sidecars/mcp/smoke_bundle.py` on the target platform. Its relocated
+  executable starts with an empty PATH, reports a fresh bridge fingerprint and
+  makes a real MCP-to-HTTP call to an ephemeral backend. This complements the
+  Rust launch/configuration tests and Python stale-bridge tests; installed-app
+  Claude authentication and OS trust checks remain separate qualification.
 - `WorkflowDetail.steps.test.tsx` pins the workflow step inspector's default
   Preview tab, shared focused editor, save/refresh path and draft cancellation.
 - `backend/src/db/agent_dispatch.rs` pins distinct queued, claimed,

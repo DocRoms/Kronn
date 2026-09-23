@@ -152,7 +152,8 @@ Kronn/
 │               ├── mod.rs      # TrackerSource trait (poll, update_status, comment, create_pr)
 │               └── github.rs   # GitHub API v3 implementation (reqwest + rustls)
 │   └── sidecars/
-│       └── docs/                # Python document-generation sidecar (0.5.1) — FastAPI + uvicorn. Frozen into desktop builds, baked into Docker, or installed via `make docs-setup` for source development. Prints `KRONN_DOCS_READY <port>` on ready.
+│       ├── docs/                # Python document-generation sidecar (0.5.1) — FastAPI + uvicorn. Frozen into desktop builds, baked into Docker, or installed via `make docs-setup` for source development. Prints `KRONN_DOCS_READY <port>` on ready.
+│       └── mcp/                 # Freezes the shared MCP bridge and smoke-tests a relocated bundle without system Python.
 │
 ├── frontend/                   # React + TypeScript (Vite)
 │   ├── package.json            # engines: node>=24 (LTS)

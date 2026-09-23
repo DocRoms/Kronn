@@ -609,7 +609,7 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
     let (domain, port) = {
         // We need config synchronously here; use blocking_lock since this runs once at startup
         let config = state.config.try_read().expect("Config lock poisoned at startup — cannot build router. Check for panic in config initialization.");
-        (config.server.domain.clone(), config.server.port)
+        (config.server.domain.clone(), config.server.listening_port())
     };
 
     let mut router = Router::new()

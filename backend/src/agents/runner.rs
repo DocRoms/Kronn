@@ -2414,15 +2414,16 @@ impl AcpSessionStore {
 /// gets one self-contained server instead: the exact status, commit and delivery bridge
 /// it needs, and nothing inherited from the user's global config.
 fn codex_task_worker_mcp_override() -> Option<String> {
-    let script = disc_introspection_mcp_path()?;
-    render_codex_task_worker_mcp_override(Some(&script))
+    render_codex_task_worker_mcp_override(disc_introspection_mcp_command())
 }
 
-fn render_codex_task_worker_mcp_override(script: Option<&str>) -> Option<String> {
-    let script = serde_json::to_string(script?).ok()?;
+fn render_codex_task_worker_mcp_override(launch: Option<InternalMcpCommand>) -> Option<String> {
+    let launch = launch?;
+    let command = serde_json::to_string(&launch.command).ok()?;
+    let args = serde_json::to_string(&launch.args).ok()?;
     let env_vars = serde_json::to_string(KRONN_INTERNAL_CODEX_ENV_VARS).ok()?;
     Some(format!(
-        "mcp_servers={{\"kronn-internal\"={{command=\"python3\",args=[{script}],env_vars={env_vars},startup_timeout_sec=30,required=true,enabled_tools=[\"task_exec_status\",\"task_exec_commit\",\"task_exec_deliver\"],default_tools_approval_mode=\"prompt\",tools={{task_exec_status={{approval_mode=\"approve\"}},task_exec_commit={{approval_mode=\"approve\"}},task_exec_deliver={{approval_mode=\"approve\"}}}}}}}}"
+        "mcp_servers={{\"kronn-internal\"={{command={command},args={args},env_vars={env_vars},startup_timeout_sec=30,required=true,enabled_tools=[\"task_exec_status\",\"task_exec_commit\",\"task_exec_deliver\"],default_tools_approval_mode=\"prompt\",tools={{task_exec_status={{approval_mode=\"approve\"}},task_exec_commit={{approval_mode=\"approve\"}},task_exec_deliver={{approval_mode=\"approve\"}}}}}}}}"
     ))
 }
 
@@ -4304,11 +4305,11 @@ fn acp_project_mcp_servers(project_path: &str) -> Vec<crate::acp::AcpMcpServer> 
     // because Kronn spawns the ACP process itself (`spawn_native`), so nothing
     // sensitive passes through the protocol.
     let mut servers: Vec<crate::acp::AcpMcpServer> = Vec::new();
-    if let Some(script) = disc_introspection_mcp_path_for_shared_config() {
+    if let Some(launch) = disc_introspection_mcp_command_for_shared_config() {
         servers.push(crate::acp::AcpMcpServer {
             id: "kronn-internal".to_string(),
-            command: "python3".to_string(),
-            args: vec![script],
+            command: launch.command,
+            args: launch.args,
             allowed_tools: Vec::new(),
         });
     }
@@ -4476,6 +4477,58 @@ pub(crate) fn disc_introspection_mcp_path() -> Option<String> {
         return Some(dev_path.to_string());
     }
     None
+}
+
+pub(crate) struct InternalMcpCommand {
+    pub command: String,
+    pub args: Vec<String>,
+    pub env: std::collections::HashMap<String, String>,
+}
+
+impl InternalMcpCommand {
+    fn script(path: String) -> Self {
+        Self {
+            command: "python3".into(),
+            args: vec![path],
+            env: Default::default(),
+        }
+    }
+}
+
+fn resolve_internal_mcp_command(
+    bundled: Option<std::ffi::OsString>,
+    script: impl FnOnce() -> Option<String>,
+) -> Option<InternalMcpCommand> {
+    if let Some(executable) = bundled {
+        // A broken installed bundle must not silently use the build checkout.
+        let path = PathBuf::from(executable);
+        return path.is_file().then(|| InternalMcpCommand {
+            command: path.to_string_lossy().into_owned(),
+            args: Vec::new(),
+            // Host CLIs read the generated config outside Kronn's process tree.
+            env: std::env::var("KRONN_BACKEND_URL")
+                .ok()
+                .map(|url| ("KRONN_BACKEND_URL".into(), url))
+                .into_iter()
+                .collect(),
+        });
+    }
+    script().map(InternalMcpCommand::script)
+}
+
+pub(crate) fn disc_introspection_mcp_command() -> Option<InternalMcpCommand> {
+    resolve_internal_mcp_command(
+        std::env::var_os("KRONN_INTERNAL_MCP_EXECUTABLE"),
+        disc_introspection_mcp_path,
+    )
+}
+
+pub(crate) fn disc_introspection_mcp_command_for_shared_config() -> Option<InternalMcpCommand> {
+    // Container commands must never leak into the host's project configuration.
+    let bundled = (!Path::new("/.dockerenv").exists())
+        .then(|| std::env::var_os("KRONN_INTERNAL_MCP_EXECUTABLE"))
+        .flatten();
+    resolve_internal_mcp_command(bundled, disc_introspection_mcp_path_for_shared_config)
 }
 
 /// Resolve a path to `disc-introspection-mcp.py` that's valid for **both**
@@ -9314,6 +9367,8 @@ async fn run_claude_task_worker_auth_probe(
     work_dir: &Path,
 ) -> std::io::Result<std::process::Output> {
     let (command, args, via_wsl) = resolved;
+    claude_task_worker_platform_check(cfg!(windows), via_wsl)
+        .map_err(|message| std::io::Error::new(std::io::ErrorKind::Unsupported, message))?;
     let (command, args, effective_work_dir) =
         platform_agent_invocation(command, args, via_wsl, work_dir);
     async_cmd(command)
@@ -9322,6 +9377,16 @@ async fn run_claude_task_worker_auth_probe(
         .stdin(Stdio::null())
         .output()
         .await
+}
+
+fn claude_task_worker_platform_check(windows: bool, via_wsl: bool) -> Result<(), String> {
+    if windows && !via_wsl {
+        return Err(
+            "Claude task workers require a sandbox, which Claude does not support on native Windows. +             Use a worker on a supported isolated runtime; ordinary Claude discussions remain available."
+                .into(),
+        );
+    }
+    Ok(())
 }
 
 async fn probe_claude_task_worker_auth(
@@ -10419,6 +10484,11 @@ pub(crate) fn try_spawn(
     // below — sending a Linux path to a Windows-native spawn would just fail.
     let (cmd_name, mut cmd_args, resolved_via_wsl) =
         resolve_agent_invocation(binary, npx_package, args)?;
+    if task_worker_context.is_some()
+        && (binary == "claude" || npx_package == Some("@anthropic-ai/claude-code"))
+    {
+        claude_task_worker_platform_check(cfg!(windows), resolved_via_wsl)?;
+    }
 
     // Force current workspace as trusted for Codex sessions inside Docker.
     // This avoids path-style mismatch issues (/Users/... vs /host-home/...).
