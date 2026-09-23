@@ -109,6 +109,14 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- Desktop installers include the internal MCP bridge with its Python runtime
+  and direct agent callbacks to the embedded backend's actual port. Claude and
+  Codex no longer depend on the build machine's source path for this bridge.
+  Claude workers on native Windows report their unavailable required sandbox
+  without weakening isolation or disabling ordinary discussions.
+- Opening the desktop app no longer saves its temporary listener port into
+  the shared CLI configuration. Later CLI starts retain their configured port
+  instead of timing out while waiting for an API on a different port.
 - Live Pages follow Kronn's selected theme instead of the operating system's.
   Refreshes with unchanged data no longer republish to the iframe and reset
   local page state; newly loaded frames still receive the current data.

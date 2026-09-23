@@ -52,3 +52,6 @@ run(venvPython, [
   '--output',
   join(repoDir, 'desktop', 'src-tauri', 'resources', 'docs-sidecar'),
 ]);
+run(venvPython, [
+  join(repoDir, 'backend', 'sidecars', 'mcp', 'build_bundle.py'),
+]);

@@ -7174,12 +7174,126 @@ Suite de la réponse.";
     fn codex_task_worker_mcp_override_fails_closed_without_bridge_script() {
         assert!(super::super::render_codex_task_worker_mcp_override(None).is_none());
         let rendered = super::super::render_codex_task_worker_mcp_override(Some(
-            "/tmp/disc-introspection-mcp.py",
+            super::super::InternalMcpCommand::script("/tmp/disc-introspection-mcp.py".into()),
         ))
         .expect("a concrete bridge path is renderable");
         assert!(rendered.contains("command=\"python3\""));
         assert!(rendered.contains("/tmp/disc-introspection-mcp.py"));
         assert!(rendered.contains("KRONN_TASK_WORKER_CONTEXT"));
+    }
+
+    #[test]
+    fn packaged_internal_mcp_runs_without_python_and_preserves_worker_scope() {
+        let dir = tempfile::tempdir().expect("temporary install");
+        let executable = dir.path().join("Kronn MCP é.exe");
+        std::fs::write(&executable, b"bundle fixture").expect("executable fixture");
+        let launch = super::super::resolve_internal_mcp_command(
+            Some(executable.clone().into_os_string()),
+            || panic!("a packaged launch must not search the checkout"),
+        )
+        .expect("installed bridge");
+        assert_eq!(launch.command, executable.to_string_lossy());
+        assert!(launch.args.is_empty());
+        let rendered = super::super::render_codex_task_worker_mcp_override(Some(launch))
+            .expect("worker configuration");
+        let parsed: toml::Value = toml::from_str(&rendered).expect("valid TOML");
+        let internal = &parsed["mcp_servers"]["kronn-internal"];
+        assert_eq!(internal["command"].as_str(), executable.to_str());
+        assert_eq!(internal["args"].as_array().map(Vec::len), Some(0));
+        assert_eq!(internal["required"].as_bool(), Some(true));
+        assert_eq!(internal["enabled_tools"].as_array().map(Vec::len), Some(3));
+        assert_eq!(
+            parsed["mcp_servers"].as_table().map(toml::Table::len),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn missing_packaged_bridge_never_falls_back_to_the_build_checkout() {
+        let dir = tempfile::tempdir().expect("temporary install");
+        assert!(super::super::resolve_internal_mcp_command(
+            Some(dir.path().join("missing.exe").into_os_string()),
+            || panic!("missing package must fail closed"),
+        )
+        .is_none());
+        assert!(super::super::resolve_internal_mcp_command(
+            Some(dir.path().as_os_str().to_owned()),
+            || panic!("a directory is not a runnable bundle"),
+        )
+        .is_none());
+        let legacy = super::super::resolve_internal_mcp_command(None, || {
+            Some("/app/scripts/disc-introspection-mcp.py".into())
+        })
+        .expect("existing Docker/script launch");
+        assert_eq!(legacy.command, "python3");
+        assert_eq!(legacy.args, ["/app/scripts/disc-introspection-mcp.py"]);
+    }
+
+    #[test]
+    fn packaged_project_mcp_config_binds_the_desktop_instance() {
+        const PROBE: &str = "KRONN_TEST_PACKAGED_CONFIG";
+        if std::env::var_os(PROBE).is_none() {
+            let dir = tempfile::tempdir().expect("temporary installation");
+            let bridge = dir.path().join("Kronn MCP é.exe");
+            std::fs::write(&bridge, b"bundle fixture").expect("bridge file");
+            let output = crate::core::cmd::sync_cmd(
+                std::env::current_exe().expect("test executable"),
+            )
+            .args(["--exact",
+                "agents::runner::runner_test::tests::packaged_project_mcp_config_binds_the_desktop_instance",
+                "--nocapture"])
+            .env(PROBE, "1")
+            .env("KRONN_INTERNAL_MCP_EXECUTABLE", &bridge)
+            .env("KRONN_BACKEND_URL", "http://127.0.0.1:43127")
+            .output().expect("isolated environment probe");
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let mut config = crate::core::mcp_scanner::McpJsonFile {
+            mcp_servers: Default::default(),
+        };
+        let injected = crate::core::mcp_scanner::inject_kronn_internal(&mut config);
+        if std::path::Path::new("/.dockerenv").exists() {
+            // A container cannot publish its private executable to host CLIs.
+            if injected {
+                assert_ne!(
+                    config.mcp_servers["kronn-internal"].command.as_deref(),
+                    std::env::var("KRONN_INTERNAL_MCP_EXECUTABLE")
+                        .ok()
+                        .as_deref()
+                );
+            }
+            return;
+        }
+        assert!(injected);
+        let json = serde_json::to_value(&config).expect("MCP configuration JSON");
+        let internal = &json["mcpServers"]["kronn-internal"];
+        assert_eq!(
+            internal["command"],
+            std::env::var("KRONN_INTERNAL_MCP_EXECUTABLE").expect("bundle path")
+        );
+        assert_eq!(internal["args"], serde_json::json!([]));
+        assert_eq!(
+            internal["env"],
+            serde_json::json!({
+                "KRONN_BACKEND_URL": "http://127.0.0.1:43127"
+            })
+        );
+    }
+
+    #[test]
+    fn claude_workers_report_unsupported_windows_sandbox_without_relaxing_policy() {
+        let error = super::super::claude_task_worker_platform_check(true, false)
+            .expect_err("native Windows cannot satisfy the required sandbox");
+        assert!(error.contains("native Windows"));
+        assert!(error.contains("ordinary Claude discussions remain available"));
+        assert!(super::super::claude_task_worker_platform_check(true, true).is_ok());
+        assert!(super::super::claude_task_worker_platform_check(false, false).is_ok());
     }
 
     #[test]

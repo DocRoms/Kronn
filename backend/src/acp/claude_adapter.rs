@@ -140,13 +140,13 @@ impl AcpTransport for ClaudeAcpAdapter {
             // This is Kronn's own executable, not a user/project declaration.
             // Keep room tools available even without a project, just as the
             // Codex adapter does, without restoring any global MCP registry.
-            let script = crate::agents::runner::disc_introspection_mcp_path().ok_or_else(|| {
-                AcpError::Transport("Claude ACP internal bridge is unavailable".into())
+            let launch = crate::agents::runner::disc_introspection_mcp_command().ok_or_else(|| {
+                AcpError::Transport("Claude ACP internal bridge is unavailable; repair the Kronn installation or check the configured bridge executable/script".into())
             })?;
             let bridge = crate::acp::AcpMcpServer {
                 id: "kronn-internal".into(),
-                command: "python3".into(),
-                args: vec![script.clone()],
+                command: launch.command.clone(),
+                args: launch.args.clone(),
                 allowed_tools: Vec::new(),
             };
             self.broker.register_trusted_mcp_server(&bridge);
@@ -155,10 +155,10 @@ impl AcpTransport for ClaudeAcpAdapter {
             file.mcp_servers.insert(
                 "kronn-internal".into(),
                 crate::core::mcp_scanner::McpServerEntry {
-                    command: Some("python3".into()),
-                    args: Some(vec![script]),
+                    command: Some(launch.command),
+                    args: Some(launch.args),
                     url: None,
-                    env: Default::default(),
+                    env: launch.env,
                 },
             );
         }

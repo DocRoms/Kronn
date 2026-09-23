@@ -257,6 +257,18 @@ fn bundled_docs_sidecar_path(resource_dir: &std::path::Path) -> std::path::PathB
         })
 }
 
+fn bundled_mcp_sidecar_path(resource_dir: &std::path::Path) -> std::path::PathBuf {
+    resource_dir
+        .join("sidecars")
+        .join("mcp")
+        .join("kronn-mcp")
+        .join(if cfg!(windows) {
+            "kronn-mcp.exe"
+        } else {
+            "kronn-mcp"
+        })
+}
+
 // ── PATH enrichment for desktop apps ───────────────────────────────────────
 
 /// Maximum time we wait for the user's login shell to print its PATH.
@@ -531,6 +543,13 @@ fn desktop_app_state(
     AppState::new_defaults(config, database, max_agents).with_data_dir_lock(data_dir_lock)
 }
 
+fn configure_embedded_server(server: &mut kronn::models::ServerConfig, port: u16) {
+    if !kronn::core::net_expose::is_exposed_host(&server.host) {
+        server.host = "127.0.0.1".to_string();
+    }
+    server.runtime_port = Some(port);
+}
+
 /// Start the Kronn backend server on a given port (runs in a tokio task)
 async fn start_backend(
     port: u16,
@@ -542,6 +561,9 @@ async fn start_backend(
     // Enrich PATH for desktop mode — GUI apps on macOS/Linux inherit a minimal PATH
     // that doesn't include user-installed binaries (npm global, homebrew, cargo, etc.)
     enrich_path();
+    // Every child belongs to this embedded instance, including when a shell
+    // inherited an override for a separate Docker/standalone installation.
+    std::env::set_var("KRONN_BACKEND_URL", format!("http://127.0.0.1:{port}"));
 
     // Load or create config
     let mut app_config = match config::load().await? {
@@ -554,10 +576,7 @@ async fn start_backend(
     // contacts / P2P mesh. The webview always talks to 127.0.0.1:port (which
     // 0.0.0.0 includes), so the local UI is unaffected either way. We never bind
     // an arbitrary configured host in embedded mode — only loopback or bind-all.
-    if !kronn::core::net_expose::is_exposed_host(&app_config.server.host) {
-        app_config.server.host = "127.0.0.1".to_string();
-    }
-    app_config.server.port = port;
+    configure_embedded_server(&mut app_config.server, port);
     let bind_host = app_config.server.host.clone();
 
     let max_agents = if app_config.server.max_concurrent_agents > 0 {
@@ -880,6 +899,16 @@ fn main() {
             // executable on first boot.
             match app.path().resource_dir() {
                 Ok(resource_dir) => {
+                    let mcp_sidecar = bundled_mcp_sidecar_path(&resource_dir);
+                    if mcp_sidecar.is_file() || !cfg!(debug_assertions) {
+                        std::env::set_var("KRONN_INTERNAL_MCP_EXECUTABLE", &mcp_sidecar);
+                        if !mcp_sidecar.is_file() {
+                            tracing::error!(
+                                "Bundled MCP bridge missing at {}; repair the installation",
+                                mcp_sidecar.display()
+                            );
+                        }
+                    }
                     let docs_sidecar = bundled_docs_sidecar_path(&resource_dir);
                     if docs_sidecar.is_file() {
                         std::env::set_var("KRONN_DOCS_SIDECAR", &docs_sidecar);
@@ -895,6 +924,9 @@ fn main() {
                     }
                 }
                 Err(error) => {
+                    if !cfg!(debug_assertions) {
+                        std::env::set_var("KRONN_INTERNAL_MCP_EXECUTABLE", "");
+                    }
                     // Document generation is optional. A damaged/missing
                     // sidecar must not terminate or relaunch the whole desktop.
                     tracing::warn!("Unable to resolve bundled resources: {error}");
@@ -992,6 +1024,45 @@ mod enrich_path_tests {
     use std::fs;
 
     #[test]
+    fn embedded_listener_preserves_the_saved_cli_port() {
+        for saved_port in [3140, 4242] {
+            for host in ["127.0.0.1", "0.0.0.0"] {
+                let mut config = config::default_config();
+                config.server.port = saved_port;
+                config.server.host = host.into();
+                configure_embedded_server(&mut config.server, 53591);
+
+                assert_eq!(config.server.listening_port(), 53591);
+                assert_eq!(config.server.host, host);
+                let serialized = serde_json::to_string(&config).unwrap();
+                assert!(!serialized.contains("runtime_port"));
+                let reloaded: kronn::models::AppConfig = serde_json::from_str(&serialized).unwrap();
+                assert_eq!(reloaded.server.port, saved_port);
+                assert_eq!(reloaded.server.listening_port(), saved_port);
+            }
+        }
+    }
+
+    #[test]
+    fn bundled_mcp_uses_the_installed_resource_directory() {
+        let root = std::path::Path::new("Installed Kronn é");
+        let config: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        let destination = config["bundle"]["resources"]["resources/mcp-sidecar/"]
+            .as_str()
+            .expect("MCP resources included in the installer");
+        let filename = if cfg!(windows) {
+            "kronn-mcp.exe"
+        } else {
+            "kronn-mcp"
+        };
+        assert_eq!(
+            bundled_mcp_sidecar_path(root),
+            root.join(destination).join("kronn-mcp").join(filename)
+        );
+    }
+
+    #[test]
     fn bundled_docs_sidecar_uses_tauri_resource_layout() {
         let resource_dir = std::path::Path::new("/tmp/kronn-resources");
         let path = bundled_docs_sidecar_path(resource_dir);
@@ -1073,8 +1144,10 @@ mod enrich_path_tests {
         );
         assert_eq!(
             remote["permissions"],
-            serde_json::json!(["allow-restart-app"])
+            serde_json::json!(["allow-restart-app", "allow-pick-folders"])
         );
+        assert_eq!(remote["windows"], serde_json::json!(["main"]));
+        assert_eq!(remote["local"], serde_json::json!(false));
     }
 
     #[test]

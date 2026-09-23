@@ -7213,6 +7213,23 @@ class AuditBridgeHardeningTests(unittest.TestCase):
         self.assertFalse(payload["retry"]["allowed"])
         self.assertIn("manually once", payload["action"])
 
+    def test_packaged_bridge_requires_reconnect_without_executing_source(self):
+        self.mod._BRIDGE_SCRIPT_SHA256_AT_LOAD = "outdated-contract"
+        with mock.patch.object(self.mod.sys, "frozen", True, create=True), \
+                mock.patch.object(self.mod.subprocess, "run") as run:
+            response = self.mod._bridge_stale_result(18, "task_exec_launch", "stale")
+            payload = json.loads(response["result"]["content"][0]["text"])
+            self.assertEqual(payload["reload"]["status"], "failed")
+            self.assertFalse(payload["retry"]["allowed"])
+            self.assertIn("Restart the MCP connection", payload["reload"]["error"])
+            run.assert_not_called()
+
+    def test_windows_bridge_requires_reconnect_without_unix_fd_reload(self):
+        with mock.patch.object(self.mod.os, "name", "nt"), \
+                mock.patch.object(self.mod.tempfile, "mkstemp") as create:
+            self.assertEqual(self.mod._schedule_bridge_reload()["status"], "failed")
+            create.assert_not_called()
+
     def test_reload_is_deferred_while_audit_sse_is_active(self):
         self.mod._BRIDGE_SCRIPT_SHA256_AT_LOAD = "outdated-contract"
         self.mod._AUDIT_STREAMS["project-1"] = {"state": "running"}

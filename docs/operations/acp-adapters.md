@@ -59,6 +59,46 @@ redacted runner diagnostic as prompt failures, never as a clean success.
 [src: file: backend/src/acp/adapter_process.rs:1]
 [src: file: backend/src/agents/runner.rs:4056]
 
+## Packaged desktop bridge
+
+The ACP host and adapters are Rust code shared with the desktop backend. Agent
+tools still use the separate `kronn-internal` MCP bridge. Desktop installers
+include `kronn-mcp`, a frozen copy of the shared Python bridge and its runtime;
+users do not need a separate Python installation for this bridge.
+The desktop resolves it through Tauri's resource directory and sets
+`KRONN_INTERNAL_MCP_EXECUTABLE` before starting the backend. An explicitly
+configured but missing executable fails closed instead of using a developer's
+source checkout. Docker and source development keep the existing script route.
+[src: file: desktop/src-tauri/src/main.rs:898]
+[src: file: backend/src/agents/runner.rs:4498]
+
+The embedded backend exports its actual loopback port as `KRONN_BACKEND_URL`
+before starting agent dispatch and MCP configuration sync. Generated desktop
+MCP configurations also carry this URL for host CLIs launched outside Kronn.
+This overrides an inherited URL belonging to another installation. Turning off
+the ACP adapter does not repair a missing bridge or an incorrect backend URL.
+[src: file: desktop/src-tauri/src/main.rs:559]
+
+Claude task workers require a sandbox. Native Windows launches are rejected
+with a specific diagnostic; this does not disable ordinary Claude discussions
+or relax worker isolation. WSL routing remains separate and must be qualified
+with a working Linux agent and bridge configuration.
+[src: file: backend/src/agents/runner.rs:9382]
+[Claude sandbox platform support](https://code.claude.com/docs/en/sandboxing)
+
+After replacing a frozen bridge, reconnect the MCP session. Frozen and Windows
+runtimes report that a restart is required instead of attempting the Unix
+file-descriptor script reload used during source development.
+[src: file: backend/scripts/disc-introspection-mcp.py:10384]
+
+The desktop sidecar build runs an MCP smoke test from a relocated directory
+with spaces and non-ASCII characters, an empty PATH and an ephemeral HTTP
+backend. It verifies initialization, a fresh source fingerprint and a real tool
+call to that backend. This test does not authenticate Claude, open the app UI,
+or prove that an installer passes Gatekeeper; those require installed-app
+qualification on each target OS.
+[src: file: backend/sidecars/mcp/smoke_bundle.py:15]
+
 ## Observability
 
 Claude's SDK model catalogue is discovered independently of these execution

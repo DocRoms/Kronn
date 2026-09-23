@@ -356,6 +356,7 @@ pub fn default_config() -> AppConfig {
         server: ServerConfig {
             host: "127.0.0.1".into(),
             port: DEFAULT_PORT,
+            runtime_port: None,
             domain: None,
             auth_token: None,
             auth_enabled: false,
@@ -803,6 +804,38 @@ mod tests {
 
         std::env::remove_var("KRONN_DATA_DIR");
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn desktop_runtime_port_is_not_saved_for_the_next_cli_start() {
+        let _lock = ENV_LOCK.lock().await;
+        let tmp = tempfile::tempdir().unwrap();
+        let previous_dir = std::env::var_os("KRONN_DATA_DIR");
+        std::env::set_var("KRONN_DATA_DIR", tmp.path());
+
+        for saved_port in [3140, 4242] {
+            let mut desktop = default_config();
+            desktop.server.port = saved_port;
+            desktop.server.runtime_port = Some(53591);
+            desktop.server.pseudo = Some("Desktop setting retained".into());
+            save(&desktop).await.unwrap();
+
+            let cli = load().await.unwrap().unwrap();
+            assert_eq!(cli.server.port, saved_port);
+            assert_eq!(cli.server.listening_port(), saved_port);
+            assert_eq!(cli.server.runtime_port, None);
+            assert_eq!(cli.server.pseudo, desktop.server.pseudo);
+            assert_eq!(cli.encryption_secret, desktop.encryption_secret);
+            assert_eq!(desktop.server.listening_port(), 53591);
+            let persisted = fs::read_to_string(config_path().unwrap()).await.unwrap();
+            assert!(!persisted.contains("runtime_port"));
+        }
+
+        match previous_dir {
+            Some(value) => std::env::set_var("KRONN_DATA_DIR", value),
+            None => std::env::remove_var("KRONN_DATA_DIR"),
+        }
     }
 
     /// Atomic rename guarantees a concurrent flurry of `save()` never yields a

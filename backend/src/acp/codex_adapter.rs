@@ -179,18 +179,19 @@ fn codex_project_mcp_override(cwd: &Path, broker: &AcpPermissionBroker) -> Optio
         ));
     }
 
-    let script = crate::agents::runner::disc_introspection_mcp_path()?;
+    let launch = crate::agents::runner::disc_introspection_mcp_command()?;
     broker.register_trusted_mcp_server(&AcpMcpServer {
         id: "kronn-internal".to_owned(),
-        command: "python3".to_owned(),
-        args: vec![script.clone()],
+        command: launch.command.clone(),
+        args: launch.args.clone(),
         allowed_tools: Vec::new(),
     });
-    let script_json = serde_json::to_string(&script).ok()?;
+    let command_json = serde_json::to_string(&launch.command).ok()?;
+    let args_json = serde_json::to_string(&launch.args).ok()?;
     let env_vars_json =
         serde_json::to_string(crate::agents::runner::KRONN_INTERNAL_CODEX_ENV_VARS).ok()?;
     entries.push_str(&format!(
-        "\"kronn-internal\"={{command=\"python3\",args=[{script_json}],env_vars={env_vars_json},startup_timeout_sec=30}}"
+        "\"kronn-internal\"={{command={command_json},args={args_json},env_vars={env_vars_json},startup_timeout_sec=30}}"
     ));
     Some(format!("mcp_servers={{{entries}}}"))
 }

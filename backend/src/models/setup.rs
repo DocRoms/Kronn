@@ -71,6 +71,10 @@ pub struct AppConfig {
 pub struct ServerConfig {
     pub host: String,
     pub port: u16,
+    /// Embedded desktop listener override; never persisted into the CLI config.
+    #[serde(skip)]
+    #[ts(skip)]
+    pub runtime_port: Option<u16>,
     /// Custom domain for CORS and TLS (e.g. "kronn.local")
     #[serde(default)]
     pub domain: Option<String>,
@@ -255,6 +259,13 @@ pub struct ServerConfig {
     /// `models::discussion_weight`; this is only the persisted field.
     #[serde(default)]
     pub discussion_weight: crate::models::DiscussionWeightConfig,
+}
+
+impl ServerConfig {
+    /// Actual listener port for this process; `port` remains the saved preference.
+    pub fn listening_port(&self) -> u16 {
+        self.runtime_port.unwrap_or(self.port)
+    }
 }
 
 /// Serde default for [`ServerConfig::default_summary_strategy`].

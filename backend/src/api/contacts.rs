@@ -160,7 +160,7 @@ pub fn invite_pseudo(server: &crate::models::ServerConfig) -> String {
 pub async fn build_invite_code(server: &crate::models::ServerConfig) -> String {
     let pseudo = invite_pseudo(server);
     let host = advertised_host_async(server).await;
-    format!("kronn:{}@{}:{}", pseudo, host, server.port)
+    format!("kronn:{}@{}:{}", pseudo, host, server.listening_port())
 }
 
 /// GET /api/contacts/invite-code — returns this instance's invite code
@@ -179,7 +179,7 @@ pub async fn network_info(State(state): State<AppState>) -> Json<ApiResponse<Net
     let info = NetworkInfo {
         tailscale_ip,
         advertised_host: host,
-        port: config.server.port,
+        port: config.server.listening_port(),
         domain: config.server.domain.clone(),
         detected_ips,
     };
@@ -266,6 +266,7 @@ mod tests {
         ServerConfig {
             host: host.into(),
             port: 3140,
+            runtime_port: None,
             domain: domain.map(String::from),
             auth_token: None,
             auth_enabled: false,
@@ -366,6 +367,15 @@ mod tests {
                 "peer must accept our code (host={h}): {code}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn desktop_invite_uses_the_runtime_port() {
+        let mut server = cfg("127.0.0.1", Some("kronn.example"));
+        server.runtime_port = Some(53591);
+        let code = build_invite_code(&server).await;
+        assert_eq!(code, "kronn:anonymous@kronn.example:53591");
+        assert_eq!(server.port, 3140);
     }
 
     #[test]
