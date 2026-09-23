@@ -1142,7 +1142,10 @@ async fn run_agent_with_timeout(
         .await
     }
     .await;
-    let runtime = capture.lock().unwrap().clone();
+    let runtime = capture
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone();
     let id = provenance.attempts.len() as u32 + 1;
     provenance.attempts.push(WorkflowAgentAttempt {
         id,

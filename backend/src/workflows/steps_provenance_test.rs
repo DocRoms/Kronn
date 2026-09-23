@@ -190,7 +190,8 @@ async fn provenance_keeps_failed_launch_and_format_negotiation_in_one_attempt() 
         provenance.attempts[0].resolved_model.as_deref(),
         Some("proxy-alias")
     );
-    assert!(result.step_model.is_none());
+    assert_eq!(result.step_agent, Some(AgentType::LiteLlm));
+    assert_eq!(result.step_model.as_deref(), Some("proxy-alias"));
     for fallback_succeeds in [false, true] {
         let mut step = step();
         typed(&mut step, OnInvalid::Fail);
@@ -215,6 +216,15 @@ async fn provenance_keeps_failed_launch_and_format_negotiation_in_one_attempt() 
         assert!(provenance.attempts[0].format_fallback);
         assert_eq!(provenance.attempts[0].succeeded, fallback_succeeds);
         assert_eq!(provenance.selected_attempt, fallback_succeeds.then_some(1));
+        assert_eq!(result.step_agent, Some(AgentType::LiteLlm));
+        assert_eq!(
+            result.step_model.as_deref(),
+            Some(if fallback_succeeds {
+                "served-model"
+            } else {
+                "proxy-alias"
+            })
+        );
     }
 }
 
@@ -335,6 +345,15 @@ fn provenance_snapshot_keeps_escalation_after_config_changes_and_unknown_acp_def
     assert!(
         result.step_model.is_none(),
         "unapplied request is not an observed native ACP default"
+    );
+    let provenance = result.agent_provenance.as_mut().unwrap();
+    provenance.selected_attempt = None;
+    provenance.attempts.clear();
+    super::super::runner::apply_step_snapshot(&step, &mut result, None);
+    assert!(result.step_agent.is_none());
+    assert!(
+        result.step_model.is_none(),
+        "no launch means no tried model"
     );
 }
 

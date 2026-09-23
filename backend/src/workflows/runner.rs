@@ -3267,7 +3267,10 @@ pub(crate) fn apply_step_snapshot(
         if let Some(provenance) = &result.agent_provenance {
             let selected = provenance
                 .selected_attempt
-                .and_then(|id| provenance.attempts.iter().find(|attempt| attempt.id == id));
+                .and_then(|id| provenance.attempts.iter().find(|attempt| attempt.id == id))
+                // Failed launches have no retained output, but their last
+                // attempted provider/model must remain diagnosable in badges.
+                .or_else(|| provenance.attempts.last());
             result.step_agent = selected.map(|attempt| attempt.agent.clone());
             result.step_model = selected.and_then(|attempt| {
                 let model = if !attempt.observed_models.is_empty() {

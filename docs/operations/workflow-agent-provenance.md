@@ -28,6 +28,9 @@ When provenance exists, the compact `step_agent` and `step_model` are derived
 from the selected attempt, never overwritten with the original step's agent
 after repair or escalation. Observed model identifiers take precedence over
 the resolved request; the tier suffix remains part of the compact label.
+When no output was retained, these compact fields identify the last attempted
+launch so a transport failure remains diagnosable; `selected_attempt` stays
+null. An empty attempt list leaves both compact fields unknown.
 An invalid repair or rejected debate output preserves the earlier selection.
 Historical rows without provenance keep their stored metadata and remain
 without an attempt history; changing configuration does not reconstruct it.
