@@ -32,6 +32,7 @@ export type RunStatusCardModel = {
   progress?: RunStatusCardProgress | null;
   result?: unknown;
   diagnostic?: string | null;
+  execDetails?: SharedRun['exec_details'];
   freshness?: 'live' | 'rehydrated' | 'unavailable';
   href?: string | null;
 };
@@ -57,6 +58,7 @@ export function sharedRunStatusCardModel(
       : null,
     result: run.result,
     diagnostic: run.diagnostic,
+    execDetails: run.exec_details,
     freshness,
     href: run.discussion_id
       ? `/discussions/${run.discussion_id}`

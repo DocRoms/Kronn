@@ -52,6 +52,7 @@ const makeStatus = (overrides: Partial<SetupStatus> = {}): SetupStatus => ({
   is_first_run: true,
   current_step: 'Agents',
   agents_detected: [],
+  scan_paths_explored: [],
   repos_detected: [],
   scan_paths_set: false,
   default_scan_path: null,
@@ -347,6 +348,35 @@ describe('SetupWizard — step 1 (scan path configuration)', () => {
     const buttons = Array.from(document.body.querySelectorAll('button'));
     const rescanBtn = buttons.find(b => b.getAttribute('title') === 'Re-scanner');
     expect(rescanBtn).toBeTruthy();
+  });
+
+  // Empty results identify the paths scanned.
+  it('names the paths the scan actually walked when it finds nothing', async () => {
+    const agent = makeAgent({ installed: true });
+    vi.mocked(agentsApi.detect).mockResolvedValue([agent]);
+    vi.mocked(setupApi.getStatus).mockResolvedValue(makeStatus({
+      repos_detected: [],
+      scan_paths_explored: ['/host-home', '/workspace/git'],
+    }));
+
+    await wrap(<SetupWizard initialStatus={null} onComplete={vi.fn()} />);
+    const continuerBtn = Array.from(document.body.querySelectorAll('button')).find(b => b.textContent?.includes('Continuer'));
+    await act(async () => { continuerBtn!.click(); });
+
+    const body = document.body.textContent!;
+    expect(body).toContain('/host-home');
+    expect(body).toContain('/workspace/git');
+  });
+
+  it('says so plainly when no path has been explored at all', async () => {
+    await enterStep1();
+    expect(document.body.textContent).toContain("Aucun chemin n'a encore été exploré.");
+  });
+
+  it('offers a folder browser next to the manual path input', async () => {
+    await enterStep1();
+    const buttons = Array.from(document.body.querySelectorAll('button'));
+    expect(buttons.some(b => b.textContent?.includes('Parcourir'))).toBe(true);
   });
 });
 

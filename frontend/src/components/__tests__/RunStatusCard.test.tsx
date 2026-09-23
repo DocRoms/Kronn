@@ -2,6 +2,8 @@ import { act, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { RunStatusCard } from '../RunStatusCard';
 import { workflowRunStatusCardModel } from '../../lib/runStatusCardModel';
+import { I18nProvider } from '../../lib/I18nContext';
+import { setUILocale } from '../../lib/i18n';
 import { runsApi, getApiBase, getAuthToken } from '../../lib/api';
 import { activeWebSocketCountForTests } from '../../hooks/useWebSocket';
 import type { SharedRun } from '../../types/generated';
@@ -10,6 +12,7 @@ vi.mock('../../lib/api', () => ({
   runsApi: { get: vi.fn(), list: vi.fn() },
   getApiBase: vi.fn(() => ''),
   getAuthToken: vi.fn(() => null),
+  config: { getUiLanguage: vi.fn().mockResolvedValue('fr') },
 }));
 
 // ─── Mock WebSocket — mirrors hooks/__tests__/useWebSocket.test.ts so the
@@ -191,6 +194,42 @@ describe('RunStatusCard', () => {
     expect(screen.getByText('run.durationUnavailable')).toBeInTheDocument();
     expect(screen.getByText('The configured API is unavailable.')).toBeInTheDocument();
     expect(screen.queryByRole('progressbar')).not.toBeInTheDocument();
+  });
+
+  it('rehydrates Quick Exec diagnostics without mixing stderr into the result', async () => {
+    setUILocale('fr');
+    vi.mocked(runsApi.get).mockResolvedValue(sharedRun({
+      id: 'qe-warning', kind: 'quick_exec', status: 'success',
+      result: { count: 12 }, exec_details: { exit_code: 0, stderr: 'Source returned a warning ☀' },
+    }));
+    render(<I18nProvider><RunStatusCard runId="qe-warning" /></I18nProvider>);
+    act(() => { MockIntersectionObserver.instances[0].setIntersecting(true); });
+    const diagnostics = await screen.findByTestId('run-status-card-exec-diagnostics');
+    expect(within(diagnostics).getByText('Code de sortie : 0')).toBeInTheDocument();
+    expect(within(diagnostics).getByText('Source returned a warning ☀')).toBeInTheDocument();
+    expect(diagnostics.querySelector('details')).not.toHaveAttribute('open');
+    const data = screen.getByTestId('run-status-card-exec-output');
+    expect(data).toHaveTextContent('count');
+    expect(data).toHaveTextContent('12');
+    expect(data).not.toHaveTextContent('Source returned a warning');
+    expect(screen.getByTestId('run-status-card')).toHaveAttribute('data-status', 'success');
+  });
+
+  it('keeps an unknown exit code unknown and bounds the stderr preview', () => {
+    render(<RunStatusCard model={{
+      id: 'qe-signalled', kind: 'quick_exec', status: 'failed',
+      execDetails: { exit_code: null, stderr: 'x'.repeat(50_000) },
+    }} />);
+    const diagnostics = screen.getByTestId('run-status-card-exec-diagnostics');
+    expect(diagnostics).toHaveTextContent('run.exitCodeUnknown');
+    expect(diagnostics).toHaveTextContent('run.resultTruncated');
+    expect(diagnostics.textContent!.length).toBeLessThan(50_000);
+    expect(within(diagnostics).queryByText('run.exitCode')).not.toBeInTheDocument();
+  });
+
+  it('does not invent process diagnostics for an older Quick Exec run', () => {
+    render(<RunStatusCard model={{ id: 'old-qe', kind: 'quick_exec', status: 'success', result: 'done' }} />);
+    expect(screen.queryByTestId('run-status-card-exec-diagnostics')).not.toBeInTheDocument();
   });
 
   it('rehydrates from server state via runId and marks freshness as rehydrated', async () => {

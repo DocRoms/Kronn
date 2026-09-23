@@ -21,11 +21,12 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, cleanup, waitFor } from '@testing-library/react';
 import { buildApiMock } from '../../../test/apiMock';
 
-const { cancelRun, resumeRun, decideRun, listBatchRunSummaries } = vi.hoisted(() => ({
+const { cancelRun, resumeRun, decideRun, listBatchRunSummaries, getRun } = vi.hoisted(() => ({
   cancelRun: vi.fn(),
   resumeRun: vi.fn(),
   decideRun: vi.fn(),
   listBatchRunSummaries: vi.fn(),
+  getRun: vi.fn(),
 }));
 
 vi.mock('../../../lib/api', () =>
@@ -38,6 +39,7 @@ vi.mock('../../../lib/api', () =>
       resumeRun,
       decideRun,
       listBatchRunSummaries,
+      getRun,
     },
   }),
 );
@@ -144,6 +146,7 @@ beforeEach(() => {
   resumeRun.mockReset().mockResolvedValue({ run_id: 'r1', new_status: 'Running' });
   decideRun.mockReset().mockResolvedValue({ run_id: 'r1', new_status: 'Running' });
   listBatchRunSummaries.mockReset().mockResolvedValue([]);
+  getRun.mockReset().mockResolvedValue(null);
 });
 
 afterEach(() => {
@@ -155,6 +158,19 @@ afterEach(() => {
 // ---- header actions ---------------------------------------------------
 
 describe('WorkflowDetail — header actions', () => {
+  it('loads the omitted collection error when its run is expanded', async () => {
+    const summary = mkRun({ id: 'collect-run', status: 'Failed', step_results: [
+      mkStepResult({ step_name: 'collect', step_kind: 'CollectApiData', status: 'Failed', output: '' }),
+    ] });
+    const cause = 'news (qa-deleted): QuickApi `qa-deleted` does not exist';
+    getRun.mockResolvedValue({ ...summary, step_results: [{ ...summary.step_results[0], output: cause }] });
+    const { container } = renderDetail({ runs: [summary] });
+    const row = container.querySelector<HTMLButtonElement>('.wf-run-compact')!;
+    if (row.getAttribute('aria-expanded') !== 'true') fireEvent.click(row);
+    expect(await screen.findByText(cause)).toBeInTheDocument();
+    expect(getRun).toHaveBeenCalledWith('wf-1', 'collect-run');
+  });
+
   it('shows copied feedback on the workflow ID pill while copying the full ID', async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, 'clipboard', {

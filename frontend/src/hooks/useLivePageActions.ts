@@ -1,9 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { pages as pagesApi } from '../lib/api';
-import type { LivePageAction } from '../types/generated';
+import type { LivePageAction, LivePageDetail } from '../types/generated';
 import {
+  hostTheme,
   liveActionBindingKey,
+  postLivePageActionSlot,
   postLivePageActionStates,
+  postLivePageTheme,
+  type LivePageActionAnchor,
   type LivePageActionIntent,
 } from '../lib/live-page-sandbox';
 
@@ -11,7 +15,7 @@ export interface LivePageActiveActionState {
   activation: number;
   actionRef: string;
   bindings: Record<string, string>;
-  anchor: { left: number; top: number; width: number; height: number };
+  anchor: LivePageActionAnchor;
   /** What this click turned into once launched or declined — its own launch,
    * never written back over the offer the other buttons still draw from. */
   card?: LivePageAction;
@@ -26,6 +30,8 @@ export interface UseLivePageActionsResult {
   /** The offer behind the open card, even once that card shows a launch. */
   selectedOffer: LivePageAction | null;
   handleIntent: (intent: LivePageActionIntent) => void;
+  /** Keeps the open card glued to its row while the Page scrolls. */
+  moveAnchor: (anchor: LivePageActiveActionState['anchor']) => void;
   handleChanged: (action: LivePageAction, activation: number) => void;
   close: () => void;
   reload: (pageId: string | null) => Promise<void>;
@@ -98,6 +104,16 @@ export function useLivePageActions(onUnavailable: () => void): UseLivePageAction
     setActiveAction(null);
   }, [setActiveAction, setLaunches]);
 
+  const moveAnchor = useCallback((anchor: LivePageActiveActionState['anchor']) => {
+    const current = activeActionRef.current;
+    if (!current) return;
+    const previous = current.anchor;
+    if (previous.left === anchor.left && previous.top === anchor.top
+      && previous.width === anchor.width && previous.height === anchor.height
+      && previous.slot === anchor.slot) return;
+    setActiveAction({ ...current, anchor });
+  }, [setActiveAction]);
+
   const handleIntent = useCallback((intent: LivePageActionIntent) => {
     const exists = actionsRef.current.some(action => action.action_ref === intent.actionRef);
     if (!exists) {
@@ -165,15 +181,79 @@ export function useLivePageActions(onUnavailable: () => void): UseLivePageAction
 
   return {
     actions, launches, activeAction, selectedAction, selectedOffer,
-    handleIntent, handleChanged, close, reload,
+    handleIntent, handleChanged, close, reload, moveAnchor,
   };
 }
 
 /**
- * Keeps a Page's iframe told how each of its buttons' rows went: on every
- * change, and again with the Page's data whenever the frame (re)loads, since a
- * fresh document has forgotten everything. Returns that frame's `onLoad`.
+ * Mirror the host theme into the opaque iframe by message. Rebuilding the
+ * document would reload it and discard Page state.
  */
+export function useLivePageTheme(
+  iframeRef: { readonly current: HTMLIFrameElement | null },
+  channelId: string,
+): void {
+  useEffect(() => {
+    const push = () => {
+      const target = iframeRef.current?.contentWindow ?? null;
+      const theme = hostTheme();
+      if (target && theme) postLivePageTheme(target, channelId, theme);
+    };
+    push();
+    const observer = new MutationObserver(push);
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+    return () => observer.disconnect();
+  }, [channelId, iframeRef]);
+}
+
+/**
+ * Reserve the measured card height in the Page DOM. The privileged action card
+ * remains in the host while the slot keeps subsequent rows below it.
+ */
+export function useLivePageActionSlot(
+  iframeRef: { readonly current: HTMLIFrameElement | null },
+  channelId: string,
+  active: LivePageActiveActionState | null,
+  cardHeight: number | null,
+): void {
+  const actionRef = active?.actionRef ?? null;
+  const bindingKey = active ? liveActionBindingKey(active.bindings) : null;
+  useEffect(() => {
+    const target = iframeRef.current?.contentWindow ?? null;
+    if (!target) return undefined;
+    if (actionRef === null || bindingKey === null || !cardHeight) {
+      postLivePageActionSlot(target, channelId, null);
+      return undefined;
+    }
+    postLivePageActionSlot(target, channelId, { actionRef, bindingKey, height: cardHeight });
+    // Closing the card must close the collapse, including on unmount. The
+    // frame captured above is the one that was told to open it; a frame that
+    // has since reloaded carries no slot to close anyway.
+    return () => postLivePageActionSlot(target, channelId, null);
+  }, [actionRef, bindingKey, cardHeight, channelId, iframeRef]);
+}
+
+/**
+ * Skip automatic publication when runtimeData is unchanged to preserve Page
+ * state. publishPageData stays unconditional for onLoad to seed fresh frames.
+ * The revision changes on every publication, including dataset replacements.
+ */
+export function usePublishPageDataWhenChanged(
+  detail: LivePageDetail | null,
+  publishPageData: () => void,
+): void {
+  const publishedRef = useRef<string | null>(null);
+  const signature = detail
+    ? [detail.id, detail.slug, detail.title, detail.data_revision, detail.datasets.length].join('\u0000')
+    : null;
+  useEffect(() => {
+    if (signature === null || publishedRef.current === signature) return;
+    publishedRef.current = signature;
+    publishPageData();
+  }, [publishPageData, signature]);
+}
+
+/** Publish row action states on change and reload; returns the iframe onLoad callback. */
 export function useActionStatesInFrame(
   iframeRef: { readonly current: HTMLIFrameElement | null },
   channelId: string,

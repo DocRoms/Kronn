@@ -32,18 +32,18 @@ const CSS = readFileSync('src/components/LivePageActionOverlay.css', 'utf8');
 
 const action = { id: 'act-1', label: 'Framer', kind: 'prompt' } as unknown as LivePageAction;
 
-function activeAt(left: number): LivePageActiveActionState {
+function activeAt(left: number, slot = false): LivePageActiveActionState {
   return {
     activation: 1,
     bindings: {},
-    anchor: { left, top: 100, width: 80, height: 24 },
+    anchor: { left, top: 100, width: 80, height: 24, slot },
   } as unknown as LivePageActiveActionState;
 }
 
-function overlayAt(left: number): HTMLElement {
+function overlayAt(left: number, slot = false): HTMLElement {
   const { container } = render(
     <LivePageActionOverlay
-      active={activeAt(left)}
+      active={activeAt(left, slot)}
       action={action}
       onChanged={() => {}}
       onClose={() => {}}
@@ -65,9 +65,39 @@ describe('LivePageActionOverlay', () => {
     expect(overlay.style.left).toBe('');
   });
 
-  it('keeps anchoring vertically at the click point', () => {
-    // The fix is about width; the card must still open under what you clicked.
-    expect(overlayAt(950).style.top).toBe('130px'); // top 100 + height 24 + 6
+  it('sits under the row until the Page has opened its collapse', () => {
+    // The frame between the click and the slot: the card goes just below the
+    // row, which is where the slot is about to appear, so nothing jumps.
+    expect(overlayAt(950).style.top).toBe('128px'); // top 100 + height 24 + 4
+  });
+
+  it('fills the collapse once the Page has opened one', () => {
+    // With a slot the rectangle IS the gap: taking its top again would push
+    // the card a full card-height below the hole it is meant to fill.
+    expect(overlayAt(950, true).style.top).toBe('100px');
+  });
+
+  it('takes the row width, so the card is as wide as what it acts on', () => {
+    expect(overlayAt(950).style.getPropertyValue('--kr-action-anchor-width')).toBe('80px');
+  });
+
+  it('reports its height so the Page can size the collapse, and clears it on close', () => {
+    const onHeightChange = vi.fn();
+    const { unmount } = render(
+      <LivePageActionOverlay
+        active={activeAt(12)}
+        action={action}
+        onChanged={() => {}}
+        onClose={() => {}}
+        onOpenDiscussion={() => {}}
+        onHeightChange={onHeightChange}
+      />,
+    );
+    expect(onHeightChange).toHaveBeenCalled();
+    onHeightChange.mockClear();
+    unmount();
+    // A card that vanishes without saying so would leave a hole in the Page.
+    expect(onHeightChange).toHaveBeenCalledWith(null);
   });
 
   it('never lets a near-zero anchor push the card off the left edge', () => {
@@ -83,6 +113,8 @@ describe('LivePageActionOverlay', () => {
     expect(CSS).not.toMatch(/max-width:\s*720px/);
     // And the clamp that lets the card slide instead of shrink.
     expect(CSS).toMatch(/left:\s*clamp\(/);
+    // In a Page the card fills the collapse, so it drops its own 720px cap.
+    expect(CSS).toMatch(/\.live-page-action-overlay \.discussion-action-card \{[^}]*width:\s*100%/);
   });
 
   it('renders nothing without an active action', () => {

@@ -18,6 +18,45 @@ export interface ExternalAgentTarget {
   modelTiers: ModelTierConfig;
 }
 
+/** A connection Kronn could route to if it were finished. */
+export interface UnusableExternalAgentTarget {
+  connectionId: string;
+  label: string;
+  /** Why it cannot run, as a translation key suffix. */
+  reason: 'no_model' | 'no_endpoint';
+}
+
+function isDynamicConnection(connection: ExternalApiConnectionView): boolean {
+  // Native LiteLLM/NVIDIA configurations already have their own AgentType and
+  // must not be duplicated in selectors.
+  return connection.origin_preset === 'open_router' || connection.origin_preset === 'other';
+}
+
+function hasModel(connection: ExternalApiConnectionView): boolean {
+  return Boolean(connection.economy_model || connection.default_model || connection.reasoning_model);
+}
+
+/** Whether Kronn can route a run to this connection as it stands. */
+export function isUsableExternalConnection(connection: ExternalApiConnectionView): boolean {
+  return isDynamicConnection(connection) && Boolean(connection.endpoint) && hasModel(connection);
+}
+
+/**
+ * Return unavailable connections with their reason so launch surfaces can
+ * explain why they cannot be selected.
+ */
+export function unusableExternalAgentTargets(
+  connections: ExternalApiConnectionView[],
+): UnusableExternalAgentTarget[] {
+  return connections
+    .filter(connection => isDynamicConnection(connection) && !(Boolean(connection.endpoint) && hasModel(connection)))
+    .map(connection => ({
+      connectionId: connection.id,
+      label: connection.display_name,
+      reason: connection.endpoint ? 'no_model' : 'no_endpoint',
+    }));
+}
+
 /** Dynamic OpenAI-compatible connections use AgentType::Custom on the wire.
  * Native LiteLLM/NVIDIA configurations already have their own AgentType and
  * must not be duplicated in selectors. */
@@ -25,11 +64,7 @@ export function externalAgentTargets(
   connections: ExternalApiConnectionView[],
 ): ExternalAgentTarget[] {
   return connections
-    .filter(connection => (
-      (connection.origin_preset === 'open_router' || connection.origin_preset === 'other')
-      && Boolean(connection.endpoint)
-      && Boolean(connection.economy_model || connection.default_model || connection.reasoning_model)
-    ))
+    .filter(isUsableExternalConnection)
     .map(connection => ({
       agent: 'Custom',
       connectionId: connection.id,

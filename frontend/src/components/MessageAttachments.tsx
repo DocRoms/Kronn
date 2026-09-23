@@ -1,8 +1,8 @@
 // 0.8.8 — render the files a user pinned to a message (Option B per-message
 // attachments). Images become thumbnails fetched as auth'd blobs (an `<img
 // src>` can't carry the auth header, so we fetch → object URL → revoke on
-// unmount). Non-image files (no disk_path on the backend) render as a filename
-// chip. Lives in its own file so the blob lifecycle is unit-testable in
+// unmount). Disk-backed text opens an escaped, bounded preview; unsupported
+// files remain filename chips. Lives in its own file so the lifecycle is testable in
 // isolation from the heavy MessageBubble.
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
@@ -10,9 +10,10 @@ import { ChevronLeft, ChevronRight, Download, ExternalLink, FileText, Image as I
 import type { ContextFile } from '../types/generated';
 import { discussions as discussionsApi, media, type ExternalApiConnectionView, type MediaModality, type MediaReferenceMode } from '../lib/api';
 import { triggerDownload } from '../lib/downloadBlob';
-import { isImageFile, isVideoFile, isViewableMedia } from '../lib/mediaKind';
+import { isImageFile, isVideoFile, isTextAttachment, isPreviewableAttachment } from '../lib/mediaKind';
 import { extractLastFrame, LastFrameError, lastFrameFilename } from '../lib/lastFrame';
 import { MediaPlayer } from './MediaPlayer';
+import { TextAttachmentPreview } from './TextAttachmentPreview';
 
 type T = (key: string, ...args: (string | number)[]) => string;
 const EMPTY_GENERATION_CONNECTIONS: ExternalApiConnectionView[] = [];
@@ -204,6 +205,13 @@ function AttachmentThumb({ file, url, failed, t, onOpen, onPrepareVideo, variant
       <span className="disc-attach-video-badge" aria-hidden="true">▶</span>
       <span className="disc-attach-video-kind">{t('disc.media.videoBadge')}</span>
     </button>
+  ) : isTextAttachment(file) ? (
+    <button type="button" className="disc-attach-chip disc-attach-chip--openable"
+      title={meta} data-testid="attach-chip" onClick={onOpen}
+      aria-label={t('disc.attachmentText', file.filename)}>
+      <FileText size={11} />
+      <span className="disc-attach-chip-name">{file.filename}</span>
+    </button>
   ) : (
     // Anything else, or a media whose bytes failed to load → filename chip.
     <span className="disc-attach-chip" title={meta} data-testid="attach-chip">
@@ -305,11 +313,11 @@ export function MessageAttachments({
   // `urls` excluded a video nobody had downloaded yet, and an image still in
   // flight, so the carousel silently skipped entries.
   const carouselFiles = useMemo(() => {
-    const sequence = (carouselScope ?? files).filter(isViewableMedia);
+    const sequence = (carouselScope ?? files).filter(isPreviewableAttachment);
     // A thumbnail must always be reachable from the sequence it opens: a scope
     // that filtered or paginated the grid away would otherwise open on nothing.
     const known = new Set(sequence.map(file => file.id));
-    const orphans = files.filter(file => isViewableMedia(file) && !known.has(file.id));
+    const orphans = files.filter(file => isPreviewableAttachment(file) && !known.has(file.id));
     return [...sequence, ...orphans];
   }, [carouselScope, files]);
   const [urls, setUrls] = useState<Record<string, string>>({});
@@ -530,10 +538,10 @@ export function MessageAttachments({
     setSelectedId(openRequest.assetId);
   }
 
-  // A clip weighs megabytes, so its bytes are fetched only once it is the one
-  // being looked at — never for the whole carousel.
+  // Load selected media outside the visible grid too (for example an image
+  // reached from a text attachment). Cached thumbnails do not refetch.
   useEffect(() => {
-    if (!selectedFile || !isVideoFile(selectedFile)) return;
+    if (!selectedFile || (!isVideoFile(selectedFile) && !isImageFile(selectedFile))) return;
     loadMediaUrl(selectedFile);
   }, [loadMediaUrl, selectedFile]);
 
@@ -600,7 +608,7 @@ export function MessageAttachments({
               <span className="disc-image-lightbox-count">
                 {selectedIndex + 1} / {carouselFiles.length}
               </span>
-              <a
+              {!isTextAttachment(selectedFile) && <a
                 className="disc-image-lightbox-action"
                 href={urls[selectedFile.id]}
                 target="_blank"
@@ -609,7 +617,7 @@ export function MessageAttachments({
                 title={t('disc.attachmentOpenNewTab')}
               >
                 <ExternalLink size={17} />
-              </a>
+              </a>}
               {onExtracted && isVideoFile(selectedFile) && urls[selectedFile.id] && (
                 // Offered only once the bytes are here: without them there is
                 // nothing to decode, and the button would promise a frame it
@@ -728,7 +736,9 @@ export function MessageAttachments({
               )}
               <div className="disc-image-lightbox-asset">
                 <div className="disc-image-lightbox-media-frame">
-                  {isVideoFile(selectedFile)
+                  {isTextAttachment(selectedFile)
+                    ? <TextAttachmentPreview key={`${discussionId}:${selectedFile.id}`} file={selectedFile} t={t} />
+                    : isVideoFile(selectedFile)
                     ? urls[selectedFile.id]
                       ? <MediaPlayer
                           src={urls[selectedFile.id]}

@@ -159,6 +159,7 @@ export function RunStatusCard({ model: initialModel, runId, compact = false, hid
     [runKind, runResult],
   );
   const result = useMemo(() => steps ? null : resultText(model?.result), [model?.result, steps]);
+  const execStderr = useMemo(() => resultText(model?.execDetails?.stderr), [model?.execDetails?.stderr]);
 
   if (!model) return <section ref={rootRef} className="run-status-card" data-testid="run-status-card"><span>{t('run.freshness.unavailable')}</span></section>;
 
@@ -303,6 +304,22 @@ export function RunStatusCard({ model: initialModel, runId, compact = false, hid
                 <div key={key}><dt>{key}</dt><dd>{value}</dd></div>
               ))}
             </dl>
+          )}
+          {model.kind === 'quick_exec' && model.execDetails && (
+            <div data-testid="run-status-card-exec-diagnostics">
+              <span>{model.execDetails.exit_code == null
+                ? t('run.exitCodeUnknown')
+                : t('run.exitCode', model.execDetails.exit_code)}</span>
+              {execStderr?.text && (
+                <details className="run-status-card-fold">
+                  <summary>{t('run.stderr')}</summary>
+                  <pre className="run-status-card-result">
+                    {execStderr.text}
+                    {execStderr.truncated && `\n${t('run.resultTruncated')}`}
+                  </pre>
+                </details>
+              )}
+            </div>
           )}
           {result && (foldResult ? (
             <details className="run-status-card-fold" data-testid="run-status-card-result-fold">

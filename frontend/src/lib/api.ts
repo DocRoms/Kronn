@@ -1,9 +1,11 @@
+import { readTextAttachmentPreview } from './textAttachmentPreview';
 import type {
   DiscussionWeightConfig,
   DiscussionWeightsResponse,
   DiscussionImportProvenance,
   SetupStatus,
   SetScanPathsRequest,
+  BrowseListing,
   SaveApiKeyRequest,
   ApiKeyDisplay,
   ApiKeysResponse,
@@ -635,6 +637,11 @@ async function api<T>(
 export const setup = {
   getStatus: () => api<SetupStatus>('GET', '/setup/status'),
   setScanPaths: (req: SetScanPathsRequest) => api<void>('POST', '/setup/scan-paths', req),
+  /**
+   * GET /api/setup/browse: server-visible roots, or children of the supplied path.
+   */
+  browse: (path?: string) =>
+    api<BrowseListing>('GET', path ? `/setup/browse?path=${encodeURIComponent(path)}` : '/setup/browse'),
   installAgent: (agentType: AgentType) => api<string>('POST', '/setup/install-agent', agentType),
   complete: () => api<void>('POST', '/setup/complete'),
   reset: () => api<void>('POST', '/setup/reset'),
@@ -1748,6 +1755,15 @@ export const discussions = {
     });
     if (!res.ok) throw new Error(`Failed to load attachment (${res.status})`);
     return res.blob();
+  },
+  /** Decode only a bounded UTF-8 preview; full downloads use contextFileBlob. */
+  contextFileTextPreview: async (id: string, fileId: string, signal?: AbortSignal) => {
+    const res = await fetch(`${_apiBase}/api/discussions/${id}/context-files/${fileId}/content`, {
+      headers: { ...authHeaders() },
+      signal,
+    });
+    if (!res.ok) throw new Error(`Failed to load attachment (${res.status})`);
+    return readTextAttachmentPreview(res.body);
   },
   /** The order a discussion's clips play in as one film (Assets > Editor). */
   videoSequence: (id: string) => api<VideoSequence>('GET', `/discussions/${id}/video-sequence`),

@@ -7,6 +7,7 @@ import {
   GitBranch, FolderOpen, Eye, Copy,
 } from 'lucide-react';
 import { KronnMark } from '../components/KronnMark';
+import { FolderPicker } from '../components/setup/FolderPicker';
 import './SetupWizard.css';
 
 interface Props {
@@ -41,6 +42,11 @@ export function SetupWizard({ initialStatus, onComplete, inDocker = false }: Pro
     initialStatus?.default_scan_path ? [initialStatus.default_scan_path] : []
   );
   const [newPath, setNewPath] = useState('');
+  const [picking, setPicking] = useState(false);
+  // Retain scanned paths to explain empty results and missing mounts.
+  const [explored, setExplored] = useState<string[]>(
+    initialStatus?.scan_paths_explored ?? []
+  );
 
   const installedCount = agents.filter(a => a.installed || a.runtime_available).length;
 
@@ -102,6 +108,7 @@ export function SetupWizard({ initialStatus, onComplete, inDocker = false }: Pro
       }
       const status = await setupApi.getStatus();
       setRepos(status.repos_detected);
+      setExplored(status.scan_paths_explored);
       if (status.repos_detected.length === 0 && !showManualPath) {
         setShowManualPath(true);
       }
@@ -119,6 +126,13 @@ export function SetupWizard({ initialStatus, onComplete, inDocker = false }: Pro
       setNewPath('');
       handleScan(updated);
     }
+  };
+
+  const handlePicked = (chosen: string[]) => {
+    setPicking(false);
+    const merged = Array.from(new Set([...paths, ...chosen]));
+    setPaths(merged);
+    void handleScan(merged);
   };
 
   const handleComplete = async () => {
@@ -428,6 +442,11 @@ export function SetupWizard({ initialStatus, onComplete, inDocker = false }: Pro
                 <div className="text-center py-8">
                   <FolderSearch size={32} className="text-ghost mb-6" />
                   <p className="setup-desc">{t('setup.noRepoFound')}</p>
+                  <p className="setup-desc text-faint">
+                    {explored.length > 0
+                      ? t('setup.pathsExplored', explored.join(', '))
+                      : t('setup.pathsExploredNone')}
+                  </p>
                 </div>
               )}
 
@@ -441,6 +460,9 @@ export function SetupWizard({ initialStatus, onComplete, inDocker = false }: Pro
                       onChange={(e) => setNewPath(e.target.value)}
                       onKeyDown={(e) => { if (e.key === 'Enter') handleAddPath(); }}
                     />
+                    <button className="btn btn-secondary" onClick={() => setPicking(true)}>
+                      <FolderOpen size={14} /> {t('setup.browse')}
+                    </button>
                     <button className="btn btn-secondary" onClick={handleAddPath}>
                       <Scan size={14} /> {t('setup.scan')}
                     </button>
@@ -456,6 +478,14 @@ export function SetupWizard({ initialStatus, onComplete, inDocker = false }: Pro
                     </div>
                   )}
                 </div>
+              )}
+
+              {picking && (
+                <FolderPicker
+                  selected={paths}
+                  onConfirm={handlePicked}
+                  onClose={() => setPicking(false)}
+                />
               )}
 
               <button

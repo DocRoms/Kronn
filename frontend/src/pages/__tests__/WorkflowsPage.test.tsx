@@ -1301,6 +1301,26 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
     expect(screen.getByText('Éditer')).toBeInTheDocument();
   });
 
+  it('keeps the full focused run when the compact page already contains its id', async () => {
+    mockWorkflowsApi.getRun.mockReset();
+    const summary = {
+      id: 'run-focused', workflow_id: 'wf-lab', status: 'Failed',
+      started_at: '2026-07-24T10:00:00Z', finished_at: '2026-07-24T10:01:00Z',
+      step_results: [{ step_name: 'collect', status: 'Failed', output: '', step_kind: 'CollectApiData', tokens_used: 0, duration_ms: 134 }],
+      tokens_used: 0, produced_branches: [], state: {},
+    };
+    const cause = 'news (qa-deleted): QuickApi `qa-deleted` does not exist';
+    mockWorkflowsApi.list.mockResolvedValue([labSummary()]);
+    mockWorkflowsApi.get.mockResolvedValue(labWorkflow());
+    mockWorkflowsApi.listRuns.mockResolvedValue([summary]);
+    mockWorkflowsApi.countRuns.mockResolvedValue(1);
+    mockWorkflowsApi.getRun.mockResolvedValue({ ...summary, step_results: [{ ...summary.step_results[0], output: cause }] });
+    await wrap(<WorkflowsPage projects={[]} installedAgentTypes={['ClaudeCode']} agentAccess={fullConfig}
+      initialSelectedWorkflowId="wf-lab" initialSelectedWorkflowRunId="run-focused" />);
+    expect(await screen.findByText(cause)).toBeInTheDocument();
+    expect(mockWorkflowsApi.getRun).toHaveBeenCalledTimes(1);
+  });
+
   it('Lancer sur un WF à variables ouvre la popup, bloque les requis vides, puis déclenche avec les valeurs', async () => {
     mockWorkflowsApi.list.mockResolvedValue([labSummary()]);
     mockWorkflowsApi.get.mockResolvedValue(labWorkflow());
