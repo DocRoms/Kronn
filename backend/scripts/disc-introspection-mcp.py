@@ -7876,7 +7876,7 @@ def call_workflow_run_get(args):
             out = s.get("output")
             if isinstance(out, str) and len(out) > 1500:
                 out = out[:1500] + f"… [truncated, {len(s['output'])} chars total]"
-            steps.append({
+            step_dict = {
                 "step_name": s.get("step_name"),
                 "status": s.get("status"),
                 "duration_ms": s.get("duration_ms"),
@@ -7884,7 +7884,17 @@ def call_workflow_run_get(args):
                 "step_kind": s.get("step_kind"),
                 "step_agent": s.get("step_agent"),
                 "output": out,
-            })
+            }
+            for field in ["step_model", "step_api_plugin_slug", "step_api_endpoint_path", "envelope_detected", "child_run_id"]:
+                val = s.get(field)
+                if val is not None:
+                    step_dict[field] = val
+            if s.get("is_rollback") is True:
+                step_dict["is_rollback"] = True
+            ntc = s.get("native_tool_calls")
+            if ntc:
+                step_dict["native_tool_calls"] = ntc
+            steps.append(step_dict)
         run = dict(run)
         run["step_results"] = steps
     return run

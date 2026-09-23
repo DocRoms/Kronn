@@ -6463,6 +6463,78 @@ class WorkflowRunHistoryTests(unittest.TestCase):
         self.assertLess(len(s["output"]), 2000)
         self.assertIn("truncated", s["output"])
 
+    def test_workflow_run_get_exposes_step_model_and_provenance_fields(self):
+        run = {"id": "r", "step_results": [
+            {
+                "step_name": "step1",
+                "status": "Success",
+                "duration_ms": 10,
+                "tokens_used": 100,
+                "step_kind": "Agent",
+                "step_agent": "ClaudeCode",
+                "output": "hello",
+                "step_model": "qwen3.8:27b-mlx",
+                "step_api_plugin_slug": "mcp-github",
+                "step_api_endpoint_path": "/repos/owner/repo/issues",
+                "envelope_detected": True,
+                "child_run_id": "child-123",
+                "is_rollback": True,
+                "native_tool_calls": [{"name": "tool1", "ok": True}],
+            },
+            {
+                "step_name": "step2",
+                "status": "Success",
+                "duration_ms": 5,
+                "tokens_used": 0,
+                "step_kind": "ApiCall",
+                "step_agent": None,
+                "output": "world",
+                "step_model": None,
+                "step_api_plugin_slug": None,
+                "step_api_endpoint_path": None,
+                "envelope_detected": None,
+                "child_run_id": None,
+                "is_rollback": False,
+                "native_tool_calls": [],
+            }
+        ]}
+        with mock.patch.object(self.mod, "_http", return_value=self._env(run)):
+            out = self.mod.call_workflow_run_get({"workflow_id": "wf", "run_id": "r"})
+
+        steps = out["step_results"]
+        self.assertEqual(len(steps), 2)
+
+        # Step 1: all fields present
+        s1 = steps[0]
+        self.assertEqual(s1["step_name"], "step1")
+        self.assertEqual(s1["status"], "Success")
+        self.assertEqual(s1["duration_ms"], 10)
+        self.assertEqual(s1["tokens_used"], 100)
+        self.assertEqual(s1["step_kind"], "Agent")
+        self.assertEqual(s1["step_agent"], "ClaudeCode")
+        self.assertEqual(s1["output"], "hello")
+        self.assertEqual(s1["step_model"], "qwen3.8:27b-mlx")
+        self.assertEqual(s1["step_api_plugin_slug"], "mcp-github")
+        self.assertEqual(s1["step_api_endpoint_path"], "/repos/owner/repo/issues")
+        self.assertEqual(s1["envelope_detected"], True)
+        self.assertEqual(s1["child_run_id"], "child-123")
+        self.assertEqual(s1["is_rollback"], True)
+        self.assertEqual(s1["native_tool_calls"], [{"name": "tool1", "ok": True}])
+
+        # Step 2: optional/null/empty fields omitted, but 7 historical keys present
+        s2 = steps[1]
+        self.assertEqual(s2["step_name"], "step2")
+        self.assertEqual(s2["status"], "Success")
+        self.assertEqual(s2["duration_ms"], 5)
+        self.assertEqual(s2["tokens_used"], 0)
+        self.assertEqual(s2["step_kind"], "ApiCall")
+        self.assertEqual(s2["step_agent"], None)
+        self.assertEqual(s2["output"], "world")
+
+        # Check that optional fields are NOT in s2
+        for field in ["step_model", "step_api_plugin_slug", "step_api_endpoint_path", "envelope_detected", "child_run_id", "is_rollback", "native_tool_calls"]:
+            self.assertNotIn(field, s2)
+
     def test_workflow_run_get_requires_both_ids(self):
         with self.assertRaises(RuntimeError):
             self.mod.call_workflow_run_get({"workflow_id": "wf"})
