@@ -15,6 +15,17 @@ use super::steps::{execute_step, resolve_step_connection, step_model_override, S
 use super::template::TemplateContext;
 use super::workspace::Workspace;
 
+fn fail_document_audit(outcome: &mut StepOutcome, reason: &str) {
+    outcome.result.status = RunStatus::Failed;
+    outcome.result.condition_result = None;
+    outcome.condition_action = None;
+    outcome.result.output = format!(
+        "Document audit failed. Files and index were preserved; inspect these changes before committing or publishing.\n{reason}\n\nAgent result:\n{}",
+        outcome.result.output
+    );
+    tracing::warn!(target: "kronn::docs_write_filter", "Document audit failed; files preserved: {reason}");
+}
+
 /// Events emitted during a workflow run for real-time SSE streaming.
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(tag = "event", content = "data")]
@@ -1334,12 +1345,29 @@ async fn execute_run_with_notify_policy(
                     // dans une copie locale du step (per-field override : le
                     // step gagne quand non-vide).
                     let mut hydrated = step.clone();
-                    if let Err(e) = super::quick_prompt_hydrate::hydrate_step_from_quick_prompt(
+                    let hydration = super::quick_prompt_hydrate::hydrate_step_from_quick_prompt(
                         &mut hydrated,
                         &state.db,
                     )
-                    .await
-                    {
+                    .await;
+                    // Observe documents before launch, including dirty/indexed
+                    // content. A failed snapshot refuses the launch rather than
+                    // guessing which writes belong to this step afterwards.
+                    let docs_before = if hydration.is_ok() && !work_dir.is_empty() {
+                        crate::core::docs_write_filter::snapshot_docs(std::path::Path::new(
+                            &work_dir,
+                        ))
+                        .await
+                        .map(Some)
+                    } else {
+                        Ok(None)
+                    };
+                    let preparation_error = hydration.err().or_else(|| {
+                        docs_before.as_ref().err().map(|error| format!(
+                            "Document audit preflight failed; no agent launched, files preserved: {error}"
+                        ))
+                    });
+                    if let Some(e) = preparation_error {
                         StepOutcome {
                             result: StepResult {
                                 step_name: step.name.clone(),
@@ -1409,7 +1437,7 @@ async fn execute_run_with_notify_policy(
                         // retries, and any scheduling gap between steps —
                         // and the WorkflowDetail live-mini-dashboard then
                         // disagrees with RunDetail's `LiveStepStatus`.
-                        let outcome = execute_step(
+                        let mut outcome = execute_step(
                             step,
                             &project_path,
                             &work_dir,
@@ -1434,30 +1462,31 @@ async fn execute_run_with_notify_policy(
                         // tail of the channel buffer, losing the last few chunks
                         // of the step's output to the SSE stream).
                         let _ = forwarder.await;
-                        // 0.7.1 — anti-secret audit on docs/ writes the agent
-                        // produced during this step. Soft-reject : we revert
-                        // via `git checkout` and log; the step itself stays
-                        // Success unless the agent's code write itself failed.
-                        // Only fires when there's a real worktree (skips
-                        // ApiCall-only / Notify-only workflows where work_dir
-                        // is empty or unmounted).
-                        if !work_dir.is_empty() {
-                            let rejections = crate::core::docs_write_filter::audit_docs_writes(
+                        // Never restore/delete observed writes: another process
+                        // may have authored them. Reject the step instead, while
+                        // preserving all content and the original agent outcome.
+                        if let Ok(Some(before)) = &docs_before {
+                            let audit = crate::core::docs_write_filter::audit_docs_writes(
                                 std::path::Path::new(&work_dir),
                                 sensitive_substrings.as_ref(),
+                                before,
                             )
                             .await;
-                            if !rejections.is_empty() {
-                                for (path, reason) in &rejections {
-                                    tracing::warn!(
-                                        target: "kronn::docs_write_filter",
-                                        "Step '{}': reverted docs write {} — {}",
-                                        step.name, path, reason.explain()
-                                    );
+                            match audit {
+                                Ok(rejections) if !rejections.is_empty() => {
+                                    let reasons = rejections
+                                        .iter()
+                                        .map(|(path, reason)| {
+                                            format!("{path}: {}", reason.explain())
+                                        })
+                                        .collect::<Vec<_>>()
+                                        .join("\n");
+                                    fail_document_audit(&mut outcome, &reasons);
+                                    let count_key = format!("docs_write_rejections.{}", step.name);
+                                    run.state.insert(count_key, rejections.len().to_string());
                                 }
-                                // Surface count in run state for UI visibility.
-                                let count_key = format!("docs_write_rejections.{}", step.name);
-                                run.state.insert(count_key, rejections.len().to_string());
+                                Err(error) => fail_document_audit(&mut outcome, &error),
+                                Ok(_) => {}
                             }
                         }
                         outcome
@@ -4199,6 +4228,27 @@ mod tests {
         }
     }
 
+    #[test]
+    fn document_audit_failure_cannot_continue_via_agent_conditions() {
+        let mut outcome = successful_step_outcome();
+        outcome.result.output = "original agent result".into();
+        outcome.condition_action = Some(ConditionAction::Skip);
+        outcome.result.condition_result = Some("Skip".into());
+        fail_document_audit(&mut outcome, "docs/new report.md: possible credential");
+        assert_eq!(outcome.result.status, RunStatus::Failed);
+        assert!(outcome.condition_action.is_none());
+        assert!(outcome.result.condition_result.is_none());
+        let persisted = serde_json::to_value(&outcome.result).unwrap();
+        assert!(persisted["output"]
+            .as_str()
+            .unwrap()
+            .contains("docs/new report.md"));
+        assert!(persisted["output"]
+            .as_str()
+            .unwrap()
+            .contains("original agent result"));
+    }
+
     #[tokio::test]
     async fn in_flight_step_stops_when_absolute_deadline_is_reached() {
         let cancel = tokio_util::sync::CancellationToken::new();
@@ -4962,6 +5012,135 @@ mod tests {
         assert_eq!(persisted.status, RunStatus::StoppedByGuard);
         assert_eq!(persisted.step_results.len(), 1);
         assert_eq!(persisted.step_results[0].status, RunStatus::StoppedByGuard);
+    }
+
+    #[tokio::test]
+    async fn document_audit_stops_the_run_and_persists_paths_without_erasing_files() {
+        check_document_audit_in_full_run(false).await;
+    }
+
+    #[tokio::test]
+    async fn document_audit_preserves_preexisting_files_after_agent_launch_failure() {
+        check_document_audit_in_full_run(true).await;
+    }
+
+    async fn check_document_audit_in_full_run(agent_launch_fails: bool) {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let (state, tokens, mut agents) = test_state_and_configs();
+        let repo = tempfile::tempdir().unwrap();
+        assert!(std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(repo.path())
+            .status()
+            .unwrap()
+            .success());
+        std::fs::create_dir(repo.path().join("docs")).unwrap();
+        let existing_path = repo.path().join("docs/preexisting.md");
+        let existing = "preexisting human documentation\n".repeat(1000);
+        std::fs::write(&existing_path, &existing).unwrap();
+        let rejected_path = repo.path().join("docs/new report.md");
+        let write_path = rejected_path.clone();
+        let fake_secret = "sk-1234567890abcdefghijklmnopqrstuvwxyz";
+        let server = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/v1/chat/completions"))
+            .respond_with(move |_: &wiremock::Request| {
+                if agent_launch_fails {
+                    return ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                        "error": {"message": "fixture provider refused the request"}
+                    }));
+                }
+                // A concurrent writer is indistinguishable from the agent here.
+                // The audit must stop the run while preserving these bytes.
+                std::fs::write(&write_path, fake_secret).unwrap();
+                ResponseTemplate::new(200).set_body_string(
+                    "data: {\"choices\":[{\"delta\":{\"content\":\"GO_PUBLISH\"}}]}\n\ndata: [DONE]\n\n"
+                )
+            }).expect(1).mount(&server).await;
+        agents.lite_llm.base_url = Some(server.uri());
+        agents.model_tiers.lite_llm.default = Some("test-model".into());
+        let project: crate::models::Project = serde_json::from_value(serde_json::json!({
+            "id":"proj-doc-audit", "name":"document audit", "path":repo.path().to_string_lossy(),
+            "repo_url":null, "token_override":null, "ai_config":{"detected":false,"configs":[]},
+            "created_at":chrono::Utc::now().to_rfc3339(), "updated_at":chrono::Utc::now().to_rfc3339()
+        })).unwrap();
+        state
+            .db
+            .with_conn(move |conn| crate::db::projects::insert_project(conn, &project))
+            .await
+            .unwrap();
+        let mut wf = make_workflow_with_artifacts(Default::default());
+        wf.id = "wf-doc-audit".into();
+        wf.project_id = Some("proj-doc-audit".into());
+        let mut agent = fake_step("advise");
+        agent.agent = AgentType::LiteLlm;
+        agent.prompt_template = "Return GO_PUBLISH".into();
+        agent.on_result = vec![StepConditionRule {
+            contains: "GO_PUBLISH".into(),
+            action: ConditionAction::Goto {
+                step_name: "publish".into(),
+                max_iterations: None,
+            },
+        }];
+        wf.steps = vec![
+            agent,
+            json_data_step("publish", serde_json::json!({"unexpected":true})),
+        ];
+        let mut run = pending_run("run-doc-audit", &wf.id);
+        insert_wf_and_run(&state, &wf, &run).await;
+        execute_run(
+            state.clone(),
+            &wf,
+            &mut run,
+            &tokens,
+            &agents,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(run.status, RunStatus::Failed);
+        assert_eq!(
+            run.step_results.len(),
+            1,
+            "publish must never execute, even with a Goto condition"
+        );
+        if agent_launch_fails {
+            assert!(
+                !rejected_path.exists(),
+                "failed launch made no document writes"
+            );
+        } else {
+            assert_eq!(std::fs::read_to_string(rejected_path).unwrap(), fake_secret);
+        }
+        assert_eq!(std::fs::read_to_string(existing_path).unwrap(), existing);
+        let persisted = state
+            .db
+            .with_conn(|conn| crate::db::workflows::get_run(conn, "run-doc-audit"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(persisted.status, RunStatus::Failed);
+        assert_eq!(persisted.step_results[0].status, RunStatus::Failed);
+        if agent_launch_fails {
+            assert!(!persisted.step_results[0]
+                .output
+                .contains("Document audit failed"));
+            assert!(!persisted.state.contains_key("docs_write_rejections.advise"));
+            return;
+        }
+        assert!(persisted.step_results[0]
+            .output
+            .contains("docs/new report.md"));
+        assert!(!persisted.step_results[0].output.contains(fake_secret));
+        assert_eq!(
+            persisted
+                .state
+                .get("docs_write_rejections.advise")
+                .map(String::as_str),
+            Some("1")
+        );
     }
 
     #[tokio::test]

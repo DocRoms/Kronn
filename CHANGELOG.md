@@ -32,6 +32,12 @@ Release notes for 0.9.3 and earlier are available in the
   are no longer retried as transient failures, and tool-support advice appears
   only when the provider explicitly rejects tools. Invalid schemas, credentials
   and quota errors remain failures.
+- Workflow document audits preserve preexisting and concurrent working-tree
+  changes, staged content and untracked files. They compare pre-step content
+  fingerprints instead of restoring every dirty document from HEAD or deleting
+  it. Changed content with a credential signal now fails the step with a
+  persistent, secret-free diagnostic; legitimate documents over 8 KiB are not
+  rejected for their size. See the [audit and recovery notes](docs/operations/workflow-docs-audit.md).
 
 ## [0.14.0] - 2026-09-23
 
