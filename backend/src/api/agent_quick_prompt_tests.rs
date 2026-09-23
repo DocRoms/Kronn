@@ -1,5 +1,6 @@
 use super::*;
 use crate::models::QuickPrompt;
+use anyhow::Context;
 use std::sync::Arc;
 
 fn saved_prompt(id: &str, project_id: Option<&str>) -> QuickPrompt {
@@ -28,7 +29,7 @@ pub(super) async fn state_with_prompts() -> AppState {
             "id":"saved-provider", "display_name":"Saved provider", "mention_alias":"saved",
             "endpoint":"http://127.0.0.1:1", "credential_slug":"saved", "origin_preset":"other",
             "created_at":"2026-09-22T00:00:00Z", "updated_at":"2026-09-22T00:00:00Z"
-        })).unwrap();
+        }))?;
         crate::db::external_api_connections::insert(conn, &connection)?;
         for (id, project) in [("global", None), ("qp-a", Some("a")), ("qp-b", Some("b"))] {
             crate::db::quick_prompts::insert_quick_prompt(conn, &saved_prompt(id, project))?;
@@ -263,11 +264,11 @@ async fn quick_prompt_run_preserves_configuration_and_queues_one_child_in_the_re
         assert!(outcome.ok, "{}", outcome.content);
         let child_id = outcome.content["disc_id"].as_str().unwrap().to_owned();
         let (child, message, jobs) = state.db.with_conn(move |conn| {
-            let child = crate::db::discussions::get_discussion(conn, &child_id)?.unwrap();
-            let message = crate::db::discussions::list_messages(conn, &child_id)?.remove(0);
+            let child = crate::db::discussions::get_discussion(conn, &child_id)?.context("queued child discussion")?;
+            let message = crate::db::discussions::list_messages(conn, &child_id)?.into_iter().next().context("queued child message")?;
             let jobs = conn.query_row("SELECT COUNT(*) FROM agent_dispatch_jobs WHERE discussion_id=?1 AND status='Pending'", [&child_id], |row| row.get::<_, i64>(0))?;
-            let values = crate::db::execution_variable_snapshots::load_values(conn, "quick_prompt", &child_id, &key, chrono::Utc::now())?.unwrap();
-            let metadata = crate::db::execution_variable_snapshots::metadata(conn, "quick_prompt", &child_id)?.unwrap();
+            let values = crate::db::execution_variable_snapshots::load_values(conn, "quick_prompt", &child_id, &key, chrono::Utc::now())?.context("queued variable values")?;
+            let metadata = crate::db::execution_variable_snapshots::metadata(conn, "quick_prompt", &child_id)?.context("queued variable metadata")?;
             let rendered = crate::models::render_quick_prompt_template_from_snapshot(&message.content, &values, &metadata.provenance);
             Ok((child, rendered, jobs))
         }).await.unwrap();
@@ -510,9 +511,11 @@ async fn quick_prompt_saved_http_settings_reach_each_provider_turn_after_templat
     state
         .db
         .with_conn(|conn| {
-            let mut qp = crate::db::quick_prompts::get_quick_prompt(conn, "global")?.unwrap();
-            qp.agent_settings.as_mut().unwrap().reasoning_effort = Some("low".into());
-            qp.agent_settings.as_mut().unwrap().max_tokens = Some(7);
+            let mut qp = crate::db::quick_prompts::get_quick_prompt(conn, "global")?
+                .context("saved Quick Prompt")?;
+            let settings = qp.agent_settings.as_mut().context("saved agent settings")?;
+            settings.reasoning_effort = Some("low".into());
+            settings.max_tokens = Some(7);
             // Exercise a real stored-template edit after the run was queued.
             crate::db::quick_prompts::update_quick_prompt(conn, &qp)?;
             Ok(())
@@ -550,7 +553,8 @@ async fn quick_prompt_unsupported_saved_limit_refuses_without_a_child_or_dispatc
     state
         .db
         .with_conn(|conn| {
-            let mut qp = crate::db::quick_prompts::get_quick_prompt(conn, "global")?.unwrap();
+            let mut qp = crate::db::quick_prompts::get_quick_prompt(conn, "global")?
+                .context("saved Quick Prompt")?;
             qp.agent = AgentType::ClaudeCode;
             qp.connection_id = None;
             crate::db::quick_prompts::update_quick_prompt(conn, &qp)
@@ -603,10 +607,14 @@ async fn quick_prompt_native_run_captures_the_saved_cli_effort_before_dispatch()
     state
         .db
         .with_conn(|conn| {
-            let mut qp = crate::db::quick_prompts::get_quick_prompt(conn, "global")?.unwrap();
+            let mut qp = crate::db::quick_prompts::get_quick_prompt(conn, "global")?
+                .context("saved Quick Prompt")?;
             qp.agent = AgentType::ClaudeCode;
             qp.connection_id = None;
-            qp.agent_settings.as_mut().unwrap().max_tokens = None;
+            qp.agent_settings
+                .as_mut()
+                .context("saved agent settings")?
+                .max_tokens = None;
             crate::db::quick_prompts::update_quick_prompt(conn, &qp)
         })
         .await

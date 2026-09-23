@@ -63,6 +63,21 @@ CI also checks dependency audit, generated-type drift, desktop compilation and
 repository-specific Rust safety lints. `.github/workflows/ci-test.yml` is the
 authoritative job graph.
 
+Run both frontend linters: passing ESLint or TypeScript does not imply the
+zero-warning Oxlint gate passes. The `with_conn` safety scanner also reads
+standalone Rust test files; a `#[cfg(test)]` on their parent module does not
+exclude their contents. Propagate fallible fixture setup inside the closure
+and assert its result after awaiting it.
+`[src: file: backend/scripts/ci/lint_with_conn_unwrap.py:79-115]`
+`[src: file: .github/workflows/ci-test.yml:449-454]`
+
+Supervisor cleanup must also reap live shell jobs whose PID was not yet recorded:
+a termination signal can arrive between the fork and that assignment, leaving
+a child alive and keeping inherited test pipes open. The shell regression injects
+TERM at this boundary for both the backend and the watcher.
+`[src: file: scripts/dev-backend-supervisor.sh:54-62]`
+`[src: file: tests/bats/ui.bats:560-644]`
+
 ## Backend CI timing SLO
 
 `test-backend` is the measured backend critical-path job: formatting and the
