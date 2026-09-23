@@ -3,7 +3,7 @@
 Select **2 to 12 discussions** from the discussion sidebar's selection menu,
 then choose **Open in a mosaic**. The new tab stores its ordered selection and
 layout in the URL (`#discussions/mosaic?discussion=…&discussion=…&layout=…`).
-Two and three tiles offer the same layout presets as the Page mosaic; larger
+Two and three tiles offer the same layout presets as the Artifact mosaic; larger
 selections use the automatic grid. On narrow screens the tiles stack vertically.
 
 Each tile links to the full discussion and shows the plan's completed/active
