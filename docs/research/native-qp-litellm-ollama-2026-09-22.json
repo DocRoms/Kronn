@@ -1,0 +1,508 @@
+{
+  "schema_version": 1,
+  "source_commit": "5c439de0b04b3c66d40ee4f4639c5b6340229cab",
+  "room_evidence_message": "68cdb507-ab5b-44fa-96c6-6638552c50f8",
+  "runs": [
+    {
+      "metadata": {
+        "provider": "litellm",
+        "model": "claude-sonnet-4-6",
+        "head": "5c439de0b04b3c66d40ee4f4639c5b6340229cab",
+        "binary_sha256": "2e47ff501371d6c24923056b75ca8d1a590c19fdd8542edb2079a4c4158f01e2",
+        "started_at": "2026-09-22T15:08:26.350267+00:00",
+        "command": [
+          "/private/tmp/kt670-final-live-bin",
+          "api::agent_tools::quick_prompt_bench::bench_quick_prompt_native_catalogue",
+          "--exact",
+          "--ignored",
+          "--nocapture",
+          "--test-threads=1"
+        ],
+        "report": "/private/tmp/kt670-litellm-sonnet-final.json",
+        "log": "/private/tmp/kt670-litellm-sonnet-final.log",
+        "mode": "full catalogue only",
+        "ollama_num_ctx_cap": 24576,
+        "exit_code": 0,
+        "finished_at": "2026-09-22T15:09:08.822609+00:00"
+      },
+      "cells": [
+        {
+          "calls": [
+            {
+              "arguments": {},
+              "error": null,
+              "name": "qp_list",
+              "ok": true
+            }
+          ],
+          "catalogue_bytes": 42775,
+          "emitted_text": "Voici le seul Quick Prompt accessible dans cette discussion :\n\n| # | Nom | ID | Ce qu'il fait | Variables obligatoires |\n|---|-----|----|---------------|------------------------|\n| 1 | **Résumé** | `global` | Résume un sujet donné | `topic` *(le sujet à résumer)* |\n\n### En pratique\nPour le lancer, il faudra fournir la variable **`topic`** — par exemple : *\"Résume-moi le sujet : intelligence artificielle générative\"*. Je peux l'exécuter pour vous avec `qp_run` si vous le souhaitez, il vous suffit de me préciser le sujet.",
+          "exit_success": true,
+          "first_prompt_tokens": 13663,
+          "model": "claude-sonnet-4-6",
+          "ok": true,
+          "persisted": true,
+          "reached": true,
+          "scenario": "list",
+          "seconds": 4.98099475,
+          "tiered": false,
+          "total_prompt_tokens": 27416,
+          "turns": 2
+        },
+        {
+          "calls": [
+            {
+              "arguments": {},
+              "error": null,
+              "name": "qp_list",
+              "ok": true
+            },
+            {
+              "arguments": {
+                "qp_id": "global",
+                "title": "Résumé — été",
+                "vars": {
+                  "topic": "été"
+                }
+              },
+              "error": null,
+              "name": "qp_run",
+              "ok": true
+            }
+          ],
+          "catalogue_bytes": 42775,
+          "emitted_text": "Je commence par récupérer la liste des Quick Prompts disponibles.Le Quick Prompt **« Résumé »** a bien été lancé sur le sujet **« été »** ✅\n\nIl s'exécute dans une nouvelle discussion (id `2694721b`). Tu peux la retrouver dans la liste des discussions du projet pour consulter le résultat dès qu'il sera disponible.",
+          "exit_success": true,
+          "first_prompt_tokens": 13672,
+          "model": "claude-sonnet-4-6",
+          "ok": true,
+          "persisted": true,
+          "reached": true,
+          "scenario": "run",
+          "seconds": 5.664813041,
+          "tiered": false,
+          "total_prompt_tokens": 41415,
+          "turns": 3
+        },
+        {
+          "calls": [
+            {
+              "arguments": {
+                "description": "Génère un résumé synthétique du sujet fourni en variable.",
+                "name": "Synthèse test",
+                "prompt_template": "Fais une synthèse claire et structurée du sujet suivant : {{topic}}",
+                "variables": [
+                  {
+                    "label": "Sujet à résumer",
+                    "name": "topic",
+                    "placeholder": "Ex. : l'intelligence artificielle générative, la Révolution française…",
+                    "required": true
+                  }
+                ]
+              },
+              "error": null,
+              "name": "qp_create_draft",
+              "ok": true
+            }
+          ],
+          "catalogue_bytes": 42775,
+          "emitted_text": "Je vais créer ce Quick Prompt sans le lancer.Le Quick Prompt **« Synthèse test »** a bien été enregistré (id `061f3436-f21d-4f3b-80d7-a127ebc7f9b9`). Voici ce qui a été configuré :\n\n| Champ | Valeur |\n|---|---|\n| **Nom** | Synthèse test |\n| **Template** | `Fais une synthèse claire et structurée du sujet suivant : {{topic}}` |\n| **Variable** | `topic` — obligatoire |\n| **Libellé** | *Sujet à résumer* |\n| **Texte indicatif** | *Ex. : l'intelligence artificielle générative, la Révolution française…* |\n\nIl est prêt à être lancé depuis le lanceur de prompts dès que vous le souhaitez.",
+          "exit_success": true,
+          "first_prompt_tokens": 13698,
+          "model": "claude-sonnet-4-6",
+          "ok": true,
+          "persisted": true,
+          "reached": true,
+          "scenario": "create",
+          "seconds": 6.324627375,
+          "tiered": false,
+          "total_prompt_tokens": 27874,
+          "turns": 2
+        },
+        {
+          "calls": [
+            {
+              "arguments": {},
+              "error": null,
+              "name": "qp_list",
+              "ok": true
+            },
+            {
+              "arguments": {
+                "description": "Nouvelle description de test",
+                "qp_id": "global"
+              },
+              "error": null,
+              "name": "qp_update",
+              "ok": true
+            }
+          ],
+          "catalogue_bytes": 42775,
+          "emitted_text": "J'ai trouvé le Quick Prompt « Résumé » avec l'id `global`. Je vais maintenant mettre à jour uniquement sa description.C'est fait ! La description du Quick Prompt **« Résumé »** a bien été mise à jour :\n\n- **Description** → `Nouvelle description de test`\n\nTous les autres réglages (modèle, template, variables, persona, règles, etc.) sont restés intacts.",
+          "exit_success": true,
+          "first_prompt_tokens": 13673,
+          "model": "claude-sonnet-4-6",
+          "ok": true,
+          "persisted": true,
+          "reached": true,
+          "scenario": "update",
+          "seconds": 6.054876208,
+          "tiered": false,
+          "total_prompt_tokens": 41478,
+          "turns": 3
+        },
+        {
+          "calls": [
+            {
+              "arguments": {
+                "connection_id": "saved-provider",
+                "modality": "image",
+                "prompt": "A lighthouse at dawn, warm golden light breaking over the horizon, gentle waves, soft mist, photorealistic, serene atmosphere"
+              },
+              "error": null,
+              "name": "media_generate",
+              "ok": true
+            }
+          ],
+          "catalogue_bytes": 42775,
+          "emitted_text": "La génération est bien lancée ✅\n\nVoici le récapitulatif du job :\n\n| Champ | Valeur |\n|---|---|\n| **Job ID** | `media-653e83360b4c9b33bf1a98fefc4d38470afae8fbaac3b80c1f6e25dbab320125` |\n| **Connexion** | `saved-provider` |\n| **Modèle** | `openai/gpt-image-2` |\n| **Statut** | `pending` |\n\nL'image apparaîtra automatiquement dans la discussion une fois générée — pas besoin de polling. 🌅",
+          "exit_success": true,
+          "first_prompt_tokens": 13685,
+          "model": "claude-sonnet-4-6",
+          "ok": true,
+          "persisted": true,
+          "reached": true,
+          "scenario": "media",
+          "seconds": 5.171033584,
+          "tiered": false,
+          "total_prompt_tokens": 27630,
+          "turns": 2
+        },
+        {
+          "calls": [
+            {
+              "arguments": {
+                "path": "status.txt"
+              },
+              "error": null,
+              "name": "read_file",
+              "ok": true
+            },
+            {
+              "arguments": {
+                "expected_sha256": "a9fe892752497aedfe6f56089a8483fd2e426e706c3481a9a033134cb5654632",
+                "new_string": "Status: ready",
+                "old_string": "Status: pending",
+                "path": "status.txt"
+              },
+              "error": null,
+              "name": "edit_file",
+              "ok": true
+            }
+          ],
+          "catalogue_bytes": 42775,
+          "emitted_text": "I'll start by reading the file to get its exact content and the SHA receipt required for a safe edit.Le fichier contient bien `Status: pending` sur une seule ligne (terminaison `\\n`). Je procède au remplacement :C'est fait. Voici ce qui a été effectué :\n\n- **Fichier lu** : `status.txt` contenait `Status: pending\\n` (fin de ligne LF, 1 ligne).\n- **Remplacement exact** : `Status: pending` → `Status: ready`, fin de ligne LF conservée.\n- **Aucun commit** effectué, conformément à ta demande.",
+          "exit_success": true,
+          "first_prompt_tokens": 13681,
+          "model": "claude-sonnet-4-6",
+          "ok": true,
+          "persisted": true,
+          "reached": true,
+          "scenario": "edit",
+          "seconds": 6.319128667,
+          "tiered": false,
+          "total_prompt_tokens": 41626,
+          "turns": 3
+        },
+        {
+          "calls": [
+            {
+              "arguments": {},
+              "error": null,
+              "name": "agent_resume_status",
+              "ok": true
+            },
+            {
+              "arguments": {
+                "status": "in_progress"
+              },
+              "error": null,
+              "name": "task_list",
+              "ok": true
+            }
+          ],
+          "catalogue_bytes": 42775,
+          "emitted_text": "Je vais consulter les deux sources simultanément.Voici le résultat de la consultation :\n\n| Source | Résultat |\n|---|---|\n| **Jobs en arrière-plan / reprises en attente** (`agent_resume_status`) | ✅ Aucun — liste vide |\n| **Tâches en cours** (`task_list` statut `in_progress`) | ✅ Aucune — liste vide |\n\n**Conclusion :** il n'existe actuellement aucun job en arrière-plan, aucune reprise en attente, et aucune tâche en cours d'exécution dans cette discussion. Tout est au calme.",
+          "exit_success": true,
+          "first_prompt_tokens": 13674,
+          "model": "claude-sonnet-4-6",
+          "ok": true,
+          "persisted": true,
+          "reached": true,
+          "scenario": "resume",
+          "seconds": 4.46868325,
+          "tiered": false,
+          "total_prompt_tokens": 27504,
+          "turns": 2
+        }
+      ],
+      "log_sha256": "5e7bffc9f043bdd3b379b4a04c570c12ec27dbfb191ab7730e4cf139604cf23b"
+    },
+    {
+      "metadata": {
+        "provider": "ollama",
+        "model": "qwen3.8:27b-mlx",
+        "head": "5c439de0b04b3c66d40ee4f4639c5b6340229cab",
+        "binary_sha256": "2e47ff501371d6c24923056b75ca8d1a590c19fdd8542edb2079a4c4158f01e2",
+        "started_at": "2026-09-22T15:09:27.454036+00:00",
+        "command": [
+          "/private/tmp/kt670-final-live-bin",
+          "api::agent_tools::quick_prompt_bench::bench_quick_prompt_native_catalogue",
+          "--exact",
+          "--ignored",
+          "--nocapture",
+          "--test-threads=1"
+        ],
+        "report": "/private/tmp/kt670-ollama-qwen27-final.json",
+        "log": "/private/tmp/kt670-ollama-qwen27-final.log",
+        "mode": "full catalogue only",
+        "ollama_num_ctx_cap": 24576,
+        "exit_code": 0,
+        "finished_at": "2026-09-22T15:10:46.086586+00:00"
+      },
+      "cells": [
+        {
+          "calls": [
+            {
+              "arguments": {},
+              "error": null,
+              "name": "qp_list",
+              "ok": true
+            }
+          ],
+          "catalogue_bytes": 42775,
+          "emitted_text": "Je vais lister les Quick Prompts enregistrés accessibles dans cette discussion.Il y a **un seul** Quick Prompt enregistré accessible dans cette discussion :\n\n| Nom | ID | Description | Variables obligatoires |\n|-----|-----|-------------|------------------------|\n| **Résumé** | `global` | Summarize a topic | `topic` |\n\nCe prompt est de portée **globale** (agent `Custom`) et attend une variable obligatoire : **`topic`** (le sujet à résumer).\n\nTu veux que je le lance sur un sujet précis ?",
+          "exit_success": true,
+          "first_prompt_tokens": 12219,
+          "model": "qwen3.8:27b-mlx",
+          "ok": true,
+          "persisted": true,
+          "reached": true,
+          "scenario": "list",
+          "seconds": 35.619013917,
+          "tiered": false,
+          "total_prompt_tokens": 24502,
+          "turns": 2
+        },
+        {
+          "calls": [
+            {
+              "arguments": {},
+              "error": null,
+              "name": "qp_list",
+              "ok": true
+            },
+            {
+              "arguments": {
+                "qp_id": "global",
+                "title": "Résumé — été",
+                "vars": {
+                  "topic": "été"
+                }
+              },
+              "error": null,
+              "name": "qp_run",
+              "ok": true
+            }
+          ],
+          "catalogue_bytes": 42775,
+          "emitted_text": "Je vais d'abord trouver le Quick Prompt « Résumé » enregistré.Lancement confirmé. ✅\n\nLe Quick Prompt **« Résumé »** (id `global`) a bien été lancé sur le sujet **« été »**, dans une nouvelle discussion :\n\n- **Discussion** : `9adf4b46-f98c-410a-b085-96e6eedb7421`\n- **Variable** : `topic = \"été\"`\n- **Agent** : Custom\n\nJe ne m'attends pas à la réponse — le lancement est confirmé. Un contrôle de santé est prévu dans ~30 s pour vérifier que l'exécution a réellement démarré (aucune base historique pour l'instant).",
+          "exit_success": true,
+          "first_prompt_tokens": 12223,
+          "model": "qwen3.8:27b-mlx",
+          "ok": true,
+          "persisted": true,
+          "reached": true,
+          "scenario": "run",
+          "seconds": 13.406720875,
+          "tiered": false,
+          "total_prompt_tokens": 36963,
+          "turns": 3
+        },
+        {
+          "calls": [
+            {
+              "arguments": {
+                "tool": "qp_create_draft"
+              },
+              "error": null,
+              "name": "tool_manual",
+              "ok": true
+            },
+            {
+              "arguments": {
+                "name": "Synthèse test",
+                "prompt_template": "Rédige une synthèse claire et structurée du sujet suivant : {{topic}}.",
+                "variables": [
+                  {
+                    "label": "Sujet à synthétiser",
+                    "name": "topic",
+                    "placeholder": "Ex. : l'impact du télétravail sur la productivité",
+                    "required": true
+                  }
+                ]
+              },
+              "error": null,
+              "name": "qp_create_draft",
+              "ok": true
+            }
+          ],
+          "catalogue_bytes": 42775,
+          "emitted_text": "Je vais d'abord consulter le contrat du outil pour bien former le prompt.Le Quick Prompt **« Synthèse test »** est enregistré (brouillon, non lancé).\n\n- **Modèle** : `qwen3.8:27b-mlx` (celui de la discussion)\n- **Variable** : `topic` — obligatoire, libellé « Sujet à synthétiser », indicatif « Ex. : l'impact du télétravail sur la productivité »\n- **Template** : « Rédige une synthèse claire et structurée du sujet suivant : {{topic}}. »\n\nIl est prêt à être lancé quand tu veux, avec un sujet à la place de `{{topic}}`.",
+          "exit_success": true,
+          "first_prompt_tokens": 12245,
+          "model": "qwen3.8:27b-mlx",
+          "ok": true,
+          "persisted": true,
+          "reached": true,
+          "scenario": "create",
+          "seconds": 8.204212458,
+          "tiered": false,
+          "total_prompt_tokens": 37172,
+          "turns": 3
+        },
+        {
+          "calls": [
+            {
+              "arguments": {},
+              "error": null,
+              "name": "qp_list",
+              "ok": true
+            },
+            {
+              "arguments": {
+                "description": "Nouvelle description de test",
+                "qp_id": "global"
+              },
+              "error": null,
+              "name": "qp_update",
+              "ok": true
+            }
+          ],
+          "catalogue_bytes": 42775,
+          "emitted_text": "Je vais d'abord trouver le Quick Prompt « Résumé » pour obtenir son identifiant.C'est fait. J'ai mis à jour le Quick Prompt « Résumé » (id `global`) en changeant uniquement sa description en « Nouvelle description de test ».\n\nTous les autres réglages ont été conservés — notamment l'agent `Custom` (et le template, les variables et le modèle, que `qp_update` ne touche pas).",
+          "exit_success": true,
+          "first_prompt_tokens": 12224,
+          "model": "qwen3.8:27b-mlx",
+          "ok": true,
+          "persisted": true,
+          "reached": true,
+          "scenario": "update",
+          "seconds": 3.993286291,
+          "tiered": false,
+          "total_prompt_tokens": 36933,
+          "turns": 3
+        },
+        {
+          "calls": [
+            {
+              "arguments": {
+                "connection_id": "saved-provider",
+                "modality": "image",
+                "prompt": "Un phare au lever du jour, lumière dorée, ciel rose et orange, mer calme"
+              },
+              "error": null,
+              "name": "media_generate",
+              "ok": true
+            }
+          ],
+          "catalogue_bytes": 42775,
+          "emitted_text": "Je lance la génération d'image.Lancement confirmé. ✅\n\n- **Job** : `media-33f6a86fa9e768e7d916c51a92d3f845ebe139b75746f73c4a791118743c71fe`\n- **Connexion** : `saved-provider` (modèle `openai/gpt-image-2`)\n- **Statut** : `pending`\n\nL'image de phare au lever du jour est en cours de génération. Elle arrivera dans la discussion de son côté ; je n'attends pas le résultat.",
+          "exit_success": true,
+          "first_prompt_tokens": 12236,
+          "model": "qwen3.8:27b-mlx",
+          "ok": true,
+          "persisted": true,
+          "reached": true,
+          "scenario": "media",
+          "seconds": 5.419573792,
+          "tiered": false,
+          "total_prompt_tokens": 24705,
+          "turns": 2
+        },
+        {
+          "calls": [
+            {
+              "arguments": {
+                "path": "status.txt"
+              },
+              "error": null,
+              "name": "read_file",
+              "ok": true
+            },
+            {
+              "arguments": {
+                "expected_sha256": "a9fe892752497aedfe6f56089a8483fd2e426e706c3481a9a033134cb5654632",
+                "new_string": "Status: ready",
+                "old_string": "Status: pending",
+                "path": "status.txt"
+              },
+              "error": null,
+              "name": "edit_file",
+              "ok": true
+            }
+          ],
+          "catalogue_bytes": 42775,
+          "emitted_text": "Je vais d'abord lire le fichier `status.txt` pour voir son contenu exact et sa fin de ligne.Fait. J'ai lu `status.txt` (contenu : `Status: pending\\n`), puis remplacé exactement `Status: pending` par `Status: ready` en conservant la fin de ligne `\\n`. Aucune modification n'a été committée.\n\nLe fichier contient maintenant :\n```\nStatus: ready\n```",
+          "exit_success": true,
+          "first_prompt_tokens": 12236,
+          "model": "qwen3.8:27b-mlx",
+          "ok": true,
+          "persisted": true,
+          "reached": true,
+          "scenario": "edit",
+          "seconds": 6.026460625,
+          "tiered": false,
+          "total_prompt_tokens": 37317,
+          "turns": 3
+        },
+        {
+          "calls": [
+            {
+              "arguments": {},
+              "error": "missing required field `task_execution_id` or `task_reference`",
+              "name": "task_exec_status",
+              "ok": false
+            },
+            {
+              "arguments": {},
+              "error": null,
+              "name": "agent_resume_status",
+              "ok": true
+            },
+            {
+              "arguments": {},
+              "error": null,
+              "name": "plan_get",
+              "ok": true
+            }
+          ],
+          "catalogue_bytes": 42775,
+          "emitted_text": "Je vais consulter l'état des reprises en attente et des tâches en arrière-plan pour cette discussion.J'ai consulté les deux sources :\n\n- **Reprises en attente** (`agent_resume_status`) : aucune job en cours ni en attente — la liste est vide.\n- **Tâches en arrière-plan** (plan de la discussion) : aucune tâche active, en attente ou bloquée. Le plan est vide (0 active, 0 later, 0 in_progress, 0 blocked).\n\n**Conclusion : il n'existe aucune tâche en arrière-plan ni reprise en attente pour moi dans cette discussion.** Rien à lancer, comme demandé.",
+          "exit_success": true,
+          "first_prompt_tokens": 12227,
+          "model": "qwen3.8:27b-mlx",
+          "ok": true,
+          "persisted": true,
+          "reached": true,
+          "scenario": "resume",
+          "seconds": 5.328135958,
+          "tiered": false,
+          "total_prompt_tokens": 49219,
+          "turns": 4
+        }
+      ],
+      "log_sha256": "f5e6640abfcea9b72501ceea3408550870fb4378d8b570cba5df246178b44871"
+    }
+  ]
+}

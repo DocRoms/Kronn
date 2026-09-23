@@ -1,0 +1,86 @@
+{
+  "date": "2026-09-23",
+  "human_scope_decision": {
+    "message_id": "6833b732-f8bc-4ce1-a4fd-d946885dc4a7",
+    "scope": "Validate the current 35b behavior; before/after comparison waived."
+  },
+  "attempts": [
+    {
+      "source_commit": "7d1656f187040996f768d01e0dab7acd6dbb4d1f",
+      "binary_sha256": "fa4e8863e000f44a35222178db6309d2fa75a4c2d58a80e5dd10bb0b57ca41f7",
+      "model": "qwen3.6:35b-mlx",
+      "started_at": "2026-09-23T08:14:51.619896+00:00",
+      "command": [
+        "/private/tmp/kt686-media-native-bin",
+        "api::agent_tools::quick_prompt_bench::bench_quick_prompt_native_catalogue",
+        "--exact",
+        "--ignored",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "report_path": "/private/tmp/kt686-media-35b-20260923T081451Z.json",
+      "log_path": "/private/tmp/kt686-media-35b-20260923T081451Z.log",
+      "scope": "One real local model; native media job without supplied connection id; isolated DB and no media workers.",
+      "exit_code": 101,
+      "finished_at": "2026-09-23T08:14:52.609401+00:00",
+      "log_sha256": "1180b09804228b5167d918bebbbd11cf92b3e294ac1a4076072db13fab3e6af8",
+      "cells": [],
+      "failure_reason": "Provider start failed: Ollama unreachable at http://localhost:11434 after 3 attempts. No inference cell was produced; rerun with authorized network access."
+    },
+    {
+      "source_commit": "7d1656f187040996f768d01e0dab7acd6dbb4d1f",
+      "binary_sha256": "fa4e8863e000f44a35222178db6309d2fa75a4c2d58a80e5dd10bb0b57ca41f7",
+      "model": "qwen3.6:35b-mlx",
+      "started_at": "2026-09-23T08:15:59.055861+00:00",
+      "command": [
+        "/private/tmp/kt686-media-native-bin",
+        "api::agent_tools::quick_prompt_bench::bench_quick_prompt_native_catalogue",
+        "--exact",
+        "--ignored",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "report_path": "/private/tmp/kt686-media-35b-20260923T081559Z.json",
+      "log_path": "/private/tmp/kt686-media-35b-20260923T081559Z.log",
+      "scope": "One real local model; native media job without supplied connection id; isolated DB and no media workers.",
+      "exit_code": 0,
+      "finished_at": "2026-09-23T08:16:35.006536+00:00",
+      "log_sha256": "dac91f88168363c2fde3e3c85452e69ef233a3abe2aaac58b211f5cdbd749ebf",
+      "cells": [
+        {
+          "calls": [
+            {
+              "arguments": {
+                "modality": "image",
+                "prompt": "phare au lever du jour"
+              },
+              "error": null,
+              "name": "media_generate",
+              "ok": true
+            }
+          ],
+          "catalogue_bytes": 42775,
+          "emitted_text": "La génération de l'image a été lancée avec succès. Le job `media-4b24b36d753f819b45f743066ac15638712e97052c6daf5cf628c2e2cdfe8baf` est en cours de traitement.",
+          "exit_success": true,
+          "first_prompt_tokens": 12223,
+          "model": "qwen3.6:35b-mlx",
+          "ok": true,
+          "persisted": true,
+          "prompt": "Lance la génération d'une image de phare au lever du jour. Confirme seulement son lancement, sans attendre le résultat.",
+          "reached": true,
+          "scenario": "media",
+          "seconds": 35.850797208,
+          "tiered": false,
+          "total_prompt_tokens": 24644,
+          "turns": 2
+        }
+      ]
+    }
+  ],
+  "limits": [
+    "One successful inference observation, not a success-rate estimate.",
+    "The first attempt failed before inference because the test could not connect to Ollama.",
+    "No media workers started; persistence of a pending job is the success criterion.",
+    "The same frozen binary as the retained six-model campaign was used."
+  ]
+}

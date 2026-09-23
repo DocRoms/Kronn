@@ -37,7 +37,7 @@ hot-path tier lookup is then projected from catalog rows. Editing the manual
 catalog refreshes that projection; removing a migrated/manual row therefore
 does not make a hidden hard-coded fallback reappear.
 [src: file: backend/src/core/model_catalog/mod.rs:38-219]
-[src: file: backend/src/agents/runner.rs:2650-2725]
+[src: file: backend/src/agents/runner.rs:2626-2701]
 
 ## Discovery boundaries
 
@@ -74,6 +74,19 @@ that exception, and other runtimes keep their existing failure policy.
 [src: file: backend/src/api/discussions/streaming.rs:2168-2220]
 [src: file: backend/src/workflows/runner.rs:738-858]
 [src: file: backend/src/workflows/steps.rs:220-286]
+
+A comparison's TARGET decides which connection its run uses (KT-672). A row
+that names a connection uses it; a row on another agent uses none, even when
+the Quick Prompt itself is backed by one. Sending the Quick Prompt's connection
+along with a different agent is what made every CLI and local target of an HTTP
+Quick Prompt fail at dispatch ("the selected external API connection no longer
+matches this agent target"): measured on a sandbox, 0 of 5 targets ran. A
+classic batch, which runs the Quick Prompt's own agent, still inherits it.
+A connection Kronn cannot route to yet — no endpoint, or no model on any tier —
+is shown in the target list with that reason instead of being dropped from it
+in silence.
+[src: file: backend/src/db/workflows.rs]
+[src: file: frontend/src/lib/externalAgentIdentity.ts]
 
 `AgentSwitchPicker` remains the common selector on discussion, QP/compare and
 workflow surfaces. It reads the shared snapshot, shows provenance, and leaves
@@ -118,7 +131,7 @@ adapter supports thread resume. Claude supports resume on both routes. Effort
 is transmitted on every supported fresh/resumed invocation; this feature does
 not add resume to the direct Codex runner. Delegated task workers retain their
 isolated direct-CLI route even when adapters are enabled.
-[src: file: backend/src/agents/runner.rs:2746-2850]
+[src: file: backend/src/agents/runner.rs:2722-2826]
 [src: file: backend/src/acp/claude_adapter.rs:200-225]
 [src: file: backend/src/acp/codex_adapter.rs:358-374]
 

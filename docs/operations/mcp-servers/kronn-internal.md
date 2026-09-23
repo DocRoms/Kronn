@@ -118,7 +118,16 @@ and [`../../architecture/important-message-publication-authority.md`](../../arch
 Bidirectional gateway between a CLI agent (Claude Code, Codex, Gemini, Kiro, Vibe in host-launched mode, …) and the Kronn backend. Three tool families :
 
 1. **Discussion introspection** (0.8.3+) — `disc_meta`, `disc_get_message`, `disc_note_list`, `disc_summarize`. Cheap reads of the current Kronn discussion.
-2. **Cross-agent memory** (0.8.4) — `disc_create`, `disc_append`, `disc_link`, `disc_transfer_session`, `disc_unlink`, `disc_find_by_session`, `disc_search`, `disc_load_other`. Push transcripts in / out of Kronn so the same thread can be picked up by a different agent later.
+2. **Cross-agent memory** (0.8.4) — `disc_create`, `disc_append`, `disc_update`, `disc_link`, `disc_transfer_session`, `disc_unlink`, `disc_find_by_session`, `disc_search`, `disc_load_other`. Push transcripts in / out of Kronn so the same thread can be picked up by a different agent later.
+
+
+`disc_update` renames a discussion, pins it or archives it — and nothing else
+(KT-21). The route behind it also accepts the agent, the model tier, the
+connection, the project and the skills/profiles/directives bound to the room;
+none of those is reachable from the tool. They decide who answers, with which
+credentials and under which instructions, so they stay a human decision in the
+UI. A rename is visible and reversible, but it is how a human finds their
+thread again: ask before renaming a room you did not open.
 3. **Catalog + actions** (0.8.5–0.10.0) — `mcp_list`, `workflow_list`, `qp_list`, `qa_list`, `qe_list`, `workflow_create_draft`, `qp_create_draft`, `qa_create_draft`, `qe_create_draft`, `qe_update`, `qe_run`, `api_call` (broker that invokes Kronn-configured APIs without credentials in the prompt).
 4. **Multi-agent collab** (0.8.6) — `disc_join` (consume invite token), `disc_wait_for_peer` (long-poll), `disc_leave`. Lets N CLI agents share one Kronn discussion in real time.
    **0.9.2 (KT-76) — surviving an MCP reload without a new token.** `disc_join`
@@ -425,13 +434,13 @@ An active audit SSE stream defers the reload with a typed diagnostic
 instead of being killed. Retry the refused mutation once with the same idempotency
 key. If preflight, handoff or reexec fails, the bridge stops automatic attempts and
 reports one precise manual reconnect/recovery action instead.
-`[src: file: backend/scripts/disc-introspection-mcp.py:9525-9553]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:9522-9550]`
 `[src: file: backend/scripts/disc-introspection-mcp.py:75-95]`
 `[src: file: backend/scripts/disc-introspection-mcp.py:2738-2810]`
-`[src: file: backend/scripts/disc-introspection-mcp.py:10057-10225]`
-`[src: file: backend/scripts/disc-introspection-mcp.py:10228-10256]`
-`[src: file: backend/scripts/disc-introspection-mcp.py:10444-10498]`
-`[src: file: backend/scripts/disc-introspection-mcp.py:10659-10672]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:10054-10222]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:10225-10253]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:10441-10495]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:10656-10669]`
 
 The replacement process restores the room and durable read cursor through the
 existing binding files; no invitation token is needed. A changed mtime with
@@ -439,8 +448,8 @@ identical contents is not stale. `task_exec_status` remains available for
 recovery; every orchestration mutation stays fail-closed until the fresh bridge
 is ready.
 `[src: file: backend/scripts/disc-introspection-mcp.py:5894-5951]`
-`[src: file: backend/scripts/disc-introspection-mcp.py:6158-6183]`
-`[src: file: backend/scripts/disc-introspection-mcp.py:6347-6415]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:6156-6181]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:6345-6413]`
 
 The first transition to this fingerprinted bridge cannot be self-protected by a
 process that loaded the preceding schema. After upgrading to 0.11.0, reconnect
@@ -616,7 +625,7 @@ catalogue does not pay for a long manual.
 `[src: file: frontend/src/components/MessageBubble.tsx:1376-1434]`
 `[src: file: frontend/src/components/MermaidDiagram.tsx:97-108]`
 `[src: file: backend/src/api/disc_prompts.rs:390-398]`
-`[src: file: backend/scripts/disc-introspection-mcp.py:8214-8224]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:8212-8222]`
 `[src: file: backend/scripts/disc-introspection-mcp.py:634-643]`
 `[src: file: backend/scripts/disc-introspection-mcp.py:4101-4174]`
 `[src: file: backend/scripts/disc-introspection-mcp.py:4871-4893]`
@@ -785,7 +794,7 @@ shared orientation supplies the join manual, wait manual and initialize text.
 This is a source instruction contract, not a guarantee that a running host has
 loaded or follows it. See [the diagnosis and qualification](../../gotchas/joined-cli-work-loop.md).
 [src: file: backend/scripts/disc-introspection-mcp.py:1250-1274]
-[src: file: backend/scripts/disc-introspection-mcp.py:9354-9371]
+[src: file: backend/scripts/disc-introspection-mcp.py:9351-9368]
 
 The bridge auto-derives your `agent_type` from the MCP `clientInfo.name` handshake (Claude Code → ClaudeCode, Codex → Codex, …) so no env-var prep is needed.
 
@@ -847,6 +856,37 @@ cursor still advances past those hidden turns.
 - **`api_call`** : invoke a configured API plugin without ever needing the credentials. The `mcp_list` tool returns the available endpoints with `${ENV.X}` placeholder support — the broker substitutes server-side.
 - **Rolling API windows**: call `workflow_step_schema` for the canonical `time.now` grammar. Time expressions are vendor-neutral, anchored once per run/call and work in Quick APIs, `ApiCall`, `BatchApiCall` and `CollectApiData` source variables.
 - **Mutating tools** (`disc_create`, `qp_create_draft`, `qa_create_draft`, `qe_create_draft`, `workflow_create_draft`) default to safe states (workflows created as `enabled: false`). Safe to call ; the user reviews before activation.
+
+## Discoverable discussion action contracts
+
+`tool_manual({tool: "signals"})` returns `catalogue.schema_version` and the
+supported discussion action signals. Omitting `tool` lists `signals` alongside
+the other manuals. Native tools read the same registry that the MCP bridge
+fetches through `GET /api/signals/catalog`; the bridge fails explicitly if that
+read fails, rather than substituting a stale local schema.
+[src: file: backend/src/api/signal_catalog.rs:1]
+[src: file: backend/scripts/disc-introspection-mcp.py:1]
+
+Version 1 describes the `kronn-action` Markdown fence for existing Quick Prompts,
+Quick APIs, Quick Execs and workflows. It includes target-discovery tools, a
+payload authoring schema, editable-input provenance, project inheritance and
+human approval semantics. The authoring schema is deliberately narrower than
+legacy deserialization: agents should not send unknown fields or server-resolved
+provenance. It does not introduce a new runtime validator. Reading the registry
+creates no card; saving an agent message persists its proposal through the
+existing transaction. Only a human launch claims and executes the target. The
+same message and fence position are idempotent; a new message is a new proposal.
+[src: file: backend/src/api/signal_catalog.rs:1]
+[src: file: backend/src/db/discussion_actions.rs:430]
+
+The existing inline authoring guidance remains in the discussion prompt and
+MCP instructions. A small-model comparison rejected replacing it with a shorter
+pointer; see [the retained observations](../../research/signal-catalogue-2026-09-22.md).
+
+This initial registry covers Automation proposals. Historical Planning, audit
+and Quick Prompt improvement signals retain their existing parsers and
+contracts; they are not claimed as entries in this first version.
+[src: file: backend/src/api/signal_catalog.rs:1]
 
 ## Common use cases in Kronn
 

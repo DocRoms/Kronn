@@ -11,6 +11,28 @@ The vision: the agent stops doing `Bash curl` on APIs we already know
 how to call. Every plugin-configured call becomes a first-class step
 with typed extraction.
 
+## Successful HTTP responses without a body
+
+A successful 2xx response with zero body bytes is represented as `data: null`.
+The step remains successful; its summary names the HTTP code and its output
+includes `[SIGNAL: http_<code>]` alongside the normal status signal. For example,
+a Jira assignment returning 204 exposes `http_204`, so `on_result` can branch
+on the transport result without fabricating fields in the API's data. The normal
+extraction rules still apply if the author explicitly configured `api_extract`.
+A JSON body containing `null` remains an ordinary JSON response; whitespace or
+other nonempty invalid JSON still produces a parsing failure.
+[src: file: backend/src/workflows/api_call_executor.rs:296-383]
+[src: file: backend/src/workflows/api_call_executor.rs:1738-1775]
+
+An empty response ends pagination. If it is the first page, the result is null;
+if earlier pages returned data, those values are retained. Links on the empty
+response are not followed. The existing retry policy is unchanged: write verbs
+are not automatically resent. Tests assert the request count for writes,
+nonempty parse failures and pagination ending with an empty response.
+[src: file: backend/src/workflows/api_call_executor.rs:1458-1467]
+[src: file: backend/src/workflows/api_call_executor.rs:1707-1718]
+[src: file: backend/src/workflows/api_call_executor.rs:3740]
+
 ## Status (2026-04-26)
 
 | Phase | Status |
@@ -129,6 +151,23 @@ with typed extraction.
    fails without v6 connectivity, so the original guard returned
    `ResolutionFailed` instead of `PrivateOrLoopback`. Fixed with an
    IP-literal parse fast path (stripping the brackets) before DNS.
+
+## Quick API references and deletion
+
+Deleting a saved Quick API checks workflow references and removes the resource
+in one database transaction. A referenced API is retained, with a `conflict`
+error naming each workflow and step to edit. This covers direct `quick_api_id`
+fields, `CollectApiData` sources and `on_failure` steps; several source aliases
+in one step count once in the deletion impact preview. No workflow is rewritten
+automatically. [src: file: backend/src/db/quick_apis.rs:223-281]
+[src: file: backend/src/api/quick_apis.rs:195-216]
+
+The workflow wizard flags references already missing from the saved catalogue,
+including old deletions or imported workflows. It waits for a successful
+catalogue read and clears the warning when the reference is replaced or removed.
+The warning identifies the step and missing id and remains visible across wizard
+stages. [src: file: frontend/src/components/workflows/WorkflowWizard.tsx:1255-1269]
+[src: file: frontend/src/components/workflows/WorkflowWizard.tsx:1318-1330]
 
 ## Run-anchored time templates
 

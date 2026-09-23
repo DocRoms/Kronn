@@ -23,8 +23,26 @@
 
 **Smaller prompts, more code where code is enough: fewer hallucinations, lower token bill, eco-design by default.**
 
-> **Status: 0.13.2 (current release).** Functional but pre-1.0. Breaking changes happen between minor versions; patch versions are safe.
+> **Status: 0.14.0 (current release).** Functional but pre-1.0. Breaking changes happen between minor versions; patch versions are safe.
 > **License: AGPL-3.0.** Using Kronn locally to build *your own* product is fine; the copyleft only kicks in if you distribute a modified Kronn to others. See [License notes](#license-notes-agpl-3-0).
+
+## What's new in 0.14.0
+
+- **More automation tools for HTTP agents:** discover and run saved Quick
+  Prompts, edit them, and author disabled workflow drafts for human review.
+  Media requests can omit the connection when only one supports the modality.
+- **Readable attachments and steadier Live Pages:** text, JSON and logs open
+  beside images and videos in the discussion carousel, with the original
+  available to download. Pages follow Kronn's theme and keep their local state
+  when a refresh brings no changed data.
+- **Workflow fixes:** optional inputs left empty stay available to Gate and
+  Exec templates (#213). Quick Exec results retain exit codes and stderr, and
+  Quick APIs referenced by workflows cannot be deleted accidentally.
+- **Easier setup:** browse the folders the server can actually reach and select
+  several repository roots in the setup wizard.
+
+See the [0.14.0 release notes](CHANGELOG.md), including validation scope and
+retained model-campaign results.
 
 ## What's new in 0.13.2
 
@@ -92,6 +110,7 @@ and the [task delegation guide](docs/guides/task-orchestration.md).
 
 ## Contents
 
+- [What's new in 0.14.0](#whats-new-in-0140)
 - [What's new in 0.13.2](#whats-new-in-0132)
 - [What's new in 0.13.1](#whats-new-in-0131)
 - [What's new in 0.13.0](#whats-new-in-0130)
@@ -155,7 +174,7 @@ Download the installer for your OS from [Releases](https://github.com/DocRoms/Kr
 ### From source: one command
 
 ```bash
-git clone --branch 0.13.2 --depth 1 https://github.com/DocRoms/Kronn.git   # latest stable release
+git clone --branch 0.14.0 --depth 1 https://github.com/DocRoms/Kronn.git   # latest stable release
 cd Kronn
 ./kronn start        # guided setup & launch (Docker)
 ```
@@ -186,7 +205,7 @@ app, Docker deployment and a bare `make run-backend` do not require it.
 Requires Docker + Docker Compose. On Windows, WSL2 (Docker Engine inside WSL works, Docker Desktop optional).
 
 ```bash
-git clone --branch 0.13.2 --depth 1 https://github.com/DocRoms/Kronn.git   # latest stable release
+git clone --branch 0.14.0 --depth 1 https://github.com/DocRoms/Kronn.git   # latest stable release
 cd Kronn
 ./kronn start
 # → http://localhost:3140

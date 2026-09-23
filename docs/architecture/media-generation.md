@@ -150,8 +150,22 @@ without a reload.
 * Agents: `media_generate` and `media_job_status`, by two independent routes —
   CLI agents through the `kronn-internal` MCP bridge, HTTP agents through the
   native orchestration catalogue
-  [src: file: backend/src/api/agent_tools.rs:435-460]. The bridge route came
+  [src: file: backend/src/api/agent_tools.rs:420-445]. The bridge route came
   first; the native one closed the half of the fleet that could not reach it.
+* **The connection is optional (KT-686).** A generation names one, or names
+  none and Kronn uses the only connection configured for that modality. When
+  several can serve it, the request is refused with their names: choosing
+  between two connections is choosing whose budget is spent, and Kronn never
+  does that for a human. The answer says which connection was billed.
+  Measured on six local models before and after: `gemma4:e2b` and `gemma4:e4b`
+  called no tool at all and asked the human for an id they could not know —
+  with the whole catalogue declared, `agent_list` among it. `connection_id`
+  was the only parameter of `media_generate` with no description, and it was
+  required; a model reads the schema and treats such a field as caller input.
+  The same reasoning as `api_call`, whose config id became optional after a 4B
+  model paired a plugin with another one's credentials. Omitting the id and
+  naming it are the same intention, so they produce the same job: the v2
+  idempotency digest excludes the connection on purpose.
 * Discovery: an agent reads which modalities are available from the worker
   catalogue `agent_list` returns — one entry per configured model, absent when
   nothing is configured, so availability is never asserted on faith. Each entry

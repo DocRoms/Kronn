@@ -97,6 +97,24 @@ export uses a semicolon for French and Spanish UI locales so spreadsheet tools
 configured with those regional separators open columns directly; other locales
 keep the standard comma. `[src: file: frontend/src/pages/PagesPage.tsx:300-329]`
 
+## Theme and refresh behavior
+
+The sandbox receives Kronn's `data-theme` before the Page markup is parsed.
+Subsequent theme changes arrive through `kronn:page-theme` messages, so they
+do not reload the iframe. Pages can style explicit `light` and `dark` values
+on their root element. A `prefers-color-scheme` fallback should exclude an
+explicit light value, for example with `:root:not([data-theme="light"])`.
+Custom theme names can use the Page's own fallback rules.
+`[src: file: frontend/src/lib/live-page-sandbox.ts:1]`
+
+The embedded viewer, standalone Page and mosaic skip automatic data
+publication when the Page id, slug, title, data revision and dataset count
+are unchanged. This preserves local state during quiet polling cycles.
+A newly loaded iframe always receives the current data. A real publication
+increments the data revision and still reaches the Page; preserving expanded
+rows or scroll position across that render is the Page's responsibility.
+`[src: file: frontend/src/hooks/useLivePageActions.ts:1]`
+
 ## Publication contract
 
 One `PublishPageData` execution contains one or more writes. The database
@@ -186,6 +204,27 @@ when the Page moves on. The API keeps speaking one `LivePageAction`: the
 declaration before a click, the declaration joined to its launch afterwards,
 with `id` naming the launch so a card follows its own run.
 `[src: file: backend/src/db/live_page_actions.rs]`
+
+Action launch history retains at most 1,000 terminal rows per
+`(page_id, action_ref)`, shared across bindings and revisions. The launch involved
+in the current write is retained, then the most recently finished rows; pending,
+launching and running rows are exempt. A new launch, decline or completion
+reconciles stored active states against their real runs/first agent turns and
+prunes terminal overflow in the same write transaction. Existing excess history
+is therefore cleaned on the next such write, not during a read or at startup.
+Reconciliation reads lifecycle metadata rather than result/step-output/stderr
+payloads. A cleanup failure rolls back the associated mutation.
+[src: file: backend/src/db/live_page_actions.rs:625]
+[src: file: backend/src/db/shared_runs.rs:147]
+
+Pruning removes the Page launch snapshot only: shared results, result discussions,
+Page-to-discussion links and declarations remain. A row whose last snapshot aged
+out no longer displays that historical result in the Page; retained runs and
+discussions remain accessible through their own history. An old pruned launch
+handle returns not-found and never falls back to a new launch. Only an explicit
+click on the still-current declaration can start another execution.
+[src: file: backend/src/db/live_page_actions.rs:625]
+[src: file: backend/src/db/live_page_action_retention_tests.rs:1]
 
 The Page reads back how each row went. `GET /api/pages/{id}/action-launches`
 returns the latest launch per row (declines excluded), polled every few seconds
@@ -289,6 +328,18 @@ successful `PARTIAL` envelope only when another source produced data; a
 required failure or a collection where every source failed makes the step
 fail. Quick Exec failures prefer the process stderr in the visible summary,
 including an actionable login command for an expired AWS SSO session.
+
+Saved sources also expose their `source_id` beside the alias and kind in
+`meta.sources`; failure summaries include that identity before the cause.
+A deleted required Quick API reports that it does not exist, while HTTP and
+JSON parsing failures retain their respective diagnostics. The workflow history
+list deliberately omits outputs; expanding a run fetches its full detail and
+reports a failed detail read with a retry action. A focused navigation keeps
+the full run even when the compact list already contains its id.
+[src: file: backend/src/workflows/collect_api_data_step.rs:60-67]
+[src: file: backend/src/workflows/collect_api_data_step.rs:508-529]
+[src: file: frontend/src/components/workflows/LoadedRunDetail.tsx:1]
+[src: file: frontend/src/pages/WorkflowsPage.tsx:804-807]
 
 Rolling windows use the common run-anchored time grammar in source variables,
 for example

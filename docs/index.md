@@ -7,7 +7,24 @@ This folder is the project's living knowledge base, shared by humans and AI agen
 - **[AGENTS.md](AGENTS.md)** — Tiered context loader read by Claude Code, Codex, Gemini, Vibe, Copilot, Kiro and any agent that follows the `AGENTS.md` convention. Start here if you're an LLM.
 - **This file (`index.md`)** — Plain landing page for humans browsing the folder. Extend it with whatever helps onboarding.
 
-## Current release: 0.13.2
+## Current release: 0.14.0
+
+- HTTP agents can discover, launch and edit Quick Prompts, and author disabled
+  workflow drafts. See [HTTP-agent capabilities](architecture/http-agent-capabilities.md)
+  and the retained [native Quick Prompt campaign](research/native-qp-litellm-ollama-2026-09-22.md).
+- Media generation can select the sole connection for a modality when none is
+  supplied. The [seven-model check](research/media-without-connection-id-2026-09-22.md)
+  records queued jobs, with no image-generation workers running.
+- Text, JSON and log attachments open in the discussion carousel, with a bounded
+  preview and the original download. See [UI structure](architecture/ui-structure.md).
+- Empty optional workflow inputs remain in execution snapshots; required and
+  undeclared variables retain validation. See
+  [execution variables](architecture/execution-variables.md).
+- Live Pages follow Kronn's theme and no longer reset local state when polled
+  data is unchanged. See the [0.14.0 release notes](../CHANGELOG.md) for these
+  changes, setup improvements and validation limits.
+
+## Earlier releases
 
 - Automation variables can reference encrypted project values without copying
   secrets into templates. Launch previews are masked and audited, while each

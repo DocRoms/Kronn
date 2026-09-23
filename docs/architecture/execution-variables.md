@@ -41,6 +41,22 @@ opened is used by the new run. A provided value is read-only unless the
 template author set `allow_manual_override`; enabling that override is an
 explicit launch action and its effective provenance is recorded.
 
+An optional `user_input` declaration always contributes a value to the new
+execution snapshot. An omitted input uses its configured Select default, or
+an empty string when there is no default (`effective_source_ref:
+optional_empty`). An explicitly blank input is preserved verbatim, clears
+an optional Select default, and retains `user_input` provenance. Required
+inputs still reject blank values when no default exists; nonblank Select
+values still have to name an enabled option. Undeclared request keys are
+not propagated. Missing or ambiguous external sources keep their existing
+resolution rules: they are not relabelled as empty operator inputs.
+
+This fixes issue #213, where dropping an optional input from the snapshot
+made strict Workflow templates reject its declared name as unknown. The
+renderer remains strict. Existing encrypted snapshots are immutable and are
+not rewritten; a new launch obtains the corrected snapshot. Resuming an
+already affected run retains its original snapshot.
+
 [src: file: backend/src/core/execution_variables.rs]
 [src: file: backend/src/api/execution_variables.rs]
 [src: file: frontend/src/components/workflows/ProvidedVariablesPreview.tsx]

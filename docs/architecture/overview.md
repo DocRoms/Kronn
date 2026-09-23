@@ -59,13 +59,13 @@ Three Docker services behind nginx gateway:
 - **Path resolution**: `resolve_host_path` uses Docker mount priority (prefers /host-home over /home/priol).
 - **macOS Docker agent bootstrap (0.3.5)**: on macOS hosts, host-mounted binaries are Darwin (macOS) executables that cannot run in the Linux container. `entrypoint.sh` detects `KRONN_HOST_OS=macOS` and installs Linux versions of Claude Code (npm), Codex (npm), and Kiro (curl) inside the container. `find_binary()` skips host-mounted Darwin binaries for `claude`, `codex`, `copilot`, `kiro-cli` when `host_is_macos()`. `~/.npm/bin` is mounted at `/host-bin/npm` via `KRONN_NPM_BIN` env var (auto-detected by Makefile `npm bin -g`).
 
-- **Ollama local LLM (0.4.0)**: unlike other agents (CLI spawn), Ollama uses HTTP API streaming (`POST OLLAMA_HOST/api/chat`). System context (MCP, skills, profiles, directives) is sent as `role: system`, user prompt as `role: user` — the model doesn't confuse context with question. The system context also states the concrete runtime model and maps `Ollama` / `@ollama` to self, so a weaker local model cannot copy a Claude identity from another participant's history. LiteLLM receives the equivalent route/alias identity guard. [src: file: backend/src/agents/runner.rs:539-557] Token tracking from `prompt_eval_count` + `eval_count` in the `done: true` response chunk. Cost: always $0. Docker: `OLLAMA_HOST` env var resolves to `host.docker.internal:11434` (macOS/Windows) or requires `OLLAMA_HOST=0.0.0.0 ollama serve` on WSL/Linux. Health endpoint returns contextual hints per environment. Setup wizard in Settings with 4 states (install → launch → pull models → model picker). `api/ollama.rs` for health+models, execution in `runner.rs:start_ollama_http()`.
+- **Ollama local LLM (0.4.0)**: unlike other agents (CLI spawn), Ollama uses HTTP API streaming (`POST OLLAMA_HOST/api/chat`). System context (MCP, skills, profiles, directives) is sent as `role: system`, user prompt as `role: user` — the model doesn't confuse context with question. The system context also states the concrete runtime model and maps `Ollama` / `@ollama` to self, so a weaker local model cannot copy a Claude identity from another participant's history. LiteLLM receives the equivalent route/alias identity guard. [src: file: backend/src/agents/runner.rs:534-552] Token tracking from `prompt_eval_count` + `eval_count` in the `done: true` response chunk. Cost: always $0. Docker: `OLLAMA_HOST` env var resolves to `host.docker.internal:11434` (macOS/Windows) or requires `OLLAMA_HOST=0.0.0.0 ollama serve` on WSL/Linux. Health endpoint returns contextual hints per environment. Setup wizard in Settings with 4 states (install → launch → pull models → model picker). `api/ollama.rs` for health+models, execution in `runner.rs:start_ollama_http()`.
 - **LiteLLM private reasoning (0.9.5)**: OpenAI-compatible streams pass
   through a stateful leading-block filter. Initial `<think>` and `<thinking>`
   content is withheld even when tags are split across chunks or never closed;
   once visible answer content starts, identically named literal tags are
   preserved. The same final sanitizer runs on persisted discussion output.
-  [src: file: backend/src/agents/runner.rs:1629-1780]
+  [src: file: backend/src/agents/runner.rs:1607-1758]
   [src: file: backend/src/api/discussions/streaming.rs:1988-1994]
 
 ### Discussions
@@ -342,6 +342,35 @@ Unified automation system: `Trigger → Steps`. Kronn and OpenAI Symphony overla
 - Isolated git worktree per run (`git worktree add`), branch: `kronn/<workflow>/<run-id>`.
 - Lifecycle hooks (shell commands): `after_create`, `before_run`, `after_run`, `before_remove`.
 - Cleanup on completion/failure.
+- **The hooks belong to the project (KT-687).** `Project.workspace.hooks` is
+  inherited by every workflow of the project that asks for isolation, and a
+  workflow overrides it field by field — what it declares wins, what it leaves
+  out comes from the project. A project that declares nothing behaves exactly
+  as before. Read and written through `GET`/`PUT /api/projects/{id}/workspace`.
+
+  *Why this is not a nicety.* Kronn can isolate a worktree; nothing in Kronn
+  could make it usable by the project's own tool chain. Measured on
+  front_euronews (20/09/2026): its `docker-compose.yml` mounts
+  `./application:/app`, a path relative to the compose file and therefore to
+  the MAIN checkout. A worktree under `.kronn/worktrees/` is invisible to that
+  container, and every Make target runs through `compose exec -T php`, so
+  `make phpstan-src` launched from a worktree analyses the main checkout
+  instead. The run passes. It is the worst shape a defect can take: green,
+  silent, and wrong — in an unattended ticket → PR pipeline it validates
+  changes nobody checked.
+
+  The recipe that fixes it is project-specific (a disposable container mounted
+  on the worktree, the main checkout's `vendor` reused read-only, lockfile
+  fingerprints compared so a divergence falls back to a real install). It has
+  no place in Kronn. What belongs in Kronn is the single place to declare it:
+  the project knows how it builds and how it tests, a workflow should not have
+  to. Before this, the recipe had to be copied into every workflow of the
+  project that asked for isolation — three copies that drift, three chances to
+  forget one.
+
+  Isolation itself stays the workflow's decision: inheriting a recipe never
+  turns a read-only fan-out into an isolated run.
+  [src: file: backend/src/workflows/runner.rs]
 
 **MCP injection:**
 - `read_all_mcp_contexts()` reads `.mcp.json` and per-project MCP context files (`docs/operations/mcp-servers/*.md`).
