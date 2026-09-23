@@ -1452,7 +1452,7 @@ export function Dashboard({ onReset }: DashboardProps) {
 
         {/* ════════ PAGES VIVANTES — progressive disclosure ════════ */}
         {page === 'pages' && pagesCapability?.activated && (
-          <ErrorBoundary mode="zone" label="Pages">
+          <ErrorBoundary mode="zone" label={t('nav.pages')}>
             <Suspense fallback={<PageFallback />}>
               <PagesPage
                 initialSelectedPageId={openPageId}

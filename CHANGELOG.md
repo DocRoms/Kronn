@@ -33,6 +33,12 @@ Release notes for 0.9.3 and earlier are available in the
   discussions read or launching agents; a missing room does not block its peers.
   [Monitoring limits and behavior](docs/operations/discussion-mosaic.md).
 
+### Changed
+
+- The Pages interface is now named Artifacts in all four languages, including
+  workflow publishing and the mosaic. Existing URLs, identifiers, API routes
+  and MCP tool names remain compatible.
+
 ### Fixed
 
 - Workflow HTTP agents recover once from an explicit unsupported structured

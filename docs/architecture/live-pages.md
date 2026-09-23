@@ -1,4 +1,15 @@
-# Live Pages architecture (v0.10.0)
+# Artifacts architecture (formerly Live Pages)
+
+## Product naming and compatibility
+
+The UI calls this library **Artifacts**. Existing `page_*` MCP tools,
+`/api/pages` endpoints, `#page/…` and `#pages/mosaic?…` URLs, `PublishPageData`
+workflow steps, stored IDs and sandbox event names keep their established
+contracts. An Artifact is the same persisted resource; renaming its product
+label does not migrate or duplicate it. Historical code and documentation use
+“Page” for that domain model.
+[src: file: frontend/src/lib/i18n/locales/en.ts:55]
+[src: file: frontend/src/lib/live-page-navigation.ts:1]
 
 ## Status
 
