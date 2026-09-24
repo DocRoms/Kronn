@@ -191,6 +191,7 @@ mod tests {
             crate::agents::runner::SpawnIo::Adapter,
             None,
             None,
+            None,
         )
         .unwrap()
     }

@@ -1057,6 +1057,39 @@ class TaskExecPrincipalSurfaceTests(unittest.TestCase):
             self.assertIn("forbids worker_scope", str(refused.exception))
             refused_http.assert_not_called()
 
+    def test_a_room_native_agent_is_the_principal_through_its_injected_context(self):
+        context = {
+            "discussion_id": "disc-parent", "agent_type": "ClaudeCode",
+            "dispatch_job_id": "job-1", "source_message_id": "msg-1",
+        }
+        http = mock.MagicMock(return_value={"success": True, "data": {"launchable": True}})
+        worker = {"kind": "agent", "agent_type": "Codex"}
+        identity = mock.MagicMock(side_effect=AssertionError("CLI identity must not be read"))
+        with mock.patch.dict(os.environ, {"KRONN_ROOM_AGENT_CONTEXT": json.dumps(context)}), \
+                mock.patch.object(self.mod, "_task_exec_identity", identity), \
+                mock.patch.object(self.mod, "_http", http):
+            for call in (self.mod.call_task_exec_prepare, self.mod.call_task_exec_launch):
+                call({"task_reference": "KT-740", "worker": worker, "worker_scope_intent": "generic"})
+        self.assertEqual(len(http.call_args_list), 2)
+        for recorded_call in http.call_args_list:
+            body = recorded_call.args[2]
+            self.assertEqual(body["room_agent"], context)
+            self.assertNotIn("source_agent", body)
+            self.assertNotIn("source_session_id", body)
+
+    def test_an_incomplete_room_agent_context_fails_closed_before_http(self):
+        http = mock.MagicMock()
+        with mock.patch.dict(os.environ, {"KRONN_ROOM_AGENT_CONTEXT": json.dumps({"discussion_id": "disc-parent"})}), \
+                mock.patch.object(self.mod, "_http", http):
+            with self.assertRaises(RuntimeError) as refused:
+                self.mod.call_task_exec_prepare({
+                    "task_reference": "KT-740",
+                    "worker": {"kind": "agent", "agent_type": "Codex"},
+                    "worker_scope_intent": "generic",
+                })
+        self.assertIn("room agent context is incomplete", str(refused.exception))
+        http.assert_not_called()
+
     def test_stale_bridge_refuses_capability_mutations_before_http(self):
         self.mod._BRIDGE_SCRIPT_MTIME_AT_LOAD = 1.0
         self.mod._BRIDGE_SCRIPT_SHA256_AT_LOAD = "outdated-contract"

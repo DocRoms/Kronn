@@ -13,6 +13,9 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Added
 
+- A room's native agent can prepare and launch a task execution itself, as
+  its principal, without a CLI joining the room. Kronn identifies it from the
+  turn it is running, so only that room's agent is accepted.
 - Workflow Agent results retain execution provenance for initial, repair,
   escalation and debate attempts, including model resolution, structured
   runtime model observations and format fallback. Compact agent/model badges

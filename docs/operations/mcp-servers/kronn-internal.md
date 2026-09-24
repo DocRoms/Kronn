@@ -354,6 +354,12 @@ idempotency key after an uncertain response. Native HTTP workers receive a
 narrowed surface: no backlog mutation or execution-status lookup, and
 `task_exec_deliver` accepts only the manifest. They never merge, approve or
 close the task.
+The principal is either a CLI session joined to the room or the room's own
+native agent during its turn. For the latter Kronn injects
+`KRONN_ROOM_AGENT_CONTEXT` (room, provider, running dispatch, trigger message)
+into the bridge environment; the backend accepts it only while that dispatch
+runs in the room, for the same provider, and never for a delegated worker's
+dispatch.
 The optional `validations` passed to `task_exec_launch` are principal-owned and
 persisted on the implicit single-task run. They use the same `ValidationSpec`
 contract as campaign runs and cannot be supplied or changed by the delivery
