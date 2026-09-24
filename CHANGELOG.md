@@ -67,6 +67,9 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- The Automations list no longer waits on a scan of every workflow run to find
+  each workflow's latest one. A `(workflow_id, started_at)` index answers it
+  directly: on a 7 GB database, from 0.85–3.7 s to 19 ms.
 - Native ACP replies no longer include echoed user prompts, including Vibe's
   copy of Kronn's injected instructions. Only agent message chunks contribute
   answer text; tool and usage events remain separate (KT-729).
