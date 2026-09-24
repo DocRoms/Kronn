@@ -424,9 +424,16 @@ export function ChatInput({
       const submittedTiers = submittedRoutingTiersRef.current[detail.discussionId] ?? {};
       if (detail.settlement === 'accepted') {
         delete submittedRoutingTiersRef.current[detail.discussionId];
-        if (current.trim()) {
+        // An input remounted before the receipt restored the submitted text
+        // itself as a draft: that is the accepted message, not a new one.
+        const isSubmittedSnapshot = current.trim() === detail.message.trim();
+        if (current.trim() && !isSubmittedSnapshot) {
           flushDraftNow(detail.discussionId, current);
         } else {
+          if (isSubmittedSnapshot) {
+            updateChatInput('');
+            setRestoredDraftAt(null);
+          }
           clearDraft(detail.discussionId);
           if (currentDiscIdRef.current === detail.discussionId) {
             updateMentionTierOverrides({});

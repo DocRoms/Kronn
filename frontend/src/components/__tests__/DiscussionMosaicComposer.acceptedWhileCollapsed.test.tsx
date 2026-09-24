@@ -66,6 +66,25 @@ describe('mosaic with its real ChatInput', () => {
     expect(loadDraft('a')).toBeNull();
   });
 
+  it('clears the restored submitted note when the composer is reopened before receipt', async () => {
+    let acknowledge!: () => void;
+    const send = vi.spyOn(discussions, 'sendMessageStream').mockImplementation((...args) => new Promise<void>(resolve => {
+      acknowledge = () => { args[8]?.({ message_id: 'saved-note', sort_order: 1, duplicate: false }); resolve(); };
+    }));
+    render(<DiscussionMosaicComposer {...props('a')} />);
+    await screen.findByRole('textbox');
+    fireEvent.click(await screen.findByLabelText('disc.note.sendAsNote'));
+    fireEvent.change(input(), { target: { value: 'a persisted note' } });
+    fireEvent.click(screen.getByLabelText('Send message'));
+    await waitFor(() => expect(send).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole('button', { name: 'disc.mosaic.replyIn:a' }));
+    fireEvent.click(screen.getByRole('button', { name: 'disc.mosaic.replyIn:a' }));
+    await waitFor(() => expect(input().value).toBe('a persisted note'));
+    await act(async () => { acknowledge(); });
+    expect(input().value).toBe('');
+    expect(loadDraft('a')).toBeNull();
+  });
+
   it('preserves a newer draft in A when the note receipt arrives while B is mounted', async () => {
     let acknowledge!: () => void;
     const send = vi.spyOn(discussions, 'sendMessageStream').mockImplementation((...args) => new Promise<void>(resolve => {
