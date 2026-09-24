@@ -2659,7 +2659,7 @@ fn listings_drop_step_outputs_but_keep_the_steps_themselves() {
             step_name: "build".into(),
             status: RunStatus::Success,
             output: "x".repeat(200_000),
-            tokens_used: 42,
+            tokens_used: Some(42),
             duration_ms: 1234,
             started_at: None,
             condition_result: None,
@@ -2678,7 +2678,7 @@ fn listings_drop_step_outputs_but_keep_the_steps_themselves() {
             step_name: "deploy".into(),
             status: RunStatus::Failed,
             output: "y".repeat(200_000),
-            tokens_used: 7,
+            tokens_used: None,
             duration_ms: 99,
             started_at: None,
             condition_result: None,
@@ -2711,7 +2711,11 @@ fn listings_drop_step_outputs_but_keep_the_steps_themselves() {
     assert_eq!(listed.step_results[0].step_name, "build");
     assert_eq!(listed.step_results[1].status, RunStatus::Failed);
     assert_eq!(listed.step_results[0].duration_ms, 1234);
-    assert_eq!(listed.step_results[0].tokens_used, 42);
+    assert_eq!(listed.step_results[0].tokens_used, Some(42));
+    assert_eq!(
+        listed.step_results[1].tokens_used, None,
+        "unknown usage must survive persistence as unknown, not zero"
+    );
     assert_eq!(listed.step_results[0].step_kind.as_deref(), Some("Agent"));
 
     // ...but not their outputs, which are the entire weight of the column.
@@ -2791,7 +2795,7 @@ fn workflow_runs_update() {
         step_name: "step1".into(),
         status: RunStatus::Success,
         output: "Done".into(),
-        tokens_used: 500,
+        tokens_used: Some(500),
         duration_ms: 1234,
         started_at: None,
         condition_result: None,

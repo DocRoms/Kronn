@@ -289,7 +289,7 @@ fn build_outcome(
             step_name: step.name.clone(),
             status: run_status,
             output,
-            tokens_used: 0,
+            tokens_used: Some(0),
             duration_ms: started.elapsed().as_millis() as u64,
             started_at: None,
             condition_result,

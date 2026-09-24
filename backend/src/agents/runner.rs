@@ -2012,6 +2012,8 @@ pub struct ScriptedProcess {
     /// `next_line` never resolves — the only way to reach a deadline branch in a
     /// test, since a drained scripted stream ends the loop normally.
     hangs_forever: bool,
+    /// Usage a structured transport (ACP) would report for the run.
+    reported_usage: Option<u64>,
 }
 
 #[cfg(test)]
@@ -2028,6 +2030,7 @@ impl ScriptedProcess {
             killed: false,
             stderr: Vec::new(),
             hangs_forever: false,
+            reported_usage: None,
         }
     }
 
@@ -2043,6 +2046,7 @@ impl ScriptedProcess {
             killed: false,
             stderr: Vec::new(),
             hangs_forever: false,
+            reported_usage: None,
         }
     }
 
@@ -2055,6 +2059,12 @@ impl ScriptedProcess {
     /// Pre-load stderr lines for the StdoutOnly diagnostic path.
     pub fn with_stderr(mut self, lines: impl IntoIterator<Item = impl Into<String>>) -> Self {
         self.stderr = lines.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Simulate usage reported by a structured transport such as ACP.
+    pub fn with_reported_usage(mut self, tokens: u64) -> Self {
+        self.reported_usage = Some(tokens);
         self
     }
 
@@ -2082,6 +2092,9 @@ impl AgentIo for ScriptedProcess {
     }
     fn output_mode(&self) -> OutputMode {
         self.output_mode
+    }
+    fn reported_token_usage(&self) -> Option<u64> {
+        self.reported_usage
     }
     async fn kill(&mut self) {
         self.killed = true;

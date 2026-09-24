@@ -67,6 +67,11 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- A workflow Agent step run through ACP now records the token usage its agent
+  reports instead of 0. When the agent reports none, the step's
+  `tokens_used` is `null` (with `tokens_status: "not_measured"` in the MCP run
+  status) and the run view shows "tokens unknown" rather than a zero. Run
+  totals still add up only the measured steps (KT-735).
 - When a Claude or Codex agent run through ACP fails, the error now includes
   the end of what the agent printed on stderr (for example an expired login)
   instead of only "exited with status 1". A prompt that cannot be delivered

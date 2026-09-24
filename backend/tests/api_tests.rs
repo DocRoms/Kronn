@@ -18784,7 +18784,7 @@ mod cold_api_handlers_tests {
             step_name: "review_pack".into(),
             status: kronn::models::RunStatus::Running,
             output: String::new(),
-            tokens_used: 0,
+            tokens_used: None,
             duration_ms: 0,
             started_at: Some(started_at),
             condition_result: None,

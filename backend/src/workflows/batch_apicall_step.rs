@@ -312,7 +312,7 @@ pub async fn execute_batch_apicall_step(
             step_name: step.name.clone(),
             status: run_status,
             output,
-            tokens_used: 0,
+            tokens_used: Some(0),
             duration_ms: start.elapsed().as_millis() as u64,
             started_at: None,
             condition_result,
@@ -522,7 +522,7 @@ fn empty_success(step: &WorkflowStep, start: Instant) -> StepOutcome {
             step_name: step.name.clone(),
             status: RunStatus::Success,
             output,
-            tokens_used: 0,
+            tokens_used: Some(0),
             duration_ms: start.elapsed().as_millis() as u64,
             started_at: None,
             condition_result,
@@ -553,7 +553,7 @@ fn fail(step: &WorkflowStep, start: Instant, msg: impl Into<String>) -> StepOutc
             step_name: step.name.clone(),
             status: RunStatus::Failed,
             output: msg,
-            tokens_used: 0,
+            tokens_used: Some(0),
             duration_ms: start.elapsed().as_millis() as u64,
             started_at: None,
             condition_result: None,
@@ -819,7 +819,7 @@ mod tests {
         assert_eq!(outcome.result.status, RunStatus::Failed);
         assert_eq!(outcome.result.step_name, "test-step");
         assert_eq!(outcome.result.output, "boom");
-        assert_eq!(outcome.result.tokens_used, 0);
+        assert_eq!(outcome.result.tokens_used, Some(0));
         assert!(outcome.condition_action.is_none());
     }
 
@@ -837,7 +837,7 @@ mod tests {
                 step_name: "child".into(),
                 status: RunStatus::Success,
                 output: output.into(),
-                tokens_used: 0,
+                tokens_used: Some(0),
                 duration_ms: 1,
                 started_at: None,
                 condition_result: None,
