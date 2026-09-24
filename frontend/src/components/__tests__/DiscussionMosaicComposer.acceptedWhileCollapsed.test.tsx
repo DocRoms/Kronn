@@ -145,6 +145,25 @@ describe('mosaic with its real ChatInput', () => {
     await waitFor(() => expect(input().value).toBe('ok'));
   });
 
+  it('keeps an identical draft typed again in A when the receipt arrives while B is mounted', async () => {
+    let acknowledge!: () => void;
+    vi.spyOn(discussions, 'sendMessageStream').mockImplementation((...args) => new Promise<void>(resolve => {
+      acknowledge = () => { args[8]?.({ message_id: 'saved-note', sort_order: 1, duplicate: false }); resolve(); };
+    }));
+    const view = render(<DiscussionMosaicComposer {...props('a')} />);
+    await screen.findByRole('textbox');
+    fireEvent.click(await screen.findByLabelText('disc.note.sendAsNote'));
+    fireEvent.change(input(), { target: { value: 'ok' } });
+    fireEvent.click(screen.getByLabelText('Send message'));
+    fireEvent.change(input(), { target: { value: 'ok' } });
+    await act(async () => { view.rerender(<DiscussionMosaicComposer {...props('b')} />); });
+    await waitFor(() => expect(input().value).toBe(''));
+    await act(async () => { acknowledge(); });
+    expect(loadDraft('a')).toMatchObject({ text: 'ok', submitted: false });
+    await act(async () => { view.rerender(<DiscussionMosaicComposer {...props('a')} />); });
+    await waitFor(() => expect(input().value).toBe('ok'));
+  });
+
   it('keeps a newer draft typed before collapsing when the late receipt arrives', async () => {
     let acknowledge!: () => void;
     vi.spyOn(discussions, 'sendMessageStream').mockImplementation((...args) => new Promise<void>(resolve => {
