@@ -29,6 +29,10 @@ const zh: TranslationDict = {
   "disc.mosaic.noPlan": "计划中没有活跃任务",
   "disc.mosaic.later": "{0} 项稍后处理",
 
+  "pages.import.commandAndArgs": "命令和参数",
+  "pages.import.approveExec": "我已检查并同意导入 {0} 的命令。",
+  "pages.import.execApprovalRequired": "请检查并批准每个新的 Quick Exec，然后重新检查导入。",
+  "pages.import.methodUnspecified": "未指定方法",
   "pages.exportArtifact": "Artifact JSON",
   "pages.import.title": "导入 Artifact",
   "pages.import.hint": "保留 HTML、已保存的数据和关联自动化定义。创建新的 Artifact 前请检查依赖项。",

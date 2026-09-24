@@ -19,6 +19,7 @@ export function ArtifactImportDialog({ onClose, onImported, initialProjectId }: 
   const [projectId, setProjectId] = useState(initialProjectId ?? '');
   const [projects, setProjects] = useState<Project[]>([]);
   const [choices, setChoices] = useState<ArtifactImportChoice[]>([]);
+  const [approvedExecIds, setApprovedExecIds] = useState<string[]>([]);
   const [preview, setPreview] = useState<ArtifactImportPreview | null>(null);
   const [dirty, setDirty] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -51,6 +52,7 @@ export function ArtifactImportDialog({ onClose, onImported, initialProjectId }: 
   const readFile = async (file?: File) => {
     if (!file || inFlight.current) return;
     inFlight.current = true; setBusy(true); setError(null); setPreview(null); setContent(''); setChoices([]);
+    setApprovedExecIds([]);
     try {
       if (file.size > MAX_BYTES) throw new Error(t('pages.import.tooLarge'));
       const text = await file.text();
@@ -61,7 +63,7 @@ export function ArtifactImportDialog({ onClose, onImported, initialProjectId }: 
     finally { inFlight.current = false; setBusy(false); }
   };
 
-  const request = (): ArtifactImportRequest => ({ content, project_id: projectId || null, choices, preview_digest: preview?.digest ?? null });
+  const request = (): ArtifactImportRequest => ({ content, project_id: projectId || null, choices, approved_quick_exec_ids: approvedExecIds, preview_digest: preview?.digest ?? null });
   const inspect = async () => {
     if (!content || inFlight.current) return;
     inFlight.current = true; setBusy(true); setError(null);
@@ -102,7 +104,21 @@ export function ArtifactImportDialog({ onClose, onImported, initialProjectId }: 
             const choice = choices.find(choice => choice.kind === entry.kind && choice.source_id === entry.source_id);
             return <div className="artifact-import-entry" key={`${entry.kind}:${entry.source_id}`}>
               <div><strong>{entry.name}</strong><small>{t(`pages.import.kind.${entry.kind}`)} · {t(`pages.import.status.${entry.disposition}`)}</small>
-                <small>{t(`pages.import.reason.${entry.reason}`)}</small></div>
+                <small>{t(`pages.import.reason.${entry.reason}`)}</small>
+                {entry.quick_exec && <div className="artifact-import-exec">
+                  <strong>{t('pages.import.commandAndArgs')}</strong>
+                  <pre>{JSON.stringify({ command: entry.quick_exec.command, args: entry.quick_exec.args }, null, 2)}</pre>
+                  <label className="artifact-import-approval"><input type="checkbox" disabled={busy}
+                    checked={approvedExecIds.includes(entry.source_id)} onChange={event => {
+                      const checked = event.target.checked;
+                      setApprovedExecIds(previous => checked ? [...previous, entry.source_id] : previous.filter(id => id !== entry.source_id));
+                      setDirty(true);
+                    }} />{t('pages.import.approveExec', entry.name)}</label>
+                </div>}
+                {entry.quick_api && <p className="artifact-import-api"><code>
+                  {entry.quick_api.method ?? t('pages.import.methodUnspecified')} {entry.quick_api.endpoint}
+                </code><small>{entry.quick_api.plugin}</small></p>}
+              </div>
               {entry.reason !== 'root' && <select aria-label={t('pages.import.choice', entry.name)} disabled={busy}
                 value={choice?.action ?? 'auto'} onChange={event => {
                   const action = event.target.value;
@@ -118,6 +134,8 @@ export function ArtifactImportDialog({ onClose, onImported, initialProjectId }: 
             </div>;
           })}
         </div>
+        {preview.entries.some(entry => entry.quick_exec && !entry.quick_exec.approved)
+          && <p className="artifact-import-note">{t('pages.import.execApprovalRequired')}</p>}
         {preview.issues.length > 0 && <ul role="alert">{preview.issues.map(issue => <li key={issue}>{issue}</li>)}</ul>}
         {preview.warnings.length > 0 && <div className="artifact-import-warning"><strong>{t('pages.import.configureLater')}</strong>
           <ul>{preview.warnings.map(warning => <li key={`${warning.kind}:${warning.id}`}>{t(`pages.import.warning.${warning.kind}`, warning.id)}</li>)}</ul></div>}

@@ -418,6 +418,14 @@ fn prepare_plan(conn: &Connection, request: &ArtifactImportRequest) -> Result<Im
         }
     }
     let known: BTreeSet<_> = resources.iter().map(|r| (r.kind, r.id.clone())).collect();
+    let mut approved_execs = BTreeSet::new();
+    for id in &request.approved_quick_exec_ids {
+        if !known.contains(&(ResourceKind::QuickExec, id.clone()))
+            || !approved_execs.insert(id.clone())
+        {
+            bail!("Unknown or duplicate Quick Exec approval");
+        }
+    }
     let mut choices = BTreeMap::new();
     for choice in &request.choices {
         let key = (choice.kind, choice.source_id.clone());
@@ -456,6 +464,8 @@ fn prepare_plan(conn: &Connection, request: &ArtifactImportRequest) -> Result<Im
                     disposition: ArtifactImportDisposition::Create,
                     existing_id: None,
                     reason: "root".into(),
+                    quick_exec: None,
+                    quick_api: None,
                 },
                 source,
                 candidate: None,
@@ -538,6 +548,8 @@ fn prepare_plan(conn: &Connection, request: &ArtifactImportRequest) -> Result<Im
             disposition,
             existing_id,
             reason: reason.into(),
+            quick_exec: None,
+            quick_api: None,
         };
         planned.push(PlannedResource {
             source,
@@ -592,9 +604,33 @@ fn prepare_plan(conn: &Connection, request: &ArtifactImportRequest) -> Result<Im
     }
     issues.sort();
     issues.dedup();
+    for item in &mut planned {
+        if item.entry.disposition != ArtifactImportDisposition::Create {
+            continue;
+        }
+        match item.source.kind {
+            ResourceKind::QuickExec => {
+                let exec: QuickExec = serde_json::from_value(item.source.value.clone())?;
+                item.entry.quick_exec = Some(ArtifactImportExecReview {
+                    command: exec.command,
+                    args: exec.args,
+                    approved: approved_execs.contains(&item.source.id),
+                });
+            }
+            ResourceKind::QuickApi => {
+                let api: QuickApi = serde_json::from_value(item.source.value.clone())?;
+                item.entry.quick_api = Some(ArtifactImportApiReview {
+                    method: api.api_method,
+                    endpoint: api.api_endpoint_path,
+                    plugin: api.api_plugin_slug,
+                });
+            }
+            _ => {}
+        }
+    }
     let warnings = execution_requirements(conn, &planned)?;
     let digest = Sha256::digest(serde_json::to_vec(&json!({
-        "content":request.content,"project_id":request.project_id,"choices":request.choices,"observations":observations,"warnings":warnings
+        "content":request.content,"project_id":request.project_id,"choices":request.choices,"approved_quick_exec_ids":approved_execs,"observations":observations,"warnings":warnings
     }))?).iter().fold(String::with_capacity(64), |mut result, byte| {
         write!(&mut result, "{byte:02x}").expect("writing to String"); result
     });
@@ -602,9 +638,10 @@ fn prepare_plan(conn: &Connection, request: &ArtifactImportRequest) -> Result<Im
         title: planned[0].source.name.clone(),
         entries: planned.iter().map(|r| r.entry.clone()).collect(),
         can_import: issues.is_empty()
-            && planned
-                .iter()
-                .all(|r| r.entry.disposition != ArtifactImportDisposition::Conflict),
+            && planned.iter().all(|r| {
+                r.entry.disposition != ArtifactImportDisposition::Conflict
+                    && r.entry.quick_exec.as_ref().is_none_or(|exec| exec.approved)
+            }),
         issues,
         warnings,
         digest,
@@ -785,7 +822,7 @@ pub async fn import(
                 bail!("Artifact import preview is stale; review the import again");
             }
             if !plan.preview.can_import {
-                bail!("Resolve Artifact import conflicts and missing dependencies first");
+                bail!("Resolve Artifact import conflicts and approve each new Quick Exec first");
             }
             let result = commit_plan(&tx, plan, &request)?;
             tx.commit()?;

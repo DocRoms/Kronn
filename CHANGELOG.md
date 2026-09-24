@@ -45,6 +45,9 @@ Release notes for 0.9.3 and earlier are available in the
   creation, reuse and conflicts, remaps references into a new Artifact and keeps
   new workflows disabled. Missing local configuration is shown before import;
   stale previews and failed imports leave no partial resources.
+- Artifact import shows each new Quick Exec's command and arguments and
+  requires explicit approval before creating it. New Quick APIs show their
+  method and endpoint in the preview.
 
 ### Changed
 

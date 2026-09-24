@@ -2179,6 +2179,128 @@ async fn artifact_import_reuses_identical_automations_copies_publishers_and_reje
 }
 
 #[tokio::test]
+async fn artifact_import_requires_each_new_command_to_be_approved_in_the_reviewed_digest() {
+    let (source, _) = workflow_portability_fixture().await;
+    let (_, exported) = get_json(
+        build_router_with_auth(source, false),
+        "/api/pages/page-portable/export",
+    )
+    .await;
+    let mut bundle = exported["data"].clone();
+    bundle["referenced_quick_execs"][0]["command"] = serde_json::json!("bash");
+    bundle["referenced_quick_execs"][0]["args"] =
+        serde_json::json!(["-c", "printf '%s' 'Équipe 🦀'"]);
+    let mut second = bundle["referenced_quick_execs"][0].clone();
+    second["id"] = serde_json::json!("second-exec");
+    bundle["referenced_quick_execs"]
+        .as_array_mut()
+        .unwrap()
+        .push(second);
+    let content = bundle.to_string();
+    let state = test_state();
+    let app = build_router_with_auth(state.clone(), false);
+    let before = workflow_import_database_snapshot(&state).await;
+    let mut request = serde_json::json!({"content":content});
+    let (_, unapproved) =
+        post_json(app.clone(), "/api/pages/import/preview", request.clone()).await;
+    assert_eq!(unapproved["data"]["can_import"], false, "{unapproved}");
+    let entries = unapproved["data"]["entries"].as_array().unwrap();
+    let exec = entries
+        .iter()
+        .find(|e| e["source_id"] == "qe-portable")
+        .unwrap();
+    assert_eq!(exec["quick_exec"]["command"], "bash");
+    assert_eq!(
+        exec["quick_exec"]["args"],
+        bundle["referenced_quick_execs"][0]["args"]
+    );
+    assert_eq!(exec["quick_exec"]["approved"], false);
+    let api = entries.iter().find(|e| e["kind"] == "quick_api").unwrap();
+    assert_eq!(
+        api["quick_api"]["endpoint"],
+        bundle["referenced_quick_apis"][0]["api_endpoint_path"]
+    );
+    assert_eq!(
+        api["quick_api"]["method"],
+        bundle["referenced_quick_apis"][0]["api_method"]
+    );
+    assert_eq!(workflow_import_database_snapshot(&state).await, before);
+    request["preview_digest"] = unapproved["data"]["digest"].clone();
+    let (_, blocked) = post_json(app.clone(), "/api/pages/import", request.clone()).await;
+    assert_eq!(blocked["success"], false);
+    request["approved_quick_exec_ids"] = serde_json::json!(["qe-portable"]);
+    let (_, partial) = post_json(app.clone(), "/api/pages/import/preview", request.clone()).await;
+    assert_eq!(partial["data"]["can_import"], false, "{partial}");
+    request["preview_digest"] = partial["data"]["digest"].clone();
+    let (_, blocked) = post_json(app.clone(), "/api/pages/import", request.clone()).await;
+    assert_eq!(blocked["success"], false);
+    request["approved_quick_exec_ids"] = serde_json::json!(["qe-portable", "second-exec"]);
+    let (_, stale) = post_json(app.clone(), "/api/pages/import", request.clone()).await;
+    assert_eq!(
+        stale["success"], false,
+        "new approvals require a new preview"
+    );
+    let (_, approved) = post_json(app.clone(), "/api/pages/import/preview", request.clone()).await;
+    assert_eq!(approved["data"]["can_import"], true, "{approved}");
+    assert_ne!(approved["data"]["digest"], partial["data"]["digest"]);
+    request["preview_digest"] = approved["data"]["digest"].clone();
+    for ids in [
+        serde_json::json!([]),
+        serde_json::json!(["unknown"]),
+        serde_json::json!(["qe-portable", "qe-portable"]),
+    ] {
+        let mut altered = request.clone();
+        altered["approved_quick_exec_ids"] = ids;
+        let (_, blocked) = post_json(app.clone(), "/api/pages/import", altered).await;
+        assert_eq!(blocked["success"], false);
+    }
+    let mut altered = request.clone();
+    bundle["referenced_quick_execs"][0]["args"] = serde_json::json!(["-c", "echo changed"]);
+    altered["content"] = serde_json::json!(bundle.to_string());
+    let (_, blocked) = post_json(app.clone(), "/api/pages/import", altered).await;
+    assert_eq!(
+        blocked["success"], false,
+        "approval is bound to the reviewed command"
+    );
+    assert_eq!(workflow_import_database_snapshot(&state).await, before);
+    let (_, imported) = post_json(app.clone(), "/api/pages/import", request).await;
+    assert_eq!(imported["success"], true, "{imported}");
+    state
+        .db
+        .with_conn(|conn| {
+            assert_eq!(
+                conn.query_row("SELECT COUNT(*) FROM quick_exec_runs", [], |r| r
+                    .get::<_, i64>(0))?,
+                0
+            );
+            let execs = kronn::db::quick_execs::list_quick_execs(conn)?;
+            assert_eq!(execs.len(), 2);
+            assert!(execs.iter().all(
+                |exec| exec.command == "bash" && exec.args == ["-c", "printf '%s' 'Équipe 🦀'"]
+            ));
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let (_, reused) = post_json(
+        app,
+        "/api/pages/import/preview",
+        serde_json::json!({"content":content}),
+    )
+    .await;
+    assert_eq!(
+        reused["data"]["can_import"], true,
+        "existing definitions require no new approval: {reused}"
+    );
+    assert!(reused["data"]["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["kind"] == "quick_exec")
+        .all(|e| e["disposition"] == "reuse" && e.get("quick_exec").is_none()));
+}
+
+#[tokio::test]
 async fn artifact_import_rollback_leaves_no_origin_mapping_or_partial_resource() {
     let (source, _) = workflow_portability_fixture().await;
     let (_, exported) = get_json(
@@ -2205,7 +2327,7 @@ async fn artifact_import_rollback_leaves_no_origin_mapping_or_partial_resource()
         app.clone(),
         "/api/pages/import/preview",
         serde_json::json!({
-            "content":content,"project_id":null
+            "content":content,"approved_quick_exec_ids":["qe-portable"],"project_id":null
         }),
     )
     .await;
@@ -2214,7 +2336,7 @@ async fn artifact_import_rollback_leaves_no_origin_mapping_or_partial_resource()
         app,
         "/api/pages/import",
         serde_json::json!({
-            "content":content,"project_id":null,"preview_digest":preview["data"]["digest"]
+            "content":content,"approved_quick_exec_ids":["qe-portable"],"project_id":null,"preview_digest":preview["data"]["digest"]
         }),
     )
     .await;
@@ -2278,7 +2400,7 @@ async fn artifact_roundtrip_preserves_null_points_and_reuses_previous_import_ide
         let (_, preview) = post_json(
             app.clone(),
             "/api/pages/import/preview",
-            serde_json::json!({"content":content,"project_id":null}),
+            serde_json::json!({"content":content,"approved_quick_exec_ids":["qe-portable"],"project_id":null}),
         )
         .await;
         assert_eq!(preview["data"]["can_import"], true, "{preview}");
@@ -2286,7 +2408,7 @@ async fn artifact_roundtrip_preserves_null_points_and_reuses_previous_import_ide
             app.clone(),
             "/api/pages/import",
             serde_json::json!({
-                "content":content,"project_id":null,"preview_digest":preview["data"]["digest"]
+                "content":content,"approved_quick_exec_ids":["qe-portable"],"project_id":null,"preview_digest":preview["data"]["digest"]
             }),
         )
         .await;
@@ -2433,14 +2555,14 @@ async fn artifact_reimport_reports_a_locally_changed_imported_dependency() {
     let (_, preview) = post_json(
         app.clone(),
         "/api/pages/import/preview",
-        serde_json::json!({"content":content}),
+        serde_json::json!({"content":content,"approved_quick_exec_ids":["qe-portable"]}),
     )
     .await;
     let (_, imported) = post_json(
         app.clone(),
         "/api/pages/import",
         serde_json::json!({
-            "content":content,"preview_digest":preview["data"]["digest"]
+            "content":content,"approved_quick_exec_ids":["qe-portable"],"preview_digest":preview["data"]["digest"]
         }),
     )
     .await;
@@ -2461,7 +2583,7 @@ async fn artifact_reimport_reports_a_locally_changed_imported_dependency() {
     let (_, conflict) = post_json(
         app.clone(),
         "/api/pages/import/preview",
-        serde_json::json!({"content":content}),
+        serde_json::json!({"content":content,"approved_quick_exec_ids":["qe-portable"]}),
     )
     .await;
     assert_eq!(conflict["data"]["can_import"], false, "{conflict}");
@@ -2478,12 +2600,12 @@ async fn artifact_reimport_reports_a_locally_changed_imported_dependency() {
     let (_, chosen) = post_json(
         app.clone(),
         "/api/pages/import/preview",
-        serde_json::json!({"content":content,"choices":choices}),
+        serde_json::json!({"content":content,"approved_quick_exec_ids":["qe-portable"],"choices":choices}),
     )
     .await;
     assert_eq!(chosen["data"]["can_import"], true, "{chosen}");
     assert_eq!(workflow_import_database_snapshot(&state).await, before);
-    let (_, copied) = post_json(app, "/api/pages/import", serde_json::json!({"content":content,"choices":choices,"preview_digest":chosen["data"]["digest"]})).await;
+    let (_, copied) = post_json(app, "/api/pages/import", serde_json::json!({"content":content,"approved_quick_exec_ids":["qe-portable"],"choices":choices,"preview_digest":chosen["data"]["digest"]})).await;
     assert_eq!(copied["success"], true, "{copied}");
     state
         .db

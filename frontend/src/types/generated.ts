@@ -496,6 +496,8 @@ export type ArtifactBundlePoint = { observed_at: string, payload: any, dedupe_ke
 
 export type ArtifactImportAction = "create" | "reuse";
 
+export type ArtifactImportApiReview = { method: string | null, endpoint: string, plugin: string, };
+
 export type ArtifactImportChoice = { kind: ArtifactResourceKind, source_id: string, action: ArtifactImportAction, target_id: string | null, };
 
 export type ArtifactImportDisposition = "create" | "reuse" | "conflict";
@@ -504,11 +506,17 @@ export type ArtifactImportEntry = { kind: ArtifactResourceKind, source_id: strin
 /**
  * UI translation key suffix: missing, identical, changed, retargeted, chosen.
  */
-reason: string, };
+reason: string, quick_exec?: ArtifactImportExecReview, quick_api?: ArtifactImportApiReview, };
+
+export type ArtifactImportExecReview = { command: string, args: Array<string>, approved: boolean, };
 
 export type ArtifactImportPreview = { title: string, entries: Array<ArtifactImportEntry>, issues: Array<string>, warnings: Array<ArtifactImportWarning>, digest: string, can_import: boolean, };
 
 export type ArtifactImportRequest = { content: string, project_id?: string | null, choices?: Array<ArtifactImportChoice>,
+/**
+ * Source identities of new Quick Execs explicitly reviewed by the user.
+ */
+approved_quick_exec_ids?: Array<string>,
 /**
  * The preview digest is required at commit; stale decisions are rejected.
  */

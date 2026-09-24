@@ -34,6 +34,51 @@ beforeEach(() => { vi.clearAllMocks(); mocks.projects.mockResolvedValue([]); moc
 afterEach(cleanup);
 
 describe('ArtifactImportDialog', () => {
+  it('shows exact commands and requests approval for every new Quick Exec before importing', async () => {
+    const entries: ArtifactImportPreview['entries'] = [
+      preview.entries[0],
+      { kind: 'quick_exec', source_id: 'qe', name: 'Collector', disposition: 'create', existing_id: null, reason: 'missing',
+        quick_exec: { command: 'bash', args: ['-c', 'printf "%s" "Équipe 🦀"'], approved: false } },
+      { kind: 'quick_api', source_id: 'qa', name: 'Metrics', disposition: 'create', existing_id: null, reason: 'missing',
+        quick_api: { method: 'POST', endpoint: '/tickets', plugin: 'jira' } },
+    ];
+    mocks.preview.mockImplementation(async request => ({
+      ...preview, digest: request.approved_quick_exec_ids.length ? 'approved-digest' : 'unapproved-digest',
+      can_import: request.approved_quick_exec_ids.includes('qe'),
+      entries: entries.map(entry => entry.quick_exec ? { ...entry, quick_exec: { ...entry.quick_exec, approved: request.approved_quick_exec_ids.includes('qe') } } : entry),
+    }));
+    render(<ArtifactImportDialog onClose={vi.fn()} onImported={vi.fn()} />);
+    await inspect();
+    expect(document.querySelector('pre')?.textContent).toBe(JSON.stringify({
+      command: 'bash', args: ['-c', 'printf "%s" "Équipe 🦀"'],
+    }, null, 2));
+    expect(screen.getByText('POST /tickets')).toBeInTheDocument();
+    expect(screen.getByText('jira')).toBeInTheDocument();
+    const approve = screen.getByRole('checkbox', { name: 'pages.import.approveExec:Collector' });
+    expect(approve).not.toBeChecked();
+    expect(screen.getByRole('button', { name: 'pages.import.confirm' })).toBeDisabled();
+    fireEvent.click(approve);
+    expect(screen.getByRole('button', { name: 'pages.import.confirm' })).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'pages.import.preview' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'pages.import.confirm' })).toBeEnabled());
+    expect(mocks.preview).toHaveBeenLastCalledWith(expect.objectContaining({ approved_quick_exec_ids: ['qe'] }));
+    fireEvent.click(approve);
+    expect(screen.getByRole('button', { name: 'pages.import.confirm' })).toBeDisabled();
+    expect(mocks.commit).not.toHaveBeenCalled();
+    fireEvent.click(approve);
+    fireEvent.click(screen.getByRole('button', { name: 'pages.import.preview' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'pages.import.confirm' })).toBeEnabled());
+    fireEvent.click(screen.getByRole('button', { name: 'pages.import.confirm' }));
+    await waitFor(() => expect(mocks.commit).toHaveBeenCalledWith(expect.objectContaining({
+      approved_quick_exec_ids: ['qe'], preview_digest: 'approved-digest',
+    })));
+    // A new file requires fresh approvals, including one with the same source IDs.
+    await chooseFile();
+    fireEvent.click(screen.getByRole('button', { name: 'pages.import.preview' }));
+    expect(await screen.findByRole('checkbox', { name: 'pages.import.approveExec:Collector' })).not.toBeChecked();
+    expect(screen.getByRole('button', { name: 'pages.import.confirm' })).toBeDisabled();
+  });
+
   it('previews without importing, then commits once with the reviewed digest despite synchronous clicks', async () => {
     const imported = vi.fn();
     render(<ArtifactImportDialog onClose={vi.fn()} onImported={imported} />);
@@ -44,7 +89,7 @@ describe('ArtifactImportDialog', () => {
     act(() => { button.click(); button.click(); });
     await waitFor(() => expect(imported).toHaveBeenCalledWith(result.artifact));
     expect(mocks.commit).toHaveBeenCalledTimes(1);
-    expect(mocks.commit).toHaveBeenCalledWith({ content, project_id: null, choices: [], preview_digest: 'digest-1' });
+    expect(mocks.commit).toHaveBeenCalledWith({ content, project_id: null, choices: [], approved_quick_exec_ids: [], preview_digest: 'digest-1' });
   });
 
   it('requires a new preview after changing a dependency choice', async () => {

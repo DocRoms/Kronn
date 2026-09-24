@@ -29,6 +29,10 @@ const fr: TranslationDict = {
   "disc.mosaic.noPlan": "Aucune tâche active dans le plan",
   "disc.mosaic.later": "{0} pour plus tard",
 
+  "pages.import.commandAndArgs": "Commande et arguments",
+  "pages.import.approveExec": "J’ai vérifié et j’autorise l’import de la commande de {0}.",
+  "pages.import.execApprovalRequired": "Vérifie et approuve chaque nouveau Quick Exec, puis vérifie à nouveau l’import.",
+  "pages.import.methodUnspecified": "Méthode non précisée",
   "pages.exportArtifact": "JSON Artifact",
   "pages.import.title": "Importer un Artifact",
   "pages.import.hint": "Conserve le HTML, les données retenues et les définitions des automatisations liées. Vérifie les dépendances avant de créer un nouvel Artifact.",

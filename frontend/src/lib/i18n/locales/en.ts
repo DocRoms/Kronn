@@ -29,6 +29,10 @@ const en: TranslationDict = {
   "disc.mosaic.noPlan": "No active plan tasks",
   "disc.mosaic.later": "{0} for later",
 
+  "pages.import.commandAndArgs": "Command and arguments",
+  "pages.import.approveExec": "I reviewed and approve importing the command for {0}.",
+  "pages.import.execApprovalRequired": "Review and approve each new Quick Exec, then check the import again.",
+  "pages.import.methodUnspecified": "Method not specified",
   "pages.exportArtifact": "Artifact JSON",
   "pages.import.title": "Import an Artifact",
   "pages.import.hint": "Keep the HTML, retained data and linked automation definitions. Review dependencies before creating a new Artifact.",

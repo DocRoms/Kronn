@@ -38,6 +38,14 @@ that need different destinations are copied, with typed references remapped;
 literal text, CSS and unrelated JavaScript are not rewritten. An explicit reuse
 that cannot target the new destination is rejected. New workflows are disabled;
 existing workflows keep their state and no automation is executed by import.
+For every Quick Exec that will be created, the preview shows the exact saved
+command and argument array. The user must approve each command and refresh the
+preview before import is enabled. The server requires these explicit source
+identities in `approved_quick_exec_ids`; the reviewed digest includes approvals
+and bundle content, so changing either invalidates the previous review.
+Reused local Quick Execs require no new approval. Choosing another file clears
+all approvals. New Quick APIs show their saved method, endpoint and plugin;
+an unspecified method is shown as unknown, not inferred.
 [src: file: backend/src/api/artifact_portability/import.rs:1]
 [src: file: frontend/src/components/ArtifactImportDialog.tsx:1]
 

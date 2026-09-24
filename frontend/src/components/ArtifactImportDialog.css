@@ -12,6 +12,11 @@
 .artifact-import-entry > div { min-width: 0; overflow-wrap: anywhere; }
 .artifact-import-entry small { display: block; margin-top: 4px; opacity: .75; }
 .artifact-import-entry select { align-self: center; max-width: 45%; }
+.artifact-import-exec { margin-top: 12px; }
+.artifact-import-exec pre { white-space: pre-wrap; overflow-wrap: anywhere; padding: 8px; background: var(--kr-bg-surface); border-radius: 6px; font-size: 12px; }
+.artifact-import-dialog .artifact-import-approval { flex-direction: row; align-items: flex-start; font-size: 13px; }
+.artifact-import-approval input { flex-shrink: 0; margin-top: 3px; }
+.artifact-import-api { overflow-wrap: anywhere; }
 .artifact-import-warning { margin-top: 16px; padding: 12px; border: 1px solid var(--kr-border); border-radius: 8px; }
 .artifact-import-warning li, .artifact-import-error { overflow-wrap: anywhere; }
 .artifact-import-error { color: var(--kr-danger, #e76f6f); }

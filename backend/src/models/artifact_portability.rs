@@ -97,6 +97,9 @@ pub struct ArtifactImportRequest {
     pub project_id: Option<String>,
     #[serde(default)]
     pub choices: Vec<ArtifactImportChoice>,
+    /// Source identities of new Quick Execs explicitly reviewed by the user.
+    #[serde(default)]
+    pub approved_quick_exec_ids: Vec<String>,
     /// The preview digest is required at commit; stale decisions are rejected.
     pub preview_digest: Option<String>,
 }
@@ -112,6 +115,22 @@ pub enum ArtifactImportDisposition {
 
 #[derive(Debug, Clone, Serialize, TS)]
 #[ts(export)]
+pub struct ArtifactImportExecReview {
+    pub command: String,
+    pub args: Vec<String>,
+    pub approved: bool,
+}
+
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+pub struct ArtifactImportApiReview {
+    pub method: Option<String>,
+    pub endpoint: String,
+    pub plugin: String,
+}
+
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
 pub struct ArtifactImportEntry {
     pub kind: ArtifactResourceKind,
     pub source_id: String,
@@ -120,6 +139,12 @@ pub struct ArtifactImportEntry {
     pub existing_id: Option<String>,
     /// UI translation key suffix: missing, identical, changed, retargeted, chosen.
     pub reason: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub quick_exec: Option<ArtifactImportExecReview>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub quick_api: Option<ArtifactImportApiReview>,
 }
 
 #[derive(Debug, Clone, Serialize, TS)]
