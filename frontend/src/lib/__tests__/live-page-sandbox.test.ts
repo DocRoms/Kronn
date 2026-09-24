@@ -260,6 +260,30 @@ describe('Live Page sandbox', () => {
     await frame.happyDOM.close();
   });
 
+  it('opens the collapse inside the block the Page names, right under its CTA', async () => {
+    const { Window } = await import('happy-dom');
+    const frame = new Window();
+    const page = '<html><head></head><body><table><tbody><tr><td>'
+      + '<div class="step" data-kronn-action-slot-host><p>x</p>'
+      + '<button data-kronn-action="autocode-implem" data-kronn-bindings=\'{"ticketKey":"EW-1"}\'>go</button></div>'
+      + '<p class="after">description</p></td></tr></tbody></table></body></html>';
+    frame.document.write(buildSandboxDocument(page, 'channel-1'));
+    for (const script of Array.from(frame.document.querySelectorAll('script:not([type])'))) {
+      (frame as unknown as { eval: (code: string) => void }).eval(script.textContent ?? '');
+    }
+    frame.dispatchEvent(new frame.MessageEvent('message', { data: {
+      type: 'kronn:page-action-slot', version: 1, channel_id: 'channel-1',
+      slot: { action_ref: 'autocode-implem', binding_key: liveActionBindingKey({ ticketKey: 'EW-1' }), height: 90 },
+    } }));
+    const slot = frame.document.querySelector('[data-kronn-action-slot]') as unknown as HTMLElement | null;
+    expect(slot?.tagName).toBe('DIV');
+    expect(slot?.parentElement?.classList.contains('step')).toBe(true);
+    expect(slot?.style.height).toBe('90px');
+    // Not after the table row: the description stays below the card.
+    expect(frame.document.querySelectorAll('tr').length).toBe(1);
+    await frame.happyDOM.close();
+  });
+
   it('reports an anchor that is the collapse the Page opened, not its row', async () => {
     const postMessage = vi.fn();
     const onAnchor = vi.fn();

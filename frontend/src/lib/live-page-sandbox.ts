@@ -253,8 +253,11 @@ export function buildSandboxDocument(
     let anchored=null;
     let anchorQueued=false;
     // A row, not the button: the card belongs under the whole line it acts on.
+    // A Page may name where its collapse opens: the card then sits under the CTA's own
+    // block instead of after the whole table row that happens to contain it.
+    const slotHost=element=>closest.call(element,'[data-kronn-action-slot-host]');
     const anchorRect=element=>{
-      const row=closest.call(element,'tr,li')||element;
+      const row=slotHost(element)||closest.call(element,'tr,li')||element;
       const rect=getBounds.call(row);
       return {left:rect.left,top:rect.top,width:rect.width,height:rect.height};
     };
@@ -276,12 +279,13 @@ export function buildSandboxDocument(
     };
     const openSlot=(ref,key,height)=>{
       const cta=findCta(ref,key);
-      const row=cta?closest.call(cta,'tr,li')||cta:null;
+      const host=cta?slotHost(cta):null;
+      const row=host||(cta?closest.call(cta,'tr,li')||cta:null);
       if(!row||!row.parentNode){dropSlot();return;}
-      const inRow=row.tagName==='TR';
+      const inRow=!host&&row.tagName==='TR';
       if(!slotEl||slotEl.__row!==row){
         dropSlot();
-        slotEl=document.createElement(inRow?'tr':'li');
+        slotEl=document.createElement(host?'div':inRow?'tr':'li');
         slotEl.setAttribute('data-kronn-action-slot','');
         if(inRow){
           // Exactly the row's own span: an oversized colspan adds phantom columns, and a
@@ -292,11 +296,12 @@ export function buildSandboxDocument(
           cell.style.padding='0';
           cell.style.border='0';
           slotEl.appendChild(cell);
-        }else{
+        }else if(!host){
           slotEl.style.listStyle='none';
         }
         slotEl.__row=row;
-        row.parentNode.insertBefore(slotEl,row.nextSibling);
+        if(host)host.appendChild(slotEl);
+        else row.parentNode.insertBefore(slotEl,row.nextSibling);
       }
       const box=inRow?slotEl.firstChild:slotEl;
       box.style.height=height+'px';
