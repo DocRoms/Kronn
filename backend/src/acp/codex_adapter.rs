@@ -32,7 +32,7 @@
 //! fixed environment variable names, never credential values in argv/prompt.
 //! Task workers instead reuse the direct worker's narrower launch policy.
 
-use super::adapter_process::AdapterProcess;
+use super::adapter_process::{AdapterProcess, StderrTail};
 use crate::agents::runner::{AdapterLaunchOptions, SpawnIo};
 use async_trait::async_trait;
 use serde_json::Value;
@@ -424,15 +424,20 @@ impl AcpTransport for CodexAcpAdapter {
             .stdout
             .take()
             .ok_or_else(|| AcpError::Transport("codex stdout unavailable".into()))?;
+        let stderr = StderrTail::capture(child.stderr.take());
         self.process.install(child, &cancel).await?;
-        stdin
-            .write_all(prompt.as_bytes())
-            .await
-            .map_err(|error| AcpError::Transport(format!("write codex prompt: {error}")))?;
-        stdin
-            .shutdown()
-            .await
-            .map_err(|error| AcpError::Transport(format!("close codex prompt stdin: {error}")))?;
+        if let Err(error) = stdin.write_all(prompt.as_bytes()).await {
+            return Err(self
+                .process
+                .prompt_write_failure("codex", "write codex prompt", error, &cancel, stderr)
+                .await);
+        }
+        if let Err(error) = stdin.shutdown().await {
+            return Err(self
+                .process
+                .prompt_write_failure("codex", "close codex prompt stdin", error, &cancel, stderr)
+                .await);
+        }
         drop(stdin);
 
         let mut lines = BufReader::new(stdout).lines();
@@ -467,7 +472,9 @@ impl AcpTransport for CodexAcpAdapter {
                 },
                 Ok(None) => break,
                 Err(error) => {
-                    return Err(AcpError::Transport(format!("read codex stdout: {error}")));
+                    return Err(stderr
+                        .into_error("codex", format!("read codex stdout: {error}"))
+                        .await);
                 }
             }
         }
@@ -478,10 +485,11 @@ impl AcpTransport for CodexAcpAdapter {
             return Err(AcpError::Transport(message));
         }
         if !status.success() {
-            return Err(AcpError::Transport(format!(
-                "codex exited with status {status}"
-            )));
+            return Err(stderr
+                .into_error("codex", format!("codex exited with status {status}"))
+                .await);
         }
+        stderr.discard("codex").await;
         let _ = events.send(AcpSessionEvent::Completed).await;
         Ok(())
     }
@@ -722,6 +730,77 @@ mod tests {
         let (tx, _rx) = mpsc::channel(16);
         let error = host.prompt(&target, "hi", tx).await.unwrap_err();
         assert!(matches!(error, AcpError::Transport(_)));
+    }
+
+    async fn prompt_fixture(body: &str, prompt: &str) -> Result<Vec<AcpSessionEvent>, AcpError> {
+        let dir = tempfile::tempdir().unwrap();
+        let fixture = crate::acp::test_support::write_fixture_script(dir.path(), body);
+        let adapter =
+            CodexAcpAdapter::new_with_program(fixture.to_string_lossy(), None, false, None);
+        let mut host = AcpHost::new(1, std::sync::Arc::new(adapter));
+        host.negotiate(init_request(&dir.path().to_string_lossy()))
+            .await
+            .unwrap();
+        let target = host.create_session().await.unwrap();
+        let (tx, rx) = mpsc::channel(16);
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            host.prompt(&target, prompt, tx),
+        )
+        .await
+        .expect("an adapter turn must never hang on its child's pipes");
+        let events = drain(rx).await;
+        result.map(|()| events)
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn a_prompt_write_to_a_dead_process_reports_its_exit_and_stderr() {
+        // More than a pipe buffer: the write cannot complete once the child is gone.
+        let prompt = "x".repeat(1 << 20);
+        let error = prompt_fixture(
+            "printf '%s\\n' 'Error: not logged in, run codex login' >&2\nexit 1",
+            &prompt,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("codex exited with status exit status: 1"),
+            "{error}"
+        );
+        assert!(error.contains("before reading its prompt"), "{error}");
+        assert!(error.contains("not logged in, run codex login"), "{error}");
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn a_failed_exit_surfaces_the_stderr_tail() {
+        let error = prompt_fixture(
+            "cat >/dev/null\nprintf '%s\\n' 'early noise' >&2\nprintf '%s\\n' 'fatal: model not available' >&2\nexit 3",
+            "hi",
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("codex exited with status"), "{error}");
+        assert!(error.contains("fatal: model not available"), "{error}");
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn stderr_is_drained_and_never_reaches_the_event_stream() {
+        // Far past a pipe buffer before stdin is read: an undrained pipe would stall here.
+        let events = prompt_fixture(
+            "head -c 1048576 /dev/zero | tr '\\0' 'e' >&2\ncat >/dev/null\nprintf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"id\":\"i1\",\"type\":\"agent_message\",\"text\":\"done\"}}'",
+            "hi",
+        )
+        .await
+        .unwrap();
+        assert!(events.contains(&AcpSessionEvent::TextDelta("done".into())));
+        assert!(events
+            .iter()
+            .all(|event| !format!("{event:?}").contains("eee")));
     }
 
     #[tokio::test]

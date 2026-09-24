@@ -67,6 +67,12 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- When a Claude or Codex agent run through ACP fails, the error now includes
+  the end of what the agent printed on stderr (for example an expired login)
+  instead of only "exited with status 1". A prompt that cannot be delivered
+  because the agent already quit reports the agent's exit status and stderr
+  rather than "Broken pipe". The executed command line is logged at debug
+  level with prompts and secret values left out (KT-666).
 - Native ACP replies no longer include echoed user prompts, including Vibe's
   copy of Kronn's injected instructions. Only agent message chunks contribute
   answer text; tool and usage events remain separate (KT-729).
