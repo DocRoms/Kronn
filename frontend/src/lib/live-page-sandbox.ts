@@ -244,8 +244,11 @@ export function buildSandboxDocument(html: string, channelId: string, initialThe
         slotEl=document.createElement(inRow?'tr':'li');
         slotEl.setAttribute('data-kronn-action-slot','');
         if(inRow){
+          // Exactly the row's own span: an oversized colspan adds phantom columns, and a
+          // table-layout:fixed table then shares its free width with them.
+          const span=Array.prototype.reduce.call(row.cells,(n,c)=>n+(c.colSpan||1),0)||1;
           const cell=document.createElement('td');
-          cell.setAttribute('colspan','99');
+          cell.setAttribute('colspan',String(span));
           cell.style.padding='0';
           cell.style.border='0';
           slotEl.appendChild(cell);

@@ -195,6 +195,31 @@ describe('Live Page sandbox', () => {
     relay.dispose();
   });
 
+  it('opens the collapse over exactly the row\'s columns', async () => {
+    // A colspan larger than the row adds phantom columns: a table-layout:fixed table then
+    // shares its free width with them and its auto column collapses to a few pixels.
+    const { Window } = await import('happy-dom');
+    const frame = new Window();
+    const page = '<html><head></head><body><table style="table-layout:fixed"><tbody>'
+      + '<tr><td>a</td><td>b</td><td colspan="2">c</td><td>d</td><td>e</td>'
+      + '<td><button data-kronn-action="autocode-ticket" data-kronn-bindings=\'{"ticketKey":"EW-1"}\'>x</button></td></tr>'
+      + '<tr><td colspan="7">next</td></tr></tbody></table></body></html>';
+    frame.document.write(buildSandboxDocument(page, 'channel-1'));
+    // `document.write` builds the DOM without running it; run the injected scripts ourselves.
+    for (const script of Array.from(frame.document.querySelectorAll('script:not([type])'))) {
+      (frame as unknown as { eval: (code: string) => void }).eval(script.textContent ?? '');
+    }
+    frame.dispatchEvent(new frame.MessageEvent('message', { data: {
+      type: 'kronn:page-action-slot', version: 1, channel_id: 'channel-1',
+      slot: { action_ref: 'autocode-ticket', binding_key: liveActionBindingKey({ ticketKey: 'EW-1' }), height: 120 },
+    } }));
+    const cell = frame.document.querySelector('[data-kronn-action-slot] > td') as unknown as HTMLTableCellElement | null;
+    expect(cell).not.toBeNull();
+    expect(cell!.colSpan).toBe(7);
+    expect(cell!.style.height).toBe('120px');
+    await frame.happyDOM.close();
+  });
+
   it('reports an anchor that is the collapse the Page opened, not its row', async () => {
     const postMessage = vi.fn();
     const onAnchor = vi.fn();
