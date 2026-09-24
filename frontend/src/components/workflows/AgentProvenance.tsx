@@ -12,7 +12,7 @@ const ROLE_KEYS: Record<WorkflowAgentAttempt['role'], string> = {
 };
 
 /** What the provider reported, else what Kronn resolved; never the current config. */
-export function attemptModelLabel(attempt: WorkflowAgentAttempt, t: Translate): string {
+function attemptModelLabel(attempt: WorkflowAgentAttempt, t: Translate): string {
   if (attempt.observed_models.length > 0) return attempt.observed_models.join(' / ');
   if (attempt.model_applied === false) return t('wf.attemptModelCliDefault');
   return attempt.resolved_model ?? t('wf.modelUnknown');
