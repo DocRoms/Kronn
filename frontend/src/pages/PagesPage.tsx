@@ -303,15 +303,21 @@ export function PagesPage({
     }
   }, [loadDetail, reloadPageActions, selectedId]);
 
+  // `refresh` is rebuilt whenever `selectedId` changes, including from inside
+  // its own call and from `select`. Depending on it directly would re-run the
+  // mount effect on every such change and double the GET /pages/{id} that
+  // call already made — read the latest closure through a ref instead.
+  const refreshRef = useRef(refresh);
+  useEffect(() => { refreshRef.current = refresh; }, [refresh]);
+
   // Initial remote-library synchronization; the state updates happen after
   // the request resolves, not synchronously in the effect body.
-  // eslint-disable-next-line react-hooks/set-state-in-effect
-  useEffect(() => { void refresh(); }, [refresh]);
+  useEffect(() => { void refreshRef.current(); }, []);
   useEffect(() => {
     if (editingHtml) return undefined;
-    const timer = window.setInterval(() => { void refresh(); }, REFRESH_MS);
+    const timer = window.setInterval(() => { void refreshRef.current(); }, REFRESH_MS);
     return () => window.clearInterval(timer);
-  }, [editingHtml, refresh]);
+  }, [editingHtml]);
 
   const select = useCallback(async (page: LivePage) => {
     if (selectionMode) {

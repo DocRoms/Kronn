@@ -108,6 +108,8 @@ Release notes for 0.9.3 and earlier are available in the
 - A failed workflow import rolls back every bundled resource, including Pages
   and Quick Prompts created before the error. Late validation or database
   failures no longer leave partial imports or activate an empty Pages library.
+- A Live Page's 30-second auto-refresh, and switching to another Page, each
+  fetch that Page's detail exactly once instead of twice (KT-736).
 
 ## [0.14.0] - 2026-09-23
 
