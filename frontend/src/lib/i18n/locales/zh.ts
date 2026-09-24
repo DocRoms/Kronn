@@ -3926,6 +3926,8 @@ const zh: TranslationDict = {
   "wf.attempts": "尝试",
   "wf.attemptRetained": "此步骤保留的输出",
   "wf.attemptNoneRetained": "没有任何尝试产生被保留的输出。",
+  "wf.attemptConnection": "连接",
+  "wf.attemptConnectionCopy": "复制已保存的连接 ID {0}",
   "wf.attemptFormatFallback": "无格式约束",
   "wf.attemptModelCliDefault": "CLI 默认模型",
   "wf.attemptRoleInitial": "初始",

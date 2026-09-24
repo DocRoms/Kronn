@@ -4018,6 +4018,8 @@ KRONN:APPLY; eso sobreescribiría el valor real con un placeholder
   'wf.attempts': 'Intentos',
   'wf.attemptRetained': 'Salida conservada para este paso',
   'wf.attemptNoneRetained': 'Ningún intento produjo una salida conservada.',
+  'wf.attemptConnection': 'Conexión',
+  'wf.attemptConnectionCopy': 'Copiar el ID de la conexión guardada {0}',
   'wf.attemptFormatFallback': 'sin restricción de formato',
   'wf.attemptModelCliDefault': 'modelo por defecto del CLI',
   'wf.attemptRoleInitial': 'inicial',

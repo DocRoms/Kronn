@@ -39,6 +39,12 @@ This records execution metadata on the completed step row. It is not an
 independent transaction journal of every in-flight provider request; abrupt
 process termination before the step result is saved may leave no provenance.
 The run detail shows each attempt and marks the retained one.
+When an attempt has a saved connection ID, it displays a compact, copyable ID;
+the tooltip and clipboard expose the full ID. Connection names are not
+snapshotted, so the detail never resolves them from the current configuration.
+Attempts without a saved connection ID do not invent one.
+
+[src: file: frontend/src/components/workflows/AgentProvenance.tsx]
 
 ## In templates and Page publication
 

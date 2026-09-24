@@ -1,5 +1,6 @@
 import type { StepResult, WorkflowAgentAttempt } from '../../types/generated';
 import { AGENT_LABELS } from '../../lib/constants';
+import { CopyIdPill } from '../CopyIdPill';
 
 type Translate = (key: string, ...args: (string | number)[]) => string;
 
@@ -51,6 +52,9 @@ export function AgentProvenanceDetails({ sr, t }: { sr: StepResult; t: Translate
           >
             {retained ? '★ ' : attempt.succeeded ? '✓ ' : '! '}
             {t(ROLE_KEYS[attempt.role])} · {AGENT_LABELS[attempt.agent] ?? attempt.agent} · {attemptModelLabel(attempt, t)}
+            {attempt.connection_id && (
+              <> · {t('wf.attemptConnection')} <CopyIdPill id={attempt.connection_id} title={t('wf.attemptConnectionCopy', attempt.connection_id)} /></>
+            )}
             {attempt.format_fallback ? ` · ${t('wf.attemptFormatFallback')}` : ''}
             {attempt.duration_ms > 0 ? ` · ${(attempt.duration_ms / 1000).toFixed(1)}s` : ''}
           </span>

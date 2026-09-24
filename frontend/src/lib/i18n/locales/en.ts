@@ -4018,6 +4018,8 @@ suggestion; that would overwrite the real value with a placeholder
   'wf.attempts': 'Attempts',
   'wf.attemptRetained': 'Output kept for this step',
   'wf.attemptNoneRetained': 'No attempt produced a kept output.',
+  'wf.attemptConnection': 'Connection',
+  'wf.attemptConnectionCopy': 'Copy saved connection ID {0}',
   'wf.attemptFormatFallback': 'without format constraint',
   'wf.attemptModelCliDefault': 'CLI default model',
   'wf.attemptRoleInitial': 'initial',

@@ -136,6 +136,8 @@ describe('RunDetail — step_kind snapshot badges (run history honesty)', () => 
     render(<RunDetail run={run} workflowSteps={steps} onDelete={() => {}} />);
     expect(screen.getByText('wf.modelUnknown')).toBeInTheDocument();
     expect(screen.queryByText('reasoning')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /main/ }));
+    expect(screen.queryByTestId('wf-agent-provenance')).not.toBeInTheDocument();
   });
 
   const attempt = (over: Partial<WorkflowAgentAttempt>): WorkflowAgentAttempt => ({
@@ -203,6 +205,39 @@ describe('RunDetail — step_kind snapshot badges (run history honesty)', () => 
     expect(list).toHaveTextContent('! wf.attemptRoleInitial · Codex · wf.attemptModelCliDefault');
     expect(list).not.toHaveTextContent('gpt-x');
     expect(list).toHaveTextContent('wf.attemptNoneRetained');
+    expect(within(list).queryByRole('button')).not.toBeInTheDocument();
+  });
+
+  it('shows and copies the saved connection for each attempt after workflow settings change', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    vi.spyOn(navigator.clipboard, 'writeText').mockImplementation(writeText);
+    const initialConnection = '12345678-abcd-4def-9012-123456789abc';
+    const retainedConnection = '87654321-abcd-4def-9012-123456789abc';
+    const currentConnection = '99999999-abcd-4def-9012-123456789abc';
+    const run = mkRun({
+      step_results: [mkResult({
+        step_kind: 'Agent', step_agent: 'Custom',
+        agent_provenance: {
+          selected_attempt: 2,
+          attempts: [
+            attempt({ connection_id: initialConnection }),
+            attempt({ id: 2, role: 'Escalation', agent: 'Custom', connection_id: retainedConnection }),
+          ],
+        },
+      })],
+    });
+    const steps = [mkStep({ agent_settings: { connection_id: currentConnection } as WorkflowStep['agent_settings'] })];
+    render(<RunDetail run={run} workflowSteps={steps} onDelete={() => {}} />);
+    fireEvent.click(screen.getByRole('button', { name: /main/ }));
+    const list = screen.getByTestId('wf-agent-provenance');
+    for (const connection of [initialConnection, retainedConnection]) {
+      const button = within(list).getByRole('button', { name: `wf.attemptConnectionCopy:${connection}` });
+      expect(button).toHaveTextContent(`#${connection.slice(0, 8)}`);
+      await act(async () => { fireEvent.click(button); });
+      expect(writeText).toHaveBeenLastCalledWith(connection);
+    }
+    expect(within(list).queryByRole('button', { name: new RegExp(currentConnection) })).not.toBeInTheDocument();
+    expect(list).not.toHaveTextContent(currentConnection);
   });
 
   it('renders the agent label for a snapshotted Agent step', () => {

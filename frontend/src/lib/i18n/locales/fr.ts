@@ -4031,6 +4031,8 @@ suggestion KRONN:APPLY ; cela écraserait la vraie valeur par un placeholder
   'wf.attempts': 'Tentatives',
   'wf.attemptRetained': 'Sortie retenue pour cette étape',
   'wf.attemptNoneRetained': "Aucune tentative n'a produit de sortie retenue.",
+  'wf.attemptConnection': 'Connexion',
+  'wf.attemptConnectionCopy': 'Copier l’identifiant de la connexion enregistrée {0}',
   'wf.attemptFormatFallback': 'sans contrainte de format',
   'wf.attemptModelCliDefault': 'modèle par défaut du CLI',
   'wf.attemptRoleInitial': 'initiale',
