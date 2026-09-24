@@ -21,6 +21,7 @@ import {
 import { formatRelativeTime } from '../lib/relativeTime';
 import { ArtifactImportDialog } from '../components/ArtifactImportDialog';
 import { triggerDownload } from '../lib/downloadBlob';
+import { standaloneDiscussionMessageUrl } from '../lib/live-page-navigation';
 import { CopyIdPill } from '../components/CopyIdPill';
 import { RunStatusCard } from '../components/RunStatusCard';
 import { LivePageActionOverlay } from '../components/LivePageActionOverlay';
@@ -1106,7 +1107,10 @@ export function PagesPage({
                 <div className="live-pages-workflows">
                   <div><MessageSquare size={13} /><strong>{t('pages.linkedDiscussions')}</strong></div>
                   {linkedDiscussions.map(discussion => (
-                    <button key={discussion.discussion_id} type="button" onClick={() => onNavigateDiscussion?.(discussion.discussion_id)} disabled={!onNavigateDiscussion}>
+                    discussion.source_message_id ? <a key={discussion.discussion_id}
+                      href={standaloneDiscussionMessageUrl(discussion.discussion_id, discussion.source_message_id)} target="_blank" rel="noopener noreferrer">
+                      {discussion.title} · {t('pages.sourceMessage')} <ExternalLink size={12} />
+                    </a> : <button key={discussion.discussion_id} type="button" onClick={() => onNavigateDiscussion?.(discussion.discussion_id)} disabled={!onNavigateDiscussion}>
                       {discussion.title}{discussion.relation === 'created_from' ? ` · ${t('pages.createdFrom')}` : ''}
                     </button>
                   ))}

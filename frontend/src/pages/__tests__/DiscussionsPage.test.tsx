@@ -3766,6 +3766,34 @@ describe('DiscussionsPage', () => {
     expect(document.querySelector('[data-search-current="true"]')).toBeNull();
   });
 
+  it('opens an Artifact source link at its exact message after loading the discussion', async () => {
+    vi.mocked(discussionsApi.runAgent).mockClear();
+    vi.mocked(discussionsApi.sendMessageStream).mockClear();
+    const target = makeListDiscussion('artifact-discussion', 2);
+    const sourceId = 'source"message';
+    vi.mocked(discussionsApi.get).mockResolvedValue({
+      ...target,
+      messages: [
+        { id: sourceId, role: 'Agent', channel: 'main', content: 'Artifact source', agent_type: 'Codex', timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
+        { id: 'newest', role: 'User', channel: 'main', content: 'Later message', agent_type: null, timestamp: '2026-01-02T00:00:00Z', tokens_used: 0, auth_mode: null },
+      ],
+    });
+    await wrap(
+      <DiscussionsPage
+        projects={[]} agents={[]} allDiscussions={[target]} configLanguage="fr"
+        agentAccess={null} refetchDiscussions={noop} refetchProjects={noop}
+        onNavigate={noop} toast={toastFn} initialActiveDiscussionId={target.id}
+        initialMessageId={sourceId} {...liftedProps()}
+      />,
+    );
+    await waitFor(() => {
+      expect(discussionsApi.get).toHaveBeenCalledWith(target.id);
+      expect(document.querySelector('[data-search-current="true"]')).toHaveAttribute('data-message-id', sourceId);
+    });
+    expect(discussionsApi.runAgent).not.toHaveBeenCalled();
+    expect(discussionsApi.sendMessageStream).not.toHaveBeenCalled();
+  });
+
   it('opens a global result at the exact message in its discussion', async () => {
     const sourceList = makeListDiscussion('d-global-source', 1);
     const targetList = makeListDiscussion('d-global-target', 1);

@@ -147,6 +147,18 @@ describe('PagesPage', () => {
     expect(pagesApi.importArtifact).not.toHaveBeenCalled();
   });
 
+  it('links an Artifact to its exact source message even in standalone mode', async () => {
+    vi.mocked(pagesApi.discussions).mockResolvedValue([{
+      discussion_id: 'source-disc', title: 'Original discussion', relation: 'created_from',
+      archived: false, source_message_id: 'source-message',
+    }]);
+    render(<PagesPage />);
+    const link = await screen.findByRole('link', { name: 'Original discussion · pages.sourceMessage' });
+    expect(link).toHaveAttribute('href', expect.stringContaining('#discussion-source-disc?message=source-message'));
+    expect(link).toHaveAttribute('target', '_blank');
+    expect(link).toHaveAttribute('rel', 'noopener noreferrer');
+  });
+
   it('opens the shared native action card from a sandbox intention', async () => {
     const pageAction: LivePageAction = {
       id: 'page-action:page-1:refresh', live_page_id: 'page-1', live_page_revision_id: 'rev-2',

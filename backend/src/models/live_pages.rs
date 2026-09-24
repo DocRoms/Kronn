@@ -137,6 +137,9 @@ pub struct LivePageDiscussionLink {
     pub title: String,
     pub relation: LivePageDiscussionRelation,
     pub archived: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub source_message_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -182,6 +185,9 @@ pub struct CreateLivePageRequest {
     /// Optional discussion that originated this Page. Agents set this to the
     /// current room so the artifact remains discoverable from both places.
     pub discussion_id: Option<String>,
+    /// Optional source message, which must belong to discussion_id.
+    #[ts(optional)]
+    pub source_message_id: Option<String>,
     #[serde(default)]
     pub datasets: Vec<CreateLivePageDataset>,
 }

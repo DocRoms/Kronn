@@ -48,6 +48,9 @@ Release notes for 0.9.3 and earlier are available in the
 - Artifact import shows each new Quick Exec's command and arguments and
   requires explicit approval before creating it. New Quick APIs show their
   method and endpoint in the preview.
+- HTML previews in discussion messages can become Artifacts with an editable
+  title, unchanged HTML/CSS/JavaScript, and a link back to the source message.
+  Repeated titles create distinct Artifacts without overwriting existing ones.
 
 ### Changed
 

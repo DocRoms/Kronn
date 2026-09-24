@@ -723,6 +723,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "188_artifact_import_origins",
         include_str!("sql/188_artifact_import_origins.sql"),
     ),
+    (
+        "189_artifact_message_origin",
+        include_str!("sql/189_artifact_message_origin.sql"),
+    ),
 ];
 
 /// Apply one migration inside the caller-owned transaction.

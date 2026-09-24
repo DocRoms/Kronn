@@ -128,6 +128,20 @@ the room where an agent authored the Page; `attached` is an explicit later
 association. These links are independent from Workflow publisher links and are
 deleted automatically if either side is removed.
 
+An HTML preview in a persisted discussion message can be promoted with
+**Make an Artifact**. The title is editable; the preview's HTML, CSS and JavaScript
+are copied unchanged to a new Artifact, with no workflow or command execution.
+The creation request includes `discussion_id` and `source_message_id`; the
+server verifies their relationship, inherits the discussion's project when no
+project was supplied, and resolves title/slug collisions with a fresh suffix.
+The Artifact, initial revision and source link are created in one transaction.
+The library's source link opens the discussion at that exact message. Removing
+the message clears only its source anchor and preserves the Artifact and its
+discussion link. Streamed previews without a persisted message id do not offer
+this action.
+[src: file: backend/src/api/live_pages.rs:365]
+[src: file: frontend/src/components/DocPreviewArtifact.tsx:10]
+
 ## Domain model
 
 ```text

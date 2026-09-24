@@ -2902,6 +2902,73 @@ async fn live_page_action_retention_prunes_on_write_and_old_handles_fail_closed(
 }
 
 #[tokio::test]
+async fn preview_artifact_preserves_html_origin_and_handles_title_collisions() {
+    let state = test_state();
+    state.db.with_conn(|conn| {
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute("INSERT INTO projects (id,name,path,created_at,updated_at) VALUES ('preview-project','Preview project','/tmp/preview-project',?1,?1)", [&now])?;
+        conn.execute("INSERT INTO discussions (id, title, project_id, created_at, updated_at) VALUES ('preview-room', 'Preview room', 'preview-project', ?1, ?1)", [&now])?;
+        conn.execute("INSERT INTO messages (id, discussion_id, role, content, timestamp) VALUES ('preview-message', 'preview-room', 'Agent', 'HTML preview', ?1)", [&now])?;
+        Ok(())
+    }).await.unwrap();
+    let app = build_router_with_auth(state.clone(), false);
+    let html = "  <!doctype html><style>h1 { color: red }</style>\n<h1>Équipe 🦀</h1><script>window.example = '<b>hello</b>';</script>\n";
+    let request = serde_json::json!({"title":"Team report", "html":html,"discussion_id":"preview-room","source_message_id":"preview-message","datasets":[]});
+    let mut ids = Vec::new();
+    let mut slugs = Vec::new();
+    for _ in 0..2 {
+        let (_, created) = post_json(app.clone(), "/api/pages", request.clone()).await;
+        assert_eq!(created["success"], true, "{created}");
+        assert_eq!(created["data"]["revision"]["html"], html);
+        assert_eq!(created["data"]["project_id"], "preview-project");
+        ids.push(created["data"]["id"].as_str().unwrap().to_owned());
+        slugs.push(created["data"]["slug"].as_str().unwrap().to_owned());
+        let (_, links) = get_json(
+            app.clone(),
+            &format!("/api/pages/{}/discussions", ids.last().unwrap()),
+        )
+        .await;
+        assert_eq!(links["data"][0]["source_message_id"], "preview-message");
+        assert_eq!(links["data"][0]["discussion_id"], "preview-room");
+        assert_eq!(links["data"][0]["relation"], "created_from");
+    }
+    assert_ne!(ids[0], ids[1]);
+    assert_eq!(slugs[0], "team-report");
+    assert_ne!(slugs[0], slugs[1]);
+    state.db.with_conn(|conn| {
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM workflow_runs",[],|r|r.get::<_,i64>(0))?,0);
+        // Removing the source message preserves the Artifact and discussion link.
+        conn.execute("DELETE FROM messages WHERE id = 'preview-message'", [])?;
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM live_page_discussion_links WHERE source_message_id IS NULL",[],|r|r.get::<_,i64>(0))?,2);
+        Ok(())
+    }).await.unwrap();
+}
+
+#[tokio::test]
+async fn preview_artifact_rejects_wrong_origin_and_rolls_back_a_late_origin_failure() {
+    let state = test_state();
+    state.db.with_conn(|conn| {
+        let now = chrono::Utc::now().to_rfc3339();
+        for id in ["room-a","room-b"] {
+            conn.execute("INSERT INTO discussions (id,title,created_at,updated_at) VALUES (?1,?1,?2,?2)",rusqlite::params![id,now])?;
+        }
+        conn.execute("INSERT INTO messages (id,discussion_id,role,content,timestamp) VALUES ('source','room-a','Agent','preview',?1)",[&now])?;
+        Ok(())
+    }).await.unwrap();
+    let app = build_router_with_auth(state.clone(), false);
+    let before = workflow_import_database_snapshot(&state).await;
+    for discussion_id in [Some("room-b"), None] {
+        let (_, rejected) = post_json(app.clone(), "/api/pages", serde_json::json!({"title":"Report","html":"<h1>Report</h1>","discussion_id":discussion_id,"source_message_id":"source"})).await;
+        assert_eq!(rejected["success"], false, "{rejected}");
+        assert_eq!(workflow_import_database_snapshot(&state).await, before);
+    }
+    state.db.with_conn(|conn| { conn.execute_batch("CREATE TRIGGER reject_origin BEFORE UPDATE OF source_message_id ON live_page_discussion_links BEGIN SELECT RAISE(ABORT, 'origin fixture failure'); END;")?; Ok(()) }).await.unwrap();
+    let (_, rejected) = post_json(app, "/api/pages",serde_json::json!({"title":"Report","html":"<h1>Report</h1>","discussion_id":"room-a","source_message_id":"source"})).await;
+    assert_eq!(rejected["success"], false, "{rejected}");
+    assert_eq!(workflow_import_database_snapshot(&state).await, before);
+}
+
+#[tokio::test]
 async fn live_page_library_state_discussion_link_and_delete_round_trip() {
     let state = test_state();
     state

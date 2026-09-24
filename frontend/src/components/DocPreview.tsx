@@ -2,6 +2,7 @@ import { useState, useRef, useEffect } from 'react';
 import { FileText, FileDown, Loader2, ExternalLink, Maximize2, Minimize2 } from 'lucide-react';
 import { docs as docsApi } from '../lib/api';
 import { useT } from '../lib/I18nContext';
+import { DocPreviewArtifact } from './DocPreviewArtifact';
 
 interface DocPreviewProps {
   /** Full HTML document composed by the agent — used both for the live
@@ -11,6 +12,7 @@ interface DocPreviewProps {
   /** Discussion id — the backend uses it to decide the output directory
    *  (`~/.kronn/generated/<discussion_id>/`) so files group per-disc. */
   discussionId: string;
+  sourceMessageId?: string;
 }
 
 /** Live HTML preview + export buttons for an agent-authored document.
@@ -25,7 +27,7 @@ interface DocPreviewProps {
  *  In phase 1 this component will also listen for an SSE event the
  *  backend emits mid-stream; for now the fence in the markdown is the
  *  single signal. */
-export function DocPreview({ html, discussionId }: DocPreviewProps) {
+export function DocPreview({ html, discussionId, sourceMessageId }: DocPreviewProps) {
   const { t } = useT();
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const [expanded, setExpanded] = useState(false);
@@ -148,6 +150,7 @@ export function DocPreview({ html, discussionId }: DocPreviewProps) {
       {/* Result rows — one per format that has generated something.
           Order is stable (PDF first, DOCX second) so the UI reads
           deterministically even when the user exports both. */}
+      {sourceMessageId && <DocPreviewArtifact html={html} discussionId={discussionId} sourceMessageId={sourceMessageId} />}
       {pdfState.kind === 'ready' && (
         <a
           className="doc-preview-download"

@@ -336,6 +336,7 @@ export interface DiscussionsPageProps {
   onNavigate: (page: string, opts?: { projectId?: string; scrollTo?: string; workflowId?: string }) => void;
   prefill?: { projectId: string; title: string; prompt: string; locked?: boolean } | null;
   initialActiveDiscussionId?: string | null;
+  initialMessageId?: string | null;
   onPrefillConsumed?: () => void;
   /** Lets a banner inside DiscussionsPage seed a NewDiscussionForm
    *  prefill on a sibling render — e.g. the post-bootstrap "Start dev
@@ -461,6 +462,7 @@ export function DiscussionsPage({
   onActiveDiscussionChange,
   lastSeenMsgCount,
   initialActiveDiscussionId,
+  initialMessageId,
   mcpConfigs = [],
   mcpIncompatibilities = [],
   onLaunchWorkflowFromPreset,
@@ -527,8 +529,9 @@ export function DiscussionsPage({
     try { localStorage.setItem('kronn:showDiscussionNotes', 'true'); } catch { /* non-fatal */ }
   }, []);
   const [showGlobalSearch, setShowGlobalSearch] = useState(false);
-  const [globalSearchTarget, setGlobalSearchTarget] = useState<GlobalSearchTarget | null>(null);
-  const globalSearchTargetRef = useRef<GlobalSearchTarget | null>(null);
+  const [globalSearchTarget, setGlobalSearchTarget] = useState<GlobalSearchTarget | null>(() =>
+    initialActiveDiscussionId && initialMessageId ? { discussionId: initialActiveDiscussionId, messageId: initialMessageId } : null);
+  const globalSearchTargetRef = useRef<GlobalSearchTarget | null>(globalSearchTarget);
   const [replyToMessageId, setReplyToMessageId] = useState<string | null>(null);
   const [messageSearchQuery, setMessageSearchQuery] = useState('');
   const deferredMessageSearchQuery = useDeferredValue(messageSearchQuery.trim());
@@ -1245,9 +1248,8 @@ export function DiscussionsPage({
     container.addEventListener('touchstart', abortByUser, { passive: true });
     const step = () => {
       const now = performance.now();
-      const row = messagesContainerRef.current?.querySelector<HTMLElement>(
-        `[data-message-id="${globalSearchTarget.messageId}"]`,
-      );
+      const row = Array.from(container.querySelectorAll<HTMLElement>('[data-message-id]'))
+        .find(message => message.dataset.messageId === globalSearchTarget.messageId);
       if (!row) {
         if (now < lookupDeadline) {
           frame = requestAnimationFrame(step);

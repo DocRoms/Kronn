@@ -1468,7 +1468,11 @@ export type CreateLivePageRequest = { title: string, slug?: string | null, proje
  * Optional discussion that originated this Page. Agents set this to the
  * current room so the artifact remains discoverable from both places.
  */
-discussion_id?: string | null, datasets?: Array<CreateLivePageDataset>, };
+discussion_id?: string | null,
+/**
+ * Optional source message, which must belong to discussion_id.
+ */
+source_message_id?: string, datasets?: Array<CreateLivePageDataset>, };
 
 export type CreateMcpConfigRequest = { server_id: string, label: string, env: Record<string, string>, args_override?: Array<string> | null, is_global: boolean, project_ids: Array<string>,
 /**
@@ -3636,7 +3640,7 @@ pinned: boolean,
  */
 archived: boolean, };
 
-export type LivePageDiscussionLink = { discussion_id: string, title: string, relation: LivePageDiscussionRelation, archived: boolean, };
+export type LivePageDiscussionLink = { discussion_id: string, title: string, relation: LivePageDiscussionRelation, archived: boolean, source_message_id?: string, };
 
 export type LivePageDiscussionRelation = "created_from" | "attached";
 

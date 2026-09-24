@@ -1,0 +1,4 @@
+.doc-preview-artifact { padding: 0 12px 10px; }
+.doc-preview-artifact form { display: flex; align-items: end; flex-wrap: wrap; gap: 8px; }
+.doc-preview-artifact label { display: flex; flex: 1 1 180px; min-width: 0; flex-direction: column; gap: 4px; font-size: 12px; }
+.doc-preview-artifact input { width: 100%; padding: 6px 8px; border: 1px solid var(--kr-border); border-radius: 6px; color: var(--kr-text-primary); background: var(--kr-bg-surface); }

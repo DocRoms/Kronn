@@ -315,7 +315,7 @@ pub fn list_live_page_discussions(
         return Ok(None);
     };
     let mut stmt = conn.prepare(
-        "SELECT d.id, d.title, links.relation, d.archived
+        "SELECT d.id, d.title, links.relation, d.archived, links.source_message_id
            FROM live_page_discussion_links links
            JOIN discussions d ON d.id = links.discussion_id
           WHERE links.page_id = ?1
@@ -325,6 +325,7 @@ pub fn list_live_page_discussions(
         .query_map([canonical_id], |row| {
             let relation: String = row.get(2)?;
             Ok(LivePageDiscussionLink {
+                source_message_id: row.get(4)?,
                 discussion_id: row.get(0)?,
                 title: row.get(1)?,
                 relation: match relation.as_str() {
