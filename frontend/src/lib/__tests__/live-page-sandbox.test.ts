@@ -195,6 +195,46 @@ describe('Live Page sandbox', () => {
     relay.dispose();
   });
 
+  it('paints the Page in the host palette before its own markup parses', () => {
+    const out = buildSandboxDocument('<html><head></head><body>x</body></html>', 'channel-1', 'dark',
+      { 'bg-surface': '#1f1140', 'border-medium': 'rgba(255, 255, 255, 0.1)' });
+    expect(out.indexOf('--kr-bg-surface:#1f1140')).toBeGreaterThan(-1);
+    expect(out.indexOf('--kr-bg-surface:#1f1140')).toBeLessThan(out.indexOf('<body'));
+    expect(out).toContain('--kr-border-medium:rgba(255, 255, 255, 0.1)');
+  });
+
+  it('drops anything that is not a plain colour value, and any unknown token', () => {
+    const out = buildSandboxDocument('<html><head></head><body>x</body></html>', 'channel-1', 'dark', {
+      'bg-surface': 'red;}</style><script>alert(1)</script>',
+      'bg-base': 'url(https://evil.example/x.png)',
+      'text-primary': '#e8eaed',
+      'not-a-token': '#000',
+    });
+    expect(out).not.toContain('alert(1)');
+    expect(out).not.toContain('evil.example');
+    expect(out).not.toContain('--kr-not-a-token');
+    expect(out).toContain('--kr-text-primary:#e8eaed');
+  });
+
+  it('applies the palette the host sends with a theme change, and only safe values', async () => {
+    const { Window } = await import('happy-dom');
+    const frame = new Window();
+    frame.document.write(buildSandboxDocument('<html><head></head><body>x</body></html>', 'channel-1'));
+    for (const script of Array.from(frame.document.querySelectorAll('script:not([type])'))) {
+      (frame as unknown as { eval: (code: string) => void }).eval(script.textContent ?? '');
+    }
+    frame.dispatchEvent(new frame.MessageEvent('message', { data: {
+      type: 'kronn:page-theme', version: 1, channel_id: 'channel-1', theme: 'dark',
+      tokens: { 'bg-surface': '#1f1140', 'bg-base': 'url(x)', 'not-a-token': '#000' },
+    } }));
+    const root = frame.document.documentElement;
+    expect(root.getAttribute('data-theme')).toBe('dark');
+    expect(root.style.getPropertyValue('--kr-bg-surface')).toBe('#1f1140');
+    expect(root.style.getPropertyValue('--kr-bg-base')).toBe('');
+    expect(root.style.getPropertyValue('--kr-not-a-token')).toBe('');
+    await frame.happyDOM.close();
+  });
+
   it('opens the collapse over exactly the row\'s columns', async () => {
     // A colspan larger than the row adds phantom columns: a table-layout:fixed table then
     // shares its free width with them and its auto column collapses to a few pixels.

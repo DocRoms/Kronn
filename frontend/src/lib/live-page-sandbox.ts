@@ -99,13 +99,46 @@ export function liveActionBindingKey(bindings: Record<string, string>): string {
  * Mirror the host data-theme into the opaque iframe. Pages style explicit
  * light/dark values and may fall back to their media query for custom themes.
  */
-export function postLivePageTheme(target: Window, channelId: string, theme: string): void {
+export function postLivePageTheme(
+  target: Window,
+  channelId: string,
+  theme: string,
+  tokens: Record<string, string> = {},
+): void {
   target.postMessage({
     type: 'kronn:page-theme',
     version: 1,
     channel_id: channelId,
     theme,
+    tokens,
   }, '*');
+}
+
+/** Kronn's structural colours, mirrored into the Page as `--kr-<name>` so a Page can
+ * paint its surfaces, rules and text in the shell's palette — and match the action
+ * card the host draws over it. Semantic colours are deliberately not shared. */
+export const LIVE_PAGE_THEME_TOKENS = [
+  'bg-base', 'bg-surface', 'bg-elevated', 'text-primary', 'text-secondary', 'text-ghost', 'border-medium',
+] as const;
+
+/** A colour value and nothing else: these land in a Page's stylesheet. */
+const SAFE_TOKEN_VALUE = /^[#(),.%\s\w-]{1,64}$/;
+
+function safeTokens(tokens: Record<string, string> | null | undefined): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const name of LIVE_PAGE_THEME_TOKENS) {
+    const value = tokens?.[name];
+    if (typeof value === 'string' && SAFE_TOKEN_VALUE.test(value) && !/url\s*\(/i.test(value)) out[name] = value;
+  }
+  return out;
+}
+
+/** The host's current values for {@link LIVE_PAGE_THEME_TOKENS}. */
+export function hostThemeTokens(): Record<string, string> {
+  const style = getComputedStyle(document.documentElement);
+  const read: Record<string, string> = {};
+  for (const name of LIVE_PAGE_THEME_TOKENS) read[name] = style.getPropertyValue('--kr-' + name).trim();
+  return safeTokens(read);
 }
 
 /** The theme the host is currently showing, read from the attribute
@@ -184,7 +217,12 @@ const ACTION_STATE_STYLE = `<style>
  * data bridge. The iframe itself must still use `sandbox="allow-scripts"`
  * without `allow-same-origin`; CSP and sandbox are complementary boundaries.
  */
-export function buildSandboxDocument(html: string, channelId: string, initialTheme?: string | null): string {
+export function buildSandboxDocument(
+  html: string,
+  channelId: string,
+  initialTheme?: string | null,
+  initialTokens?: Record<string, string> | null,
+): string {
   const safeChannel = JSON.stringify(channelId).replaceAll('<', '\\u003c');
   // Set before the Page's own markup parses, so it never paints in the wrong
   // theme for a frame. Runtime changes arrive by message instead, because
@@ -192,7 +230,9 @@ export function buildSandboxDocument(html: string, channelId: string, initialThe
   const theme = typeof initialTheme === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(initialTheme)
     ? `<script>document.documentElement.setAttribute('data-theme',${JSON.stringify(initialTheme)})</script>`
     : '';
-  const head = `<meta http-equiv="Content-Security-Policy" content="${LIVE_PAGE_CSP}">${theme}${ACTION_STATE_STYLE}`;
+  const tokens = Object.entries(safeTokens(initialTokens));
+  const palette = tokens.length ? `<style>:root{${tokens.map(([k, v]) => `--kr-${k}:${v}`).join(';')}}</style>` : '';
+  const head = `<meta http-equiv="Content-Security-Policy" content="${LIVE_PAGE_CSP}">${theme}${palette}${ACTION_STATE_STYLE}`;
   const bridge = `<script>(()=>{
     const channel=${safeChannel};
     const userActivation=navigator.userActivation;
@@ -388,6 +428,13 @@ export function buildSandboxDocument(html: string, channelId: string, initialThe
         const t=message.theme;
         if(typeof t!=='string'||t.length>64)return;
         document.documentElement.setAttribute('data-theme',t);
+        const tokens=message.tokens&&typeof message.tokens==='object'?message.tokens:{};
+        for(const name of ${JSON.stringify(LIVE_PAGE_THEME_TOKENS)}){
+          const value=tokens[name];
+          if(typeof value==='string'&&/^[#(),.%\\s\\w-]{1,64}$/.test(value)&&!/url\\s*\\(/i.test(value)){
+            document.documentElement.style.setProperty('--kr-'+name,value);
+          }
+        }
         dispatchEvent(new CustomEvent('kronn:page-theme',{detail:t}));
         return;
       }

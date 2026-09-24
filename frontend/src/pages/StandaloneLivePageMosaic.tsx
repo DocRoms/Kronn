@@ -4,6 +4,7 @@ import { pages as pagesApi } from '../lib/api';
 import {
   buildSandboxDocument,
   hostTheme,
+  hostThemeTokens,
   createLivePageOpenLinkRelay,
   runtimeData,
 } from '../lib/live-page-sandbox';
@@ -61,7 +62,7 @@ function MosaicLivePageFrame({ pageId }: { pageId: string }) {
   }, [pageId, reloadPageActions]);
 
   const sandboxDocument = useMemo(
-    () => detail ? buildSandboxDocument(detail.revision.html, bridgeChannel, hostTheme()) : '',
+    () => detail ? buildSandboxDocument(detail.revision.html, bridgeChannel, hostTheme(), hostThemeTokens()) : '',
     [bridgeChannel, detail],
   );
   const publishToFrame = useCallback(() => {

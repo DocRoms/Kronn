@@ -3,6 +3,7 @@ import { pages as pagesApi } from '../lib/api';
 import type { LivePageAction, LivePageDetail } from '../types/generated';
 import {
   hostTheme,
+  hostThemeTokens,
   liveActionBindingKey,
   postLivePageActionSlot,
   postLivePageActionStates,
@@ -197,7 +198,7 @@ export function useLivePageTheme(
     const push = () => {
       const target = iframeRef.current?.contentWindow ?? null;
       const theme = hostTheme();
-      if (target && theme) postLivePageTheme(target, channelId, theme);
+      if (target && theme) postLivePageTheme(target, channelId, theme, hostThemeTokens());
     };
     push();
     const observer = new MutationObserver(push);
