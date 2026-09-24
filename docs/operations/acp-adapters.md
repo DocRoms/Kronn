@@ -101,6 +101,15 @@ qualification on each target OS.
 
 ## Observability
 
+Native ACP updates distinguish `user_message_chunk` (including Vibe's echo
+of the injected prompt) from `agent_message_chunk`. Only the latter contributes
+to the displayed reply. Thought, tool-content and unknown labelled updates do
+not become answer text; tool and usage events still follow their own paths.
+Older runtimes with unlabelled content retain their compatibility path.
+An echo without an agent message therefore supplies no answer text.
+[src: file: backend/src/acp.rs:940]
+[ACP session updates](https://agentclientprotocol.com/protocol/v1/prompt-turn#session-updates)
+
 Claude's SDK model catalogue is discovered independently of these execution
 toggles. It uses an initialization-only, no-prompt CLI process, not the ACP
 adapter's empty configuration options. See [catalogue discovery and selector
