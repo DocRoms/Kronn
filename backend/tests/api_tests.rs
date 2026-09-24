@@ -21133,3 +21133,79 @@ async fn a_settled_media_job_is_never_reprocessed_by_a_later_sweep() {
         "no duplicate asset from the redundant sweep"
     );
 }
+
+/// Clients settle a composer draft on the `accepted` receipt; the note route
+/// must emit it (and mark a retry of the same id as a duplicate) like a turn.
+#[tokio::test]
+async fn a_note_send_returns_an_acceptance_receipt_and_deduplicates_its_retry() {
+    let state = test_state();
+    state
+        .db
+        .with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO discussions (id, title, agent, language, participants_json,
+             created_at, updated_at, message_count, workspace_mode)
+             VALUES ('d-note','Notes','ClaudeCode','fr','[]',
+             datetime('now'), datetime('now'), 0, 'Direct')",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    let mut bodies = Vec::new();
+    for _ in 0..2 {
+        let app = build_router_with_auth(state.clone(), false);
+        let mut req = Request::builder()
+            .method("POST")
+            .uri("/api/discussions/d-note/messages")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&serde_json::json!({
+                    "content": "à garder pour plus tard",
+                    "channel": "note",
+                    "client_message_id": "7b0c9d5e-3f1a-4c2b-9e8d-6a5f4b3c2d1e",
+                }))
+                .unwrap(),
+            ))
+            .unwrap();
+        req.extensions_mut()
+            .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+                [127, 0, 0, 1],
+                45678,
+            ))));
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        bodies.push(String::from_utf8(body.to_vec()).unwrap());
+    }
+    for body in &bodies {
+        assert!(
+            body.contains("event: accepted"),
+            "a saved note must be acknowledged: {body}"
+        );
+    }
+    assert!(bodies[0].contains("\"duplicate\":false"), "{}", bodies[0]);
+    assert!(bodies[1].contains("\"duplicate\":true"), "{}", bodies[1]);
+
+    let (notes, jobs): (i64, i64) = state
+        .db
+        .with_conn(|conn| {
+            let notes = conn.query_row(
+                "SELECT COUNT(*) FROM messages WHERE discussion_id = 'd-note' AND channel = 'note'",
+                [],
+                |row| row.get(0),
+            )?;
+            let jobs = conn.query_row(
+                "SELECT COUNT(*) FROM agent_dispatch_jobs WHERE discussion_id = 'd-note'",
+                [],
+                |row| row.get(0),
+            )?;
+            Ok((notes, jobs))
+        })
+        .await
+        .unwrap();
+    assert_eq!(notes, 1, "the retry must not duplicate the note");
+    assert_eq!(jobs, 0, "a note never dispatches an agent");
+}

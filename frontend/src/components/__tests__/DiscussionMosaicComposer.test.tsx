@@ -94,6 +94,17 @@ describe('DiscussionMosaicComposer', () => {
     await waitFor(() => expect(screen.queryByText('disc.mosaic.sendFailed')).toBeNull());
   });
 
+  it('settles a note as accepted on the receipt the note route returns', async () => {
+    const settled = settledEvents();
+    render(<DiscussionMosaicComposer discussionId="a" title="Alpha" toast={vi.fn()} />);
+    await screen.findByTestId('chat-input');
+    fireEvent.click(screen.getByText('note'));
+    await waitFor(() => expect(settled).toHaveBeenCalledWith({ discussionId: 'a', message: 'a note', settlement: 'accepted' }));
+    expect(mocks.send).toHaveBeenCalledTimes(1);
+    expect(mocks.send.mock.calls[0][1]).toMatchObject({ channel: 'note', content: 'a note' });
+    expect(localStorage.getItem('kronn:message-outbox:a')).toBeNull();
+  });
+
   it('sends a note on its own channel without the dispatch outbox, and restores it on refusal', async () => {
     const settled = settledEvents();
     mocks.send.mockImplementationOnce(async (...args: unknown[]) => { (args[4] as (e: string) => void)('locked'); });
