@@ -22,6 +22,11 @@ Release notes for 0.9.3 and earlier are available in the
   reported or resolved model, format fallback, duration, outcome) and marks the
   one whose output was kept. A step with no recorded model shows "unknown
   model" instead of today's step configuration.
+- Later workflow steps can read an Agent step's provenance as
+  `steps.<name>.provenance` (agent, model, connection, role, whether the output
+  was retained), and `PublishPageData` can publish it as a typed value, so a Page
+  names the agent behind its analysis instead of hard-coding it. A step without
+  recorded provenance exposes none.
 - Task execution usage for HTTP agents records the prompt tokens a provider
   served from its cache, when it reports them (`prompt_tokens_details.cached_tokens`
   or `cache_read_input_tokens`). Turns that do not report it stay unknown and are

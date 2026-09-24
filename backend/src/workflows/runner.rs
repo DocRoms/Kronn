@@ -777,6 +777,7 @@ async fn execute_run_with_notify_policy(
             prior_agent.as_deref(),
             prior.step_model.as_deref(),
         );
+        ctx.set_step_provenance(&prior.step_name, prior.agent_provenance.as_deref());
     }
     // 0.7.0 Phase 6 — seed durable state from the run row. On a fresh
     // run this is empty (no-op); on resume / restart-recovery it carries
@@ -3270,6 +3271,7 @@ pub(crate) fn record_step_completion(
         agent_name.as_deref(),
         result.step_model.as_deref(),
     );
+    ctx.set_step_provenance(&step.name, result.agent_provenance.as_deref());
 }
 
 pub(crate) fn apply_step_snapshot(
