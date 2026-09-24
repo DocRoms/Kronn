@@ -19,6 +19,7 @@ const props = (id: string) => ({ discussionId: id, title: id, toast: vi.fn() });
 const input = () => screen.getByRole('textbox') as HTMLTextAreaElement;
 
 beforeEach(() => {
+  vi.restoreAllMocks();
   localStorage.clear();
   vi.spyOn(agents, 'detect').mockResolvedValue([]);
   vi.spyOn(discussions, 'get').mockImplementation(async id => disc(id));
@@ -63,6 +64,29 @@ describe('mosaic with its real ChatInput', () => {
     fireEvent.click(screen.getByRole('button', { name: 'disc.mosaic.replyIn:a' }));
     await waitFor(() => expect(input().value).toBe(''));
     expect(loadDraft('a')).toBeNull();
+  });
+
+  it('preserves a newer draft in A when the note receipt arrives while B is mounted', async () => {
+    let acknowledge!: () => void;
+    const send = vi.spyOn(discussions, 'sendMessageStream').mockImplementation((...args) => new Promise<void>(resolve => {
+      acknowledge = () => { args[8]?.({ message_id: 'saved-note', sort_order: 1, duplicate: false }); resolve(); };
+    }));
+    const view = render(<DiscussionMosaicComposer {...props('a')} />);
+    await screen.findByRole('textbox');
+    fireEvent.click(await screen.findByLabelText('disc.note.sendAsNote'));
+    fireEvent.change(input(), { target: { value: 'sent note A' } });
+    fireEvent.click(screen.getByLabelText('Send message'));
+    await waitFor(() => expect(send).toHaveBeenCalledTimes(1));
+    fireEvent.change(input(), { target: { value: 'new unsent draft A' } });
+    await act(async () => { view.rerender(<DiscussionMosaicComposer {...props('b')} />); });
+    await waitFor(() => expect(input().value).toBe(''));
+    expect(loadDraft('a')?.text).toBe('new unsent draft A');
+    fireEvent.change(input(), { target: { value: 'draft B' } });
+    await act(async () => { acknowledge(); });
+    expect(loadDraft('a')?.text).toBe('new unsent draft A');
+    expect(input().value).toBe('draft B');
+    await act(async () => { view.rerender(<DiscussionMosaicComposer {...props('a')} />); });
+    await waitFor(() => expect(input().value).toBe('new unsent draft A'));
   });
 
   it('keeps a newer draft typed before collapsing when the late receipt arrives', async () => {

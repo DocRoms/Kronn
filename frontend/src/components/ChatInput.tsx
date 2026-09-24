@@ -411,9 +411,12 @@ export function ChatInput({
       if (detail.discussionId !== currentDiscIdRef.current) {
         // The user switched rooms while the request was in flight. The
         // submitted snapshot belongs to the previous room: remove it only
-        // after durable acceptance; on refusal leave it stored so returning
-        // to that room restores the unsent message.
-        if (detail.settlement === 'accepted') clearDraft(detail.discussionId);
+        // after durable acceptance, and only if it is still that snapshot (a
+        // newer draft typed there before leaving is kept); on refusal leave it
+        // stored so returning to that room restores the unsent message.
+        if (detail.settlement === 'accepted' && loadDraft(detail.discussionId)?.text === detail.message) {
+          clearDraft(detail.discussionId);
+        }
         return;
       }
 

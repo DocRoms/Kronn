@@ -62,6 +62,9 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- A draft typed in a discussion after sending, then left for another
+  discussion, is no longer erased when the earlier message is acknowledged;
+  only the sent text itself is cleared.
 - Native backend hot reload uses the initial startup readiness budget instead
   of stopping a still-starting backend after roughly 30 seconds. Slow project
   MCP synchronization can finish before the HTTP listener becomes ready;
