@@ -66,17 +66,12 @@ start_backend() {
 }
 
 backend_ready() {
-    local attempt=0
-    while (( attempt < 300 )); do
-        if curl -fsS --connect-timeout 1 --max-time 1 -o /dev/null \
-            "$HEALTH_URL" 2>/dev/null; then
-            return 0
-        fi
-        kill -0 "$backend_pid" 2>/dev/null || return 1
-        attempt=$((attempt + 1))
-        sleep 0.1
-    done
-    return 1
+    # Startup work (including project MCP sync) runs before the HTTP bind on
+    # every launch. A reload needs the same readiness budget as the first boot.
+    wait_for_process_http_ready \
+        "$HEALTH_URL" "$backend_pid" \
+        "${KRONN_DEV_READY_ATTEMPTS:-300}" \
+        "${KRONN_DEV_READY_INTERVAL:-1}"
 }
 
 trap 'reload_requested=1' USR1
@@ -151,20 +146,25 @@ while true; do
         stop_child "$backend_pid"
         backend_pid=""
         start_backend
-        if ! backend_ready; then
-            status=1
-            if kill -0 "$backend_pid" 2>/dev/null; then
-                stop_child "$backend_pid"
-            else
+        if backend_ready; then
+            echo "  Backend hot reload complete."
+        else
+            readiness_status=$?
+            if [[ "$readiness_status" == "2" ]] || ! kill -0 "$backend_pid" 2>/dev/null; then
                 wait "$backend_pid" 2>/dev/null
                 status=$?
+                echo "  Backend exited before readiness after the hot-reload swap (exit $status)." >&2
+                # Even exit 0 is a failed reload if the server never became ready.
+                [[ "$status" != "0" ]] || status=1
+            else
+                status=1
+                echo "  Backend readiness timed out after the hot-reload swap ($HEALTH_URL); stopping the still-running backend." >&2
+                stop_child "$backend_pid"
             fi
             backend_pid=""
             record_failure "$status"
-            echo "  Backend failed after the hot-reload swap." >&2
             exit "$status"
         fi
-        echo "  Backend hot reload complete."
     fi
 
     if ! kill -0 "$backend_pid" 2>/dev/null; then
