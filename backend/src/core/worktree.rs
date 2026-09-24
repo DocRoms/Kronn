@@ -1456,6 +1456,25 @@ pub fn fast_forward_target_to(
     fast_forward_to(&checkout, candidate_sha)
 }
 
+/// Whether `ancestor` is reachable from `descendant` (`git merge-base --is-ancestor`).
+pub fn is_ancestor(repo_path: &Path, ancestor: &str, descendant: &str) -> Result<bool, String> {
+    reject_option_like_rev(ancestor)?;
+    reject_option_like_rev(descendant)?;
+    let out = sync_cmd("git")
+        .args(["merge-base", "--is-ancestor", ancestor, descendant])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|e| format!("git merge-base failed: {e}"))?;
+    match out.status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => Err(format!(
+            "cannot compare {ancestor} with {descendant}: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )),
+    }
+}
+
 /// Confirm a worktree's HEAD is exactly `expected_sha`.
 ///
 /// Defense-in-depth after `create_task_worktree` (a ref that moved between pin and

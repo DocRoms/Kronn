@@ -76,6 +76,11 @@ Release notes for 0.9.3 and earlier are available in the
   principal room gets a notice naming the fix, for example
   `git worktree add <path> <branch>`. The approval stays valid: once fixed,
   resuming the execution or approving again starts the integration.
+- An execution interrupted while its merge was being applied can be resumed
+  again. If the merge had already landed, even with more commits on the target
+  since, resuming now closes it as done instead of staying `Interrupted`; if it
+  had not, resuming replays the apply safely. The recovery action Kronn
+  proposes is always one that resume accepts.
 - The Automations list no longer waits on a scan of every workflow run to find
   each workflow's latest one. A `(workflow_id, started_at)` index answers it
   directly: on a 7 GB database, from 0.85–3.7 s to 19 ms.

@@ -539,6 +539,37 @@ impl ExecutionRecoveryAction {
             Self::BlockAgentUnavailable => "block_agent_unavailable",
         }
     }
+
+    /// The status `/resume` first moves an `Interrupted` row into for this
+    /// action. `None` for the worker/provisioning resumes, which own an
+    /// origin-specific claim instead of one fixed transition.
+    pub fn resume_target(self) -> Option<TaskExecutionStatus> {
+        use TaskExecutionStatus::*;
+        match self {
+            Self::ResumeProvisioning | Self::ResumeWorker => None,
+            Self::AwaitReview => Some(AwaitingReview),
+            Self::RebuildCandidate => Some(Integrating),
+            Self::RunValidations => Some(Validating),
+            Self::ApplyFastForward | Self::IdempotentClose => Some(Applying),
+            Self::BlockDirtyTarget => Some(Blocked),
+            Self::AwaitHuman
+            | Self::BlockMissingWorkspace
+            | Self::BlockMissingDiscussion
+            | Self::BlockAgentUnavailable => Some(Escalated),
+        }
+    }
+
+    /// Whether `/resume` can apply this action to a row interrupted from
+    /// `origin`. Read from the transition table `transition_execution` enforces,
+    /// so a recommendation can never name a resume the state machine refuses.
+    pub fn resumable_from(self, origin: TaskExecutionStatus) -> bool {
+        match self.resume_target() {
+            None => true,
+            // Escalation is a generalized escape that skips the origin guard.
+            Some(TaskExecutionStatus::Escalated) => true,
+            Some(to) => TaskExecutionStatus::interrupted_resume_allowed(origin, to),
+        }
+    }
 }
 
 impl std::str::FromStr for ExecutionRecoveryAction {

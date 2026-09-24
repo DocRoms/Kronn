@@ -517,6 +517,162 @@ pub fn start_resilience_watchdog(state: AppState) {
     });
 }
 
+/// Recovery decision for an integration-saga origin, read from the real Git
+/// target. Shared by boot classification and `/resume` so both apply one table.
+fn integration_recovery_decision(
+    execution: &TaskExecution,
+    origin: TaskExecutionStatus,
+    project_path: Option<&str>,
+    target_branch: Option<&str>,
+) -> (ExecutionRecoveryAction, String) {
+    match (project_path, target_branch) {
+        (None, _) => (
+            ExecutionRecoveryAction::BlockMissingWorkspace,
+            "the integration project no longer resolves; preserve checkpoints for repair".into(),
+        ),
+        (_, None) => (
+            ExecutionRecoveryAction::AwaitHuman,
+            "the integration target branch is no longer pinned".into(),
+        ),
+        (Some(project_path), Some(target)) => {
+            let repo = scanner::resolve_host_path(project_path);
+            let tip = worktree::resolve_commit(&repo, target).ok();
+            let checkout = worktree::integration_target_worktree(&repo, target);
+            let dirty = checkout
+                .as_ref()
+                .ok()
+                .and_then(|path| worktree::worktree_dirty_files(path).ok())
+                .map(|files| !files.is_empty())
+                .unwrap_or(true);
+            // The target may have moved past a candidate it already contains
+            // (the apply landed, then more work did): that apply is done.
+            let applied = origin == TaskExecutionStatus::Applying
+                && execution
+                    .candidate_merge_sha
+                    .as_deref()
+                    .zip(tip.as_deref())
+                    .is_some_and(|(merge, tip)| {
+                        merge == tip || worktree::is_ancestor(&repo, merge, tip).unwrap_or(false)
+                    });
+            match checkout {
+                Err(reason) => (ExecutionRecoveryAction::BlockMissingWorkspace, reason),
+                Ok(_) if applied => (
+                    ExecutionRecoveryAction::IdempotentClose,
+                    "the real target already contains the candidate; close without replaying Git"
+                        .into(),
+                ),
+                Ok(_) => match crate::models::saga_resume_action(
+                origin,
+                execution.candidate_target_sha.as_deref(),
+                execution.candidate_merge_sha.as_deref(),
+                execution.integrated_sha.as_deref(),
+                tip.as_deref(),
+                dirty,
+            ) {
+                SagaResumeAction::RebuildCandidate => (
+                    ExecutionRecoveryAction::RebuildCandidate,
+                    "Git target drifted or the candidate checkpoint is incomplete; rebuild from the real tip".into(),
+                ),
+                SagaResumeAction::RunValidations => (
+                    ExecutionRecoveryAction::RunValidations,
+                    "candidate exists at the pinned target; validations must be replayed".into(),
+                ),
+                SagaResumeAction::ApplyFastForward => (
+                    ExecutionRecoveryAction::ApplyFastForward,
+                    "validated candidate is pending a clean guarded fast-forward".into(),
+                ),
+                SagaResumeAction::IdempotentClose => (
+                    ExecutionRecoveryAction::IdempotentClose,
+                    "the real target already equals the candidate; close without replaying Git".into(),
+                ),
+                SagaResumeAction::BlockDirtyTarget => (
+                    ExecutionRecoveryAction::BlockDirtyTarget,
+                    "the target worktree is dirty; preserve both histories and wait".into(),
+                ),
+                SagaResumeAction::NoOp => (
+                    ExecutionRecoveryAction::AwaitHuman,
+                    "the integration checkpoint cannot be advanced automatically".into(),
+                ),
+                },
+            }
+        }
+    }
+}
+
+/// Keep a recovery decision only if `/resume` accepts it from `origin`; otherwise
+/// park it for a human. An interrupted Blocked row resumes through its own restore
+/// path, so its decision is not consumed as-is.
+fn resumable_recovery(
+    origin: TaskExecutionStatus,
+    action: ExecutionRecoveryAction,
+    reason: String,
+) -> (ExecutionRecoveryAction, String) {
+    if origin == TaskExecutionStatus::Blocked || action.resumable_from(origin) {
+        (action, reason)
+    } else {
+        (
+            ExecutionRecoveryAction::AwaitHuman,
+            format!(
+                "{} cannot resume from {}: {reason}",
+                action.as_str(),
+                origin.as_str()
+            ),
+        )
+    }
+}
+
+/// Re-derive the integration recovery decision of an interrupted execution from
+/// its current origin and the real Git target, and persist it as pending. A
+/// decision taken before a later interruption otherwise names a refused resume.
+async fn refresh_integration_recovery(
+    db: &Database,
+    exec_id: &str,
+) -> Result<crate::models::TaskExecutionRecovery> {
+    let id = exec_id.to_string();
+    let (execution, run, project_path) = db
+        .with_conn(move |conn| {
+            let execution = crate::db::orchestration::get_task_execution(conn, &id)?
+                .context("interrupted execution vanished")?;
+            let run = crate::db::orchestration::get_orchestration_run(
+                conn,
+                &execution.orchestration_run_id,
+            )?
+            .context("orchestration run vanished")?;
+            let project_path = run
+                .project_id
+                .as_deref()
+                .map(|project_id| crate::db::projects::get_project(conn, project_id))
+                .transpose()?
+                .flatten()
+                .map(|project| project.path);
+            Ok((execution, run, project_path))
+        })
+        .await?;
+    let origin = execution
+        .interrupted_from_status
+        .filter(|_| execution.status == TaskExecutionStatus::Interrupted)
+        .context("execution is not interrupted")?;
+    if !matches!(
+        origin,
+        TaskExecutionStatus::Integrating
+            | TaskExecutionStatus::Validating
+            | TaskExecutionStatus::Applying
+    ) {
+        bail!("{} is not an integration origin", origin.as_str());
+    }
+    let (action, reason) = integration_recovery_decision(
+        &execution,
+        origin,
+        project_path.as_deref(),
+        run.target_branch.as_deref(),
+    );
+    let (action, reason) = resumable_recovery(origin, action, reason);
+    db.with_conn(move |conn| {
+        crate::db::orchestration::set_execution_recovery(conn, &execution, &run, action, &reason)
+    })
+    .await
+}
+
 async fn classify_interrupted_execution(
     db: &Database,
     exec_id: &str,
@@ -690,64 +846,12 @@ async fn classify_interrupted_execution(
             | TaskExecutionStatus::Validating
             | TaskExecutionStatus::Applying
     ) {
-        match (project_path.as_deref(), run.target_branch.as_deref()) {
-            (None, _) => (
-                ExecutionRecoveryAction::BlockMissingWorkspace,
-                "the integration project no longer resolves; preserve checkpoints for repair"
-                    .into(),
-            ),
-            (_, None) => (
-                ExecutionRecoveryAction::AwaitHuman,
-                "the integration target branch is no longer pinned".into(),
-            ),
-            (Some(project_path), Some(target)) => {
-                let repo = scanner::resolve_host_path(project_path);
-                let tip = worktree::resolve_commit(&repo, target).ok();
-                let checkout = worktree::integration_target_worktree(&repo, target);
-                let dirty = checkout
-                    .as_ref()
-                    .ok()
-                    .and_then(|path| worktree::worktree_dirty_files(path).ok())
-                    .map(|files| !files.is_empty())
-                    .unwrap_or(true);
-                match checkout {
-                    Err(reason) => (ExecutionRecoveryAction::BlockMissingWorkspace, reason),
-                    Ok(_) => match crate::models::saga_resume_action(
-                    origin,
-                    execution.candidate_target_sha.as_deref(),
-                    execution.candidate_merge_sha.as_deref(),
-                    execution.integrated_sha.as_deref(),
-                    tip.as_deref(),
-                    dirty,
-                ) {
-                    SagaResumeAction::RebuildCandidate => (
-                        ExecutionRecoveryAction::RebuildCandidate,
-                        "Git target drifted or the candidate checkpoint is incomplete; rebuild from the real tip".into(),
-                    ),
-                    SagaResumeAction::RunValidations => (
-                        ExecutionRecoveryAction::RunValidations,
-                        "candidate exists at the pinned target; validations must be replayed".into(),
-                    ),
-                    SagaResumeAction::ApplyFastForward => (
-                        ExecutionRecoveryAction::ApplyFastForward,
-                        "validated candidate is pending a clean guarded fast-forward".into(),
-                    ),
-                    SagaResumeAction::IdempotentClose => (
-                        ExecutionRecoveryAction::IdempotentClose,
-                        "the real target already equals the candidate; close without replaying Git".into(),
-                    ),
-                    SagaResumeAction::BlockDirtyTarget => (
-                        ExecutionRecoveryAction::BlockDirtyTarget,
-                        "the target worktree is dirty; preserve both histories and wait".into(),
-                    ),
-                    SagaResumeAction::NoOp => (
-                        ExecutionRecoveryAction::AwaitHuman,
-                        "the integration checkpoint cannot be advanced automatically".into(),
-                    ),
-                    },
-                }
-            }
-        }
+        integration_recovery_decision(
+            &execution,
+            origin,
+            project_path.as_deref(),
+            run.target_branch.as_deref(),
+        )
     } else {
         match origin {
             TaskExecutionStatus::Pending
@@ -787,6 +891,7 @@ async fn classify_interrupted_execution(
             | TaskExecutionStatus::Cancelled => unreachable!(),
         }
     };
+    let (action, reason) = resumable_recovery(interrupted_origin, action, reason);
     db.with_conn(move |conn| {
         crate::db::orchestration::set_execution_recovery(conn, &execution, &run, action, &reason)?;
         Ok(())
@@ -2045,8 +2150,12 @@ async fn finish_recovered_apply(
                 return Err(internal(reason));
             }
         };
-    let integrated = if real_tip == merge_sha {
-        // Git already landed before the old process died. Do not replay it.
+    // Git already landed before the old process died, possibly with more work on
+    // top since. Do not replay it.
+    let already_applied = real_tip == merge_sha
+        || worktree::is_ancestor(&target_checkout, merge_sha, &real_tip)
+            .map_err(|error| internal(format!("cannot compare target with candidate: {error}")))?;
+    let integrated = if already_applied {
         merge_sha.to_string()
     } else {
         if real_tip != target_sha {
@@ -2121,7 +2230,7 @@ async fn finish_recovered_apply(
             }
         }
     };
-    if real_tip == merge_sha && claim_apply {
+    if already_applied && claim_apply {
         let id = execution.id.clone();
         let claimed = db
             .with_conn(move |conn| {
@@ -2191,7 +2300,12 @@ async fn interrupt_recovered_apply(
         Ok(())
     })
     .await
-    .map_err(|error| ProvisionError::Internal(error.to_string()))
+    .map_err(|error| ProvisionError::Internal(error.to_string()))?;
+    // The pending decision predates this interruption; re-read it from Git.
+    if let Err(error) = refresh_integration_recovery(db, exec_id).await {
+        tracing::warn!(execution_id = %exec_id, %error, "recovery decision not refreshed");
+    }
+    Ok(())
 }
 
 /// Continue a campaign only after a clean success and only while no human gate
@@ -7384,6 +7498,27 @@ pub async fn resume_execution(
         ));
     }
 
+    let origin = snapshot
+        .execution
+        .interrupted_from_status
+        .unwrap_or(TaskExecutionStatus::Interrupted);
+    let recovery = if recovery.recovery_action.resumable_from(origin) {
+        recovery
+    } else {
+        match refresh_integration_recovery(&state.db, &exec_id).await {
+            Ok(refreshed) => refreshed,
+            Err(error) => {
+                return Json(ApiResponse::err_coded(
+                    ApiErrorCode::Conflict,
+                    format!(
+                        "recovery decision {} cannot resume from {}: {error}",
+                        recovery.recovery_action.as_str(),
+                        origin.as_str()
+                    ),
+                ));
+            }
+        }
+    };
     let action = recovery.recovery_action;
     let result: Result<String, ProvisionError> = match action {
         ExecutionRecoveryAction::ResumeProvisioning => {
@@ -14744,6 +14879,223 @@ mod tests {
             ));
             assert_eq!(git_rev(&target, "HEAD"), sha);
         }
+    }
+
+    /// An `Applying` execution interrupted after its armed checkpoint, still carrying
+    /// the `run_validations` decision of an earlier recovery.
+    async fn interrupted_applying_with_stale_decision(
+        db: &std::sync::Arc<Database>,
+        repo: &Path,
+        key: &str,
+    ) -> (TaskExecution, String, String) {
+        let (execution, _task_ref, child) =
+            approved_execution_with_commit(db, repo, key, "worker.txt", "done", vec![]).await;
+        let target_sha = git_rev(repo, "main");
+        checkpoint(
+            db,
+            &execution.id,
+            CheckpointStep::Anchored(target_sha.clone()),
+        )
+        .await
+        .unwrap();
+        let merge_sha = match worktree::build_candidate(&child, &target_sha).unwrap() {
+            worktree::CandidateOutcome::Built { sha } => sha,
+            other => panic!("expected a candidate, got {other:?}"),
+        };
+        checkpoint(db, &execution.id, CheckpointStep::Built(merge_sha.clone()))
+            .await
+            .unwrap();
+        checkpoint(db, &execution.id, CheckpointStep::Validating)
+            .await
+            .unwrap();
+        let backup = worktree::write_backup_ref(
+            repo,
+            &format!("{}-{}", execution.task_id, exec_short(&execution.id)),
+            &target_sha,
+        )
+        .unwrap();
+        checkpoint(db, &execution.id, CheckpointStep::Armed(backup))
+            .await
+            .unwrap();
+        let id = execution.id.clone();
+        db.with_conn(move |conn| {
+            crate::db::orchestration::transition_execution(
+                conn,
+                &id,
+                TaskExecutionStatus::Interrupted,
+                &backend_actor(),
+                serde_json::json!({ "reason": "backend restart" }),
+            )?;
+            let execution = crate::db::orchestration::get_task_execution(conn, &id)?
+                .context("execution exists")?;
+            let run = crate::db::orchestration::get_orchestration_run(
+                conn,
+                &execution.orchestration_run_id,
+            )?
+            .context("run exists")?;
+            crate::db::orchestration::set_execution_recovery(
+                conn,
+                &execution,
+                &run,
+                ExecutionRecoveryAction::RunValidations,
+                "decided before the apply was interrupted",
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        (execution, target_sha, merge_sha)
+    }
+
+    fn recovery_test_state(db: &std::sync::Arc<Database>) -> AppState {
+        AppState::new_defaults(
+            std::sync::Arc::new(tokio::sync::RwLock::new(
+                crate::core::config::default_config(),
+            )),
+            db.clone(),
+            crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+        )
+    }
+
+    #[test]
+    fn every_kept_recovery_decision_is_one_resume_accepts() {
+        use TaskExecutionStatus::*;
+        let actions = [
+            ExecutionRecoveryAction::ResumeProvisioning,
+            ExecutionRecoveryAction::ResumeWorker,
+            ExecutionRecoveryAction::AwaitReview,
+            ExecutionRecoveryAction::AwaitHuman,
+            ExecutionRecoveryAction::RebuildCandidate,
+            ExecutionRecoveryAction::RunValidations,
+            ExecutionRecoveryAction::ApplyFastForward,
+            ExecutionRecoveryAction::IdempotentClose,
+            ExecutionRecoveryAction::BlockDirtyTarget,
+            ExecutionRecoveryAction::BlockMissingWorkspace,
+            ExecutionRecoveryAction::BlockMissingDiscussion,
+            ExecutionRecoveryAction::BlockAgentUnavailable,
+        ];
+        let origins = [
+            Pending,
+            Provisioning,
+            Working,
+            AwaitingReview,
+            Approved,
+            ChangesRequested,
+            Integrating,
+            Validating,
+            Applying,
+            Escalated,
+        ];
+        for origin in origins {
+            for action in actions {
+                let (kept, _) = resumable_recovery(origin, action, "reason".into());
+                assert!(
+                    kept.resumable_from(origin),
+                    "{} kept for origin {} must be resumable",
+                    kept.as_str(),
+                    origin.as_str()
+                );
+                if let Some(to) = kept.resume_target().filter(|to| *to != Escalated) {
+                    assert!(TaskExecutionStatus::interrupted_resume_allowed(origin, to));
+                }
+            }
+        }
+        assert!(!ExecutionRecoveryAction::RunValidations.resumable_from(Applying));
+        assert_eq!(
+            resumable_recovery(
+                Applying,
+                ExecutionRecoveryAction::RunValidations,
+                "r".into()
+            )
+            .0,
+            ExecutionRecoveryAction::AwaitHuman
+        );
+    }
+
+    #[tokio::test]
+    async fn interrupted_apply_already_landed_resumes_to_done_without_replaying_git() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let (execution, _target_sha, merge_sha) =
+            interrupted_applying_with_stale_decision(&db, repo.path(), "landed-apply").await;
+        // The apply landed before the restart, and more work landed on top since.
+        assert!(git(repo.path(), &["merge", "--ff-only", &merge_sha])
+            .status
+            .success());
+        std::fs::write(repo.path().join("later.txt"), "later").unwrap();
+        for args in [vec!["add", "later.txt"], vec!["commit", "-m", "later work"]] {
+            assert!(git(repo.path(), &args).status.success());
+        }
+        let tip = git_rev(repo.path(), "main");
+
+        classify_interrupted_execution(&db, &execution.id, &[AgentType::ClaudeCode])
+            .await
+            .unwrap();
+        let id = execution.id.clone();
+        let decided = db
+            .with_conn(move |conn| crate::db::orchestration::get_execution_recovery(conn, &id))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            decided.recovery_action,
+            ExecutionRecoveryAction::IdempotentClose
+        );
+        assert!(decided
+            .recovery_action
+            .resumable_from(TaskExecutionStatus::Applying));
+
+        let Json(resumed) =
+            resume_execution(State(recovery_test_state(&db)), Path(execution.id.clone())).await;
+        assert!(resumed.success, "resume failed: {:?}", resumed.error);
+        let done = exec_of(&db, &execution.id).await;
+        assert_eq!(done.status, TaskExecutionStatus::Done);
+        assert_eq!(done.integrated_sha.as_deref(), Some(merge_sha.as_str()));
+        assert_eq!(
+            git_rev(repo.path(), "main"),
+            tip,
+            "the target is not rewound"
+        );
+        let recovery = resumed.data.unwrap().recovery.unwrap();
+        assert!(!recovery.pending, "the decision is consumed");
+    }
+
+    #[tokio::test]
+    async fn stale_run_validations_decision_on_an_applying_interruption_is_rederived() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let (execution, target_sha, merge_sha) =
+            interrupted_applying_with_stale_decision(&db, repo.path(), "stale-decision").await;
+        assert_eq!(
+            git_rev(repo.path(), "main"),
+            target_sha,
+            "apply not done yet"
+        );
+
+        let state = recovery_test_state(&db);
+        let Json(resumed) =
+            resume_execution(State(state.clone()), Path(execution.id.clone())).await;
+        assert!(resumed.success, "resume failed: {:?}", resumed.error);
+        let done = exec_of(&db, &execution.id).await;
+        assert_eq!(done.status, TaskExecutionStatus::Done);
+        assert_eq!(done.integrated_sha.as_deref(), Some(merge_sha.as_str()));
+        assert_eq!(
+            git_rev(repo.path(), "main"),
+            merge_sha,
+            "the apply is replayed once"
+        );
+        assert_eq!(
+            resumed.data.unwrap().recovery.unwrap().recovery_action,
+            ExecutionRecoveryAction::ApplyFastForward
+        );
+
+        let Json(replay) = resume_execution(State(state), Path(execution.id.clone())).await;
+        assert!(replay.success);
+        assert_eq!(
+            replay.data.unwrap().outcome.as_deref(),
+            Some("already resumed: Done")
+        );
+        assert_eq!(git_rev(repo.path(), "main"), merge_sha);
     }
 
     #[tokio::test]
