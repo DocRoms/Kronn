@@ -136,6 +136,13 @@ fn codex_project_mcp_override(cwd: &Path, broker: &AcpPermissionBroker) -> Optio
                 file.mcp_servers
                     .into_iter()
                     .filter_map(|(id, entry)| {
+                        // Kronn supplies this reserved entry below, including
+                        // its trusted launch command and env-name allowlist.
+                        // A synced project copy would duplicate the TOML key
+                        // and make Codex reject the entire bootstrap config.
+                        if id == "kronn-internal" {
+                            return None;
+                        }
                         let command = entry.command.clone()?;
                         (!command.trim().is_empty()
                             && !crate::core::mcp_scanner::mcp_entry_leaks_secret(&entry))
@@ -799,6 +806,62 @@ exec sleep 30"#,
         );
         for var in crate::agents::runner::KRONN_INTERNAL_CODEX_ENV_VARS {
             assert!(argv.contains(var), "{var} must be listed by name: {argv}");
+        }
+    }
+
+    #[test]
+    fn project_internal_bridge_is_replaced_once_in_valid_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        let launch = crate::agents::runner::disc_introspection_mcp_command().unwrap();
+        for project_bridge in [
+            serde_json::json!({"command": launch.command, "args": launch.args}),
+            serde_json::json!({"command": "project-provided-bridge", "args": ["project-argument"]}),
+        ] {
+            std::fs::write(
+                dir.path().join(".mcp.json"),
+                serde_json::to_vec(&serde_json::json!({"mcpServers": {
+                    "kronn-internal": project_bridge,
+                    "project-safe": {"command": "safe-server", "args": ["serve"]},
+                }}))
+                .unwrap(),
+            )
+            .unwrap();
+            let broker = AcpPermissionBroker::scoped(
+                false,
+                AcpSessionScope::new(
+                    Some(dir.path().to_path_buf()),
+                    "project-with-internal-bridge",
+                ),
+            );
+            let config = codex_project_mcp_override(dir.path(), &broker).unwrap();
+            let parsed: toml::Value = toml::from_str(&config)
+                .expect("the project internal bridge must not duplicate the reserved TOML key");
+            let servers = parsed["mcp_servers"].as_table().unwrap();
+            assert_eq!(servers.len(), 2);
+            assert_eq!(
+                servers["project-safe"]["command"].as_str(),
+                Some("safe-server")
+            );
+            let internal = &servers["kronn-internal"];
+            assert_eq!(internal["command"].as_str(), Some(launch.command.as_str()));
+            let args: Vec<_> = internal["args"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|value| value.as_str().unwrap())
+                .collect();
+            assert_eq!(args, launch.args);
+            let env_names: Vec<_> = internal["env_vars"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|value| value.as_str().unwrap())
+                .collect();
+            assert_eq!(
+                env_names,
+                crate::agents::runner::KRONN_INTERNAL_CODEX_ENV_VARS
+            );
+            assert!(internal.get("env").is_none());
         }
     }
 

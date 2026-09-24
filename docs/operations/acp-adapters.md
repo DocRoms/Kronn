@@ -206,6 +206,15 @@ project path never reuses that identifier.
 
 ## Troubleshooting
 
+- **Codex exits immediately for a project but works in a project-less room:**
+  check the project MCP override for a duplicate `kronn-internal` key. Project
+  sync may already declare the bridge in `.mcp.json`. The adapter must exclude
+  that reserved entry before adding its trusted bridge declaration exactly
+  once, or Codex refuses the invalid TOML during bootstrap (exit 1). Other
+  authorized project servers remain in the override; no global configuration
+  change or MCP permission bypass is needed.
+  [src: file: backend/src/acp/codex_adapter.rs:140]
+
 - **"no verified production ACP command" / adapter never engages:** check the
   exact toggle name (`KRONN_ACP_ADAPTER_CODEX` / `KRONN_ACP_ADAPTER_CLAUDE`,
   case-sensitive). Unset enables the adapter; `1`/`true` also enables it,

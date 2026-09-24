@@ -47,6 +47,9 @@ Release notes for 0.9.3 and earlier are available in the
 - Native ACP replies no longer include echoed user prompts, including Vibe's
   copy of Kronn's injected instructions. Only agent message chunks contribute
   answer text; tool and usage events remain separate (KT-729).
+- Codex discussions with a project-synced internal MCP bridge no longer fail
+  immediately during bootstrap: the adapter emits the reserved
+  `kronn-internal` entry exactly once (KT-730).
 - Native backend hot reload uses the initial startup readiness budget instead
   of stopping a still-starting backend after roughly 30 seconds. Slow project
   MCP synchronization can finish before the HTTP listener becomes ready;
