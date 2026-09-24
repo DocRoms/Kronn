@@ -70,6 +70,11 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- A long discussion left open no longer freezes the page every few seconds.
+  Unrelated refreshes (room links, the dashboard, background status) re-rendered
+  every message; the transcript is now reused while nothing it shows changed.
+  On a 2,000-message room at rest: from about 0.9 s pauses every 5 s to short
+  ones (production build: 0.9 s of long tasks per 20 s down to 0.35 s).
 - The Automations list no longer waits on a scan of every workflow run to find
   each workflow's latest one. A `(workflow_id, started_at)` index answers it
   directly: on a 7 GB database, from 0.85–3.7 s to 19 ms.
