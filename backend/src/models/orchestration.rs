@@ -445,6 +445,13 @@ pub enum BlockedReasonCode {
     /// The target CLI session already holds a live offer for another execution.
     /// Needs a human decision: re-offer to another session or pick a native worker.
     WorkerSessionCommittedElsewhere,
+    /// An approved integration cannot start because its target branch is checked
+    /// out in no worktree, or in several. The row stays `Approved`; a human or the
+    /// principal checks the branch out once, then retries the approval or resume.
+    IntegrationTargetNotCheckedOut,
+    /// An approved integration was refused by another precondition (dirty target,
+    /// unpinned branch, missing worktree...). The row stays `Approved` until retried.
+    IntegrationRefused,
 }
 
 impl BlockedReasonCode {
@@ -452,6 +459,8 @@ impl BlockedReasonCode {
         match self {
             Self::AwaitingWorkerAcceptance => "awaiting_worker_acceptance",
             Self::WorkerSessionCommittedElsewhere => "worker_session_committed_elsewhere",
+            Self::IntegrationTargetNotCheckedOut => "integration_target_not_checked_out",
+            Self::IntegrationRefused => "integration_refused",
         }
     }
 }
@@ -462,6 +471,8 @@ impl std::str::FromStr for BlockedReasonCode {
         match value {
             "awaiting_worker_acceptance" => Ok(Self::AwaitingWorkerAcceptance),
             "worker_session_committed_elsewhere" => Ok(Self::WorkerSessionCommittedElsewhere),
+            "integration_target_not_checked_out" => Ok(Self::IntegrationTargetNotCheckedOut),
+            "integration_refused" => Ok(Self::IntegrationRefused),
             _ => anyhow::bail!("Unknown blocked reason code: {value}"),
         }
     }
@@ -526,6 +537,37 @@ impl ExecutionRecoveryAction {
             Self::BlockMissingWorkspace => "block_missing_workspace",
             Self::BlockMissingDiscussion => "block_missing_discussion",
             Self::BlockAgentUnavailable => "block_agent_unavailable",
+        }
+    }
+
+    /// The status `/resume` first moves an `Interrupted` row into for this
+    /// action. `None` for the worker/provisioning resumes, which own an
+    /// origin-specific claim instead of one fixed transition.
+    pub fn resume_target(self) -> Option<TaskExecutionStatus> {
+        use TaskExecutionStatus::*;
+        match self {
+            Self::ResumeProvisioning | Self::ResumeWorker => None,
+            Self::AwaitReview => Some(AwaitingReview),
+            Self::RebuildCandidate => Some(Integrating),
+            Self::RunValidations => Some(Validating),
+            Self::ApplyFastForward | Self::IdempotentClose => Some(Applying),
+            Self::BlockDirtyTarget => Some(Blocked),
+            Self::AwaitHuman
+            | Self::BlockMissingWorkspace
+            | Self::BlockMissingDiscussion
+            | Self::BlockAgentUnavailable => Some(Escalated),
+        }
+    }
+
+    /// Whether `/resume` can apply this action to a row interrupted from
+    /// `origin`. Read from the transition table `transition_execution` enforces,
+    /// so a recommendation can never name a resume the state machine refuses.
+    pub fn resumable_from(self, origin: TaskExecutionStatus) -> bool {
+        match self.resume_target() {
+            None => true,
+            // Escalation is a generalized escape that skips the origin guard.
+            Some(TaskExecutionStatus::Escalated) => true,
+            Some(to) => TaskExecutionStatus::interrupted_resume_allowed(origin, to),
         }
     }
 }

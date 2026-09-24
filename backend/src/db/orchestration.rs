@@ -1127,7 +1127,8 @@ pub fn principal_attention(conn: &Connection, run_id: &str) -> Result<PrincipalA
     let awaiting_human: i64 = conn.query_row(
         "SELECT COUNT(*) FROM task_executions WHERE orchestration_run_id = ?1 \
          AND (status = 'Escalated' OR (status = 'Blocked' AND \
-              COALESCE(blocked_reason_code, '') <> 'awaiting_worker_acceptance'))",
+              COALESCE(blocked_reason_code, '') <> 'awaiting_worker_acceptance') \
+              OR (status = 'Approved' AND blocked_reason_code IS NOT NULL))",
         [run_id],
         |row| row.get(0),
     )?;
@@ -2012,6 +2013,133 @@ pub fn block_execution(
             )?;
         }
         Ok(moved)
+    })
+}
+
+/// Record why an approved integration could not start, and tell the principal room.
+///
+/// The row deliberately stays `Approved`: the approval is durable and a retry
+/// (approve replay or resume) consumes it, and its `Approved -> Integrating` move
+/// clears this hold. A repeat of the same refusal posts nothing new. Returns
+/// whether a new hold was recorded.
+pub fn hold_approved_integration(
+    conn: &Connection,
+    exec_id: &str,
+    code: BlockedReasonCode,
+    reason: &str,
+    fix: &str,
+    actor: &OrchestrationActor,
+) -> Result<bool> {
+    in_savepoint(conn, |conn| {
+        let Some(execution) = get_task_execution(conn, exec_id)? else {
+            return Ok(false);
+        };
+        if execution.status != TaskExecutionStatus::Approved
+            || (execution.blocked_reason_code == Some(code)
+                && execution.blocked_reason.as_deref() == Some(reason))
+        {
+            return Ok(false);
+        }
+        let now = Utc::now();
+        let moved = conn.execute(
+            "UPDATE task_executions \
+             SET blocked_reason = ?2, blocked_reason_code = ?3, updated_at = ?4 \
+             WHERE id = ?1 AND status = 'Approved'",
+            params![exec_id, reason, code.as_str(), now.to_rfc3339()],
+        )?;
+        if moved == 0 {
+            return Ok(false);
+        }
+        record_execution_event(
+            conn,
+            exec_id,
+            "integration_refused",
+            None,
+            None,
+            actor,
+            serde_json::json!({ "reason": reason, "code": code.as_str(), "fix": fix }),
+        )?;
+        let occurrence: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM task_execution_events \
+             WHERE task_execution_id = ?1 AND action = 'integration_refused'",
+            [exec_id],
+            |row| row.get(0),
+        )?;
+        let task: Option<(i64, String)> = conn
+            .query_row(
+                "SELECT task_number, title FROM planning_tasks WHERE id = ?1",
+                [&execution.task_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((task_number, title)) = task else {
+            return Ok(true);
+        };
+        let parent = execution.parent_discussion_id.as_str();
+        let Some(principal) = crate::db::discussions::get_discussion(conn, parent)? else {
+            return Ok(true);
+        };
+        let reference = format!("KT-{task_number}");
+        let message = DiscussionMessage {
+            id: format!("orch-integration-refused:{exec_id}:{occurrence}"),
+            role: MessageRole::User,
+            channel: MessageChannel::Main,
+            content: format!(
+                "**Intégration bloquée — {reference}**\n\n\
+                 L'exécution `{exec_id}` (**{title}**) est approuvée, mais son intégration \
+                 n'a pas pu démarrer : {reason}\n\n\
+                 **Correctif :** {fix} Puis relance l'intégration (`task_exec_resume` ou \
+                 nouvelle approbation) : l'approbation reste acquise."
+            ),
+            agent_type: None,
+            timestamp: now,
+            tokens_used: 0,
+            session_tokens_at_message: None,
+            recovered_partial: false,
+            auth_mode: None,
+            model_tier: None,
+            model: None,
+            cost_usd: None,
+            author_pseudo: Some("Orchestrateur".to_string()),
+            author_avatar_email: None,
+            source_msg_id: None,
+            duration_ms: None,
+            lint_report: None,
+            target_agent: None,
+            reply_to_message_id: None,
+            author_cli_ordinal: None,
+        };
+        let targets = [MessageTarget::discussion_agent(principal.agent)];
+        crate::db::discussions::insert_message_with_targets_and_dispatches_within_tx(
+            conn,
+            parent,
+            &message,
+            &targets,
+            &[],
+            None,
+        )?;
+        crate::db::discussion_important::publish_steering_card(
+            conn,
+            parent,
+            &message.id,
+            crate::db::discussion_important::SteeringCard {
+                category: crate::db::discussion_important::ImportantCategory::HumanActionRequired,
+                dedup_key: &format!("orch.integration.refused.{exec_id}.{occurrence}"),
+                title: &format!("{reference} — intégration bloquée"),
+                highlight: &format!("{reference} est approuvée mais n'est pas intégrée."),
+                impact: "La branche cible n'avance pas tant que la cause n'est pas corrigée.",
+                action_required: crate::db::discussion_important::ImportantAction::owed(
+                    fix, "Humain",
+                ),
+                references: crate::db::discussion_important::ImportantReferences {
+                    task_ref: Some(reference.clone()),
+                    execution_id: Some(exec_id.to_string()),
+                    ..Default::default()
+                },
+            },
+            &message.timestamp.to_rfc3339(),
+        )?;
+        Ok(true)
     })
 }
 
@@ -3325,7 +3453,8 @@ pub fn transition_execution(
         // effective resume/advance clears the reason together with the checkpoint
         // in this savepoint. This also makes an unrelated active/terminal
         // transition self-heal a stale pre-KT-426 blocker instead of exposing two
-        // contradictory states through task_exec_status.
+        // contradictory states through task_exec_status. An `Approved` row may
+        // also carry a refused-integration hold; leaving Approved clears it here.
         let preserves_blocked_hold = to == Blocked || (from == Blocked && to == Interrupted);
         if !preserves_blocked_hold {
             conn.execute(

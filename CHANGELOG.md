@@ -75,6 +75,17 @@ Release notes for 0.9.3 and earlier are available in the
   every message; the transcript is now reused while nothing it shows changed.
   On a 2,000-message room at rest: from about 0.9 s pauses every 5 s to short
   ones (production build: 0.9 s of long tasks per 20 s down to 0.35 s).
+- An approved task whose integration cannot start no longer sits silently in
+  `Approved`. When the target branch is checked out in no worktree (or in
+  several), or another precondition fails, the execution records why and the
+  principal room gets a notice naming the fix, for example
+  `git worktree add <path> <branch>`. The approval stays valid: once fixed,
+  resuming the execution or approving again starts the integration.
+- An execution interrupted while its merge was being applied can be resumed
+  again. If the merge had already landed, even with more commits on the target
+  since, resuming now closes it as done instead of staying `Interrupted`; if it
+  had not, resuming replays the apply safely. The recovery action Kronn
+  proposes is always one that resume accepts.
 - The Automations list no longer waits on a scan of every workflow run to find
   each workflow's latest one. A `(workflow_id, started_at)` index answers it
   directly: on a 7 GB database, from 0.85–3.7 s to 19 ms.
