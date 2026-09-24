@@ -41,6 +41,7 @@ import { ImportDropzone } from '../components/workflows/ImportDropzone';
 import { triggerDownload } from '../lib/downloadBlob';
 import { mergeDeclaredAndDetected } from '../lib/workflowVariables';
 import { detectAutomationImport, type AutomationImportKind } from '../lib/automationImport';
+import { describeRedacted, exportRedactionNotice, redactedFieldsIn } from '../lib/redactedFields';
 import { AGENT_LABELS, MODEL_TIER_ICONS, agentColor } from '../lib/constants';
 import { AgentSwitchPicker } from '../components/AgentSwitchPicker';
 import type { AgentSwitchTarget } from '../components/AgentSwitchPicker';
@@ -2756,6 +2757,8 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                     const { filename, blob } = await workflowsApi.exportWorkflow(detailWorkflow.id);
                     triggerDownload(filename, blob);
                     if (toastProp) toastProp(t('wf.exportDone').replace('{name}', detailWorkflow.name), 'success');
+                    const notice = await exportRedactionNotice(blob, t);
+                    if (notice && toastProp) toastProp(notice, 'info');
                   } catch (e) {
                     if (toastProp) toastProp(userError(e), 'error');
                   }
@@ -3515,6 +3518,8 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                                 const { filename, blob } = await quickApisApi.exportQa(qa.id);
                                 triggerDownload(filename, blob);
                                 if (toastProp) toastProp(t('qa.exportDone').replace('{name}', qa.name), 'success');
+                                const notice = await exportRedactionNotice(blob, t);
+                                if (notice && toastProp) toastProp(notice, 'info');
                               } catch (e) {
                                 if (toastProp) toastProp(userError(e), 'error');
                               }
@@ -3928,6 +3933,8 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                             onClick={async () => {
                               const result = await quickExecsApi.export(quickExec.id);
                               triggerDownload(result.filename, result.blob);
+                              const notice = await exportRedactionNotice(result.blob, t);
+                              if (notice && toastProp) toastProp(notice, 'info');
                             }}
                           >
                             <Download size={12} />
@@ -4308,6 +4315,22 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                     </div>
                   )}
                 </div>
+
+                {(() => {
+                  const masked = redactedFieldsIn(importing.content);
+                  if (!masked.length) return null;
+                  return (
+                    <div className="wf-import-redacted mt-4" role="note" data-testid="import-redacted-fields">
+                      <strong>{t('imp.redactedTitle')}</strong>
+                      <p className="text-sm text-muted">{t('imp.redactedHint')}</p>
+                      <ul className="text-sm">
+                        {masked.map(field => (
+                          <li key={`${field.kind}:${field.resource_id}:${field.field}`}>{describeRedacted(field, t)}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  );
+                })()}
 
                 <label className="wf-label mt-4">{t('imp.targetProject')}</label>
                 <select

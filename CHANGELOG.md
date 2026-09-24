@@ -57,6 +57,11 @@ Release notes for 0.9.3 and earlier are available in the
 - The Pages interface is now named Artifacts in all four languages, including
   workflow publishing and the mosaic. Existing URLs, identifiers, API routes
   and MCP tool names remain compatible.
+- Workflow, Quick API and Quick Exec exports replace literal credentials
+  (authorization headers, secret query or body values, `--token`-style
+  arguments) with a marker and list the masked fields in the file, never their
+  values. `{{…}}` references are kept. A notice follows the download, and the
+  import preview lists the masked fields before confirmation.
 
 ### Fixed
 

@@ -1855,16 +1855,35 @@ pub async fn export_workflow(
         }
     };
 
+    // A literal credential must not travel with a file meant to be shared.
+    let mut redacted_fields = Vec::new();
+    let mut exported = wf.clone();
+    let (mut referenced_workflows, mut referenced_quick_apis, mut referenced_quick_execs) = (
+        referenced_workflows,
+        referenced_quick_apis,
+        referenced_quick_execs,
+    );
+    crate::core::export_secrets::redact_workflow(&mut exported, &mut redacted_fields);
+    for workflow in &mut referenced_workflows {
+        crate::core::export_secrets::redact_workflow(workflow, &mut redacted_fields);
+    }
+    for api in &mut referenced_quick_apis {
+        crate::core::export_secrets::redact_quick_api(api, &mut redacted_fields);
+    }
+    for exec in &mut referenced_quick_execs {
+        crate::core::export_secrets::redact_quick_exec(exec, &mut redacted_fields);
+    }
     let envelope = WorkflowExportEnvelope {
         kind: WORKFLOW_EXPORT_KIND.to_string(),
         version: EXPORT_VERSION,
         exported_at: Utc::now(),
-        workflow: wf.clone(),
+        workflow: exported,
         referenced_quick_prompts,
         referenced_quick_apis,
         referenced_quick_execs,
         referenced_pages,
         referenced_workflows,
+        redacted_fields,
     };
 
     // Sanitised filename: `<workflow_name>.kronn-workflow.json`. Replace
@@ -5698,6 +5717,7 @@ mod tests {
             referenced_quick_execs: vec![],
             referenced_pages: vec![],
             referenced_workflows: vec![child],
+            redacted_fields: vec![],
         };
         let json = serde_json::to_string(&env).unwrap();
         let parsed: WorkflowExportEnvelope = serde_json::from_str(&json).unwrap();
@@ -5718,6 +5738,7 @@ mod tests {
             referenced_quick_execs: vec![],
             referenced_pages: vec![],
             referenced_workflows: vec![],
+            redacted_fields: vec![],
         };
         let json = serde_json::to_string(&env).unwrap();
         assert!(
@@ -5738,6 +5759,7 @@ mod tests {
             referenced_quick_execs: vec![],
             referenced_pages: vec![],
             referenced_workflows: vec![],
+            redacted_fields: vec![],
         };
         let json = serde_json::to_string(&env).unwrap();
         assert!(json.contains("\"kind\":\"kronn.workflow\""));
@@ -5763,6 +5785,7 @@ mod tests {
             referenced_quick_execs: vec![],
             referenced_pages: vec![],
             referenced_workflows: vec![],
+            redacted_fields: vec![],
         };
         let json = serde_json::to_string(&env).unwrap();
         assert!(
@@ -5799,6 +5822,7 @@ mod tests {
             referenced_quick_execs: vec![],
             referenced_pages: vec![],
             referenced_workflows: vec![],
+            redacted_fields: vec![],
         };
         let json = serde_json::to_string(&env).unwrap();
         let parsed: WorkflowExportEnvelope = serde_json::from_str(&json).unwrap();

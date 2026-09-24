@@ -5159,7 +5159,11 @@ export type QuickApiExportEnvelope = { kind: string, version: number, exported_a
  * `id`, `project_id`, `created_at`, `updated_at` are present on the
  * wire but reset at import — fresh values are minted by the importer.
  */
-quick_api: QuickApi, };
+quick_api: QuickApi,
+/**
+ * Fields whose literal secret was replaced before export (never the value).
+ */
+redacted_fields?: Array<RedactedField>, };
 
 export type QuickExec = { id: string, name: string, icon: string, description: string, project_id: string | null, command: string, args: Array<string>, timeout_secs: number, output_format: CollectQuickExecOutputFormat, variables: Array<PromptVariable>,
 /**
@@ -5177,7 +5181,11 @@ exit_code: number | null,
  */
 stderr: string | null, };
 
-export type QuickExecExportEnvelope = { kind: string, version: number, exported_at: string, quick_exec: QuickExec, };
+export type QuickExecExportEnvelope = { kind: string, version: number, exported_at: string, quick_exec: QuickExec,
+/**
+ * Fields whose literal secret was replaced before export (never the value).
+ */
+redacted_fields?: Array<RedactedField>, };
 
 export type QuickExecResult = { status: QuickExecStatus,
 /**
@@ -5299,6 +5307,16 @@ export type RecentMessagePreview = { sort_order: number, role: string, agent_typ
 preview: string, };
 
 export type RecoveryStatus = { configured: boolean, };
+
+export type RedactedField = {
+/**
+ * `quick_api`, `quick_exec` or `workflow_step`.
+ */
+kind: string, resource_id: string, name: string,
+/**
+ * Dotted location, e.g. `api_headers.Authorization` or `args.3`.
+ */
+field: string, };
 
 export type RefreshModelCatalogRequest = { runtime_target_id: string, agent_type: AgentType, force?: boolean, };
 
@@ -7444,7 +7462,12 @@ referenced_pages?: Array<WorkflowExportPage>,
  * atomic operation and remaps `sub_workflow_id` to the fresh child ids.
  * Empty when the workflow has no SubWorkflow steps. Excludes the root.
  */
-referenced_workflows?: Array<Workflow>, };
+referenced_workflows?: Array<Workflow>,
+/**
+ * Fields whose literal secret was replaced before export (never the
+ * value). An importer shows them so nothing silently runs without them.
+ */
+redacted_fields?: Array<RedactedField>, };
 
 export type WorkflowExportPage = { id: string, slug: string, title: string, html: string, created_by_agent: string | null, datasets: Array<WorkflowExportPageDataset>, };
 

@@ -1871,6 +1871,81 @@ async fn workflow_export_import_bundles_quick_prompt_quick_api_and_page() {
     );
 }
 
+#[tokio::test]
+async fn exports_mask_literal_secrets_and_list_the_masked_fields() {
+    let (state, _) = workflow_portability_fixture().await;
+    let secret = "sk-live-1234567890abcdefghijklmn";
+    state
+        .db
+        .with_conn(move |connection| {
+            let mut api = kronn::db::quick_apis::get_quick_api(connection, "qa-portable")?.unwrap();
+            api.api_headers = Some(std::collections::HashMap::from([
+                ("Authorization".to_string(), format!("Bearer {secret}")),
+                ("Accept".to_string(), "application/json".to_string()),
+            ]));
+            kronn::db::quick_apis::update_quick_api(connection, &api)?;
+            let mut exec =
+                kronn::db::quick_execs::get_quick_exec(connection, "qe-portable")?.unwrap();
+            exec.args = vec!["--token".into(), "abc123".into()];
+            kronn::db::quick_execs::update_quick_exec(connection, &exec)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let app = build_router_with_auth(state.clone(), false);
+
+    for uri in [
+        "/api/workflows/workflow-portable/export",
+        "/api/quick-apis/qa-portable/export",
+        "/api/quick-execs/qe-portable/export",
+    ] {
+        let (status, _, body) = get_raw(app.clone(), uri).await;
+        assert_eq!(status, StatusCode::OK, "{uri}");
+        let text = String::from_utf8(body).unwrap();
+        assert!(
+            !text.contains(secret) && !text.contains("abc123"),
+            "{uri} leaked a secret"
+        );
+        let exported: Value = serde_json::from_str(&text).unwrap();
+        assert!(
+            !exported["redacted_fields"].as_array().unwrap().is_empty(),
+            "{uri} must list what it masked"
+        );
+    }
+
+    let (_, _, body) = get_raw(app.clone(), "/api/workflows/workflow-portable/export").await;
+    let exported: Value = serde_json::from_slice(&body).unwrap();
+    let mut fields: Vec<String> = exported["redacted_fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|field| {
+            format!(
+                "{}:{}",
+                field["kind"].as_str().unwrap(),
+                field["field"].as_str().unwrap()
+            )
+        })
+        .collect();
+    fields.sort();
+    assert_eq!(
+        fields,
+        ["quick_api:api_headers.Authorization", "quick_exec:args.1"]
+    );
+    let api = &exported["referenced_quick_apis"][0];
+    assert_eq!(api["api_headers"]["Accept"], "application/json");
+    // The stored definitions are untouched: only the file is masked.
+    let stored = state
+        .db
+        .with_read_conn(|connection| {
+            kronn::db::quick_apis::get_quick_api(connection, "qa-portable")
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(stored.api_headers.unwrap()["Authorization"].contains(secret));
+}
+
 // Snapshot complete persisted rows, including existing resources and the
 // capability latch, so rollback cannot pass by deleting/recreating old data.
 async fn workflow_import_database_snapshot(state: &AppState) -> Vec<(String, Vec<String>)> {
