@@ -144,7 +144,15 @@ thread again: ask before renaming a room you did not open.
    resume credential/cursor; this one-time upgrade case returns
    `runtime_bound: false` and `rejoin_required: true` and needs one fresh join
    instead of silently claiming that append is safe. `disc_link({})` binds the
-   current session to the bound disc for a room reached another way.
+   current session to the bound disc for a room reached another way — but it
+   only ever writes that durable resume mapping, never the live
+   `discussion_sessions` row `task_exec_prepare`/`task_exec_launch` authorize
+   against. Its response says which state the caller ends up in: an active
+   member on that exact disc already gets `runtime_bound: true`; anyone else
+   gets the same `runtime_bound: false` / `rejoin_required: true` shape as
+   `disc_find_by_session`, plus a `hint` naming the exact remedy
+   (`disc_invite_peer` for a fresh token, then `disc_join({token: "kr-join-..."})`)
+   instead of task_exec calls failing later with no explanation.
    Both refuse to act rather than guess when no durable identity exists, and
    neither ever passes `force_reassign`: a session owned by another discussion
    is reported, never stolen.

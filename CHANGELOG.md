@@ -74,6 +74,11 @@ Release notes for 0.9.3 and earlier are available in the
   seconds. The refresh sends the revision it holds and the server returns the
   detail only when it changed; on a 2,000-message room this removes about
   40 MB per minute of transfer while it sits idle.
+- `disc_link` now reports whether the session it just bound is actually usable
+  by `task_exec_prepare`/`task_exec_launch`, instead of a bare success that
+  left the gap to surface later as an unexplained `rejoin_required`. The
+  response now says so at link time and names the exact next call
+  (`disc_invite_peer` then `disc_join`) when a rejoin is still needed (KT-737).
 - Native ACP replies no longer include echoed user prompts, including Vibe's
   copy of Kronn's injected instructions. Only agent message chunks contribute
   answer text; tool and usage events remain separate (KT-729).
