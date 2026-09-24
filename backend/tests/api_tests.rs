@@ -21298,3 +21298,100 @@ async fn a_note_send_returns_an_acceptance_receipt_and_deduplicates_its_retry() 
     assert_eq!(notes, 1, "the retry must not duplicate the note");
     assert_eq!(jobs, 0, "a note never dispatches an agent");
 }
+
+/// An idle open discussion must not re-download its transcript: the poll omits
+/// the detail while its revision is unchanged, even with several routed turns
+/// whose targets live in a map, and returns it again after a new message.
+#[tokio::test]
+async fn discussion_poll_omits_an_unchanged_detail_and_returns_it_after_a_change() {
+    let state = test_state();
+    state
+        .db
+        .with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO discussions (id, title, agent, language, participants_json,
+             created_at, updated_at, message_count, workspace_mode, no_agent)
+             VALUES ('d-poll','Poll','ClaudeCode','fr','[]',
+             datetime('now'), datetime('now'), 0, 'Direct', 1)",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let post =
+        |content: &'static str| {
+            let state = state.clone();
+            async move {
+                let app = build_router_with_auth(state, false);
+                let mut req = Request::builder()
+                    .method("POST")
+                    .uri("/api/discussions/d-poll/messages")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "content": content,
+                            "target_agents": ["Codex", "ClaudeCode"],
+                            "target_agent": "Codex",
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap();
+                req.extensions_mut().insert(axum::extract::ConnectInfo(
+                    std::net::SocketAddr::from(([127, 0, 0, 1], 45678)),
+                ));
+                let resp = app.oneshot(req).await.unwrap();
+                assert_eq!(resp.status(), StatusCode::OK);
+                resp.into_body().collect().await.unwrap();
+            }
+        };
+    post("@codex premier").await;
+    post("@claude second").await;
+
+    let app = build_router_with_auth(state.clone(), false);
+    let (_, first) = get_json(app.clone(), "/api/discussions/d-poll/poll").await;
+    assert_eq!(first["success"], true, "{first}");
+    let revision = first["data"]["revision"].as_str().unwrap().to_string();
+    assert_eq!(first["data"]["detail"]["id"], "d-poll");
+    assert_eq!(
+        first["data"]["detail"]["messages"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    for _ in 0..5 {
+        let (_, again) = get_json(
+            app.clone(),
+            &format!("/api/discussions/d-poll/poll?revision={revision}"),
+        )
+        .await;
+        assert_eq!(
+            again["data"]["revision"],
+            revision.as_str(),
+            "identical content, same revision"
+        );
+        assert!(
+            again["data"]["detail"].is_null(),
+            "unchanged detail must be omitted: {again}"
+        );
+    }
+
+    post("@codex troisième").await;
+    let (_, changed) = get_json(
+        app.clone(),
+        &format!("/api/discussions/d-poll/poll?revision={revision}"),
+    )
+    .await;
+    assert_ne!(changed["data"]["revision"], revision.as_str());
+    assert_eq!(
+        changed["data"]["detail"]["messages"]
+            .as_array()
+            .unwrap()
+            .len(),
+        3
+    );
+
+    let (_, missing) = get_json(app, "/api/discussions/nope/poll").await;
+    assert_eq!(missing["success"], false);
+}

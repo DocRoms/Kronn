@@ -70,6 +70,10 @@ Release notes for 0.9.3 and earlier are available in the
 - The Automations list no longer waits on a scan of every workflow run to find
   each workflow's latest one. A `(workflow_id, started_at)` index answers it
   directly: on a 7 GB database, from 0.85–3.7 s to 19 ms.
+- An open discussion no longer re-downloads its whole transcript every five
+  seconds. The refresh sends the revision it holds and the server returns the
+  detail only when it changed; on a 2,000-message room this removes about
+  40 MB per minute of transfer while it sits idle.
 - Native ACP replies no longer include echoed user prompts, including Vibe's
   copy of Kronn's injected instructions. Only agent message chunks contribute
   answer text; tool and usage events remain separate (KT-729).

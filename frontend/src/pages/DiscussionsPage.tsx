@@ -1125,11 +1125,14 @@ export function DiscussionsPage({
   useEffect(() => {
     if (!activeDiscussionId) return;
     let cancelled = false;
+    // The server omits the detail while it still matches this revision, so an
+    // idle open discussion stops re-downloading its whole transcript.
+    let revision: string | null = null;
     const fetchActive = () => {
-      discussionsApi.get(activeDiscussionId).then(disc => {
-        if (!cancelled && disc) {
-          reconcileLoadedDiscussion(disc);
-        }
+      discussionsApi.poll(activeDiscussionId, revision).then(result => {
+        if (cancelled || !result) return;
+        revision = result.revision;
+        if (result.detail) reconcileLoadedDiscussion(result.detail);
       }).catch(() => { /* ignore fetch errors */ });
     };
     fetchActive();
