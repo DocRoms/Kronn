@@ -881,7 +881,7 @@ parent_run_sequence: number | null, };
  * value surfaces instead of being silently coerced. Variant names serialize to the
  * exact DB strings (snake_case) so `as_str` and the enum stay in lockstep.
  */
-export type BlockedReasonCode = "awaiting_worker_acceptance" | "worker_session_committed_elsewhere";
+export type BlockedReasonCode = "awaiting_worker_acceptance" | "worker_session_committed_elsewhere" | "integration_target_not_checked_out" | "integration_refused";
 
 export type BootstrapProjectRequest = { name: string, description: string, agent: AgentType, mcp_config_ids?: Array<string>, skill_ids?: Array<string>, };
 

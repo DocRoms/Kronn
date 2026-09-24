@@ -1260,8 +1260,12 @@ pub fn resolve_local_branch(repo_path: &Path, rev: &str) -> Result<String, Strin
     Ok(branch.to_string())
 }
 
-/// Resolve the checkout to mutate, not merely the repository containing its ref.
-pub fn integration_target_worktree(repo_path: &Path, target: &str) -> Result<PathBuf, String> {
+/// Every worktree that has the local branch `target` checked out, with the
+/// resolved branch name. Integration needs exactly one of them.
+pub fn target_branch_checkouts(
+    repo_path: &Path,
+    target: &str,
+) -> Result<(String, Vec<PathBuf>), String> {
     let branch = resolve_local_branch(repo_path, target)?;
     let branch_field = format!("branch refs/heads/{branch}");
     let output = sync_cmd("git")
@@ -1287,6 +1291,12 @@ pub fn integration_target_worktree(repo_path: &Path, target: &str) -> Result<Pat
             current_path = None;
         }
     }
+    Ok((branch, matches))
+}
+
+/// Resolve the checkout to mutate, not merely the repository containing its ref.
+pub fn integration_target_worktree(repo_path: &Path, target: &str) -> Result<PathBuf, String> {
+    let (branch, matches) = target_branch_checkouts(repo_path, target)?;
     let [path] = matches.as_slice() else {
         return Err(format!(
             "integration target '{branch}' must have exactly one checked-out worktree (found {})",

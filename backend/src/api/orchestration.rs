@@ -1565,6 +1565,54 @@ pub enum IntegrationOutcome {
     NotIntegrable { status: TaskExecutionStatus },
 }
 
+/// Refuse an integration that never started, leaving the reason on the approved
+/// row and a notice in the principal room so the approval is not silently parked.
+async fn hold_approved_integration(
+    db: &Database,
+    exec_id: &str,
+    code: BlockedReasonCode,
+    reason: String,
+    fix: &str,
+) -> Result<IntegrationOutcome, ProvisionError> {
+    let id = exec_id.to_string();
+    let durable_reason = reason.clone();
+    let fix = fix.to_string();
+    db.with_conn(move |conn| {
+        crate::db::orchestration::hold_approved_integration(
+            conn,
+            &id,
+            code,
+            &durable_reason,
+            &fix,
+            &backend_actor(),
+        )
+    })
+    .await
+    .map_err(|error| ProvisionError::Internal(error.to_string()))?;
+    Ok(IntegrationOutcome::Refused { reason })
+}
+
+/// Name the fix for a target branch that is not checked out in exactly one worktree.
+fn target_checkout_fix(repo_path: &std::path::Path, target: &str) -> (BlockedReasonCode, String) {
+    match worktree::target_branch_checkouts(repo_path, target) {
+        Ok((branch, checkouts)) if checkouts.is_empty() => (
+            BlockedReasonCode::IntegrationTargetNotCheckedOut,
+            format!("Crée un worktree sur `{branch}` (`git worktree add <chemin> {branch}`)."),
+        ),
+        Ok((branch, checkouts)) if checkouts.len() > 1 => (
+            BlockedReasonCode::IntegrationTargetNotCheckedOut,
+            format!(
+                "Garde `{branch}` extraite dans un seul worktree ({} actuellement).",
+                checkouts.len()
+            ),
+        ),
+        _ => (
+            BlockedReasonCode::IntegrationRefused,
+            format!("Fais de `{target}` une branche locale extraite dans un worktree propre."),
+        ),
+    }
+}
+
 /// Run the `TwoPhaseFfOnly` integration for an approved execution.
 ///
 /// Every step records its checkpoint BEFORE acting, so a crash anywhere leaves the
@@ -1638,20 +1686,36 @@ pub async fn run_integration(
 
     // The target must be pinned: an unpinned branch is exactly the case where the
     // engine would guess which history to advance.
+    let generic = BlockedReasonCode::IntegrationRefused;
     let Some(target_branch) = run.target_branch.clone() else {
-        return Ok(IntegrationOutcome::Refused {
-            reason: "no pinned target branch".into(),
-        });
+        return hold_approved_integration(
+            db,
+            exec_id,
+            generic,
+            "no pinned target branch".into(),
+            "Épingle une branche cible sur le run d'orchestration.",
+        )
+        .await;
     };
     let Some(project_id) = run.project_id.clone() else {
-        return Ok(IntegrationOutcome::Refused {
-            reason: "run has no project".into(),
-        });
+        return hold_approved_integration(
+            db,
+            exec_id,
+            generic,
+            "run has no project".into(),
+            "Rattache le run d'orchestration à un projet.",
+        )
+        .await;
     };
     let Some(child_path) = workspace.and_then(|w| w.canonical_path) else {
-        return Ok(IntegrationOutcome::Refused {
-            reason: "no managed worktree".into(),
-        });
+        return hold_approved_integration(
+            db,
+            exec_id,
+            generic,
+            "no managed worktree".into(),
+            "Restaure le worktree de la tâche ou réaffecte l'exécution.",
+        )
+        .await;
     };
 
     let project_path = {
@@ -1661,32 +1725,66 @@ pub async fn run_integration(
             .map_err(|e| internal(e.to_string()))?
     };
     let Some(project_path) = project_path else {
-        return Ok(IntegrationOutcome::Refused {
-            reason: "project vanished".into(),
-        });
+        return hold_approved_integration(
+            db,
+            exec_id,
+            generic,
+            "project vanished".into(),
+            "Restaure le projet du run d'orchestration.",
+        )
+        .await;
     };
     let repo_path = scanner::resolve_host_path(&project_path);
     let child = std::path::Path::new(&child_path);
     let target_checkout = match worktree::integration_target_worktree(&repo_path, &target_branch) {
         Ok(path) => path,
-        Err(reason) => return Ok(IntegrationOutcome::Refused { reason }),
+        Err(reason) => {
+            let (code, fix) = target_checkout_fix(&repo_path, &target_branch);
+            return hold_approved_integration(db, exec_id, code, reason, &fix).await;
+        }
     };
 
     // ── Preflight: never apply over uncommitted work ──
     match worktree::worktree_dirty_files(&target_checkout) {
         Ok(dirty) if !dirty.is_empty() => {
-            return Ok(IntegrationOutcome::Refused {
-                reason: format!("target has {} uncommitted file(s)", dirty.len()),
-            });
+            return hold_approved_integration(
+                db,
+                exec_id,
+                generic,
+                format!("target has {} uncommitted file(s)", dirty.len()),
+                &format!(
+                    "Committe ou retire les fichiers non commités de `{}`.",
+                    target_checkout.display()
+                ),
+            )
+            .await;
         }
-        Err(e) => return Ok(IntegrationOutcome::Refused { reason: e }),
+        Err(e) => {
+            return hold_approved_integration(
+                db,
+                exec_id,
+                generic,
+                e,
+                &format!("Vérifie l'état Git de `{}`.", target_checkout.display()),
+            )
+            .await;
+        }
         Ok(_) => {}
     }
 
     // ── Anchor: pin the tip the candidate is built on ──
     let target_sha = match worktree::resolve_commit(&repo_path, &target_branch) {
         Ok(sha) => sha,
-        Err(e) => return Ok(IntegrationOutcome::Refused { reason: e }),
+        Err(e) => {
+            return hold_approved_integration(
+                db,
+                exec_id,
+                generic,
+                e,
+                &format!("Vérifie que la branche `{target_branch}` pointe sur un commit."),
+            )
+            .await;
+        }
     };
     checkpoint(db, exec_id, CheckpointStep::Anchored(target_sha.clone())).await?;
 
@@ -14345,6 +14443,105 @@ mod tests {
         .await
         .unwrap();
         (execution, task_ref, child)
+    }
+
+    #[tokio::test]
+    async fn refused_integration_on_an_unchecked_out_target_is_held_and_announced() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (execution, _, _) = approved_execution_with_commit(
+            &db,
+            repo.path(),
+            "target-without-worktree",
+            "worker.txt",
+            "validated",
+            vec![],
+        )
+        .await;
+        assert!(git(repo.path(), &["branch", "feature-target", "main"])
+            .status
+            .success());
+        let run_id = execution.orchestration_run_id.clone();
+        db.with_conn(move |conn| {
+            conn.execute(
+                "UPDATE orchestration_runs SET target_branch = 'feature-target' WHERE id = ?1",
+                [run_id],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        for _ in 0..2 {
+            let outcome = run_integration(&db, &execution.id).await.unwrap();
+            assert!(
+                matches!(outcome, IntegrationOutcome::Refused { .. }),
+                "got {outcome:?}"
+            );
+        }
+        let held = exec_of(&db, &execution.id).await;
+        assert_eq!(held.status, TaskExecutionStatus::Approved);
+        assert_eq!(
+            held.blocked_reason_code,
+            Some(BlockedReasonCode::IntegrationTargetNotCheckedOut)
+        );
+        assert!(held
+            .blocked_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("feature-target")));
+        let parent = execution.parent_discussion_id.clone();
+        let posted: Vec<String> = db
+            .with_conn(move |conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT content FROM messages WHERE discussion_id = ?1 \
+                     AND id LIKE 'orch-integration-refused:%' ORDER BY rowid",
+                )?;
+                let rows = stmt
+                    .query_map([parent], |row| row.get::<_, String>(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                Ok(rows)
+            })
+            .await
+            .unwrap();
+        assert_eq!(posted.len(), 1, "a repeated refusal must not spam the room");
+        assert!(
+            posted[0].contains("git worktree add <chemin> feature-target"),
+            "the notice must name the fix: {}",
+            posted[0]
+        );
+        let run_id = execution.orchestration_run_id.clone();
+        let attention = db
+            .with_conn(move |conn| crate::db::orchestration::principal_attention(conn, &run_id))
+            .await
+            .unwrap();
+        assert_eq!(
+            attention.awaiting_human, 1,
+            "the held approval needs attention"
+        );
+
+        // Once the branch is checked out, the same durable approval integrates.
+        let target_dir = tempfile::tempdir().unwrap();
+        let target = target_dir.path().join("feature");
+        assert!(git(
+            repo.path(),
+            &[
+                "worktree",
+                "add",
+                target.to_str().unwrap(),
+                "feature-target"
+            ]
+        )
+        .status
+        .success());
+        let outcome = run_integration(&db, &execution.id).await.unwrap();
+        assert!(
+            matches!(outcome, IntegrationOutcome::Integrated { .. }),
+            "got {outcome:?}"
+        );
+        let done = exec_of(&db, &execution.id).await;
+        assert_eq!(done.status, TaskExecutionStatus::Done);
+        assert_eq!(done.blocked_reason_code, None);
+        assert_eq!(done.blocked_reason, None);
     }
 
     async fn assert_pinned_target_checkout_integration(main_dirty: bool) {

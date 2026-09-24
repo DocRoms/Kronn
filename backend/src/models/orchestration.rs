@@ -445,6 +445,13 @@ pub enum BlockedReasonCode {
     /// The target CLI session already holds a live offer for another execution.
     /// Needs a human decision: re-offer to another session or pick a native worker.
     WorkerSessionCommittedElsewhere,
+    /// An approved integration cannot start because its target branch is checked
+    /// out in no worktree, or in several. The row stays `Approved`; a human or the
+    /// principal checks the branch out once, then retries the approval or resume.
+    IntegrationTargetNotCheckedOut,
+    /// An approved integration was refused by another precondition (dirty target,
+    /// unpinned branch, missing worktree...). The row stays `Approved` until retried.
+    IntegrationRefused,
 }
 
 impl BlockedReasonCode {
@@ -452,6 +459,8 @@ impl BlockedReasonCode {
         match self {
             Self::AwaitingWorkerAcceptance => "awaiting_worker_acceptance",
             Self::WorkerSessionCommittedElsewhere => "worker_session_committed_elsewhere",
+            Self::IntegrationTargetNotCheckedOut => "integration_target_not_checked_out",
+            Self::IntegrationRefused => "integration_refused",
         }
     }
 }
@@ -462,6 +471,8 @@ impl std::str::FromStr for BlockedReasonCode {
         match value {
             "awaiting_worker_acceptance" => Ok(Self::AwaitingWorkerAcceptance),
             "worker_session_committed_elsewhere" => Ok(Self::WorkerSessionCommittedElsewhere),
+            "integration_target_not_checked_out" => Ok(Self::IntegrationTargetNotCheckedOut),
+            "integration_refused" => Ok(Self::IntegrationRefused),
             _ => anyhow::bail!("Unknown blocked reason code: {value}"),
         }
     }

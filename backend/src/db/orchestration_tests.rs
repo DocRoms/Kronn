@@ -3940,6 +3940,12 @@ fn parse_blocked_reason_code_is_strict() {
         parse_blocked_reason_code(30, Some("worker_session_committed_elsewhere".into())).unwrap(),
         Some(WorkerSessionCommittedElsewhere)
     );
+    for code in [IntegrationTargetNotCheckedOut, IntegrationRefused] {
+        assert_eq!(
+            parse_blocked_reason_code(30, Some(code.as_str().into())).unwrap(),
+            Some(code)
+        );
+    }
     assert!(
         parse_blocked_reason_code(30, Some("some_future_code".into())).is_err(),
         "a code outside the enum domain must surface as an error, not vanish — the \

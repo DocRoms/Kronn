@@ -70,6 +70,12 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- An approved task whose integration cannot start no longer sits silently in
+  `Approved`. When the target branch is checked out in no worktree (or in
+  several), or another precondition fails, the execution records why and the
+  principal room gets a notice naming the fix, for example
+  `git worktree add <path> <branch>`. The approval stays valid: once fixed,
+  resuming the execution or approving again starts the integration.
 - The Automations list no longer waits on a scan of every workflow run to find
   each workflow's latest one. A `(workflow_id, started_at)` index answers it
   directly: on a 7 GB database, from 0.85–3.7 s to 19 ms.
