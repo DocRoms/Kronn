@@ -482,7 +482,11 @@ tts_voices?: Record<string, string>, disabled_agents: Array<AgentType>, };
  */
 export type AppendLintSummary = { fabricated_count: number, unsourced_count: number, note: string, };
 
-export type ArtifactBundle = { kind: string, version: number, exported_at: string, artifact: ArtifactBundlePage, referenced_artifacts: Array<ArtifactBundlePage>, referenced_workflows: Array<Workflow>, referenced_quick_prompts: Array<QuickPrompt>, referenced_quick_apis: Array<QuickApi>, referenced_quick_execs: Array<QuickExec>, };
+export type ArtifactBundle = { kind: string, version: number, exported_at: string, artifact: ArtifactBundlePage, referenced_artifacts: Array<ArtifactBundlePage>, referenced_workflows: Array<Workflow>, referenced_quick_prompts: Array<QuickPrompt>, referenced_quick_apis: Array<QuickApi>, referenced_quick_execs: Array<QuickExec>,
+/**
+ * Literal credentials replaced before export; locations only, never values.
+ */
+redacted_fields?: Array<RedactedField>, };
 
 export type ArtifactBundleDataset = { name: string, kind: LivePageDatasetKind,
 /**

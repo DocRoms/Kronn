@@ -60,6 +60,9 @@ pub struct ArtifactBundle {
     pub referenced_quick_apis: Vec<QuickApi>,
     #[serde(default)]
     pub referenced_quick_execs: Vec<QuickExec>,
+    /// Literal credentials replaced before export; locations only, never values.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub redacted_fields: Vec<crate::core::export_secrets::RedactedField>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, TS)]

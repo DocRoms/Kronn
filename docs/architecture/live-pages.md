@@ -54,6 +54,11 @@ local files are not bundled. Definitions retain those references; preview lists 
 plugin/model connections, skills, profiles and directives, and offers an
 explicit import-and-configure-later confirmation. File paths and endpoint
 availability are not checked. Copied webhook approval tokens are cleared.
+A literal credential typed into an embedded Workflow, Quick API or Quick Exec
+(authorization header, secret query/body value, `--token`-style argument) is
+replaced by a marker and listed in `redacted_fields`, never its value; the
+import preview shows that list. `{{…}}` references are kept.
+[src: file: backend/src/core/export_secrets.rs:1]
 The selected project applies to newly created automation definitions and
 Artifact action scopes. A deliberately reused local definition is unchanged.
 [src: file: backend/src/api/artifact_portability/import.rs:1]

@@ -3,6 +3,7 @@ import { Loader2, Upload, X } from 'lucide-react';
 import { pages, projects as projectsApi } from '../lib/api';
 import { useT } from '../lib/I18nContext';
 import { userError } from '../lib/userError';
+import { describeRedacted, redactedFieldsIn } from '../lib/redactedFields';
 import type { ArtifactImportChoice, ArtifactImportPreview, ArtifactImportRequest, LivePage, Project } from '../types/generated';
 import './ArtifactImportDialog.css';
 
@@ -137,6 +138,12 @@ export function ArtifactImportDialog({ onClose, onImported, initialProjectId }: 
         {preview.entries.some(entry => entry.quick_exec && !entry.quick_exec.approved)
           && <p className="artifact-import-note">{t('pages.import.execApprovalRequired')}</p>}
         {preview.issues.length > 0 && <ul role="alert">{preview.issues.map(issue => <li key={issue}>{issue}</li>)}</ul>}
+        {(() => {
+          const masked = redactedFieldsIn(content);
+          return masked.length > 0 && <div className="artifact-import-warning" role="note" data-testid="import-redacted-fields">
+            <strong>{t('imp.redactedTitle')}</strong><p>{t('imp.redactedHint')}</p>
+            <ul>{masked.map(field => <li key={`${field.kind}:${field.resource_id}:${field.field}`}>{describeRedacted(field, t)}</li>)}</ul></div>;
+        })()}
         {preview.warnings.length > 0 && <div className="artifact-import-warning"><strong>{t('pages.import.configureLater')}</strong>
           <ul>{preview.warnings.map(warning => <li key={`${warning.kind}:${warning.id}`}>{t(`pages.import.warning.${warning.kind}`, warning.id)}</li>)}</ul></div>}
         <p className="artifact-import-note">{t('pages.import.boundaries')}</p>

@@ -223,16 +223,30 @@ fn export_bundle(conn: &Connection, id: &str) -> Result<ArtifactBundle> {
             bail!("Artifact bundle exceeds 16 MiB");
         }
     }
+    let mut redacted_fields = Vec::new();
+    let mut workflows: Vec<_> = workflows.into_values().collect();
+    let mut quick_apis: Vec<_> = quick_apis.into_values().collect();
+    let mut quick_execs: Vec<_> = quick_execs.into_values().collect();
+    for workflow in &mut workflows {
+        crate::core::export_secrets::redact_workflow(workflow, &mut redacted_fields);
+    }
+    for api in &mut quick_apis {
+        crate::core::export_secrets::redact_quick_api(api, &mut redacted_fields);
+    }
+    for exec in &mut quick_execs {
+        crate::core::export_secrets::redact_quick_exec(exec, &mut redacted_fields);
+    }
     let bundle = ArtifactBundle {
         kind: BUNDLE_KIND.into(),
         version: BUNDLE_VERSION,
         exported_at: Utc::now(),
         artifact,
         referenced_artifacts: pages.into_values().collect(),
-        referenced_workflows: workflows.into_values().collect(),
+        referenced_workflows: workflows,
         referenced_quick_prompts: quick_prompts.into_values().collect(),
-        referenced_quick_apis: quick_apis.into_values().collect(),
-        referenced_quick_execs: quick_execs.into_values().collect(),
+        referenced_quick_apis: quick_apis,
+        referenced_quick_execs: quick_execs,
+        redacted_fields,
     };
     if serde_json::to_vec(&bundle)?.len() > MAX_BUNDLE_BYTES {
         bail!("Artifact bundle exceeds 16 MiB");

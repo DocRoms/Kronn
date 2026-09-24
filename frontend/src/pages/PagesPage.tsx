@@ -21,6 +21,7 @@ import {
 import { formatRelativeTime } from '../lib/relativeTime';
 import { ArtifactImportDialog } from '../components/ArtifactImportDialog';
 import { triggerDownload } from '../lib/downloadBlob';
+import { exportRedactionNotice } from '../lib/redactedFields';
 import { standaloneDiscussionMessageUrl } from '../lib/live-page-navigation';
 import { CopyIdPill } from '../components/CopyIdPill';
 import { RunStatusCard } from '../components/RunStatusCard';
@@ -185,15 +186,19 @@ export function PagesPage({
   const [exportBusy, setExportBusy] = useState<'pdf' | 'docx' | 'json' | null>(null);
   const [exportResult, setExportResult] = useState<{ url: string; filename: string } | null>(null);
   const [importOpen, setImportOpen] = useState(false);
+  const [exportNotice, setExportNotice] = useState<{ pageId: string; text: string } | null>(null);
   const closeImport = useCallback(() => setImportOpen(false), []);
   const artifactExportInFlight = useRef(false);
   const exportArtifact = async () => {
     if (!detail || artifactExportInFlight.current) return;
-    artifactExportInFlight.current = true; setExportBusy('json');
+    artifactExportInFlight.current = true; setExportBusy('json'); setExportNotice(null);
     try {
       const bundle = await pagesApi.exportArtifact(detail.id);
-      triggerDownload(`${detail.slug}.kronn-artifact.json`, new Blob([JSON.stringify(bundle)], { type: 'application/json' }));
+      const blob = new Blob([JSON.stringify(bundle)], { type: 'application/json' });
+      triggerDownload(`${detail.slug}.kronn-artifact.json`, blob);
       setError(null);
+      const notice = await exportRedactionNotice(blob, t);
+      if (notice) setExportNotice({ pageId: detail.id, text: notice });
     } catch (cause) { setError(userError(cause)); }
     finally { artifactExportInFlight.current = false; setExportBusy(null); }
   };
@@ -858,6 +863,8 @@ export function PagesPage({
 
       <section className="live-pages-viewer">
         {error && <div className="live-pages-error" role="alert">{error}</div>}
+        {exportNotice && exportNotice.pageId === detail?.id
+          && <div className="live-pages-notice" role="status" data-testid="artifact-export-redacted">{exportNotice.text}</div>}
         {detail ? (
           <>
             <header className="live-pages-viewer-header collection-detail-header">

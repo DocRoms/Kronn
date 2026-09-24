@@ -35,17 +35,58 @@ const SECRET_HEADERS: &[&str] = &[
     "x-auth-token",
 ];
 
-const SECRET_FLAG_WORDS: &[&str] = &[
+/// Words that make a parameter name a secret on their own (`token`, `db_password`).
+const SECRET_WORDS: &[&str] = &[
     "token",
     "password",
     "passwd",
+    "pwd",
+    "passphrase",
     "secret",
     "apikey",
-    "api-key",
-    "api_key",
     "bearer",
     "credential",
+    "credentials",
+    "auth",
 ];
+
+/// Word pairs that name a key (`api_key`, `privateKey`), unlike `sort_key`.
+const SECRET_KEY_PREFIXES: &[&str] = &[
+    "api",
+    "access",
+    "private",
+    "secret",
+    "signing",
+    "encryption",
+    "client",
+];
+
+/// Whether a parameter, header or flag name designates a credential. Names are
+/// compared word by word so `max_tokens` or `tokenizer` stay ordinary.
+fn secret_name(name: &str) -> bool {
+    let mut words: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut previous_lower = false;
+    for ch in name.trim_start_matches('-').chars() {
+        if !ch.is_ascii_alphanumeric() {
+            words.extend((!current.is_empty()).then(|| std::mem::take(&mut current)));
+            previous_lower = false;
+            continue;
+        }
+        if ch.is_ascii_uppercase() && previous_lower {
+            words.push(std::mem::take(&mut current));
+        }
+        previous_lower = ch.is_ascii_lowercase() || ch.is_ascii_digit();
+        current.push(ch.to_ascii_lowercase());
+    }
+    words.extend((!current.is_empty()).then_some(current));
+    words
+        .iter()
+        .any(|word| SECRET_WORDS.contains(&word.as_str()))
+        || words
+            .windows(2)
+            .any(|pair| pair[1] == "key" && SECRET_KEY_PREFIXES.contains(&pair[0].as_str()))
+}
 
 /// The value without its `{{…}}` placeholders: only this part can hold a
 /// literal secret, since placeholders are resolved at run time.
@@ -105,7 +146,7 @@ impl Scope<'_> {
             if literal.is_empty() {
                 continue;
             }
-            if (SECRET_HEADERS.contains(&key.to_ascii_lowercase().as_str())
+            if ((SECRET_HEADERS.contains(&key.to_ascii_lowercase().as_str()) || secret_name(key))
                 && !only_scheme(&literal))
                 || suspicious(&format!("{key}: {literal}"))
             {
@@ -120,7 +161,10 @@ impl Scope<'_> {
             if literal.is_empty() {
                 continue;
             }
-            if suspicious(&format!("{key}={literal}")) || suspicious(&literal) {
+            if (secret_name(key) && !only_scheme(&literal))
+                || suspicious(&format!("{key}={literal}"))
+                || suspicious(&literal)
+            {
                 self.mask(value, format!("{prefix}.{key}"));
             }
         }
@@ -133,7 +177,10 @@ impl Scope<'_> {
                 if literal.is_empty() {
                     return;
                 }
-                let keyed = key.is_some_and(|key| suspicious(&format!("\"{key}\": \"{literal}\"")));
+                let keyed = key.is_some_and(|key| {
+                    (secret_name(key) && !only_scheme(&literal))
+                        || suspicious(&format!("\"{key}\": \"{literal}\""))
+                });
                 if keyed || suspicious(&literal) {
                     self.mask(text, path);
                 }
@@ -151,11 +198,6 @@ impl Scope<'_> {
             _ => {}
         }
     }
-}
-
-fn names_a_secret(flag: &str) -> bool {
-    let flag = flag.trim_start_matches('-').to_ascii_lowercase();
-    SECRET_FLAG_WORDS.iter().any(|word| flag.contains(word))
 }
 
 pub fn redact_quick_api(api: &mut QuickApi, found: &mut Vec<RedactedField>) {
@@ -187,13 +229,22 @@ pub fn redact_quick_exec(exec: &mut QuickExec, found: &mut Vec<RedactedField>) {
     }
     let mut after_secret_flag = false;
     for (index, arg) in exec.args.iter_mut().enumerate() {
-        let flag_value = after_secret_flag && !arg.starts_with('-');
-        after_secret_flag = arg.starts_with('-') && !arg.contains('=') && names_a_secret(arg);
-        let literal = literal_part(arg);
+        // A value may start with a single dash; only a long option ends the value.
+        let flag_value = after_secret_flag && !arg.starts_with("--");
+        // `--token=value` and `TOKEN=value` carry the value in the same argument.
+        let (name, value) = match arg.split_once('=') {
+            Some((name, value)) if !name.is_empty() && !name.contains(char::is_whitespace) => {
+                (name, Some(value))
+            }
+            _ => (arg.as_str(), None),
+        };
+        after_secret_flag = arg.starts_with('-') && value.is_none() && secret_name(name);
+        let literal = literal_part(value.unwrap_or(arg));
         if literal.is_empty() {
             continue;
         }
-        if flag_value || suspicious(&literal) {
+        let named = value.is_some() && secret_name(name) && !only_scheme(&literal);
+        if flag_value || named || suspicious(&literal_part(arg)) {
             scope.mask(arg, format!("args.{index}"));
         }
     }

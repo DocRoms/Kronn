@@ -34,6 +34,18 @@ beforeEach(() => { vi.clearAllMocks(); mocks.projects.mockResolvedValue([]); moc
 afterEach(cleanup);
 
 describe('ArtifactImportDialog', () => {
+  it('lists the secrets the export masked before the import is confirmed', async () => {
+    render(<ArtifactImportDialog onClose={vi.fn()} onImported={vi.fn()} />);
+    await chooseFile(JSON.stringify({ kind: 'kronn.artifact', version: 1, redacted_fields: [
+      { kind: 'quick_exec', resource_id: 'qe', name: 'Collector', field: 'args.1' },
+    ] }));
+    fireEvent.click(screen.getByRole('button', { name: 'pages.import.preview' }));
+    const note = await screen.findByTestId('import-redacted-fields');
+    expect(note).toHaveTextContent('imp.redactedTitle');
+    expect(note).toHaveTextContent('imp.redactedKind.quick_exec « Collector » : args.1');
+    expect(mocks.commit).not.toHaveBeenCalled();
+  });
+
   it('shows exact commands and requests approval for every new Quick Exec before importing', async () => {
     const entries: ArtifactImportPreview['entries'] = [
       preview.entries[0],

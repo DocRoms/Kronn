@@ -202,3 +202,72 @@ fn an_export_without_literal_secrets_is_unchanged() {
     assert!(found.is_empty());
     assert_eq!(serde_json::to_value(&qa).unwrap(), before);
 }
+
+#[test]
+fn masks_a_plain_token_query_parameter() {
+    let mut qa = api(&[], &[("token", "synthetic-short-value")], None);
+    let mut found = vec![];
+    redact_quick_api(&mut qa, &mut found);
+    assert_eq!(qa.api_query.as_ref().unwrap()["token"], REDACTED);
+}
+
+#[test]
+fn masks_an_inline_token_flag_and_a_password_value_starting_with_a_hyphen() {
+    let mut qe = exec(&[
+        "--token=synthetic-short-value",
+        "--password",
+        "-synthetic-short-value",
+        "API_KEY=abc",
+    ]);
+    let mut found = vec![];
+    redact_quick_exec(&mut qe, &mut found);
+    assert_eq!(qe.args, [REDACTED, "--password", REDACTED, REDACTED]);
+}
+
+#[test]
+fn names_that_merely_contain_a_secret_word_stay_visible() {
+    let mut qe = exec(&[
+        "--max-tokens",
+        "512",
+        "--tokenizer",
+        "cl100k",
+        "--token={{vars.token}}",
+        "--sort-key=date",
+    ]);
+    let mut found = vec![];
+    redact_quick_exec(&mut qe, &mut found);
+    assert!(found.is_empty(), "{found:?}");
+    let body = serde_json::json!({"author": "Ana", "token_type": "Bearer"});
+    let mut qa = api(
+        &[],
+        &[("max_tokens", "512"), ("sort_key", "date")],
+        Some(body),
+    );
+    redact_quick_api(&mut qa, &mut found);
+    assert!(found.is_empty(), "{found:?}");
+}
+
+#[test]
+fn secret_names_are_recognised_word_by_word_and_in_camel_case() {
+    for name in [
+        "token",
+        "--auth-token",
+        "apiKey",
+        "X-Api-Key",
+        "client_secret",
+        "privateKey",
+        "db_password",
+    ] {
+        assert!(secret_name(name), "{name}");
+    }
+    for name in [
+        "max_tokens",
+        "tokenizer",
+        "sort_key",
+        "author",
+        "cacheKey",
+        "--verbose",
+    ] {
+        assert!(!secret_name(name), "{name}");
+    }
+}

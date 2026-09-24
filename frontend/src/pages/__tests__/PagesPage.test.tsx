@@ -139,6 +139,17 @@ describe('PagesPage', () => {
     expect(JSON.parse(await blob.text())).toEqual(bundle);
   });
 
+  it('says which secrets the exported bundle masked', async () => {
+    vi.mocked(pagesApi.exportArtifact).mockResolvedValue({ kind: 'kronn.artifact', version: 1, redacted_fields: [
+      { kind: 'quick_api', resource_id: 'qa', name: 'Metrics', field: 'api_headers.Authorization' },
+    ] } as never);
+    render(<PagesPage />);
+    await screen.findByTestId('live-page-frame');
+    fireEvent.click(screen.getByText('pages.export'));
+    fireEvent.click(screen.getByRole('button', { name: 'pages.exportArtifact' }));
+    expect(await screen.findByTestId('artifact-export-redacted')).toHaveTextContent('imp.exportRedacted');
+  });
+
   it('offers an import even when no Artifact exists', async () => {
     vi.mocked(pagesApi.list).mockResolvedValue([]);
     render(<PagesPage />);

@@ -1944,6 +1944,20 @@ async fn exports_mask_literal_secrets_and_list_the_masked_fields() {
         .unwrap()
         .unwrap();
     assert!(stored.api_headers.unwrap()["Authorization"].contains(secret));
+
+    // The Artifact bundle embeds the same dependencies and masks them the same way.
+    let (status, _, body) = get_raw(app, "/api/pages/page-portable/export").await;
+    assert_eq!(status, StatusCode::OK);
+    let text = String::from_utf8(body).unwrap();
+    assert!(
+        !text.contains(secret) && !text.contains("abc123"),
+        "the Artifact bundle leaked a secret"
+    );
+    let bundle: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(
+        bundle["data"]["redacted_fields"].as_array().unwrap().len(),
+        2
+    );
 }
 
 // Snapshot complete persisted rows, including existing resources and the
