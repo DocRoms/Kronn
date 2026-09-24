@@ -66,6 +66,15 @@ pub struct InFlightAgentResponse {
     pub dispatch: Option<ActiveAgentDispatch>,
 }
 
+/// A detail refresh: `detail` is omitted when `revision` still matches the
+/// one the client sent.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct DiscussionPoll {
+    pub revision: String,
+    pub detail: Option<DiscussionDetail>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct DiscussionDetail {

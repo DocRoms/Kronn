@@ -40,6 +40,7 @@ import type {
   ImportPluginBundleReport,
   Discussion,
   DiscussionDetail,
+  DiscussionPoll,
   DiscussionMonitorItem,
   DiscussionNativeAgentMode,
   DiscussionAgentHandoffMode,
@@ -1507,6 +1508,11 @@ export const discussions = {
   get: (id: string) => api<Discussion & Partial<Pick<DiscussionDetail, 'active_agent_dispatches' | 'message_targets' | 'partial_response'>>>(
     'GET',
     `/discussions/${id}`,
+  ),
+  /** The detail only when it changed since `revision`; `detail` is null otherwise. */
+  poll: (id: string, revision?: string | null) => api<DiscussionPoll>(
+    'GET',
+    `/discussions/${id}/poll${revision ? `?revision=${encodeURIComponent(revision)}` : ''}`,
   ),
   create: (req: CreateDiscussionRequest) => api<Discussion>('POST', '/discussions', req),
   delete: (id: string) => api<void>('DELETE', `/discussions/${id}`),
