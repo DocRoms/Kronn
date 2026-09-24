@@ -4523,6 +4523,20 @@ class WorkflowTriggerTests(unittest.TestCase):
         _, _, body = self.fake_http.call_args.args
         self.assertNotIn("variables", body)
 
+    def test_undeclared_key_is_named_instead_of_silently_dropped(self):
+        # KT-738 — `vars` (not `variables`) used to be dropped silently, so
+        # the backend answered an unrelated "Variable X is required" instead
+        # of pointing at the caller's actual mistake.
+        with self.assertRaises(RuntimeError) as ctx:
+            self.mod.call_workflow_trigger({
+                "workflow_id": "wf-1",
+                "vars": {"ticketKey": "KT-738"},
+            })
+        self.fake_http.assert_not_called()
+        message = str(ctx.exception)
+        self.assertIn("vars", message)
+        self.assertIn("variables", message)
+
 
 class WorkflowActiveRunsTests(unittest.TestCase):
     """`workflow_active_runs` — in-flight board over GET /api/workflows.
