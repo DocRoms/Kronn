@@ -5547,6 +5547,38 @@ def _task_exec_identity(tool_name):
 
 
 _TASK_WORKER_CONTEXT_ENV = "KRONN_TASK_WORKER_CONTEXT"
+_ROOM_AGENT_CONTEXT_ENV = "KRONN_ROOM_AGENT_CONTEXT"
+
+
+def _room_agent_context(tool_name):
+    """The room's native agent identity, injected by Kronn for its own turn.
+
+    Like the worker capability it never appears in an input schema. Absent
+    means this bridge is not a room's native agent; malformed fails closed.
+    """
+    raw = os.environ.get(_ROOM_AGENT_CONTEXT_ENV)
+    if not raw:
+        return None
+    try:
+        value = json.loads(raw)
+    except (TypeError, ValueError) as error:
+        raise RuntimeError(f"{tool_name}: room agent context is invalid") from error
+    fields = ("discussion_id", "agent_type", "dispatch_job_id", "source_message_id")
+    if not isinstance(value, dict) or any(
+        not isinstance(value.get(field), str) or not value[field].strip() for field in fields
+    ):
+        raise RuntimeError(f"{tool_name}: room agent context is incomplete")
+    return {field: value[field].strip() for field in fields}
+
+
+def _task_exec_principal(tool_name):
+    """Principal identity fields for prepare/launch: the room's native agent
+    when Kronn launched this bridge for it, otherwise the joined CLI session."""
+    room_agent = _room_agent_context(tool_name)
+    if room_agent is not None:
+        return {"room_agent": room_agent}
+    source_agent, source_session_id = _task_exec_identity(tool_name)
+    return {"source_agent": source_agent, "source_session_id": source_session_id}
 
 
 def _spawned_task_worker_context(required=False, tool_name="spawned task worker"):
@@ -5808,14 +5840,12 @@ def call_task_exec_prepare(args):
             f"{_TASK_EXEC_MANUAL_HINT}"
         )
     scope_intent, worker_scope = _task_exec_scope_contract(args, "task_exec_prepare")
-    source_agent, source_session_id = _task_exec_identity("task_exec_prepare")
     body = {
         "task_reference": task_reference,
         "parent_discussion_id": _disc_id(),
         "worker": worker,
         "worker_scope_intent": scope_intent,
-        "source_agent": source_agent,
-        "source_session_id": source_session_id,
+        **_task_exec_principal("task_exec_prepare"),
     }
     if worker_scope is not None:
         body["worker_scope"] = worker_scope
@@ -5832,14 +5862,12 @@ def call_task_exec_launch(args):
             f"{_TASK_EXEC_MANUAL_HINT}"
         )
     scope_intent, worker_scope = _task_exec_scope_contract(args, "task_exec_launch")
-    source_agent, source_session_id = _task_exec_identity("task_exec_launch")
     body = {
         "task_reference": task_reference,
         "parent_discussion_id": _disc_id(),
         "worker": worker,
         "worker_scope_intent": scope_intent,
-        "source_agent": source_agent,
-        "source_session_id": source_session_id,
+        **_task_exec_principal("task_exec_launch"),
     }
     for optional in ("base_rev", "idempotency_key", "validations"):
         if args.get(optional) is not None:

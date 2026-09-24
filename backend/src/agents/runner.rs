@@ -2172,6 +2172,17 @@ pub fn fix_file_ownership(work_dir: &Path) {
 /// durable task. The child process forwards this opaque context through the
 /// Kronn MCP bridge; the backend still revalidates every field against the
 /// execution and dispatch rows before accepting a delivery.
+/// Identity of a room's own native agent for the current turn, derived by the
+/// dispatcher from the running dispatch job. Like the worker context it only
+/// travels in the process environment, never in the prompt or tool arguments.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RoomAgentBridgeContext {
+    pub discussion_id: String,
+    pub agent_type: String,
+    pub dispatch_job_id: String,
+    pub source_message_id: String,
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct TaskWorkerBridgeContext {
     pub execution_id: String,
@@ -2190,6 +2201,7 @@ pub(crate) const KRONN_INTERNAL_CODEX_ENV_VARS: &[&str] = &[
     "KRONN_BACKEND_URL",
     "KRONN_AUTH_TOKEN",
     "KRONN_TASK_WORKER_CONTEXT",
+    "KRONN_ROOM_AGENT_CONTEXT",
     "KRONN_SESSION_ID",
     "KRONN_CALLER_SESSION_ID",
     "KRONN_AGENT_TYPE",
@@ -2509,6 +2521,9 @@ pub struct AgentStartConfig<'a> {
     /// environment; it is never rendered into the model prompt or accepted as
     /// a tool argument. HTTP workers keep using the in-process native executor.
     pub task_worker_context: Option<&'a TaskWorkerBridgeContext>,
+    /// The room's native agent identity for this turn, so it can act as the
+    /// principal of `task_exec`. Ignored when a worker context is present.
+    pub room_agent_context: Option<&'a RoomAgentBridgeContext>,
     /// Ollama-only: a JSON Schema (a `TypedSchema` step's schema, already
     /// wrapped in the canonical envelope shape by the caller) forwarded as
     /// the `/api/chat` `format` param — grammar-constrained decoding +
@@ -2601,6 +2616,7 @@ impl<'a> AgentStartConfig<'a> {
             native_acp_full_prompt: None,
             cli_resume_id: None,
             task_worker_context: None,
+            room_agent_context: None,
             ollama_format: None,
             model_override: None,
             reasoning_effort_override: None,
@@ -3580,6 +3596,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
             };
             let launch = AdapterLaunchOptions {
                 worker_context: config.task_worker_context.cloned(),
+                room_agent_context: config.room_agent_context.cloned(),
                 worker_args,
                 api_key: get_api_key(env_key, config.tokens),
             };
@@ -3695,6 +3712,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
         SpawnIo::Direct(stdin_prompt.as_deref()),
         config.discussion_id,
         config.task_worker_context,
+        config.room_agent_context,
     ) {
         Ok(c) => c,
         Err(e) => {
@@ -3710,6 +3728,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                     SpawnIo::Direct(stdin_prompt.as_deref()),
                     config.discussion_id,
                     config.task_worker_context,
+                    config.room_agent_context,
                 )?
             } else {
                 return Err(e);
@@ -3846,6 +3865,7 @@ pub(crate) enum SpawnIo<'a> {
 #[derive(Default)]
 pub(crate) struct AdapterLaunchOptions {
     pub(crate) worker_context: Option<TaskWorkerBridgeContext>,
+    pub(crate) room_agent_context: Option<RoomAgentBridgeContext>,
     pub(crate) worker_args: Option<Vec<String>>,
     pub(crate) api_key: Option<String>,
 }
@@ -10704,6 +10724,7 @@ pub(crate) fn try_spawn(
     io: SpawnIo<'_>,
     discussion_id: Option<&str>,
     task_worker_context: Option<&TaskWorkerBridgeContext>,
+    room_agent_context: Option<&RoomAgentBridgeContext>,
 ) -> Result<tokio::process::Child, String> {
     let stdin_payload = match io {
         SpawnIo::Direct(payload) => payload,
@@ -10860,6 +10881,16 @@ pub(crate) fn try_spawn(
     } else {
         // A normal turn must never inherit a caller's worker capability.
         cmd.env_remove("KRONN_TASK_WORKER_CONTEXT");
+    }
+    match room_agent_context.filter(|_| task_worker_context.is_none()) {
+        Some(context) => {
+            let encoded = serde_json::to_string(context)
+                .map_err(|error| format!("Unable to encode room agent context: {error}"))?;
+            cmd.env("KRONN_ROOM_AGENT_CONTEXT", encoded);
+        }
+        None => {
+            cmd.env_remove("KRONN_ROOM_AGENT_CONTEXT");
+        }
     }
 
     let real_home = std::env::var("KRONN_HOST_HOME").ok().filter(|rh| {

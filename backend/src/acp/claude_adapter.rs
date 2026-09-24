@@ -292,6 +292,7 @@ impl AcpTransport for ClaudeAcpAdapter {
             SpawnIo::Adapter,
             self.discussion_id.as_deref(),
             self.launch.worker_context.as_ref(),
+            self.launch.room_agent_context.as_ref(),
         )
         .map_err(AcpError::Transport)?;
         let mut stdin = child
