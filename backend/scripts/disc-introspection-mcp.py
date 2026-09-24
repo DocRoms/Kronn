@@ -4262,6 +4262,29 @@ def _unwrap(envelope):
     return envelope.get("data")
 
 
+def _reject_unknown_args(tool_name, args, hint=None):
+    """Fail on an argument the tool's own inputSchema does not declare.
+
+    A silently-dropped typo (e.g. `vars` where the schema says `variables`)
+    otherwise reaches the backend as if the field were simply absent, so the
+    caller sees an unrelated "required" error instead of its own mistake.
+    """
+    if not isinstance(args, dict):
+        return
+    schema = next((t["inputSchema"] for t in TOOLS if t["name"] == tool_name), None)
+    allowed = set((schema or {}).get("properties") or {})
+    unknown = sorted(set(args) - allowed)
+    if not unknown:
+        return
+    message = (
+        f"{tool_name}: unknown argument(s) {', '.join(unknown)}; "
+        f"expected one of: {', '.join(sorted(allowed))}."
+    )
+    if hint:
+        message += f" {hint}"
+    raise RuntimeError(message)
+
+
 def _disc_append_attachment_paths(raw_paths):
     """Validate and resolve local files an agent wants to publish in a room.
 
@@ -8480,6 +8503,12 @@ def call_workflow_trigger(args):
     workflow_id = args.get("workflow_id")
     if not workflow_id:
         raise RuntimeError("workflow_trigger: missing required 'workflow_id'")
+    # An undeclared key (e.g. `vars`) must not be dropped silently: without
+    # this, the backend answers "Variable X is required" instead of naming
+    # the caller's actual mistake.
+    _reject_unknown_args(
+        "workflow_trigger", args, hint="Manual-launch variables go in `variables`."
+    )
     body = {"workflow_id": workflow_id}
     variables = args.get("variables")
     if isinstance(variables, dict):

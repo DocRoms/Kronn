@@ -110,6 +110,10 @@ Release notes for 0.9.3 and earlier are available in the
   failures no longer leave partial imports or activate an empty Pages library.
 - A Live Page's 30-second auto-refresh, and switching to another Page, each
   fetch that Page's detail exactly once instead of twice (KT-736).
+- Triggering a workflow from MCP with an argument its tool does not declare
+  (for example `vars` instead of `variables`) now fails with an error naming
+  the expected `variables` argument, instead of silently dropping the value
+  and reporting an unrelated "variable is required" error (KT-738).
 
 ## [0.14.0] - 2026-09-23
 
