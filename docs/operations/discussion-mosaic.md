@@ -14,10 +14,29 @@ Message author, CLI ordinal and model labels come from stored message metadata.
 A configured native agent in the header is not evidence that a joined CLI is
 currently working. No activity is inferred from CLI presence.
 
-The monitor is deliberately read-only. It does not send messages, launch or
-resume agents, acknowledge room cursors, or update the discussion unread state.
-Markdown proposals remain text; the preview has no action cards or iframe and
-omits image fetching. Open the full discussion to interact with its contents.
+The monitor itself is read-only. It does not launch or resume agents,
+acknowledge room cursors, or update the discussion unread state. Markdown
+proposals remain text; the preview has no action cards or iframe and omits image
+fetching. Open the full discussion to interact with its contents.
+
+## Writing to one tile
+
+Clicking a tile (or its reply button) selects it: the tile gets an accent
+outline and the collapsible input at the bottom names it. Nothing can be sent
+without a selection. The input is the discussion's own `ChatInput`, with its
+mentions, `@all`, joined CLIs and per-discussion draft; changing tile keeps
+each draft in its discussion. The selected discussion is loaded once on
+selection, and the input appears only when that exact record is loaded.
+Each message first reaches the same local outbox as the discussion page, with
+a stable UUID; the draft is cleared at that point. The outbox then sends it with
+`defer_dispatch`, so the server persists it and runs the agent after the current
+run, and closing the tab does not cut the reply. A failed send stays listed
+under the input and retries with the same UUID (the server deduplicates it);
+it can be retried now or discarded. An entry still waiting when another tile is
+selected resumes when its discussion is open again, here or in the full page.
+Notes are sent on their own channel, never through the dispatch outbox, and
+are restored as a draft if refused. Voice conversation, read-aloud, debates and
+`kronn-important` publication stay in the full discussion and are hidden here.
 
 ## Bounded refresh contract
 

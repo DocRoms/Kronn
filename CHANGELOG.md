@@ -36,6 +36,8 @@ Release notes for 0.9.3 and earlier are available in the
   Each tile scrolls independently and links to its full discussion. The bounded
   read-only monitor shares one WebSocket and batches refreshes without marking
   discussions read or launching agents; a missing room does not block its peers.
+  Selecting a tile opens a collapsible input bound to that discussion, with its
+  mentions and draft; messages use the durable outbox route.
   [Monitoring limits and behavior](docs/operations/discussion-mosaic.md).
 - The discussion asset carousel has a copy button. Text, JSON and log files are
   copied whole (up to 2 MiB), images as PNG, and videos only where the browser
@@ -71,6 +73,9 @@ Release notes for 0.9.3 and earlier are available in the
 - Codex discussions with a project-synced internal MCP bridge no longer fail
   immediately during bootstrap: the adapter emits the reserved
   `kronn-internal` entry exactly once (KT-730).
+- A draft typed in a discussion after sending, then left for another
+  discussion, is no longer erased when the earlier message is acknowledged;
+  only the sent text itself is cleared.
 - Native backend hot reload uses the initial startup readiness budget instead
   of stopping a still-starting backend after roughly 30 seconds. Slow project
   MCP synchronization can finish before the HTTP listener becomes ready;

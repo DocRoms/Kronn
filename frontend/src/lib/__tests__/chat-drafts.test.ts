@@ -3,6 +3,7 @@ import {
   saveDraft,
   loadDraft,
   clearDraft,
+  clearSubmittedDraft,
   purgeExpiredDrafts,
   CHAT_DRAFT_CONFIG,
   NEW_DISCUSSION_DRAFT_ID,
@@ -53,7 +54,22 @@ describe('chat-drafts', () => {
       text: '@codex legacy',
       savedAt: '2026-04-15T09:00:00.000Z',
       routingTiers: {},
+      submitted: false,
     });
+  });
+
+  it('marks only an explicitly submitted snapshot and clears nothing else', () => {
+    saveDraft('s', 'ok', {}, { submitted: true });
+    expect(loadDraft('s')?.submitted).toBe(true);
+    clearSubmittedDraft('s', 'other text');
+    expect(loadDraft('s')?.text).toBe('ok');
+    saveDraft('s', 'ok');
+    expect(loadDraft('s')?.submitted).toBe(false);
+    clearSubmittedDraft('s', 'ok');
+    expect(loadDraft('s')?.text).toBe('ok');
+    saveDraft('s', 'ok', {}, { submitted: true });
+    clearSubmittedDraft('s', 'ok');
+    expect(loadDraft('s')).toBeNull();
   });
 
   it('isolates drafts per discussion id', () => {
