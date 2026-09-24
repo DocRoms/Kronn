@@ -60,6 +60,10 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- Native backend hot reload uses the initial startup readiness budget instead
+  of stopping a still-starting backend after roughly 30 seconds. Slow project
+  MCP synchronization can finish before the HTTP listener becomes ready;
+  diagnostics distinguish readiness timeout from an actual backend exit.
 - Workflow HTTP agents recover once from an explicit unsupported structured
   output response by keeping the schema in the prompt and retaining the model,
   tools and local validation policy. A persistent notice records the fallback,
