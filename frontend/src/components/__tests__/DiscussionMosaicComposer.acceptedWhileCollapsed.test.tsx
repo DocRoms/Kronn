@@ -108,6 +108,43 @@ describe('mosaic with its real ChatInput', () => {
     await waitFor(() => expect(input().value).toBe('new unsent draft A'));
   });
 
+  it('keeps an identical message typed again while the first note is pending', async () => {
+    let acknowledge!: () => void;
+    const send = vi.spyOn(discussions, 'sendMessageStream').mockImplementation((...args) => new Promise<void>(resolve => {
+      acknowledge = () => { args[8]?.({ message_id: 'saved-note', sort_order: 1, duplicate: false }); resolve(); };
+    }));
+    render(<DiscussionMosaicComposer {...props('a')} />);
+    await screen.findByRole('textbox');
+    fireEvent.click(await screen.findByLabelText('disc.note.sendAsNote'));
+    fireEvent.change(input(), { target: { value: 'ok' } });
+    fireEvent.click(screen.getByLabelText('Send message'));
+    await waitFor(() => expect(send).toHaveBeenCalledTimes(1));
+    expect(input().value).toBe('');
+    fireEvent.change(input(), { target: { value: 'ok' } });
+    await act(async () => { acknowledge(); });
+    expect(input().value).toBe('ok');
+  });
+
+  it('keeps an identical draft typed again and stored while collapsed when the late receipt arrives', async () => {
+    let acknowledge!: () => void;
+    vi.spyOn(discussions, 'sendMessageStream').mockImplementation((...args) => new Promise<void>(resolve => {
+      acknowledge = () => { args[8]?.({ message_id: 'saved-note', sort_order: 1, duplicate: false }); resolve(); };
+    }));
+    render(<DiscussionMosaicComposer {...props('a')} />);
+    await screen.findByRole('textbox');
+    fireEvent.click(await screen.findByLabelText('disc.note.sendAsNote'));
+    fireEvent.change(input(), { target: { value: 'ok' } });
+    fireEvent.click(screen.getByLabelText('Send message'));
+    expect(loadDraft('a')).toMatchObject({ text: 'ok', submitted: true });
+    fireEvent.change(input(), { target: { value: 'ok' } });
+    fireEvent.click(screen.getByRole('button', { name: 'disc.mosaic.replyIn:a' }));
+    expect(loadDraft('a')).toMatchObject({ text: 'ok', submitted: false });
+    await act(async () => { acknowledge(); });
+    expect(loadDraft('a')?.text).toBe('ok');
+    fireEvent.click(screen.getByRole('button', { name: 'disc.mosaic.replyIn:a' }));
+    await waitFor(() => expect(input().value).toBe('ok'));
+  });
+
   it('keeps a newer draft typed before collapsing when the late receipt arrives', async () => {
     let acknowledge!: () => void;
     vi.spyOn(discussions, 'sendMessageStream').mockImplementation((...args) => new Promise<void>(resolve => {

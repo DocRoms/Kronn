@@ -27,6 +27,7 @@ import {
   loadDraft,
   saveDraft,
   clearDraft,
+  clearSubmittedDraft,
   type DraftRoutingTiers,
 } from '../lib/chat-drafts';
 import {
@@ -284,6 +285,8 @@ export function ChatInput({
   // and clears on successful send.
   const [restoredDraftAt, setRestoredDraftAt] = useState<string | null>(null);
   const draftSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** Text restored from a send still awaiting its receipt, until anything is typed. */
+  const restoredSubmittedRef = useRef<string | null>(null);
   const currentDiscIdRef = useRef<string | null>(null);
   const [mentionTierOverrides, setMentionTierOverrides] = useState<DraftRoutingTiers>({});
   const mentionTierOverridesRef = useRef<DraftRoutingTiers>({});
@@ -306,6 +309,7 @@ export function ChatInput({
   const scheduleDraftSave = useCallback((text: string) => {
     const discId = currentDiscIdRef.current;
     if (!discId) return;
+    restoredSubmittedRef.current = null;
     if (draftSaveTimerRef.current) clearTimeout(draftSaveTimerRef.current);
     // 250ms debounce — fast enough to survive a "type-and-tab-away" gesture
     // but sparse enough to never hammer localStorage on long messages.
@@ -336,12 +340,12 @@ export function ChatInput({
     return () => window.removeEventListener('kronn:composer-prefill', handler);
   }, [discussion?.id, updateChatInput, scheduleDraftSave]);
 
-  const flushDraftNow = useCallback((discId: string, text: string) => {
+  const flushDraftNow = useCallback((discId: string, text: string, submitted = false) => {
     if (draftSaveTimerRef.current) {
       clearTimeout(draftSaveTimerRef.current);
       draftSaveTimerRef.current = null;
     }
-    saveDraft(discId, text, mentionTierOverridesRef.current);
+    saveDraft(discId, text, mentionTierOverridesRef.current, { submitted });
   }, []);
 
   // On discussion switch: flush the previous discussion's draft (without
@@ -373,6 +377,7 @@ export function ChatInput({
     setPreferredTiers(rememberedTiers);
 
     const saved = loadDraft(nextDiscId);
+    restoredSubmittedRef.current = saved?.submitted ? saved.text : null;
     if (saved) {
       updateChatInput(saved.text);
       updateMentionTierOverrides(saved.routingTiers);
@@ -414,9 +419,7 @@ export function ChatInput({
         // after durable acceptance, and only if it is still that snapshot (a
         // newer draft typed there before leaving is kept); on refusal leave it
         // stored so returning to that room restores the unsent message.
-        if (detail.settlement === 'accepted' && loadDraft(detail.discussionId)?.text === detail.message) {
-          clearDraft(detail.discussionId);
-        }
+        if (detail.settlement === 'accepted') clearSubmittedDraft(detail.discussionId, detail.message);
         return;
       }
 
@@ -425,12 +428,15 @@ export function ChatInput({
       if (detail.settlement === 'accepted') {
         delete submittedRoutingTiersRef.current[detail.discussionId];
         // An input remounted before the receipt restored the submitted text
-        // itself as a draft: that is the accepted message, not a new one.
-        const isSubmittedSnapshot = current.trim() === detail.message.trim();
+        // itself as a draft, and nothing was typed since: that is the
+        // accepted message, not a new one.
+        const isSubmittedSnapshot = restoredSubmittedRef.current === detail.message
+          && current === detail.message;
         if (current.trim() && !isSubmittedSnapshot) {
           flushDraftNow(detail.discussionId, current);
         } else {
           if (isSubmittedSnapshot) {
+            restoredSubmittedRef.current = null;
             updateChatInput('');
             setRestoredDraftAt(null);
           }
@@ -903,7 +909,7 @@ export function ChatInput({
       ...submittedRoutingTiersRef.current,
       [discussion.id]: { ...mentionTierOverridesRef.current },
     };
-    flushDraftNow(discussion.id, msg);
+    flushDraftNow(discussion.id, msg, true);
     setRestoredDraftAt(null);
     updateChatInput('');
     updateMentionTierOverrides({});

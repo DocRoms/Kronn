@@ -4,7 +4,7 @@ import { ChatInput } from './ChatInput';
 import { agents as agentsApi, discussions as discussionsApi } from '../lib/api';
 import { useT } from '../lib/I18nContext';
 import { publishMessageSendSettled } from '../lib/messageSendLifecycle';
-import { clearDraft, loadDraft } from '../lib/chat-drafts';
+import { clearSubmittedDraft } from '../lib/chat-drafts';
 import { useMessageQueue, type QueuedMessage, type QueuedMessageControl } from '../hooks/useMessageQueue';
 import { userError } from '../lib/userError';
 import { sendToDiscussion } from '../lib/sendToDiscussion';
@@ -55,11 +55,11 @@ export function DiscussionMosaicComposer({ discussionId, title, toast }: {
 }
 
 /** Settles an accepted send. The input may have been collapsed or left before
- *  the receipt, with nobody listening: the stored draft is then still the sent
- *  text and would come back. A newer draft differs and is kept. */
+ *  the receipt, with nobody listening: the stored draft is then still the
+ *  submitted snapshot and would come back. Anything typed since is kept. */
 function settleAccepted(discussionId: string, text: string) {
   publishMessageSendSettled(discussionId, text, 'accepted');
-  if (loadDraft(discussionId)?.text === text) clearDraft(discussionId);
+  clearSubmittedDraft(discussionId, text);
 }
 
 /** One discussion's input. Keyed by its id, so everything it sends is bound to
