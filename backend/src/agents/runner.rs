@@ -9448,33 +9448,41 @@ impl ClaudeSandboxCatalogueReceipt {
     }
 }
 
+/// One Git root measured by the catalogue preflight; `label` names it in a
+/// refusal without exposing its path.
+pub(crate) struct ClaudeSandboxCatalogueRoot {
+    pub label: String,
+    pub path: PathBuf,
+}
+
 fn claude_sandbox_catalogue_receipt(
-    repo_roots: &[PathBuf],
+    repo_roots: &[ClaudeSandboxCatalogueRoot],
 ) -> Result<ClaudeSandboxCatalogueReceipt, String> {
     let mut common_dirs = std::collections::BTreeSet::new();
     let mut worktrees = std::collections::BTreeSet::new();
-    for repo_root in repo_roots {
+    for root in repo_roots {
+        let unreadable = || claude_sandbox_catalogue_unreadable(&root.label);
         let common_output = sync_cmd("git")
             .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
-            .current_dir(repo_root)
+            .current_dir(&root.path)
             .output()
-            .map_err(|_| claude_sandbox_catalogue_unreadable())?;
+            .map_err(|_| unreadable())?;
         if !common_output.status.success() {
-            return Err(claude_sandbox_catalogue_unreadable());
+            return Err(unreadable());
         }
         let common_dir = PathBuf::from(String::from_utf8_lossy(&common_output.stdout).trim())
             .canonicalize()
-            .map_err(|_| claude_sandbox_catalogue_unreadable())?;
+            .map_err(|_| unreadable())?;
         if !common_dirs.insert(common_dir) {
             continue;
         }
         let output = sync_cmd("git")
             .args(["worktree", "list", "--porcelain"])
-            .current_dir(repo_root)
+            .current_dir(&root.path)
             .output()
-            .map_err(|_| claude_sandbox_catalogue_unreadable())?;
+            .map_err(|_| unreadable())?;
         if !output.status.success() {
-            return Err(claude_sandbox_catalogue_unreadable());
+            return Err(unreadable());
         }
         for line in String::from_utf8_lossy(&output.stdout).lines() {
             if let Some(path) = line.strip_prefix("worktree ") {
@@ -9489,11 +9497,44 @@ fn claude_sandbox_catalogue_receipt(
     })
 }
 
-fn claude_sandbox_catalogue_unreadable() -> String {
-    "Claude task worker refused before provisioning: reason_code=claude_sandbox_catalogue_unreadable; \
-     the registered Git worktree catalogue could not be measured. No repository or worktree path \
-     was logged. Use `task_exec_reassign` to move this execution to another available worker."
-        .to_string()
+fn claude_sandbox_catalogue_unreadable(label: &str) -> String {
+    format!(
+        "Claude task worker refused before provisioning: reason_code=claude_sandbox_catalogue_unreadable; \
+         the Git root of {label} is inaccessible, so its registered worktrees could not be measured. \
+         No repository or worktree path was logged. Make that repository readable as a Git \
+         checkout, or fix or remove it from the project's linked repositories."
+    )
+}
+
+/// Roots whose worktree catalogue the Claude sandbox could enumerate. A linked
+/// location that does not exist has no catalogue to enumerate, so it is skipped;
+/// any other access failure stays in the list and fails closed.
+pub(crate) fn claude_sandbox_catalogue_roots(
+    project: &crate::models::Project,
+) -> Vec<ClaudeSandboxCatalogueRoot> {
+    let mut roots = vec![ClaudeSandboxCatalogueRoot {
+        label: format!("project `{}`", project.name),
+        path: crate::core::scanner::resolve_host_path(&project.path),
+    }];
+    for repo in &project.linked_repos {
+        let Some(location) = repo.local_location() else {
+            continue;
+        };
+        let path = crate::core::scanner::resolve_host_path(location);
+        if matches!(path.try_exists(), Ok(false)) {
+            tracing::warn!(
+                "Claude sandbox catalogue: linked repository `{}` of project `{}` does not exist on this host; skipped",
+                repo.name,
+                project.name
+            );
+            continue;
+        }
+        roots.push(ClaudeSandboxCatalogueRoot {
+            label: format!("linked repository `{}`", repo.name),
+            path,
+        });
+    }
+    roots
 }
 
 pub(crate) fn claude_task_worker_catalogue_preflight(
@@ -9502,16 +9543,7 @@ pub(crate) fn claude_task_worker_catalogue_preflight(
     if !super::host_is_macos() {
         return Ok(());
     }
-    let mut repo_roots = vec![crate::core::scanner::resolve_host_path(&project.path)];
-    repo_roots.extend(project.linked_repos.iter().filter_map(|repo| {
-        let location = repo.location.trim();
-        (!location.is_empty()
-            && !location.starts_with("http://")
-            && !location.starts_with("https://")
-            && !location.starts_with("git@"))
-        .then(|| crate::core::scanner::resolve_host_path(location))
-    }));
-    claude_sandbox_catalogue_receipt(&repo_roots)?.validate()
+    claude_sandbox_catalogue_receipt(&claude_sandbox_catalogue_roots(project))?.validate()
 }
 
 async fn run_claude_task_worker_auth_probe(

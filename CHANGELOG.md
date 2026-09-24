@@ -67,6 +67,12 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- A local linked repository whose path does not exist on this machine no longer
+  makes the Claude task worker unavailable for the whole project on macOS: it is
+  skipped with a warning. A linked repository or project that exists but cannot
+  be read as a Git checkout still refuses the worker, and the refusal now names
+  it instead of suggesting a reassignment. Saving linked repositories now
+  rejects a local path that does not exist; remote URLs are unchanged (KT-741).
 - Native ACP replies no longer include echoed user prompts, including Vibe's
   copy of Kronn's injected instructions. Only agent message chunks contribute
   answer text; tool and usage events remain separate (KT-729).

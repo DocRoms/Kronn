@@ -7110,13 +7110,132 @@ Suite de la réponse.";
         root
     }
 
+    fn catalogue_root(
+        label: &str,
+        path: std::path::PathBuf,
+    ) -> super::super::ClaudeSandboxCatalogueRoot {
+        super::super::ClaudeSandboxCatalogueRoot {
+            label: label.into(),
+            path,
+        }
+    }
+
+    fn catalogue_project(
+        path: &std::path::Path,
+        linked: &[(&str, String)],
+    ) -> crate::models::Project {
+        let now = chrono::Utc::now();
+        crate::models::Project {
+            id: "p1".into(),
+            name: "proj".into(),
+            path: path.to_string_lossy().into_owned(),
+            repo_url: None,
+            token_override: None,
+            ai_config: crate::models::AiConfigStatus {
+                detected: false,
+                configs: vec![],
+            },
+            audit_status: crate::models::AiAuditStatus::NoTemplate,
+            ai_todo_count: 0,
+            tech_debt_count: 0,
+            needs_docs_migration: false,
+            path_exists: true,
+            write_access: None,
+            mcp_sync_report: None,
+            default_skill_ids: vec![],
+            default_profile_id: None,
+            briefing_notes: None,
+            linked_repos: linked
+                .iter()
+                .enumerate()
+                .map(|(index, (name, location))| crate::models::LinkedRepo {
+                    id: format!("lr-{index}"),
+                    name: (*name).into(),
+                    kind: "api".into(),
+                    location: location.clone(),
+                    description: String::new(),
+                })
+                .collect(),
+            workspace: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    #[test]
+    fn claude_catalogue_skips_a_linked_repository_missing_on_this_host() {
+        let repo = synthetic_git_worktree_catalogue(1);
+        let missing = repo.path().join("absent-linked-repo");
+        let project = catalogue_project(
+            &repo.path().join("main"),
+            &[
+                ("ghost", missing.to_string_lossy().into_owned()),
+                ("remote", "https://github.com/org/remote".into()),
+                (
+                    "sibling",
+                    repo.path()
+                        .join("worktree-0")
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+            ],
+        );
+        let roots = super::super::claude_sandbox_catalogue_roots(&project);
+        let labels: Vec<&str> = roots.iter().map(|root| root.label.as_str()).collect();
+        assert_eq!(
+            labels,
+            ["project `proj`", "linked repository `sibling`"],
+            "a missing path and a URL are not measured"
+        );
+        let receipt = super::super::claude_sandbox_catalogue_receipt(&roots).unwrap();
+        assert_eq!(receipt.common_dir_count, 1);
+        assert_eq!(receipt.worktree_count, 2);
+        assert_eq!(receipt.validate(), Ok(()));
+    }
+
+    #[test]
+    fn claude_catalogue_names_an_existing_linked_repository_it_cannot_read() {
+        let repo = synthetic_git_worktree_catalogue(0);
+        let not_git = tempfile::tempdir().unwrap();
+        let secret_path = not_git.path().to_string_lossy().into_owned();
+        let project = catalogue_project(
+            &repo.path().join("main"),
+            &[("plain-folder", secret_path.clone())],
+        );
+        let roots = super::super::claude_sandbox_catalogue_roots(&project);
+        assert_eq!(roots.len(), 2, "an existing path stays fail-closed");
+        let error = super::super::claude_sandbox_catalogue_receipt(&roots).unwrap_err();
+        assert!(error.contains("reason_code=claude_sandbox_catalogue_unreadable"));
+        assert!(
+            error.contains("linked repository `plain-folder`"),
+            "{error}"
+        );
+        assert!(!error.contains("task_exec_reassign"), "{error}");
+        assert!(!error.contains(&secret_path));
+    }
+
+    #[test]
+    fn claude_catalogue_names_the_project_root_when_it_is_not_readable() {
+        let not_git = tempfile::tempdir().unwrap();
+        let project = catalogue_project(not_git.path(), &[]);
+        let error = super::super::claude_sandbox_catalogue_receipt(
+            &super::super::claude_sandbox_catalogue_roots(&project),
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("the Git root of project `proj` is inaccessible"),
+            "{error}"
+        );
+        assert!(!error.contains("task_exec_reassign"), "{error}");
+    }
+
     #[test]
     fn claude_task_worker_accepts_catalogue_below_conservative_bounds() {
         let repo = synthetic_git_worktree_catalogue(3);
         let duplicate_checkout = repo.path().join("worktree-0");
         let receipt = super::super::claude_sandbox_catalogue_receipt(&[
-            repo.path().join("main"),
-            duplicate_checkout,
+            catalogue_root("project `main`", repo.path().join("main")),
+            catalogue_root("linked repository `dup`", duplicate_checkout),
         ])
         .unwrap();
         assert_eq!(receipt.common_dir_count, 1);
@@ -7134,8 +7253,11 @@ Suite de la réponse.";
         )
         .unwrap();
         let secret_path = repo.path().to_string_lossy().to_string();
-        let receipt =
-            super::super::claude_sandbox_catalogue_receipt(&[repo.path().join("main")]).unwrap();
+        let receipt = super::super::claude_sandbox_catalogue_receipt(&[catalogue_root(
+            "project `main`",
+            repo.path().join("main"),
+        )])
+        .unwrap();
         let error = receipt.validate().unwrap_err();
         assert_eq!(receipt.common_dir_count, 1);
         assert_eq!(receipt.worktree_count, 66);

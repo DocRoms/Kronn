@@ -17703,6 +17703,7 @@ mod cold_api_handlers_tests {
     #[tokio::test]
     async fn set_linked_repos_seeded_project_returns_envelope() {
         let (_dir, repo) = seed_repo("linked-repos");
+        let companion = tempfile::tempdir().unwrap();
         let state = test_state();
         let pid = seed_project_with_repo(&state, &repo).await;
         let app = build_router_with_auth(state, false);
@@ -17713,13 +17714,59 @@ mod cold_api_handlers_tests {
             serde_json::json!([
                 {
                     "id": "lr-1", "name": "api", "kind": "api",
-                    "location": "/tmp/api-repo", "description": "API repo"
+                    "location": companion.path().to_string_lossy(), "description": "API repo"
+                },
+                {
+                    "id": "lr-2", "name": "remote", "kind": "docs",
+                    "location": "https://github.com/org/remote-docs"
+                },
+                {
+                    "id": "lr-3", "name": "ssh", "kind": "other",
+                    "location": "git@github.com:org/ssh-repo.git"
                 }
             ]),
         )
         .await;
         assert_eq!(st, StatusCode::OK);
-        assert!(json.get("success").is_some());
+        assert_eq!(json["success"], true, "{json}");
+    }
+
+    #[tokio::test]
+    async fn set_linked_repos_refuses_a_local_path_that_does_not_exist() {
+        let (_dir, repo) = seed_repo("linked-repos-missing");
+        let missing = tempfile::tempdir().unwrap().path().join("gone");
+        let state = test_state();
+        let pid = seed_project_with_repo(&state, &repo).await;
+        let app = build_router_with_auth(state.clone(), false);
+
+        let (st, json) = put_json(
+            app,
+            &format!("/api/projects/{}/linked-repos", pid),
+            serde_json::json!([
+                {
+                    "id": "lr-1", "name": "legacy-api", "kind": "api",
+                    "location": missing.to_string_lossy()
+                }
+            ]),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(json["success"], false, "{json}");
+        let error = json["error"].as_str().unwrap();
+        assert!(error.contains("`legacy-api`"), "{error}");
+        assert!(error.contains("does not exist"), "{error}");
+
+        let pid_read = pid.clone();
+        let stored = state
+            .db
+            .with_conn(move |conn| kronn::db::projects::get_project(conn, &pid_read))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            stored.linked_repos.is_empty(),
+            "a refused save must not persist"
+        );
     }
 
     #[tokio::test]
