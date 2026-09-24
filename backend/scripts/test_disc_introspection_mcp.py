@@ -673,7 +673,9 @@ class DiscSourceBindingToolTests(unittest.TestCase):
                 "source_agent": "Codex",
                 "source_session_id": "session-1",
             })
-        self.fake_http.assert_called_once_with("POST", "/api/disc/link", {
+        # A runtime-status read now follows the bind; check the bind call
+        # itself rather than assuming it's the only one.
+        self.fake_http.assert_any_call("POST", "/api/disc/link", {
             "disc_id": "disc-a",
             "source_agent": "Codex",
             "source_session_id": "session-1",
@@ -688,8 +690,47 @@ class DiscSourceBindingToolTests(unittest.TestCase):
                 "source_session_id": "session-2",
                 "force_reassign": True,
             })
-        body = self.fake_http.call_args.args[2]
+        body = self.fake_http.call_args_list[0].args[2]
         self.assertIs(body["force_reassign"], True)
+
+    def test_disc_link_reports_rejoin_required_when_not_an_active_member(self):
+        # The write succeeds (durable resume mapping), but no active
+        # `discussion_sessions` row backs it, so the response must say so and
+        # name the exact remedy instead of a bare success.
+        self.mod._set_current_disc_id("disc-a")
+        with mock.patch.object(self.mod, "_http", self.fake_http):
+            result = self.mod.call_disc_link({
+                "disc_id": "disc-a",
+                "source_agent": "Codex",
+                "source_session_id": "session-1",
+            })
+        self.assertFalse(result["runtime_bound"])
+        self.assertTrue(result["rejoin_required"])
+        self.assertIn("disc_join", result["hint"])
+        self.assertIn("disc_invite_peer", result["hint"])
+
+    def test_disc_link_reports_runtime_bound_when_already_an_active_member(self):
+        # A session that already has a live `discussion_sessions` row on this
+        # exact disc is genuinely usable by task_exec_prepare; say so.
+        def respond(method, path, body=None):
+            if path == "/api/disc/link":
+                return {"success": True, "data": True}
+            self.assertTrue(path.startswith("/api/disc/session-status?"))
+            return {"success": True, "data": {
+                "binding_version": 1,
+                "bound_disc_id": "disc-a",
+                "connected_disc_id": "disc-a",
+                "connection_status": "active",
+            }}
+        http = mock.MagicMock(side_effect=respond)
+        with mock.patch.object(self.mod, "_http", http):
+            result = self.mod.call_disc_link({
+                "disc_id": "disc-a",
+                "source_agent": "Codex",
+                "source_session_id": "session-1",
+            })
+        self.assertTrue(result["runtime_bound"])
+        self.assertNotIn("rejoin_required", result)
 
     def test_disc_transfer_session_requires_pinned_source_and_confirmation(self):
         tool = next(

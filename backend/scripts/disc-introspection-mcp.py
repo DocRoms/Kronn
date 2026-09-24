@@ -5405,12 +5405,57 @@ def call_disc_link(args):
         )
     if not source_agent or source_agent == "Unknown":
         raise RuntimeError("disc_link: could not infer source_agent — pass it explicitly")
-    return _unwrap(_http("POST", "/api/disc/link", {
+    _unwrap(_http("POST", "/api/disc/link", {
         "disc_id": disc_id,
         "source_agent": source_agent,
         "source_session_id": source_session_id,
         "force_reassign": bool(args.get("force_reassign", False)),
     }))
+    return _disc_link_runtime_report(disc_id, source_agent)
+
+
+def _disc_link_runtime_report(disc_id, source_agent):
+    """`disc_link` only writes the durable resume mapping, never the live
+    `discussion_sessions` row `task_exec_prepare` authorizes against — say so
+    now, with a read-only status check, instead of a bare success."""
+    live_session_id = _session_id_for_caller()
+    try:
+        qs = urllib.parse.urlencode({
+            "source_agent": source_agent,
+            "source_session_id": live_session_id,
+        })
+        status = _unwrap(_http("GET", f"/api/disc/session-status?{qs}"))
+    except Exception:
+        status = None
+    live = (
+        isinstance(status, dict)
+        and status.get("connected_disc_id") == disc_id
+        and status.get("connection_status") in ("active", "paused")
+    )
+    if live:
+        return {"session_bound": True, "disc_id": disc_id, "runtime_bound": True}
+    try:
+        already_here = _disc_id() == disc_id
+    except RuntimeError:
+        already_here = False
+    get_token = (
+        "disc_invite_peer({}) mints one for THIS room"
+        if already_here
+        else f"get a kr-join token for {disc_id} (its [+ Inviter] button, or "
+        "disc_invite_peer({}) from a bridge already bound there)"
+    )
+    return {
+        "session_bound": True,
+        "disc_id": disc_id,
+        "runtime_bound": False,
+        "rejoin_required": True,
+        "hint": (
+            f"The durable resume link now points to {disc_id}, but this session "
+            "is not an active member of it, so task_exec_prepare/task_exec_launch "
+            f"will still refuse it. {get_token}, then call "
+            'disc_join({token: "kr-join-..."}) to become one.'
+        ),
+    }
 
 
 def call_disc_transfer_session(args):
