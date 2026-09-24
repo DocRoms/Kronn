@@ -3941,6 +3941,8 @@ KRONN:APPLY; eso sobreescribiría el valor real con un placeholder
   'wf.tokensTotal': 'tokens (total run)',
   'wf.tokensTotalHint': 'Suma de tokens consumidos por todos los steps de este run desde su inicio. Incluye los agentes; los gates siempre contribuyen 0.',
   'wf.stepTokensSuffix': 'tk',
+  'wf.stepTokensUnknown': 'tokens desconocidos',
+  'wf.stepTokensUnknownHint': 'El agente no informó el consumo de tokens de este step. No es cero: simplemente no se midió.',
   'wf.stepTokensHint': 'Tokens consumidos por este step. Gates / Exec / ApiCall / Notify no queman nada — se quedan en 0. Los agentes escalan según largo del prompt + respuesta.',
   'wf.gate.title': 'Se requiere decisión humana',
   'wf.gate.defaultMessage': 'Se requiere aprobación para continuar.',

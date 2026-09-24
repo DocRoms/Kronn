@@ -1,7 +1,14 @@
 //! Process ownership shared by the two CLI-backed ACP adapters.
-use std::{process::ExitStatus, sync::Mutex};
+use std::{
+    collections::VecDeque,
+    process::ExitStatus,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
-use tokio::process::Child;
+use tokio::io::AsyncReadExt;
+use tokio::process::{Child, ChildStderr};
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use super::AcpError;
@@ -48,6 +55,94 @@ impl Drop for OwnedChild {
     fn drop(&mut self) {
         let _ = self.signal_group();
         // The launcher also enables Child::kill_on_drop for portable cleanup.
+    }
+}
+
+/// Bytes of adapter stderr kept for diagnostics. The pipe is drained in full
+/// so a verbose child never blocks on it; only the end explains a failure.
+const STDERR_TAIL_BYTES: usize = 8 * 1024;
+/// Chars of that tail carried in the surfaced error, which callers cap too.
+const STDERR_ERROR_EXCERPT_CHARS: usize = 600;
+/// Descendants (MCP servers) can inherit the pipe and keep it open after the
+/// adapter exits, so EOF is awaited briefly rather than indefinitely.
+const STDERR_EOF_GRACE: Duration = Duration::from_millis(500);
+/// Bound for reaping a child whose stdin broke: it has normally exited already.
+const DEAD_CHILD_GRACE: Duration = Duration::from_secs(5);
+
+/// Concurrently drained, bounded tail of an adapter's stderr. Kept out of the
+/// ACP event stream: it reaches only logs and failure messages.
+pub(super) struct StderrTail {
+    buffer: Arc<Mutex<VecDeque<u8>>>,
+    reader: Option<JoinHandle<()>>,
+}
+
+impl StderrTail {
+    pub(super) fn capture(stderr: Option<ChildStderr>) -> Self {
+        let buffer = Arc::new(Mutex::new(VecDeque::new()));
+        let reader = stderr.map(|mut stderr| {
+            let buffer = buffer.clone();
+            tokio::spawn(async move {
+                let mut chunk = [0u8; 4096];
+                while let Ok(read) = stderr.read(&mut chunk).await {
+                    if read == 0 {
+                        break;
+                    }
+                    let mut tail = buffer.lock().unwrap();
+                    tail.extend(&chunk[..read]);
+                    let excess = tail.len().saturating_sub(STDERR_TAIL_BYTES);
+                    tail.drain(..excess);
+                }
+            })
+        });
+        Self { buffer, reader }
+    }
+
+    /// Redacted tail text, after the child's exit has been observed.
+    pub(super) async fn finish(mut self) -> String {
+        if let Some(mut reader) = self.reader.take() {
+            if tokio::time::timeout(STDERR_EOF_GRACE, &mut reader)
+                .await
+                .is_err()
+            {
+                reader.abort();
+            }
+        }
+        let bytes: Vec<u8> = self.buffer.lock().unwrap().iter().copied().collect();
+        let text = String::from_utf8_lossy(&bytes);
+        crate::core::redact::redact_for_audit_artifact(text.trim()).0
+    }
+
+    /// Log the tail and attach its end to `cause`, the error the turn reports.
+    pub(super) async fn into_error(self, program: &str, cause: String) -> AcpError {
+        let tail = self.finish().await;
+        if tail.is_empty() {
+            tracing::warn!(program, "ACP adapter failed without stderr: {cause}");
+            return AcpError::Transport(cause);
+        }
+        tracing::warn!(program, "ACP adapter failed: {cause}; stderr tail:\n{tail}");
+        let skip = tail
+            .chars()
+            .count()
+            .saturating_sub(STDERR_ERROR_EXCERPT_CHARS);
+        let excerpt: String = tail.chars().skip(skip).collect();
+        let marker = if skip > 0 { "…" } else { "" };
+        AcpError::Transport(format!("{cause}; stderr: {marker}{excerpt}"))
+    }
+
+    /// Successful turns keep their stderr at debug level only.
+    pub(super) async fn discard(self, program: &str) {
+        let tail = self.finish().await;
+        if !tail.is_empty() {
+            tracing::debug!(program, "ACP adapter stderr tail:\n{tail}");
+        }
+    }
+}
+
+impl Drop for StderrTail {
+    fn drop(&mut self) {
+        if let Some(reader) = self.reader.take() {
+            reader.abort();
+        }
     }
 }
 
@@ -160,6 +255,26 @@ impl AdapterProcess {
             }
             status = child.0.wait() => status.map_err(|error| AcpError::Transport(format!("wait for adapter: {error}"))),
         }
+    }
+
+    /// A prompt write that fails usually means the child already died: its
+    /// exit status and stderr are the cause, the broken pipe only the symptom.
+    pub(super) async fn prompt_write_failure(
+        &self,
+        program: &str,
+        operation: &str,
+        error: std::io::Error,
+        cancel: &CancellationToken,
+        stderr: StderrTail,
+    ) -> AcpError {
+        let cause = match tokio::time::timeout(DEAD_CHILD_GRACE, self.wait(cancel)).await {
+            Ok(Ok(status)) => {
+                format!("{program} exited with status {status} before reading its prompt ({operation}: {error})")
+            }
+            Ok(Err(wait_error)) => format!("{operation}: {error}; {wait_error}"),
+            Err(_) => format!("{operation}: {error}"),
+        };
+        stderr.into_error(program, cause).await
     }
 
     pub(super) async fn cancel(&self) -> Result<(), AcpError> {

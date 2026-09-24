@@ -23,7 +23,7 @@
 //! by [`AcpPermissionBroker::session_policy`] and applied as static CLI flags
 //! instead of a live negotiation.
 
-use super::adapter_process::AdapterProcess;
+use super::adapter_process::{AdapterProcess, StderrTail};
 use async_trait::async_trait;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -302,15 +302,26 @@ impl AcpTransport for ClaudeAcpAdapter {
             .stdout
             .take()
             .ok_or_else(|| AcpError::Transport("claude stdout unavailable".into()))?;
+        let stderr = StderrTail::capture(child.stderr.take());
         self.process.install(child, &cancel).await?;
-        stdin
-            .write_all(prompt.as_bytes())
-            .await
-            .map_err(|error| AcpError::Transport(format!("write claude prompt: {error}")))?;
-        stdin
-            .shutdown()
-            .await
-            .map_err(|error| AcpError::Transport(format!("close claude prompt stdin: {error}")))?;
+        if let Err(error) = stdin.write_all(prompt.as_bytes()).await {
+            return Err(self
+                .process
+                .prompt_write_failure("claude", "write claude prompt", error, &cancel, stderr)
+                .await);
+        }
+        if let Err(error) = stdin.shutdown().await {
+            return Err(self
+                .process
+                .prompt_write_failure(
+                    "claude",
+                    "close claude prompt stdin",
+                    error,
+                    &cancel,
+                    stderr,
+                )
+                .await);
+        }
         drop(stdin);
 
         let mut lines = BufReader::new(stdout).lines();
@@ -352,7 +363,9 @@ impl AcpTransport for ClaudeAcpAdapter {
                 }
                 Ok(None) => break,
                 Err(error) => {
-                    return Err(AcpError::Transport(format!("read claude stdout: {error}")));
+                    return Err(stderr
+                        .into_error("claude", format!("read claude stdout: {error}"))
+                        .await);
                 }
             }
         }
@@ -363,10 +376,11 @@ impl AcpTransport for ClaudeAcpAdapter {
             return Err(AcpError::Transport(failure));
         }
         if !status.success() {
-            return Err(AcpError::Transport(format!(
-                "claude exited with status {status}"
-            )));
+            return Err(stderr
+                .into_error("claude", format!("claude exited with status {status}"))
+                .await);
         }
+        stderr.discard("claude").await;
         let _ = events.send(AcpSessionEvent::Completed).await;
         Ok(())
     }

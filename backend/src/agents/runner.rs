@@ -2012,6 +2012,8 @@ pub struct ScriptedProcess {
     /// `next_line` never resolves — the only way to reach a deadline branch in a
     /// test, since a drained scripted stream ends the loop normally.
     hangs_forever: bool,
+    /// Usage a structured transport (ACP) would report for the run.
+    reported_usage: Option<u64>,
 }
 
 #[cfg(test)]
@@ -2028,6 +2030,7 @@ impl ScriptedProcess {
             killed: false,
             stderr: Vec::new(),
             hangs_forever: false,
+            reported_usage: None,
         }
     }
 
@@ -2043,6 +2046,7 @@ impl ScriptedProcess {
             killed: false,
             stderr: Vec::new(),
             hangs_forever: false,
+            reported_usage: None,
         }
     }
 
@@ -2055,6 +2059,12 @@ impl ScriptedProcess {
     /// Pre-load stderr lines for the StdoutOnly diagnostic path.
     pub fn with_stderr(mut self, lines: impl IntoIterator<Item = impl Into<String>>) -> Self {
         self.stderr = lines.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Simulate usage reported by a structured transport such as ACP.
+    pub fn with_reported_usage(mut self, tokens: u64) -> Self {
+        self.reported_usage = Some(tokens);
         self
     }
 
@@ -2082,6 +2092,9 @@ impl AgentIo for ScriptedProcess {
     }
     fn output_mode(&self) -> OutputMode {
         self.output_mode
+    }
+    fn reported_token_usage(&self) -> Option<u64> {
+        self.reported_usage
     }
     async fn kill(&mut self) {
         self.killed = true;
@@ -3822,7 +3835,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
 /// Common inputs to every ACP session-start path (native and adapted alike).
 /// The adapter owns prompt writes; the direct runner schedules them. Keep
 /// this distinction explicit so sharing spawn policy cannot close ACP stdin
-/// prematurely or leave an unread stderr pipe (adapters historically discard it).
+/// prematurely. Both variants pipe stderr: whoever spawns must drain it.
 #[derive(Clone, Copy)]
 pub(crate) enum SpawnIo<'a> {
     Direct(Option<&'a str>),
@@ -10602,11 +10615,76 @@ pub(crate) fn should_skip_home_override(binary: &str, npx_package: Option<&str>)
     )
 }
 
+/// Longest positional argument logged verbatim; longer ones are prompts or
+/// inline JSON (MCP registries) and only their size is logged.
+const ARGV_LOG_VALUE_MAX_CHARS: usize = 96;
+
+/// Argv as it may appear in a debug log: flags verbatim, `-c key=value`
+/// overrides reduced to the key when the value is long or secret-shaped, and
+/// prompt-like values replaced by their length. Every kept part is redacted.
+pub(crate) fn loggable_argv(args: &[String]) -> String {
+    let elided = |value: &str| format!("<{} chars>", value.chars().count());
+    let short_plain = |value: &str| {
+        value.chars().count() <= ARGV_LOG_VALUE_MAX_CHARS && !value.chars().any(char::is_whitespace)
+    };
+    let mut out = Vec::with_capacity(args.len());
+    let mut after_config_flag = false;
+    let mut after_secret_flag = false;
+    for arg in args {
+        let shown = if after_secret_flag {
+            elided(arg)
+        } else if after_config_flag {
+            match arg.split_once('=') {
+                Some((key, value)) if short_plain(value) && !looks_secret(value) => {
+                    format!("{key}={value}")
+                }
+                Some((key, value)) => format!("{key}={}", elided(value)),
+                None => elided(arg),
+            }
+        } else if arg.starts_with('-') && short_plain(arg) {
+            match arg.split_once('=') {
+                Some((flag, value)) if secret_flag_name(flag) => {
+                    format!("{flag}={}", elided(value))
+                }
+                _ => arg.clone(),
+            }
+        } else if short_plain(arg) && !looks_secret(arg) {
+            arg.clone()
+        } else {
+            elided(arg)
+        };
+        after_config_flag = matches!(arg.as_str(), "-c" | "--config");
+        after_secret_flag = arg.starts_with('-') && !arg.contains('=') && secret_flag_name(arg);
+        out.push(crate::core::redact::redact_for_audit_artifact(&shown).0);
+    }
+    out.join(" ")
+}
+
+fn secret_flag_name(flag: &str) -> bool {
+    let flag = flag.to_ascii_lowercase();
+    [
+        "token",
+        "key",
+        "secret",
+        "passw",
+        "credential",
+        "bearer",
+        "auth",
+    ]
+    .iter()
+    .any(|needle| flag.contains(needle))
+}
+
+fn looks_secret(value: &str) -> bool {
+    crate::core::redact::redact_for_audit_artifact(value).1 > 0
+}
+
 /// Spawn an agent process. If npx_package is Some, uses npx to run.
 ///
 /// `SpawnIo::Direct(Some(payload))` writes and closes the child's stdin.
-/// `SpawnIo::Adapter` leaves that pipe for the adapter's awaited prompt write
-/// and uses null stderr because adapters consume structured stdout events.
+/// `SpawnIo::Adapter` leaves that pipe for the adapter's awaited prompt write.
+/// stderr is piped in both modes; the caller must drain it concurrently or a
+/// verbose child blocks once the pipe buffer fills.
 ///
 /// 9 args: each is genuinely independent — bundling them into a config
 /// struct would just shuffle the verbosity from the direct and adapter call
@@ -10665,11 +10743,8 @@ pub(crate) fn try_spawn(
             cmd_args.splice(exec_idx + 1..exec_idx + 1, overrides);
         }
     }
-    // Never log argv: prompts may contain user data and, historically, API
-    // credentials. Besides the persistent log, argv is already visible to
-    // the child process; duplicating it at INFO turns a transient exposure
-    // into a durable one. Operational diagnostics only need the executable,
-    // argument count, workdir and auth mode.
+    // INFO never carries argv: prompts may contain user data and, historically,
+    // API credentials. The debug line below logs a redacted, elided form.
     tracing::info!(
         "Spawning agent: {} ({} args) in {} (key: {})",
         cmd_name,
@@ -10689,6 +10764,8 @@ pub(crate) fn try_spawn(
         work_dir,
     );
 
+    tracing::debug!("Agent argv: {} {}", final_cmd, loggable_argv(&final_args));
+
     let mut cmd = async_cmd(&final_cmd);
     cmd.args(&final_args)
         .current_dir(&effective_work_dir)
@@ -10700,11 +10777,9 @@ pub(crate) fn try_spawn(
             },
         )
         .stdout(Stdio::piped())
-        .stderr(if matches!(io, SpawnIo::Adapter) {
-            Stdio::null()
-        } else {
-            Stdio::piped()
-        })
+        // Adapters once used a null stderr so an undrained pipe could never
+        // stall them; they now drain it into a bounded tail for diagnostics.
+        .stderr(Stdio::piped())
         // SIGKILL the agent process if its `Child` is dropped before
         // `wait()` returns. This is what makes workflow-run cancellation
         // actually stop in-flight Agent steps: when the runner drops the
@@ -12066,5 +12141,69 @@ mod acp_resume_tests {
         let short = acp_failure_diagnostic("prompt", "short 🦀 non-secret error");
         assert_eq!(short, "ACP prompt failed: short 🦀 non-secret error");
         assert!(!short.ends_with('…'));
+    }
+}
+
+#[cfg(test)]
+mod argv_log_tests {
+    use super::loggable_argv;
+
+    fn argv(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|part| part.to_string()).collect()
+    }
+
+    #[test]
+    fn keeps_the_command_shape_but_never_prompts_or_secret_values() {
+        let prompt = "Refactor the billing module and keep customer data private";
+        let registry = format!(
+            "mcp_servers={{\"kronn\":{{\"command\":\"bridge\",\"args\":[\"{}\"]}}}}",
+            "x".repeat(200)
+        );
+        let logged = loggable_argv(&argv(&[
+            "exec",
+            "resume",
+            "th-1",
+            "--json",
+            "-c",
+            "model_reasoning_effort=\"high\"",
+            "-c",
+            &registry,
+            "-c",
+            "api_key=sk-proj-abcdefghijklmnopqrstuvwxyz0123456789",
+            "--model",
+            "gpt-5",
+            "--token",
+            "opaque-bearer-value",
+            "--api-key=raw-secret-value",
+            "--sandbox=workspace-write",
+            prompt,
+            "-",
+        ]));
+
+        for kept in [
+            "exec resume th-1 --json",
+            "-c model_reasoning_effort=\"high\"",
+            "--model gpt-5",
+            "--sandbox=workspace-write",
+            " -",
+        ] {
+            assert!(logged.contains(kept), "{kept:?} missing from {logged}");
+        }
+        assert!(logged.contains(&format!("mcp_servers=<{} chars>", registry.len() - 12)));
+        assert!(logged.contains(&format!("<{} chars>", prompt.chars().count())));
+        for leaked in [
+            "billing",
+            "sk-proj",
+            "opaque-bearer-value",
+            "raw-secret-value",
+            "xxxx",
+        ] {
+            assert!(!logged.contains(leaked), "{leaked:?} leaked into {logged}");
+        }
+    }
+
+    #[test]
+    fn counts_unicode_prompts_in_chars() {
+        assert_eq!(loggable_argv(&argv(&["-p", "résumé 🙂"])), "-p <8 chars>");
     }
 }

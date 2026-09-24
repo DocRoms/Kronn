@@ -6324,7 +6324,12 @@ export type StepOutputFormat = { "type": "FreeText" } | { "type": "Structured" }
  */
 schema: any, on_invalid: OnInvalid, };
 
-export type StepResult = { step_name: string, status: RunStatus, output: string, tokens_used: number, duration_ms: number,
+export type StepResult = { step_name: string, status: RunStatus, output: string,
+/**
+ * `None` when an agent ran but its runtime reported no usage: a step
+ * that called a model was not free, so unknown must not read as zero.
+ */
+tokens_used: number | null, duration_ms: number,
 /**
  * 0.8.2 — Wall-clock timestamp at which the step started executing.
  * Optional for backward compatibility with runs written before this

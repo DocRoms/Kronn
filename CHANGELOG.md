@@ -79,6 +79,17 @@ Release notes for 0.9.3 and earlier are available in the
   left the gap to surface later as an unexplained `rejoin_required`. The
   response now says so at link time and names the exact next call
   (`disc_invite_peer` then `disc_join`) when a rejoin is still needed (KT-737).
+- A workflow Agent step run through ACP now records the token usage its agent
+  reports instead of 0. When the agent reports none, the step's
+  `tokens_used` is `null` (with `tokens_status: "not_measured"` in the MCP run
+  status) and the run view shows "tokens unknown" rather than a zero. Run
+  totals still add up only the measured steps (KT-735).
+- When a Claude or Codex agent run through ACP fails, the error now includes
+  the end of what the agent printed on stderr (for example an expired login)
+  instead of only "exited with status 1". A prompt that cannot be delivered
+  because the agent already quit reports the agent's exit status and stderr
+  rather than "Broken pipe". The executed command line is logged at debug
+  level with prompts and secret values left out (KT-666).
 - Native ACP replies no longer include echoed user prompts, including Vibe's
   copy of Kronn's injected instructions. Only agent message chunks contribute
   answer text; tool and usage events remain separate (KT-729).

@@ -290,7 +290,8 @@ pub struct StepResultSummary {
     /// must inspect `tokens_status` instead of treating an unknown value as 0.
     pub tokens_used: Option<u64>,
     /// Explicit measurement state for steps whose usage may be unavailable.
-    /// BatchQuickPrompt carries this in its structured envelope; legacy and
+    /// BatchQuickPrompt carries this in its structured envelope; an Agent step
+    /// whose runtime reported no usage is `not_measured`; measured and
     /// deterministic steps omit it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tokens_status: Option<String>,
@@ -339,7 +340,11 @@ fn step_tokens_measurement(step: &StepResult) -> (Option<u64>, Option<String>) {
         return (None, Some("in_progress".to_string()));
     }
     if step.step_kind.as_deref() != Some("BatchQuickPrompt") {
-        return (Some(step.tokens_used), None);
+        let status = step
+            .tokens_used
+            .is_none()
+            .then(|| "not_measured".to_string());
+        return (step.tokens_used, status);
     }
     let status = crate::workflows::template::extract_step_envelope(&step.output)
         .and_then(|envelope| serde_json::from_str::<serde_json::Value>(&envelope.data_json).ok())
@@ -349,7 +354,7 @@ fn step_tokens_measurement(step: &StepResult) -> (Option<u64>, Option<String>) {
                 .map(str::to_string)
         });
     match status.as_deref() {
-        Some("measured" | "partial") => (Some(step.tokens_used), status),
+        Some("measured" | "partial") => (step.tokens_used, status),
         Some(_) => (None, status),
         None => (None, Some("unavailable_legacy_batch".to_string())),
     }
@@ -1289,7 +1294,7 @@ mod tests {
             output: format!(
                 "---STEP_OUTPUT---\n{{\"data\":{{\"tokens_status\":\"{tokens_status}\"}},\"status\":\"OK\",\"summary\":\"batch\"}}\n---END_STEP_OUTPUT---\n[SIGNAL: OK]"
             ),
-            tokens_used,
+            tokens_used: Some(tokens_used),
             duration_ms: 10,
             started_at: Some(Utc::now()),
             condition_result: None,
@@ -1319,6 +1324,19 @@ mod tests {
             step_tokens_measurement(&measured),
             (Some(42), Some("measured".to_string()))
         );
+    }
+
+    #[test]
+    fn unmeasured_agent_step_is_reported_as_unknown_not_zero() {
+        let mut agent = batch_step_result(0, "unused");
+        agent.step_kind = Some("Agent".into());
+        agent.tokens_used = None;
+        assert_eq!(
+            step_tokens_measurement(&agent),
+            (None, Some("not_measured".to_string()))
+        );
+        agent.tokens_used = Some(1_234);
+        assert_eq!(step_tokens_measurement(&agent), (Some(1_234), None));
     }
 
     #[test]

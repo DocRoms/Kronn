@@ -169,7 +169,7 @@ pub async fn execute_notify_step_with_policy(
                 RunStatus::Failed
             },
             output,
-            tokens_used: 0,
+            tokens_used: Some(0),
             duration_ms: start.elapsed().as_millis() as u64,
             started_at: None,
             condition_result,
@@ -226,7 +226,7 @@ fn fail(step: &WorkflowStep, start: Instant, msg: impl Into<String>) -> StepOutc
             step_name: step.name.clone(),
             status: RunStatus::Failed,
             output,
-            tokens_used: 0,
+            tokens_used: Some(0),
             duration_ms: start.elapsed().as_millis() as u64,
             started_at: None,
             condition_result,
@@ -413,7 +413,8 @@ mod tests {
             out.result.output
         );
         assert_eq!(
-            out.result.tokens_used, 0,
+            out.result.tokens_used,
+            Some(0),
             "Notify must never consume tokens"
         );
 

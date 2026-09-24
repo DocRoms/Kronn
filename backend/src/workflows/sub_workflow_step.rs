@@ -217,12 +217,13 @@ pub async fn execute_sub_workflow_step(
     let success = matches!(child_status, RunStatus::Success);
     let status_str = if success { "OK" } else { "SUBWF_FAILED" };
     let signal = status_str;
+    let child_tokens = measured_run_tokens(&child_run);
     let summary = format!(
-        "Sous-workflow « {} » → {:?} ({} étapes, {} tokens)",
+        "Sous-workflow « {} » → {:?} ({} étapes, {})",
         child_wf.name,
         child_status,
         child_run.step_results.len(),
-        child_run.tokens_used,
+        tokens_label(child_tokens),
     );
     // 2026-06-11 Phase 2 (§5 envelope enrichment) — expose the child's LAST
     // step output + name so a parent step (`create_pr`, `ready_gate`) can read
@@ -259,7 +260,7 @@ pub async fn execute_sub_workflow_step(
                 RunStatus::Failed
             },
             output,
-            tokens_used: child_run.tokens_used, // aggregate child cost onto the step
+            tokens_used: child_tokens, // aggregate child cost onto the step
             duration_ms: start.elapsed().as_millis() as u64,
             started_at: None,
             condition_result,
@@ -597,7 +598,7 @@ async fn execute_foreach(
     let mut results: Vec<serde_json::Value> = Vec::with_capacity(items.len());
     let mut succeeded = 0usize;
     let mut failed = 0usize;
-    let mut total_tokens = 0u64;
+    let mut total_tokens = Some(0u64);
     let mut last_child_id: Option<String> = None;
     let mut last_output: Option<String> = None;
 
@@ -866,7 +867,10 @@ async fn execute_foreach(
         } else {
             failed += 1;
         }
-        total_tokens += child_run.tokens_used;
+        let child_tokens = measured_run_tokens(&child_run);
+        total_tokens = total_tokens
+            .zip(child_tokens)
+            .map(|(a, b)| a.saturating_add(b));
         last_output = child_run.step_results.last().map(|s| s.output.clone());
         last_child_id = Some(child_run.id.clone());
         // Surface per-child cost/timing so the parent run's foreach table can
@@ -879,7 +883,7 @@ async fn execute_foreach(
             "id": item_id,
             "child_run_id": child_run.id,
             "status": format!("{:?}", child_run.status),
-            "tokens": child_run.tokens_used,
+            "tokens": child_tokens,
         });
         if let Some(finished_at) = child_run.finished_at {
             let duration_ms = finished_at
@@ -900,12 +904,12 @@ async fn execute_foreach(
 
     let (status_str, signal) = aggregate_foreach(succeeded, failed);
     let summary = format!(
-        "Sous-workflow « {} » × {} tâche(s) → {} ok / {} échec(s) ({} tokens)",
+        "Sous-workflow « {} » × {} tâche(s) → {} ok / {} échec(s) ({})",
         child_wf.name,
         results.len(),
         succeeded,
         failed,
-        total_tokens,
+        tokens_label(total_tokens),
     );
     let data = json!({
         "mode": "foreach",
@@ -971,13 +975,28 @@ pub fn forbidden_in_rollback(step: &WorkflowStep) -> StepOutcome {
     )
 }
 
+/// A child run's total is known only when every one of its steps was measured.
+fn measured_run_tokens(run: &WorkflowRun) -> Option<u64> {
+    run.step_results
+        .iter()
+        .all(|step| step.tokens_used.is_some())
+        .then_some(run.tokens_used)
+}
+
+fn tokens_label(tokens: Option<u64>) -> String {
+    match tokens {
+        Some(tokens) => format!("{tokens} tokens"),
+        None => "tokens non mesurés".to_string(),
+    }
+}
+
 fn fail(step: &WorkflowStep, start: Instant, msg: String) -> StepOutcome {
     StepOutcome {
         result: StepResult {
             step_name: step.name.clone(),
             status: RunStatus::Failed,
             output: msg,
-            tokens_used: 0,
+            tokens_used: Some(0),
             duration_ms: start.elapsed().as_millis() as u64,
             started_at: None,
             condition_result: None,
