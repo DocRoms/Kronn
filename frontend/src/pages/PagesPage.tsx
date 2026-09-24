@@ -14,6 +14,7 @@ import { datasetRecords, recordsToRows } from '../lib/live-page-csv';
 import {
   buildSandboxDocument,
   hostTheme,
+  hostThemeTokens,
   createLivePageOpenLinkRelay,
   requestRenderedPageHtml,
   runtimeData,
@@ -632,7 +633,7 @@ export function PagesPage({
     return () => window.removeEventListener('resize', reposition);
   }, [mosaicMenuRef, positionMosaicMenu]);
   const document = useMemo(
-    () => revisionHtml ? buildSandboxDocument(revisionHtml, bridgeChannel, hostTheme()) : '',
+    () => revisionHtml ? buildSandboxDocument(revisionHtml, bridgeChannel, hostTheme(), hostThemeTokens()) : '',
     [bridgeChannel, revisionHtml],
   );
   const publishToFrame = useCallback(() => {

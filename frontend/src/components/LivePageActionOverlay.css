@@ -37,6 +37,12 @@
 .live-page-action-overlay .discussion-action-card {
   width: 100%;
   margin-top: 0;
+  /* Here the card is a collapse under a row of the Page, not a floating card in a
+     thread: flat surface, hairline border, no drop shadow — the Page's own language.
+     The launch button keeps the accent: it is the one decision the card asks for. */
+  border-color: var(--kr-border);
+  background: var(--kr-bg-surface);
+  box-shadow: none;
 }
 
 /* Always reachable, whatever state the card is in: a launched card has no
