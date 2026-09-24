@@ -130,6 +130,10 @@ export interface ChatInputProps {
   externalConnections?: ExternalApiConnectionView[];
   toast: ToastFn;
   t: (key: string, ...args: (string | number)[]) => string;
+  /** Voice conversation and read-aloud need this page's playback; hidden where it has none. */
+  showVoiceControls?: boolean;
+  /** Debates are launched from the full discussion only. */
+  showDebate?: boolean;
 }
 
 export function ChatInput({
@@ -151,6 +155,8 @@ export function ChatInput({
   onStop,
   onOrchestrate,
   onTtsToggle,
+  showVoiceControls = true,
+  showDebate = true,
   onWorktreeErrorDismiss,
   onWorktreeRetry,
   isAgentRestricted,
@@ -1798,6 +1804,7 @@ export function ChatInput({
               {sttState === 'recording' ? <MicOff size={15} /> : <Mic size={15} />}
             </button>
 
+            {showVoiceControls && <>
             {/* Voice conversation mode */}
             <button
               className="disc-tool-btn"
@@ -1831,6 +1838,7 @@ export function ChatInput({
             >
               {ttsEnabled ? <Volume2 size={15} /> : <VolumeX size={15} />}
             </button>
+            </>}
 
             {discussionNotesEnabled && (
               <span className="disc-note-tools" role="group" aria-label={t('disc.note.label')}>
@@ -1864,7 +1872,7 @@ export function ChatInput({
             )}
 
             {/* Debate / multi-agent */}
-            <div className="relative">
+            {showDebate && <div className="relative">
               <button
                 className="disc-tool-btn"
                 data-active={showDebatePopover}
@@ -2020,7 +2028,7 @@ export function ChatInput({
                   </button>
                 </div>
               )}
-            </div>
+            </div>}
 
           </div>
 

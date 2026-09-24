@@ -36,6 +36,8 @@ Release notes for 0.9.3 and earlier are available in the
   Each tile scrolls independently and links to its full discussion. The bounded
   read-only monitor shares one WebSocket and batches refreshes without marking
   discussions read or launching agents; a missing room does not block its peers.
+  Selecting a tile opens a collapsible input bound to that discussion, with its
+  mentions and draft; messages use the durable outbox route.
   [Monitoring limits and behavior](docs/operations/discussion-mosaic.md).
 - The discussion asset carousel has a copy button. Text, JSON and log files are
   copied whole (up to 2 MiB), images as PNG, and videos only where the browser

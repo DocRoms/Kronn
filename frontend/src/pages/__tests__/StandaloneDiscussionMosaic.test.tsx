@@ -4,6 +4,10 @@ import { StandaloneDiscussionMosaic } from '../StandaloneDiscussionMosaic';
 import { useDiscussionMonitor } from '../../hooks/useDiscussionMonitor';
 import type { DiscussionMonitorItem, DiscussionMonitorPreview } from '../../types/generated';
 vi.mock('../../hooks/useDiscussionMonitor', () => ({ useDiscussionMonitor: vi.fn() }));
+vi.mock('../../components/DiscussionMosaicComposer', () => ({
+  DiscussionMosaicComposer: ({ discussionId, title }: { discussionId: string | null; title: string }) =>
+    <div data-testid="mosaic-composer">{discussionId ?? 'none'}|{title}</div>,
+}));
 vi.mock('../../lib/I18nContext', () => ({ useT: () => ({ t: (key: string, ...args: (string | number)[]) => args.length ? `${key}:${args.join(',')}` : key }) }));
 const preview = (title: string, overrides: Partial<DiscussionMonitorPreview> = {}): DiscussionMonitorPreview => ({
   title, shared_id: null, agent: 'Codex', connection_name: null, awaiting_agent: false, agent_running: false,
@@ -19,6 +23,18 @@ function monitor(items: DiscussionMonitorItem[], error = false) {
 beforeEach(() => { vi.clearAllMocks(); window.location.hash = ''; });
 
 describe('discussion mosaic', () => {
+  it('selects one tile at a time and binds the composer to it', () => {
+    monitor([{ id: 'a', preview: preview('Alpha'), error: null }, { id: 'b', preview: preview('Beta'), error: null }]);
+    render(<StandaloneDiscussionMosaic discussionIds={['a', 'b']} layout="two-columns" />);
+    expect(screen.getByTestId('mosaic-composer')).toHaveTextContent('none|');
+    fireEvent.click(screen.getByRole('button', { name: 'disc.mosaic.replyIn:Alpha' }));
+    expect(screen.getByRole('article', { name: 'Alpha' })).toHaveAttribute('data-selected', 'true');
+    expect(screen.getByTestId('mosaic-composer')).toHaveTextContent('a|Alpha');
+    fireEvent.click(within(screen.getByRole('article', { name: 'Beta' })).getByText('disc.mosaic.previewHint'));
+    expect(screen.getByRole('article', { name: 'Alpha' })).not.toHaveAttribute('data-selected');
+    expect(screen.getByRole('button', { name: 'disc.mosaic.replyIn:Beta' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByTestId('mosaic-composer')).toHaveTextContent('b|Beta');
+  });
   it('shows plan progress, author provenance and isolated missing discussion without executable content', () => {
     monitor([{ id: 'a', preview: preview('Alpha', { pending_question_count: 1 }), error: null }, { id: 'b', preview: null, error: 'not_found' }]);
     const previous = document.title;

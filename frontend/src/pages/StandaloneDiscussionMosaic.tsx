@@ -1,10 +1,12 @@
 import { memo, useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
-import { ArrowUpRight, ChevronsDown, RefreshCw } from 'lucide-react';
+import { ArrowUpRight, ChevronsDown, MessageSquareReply, RefreshCw } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { useT } from '../lib/I18nContext';
 import { AGENT_LABELS } from '../lib/constants';
 import { useDiscussionMonitor } from '../hooks/useDiscussionMonitor';
+import { useToast } from '../hooks/useToast';
+import { DiscussionMosaicComposer } from '../components/DiscussionMosaicComposer';
 import { discussionMosaicUrl, type DiscussionMosaicLayout } from '../lib/discussion-mosaic-navigation';
 import { livePageMosaicLayouts, standaloneDiscussionUrl } from '../lib/live-page-navigation';
 import type { DiscussionMonitorItem, DiscussionMonitorMessage } from '../types/generated';
@@ -35,7 +37,9 @@ const MessagePreview = memo(function MessagePreview(message: DiscussionMonitorMe
   </section>;
 });
 
-const DiscussionTile = memo(function DiscussionTile({ id, item, error }: { id: string; item?: DiscussionMonitorItem; error: boolean }) {
+const DiscussionTile = memo(function DiscussionTile({ id, item, error, selected, onSelect }: {
+  id: string; item?: DiscussionMonitorItem; error: boolean; selected: boolean; onSelect: (id: string) => void;
+}) {
   const { t } = useT();
   const scroll = useRef<HTMLDivElement>(null);
   const [follow, setFollow] = useState(true);
@@ -49,7 +53,8 @@ const DiscussionTile = memo(function DiscussionTile({ id, item, error }: { id: s
     : preview?.progress_phase === 'upstream_wait' ? t('disc.mosaic.upstream')
       : preview?.agent_running ? t('disc.mosaic.running')
         : preview?.awaiting_agent ? t('disc.mosaic.queued') : t('disc.mosaic.ready');
-  return <article className="standalone-live-page-mosaic-tile discussion-mosaic-tile" aria-label={preview?.title || id}>
+  return <article className="standalone-live-page-mosaic-tile discussion-mosaic-tile" aria-label={preview?.title || id}
+    data-selected={selected || undefined} onClick={() => onSelect(id)}>
     <header className="discussion-mosaic-tile-header">
       <div>
         <h2><a href={standaloneDiscussionUrl(id)} target="_blank" rel="noopener noreferrer">{preview?.title || id}<ArrowUpRight size={15} /></a></h2>
@@ -57,7 +62,12 @@ const DiscussionTile = memo(function DiscussionTile({ id, item, error }: { id: s
           {preview?.agent && <span>{preview.connection_name || AGENT_LABELS[preview.agent]}</span>}
         </div>
       </div>
-      {preview && <span className="discussion-mosaic-status" data-active={preview.awaiting_agent || preview.agent_running}>{status}</span>}
+      <div className="discussion-mosaic-tile-actions">
+        {preview && <span className="discussion-mosaic-status" data-active={preview.awaiting_agent || preview.agent_running}>{status}</span>}
+        <button type="button" className="discussion-mosaic-select" aria-pressed={selected}
+          aria-label={t('disc.mosaic.replyIn', preview?.title || id)} title={t('disc.mosaic.replyIn', preview?.title || id)}
+          onClick={event => { event.stopPropagation(); onSelect(id); }}><MessageSquareReply size={14} /></button>
+      </div>
     </header>
     {plan && <div className="discussion-mosaic-plan">
       {total > 0 ? <>
@@ -96,6 +106,9 @@ export function StandaloneDiscussionMosaic({ discussionIds, layout: initialLayou
   const layoutId = useId();
   const [layout, setLayout] = useState(initialLayout);
   const { items, error, updatedAt, connectionState, refresh } = useDiscussionMonitor(discussionIds);
+  const { toast, ToastContainer } = useToast();
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const selectedTitle = selectedId ? items.find(item => item.id === selectedId)?.preview?.title || selectedId : '';
   useEffect(() => {
     const previous = document.title;
     document.title = `${t('disc.mosaic.title')} · Kronn`;
@@ -117,7 +130,10 @@ export function StandaloneDiscussionMosaic({ discussionIds, layout: initialLayou
       <button type="button" onClick={refresh} aria-label={t('disc.mosaic.refresh')} title={t('disc.mosaic.refresh')}><RefreshCw size={16} /></button>
     </header>
     <div className="standalone-live-page-mosaic discussion-mosaic-grid" data-layout={layout} data-count={discussionIds.length}>
-      {discussionIds.map(id => <DiscussionTile key={id} id={id} item={items.find(item => item.id === id)} error={error} />)}
+      {discussionIds.map(id => <DiscussionTile key={id} id={id} item={items.find(item => item.id === id)} error={error}
+        selected={id === selectedId} onSelect={setSelectedId} />)}
     </div>
+    <DiscussionMosaicComposer discussionId={selectedId} title={selectedTitle} toast={toast} />
+    <ToastContainer />
   </main>;
 }
