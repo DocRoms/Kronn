@@ -128,3 +128,7 @@
     grid-column: auto;
   }
 }
+
+/* Content-sized Page: the frame is as tall as its document and this shell scrolls it,
+   so the action card positioned inside the shell moves with the Page natively. */
+.standalone-live-page-mosaic-frame-shell.is-content-sized { overflow-y: auto; }

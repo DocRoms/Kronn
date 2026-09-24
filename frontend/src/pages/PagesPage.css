@@ -361,3 +361,7 @@ button.live-pages-refresh-row:hover { background: var(--kr-bg-hover); }
   .live-pages-html-preview-diff { grid-template-columns: 1fr; }
   .live-pages-html-preview-diff > section + section { border-top: 1px solid var(--kr-border-subtle); border-left: 0; }
 }
+
+/* Content-sized Page: the frame is as tall as its document and this shell scrolls it,
+   so the action card positioned inside the shell moves with the Page natively. */
+.live-pages-frame-shell.is-content-sized { overflow-y: auto; }

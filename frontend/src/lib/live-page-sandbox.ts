@@ -414,6 +414,45 @@ export function buildSandboxDocument(
     try{
       Object.defineProperty(window,'open',{configurable:false,writable:false,value:url=>relayOpenLink(url)});
     }catch(_error){}
+    // A Page that declares <meta name="kronn-page-height" content="auto"> is sized to its
+    // content by the host, which then scrolls it: the host's action card lives in that same
+    // scroll context and follows the Page natively, instead of chasing it frame by frame.
+    // The html box height is the content height, whatever the current frame size — so a
+    // collapse that closes lets the frame shrink back.
+    let heightSent=-1;
+    let heightQueued=false;
+    const autoHeight=()=>{
+      const meta=document.querySelector('meta[name="kronn-page-height"]');
+      return Boolean(meta)&&(getAttribute.call(meta,'content')||'').trim()==='auto';
+    };
+    const sendHeight=()=>{
+      heightQueued=false;
+      if(!linkPort)return;
+      const height=Math.ceil(getBounds.call(document.documentElement).height);
+      if(!isFinite(height)||height<=0||height>200000||height===heightSent)return;
+      heightSent=height;
+      portPost.call(linkPort,{type:'kronn:page-height',version:1,channel_id:channel,height});
+    };
+    const queueHeight=()=>{
+      if(heightQueued)return;
+      heightQueued=true;
+      if(typeof requestAnimationFrame==='function')requestAnimationFrame(sendHeight);else setTimeout(sendHeight,16);
+    };
+    let heightWatched=false;
+    const watchHeight=()=>{
+      if(!autoHeight())return;
+      document.documentElement.style.overflow='hidden';
+      heightSent=-1;
+      queueHeight();
+      if(heightWatched)return;
+      heightWatched=true;
+      if(typeof ResizeObserver==='function'){
+        const observer=new ResizeObserver(queueHeight);
+        observer.observe(document.documentElement);
+        if(document.body)observer.observe(document.body);
+      }
+      addEventListener('load',queueHeight);
+    };
     addEventListener('message',event=>{
       const message=event.data;
       if(!message||message.version!==1||message.channel_id!==channel)return;
@@ -422,6 +461,7 @@ export function buildSandboxDocument(
         stopImmediate.call(event);
         linkPort=event.ports[0];
         portStart.call(linkPort);
+        watchHeight();
         return;
       }
       if(message.type==='kronn:page-data'){
@@ -515,6 +555,7 @@ export function createLivePageOpenLinkRelay(
   openExternal: (url: string, target: string, features: string) => unknown = window.open.bind(window),
   onAction?: (intent: LivePageActionIntent) => void,
   onAnchor?: (anchor: LivePageActionIntent['anchor']) => void,
+  onHeight?: (height: number) => void,
 ): LivePageOpenLinkRelay {
   let activePort: MessagePort | null = null;
   const validAnchor = (anchor: LivePageActionAnchor | undefined): anchor is LivePageActionAnchor => (
@@ -531,6 +572,13 @@ export function createLivePageOpenLinkRelay(
     if (message.type === 'kronn:page-action-anchor') {
       if (!validAnchor(message.anchor)) return;
       onAnchor?.({ ...message.anchor, slot: message.anchor.slot === true });
+      return;
+    }
+    // A content-sized Page reporting its height: layout, not a user action.
+    if ((message as { type?: string }).type === 'kronn:page-height') {
+      const height = (message as { height?: unknown }).height;
+      if (typeof height !== 'number' || !Number.isFinite(height) || height <= 0 || height > 200_000) return;
+      onHeight?.(Math.ceil(height));
       return;
     }
     if (navigator.userActivation && !navigator.userActivation.isActive) return;

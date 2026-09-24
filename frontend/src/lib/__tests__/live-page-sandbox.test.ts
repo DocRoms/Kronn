@@ -284,6 +284,58 @@ describe('Live Page sandbox', () => {
     await frame.happyDOM.close();
   });
 
+  async function framePosting(page: string, height: number) {
+    const { Window } = await import('happy-dom');
+    const frame = new Window();
+    frame.document.write(buildSandboxDocument(page, 'channel-1'));
+    // The bridge captures the native at start: patch before running it.
+    const received: unknown[] = [];
+    const natives = frame as unknown as {
+      Element: { prototype: { getBoundingClientRect: () => unknown } };
+      MessagePort: { prototype: { postMessage: (m: unknown) => void; start: () => void } };
+    };
+    natives.Element.prototype.getBoundingClientRect = () => ({ left: 0, top: 0, width: 800, height, right: 800, bottom: height });
+    natives.MessagePort.prototype.postMessage = (m: unknown) => { received.push(m); };
+    natives.MessagePort.prototype.start = () => {};
+    for (const script of Array.from(frame.document.querySelectorAll('script:not([type])'))) {
+      (frame as unknown as { eval: (code: string) => void }).eval(script.textContent ?? '');
+    }
+    frame.dispatchEvent(new frame.MessageEvent('message', {
+      data: { type: 'kronn:page-link-port', version: 1, channel_id: 'channel-1' },
+      ports: [{} as never],
+    }));
+    await new Promise(resolve => setTimeout(resolve, 60));
+    await frame.happyDOM.close();
+    return received.filter(m => (m as { type?: string }).type === 'kronn:page-height');
+  }
+
+  it('reports its content height when the Page opts in', async () => {
+    const posted = await framePosting(
+      '<html><head><meta name="kronn-page-height" content="auto"></head><body>x</body></html>', 2480.4);
+    expect(posted).toEqual([{ type: 'kronn:page-height', version: 1, channel_id: 'channel-1', height: 2481 }]);
+  });
+
+  it('never reports a height for a Page that did not opt in', async () => {
+    expect(await framePosting('<html><head></head><body>x</body></html>', 2480)).toEqual([]);
+  });
+
+  it('relays a valid Page height without user activation, and drops the rest', async () => {
+    const postMessage = vi.fn();
+    const onHeight = vi.fn();
+    const relay = createLivePageOpenLinkRelay('channel-1', vi.fn(), vi.fn(), vi.fn(), onHeight);
+    relay.connect({ postMessage } as unknown as Window);
+    const port = (postMessage.mock.calls[0][2] as MessagePort[])[0];
+    Object.defineProperty(navigator, 'userActivation', { configurable: true, value: { isActive: false, hasBeenActive: true } });
+    for (const height of [Number.NaN, -1, 0, 300_000, '900']) {
+      port.postMessage({ type: 'kronn:page-height', version: 1, channel_id: 'channel-1', height });
+    }
+    port.postMessage({ type: 'kronn:page-height', version: 1, channel_id: 'other', height: 700 });
+    port.postMessage({ type: 'kronn:page-height', version: 1, channel_id: 'channel-1', height: 1234.2 });
+    await vi.waitFor(() => expect(onHeight).toHaveBeenCalledWith(1235));
+    expect(onHeight).toHaveBeenCalledTimes(1);
+    relay.dispose();
+  });
+
   it('reports an anchor that is the collapse the Page opened, not its row', async () => {
     const postMessage = vi.fn();
     const onAnchor = vi.fn();

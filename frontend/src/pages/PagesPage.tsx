@@ -648,11 +648,17 @@ export function PagesPage({
       data: runtimeData(detail),
     }, '*');
   }, [bridgeChannel, detail]);
+  // A content-sized Page reports its height; it only applies to the document that sent it,
+  // so a new revision that does not opt in never inherits the previous one's size.
+  const [frameSize, setFrameSize] = useState<{ doc: string; height: number } | null>(null);
+  const frameDocRef = useRef(document);
+  useEffect(() => { frameDocRef.current = document; }, [document]);
+  const frameHeight = frameSize && frameSize.doc === document ? frameSize.height : null;
   useEffect(() => {
     const relay = createLivePageOpenLinkRelay(bridgeChannel, undefined, intent => {
       setError(null);
       handlePageActionIntent(intent);
-    }, movePageActionAnchor);
+    }, movePageActionAnchor, height => setFrameSize({ doc: frameDocRef.current, height }));
     linkRelayRef.current = relay;
     return () => {
       if (linkRelayRef.current === relay) linkRelayRef.current = null;
@@ -1217,9 +1223,10 @@ export function PagesPage({
                 )}
               </div>
             ) : (
-              <div className="live-pages-frame-shell">
+              <div className={frameHeight ? "live-pages-frame-shell is-content-sized" : "live-pages-frame-shell"}>
                 <iframe
                   ref={iframeRef}
+                  style={frameHeight ? { height: frameHeight } : undefined}
                   title={detail.title}
                   sandbox="allow-scripts"
                   srcDoc={document}
