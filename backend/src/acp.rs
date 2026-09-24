@@ -961,11 +961,12 @@ fn events_from_notifications(messages: Vec<Value>, session_id: &str) -> Vec<AcpS
             // Which kind of chunk this is. A runtime that does not say keeps the
             // old behaviour — its text is the answer.
             let kind = update.get("sessionUpdate").and_then(Value::as_str);
-            // The model's private reasoning, which several runtimes stream
-            // before the answer. It is deliberately never shown: it is a
-            // scratchpad, and concatenating it into the reply would leak it.
-            let is_thought = matches!(kind, Some("agent_thought_chunk"));
-            if let (Some(content), false) = (update.get("content"), is_thought) {
+            // Vibe echoes the injected prompt as user_message_chunk. Only
+            // agent_message_chunk is an answer: user echoes, private thoughts,
+            // tool content and future labelled variants must not become text.
+            // Keep compatibility with older unlabelled runtime frames.
+            let is_answer = matches!(kind, None | Some("agent_message_chunk"));
+            if let (Some(content), true) = (update.get("content"), is_answer) {
                 match content {
                     Value::String(text) => events.push(AcpSessionEvent::TextDelta(text.to_owned())),
                     Value::Array(blocks) => {
@@ -1944,6 +1945,71 @@ mod tests {
         assert!(
             events.is_empty(),
             "reasoning leaked into the reply: {events:?}"
+        );
+    }
+
+    /// A labelled non-answer must not become a successful-looking reply.
+    #[test]
+    fn labelled_non_agent_content_never_becomes_the_reply() {
+        for kind in [
+            "user_message_chunk",
+            "agent_thought_chunk",
+            "tool_call",
+            "tool_call_update",
+            "future_update",
+        ] {
+            for content in [
+                json!("injected prompt or non-answer"),
+                json!({"type": "text", "text": "injected prompt or non-answer"}),
+                json!([{"type": "text", "text": "injected prompt or non-answer"}]),
+            ] {
+                let events = events_from_notifications(
+                    vec![json!({
+                        "jsonrpc": "2.0", "method": "session/update",
+                        "params": {"sessionId": "vibe-session", "update": {
+                            "sessionUpdate": kind, "content": content,
+                        }}
+                    })],
+                    "vibe-session",
+                );
+                assert!(
+                    events.is_empty(),
+                    "{kind} leaked into the answer: {events:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn echoed_user_prompt_keeps_agent_reply_tool_and_usage_events_distinct() {
+        let events = events_from_notifications(
+            vec![
+                json!({"params": {"sessionId": "vibe-session", "update": {
+                    "sessionUpdate": "user_message_chunk", "content": {"type": "text", "text": "Kronn instructions + user prompt"}
+                }}}),
+                json!({"params": {"sessionId": "vibe-session", "update": {
+                    "sessionUpdate": "tool_call", "toolCallId": "call-1", "title": "read_file",
+                    "content": [{"type": "text", "text": "tool output, not the answer"}]
+                }}}),
+                json!({"params": {"sessionId": "vibe-session", "update": {
+                    "sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "Bonjour 🦀"},
+                    "usage": {"inputTokens": 30, "outputTokens": 4}
+                }}}),
+            ],
+            "vibe-session",
+        );
+        assert_eq!(
+            events,
+            vec![
+                AcpSessionEvent::ToolCall {
+                    name: "read_file".into()
+                },
+                AcpSessionEvent::TextDelta("Bonjour 🦀".into()),
+                AcpSessionEvent::Usage {
+                    input_tokens: 30,
+                    output_tokens: 4
+                },
+            ]
         );
     }
 
