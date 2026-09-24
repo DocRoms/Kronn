@@ -64,4 +64,22 @@ describe('mosaic with its real ChatInput', () => {
     await waitFor(() => expect(input().value).toBe(''));
     expect(loadDraft('a')).toBeNull();
   });
+
+  it('keeps a newer draft typed before collapsing when the late receipt arrives', async () => {
+    let acknowledge!: () => void;
+    vi.spyOn(discussions, 'sendMessageStream').mockImplementation((...args) => new Promise<void>(resolve => {
+      acknowledge = () => { args[8]?.({ message_id: 'saved-note', sort_order: 1, duplicate: false }); resolve(); };
+    }));
+    render(<DiscussionMosaicComposer {...props('a')} />);
+    await screen.findByRole('textbox');
+    fireEvent.click(await screen.findByLabelText('disc.note.sendAsNote'));
+    fireEvent.change(input(), { target: { value: 'the sent note' } });
+    fireEvent.click(screen.getByLabelText('Send message'));
+    fireEvent.change(input(), { target: { value: 'a newer draft' } });
+    fireEvent.click(screen.getByRole('button', { name: 'disc.mosaic.replyIn:a' }));
+    await act(async () => { acknowledge(); });
+    expect(loadDraft('a')?.text).toBe('a newer draft');
+    fireEvent.click(screen.getByRole('button', { name: 'disc.mosaic.replyIn:a' }));
+    await waitFor(() => expect(input().value).toBe('a newer draft'));
+  });
 });
