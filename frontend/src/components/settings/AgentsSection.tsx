@@ -901,6 +901,11 @@ export function AgentsSection({
                         ⚠️ {t(`agentRuntimeWarning.${agent.runtime_warning}`)}
                       </div>
                     )}
+                    {agent.shadowed_installs?.map(install => (
+                      <div key={install.path} className="set-agent-runtime-warning" role="note">
+                        ⚠️ {t('agentRuntimeWarning.shadowedInstall', agent.path ?? '', agent.version ?? '', install.path, install.version)}
+                      </div>
+                    ))}
                     {quotaBlocked && (
                       <div className="set-agent-runtime-warning" role="alert">
                         <span>{t('config.quotaBlocked')}</span>

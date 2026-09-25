@@ -70,6 +70,12 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- `kronn start-dev` no longer moves `/opt/homebrew/bin` and `~/.cargo/bin`
+  ahead of your own PATH; it adds them at the end, and only when missing. With a
+  second, older agent CLI installed through Homebrew/npm, Kronn used to run that
+  copy: an old Claude Code served `opus` as Opus 4.8 while the up-to-date CLI
+  serves Opus 5.5. The Agents settings now warn when another copy of a CLI with
+  a different version is on PATH, naming the path and version of each.
 - A long discussion left open no longer freezes the page every few seconds.
   Unrelated refreshes (room links, the dashboard, background status) re-rendered
   every message; the transcript is now reused while nothing it shows changed.

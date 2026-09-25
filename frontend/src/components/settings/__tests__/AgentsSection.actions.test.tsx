@@ -845,6 +845,27 @@ describe('AgentsSection — runtime-available rendering', () => {
     expect(screen.getByText(/agentRuntimeWarning\.vibe\.sdk_fallback/)).toBeTruthy();
   });
 
+  it('names the CLI copy Kronn runs and the one it shadows', () => {
+    renderSection({
+      agents: [makeAgent({
+        name: 'AgentClaude', agent_type: 'ClaudeCode', installed: true, enabled: true,
+        path: '/opt/homebrew/bin/claude', version: '2.1.207',
+        shadowed_installs: [{ path: '/Users/u/.local/bin/claude', version: '2.1.282' }],
+      })],
+    });
+    expect(screen.getByText(
+      'agentRuntimeWarning.shadowedInstall:/opt/homebrew/bin/claude,2.1.207,/Users/u/.local/bin/claude,2.1.282',
+      { exact: false },
+    )).toBeTruthy();
+  });
+
+  it('shows no shadowed-install note when there is a single copy', () => {
+    renderSection({
+      agents: [makeAgent({ name: 'AgentClaude', agent_type: 'ClaudeCode', installed: true, enabled: true })],
+    });
+    expect(screen.queryByText(/agentRuntimeWarning\.shadowedInstall/)).toBeNull();
+  });
+
   it('shows authentication required separately from installed and copies the setup command', () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, 'clipboard', {

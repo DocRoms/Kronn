@@ -309,6 +309,32 @@ setup() {
     assert_output "cargo node pnpm watchexec"
 }
 
+# ─── path_append_missing (kronn start-dev PATH) ───────────────────────────────
+
+@test "path_append_missing: keeps the user's order when the dir is already listed" {
+    run path_append_missing "/Users/u/.local/bin:/opt/homebrew/bin:/usr/bin" "/opt/homebrew/bin"
+    assert_success
+    assert_output "/Users/u/.local/bin:/opt/homebrew/bin:/usr/bin"
+}
+
+@test "path_append_missing: appends a missing dir at the end" {
+    run path_append_missing "/Users/u/.local/bin:/usr/bin" "/opt/homebrew/bin"
+    assert_success
+    assert_output "/Users/u/.local/bin:/usr/bin:/opt/homebrew/bin"
+}
+
+@test "path_append_missing: matches whole entries, not prefixes" {
+    run path_append_missing "/opt/homebrew/bin-old:/usr/bin" "/opt/homebrew/bin"
+    assert_success
+    assert_output "/opt/homebrew/bin-old:/usr/bin:/opt/homebrew/bin"
+}
+
+@test "path_append_missing: an empty PATH becomes the dir alone" {
+    run path_append_missing "" "/opt/homebrew/bin"
+    assert_success
+    assert_output "/opt/homebrew/bin"
+}
+
 @test "dev_missing_tools: a non-1 token (e.g. 'yes') counts as missing" {
     run dev_missing_tools yes 1 1 1
     assert_success

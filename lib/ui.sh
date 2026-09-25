@@ -345,6 +345,18 @@ dev_missing_tools() {
     echo "${missing# }"
 }
 
+# Pure: echo PATH ($1) with DIR ($2) appended only when it is not already an
+# entry. Never reorders: the backend resolves agent CLIs through PATH, so moving
+# a directory ahead of the user's own choice can launch a stale duplicate binary.
+path_append_missing() {
+    local path="${1-}" dir="${2-}"
+    [[ -n "$dir" ]] || { echo "$path"; return; }
+    case ":${path}:" in
+        *":${dir}:"*) echo "$path" ;;
+        *) echo "${path:+${path}:}${dir}" ;;
+    esac
+}
+
 # Hot reload belongs to developing Kronn, not to using it. On macOS `kronn
 # start` routes to the native backend because Docker cannot reach the host CLIs
 # or the Keychain — but that user is not editing Rust, and a rebuild swap kills

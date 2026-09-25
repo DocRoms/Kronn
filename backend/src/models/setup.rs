@@ -787,6 +787,20 @@ pub struct AgentDetection {
     /// `None` means "no degradation detected, agent is healthy".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_warning: Option<String>,
+    /// Other copies of this CLI on PATH, shadowed by `path`, whose version
+    /// differs from the one Kronn runs. The CLI resolves model aliases itself,
+    /// so a stale shadowing copy silently changes the model an alias serves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub shadowed_installs: Option<Vec<ShadowedInstall>>,
+}
+
+/// A copy of an agent CLI that PATH order hides behind the one Kronn runs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ShadowedInstall {
+    pub path: String,
+    pub version: String,
 }
 
 fn default_true() -> bool {
