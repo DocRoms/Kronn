@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import type { ContextFile } from '../../types/generated';
 import { LastFrameError } from '../../lib/lastFrame';
@@ -65,6 +65,8 @@ describe('DiscussionAssetsPanel', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    // Without an IntersectionObserver, thumbnails load at once (documented fallback).
+    vi.stubGlobal('IntersectionObserver', undefined);
     globalThis.URL.createObjectURL = vi.fn(({ type }: Blob) => `blob:${type}`);
     globalThis.URL.revokeObjectURL = vi.fn();
     discussionsApi.contextFileBlob.mockResolvedValue(new Blob(['image'], { type: 'image/png' }));
@@ -78,6 +80,7 @@ describe('DiscussionAssetsPanel', () => {
       height: 640,
     });
   });
+  afterEach(() => vi.unstubAllGlobals());
 
   const imageConnection = {
     id: 'conn-1', display_name: 'OpenRouter', mention_alias: '@openrouter',

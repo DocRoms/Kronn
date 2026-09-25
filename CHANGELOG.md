@@ -70,6 +70,9 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- Opening a discussion no longer downloads every image it contains. An image
+  thumbnail, which is the whole file, loads as it nears the screen: on a
+  2,000-message room with 12 images, 9.5 MB instead of 15.6 MB at opening.
 - An open discussion no longer re-downloads its whole transcript when an
   unrelated workflow or media run reports progress. Every refresh now asks for
   the detail only if it changed, and a burst of events collapses into one
