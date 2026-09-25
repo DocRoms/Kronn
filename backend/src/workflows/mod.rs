@@ -403,7 +403,7 @@ impl WorkflowEngine {
             )
             .await
             {
-                tracing::error!("Workflow run {} failed: {}", run.id, e);
+                runner::settle_errored_run(&state, &workflow, &mut run, &e).await;
             }
             // B6 — surface a silently-failing scheduled/auto run via webhook.
             // Best-effort: never affects the run. `run.status` is final here.

@@ -2340,8 +2340,7 @@ pub async fn import_workflow(
 /// 0.6.0 UX pass — accepts an optional JSON body with `variables` (manual
 /// launch). When the workflow has declared `variables`, required ones
 /// must be filled (400 if not). Variable values land in the run's
-/// `trigger_context` so they resolve as `{{var_name}}` in step prompts
-/// (the existing `inject_trigger_context` already handles that path).
+/// encrypted execution-variable snapshot, never in `trigger_context`.
 /// Legacy callers that send no body still work — `Option<Json<...>>` ➜
 /// `None` → no variables → exactly the previous behaviour.
 pub(crate) async fn start_manual_run(
@@ -2351,6 +2350,21 @@ pub(crate) async fn start_manual_run(
     event_sender: Option<tokio::sync::mpsc::Sender<crate::workflows::runner::RunEvent>>,
     launch: crate::core::launch_context::LaunchContext,
 ) -> Result<WorkflowRun, String> {
+    let (wf, run) = create_manual_run(state, workflow_id, provided_vars, launch).await?;
+    spawn_manual_run(state, wf, run.clone(), event_sender, false);
+    Ok(run)
+}
+
+/// Every manual launcher (UI, Live Page, discussion action, MCP) goes
+/// through here: workflow lookup, the variable preflight that writes the
+/// encrypted snapshot `execute_run` requires, then the atomic
+/// concurrency-checked insert of the Pending run.
+pub(crate) async fn create_manual_run(
+    state: &AppState,
+    workflow_id: &str,
+    provided_vars: std::collections::HashMap<String, String>,
+    launch: crate::core::launch_context::LaunchContext,
+) -> Result<(Workflow, WorkflowRun), String> {
     let lookup_id = workflow_id.to_string();
     let mut wf = state
         .db
@@ -2359,7 +2373,7 @@ pub(crate) async fn start_manual_run(
         .map_err(|error| format!("DB error: {error}"))?
         .ok_or_else(|| "Workflow not found".to_string())?;
     if !wf.enabled {
-        return Err("Workflow is disabled".into());
+        return Err("Workflow is disabled — enable it before triggering".into());
     }
     // A GLOBAL workflow launched from a project-scoped discussion resolves
     // that project's environment/worktree exactly like one declared on the
@@ -2444,25 +2458,36 @@ pub(crate) async fn start_manual_run(
             if let Some(max) = limit {
                 let active = crate::db::workflows::count_active_runs(conn, &workflow_id)?;
                 if active >= max {
-                    anyhow::bail!("Concurrency limit reached ({active}/{max})");
+                    return Ok(Err(format!("Concurrency limit reached ({active}/{max})")));
                 }
             }
-            crate::db::workflows::insert_run(conn, &persisted)
+            crate::db::workflows::insert_run(conn, &persisted)?;
+            Ok(Ok(()))
         })
         .await
-        .map_err(|error| format!("DB error: {error}"))?;
+        .map_err(|error| format!("DB error: {error}"))??;
+    Ok((wf, run))
+}
 
-    let state_for_run = state.clone();
-    let mut run_exec = run.clone();
+/// Runs a run created by [`create_manual_run`] in the background. An
+/// `execute_run` error leaves it Failed with the reason, never Running.
+pub(crate) fn spawn_manual_run(
+    state: &AppState,
+    wf: Workflow,
+    mut run: WorkflowRun,
+    event_sender: Option<tokio::sync::mpsc::Sender<crate::workflows::runner::RunEvent>>,
+    notify_on_failure: bool,
+) {
+    let state = state.clone();
     tokio::spawn(async move {
-        let config = state_for_run.config.read().await;
+        let config = state.config.read().await;
         let tokens = config.tokens.clone();
         let agents = config.agents.clone();
         drop(config);
         if let Err(error) = crate::workflows::runner::execute_run(
-            state_for_run,
+            state.clone(),
             &wf,
-            &mut run_exec,
+            &mut run,
             &tokens,
             &agents,
             event_sender,
@@ -2471,10 +2496,12 @@ pub(crate) async fn start_manual_run(
         )
         .await
         {
-            tracing::error!(run_id = %run_exec.id, error = %error, "workflow action run failed");
+            crate::workflows::runner::settle_errored_run(&state, &wf, &mut run, &error).await;
+        }
+        if notify_on_failure {
+            crate::core::run_notify::notify_if_failed(&state, &wf, &run).await;
         }
     });
-    Ok(run)
 }
 
 pub async fn trigger(
@@ -3294,7 +3321,6 @@ pub async fn decide_run(
     // for reject). The UI already polls run state via SSE/refetch.
     let state_clone = state.clone();
     let run_for_resume = run.clone();
-    let run_id_for_log = run.id.clone();
     tokio::spawn(async move {
         let cfg = state_clone.config.read().await;
         let tokens = cfg.tokens.clone();
@@ -3312,7 +3338,8 @@ pub async fn decide_run(
         )
         .await
         {
-            tracing::error!("Resume run {} failed: {}", run_id_for_log, e);
+            crate::workflows::runner::settle_errored_run(&state_clone, &workflow, &mut run_mut, &e)
+                .await;
         }
         // A gate-resumed run (human approve or the auto-approve timer) that
         // then fails is exactly as unattended as its scheduled first half —
@@ -3416,7 +3443,6 @@ pub async fn resume_interrupted(
     }
 
     let state_clone = state.clone();
-    let run_id_for_log = run.id.clone();
     let response_run_id = run.id.clone();
     tokio::spawn(async move {
         let cfg = state_clone.config.read().await;
@@ -3433,7 +3459,8 @@ pub async fn resume_interrupted(
         )
         .await
         {
-            tracing::error!("Resume of interrupted run {} failed: {}", run_id_for_log, e);
+            crate::workflows::runner::settle_errored_run(&state_clone, &workflow, &mut run, &e)
+                .await;
         }
         // Same unattended-failure contract as the gate resume path.
         crate::core::run_notify::notify_if_failed(&state_clone, &workflow, &run).await;

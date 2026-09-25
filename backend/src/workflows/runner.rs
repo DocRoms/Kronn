@@ -319,6 +319,88 @@ pub(crate) fn inject_and_consume_gate_feedback(
     }
 }
 
+/// Last word of a detached launcher whose `execute_run`/`resume_run` returned
+/// `Err`: the run becomes Failed with the reason instead of staying Running,
+/// where it would keep counting against `concurrency_limit`.
+pub async fn settle_errored_run(
+    state: &AppState,
+    workflow: &Workflow,
+    run: &mut WorkflowRun,
+    error: &anyhow::Error,
+) {
+    tracing::error!(run_id = %run.id, "Workflow run failed: {error:#}");
+    // The durable status decides, not the in-memory one: a gate resume
+    // claimed Running in the DB before its copy left WaitingApproval.
+    let reason = format!("Workflow run aborted: {error:#}");
+    run.status = RunStatus::Failed;
+    run.finished_at = Some(Utc::now());
+    run.step_results.push(StepResult {
+        step_name: "__run_error__".to_string(),
+        status: RunStatus::Failed,
+        output: reason,
+        tokens_used: Some(0),
+        duration_ms: 0,
+        started_at: None,
+        condition_result: None,
+        envelope_detected: None,
+        step_kind: None,
+        step_api_plugin_slug: None,
+        step_api_endpoint_path: None,
+        is_rollback: false,
+        child_run_id: None,
+        agent_provenance: None,
+        native_tool_calls: Box::default(),
+        step_agent: None,
+        step_model: None,
+    });
+    let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
+    let run_id = run.id.clone();
+    let settled = state
+        .db
+        .with_conn(move |conn| {
+            let updated = crate::db::workflows::update_run_progress(conn, snap)?;
+            if updated {
+                crate::db::execution_variable_snapshots::purge_run_lifetime_snapshot(
+                    conn,
+                    "workflow",
+                    &run_id,
+                    Utc::now(),
+                )?;
+                return Ok(None);
+            }
+            // Blocked by the status guard (already terminal, paused, or a
+            // Cancel won the race): keep the durable status.
+            Ok(crate::db::workflows::get_run(conn, &run_id)?.map(|row| row.status))
+        })
+        .await;
+    match settled {
+        Ok(None) => {
+            let _ = state
+                .ws_broadcast
+                .send(crate::models::WsMessage::WorkflowRunUpdated {
+                    run_id: run.id.clone(),
+                    workflow_id: workflow.id.clone(),
+                    status: format!("{:?}", run.status),
+                    step_index: run.step_results.len() as i32 - 1,
+                    total_steps: workflow.steps.len() as u32,
+                    current_step: None,
+                });
+            let _ = state
+                .ws_broadcast
+                .send(crate::models::WsMessage::SharedRunUpdated {
+                    run_id: run.id.clone(),
+                });
+        }
+        Ok(Some(status)) => {
+            run.step_results.pop();
+            run.status = status;
+        }
+        Err(persist_error) => {
+            tracing::error!(run_id = %run.id, "could not record the run failure: {persist_error:#}");
+        }
+    }
+}
+
 /// Runs above this one in its sub-workflow chain, nearest first.
 async fn ancestor_run_ids(state: &AppState, run: &WorkflowRun) -> Vec<String> {
     let Some(parent) = run.parent_run_id.clone() else {
@@ -5164,6 +5246,135 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(persisted.status, RunStatus::Cancelled);
+    }
+
+    async fn wait_until_settled(state: &crate::AppState, run_id: &str) -> WorkflowRun {
+        for _ in 0..500 {
+            let id = run_id.to_string();
+            let run = state
+                .db
+                .with_conn(move |conn| crate::db::workflows::get_run(conn, &id))
+                .await
+                .unwrap()
+                .expect("run row");
+            if !matches!(run.status, RunStatus::Pending | RunStatus::Running) {
+                return run;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("run {run_id} never left Running");
+    }
+
+    #[tokio::test]
+    async fn a_background_run_whose_execute_run_fails_ends_failed_with_the_reason() {
+        // The KT-786 shape: variables declared, no snapshot prepared.
+        let (state, _, _) = test_state_and_configs();
+        let mut workflow = make_workflow_with_artifacts(Default::default());
+        workflow.id = "wf-snapshot-missing".into();
+        workflow.variables = vec![PromptVariable {
+            name: "ticket".into(),
+            label: "Ticket".into(),
+            placeholder: String::new(),
+            description: None,
+            required: true,
+            pattern: None,
+            source: Default::default(),
+            source_ref: None,
+            allow_manual_override: false,
+            control: None,
+        }];
+        workflow.steps = vec![json_data_step("first", serde_json::json!({ "n": 1 }))];
+        let run = pending_run("run-snapshot-missing", &workflow.id);
+        let (wf_db, run_db) = (workflow.clone(), run.clone());
+        state
+            .db
+            .with_conn(move |conn| {
+                crate::db::workflows::insert_workflow(conn, &wf_db)?;
+                crate::db::workflows::insert_run(conn, &run_db)
+            })
+            .await
+            .unwrap();
+
+        crate::api::workflows::spawn_manual_run(&state, workflow, run, None, false);
+        let settled = wait_until_settled(&state, "run-snapshot-missing").await;
+
+        assert_eq!(settled.status, RunStatus::Failed);
+        assert!(settled.finished_at.is_some());
+        let reason = settled.step_results.last().expect("failure step");
+        assert_eq!(reason.step_name, "__run_error__");
+        assert!(
+            reason.output.contains("snapshot unavailable or expired"),
+            "the reason is kept: {}",
+            reason.output
+        );
+        let shared = state
+            .db
+            .with_conn(|conn| crate::db::shared_runs::get(conn, "run-snapshot-missing"))
+            .await
+            .unwrap()
+            .expect("shared run projected");
+        assert!(matches!(
+            shared.status,
+            crate::models::SharedRunStatus::Failed
+        ));
+    }
+
+    #[tokio::test]
+    async fn settling_an_errored_gate_resume_fails_the_run_claimed_running() {
+        let (state, _, _) = test_state_and_configs();
+        let mut workflow = make_workflow_with_artifacts(Default::default());
+        workflow.id = "wf-settle-resume".into();
+        let mut run = pending_run("run-settle-resume", &workflow.id);
+        let (wf_db, mut run_db) = (workflow.clone(), run.clone());
+        run_db.status = RunStatus::Running;
+        state
+            .db
+            .with_conn(move |conn| {
+                crate::db::workflows::insert_workflow(conn, &wf_db)?;
+                crate::db::workflows::insert_run(conn, &run_db)
+            })
+            .await
+            .unwrap();
+        run.status = RunStatus::WaitingApproval;
+
+        settle_errored_run(
+            &state,
+            &workflow,
+            &mut run,
+            &anyhow::anyhow!("resume broke"),
+        )
+        .await;
+
+        let persisted = wait_until_settled(&state, "run-settle-resume").await;
+        assert_eq!(persisted.status, RunStatus::Failed);
+        assert!(persisted.step_results[0].output.contains("resume broke"));
+    }
+
+    #[tokio::test]
+    async fn settling_an_errored_run_keeps_a_cancel_that_won_the_race() {
+        let (state, _, _) = test_state_and_configs();
+        let mut workflow = make_workflow_with_artifacts(Default::default());
+        workflow.id = "wf-settle-cancelled".into();
+        let mut run = pending_run("run-settle-cancelled", &workflow.id);
+        let (wf_db, mut run_db) = (workflow.clone(), run.clone());
+        run_db.status = RunStatus::Cancelled;
+        state
+            .db
+            .with_conn(move |conn| {
+                crate::db::workflows::insert_workflow(conn, &wf_db)?;
+                crate::db::workflows::insert_run(conn, &run_db)
+            })
+            .await
+            .unwrap();
+        run.status = RunStatus::Running;
+
+        settle_errored_run(&state, &workflow, &mut run, &anyhow::anyhow!("late error")).await;
+
+        assert_eq!(run.status, RunStatus::Cancelled, "no failure is reported");
+        assert!(run.step_results.is_empty());
+        let persisted = wait_until_settled(&state, "run-settle-cancelled").await;
+        assert_eq!(persisted.status, RunStatus::Cancelled);
+        assert!(persisted.step_results.is_empty());
     }
 
     #[tokio::test]

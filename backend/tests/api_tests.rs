@@ -3701,6 +3701,162 @@ async fn workflow_http_optional_input_does_not_hide_unknown_template_variables()
     );
 }
 
+/// KT-786: the MCP launcher must prepare the same encrypted snapshot as the
+/// UI route, so a workflow with required variables reaches its first step.
+#[tokio::test]
+async fn mcp_workflow_trigger_runs_a_workflow_with_required_variables_like_the_ui_route() {
+    let state = test_state();
+    let secret = kronn::core::crypto::generate_secret();
+    state.config.write().await.encryption_secret = Some(secret.clone());
+    let directory = tempfile::tempdir().unwrap();
+    let project_path = directory.path().to_string_lossy().into_owned();
+    let now = chrono::Utc::now();
+    let workflow = kronn::models::Workflow {
+        id: "required-input-workflow".into(),
+        name: "Required input".into(),
+        project_id: Some("required-input-project".into()),
+        trigger: kronn::models::WorkflowTrigger::Manual,
+        steps: vec![kronn::models::WorkflowStep {
+            name: "Review".into(),
+            step_type: kronn::models::StepType::Gate,
+            gate_message: Some("Ticket: [{{ticket}}]".into()),
+            ..Default::default()
+        }],
+        actions: vec![],
+        safety: kronn::models::WorkflowSafety {
+            sandbox: false,
+            max_files: None,
+            max_lines: None,
+            require_approval: false,
+        },
+        workspace_config: None,
+        concurrency_limit: None,
+        guards: None,
+        artifacts: HashMap::new(),
+        on_failure: vec![],
+        exec_allowlist: vec![],
+        variables: vec![kronn::models::PromptVariable {
+            name: "ticket".into(),
+            label: "Ticket".into(),
+            placeholder: String::new(),
+            description: None,
+            required: true,
+            pattern: None,
+            source: None,
+            source_ref: None,
+            allow_manual_override: false,
+            control: None,
+        }],
+        enabled: true,
+        pinned: false,
+        created_at: now,
+        updated_at: now,
+    };
+    state.db.with_conn(move |conn| {
+        conn.execute("INSERT INTO projects (id,name,path,created_at,updated_at) VALUES ('required-input-project','Required input',?1,?2,?2)", rusqlite::params![project_path, now.to_rfc3339()])?;
+        kronn::db::workflows::insert_workflow(conn, &workflow)
+    }).await.unwrap();
+    let variables = serde_json::json!({"ticket": "KT-786"});
+
+    let response = build_router_with_auth(state.clone(), false)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/workflows/required-input-workflow/trigger")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({"variables": variables}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let bytes = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        response.into_body().collect(),
+    )
+    .await
+    .expect("workflow SSE must terminate")
+    .unwrap()
+    .to_bytes();
+    let events = String::from_utf8(bytes.to_vec()).unwrap();
+    let ui_run_id = events
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .filter_map(|data| serde_json::from_str::<Value>(data).ok())
+        .find_map(|event| event["run_id"].as_str().map(str::to_owned))
+        .unwrap_or_else(|| panic!("missing run_start: {events}"));
+
+    let (status, body) = post_json(
+        build_router_with_auth(state.clone(), false),
+        "/api/mcp/workflow-trigger",
+        serde_json::json!({"workflow_id": "required-input-workflow", "variables": variables}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["success"], true, "{body}");
+    let mcp_run_id = body["data"]["run_id"].as_str().unwrap().to_owned();
+
+    let key = kronn::core::crypto::parse_secret(&secret).unwrap();
+    let mut observed = Vec::new();
+    for run_id in [ui_run_id, mcp_run_id] {
+        let mut run = None;
+        for _ in 0..500 {
+            let id = run_id.clone();
+            let current = state
+                .db
+                .with_conn(move |conn| kronn::db::workflows::get_run(conn, &id))
+                .await
+                .unwrap()
+                .expect("persisted run");
+            if !matches!(
+                current.status,
+                kronn::models::RunStatus::Pending | kronn::models::RunStatus::Running
+            ) {
+                run = Some(current);
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let run = run.unwrap_or_else(|| panic!("run {run_id} never reached its first step"));
+        assert_eq!(
+            run.status,
+            kronn::models::RunStatus::WaitingApproval,
+            "{:?}",
+            run.step_results
+        );
+        assert!(
+            run.trigger_context
+                .as_ref()
+                .unwrap()
+                .get("ticket")
+                .is_none(),
+            "variables must stay out of plaintext trigger metadata"
+        );
+        let id = run_id.clone();
+        let values = state
+            .db
+            .with_conn(move |conn| {
+                kronn::db::execution_variable_snapshots::load_values(
+                    conn,
+                    "workflow",
+                    &id,
+                    &key,
+                    chrono::Utc::now(),
+                )
+            })
+            .await
+            .unwrap()
+            .expect("encrypted snapshot");
+        observed.push((run.step_results[0].output.clone(), values));
+    }
+    assert_eq!(observed[0].0, "Ticket: [KT-786]");
+    assert_eq!(
+        observed[0], observed[1],
+        "MCP and UI runs see the same values"
+    );
+}
+
 /// Build a test router backed by an in-memory database (auth disabled).
 fn test_app() -> Router {
     build_router_with_auth(test_state(), false)
@@ -18219,6 +18375,7 @@ mod cold_api_handlers_tests {
     #[tokio::test]
     async fn mcp_workflow_trigger_required_var_missing_returns_err() {
         let state = test_state();
+        state.config.write().await.encryption_secret = Some(kronn::core::crypto::generate_secret());
         let now = chrono::Utc::now();
         let workflow_id = format!("wf-vars-{}", uuid::Uuid::new_v4());
         let wf = kronn::models::Workflow {
@@ -18278,8 +18435,9 @@ mod cold_api_handlers_tests {
         assert_eq!(st, StatusCode::OK);
         assert_eq!(json["success"], serde_json::Value::Bool(false));
         let err = json["error"].as_str().unwrap_or("");
+        // Same preflight answer as the UI route and qp_run.
         assert!(
-            err.contains("obligatoire") || err.contains("required"),
+            err.starts_with("preflight_failed:") && err.contains("missing_user_input"),
             "expected required-variable error, got {err}"
         );
     }

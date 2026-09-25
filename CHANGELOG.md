@@ -75,6 +75,13 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- A workflow with launch variables triggered from MCP (`workflow_trigger`) now
+  runs. That launcher never prepared the encrypted variable snapshot the UI
+  prepares, so the run died at start and stayed "Running" forever, counting
+  against the workflow's concurrency limit. MCP now goes through the UI's
+  launcher, a variable preflight failure is returned to the caller as with
+  `qp_run`, and a run whose execution errors in the background (MCP, UI,
+  schedule, tracker, resume) is marked Failed with the reason (KT-786).
 - Two workflows of one project that run in its main checkout and start at the
   same moment (crons sharing a minute, for example) no longer make one of them
   fail at once with "Refusing to run in the main checkout". The later run now
