@@ -75,6 +75,13 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- A prelocalized rework no longer edits the launch line numbers on moved
+  content. When a delivery changed the file's line count, `request_changes`
+  replayed the same range and a local worker deleted the neighbouring rule.
+  Before a rework, a resume or a reassignment, Kronn now re-anchors the range
+  on the lines around it and tells the worker the new range; if anything
+  outside the range changed, it refuses with `stale range: …; relaunch with a
+  new worker_scope`, naming the launch range and the observed change.
 - A CLI task worker that runs `git commit` itself can no longer deliver a
   commit carrying an invented identity. At delivery, every `Signed-off-by`,
   `Co-Authored-By` or similar trailer in the delivered commits must name the

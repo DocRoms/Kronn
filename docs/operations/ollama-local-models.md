@@ -176,6 +176,18 @@ ordinary `prelocalized_edit`, choose the narrowest verified range possible —
 never use replacement semantics for an insertion when this structural mode is
 available.
 A pure `insert_after_line` never asks the worker to retype the anchor: the executor preserves the anchor bytes mechanically, so the worker authors only the new text.
+
+The scope is written against the pinned base, but a delivery can change the
+file's line count. Before `request_changes` hands the work back, and before a
+resumed or reassigned worker runs, Kronn re-anchors it: every line before the
+range (and after it, for `prelocalized_edit`) must still match the base byte for
+byte, and the new range is what lies between them. The persisted scope is
+updated, journaled as `worker_scope_reanchored`, and the hand-off names the new
+range. When anything outside the range changed, the range was deleted
+entirely, or it grew past 200 lines, the rework is refused with
+`stale range: …; relaunch with a new worker_scope`, naming the launch range
+and the observed change.
+`[src: file: backend/src/api/orchestration.rs]`
 `task_exec_status` now exposes `usage.http` — cumulative HTTP traffic, context peak, and per-phase detail — without prompts or arguments.
 
 Native HTTP delivery — and delivery from a spawned host CLI worker that uses

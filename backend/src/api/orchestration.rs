@@ -1027,6 +1027,16 @@ fn handoff_notice_with_context(
 
 async fn wake_recovered_worker(db: &Database, exec_id: &str) -> Result<String> {
     let id = exec_id.to_string();
+    let execution = db
+        .with_conn(move |conn| {
+            crate::db::orchestration::get_task_execution(conn, &id)?
+                .context("execution vanished before worker wake")
+        })
+        .await?;
+    let scope_note = reanchor_execution_scope(db, &execution)
+        .await?
+        .map(|reanchored| reanchored_scope_note(&reanchored));
+    let id = exec_id.to_string();
     db.with_conn(move |conn| {
         let tx = conn.unchecked_transaction()?;
         let execution = crate::db::orchestration::get_task_execution(&tx, &id)?
@@ -1065,10 +1075,10 @@ async fn wake_recovered_worker(db: &Database, exec_id: &str) -> Result<String> {
         )?;
         if !exists {
             let has_delivered = has_recorded_delivery(&tx, &id)?;
-            let message = orchestrator_message(
-                message_id,
-                handoff_notice_with_context(has_delivered, None, Some(&tx), Some(&id)),
-            );
+            let mut content =
+                handoff_notice_with_context(has_delivered, None, Some(&tx), Some(&id));
+            content.push_str(scope_note.as_deref().unwrap_or_default());
+            let message = orchestrator_message(message_id, content);
             if target.kind == MessageTargetKind::Cli {
                 crate::db::discussions::insert_message_with_targets_and_dispatches_within_tx(
                     &tx,
@@ -1653,6 +1663,227 @@ fn validate_worker_scope_in_worktree(
             Ok(())
         }
     }
+}
+
+/// A prelocalized target that no longer fits the file the next round reads.
+#[derive(Debug)]
+pub(crate) struct StaleWorkerScope(pub String);
+
+impl std::fmt::Display for StaleWorkerScope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for StaleWorkerScope {}
+
+fn describe_worker_scope(scope: &TaskWorkerScope) -> String {
+    match scope {
+        TaskWorkerScope::PrelocalizedEdit {
+            start_line,
+            end_line,
+            ..
+        } => format!("lines {start_line}-{end_line}"),
+        TaskWorkerScope::PrelocalizedInsertAfter { anchor_line, .. } => {
+            format!("anchor line {anchor_line}")
+        }
+    }
+}
+
+fn worker_scope_path(scope: &TaskWorkerScope) -> &str {
+    match scope {
+        TaskWorkerScope::PrelocalizedEdit { path, .. }
+        | TaskWorkerScope::PrelocalizedInsertAfter { path, .. } => path,
+    }
+}
+
+/// The lines that differ between `base` and `current`, numbered in `current`.
+fn observed_line_change(base: &[&[u8]], current: &[&[u8]]) -> String {
+    let window = |start: usize, end: usize| {
+        if start == end {
+            start.to_string()
+        } else {
+            format!("{start}-{end}")
+        }
+    };
+    let prefix = base
+        .iter()
+        .zip(current)
+        .take_while(|(left, right)| left == right)
+        .count();
+    let room = base.len().min(current.len()) - prefix;
+    let suffix = base
+        .iter()
+        .rev()
+        .zip(current.iter().rev())
+        .take(room)
+        .take_while(|(left, right)| left == right)
+        .count();
+    if current.len() - suffix > prefix {
+        format!("lines {}", window(prefix + 1, current.len() - suffix))
+    } else {
+        format!(
+            "base lines {} removed",
+            window(prefix + 1, base.len() - suffix)
+        )
+    }
+}
+
+/// Map the launch-time scope onto the file as it is now. Only the scoped lines
+/// may differ from the pinned base, so everything around them locates the new
+/// range exactly; any other difference makes the range stale.
+fn reanchor_worker_scope(
+    original: &TaskWorkerScope,
+    base: &[u8],
+    current: Option<&[u8]>,
+) -> Result<TaskWorkerScope, StaleWorkerScope> {
+    let path = worker_scope_path(original);
+    let launched = describe_worker_scope(original);
+    let stale = |detail: String| {
+        StaleWorkerScope(format!(
+            "stale range: {detail}; relaunch with a new worker_scope"
+        ))
+    };
+    let Some(current) = current else {
+        return Err(stale(format!(
+            "`{path}` ({launched} at launch) no longer exists in the worktree"
+        )));
+    };
+    let base_lines = base
+        .split_inclusive(|byte| *byte == b'\n')
+        .collect::<Vec<_>>();
+    let current_lines = current
+        .split_inclusive(|byte| *byte == b'\n')
+        .collect::<Vec<_>>();
+    let (before, after) = match original {
+        TaskWorkerScope::PrelocalizedEdit {
+            start_line,
+            end_line,
+            ..
+        } => (
+            (*start_line as usize).saturating_sub(1),
+            base_lines.len().saturating_sub(*end_line as usize),
+        ),
+        TaskWorkerScope::PrelocalizedInsertAfter { anchor_line, .. } => (*anchor_line as usize, 0),
+    };
+    let untouched = before + after <= base_lines.len()
+        && before + after <= current_lines.len()
+        && current_lines[..before] == base_lines[..before]
+        && current_lines[current_lines.len() - after..] == base_lines[base_lines.len() - after..];
+    if !untouched {
+        return Err(stale(format!(
+            "`{path}` changed outside the prelocalized {launched} since launch (observed change: {})",
+            observed_line_change(&base_lines, &current_lines)
+        )));
+    }
+    let TaskWorkerScope::PrelocalizedEdit { start_line, .. } = original else {
+        return Ok(original.clone());
+    };
+    let end_line = current_lines.len() - after;
+    if end_line < *start_line as usize {
+        return Err(stale(format!(
+            "the delivered change removed every line of `{path}` {launched} (observed range: empty)"
+        )));
+    }
+    let moved = TaskWorkerScope::PrelocalizedEdit {
+        path: path.to_string(),
+        start_line: *start_line,
+        end_line: end_line as u32,
+    };
+    moved.validate().map_err(|error| {
+        stale(format!(
+            "`{path}` {launched} now spans {} ({error})",
+            describe_worker_scope(&moved)
+        ))
+    })?;
+    Ok(moved)
+}
+
+/// A prelocalized scope that moved since launch, for the worker's hand-off.
+struct ReanchoredScope {
+    original: TaskWorkerScope,
+    current: TaskWorkerScope,
+}
+
+fn reanchored_scope_note(scope: &ReanchoredScope) -> String {
+    let target = |scope: &TaskWorkerScope| match scope {
+        TaskWorkerScope::PrelocalizedEdit {
+            start_line,
+            end_line,
+            ..
+        } => format!("la plage inclusive `{start_line}..={end_line}`"),
+        TaskWorkerScope::PrelocalizedInsertAfter { anchor_line, .. } => {
+            format!("l'insertion après la ligne `{anchor_line}`")
+        }
+    };
+    format!(
+        "\n\n## Cible prélocalisée réancrée\n\
+         `{path}` a changé depuis le lancement : la cible est maintenant {current} \
+         (au lancement : {original}). Les outils imposent cette nouvelle cible ; ne te \
+         fie pas aux numéros de ligne du brief initial.",
+        path = worker_scope_path(&scope.current),
+        current = target(&scope.current),
+        original = target(&scope.original),
+    )
+}
+
+/// Re-anchor a prelocalized execution before another worker round reads its
+/// frozen range: a delivery that changed the line count moved the content.
+/// Refusals are `StaleWorkerScope` errors; the re-anchored scope is persisted.
+async fn reanchor_execution_scope(
+    db: &Database,
+    exec: &TaskExecution,
+) -> Result<Option<ReanchoredScope>> {
+    let (Some(persisted), Some(base_sha)) = (exec.worker_scope.clone(), exec.base_sha.clone())
+    else {
+        return Ok(None);
+    };
+    let execution_id = exec.id.clone();
+    let (original, workspace) = db
+        .with_conn(move |conn| {
+            Ok((
+                crate::db::orchestration::launch_worker_scope(conn, &execution_id)?,
+                crate::db::discussion_workspaces::get_managed_for_execution(conn, &execution_id)?,
+            ))
+        })
+        .await?;
+    let Some(worktree) = workspace.and_then(|workspace| workspace.canonical_path) else {
+        return Ok(None);
+    };
+    let original = original.unwrap_or_else(|| persisted.clone());
+    let worktree = std::path::PathBuf::from(worktree);
+    let path = worker_scope_path(&original);
+    let base =
+        worktree::file_at_revision(&worktree, &base_sha, path).map_err(anyhow::Error::msg)?;
+    let current = match std::fs::read(worktree.join(path)) {
+        Ok(bytes) => Some(bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => bail!("cannot read `{path}` in the worktree: {error}"),
+    };
+    let reanchored = reanchor_worker_scope(&original, &base, current.as_deref())?;
+    if reanchored != persisted {
+        let changes = serde_json::json!({
+            "original": original,
+            "from": persisted,
+            "to": reanchored,
+            "base_sha": base_sha,
+        });
+        let (id, scope) = (exec.id.clone(), reanchored.clone());
+        db.with_conn(move |conn| {
+            crate::db::orchestration::reanchor_execution_worker_scope(
+                conn,
+                &id,
+                &scope,
+                &backend_actor(),
+                changes,
+            )
+        })
+        .await?;
+    }
+    Ok((reanchored != original).then_some(ReanchoredScope {
+        original,
+        current: reanchored,
+    }))
 }
 
 /// What one integration attempt did (KT-320 DoD-3/7/8).
@@ -4573,6 +4804,9 @@ pub enum ReviewOutcome {
     /// The ReviewDecision failed the v1 contract; `detail` explains (validated AFTER authz, so
     /// a stranger gets no validation oracle).
     InvalidDecision(String),
+    /// request_changes was refused: the delivered file no longer fits the prelocalized
+    /// range, and replaying its line numbers would edit moved content.
+    StaleScope(String),
 }
 
 /// The principal decides a delivered attempt (KT-319 tranche 3a, DoD-2/4/5/7/8). The caller's
@@ -4878,9 +5112,32 @@ async fn decide_authorized_review(
                 let worker_target = worker_target_from_execution(&exec)
                     .map_err(|e| ProvisionError::Internal(e.to_string()))?;
 
+                // A rework replays the prelocalized range on the delivered file; an
+                // exhausted budget escalates instead, so it needs no re-anchoring.
+                let reworks = exec.status == TaskExecutionStatus::AwaitingReview
+                    && exec.review_rounds < exec.max_review_rounds;
+                let reanchored = if reworks {
+                    match reanchor_execution_scope(db, &exec).await {
+                        Ok(reanchored) => reanchored,
+                        Err(error) => {
+                            return match error.downcast::<StaleWorkerScope>() {
+                                Ok(stale) => Ok(ReviewOutcome::StaleScope(stale.0)),
+                                Err(error) => Err(ProvisionError::Internal(error.to_string())),
+                            }
+                        }
+                    }
+                } else {
+                    None
+                };
+
                 // (a) findings → the worker in the child (DoD-4).
-                let findings_msg =
+                let mut findings_msg =
                     build_review_findings_message(&exec.id, exec.attempt_no, &decision, &child);
+                if let Some(reanchored) = reanchored.as_ref() {
+                    findings_msg
+                        .content
+                        .push_str(&reanchored_scope_note(reanchored));
+                }
                 let findings = (child.clone(), findings_msg, worker_target.clone());
 
                 // (b) escalation solicitation → the principal (used only if the budget is exhausted
@@ -5434,15 +5691,14 @@ fn begin_provisioning(
             )));
         }
     }
-    if is_replay
-        && worker_scope.is_some()
-        && existing
-            .as_ref()
-            .is_some_and(|execution| execution.worker_scope.as_ref() != worker_scope)
-    {
-        return Ok(Err(ProvisionError::NotLaunchable(
-            "idempotent replay cannot change the persisted worker_scope".into(),
-        )));
+    if let (true, Some(_), Some(execution)) = (is_replay, worker_scope, existing.as_ref()) {
+        // Compare with the launch scope: a rework may have re-anchored the persisted one.
+        let launched = crate::db::orchestration::launch_worker_scope(conn, &execution.id)?;
+        if launched.as_ref() != worker_scope {
+            return Ok(Err(ProvisionError::NotLaunchable(
+                "idempotent replay cannot change the persisted worker_scope".into(),
+            )));
+        }
     }
 
     // Fail closed before the execution row, sub-discussion or worktree exists.
@@ -7883,7 +8139,10 @@ pub async fn resume_execution(
         }
         ExecutionRecoveryAction::ResumeWorker => wake_recovered_worker(&state.db, &exec_id)
             .await
-            .map_err(|error| ProvisionError::Internal(error.to_string())),
+            .map_err(|error| match error.downcast::<StaleWorkerScope>() {
+                Ok(stale) => ProvisionError::CheckpointRefused(stale.0),
+                Err(error) => ProvisionError::Internal(error.to_string()),
+            }),
         ExecutionRecoveryAction::AwaitReview => {
             let id = exec_id.clone();
             match state
@@ -8234,6 +8493,17 @@ pub(crate) async fn reassign_native_execution(
     crate::db::orchestration::ensure_task_worker_transport_compatible(&selection.target)
         .map_err(|error| anyhow::anyhow!("worker_transport: {error}"))?;
     let id = exec_id.to_string();
+    let execution = state
+        .db
+        .with_conn(move |conn| {
+            crate::db::orchestration::get_task_execution(conn, &id)?
+                .context("execution vanished before worker reassignment")
+        })
+        .await?;
+    let scope_note = reanchor_execution_scope(&state.db, &execution)
+        .await?
+        .map(|reanchored| reanchored_scope_note(&reanchored));
+    let id = exec_id.to_string();
     let persisted_reason = reason.to_string();
     let (view, replaced_dispatch_id) = state
         .db
@@ -8292,6 +8562,7 @@ pub(crate) async fn reassign_native_execution(
                 handoff.push_str("\n\n## Consigne du principal pour cette réaffectation\n\n");
                 handoff.push_str(persisted_reason.trim());
             }
+            handoff.push_str(scope_note.as_deref().unwrap_or_default());
             let message =
                 orchestrator_message(format!("orch-reassign:{}:{}", id, generation), handoff);
             crate::db::discussions::insert_message(&transaction, &child, &message)?;
@@ -10631,6 +10902,7 @@ pub(crate) fn review_outcome_to_response(outcome: ReviewOutcome) -> ApiResponse<
         ReviewOutcome::InvalidDecision(detail) => {
             ApiResponse::err_coded(ApiErrorCode::Validation, detail)
         }
+        ReviewOutcome::StaleScope(detail) => ApiResponse::err_coded(ApiErrorCode::Conflict, detail),
     }
 }
 
@@ -22800,6 +23072,364 @@ mod tests {
         .await
         .unwrap();
         assert!(matches!(delivered, DeliverOutcome::Delivered { .. }));
+    }
+
+    const STYLE_PATH: &str = "tc.justin.scss";
+    const STYLE_BASE: &str = ".tc-justin {\n  display: flex;\n}\n\
+        .tc-justin__title {\n  margin: 0;\n}\n\
+        .tc-justin__list-gradient {\n  background: linear-gradient(red, blue);\n}\n";
+    const STYLE_NEIGHBOUR: &str =
+        ".tc-justin__list-gradient {\n  background: linear-gradient(red, blue);\n}\n";
+
+    fn style_scope(start_line: u32, end_line: u32) -> TaskWorkerScope {
+        TaskWorkerScope::PrelocalizedEdit {
+            path: STYLE_PATH.into(),
+            start_line,
+            end_line,
+        }
+    }
+
+    /// A prelocalized `4..=6` attempt delivered with `delivered` as the file,
+    /// then handed back to a native worker for the rework, as in production.
+    async fn prelocalized_delivery(
+        db: &Database,
+        repo: &Path,
+        delivered: &str,
+    ) -> (String, String) {
+        std::fs::write(repo.join(STYLE_PATH), STYLE_BASE).unwrap();
+        git(repo, &["add", STYLE_PATH]);
+        git(repo, &["commit", "-m", "style"]);
+        let (_task_ref, parent_id, _child_id, exec_id) = attached_cli_worker(db, repo).await;
+        let (id, scope) = (
+            exec_id.clone(),
+            serde_json::to_string(&style_scope(4, 6)).unwrap(),
+        );
+        db.with_conn(move |conn| {
+            conn.execute(
+                "UPDATE task_executions SET worker_scope_json = ?2 WHERE id = ?1",
+                rusqlite::params![id, scope],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let path = managed_worktree_path(db, &exec_id).await;
+        std::fs::write(Path::new(&path).join(STYLE_PATH), delivered).unwrap();
+        git(
+            Path::new(&path),
+            &["commit", "-s", "-am", "style: round one"],
+        );
+        let manifest = manifest_json_with_files_for_dod(
+            &git_rev(Path::new(&path), "HEAD"),
+            serde_json::json!([{ "path": STYLE_PATH, "kind": "modified" }]),
+            &dod_id_for_execution(db, &exec_id).await,
+            true,
+        );
+        let delivered = deliver_worker_manifest(db, &exec_id, "ClaudeCode", "sess-a", &manifest)
+            .await
+            .unwrap();
+        assert!(matches!(delivered, DeliverOutcome::Delivered { .. }));
+        let id = exec_id.clone();
+        db.with_conn(move |conn| {
+            conn.execute(
+                "UPDATE task_executions SET worker_target_kind = 'agent', \
+                     worker_cli_session_id = NULL, worker_agent_type = 'Ollama' WHERE id = ?1",
+                [&id],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        seed_cli_session(db, 102, &parent_id, "sess-b").await;
+        (exec_id, path)
+    }
+
+    #[tokio::test]
+    async fn request_changes_reanchors_a_prelocalized_range_after_a_delivery_that_added_lines() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        // Round one rewrote 4..=6 as five lines, with an orphan brace.
+        let grown = ".tc-justin {\n  display: flex;\n}\n\
+            .tc-justin__title {\n  margin: 0;\n  padding: 0;\n}\n}\n"
+            .to_string()
+            + STYLE_NEIGHBOUR;
+        let (exec_id, path) = prelocalized_delivery(&db, repo.path(), &grown).await;
+
+        let outcome = decide_review(
+            &db,
+            &exec_id,
+            &review_request_changes("remove the orphan brace"),
+            "ClaudeCode",
+            "sess-b",
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(
+                outcome,
+                ReviewOutcome::Reviewed {
+                    verdict: ReviewVerdict::RequestChanges,
+                    ..
+                }
+            ),
+            "{outcome:?}"
+        );
+        let execution = exec_of(&db, &exec_id).await;
+        assert_eq!(execution.worker_scope, Some(style_scope(4, 8)));
+        assert_eq!(
+            event_count(&db, &exec_id, "worker_scope_reanchored").await,
+            1
+        );
+        let findings_id = format!("orch-review-findings:{exec_id}:0");
+        let findings: String = db
+            .with_conn(move |conn| {
+                Ok(conn.query_row(
+                    "SELECT content FROM messages WHERE id = ?1",
+                    [findings_id],
+                    |row| row.get(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert!(
+            findings.contains("`4..=8`") && findings.contains("`4..=6`"),
+            "the rework must be told the range moved: {findings}"
+        );
+
+        // The rework edits exactly the re-anchored range: the neighbour survives.
+        let worktree = Path::new(&path);
+        let receipt =
+            crate::api::agent_workspace_tools::read_file_payload(worktree, STYLE_PATH, None, None)
+                .unwrap()["content_sha256"]
+                .as_str()
+                .unwrap()
+                .to_string();
+        crate::api::agent_workspace_tools::edit_lines_payload(
+            worktree,
+            STYLE_PATH,
+            4,
+            8,
+            ".tc-justin__title {\n  margin: 0;\n  padding: 0;\n}\n",
+            &receipt,
+        )
+        .unwrap();
+        let reworked = std::fs::read_to_string(worktree.join(STYLE_PATH)).unwrap();
+        assert!(reworked.ends_with(STYLE_NEIGHBOUR), "{reworked}");
+        assert_eq!(reworked.matches('}').count(), 3, "{reworked}");
+
+        // Every later round maps from the launch range, not the previous one.
+        let reanchored = reanchor_execution_scope(&db, &exec_of(&db, &exec_id).await)
+            .await
+            .unwrap()
+            .expect("still moved from the launch range");
+        assert_eq!(reanchored.original, style_scope(4, 6));
+        assert_eq!(reanchored.current, style_scope(4, 7));
+        assert_eq!(
+            exec_of(&db, &exec_id).await.worker_scope,
+            Some(style_scope(4, 7))
+        );
+    }
+
+    #[tokio::test]
+    async fn request_changes_refuses_a_stale_prelocalized_range_naming_both_ranges() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        // Round one also touched the neighbouring rule, outside its range.
+        let outside = STYLE_BASE.replace("red, blue", "red, green");
+        let (exec_id, _path) = prelocalized_delivery(&db, repo.path(), &outside).await;
+
+        let outcome = decide_review(
+            &db,
+            &exec_id,
+            &review_request_changes("adjust the title"),
+            "ClaudeCode",
+            "sess-b",
+        )
+        .await
+        .unwrap();
+        let detail = match outcome {
+            ReviewOutcome::StaleScope(detail) => detail,
+            other => panic!("a stale range must refuse the rework, got {other:?}"),
+        };
+        assert!(
+            detail.contains("stale range")
+                && detail.contains("lines 4-6")
+                && detail.contains("observed change: lines 8")
+                && detail.contains("relaunch with a new worker_scope"),
+            "{detail}"
+        );
+        let execution = exec_of(&db, &exec_id).await;
+        assert_eq!(execution.status, TaskExecutionStatus::AwaitingReview);
+        assert_eq!(execution.worker_scope, Some(style_scope(4, 6)));
+        assert_eq!(
+            count(
+                &db,
+                "SELECT COUNT(*) FROM messages WHERE id LIKE 'orch-review-findings:%'"
+            )
+            .await,
+            0
+        );
+        let response = review_outcome_to_response(ReviewOutcome::StaleScope(detail));
+        assert_eq!(response.error_code.as_deref(), Some("conflict"));
+    }
+
+    #[tokio::test]
+    async fn resumed_prelocalized_worker_is_reanchored_or_refused() {
+        let repo = init_repo();
+        std::fs::write(repo.path().join(STYLE_PATH), STYLE_BASE).unwrap();
+        git(repo.path(), &["add", STYLE_PATH]);
+        git(repo.path(), &["commit", "-m", "style"]);
+        let db = Database::open_in_memory().unwrap();
+        let (task_ref, parent_id, _) = seed(&db, repo.path()).await;
+        let execution = provision_single_task_execution_with_scope_and_validations(
+            &db,
+            ProvisionInput {
+                task_reference: task_ref.clone(),
+                parent_discussion_id: parent_id.clone(),
+                worker: MessageTarget::discussion_agent(AgentType::Ollama),
+                base_rev: Some("main".into()),
+                idempotency_key: Some("prelocalized-resume".into()),
+            },
+            Some(style_scope(4, 6)),
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+        let exec_id = execution.id.clone();
+        let child = execution.sub_discussion_id.clone().unwrap();
+        let dispatch = execution.dispatch_job_id.clone().unwrap();
+        let e = exec_id.clone();
+        db.with_conn(move |conn| {
+            crate::db::agent_dispatch::mark_completed(conn, &dispatch)?;
+            crate::db::orchestration::transition_execution(
+                conn,
+                &e,
+                TaskExecutionStatus::Interrupted,
+                &backend_actor(),
+                serde_json::json!({}),
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        // The interrupted worker had already replaced 4..=6 with one line.
+        let path = managed_worktree_path(&db, &exec_id).await;
+        let shrunk = ".tc-justin {\n  display: flex;\n}\n.tc-justin__title { margin: 0; }\n"
+            .to_string()
+            + STYLE_NEIGHBOUR;
+        std::fs::write(Path::new(&path).join(STYLE_PATH), &shrunk).unwrap();
+
+        wake_recovered_worker(&db, &exec_id).await.unwrap();
+        assert_eq!(
+            exec_of(&db, &exec_id).await.worker_scope,
+            Some(style_scope(4, 4))
+        );
+        let message_id = format!("orch-resume-worker:{exec_id}:0");
+        let notice: String = db
+            .with_conn(move |conn| {
+                Ok(conn.query_row(
+                    "SELECT content FROM messages WHERE id = ?1 AND discussion_id = ?2",
+                    rusqlite::params![message_id, child],
+                    |row| row.get(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert!(notice.contains("`4..=4`"), "{notice}");
+
+        // An idempotent launch replay still compares with the launch scope.
+        let replay = |scope: TaskWorkerScope| {
+            let input = ProvisionInput {
+                task_reference: task_ref.clone(),
+                parent_discussion_id: parent_id.clone(),
+                worker: MessageTarget::discussion_agent(AgentType::Ollama),
+                base_rev: Some("main".into()),
+                idempotency_key: Some("prelocalized-resume".into()),
+            };
+            provision_single_task_execution_with_scope_and_validations(
+                &db,
+                input,
+                Some(scope),
+                Vec::new(),
+            )
+        };
+        assert_eq!(replay(style_scope(4, 6)).await.unwrap().id, exec_id);
+        let changed = replay(style_scope(4, 5)).await.unwrap_err();
+        assert!(
+            provision_error_parts(&changed)
+                .1
+                .contains("cannot change the persisted worker_scope"),
+            "{changed:?}"
+        );
+
+        // A change above the range leaves nothing safe to replay.
+        std::fs::write(
+            Path::new(&path).join(STYLE_PATH),
+            shrunk.replace("display: flex", "display: grid"),
+        )
+        .unwrap();
+        let error = wake_recovered_worker(&db, &exec_id).await.unwrap_err();
+        let stale = error
+            .downcast_ref::<StaleWorkerScope>()
+            .unwrap_or_else(|| panic!("expected a stale-range refusal, got {error:#}"));
+        assert!(
+            stale.0.contains("lines 4-6") && stale.0.contains("observed change: lines 2"),
+            "{stale}"
+        );
+    }
+
+    #[test]
+    fn prelocalized_range_follows_only_changes_confined_to_it() {
+        let scope = style_scope(4, 6);
+        let base = STYLE_BASE.as_bytes();
+        assert_eq!(
+            reanchor_worker_scope(&scope, base, Some(base)).unwrap(),
+            scope
+        );
+        let grown = STYLE_BASE.replace("margin: 0;\n", "margin: 0;\n  padding: 0;\n  gap: 0;\n");
+        assert_eq!(
+            reanchor_worker_scope(&scope, base, Some(grown.as_bytes())).unwrap(),
+            style_scope(4, 8)
+        );
+
+        let refusal = |current: Option<&str>| {
+            reanchor_worker_scope(&scope, base, current.map(str::as_bytes))
+                .unwrap_err()
+                .0
+        };
+        let emptied = STYLE_BASE.replace(".tc-justin__title {\n  margin: 0;\n}\n", "");
+        let detail = refusal(Some(&emptied));
+        assert!(
+            detail.contains("removed every line") && detail.contains("lines 4-6"),
+            "{detail}"
+        );
+        let appended = STYLE_BASE.to_string() + ".extra {}\n";
+        assert!(
+            refusal(Some(&appended)).contains("observed change: lines 10"),
+            "a change after the range is outside it too"
+        );
+        assert!(refusal(None).contains("no longer exists"));
+        let huge = STYLE_BASE.replace("margin: 0;\n", &"  margin: 0;\n".repeat(250));
+        assert!(refusal(Some(&huge)).contains("now spans lines 4-255"));
+
+        let anchor = TaskWorkerScope::PrelocalizedInsertAfter {
+            path: STYLE_PATH.into(),
+            anchor_line: 4,
+        };
+        let inserted =
+            STYLE_BASE.replace(".tc-justin__title {\n", ".tc-justin__title {\n  gap: 0;\n");
+        assert_eq!(
+            reanchor_worker_scope(&anchor, base, Some(inserted.as_bytes())).unwrap(),
+            anchor
+        );
+        let above = STYLE_BASE.replace("display: flex", "display: grid");
+        let detail = reanchor_worker_scope(&anchor, base, Some(above.as_bytes()))
+            .unwrap_err()
+            .0;
+        assert!(
+            detail.contains("anchor line 4") && detail.contains("observed change: lines 2"),
+            "{detail}"
+        );
     }
 
     /// Both handoffs — the wake and the reassignment — must match what the

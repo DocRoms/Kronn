@@ -2338,6 +2338,23 @@ pub fn commit_messages(
         .collect())
 }
 
+/// Raw bytes of `path` as committed at `rev`.
+pub fn file_at_revision(worktree_path: &Path, rev: &str, path: &str) -> Result<Vec<u8>, String> {
+    reject_option_like_rev(rev)?;
+    let output = sync_cmd("git")
+        .args(["cat-file", "blob", &format!("{rev}:{path}")])
+        .current_dir(worktree_path)
+        .output()
+        .map_err(|e| format!("git cat-file failed in worktree: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "cannot read `{path}` at {rev}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(output.stdout)
+}
+
 /// The `Name <email>` that `git commit -s` signs with in this worktree.
 pub fn committer_identity(worktree_path: &Path) -> Result<String, String> {
     let output = sync_cmd("git")

@@ -4234,6 +4234,63 @@ pub fn list_execution_events(conn: &Connection, exec_id: &str) -> Result<Vec<Tas
     Ok(events)
 }
 
+const WORKER_SCOPE_REANCHORED: &str = "worker_scope_reanchored";
+
+/// The prelocalized scope the execution was launched with. Re-anchoring
+/// rewrites `worker_scope_json`, so its first journal entry keeps the original.
+pub fn launch_worker_scope(
+    conn: &Connection,
+    exec_id: &str,
+) -> Result<Option<crate::models::TaskWorkerScope>> {
+    let first: Option<String> = conn
+        .query_row(
+            "SELECT changes_json FROM task_execution_events \
+             WHERE task_execution_id = ?1 AND action = ?2 \
+             ORDER BY created_at ASC, rowid ASC LIMIT 1",
+            params![exec_id, WORKER_SCOPE_REANCHORED],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if let Some(changes) = first {
+        let changes: serde_json::Value = serde_json::from_str(&changes)?;
+        return Ok(Some(serde_json::from_value(changes["original"].clone())?));
+    }
+    Ok(get_task_execution(conn, exec_id)?.and_then(|execution| execution.worker_scope))
+}
+
+/// Persist a re-anchored prelocalized scope and journal it atomically.
+pub fn reanchor_execution_worker_scope(
+    conn: &Connection,
+    exec_id: &str,
+    scope: &crate::models::TaskWorkerScope,
+    actor: &OrchestrationActor,
+    changes: serde_json::Value,
+) -> Result<()> {
+    in_savepoint(conn, |conn| {
+        let updated = conn.execute(
+            "UPDATE task_executions SET worker_scope_json = ?2, updated_at = ?3 WHERE id = ?1",
+            params![
+                exec_id,
+                serde_json::to_string(scope)?,
+                Utc::now().to_rfc3339()
+            ],
+        )?;
+        anyhow::ensure!(
+            updated == 1,
+            "execution vanished before its scope was re-anchored"
+        );
+        record_execution_event(
+            conn,
+            exec_id,
+            WORKER_SCOPE_REANCHORED,
+            None,
+            None,
+            actor,
+            changes,
+        )
+    })
+}
+
 // ─── Validation runs ─────────────────────────────────────────────────────────
 
 /// Record a validation run against the exact candidate commit (ADR §6). The
