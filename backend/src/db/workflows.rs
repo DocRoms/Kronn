@@ -120,6 +120,12 @@ pub fn reconcile_stale_runs(
              WHERE status IN ('Running', 'Pending') AND started_at < ?1",
             params![cutoff, now_rfc],
         )?;
+        // Live Page launches read the shared-run projection, not this table.
+        for reconciled in &flipped {
+            if let Some(run) = get_run(conn, &reconciled.run_id)? {
+                crate::db::shared_runs::sync_workflow(conn, &run)?;
+            }
+        }
     }
     Ok(flipped)
 }

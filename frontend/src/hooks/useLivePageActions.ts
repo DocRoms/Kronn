@@ -20,6 +20,8 @@ export interface LivePageActiveActionState {
   /** What this click turned into once launched or declined — its own launch,
    * never written back over the offer the other buttons still draw from. */
   card?: LivePageAction;
+  /** The row's finished launch, reachable from a fresh offer. */
+  previous?: LivePageAction;
 }
 
 export interface UseLivePageActionsResult {
@@ -129,13 +131,18 @@ export function useLivePageActions(onUnavailable: () => void): UseLivePageAction
       setActiveAction(null);
       return;
     }
-    // A row that has run reopens on its latest run — what happened, or where
-    // it stands — rather than on a blank offer; the card offers to launch it
-    // again from there.
+    // A row still running reopens on that run. A finished one opens a fresh
+    // offer, with its last run one click away: relaunching is the usual intent.
     const latest = launchesRef.current.find(launch =>
       launch.action_ref === intent.actionRef && launch.binding_key === bindingKey);
+    const running = latest && IN_FLIGHT.has(latest.state) ? latest : undefined;
     activationRef.current += 1;
-    setActiveAction({ ...intent, activation: activationRef.current, card: latest });
+    setActiveAction({
+      ...intent,
+      activation: activationRef.current,
+      card: running,
+      previous: running ? undefined : latest,
+    });
   }, [setActiveAction]);
 
   // Keyed on the activation, not the block: a launch that answers after the

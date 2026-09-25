@@ -70,6 +70,11 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- A Live Page action whose workflow run was interrupted by a restart no longer
+  stays "running" forever and blocks its row. The interruption now reaches
+  the run's shared status, runs left in that state by earlier versions are
+  repaired at startup, and a row whose last launch finished opens on a fresh
+  launch, with the last result one click away.
 - A Page opened in its own tab now keeps up with new data. It is read again
   every 30 s and when the tab comes back into view, and the new data is sent
   to the open page without reloading it, so scroll and open rows are kept.

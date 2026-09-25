@@ -1844,7 +1844,7 @@ fn mcp_config_hash_changes_on_args_override() {
 // Workflows CRUD
 // ═══════════════════════════════════════════════════════════════════════════
 
-fn sample_workflow(id: &str) -> Workflow {
+pub(crate) fn sample_workflow(id: &str) -> Workflow {
     let now = Utc::now();
     Workflow {
         pinned: false,
@@ -2010,7 +2010,7 @@ fn workflows_pinned_roundtrip() {
 
 // ─── Workflow Runs ───────────────────────────────────────────────────────
 
-fn sample_run(id: &str, workflow_id: &str) -> WorkflowRun {
+pub(crate) fn sample_run(id: &str, workflow_id: &str) -> WorkflowRun {
     let now = Utc::now();
     WorkflowRun {
         id: id.into(),
@@ -2208,6 +2208,82 @@ fn reconcile_stale_runs_flips_only_old_running_pending_to_interrupted() {
         "the fresh zombie is reconciled at cutoff 0"
     );
     assert_eq!(by_id("fresh").status, RunStatus::Interrupted);
+}
+
+#[test]
+fn boot_reconcile_settles_the_shared_run_of_an_interrupted_workflow() {
+    let conn = test_db();
+    crate::db::workflows::insert_workflow(&conn, &sample_workflow("w1")).unwrap();
+    let mut zombie = sample_run("zombie", "w1");
+    zombie.status = RunStatus::Running;
+    crate::db::workflows::insert_run(&conn, &zombie).unwrap();
+    let shared = |id: &str| {
+        crate::db::shared_runs::lifecycle(&conn, id)
+            .unwrap()
+            .unwrap()
+    };
+    assert!(matches!(
+        shared("zombie").status,
+        crate::models::SharedRunStatus::Running
+    ));
+
+    crate::db::workflows::reconcile_stale_runs(&conn, 0).unwrap();
+
+    assert!(
+        matches!(
+            shared("zombie").status,
+            crate::models::SharedRunStatus::Failed
+        ),
+        "a Live Page launch reading this run must see it end"
+    );
+}
+
+#[test]
+fn boot_repair_resyncs_shared_runs_left_live_for_finished_runs() {
+    let conn = test_db();
+    crate::db::workflows::insert_workflow(&conn, &sample_workflow("w1")).unwrap();
+    let mut left_live = sample_run("left-live", "w1");
+    left_live.status = RunStatus::Running;
+    crate::db::workflows::insert_run(&conn, &left_live).unwrap();
+    let mut still_running = sample_run("still-running", "w1");
+    still_running.status = RunStatus::Running;
+    crate::db::workflows::insert_run(&conn, &still_running).unwrap();
+    // The state older builds left behind: the run was interrupted without
+    // re-projecting its shared row.
+    conn.execute(
+        "UPDATE workflow_runs SET status = 'Interrupted' WHERE id = 'left-live'",
+        [],
+    )
+    .unwrap();
+    let shared = |id: &str| {
+        crate::db::shared_runs::lifecycle(&conn, id)
+            .unwrap()
+            .unwrap()
+    };
+    assert!(matches!(
+        shared("left-live").status,
+        crate::models::SharedRunStatus::Running
+    ));
+
+    assert_eq!(
+        crate::db::shared_runs::repair_stale_workflow_projections(&conn).unwrap(),
+        1
+    );
+    assert!(matches!(
+        shared("left-live").status,
+        crate::models::SharedRunStatus::Failed
+    ));
+    assert!(
+        matches!(
+            shared("still-running").status,
+            crate::models::SharedRunStatus::Running
+        ),
+        "a run still in flight keeps its live projection"
+    );
+    assert_eq!(
+        crate::db::shared_runs::repair_stale_workflow_projections(&conn).unwrap(),
+        0
+    );
 }
 
 #[test]

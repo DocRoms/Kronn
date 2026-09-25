@@ -228,6 +228,14 @@ impl Database {
                 Vec::new()
             }
         };
+        match shared_runs::repair_stale_workflow_projections(&conn) {
+            Ok(0) => {}
+            Ok(n) => tracing::info!(
+                "Re-synced {} shared runs still marked live for finished workflow runs",
+                n
+            ),
+            Err(e) => tracing::warn!("Failed to repair stale shared-run projections: {}", e),
+        }
 
         // 0.8.6 — auto-purge api_call_logs older than 90 days at boot.
         // Generous default : keeps a quarter of audit trail for debug

@@ -23,7 +23,7 @@ vi.mock('../LivePageActionCard', () => ({
   LivePageActionCard: () => <div data-testid="card" />,
 }));
 import { readFileSync } from 'node:fs';
-import { render } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import { LivePageActionOverlay } from '../LivePageActionOverlay';
 import type { LivePageAction } from '../../types/generated';
 import type { LivePageActiveActionState } from '../../hooks/useLivePageActions';
@@ -123,5 +123,35 @@ describe('LivePageActionOverlay', () => {
       onClose={() => {}} onOpenDiscussion={() => {}} />,
     );
     expect(container.querySelector('.live-page-action-overlay')).toBeNull();
+  });
+
+  it('keeps a finished launch one click away from the fresh offer', () => {
+    const previous = { id: 'launch-1', state: 'succeeded' } as unknown as LivePageAction;
+    const onChanged = vi.fn();
+    render(
+      <LivePageActionOverlay
+        active={{ ...activeAt(8), previous }}
+        action={action}
+        onChanged={onChanged}
+        onClose={() => {}}
+        onOpenDiscussion={() => {}}
+      />,
+    );
+    fireEvent.click(screen.getByTestId('page-action-overlay-previous'));
+    expect(onChanged).toHaveBeenCalledWith(previous, 1);
+  });
+
+  it('shows no previous-launch link on a running card', () => {
+    const previous = { id: 'launch-1', state: 'succeeded' } as unknown as LivePageAction;
+    render(
+      <LivePageActionOverlay
+        active={{ ...activeAt(8), card: previous, previous: undefined }}
+        action={action}
+        onChanged={() => {}}
+        onClose={() => {}}
+        onOpenDiscussion={() => {}}
+      />,
+    );
+    expect(screen.queryByTestId('page-action-overlay-previous')).toBeNull();
   });
 });

@@ -2024,6 +2024,7 @@ const es: TranslationDict = {
   'disc.action.state.failed': 'Fallida',
   'disc.action.state.cancelled': 'Cancelada',
   'disc.action.state.preflight_failed': 'Preparación fallida',
+  'pages.action.previousLaunch': 'Último lanzamiento: {0} — ver',
   'disc.action.launch': 'Iniciar',
   'disc.action.openDiscussion': 'Abrir discusión',
   'disc.action.relaunch': 'Volver a iniciar',
