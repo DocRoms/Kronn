@@ -1663,16 +1663,19 @@ pub enum IntegrationOutcome {
     /// The candidate could not be built or did not validate. Branch, worktree and
     /// sub-discussion are untouched and the worker is back in the loop.
     SentBack { reason: String },
-    /// A precondition was not met, so nothing was attempted at all.
+    /// A precondition was not met and the target is untouched. A live execution
+    /// is parked with the reason (approval hold, `Blocked` or `Interrupted`).
     Refused { reason: String },
     /// The execution is not `Approved` — a replay of an integration already run
     /// lands here rather than doing it twice.
     NotIntegrable { status: TaskExecutionStatus },
 }
 
-/// Refuse an integration that never started, leaving the reason on the approved
-/// row and a notice in the principal room so the approval is not silently parked.
-async fn hold_approved_integration(
+/// Park a refused integration with its reason and fix, and tell the principal
+/// room, so neither an approval nor a validated candidate is silently stranded.
+/// A row parked `Interrupted` gets its recovery decision from the real Git state;
+/// a row in no parkable state reports the refusal as an error.
+async fn hold_integration(
     db: &Database,
     exec_id: &str,
     code: BlockedReasonCode,
@@ -1682,19 +1685,29 @@ async fn hold_approved_integration(
     let id = exec_id.to_string();
     let durable_reason = reason.clone();
     let fix = fix.to_string();
-    db.with_conn(move |conn| {
-        crate::db::orchestration::hold_approved_integration(
-            conn,
-            &id,
-            code,
-            &durable_reason,
-            &fix,
-            &backend_actor(),
-        )
-    })
-    .await
-    .map_err(|error| ProvisionError::Internal(error.to_string()))?;
-    Ok(IntegrationOutcome::Refused { reason })
+    let parked = db
+        .with_conn(move |conn| {
+            crate::db::orchestration::hold_refused_integration(
+                conn,
+                &id,
+                code,
+                &durable_reason,
+                &fix,
+                &backend_actor(),
+            )
+        })
+        .await
+        .map_err(|error| ProvisionError::Internal(error.to_string()))?;
+    match parked {
+        None => Err(ProvisionError::CheckpointRefused(reason)),
+        Some(TaskExecutionStatus::Interrupted) => {
+            if let Err(error) = refresh_integration_recovery(db, exec_id).await {
+                tracing::warn!(execution_id = %exec_id, %error, "refused integration has no recovery decision");
+            }
+            Ok(IntegrationOutcome::Refused { reason })
+        }
+        Some(_) => Ok(IntegrationOutcome::Refused { reason }),
+    }
 }
 
 /// Name the fix for a target branch that is not checked out in exactly one worktree.
@@ -1716,6 +1729,45 @@ fn target_checkout_fix(repo_path: &std::path::Path, target: &str) -> (BlockedRea
             format!("Fais de `{target}` une branche locale extraite dans un worktree propre."),
         ),
     }
+}
+
+/// Name the fix for a fast-forward the target checkout refused.
+fn apply_refusal_fix(repo_path: &std::path::Path, target: &str) -> (BlockedReasonCode, String) {
+    match worktree::integration_target_worktree(repo_path, target) {
+        Err(_) => target_checkout_fix(repo_path, target),
+        Ok(checkout) => match worktree::worktree_dirty_files(&checkout) {
+            Ok(dirty) if !dirty.is_empty() => (
+                BlockedReasonCode::IntegrationRefused,
+                format!(
+                    "Committe ou retire les fichiers non commités de `{}`.",
+                    checkout.display()
+                ),
+            ),
+            _ => (
+                BlockedReasonCode::IntegrationRefused,
+                format!("Vérifie l'état Git de `{}`.", checkout.display()),
+            ),
+        },
+    }
+}
+
+/// How many times one integration attempt re-anchors on a target that advanced
+/// during its validations before it parks for a human.
+const MAX_INTEGRATION_REBUILDS: u32 = 3;
+
+const CHILD_WORKTREE_FIX: &str = "Restaure le worktree de la tâche ou réaffecte l'exécution.";
+const BACKUP_REF_FIX: &str = "Vérifie que le dépôt accepte l'écriture de `refs/kronn-backup/` \
+     (verrou `.lock` résiduel, disque plein).";
+
+fn backup_slug(execution: &TaskExecution) -> String {
+    format!("{}-{}", execution.task_id, exec_short(&execution.id))
+}
+
+/// A built candidate, the tip it was built on and the verified ref back to it.
+struct AnchoredCandidate {
+    target_sha: String,
+    merge_sha: String,
+    backup_ref: String,
 }
 
 /// Run the `TwoPhaseFfOnly` integration for an approved execution.
@@ -1793,7 +1845,7 @@ pub async fn run_integration(
     // engine would guess which history to advance.
     let generic = BlockedReasonCode::IntegrationRefused;
     let Some(target_branch) = run.target_branch.clone() else {
-        return hold_approved_integration(
+        return hold_integration(
             db,
             exec_id,
             generic,
@@ -1803,7 +1855,7 @@ pub async fn run_integration(
         .await;
     };
     let Some(project_id) = run.project_id.clone() else {
-        return hold_approved_integration(
+        return hold_integration(
             db,
             exec_id,
             generic,
@@ -1813,12 +1865,12 @@ pub async fn run_integration(
         .await;
     };
     let Some(child_path) = workspace.and_then(|w| w.canonical_path) else {
-        return hold_approved_integration(
+        return hold_integration(
             db,
             exec_id,
             generic,
             "no managed worktree".into(),
-            "Restaure le worktree de la tâche ou réaffecte l'exécution.",
+            CHILD_WORKTREE_FIX,
         )
         .await;
     };
@@ -1830,7 +1882,7 @@ pub async fn run_integration(
             .map_err(|e| internal(e.to_string()))?
     };
     let Some(project_path) = project_path else {
-        return hold_approved_integration(
+        return hold_integration(
             db,
             exec_id,
             generic,
@@ -1845,14 +1897,14 @@ pub async fn run_integration(
         Ok(path) => path,
         Err(reason) => {
             let (code, fix) = target_checkout_fix(&repo_path, &target_branch);
-            return hold_approved_integration(db, exec_id, code, reason, &fix).await;
+            return hold_integration(db, exec_id, code, reason, &fix).await;
         }
     };
 
     // ── Preflight: never apply over uncommitted work ──
     match worktree::worktree_dirty_files(&target_checkout) {
         Ok(dirty) if !dirty.is_empty() => {
-            return hold_approved_integration(
+            return hold_integration(
                 db,
                 exec_id,
                 generic,
@@ -1865,7 +1917,7 @@ pub async fn run_integration(
             .await;
         }
         Err(e) => {
-            return hold_approved_integration(
+            return hold_integration(
                 db,
                 exec_id,
                 generic,
@@ -1876,12 +1928,22 @@ pub async fn run_integration(
         }
         Ok(_) => {}
     }
+    if let Err(error) = worktree::resolve_commit(child, "HEAD") {
+        return hold_integration(
+            db,
+            exec_id,
+            generic,
+            format!("managed worktree is unusable: {error}"),
+            CHILD_WORKTREE_FIX,
+        )
+        .await;
+    }
 
     // ── Anchor: pin the tip the candidate is built on ──
     let target_sha = match worktree::resolve_commit(&repo_path, &target_branch) {
         Ok(sha) => sha,
         Err(e) => {
-            return hold_approved_integration(
+            return hold_integration(
                 db,
                 exec_id,
                 generic,
@@ -1891,6 +1953,15 @@ pub async fn run_integration(
             .await;
         }
     };
+    // The way back is written before the anchor, where a refusal can still hold
+    // the approval; the Armed checkpoint records it later.
+    let backup_ref =
+        match worktree::write_backup_ref(&repo_path, &backup_slug(&execution), &target_sha) {
+            Ok(backup) => backup,
+            Err(error) => {
+                return hold_integration(db, exec_id, generic, error, BACKUP_REF_FIX).await
+            }
+        };
     checkpoint(db, exec_id, CheckpointStep::Anchored(target_sha.clone())).await?;
 
     // ── Phase 1: build the candidate in the CHILD worktree ──
@@ -1907,40 +1978,216 @@ pub async fn run_integration(
                 reason: format!("conflict in {}", files.join(", ")),
             });
         }
-        Err(e) => return Ok(IntegrationOutcome::Refused { reason: e }),
+        Err(error) => {
+            return hold_integration(db, exec_id, generic, error, CHILD_WORKTREE_FIX).await
+        }
     };
     checkpoint(db, exec_id, CheckpointStep::Built(merge_sha.clone())).await?;
 
     // ── Validations: a failure sends the work back, it never blocks the parent ──
     checkpoint(db, exec_id, CheckpointStep::Validating).await?;
-    if let Some(reason) =
-        run_pending_validations(db, exec_id, &run.validations, child, &merge_sha).await?
-    {
-        send_back(db, exec_id, reason.clone()).await?;
-        return Ok(IntegrationOutcome::SentBack { reason });
-    }
+    validate_and_apply(
+        db,
+        &execution,
+        &run,
+        &repo_path,
+        &child_path,
+        AnchoredCandidate {
+            target_sha,
+            merge_sha,
+            backup_ref,
+        },
+    )
+    .await
+}
 
-    // ── Arm: the backup ref must exist and read back before the parent may move ──
-    let slug = format!("{}-{}", execution.task_id, exec_short(&execution.id));
-    let backup = match worktree::write_backup_ref(&repo_path, &slug, &target_sha) {
-        Ok(r) => r,
-        Err(e) => return Ok(IntegrationOutcome::Refused { reason: e }),
-    };
-    checkpoint(db, exec_id, CheckpointStep::Armed(backup)).await?;
-
-    // ── Phase 2: advance the parent, fast-forward only ──
-    let integrated =
-        match worktree::fast_forward_target_to(&repo_path, &target_branch, &target_sha, &merge_sha)
+/// Validate, arm and fast-forward a built candidate; the row is `Validating` on
+/// entry. A target that advanced meanwhile is re-anchored and rebuilt, at most
+/// `MAX_INTEGRATION_REBUILDS` times, and every other refusal parks the row
+/// instead of leaving it `Applying`.
+async fn validate_and_apply(
+    db: &Database,
+    execution: &TaskExecution,
+    run: &crate::models::OrchestrationRun,
+    repo: &std::path::Path,
+    child_path: &str,
+    mut candidate: AnchoredCandidate,
+) -> Result<IntegrationOutcome, ProvisionError> {
+    let exec_id = execution.id.as_str();
+    let child = std::path::Path::new(child_path);
+    let target_branch = run
+        .target_branch
+        .as_deref()
+        .ok_or_else(|| ProvisionError::Internal("run has no pinned target branch".into()))?;
+    let generic = BlockedReasonCode::IntegrationRefused;
+    let mut rebuilds = 0;
+    loop {
+        if let Some(reason) =
+            run_pending_validations(db, exec_id, &run.validations, child, &candidate.merge_sha)
+                .await?
         {
-            Ok(sha) => sha,
-            Err(e) => return Ok(IntegrationOutcome::Refused { reason: e }),
+            send_back(db, exec_id, reason.clone()).await?;
+            return Ok(IntegrationOutcome::SentBack { reason });
+        }
+        checkpoint(
+            db,
+            exec_id,
+            CheckpointStep::Armed(candidate.backup_ref.clone()),
+        )
+        .await?;
+
+        // ── Phase 2: advance the parent, fast-forward only ──
+        let tip = match worktree::resolve_commit(repo, target_branch) {
+            Ok(tip) => tip,
+            Err(error) => {
+                let fix = format!("Vérifie que la branche `{target_branch}` pointe sur un commit.");
+                return hold_integration(db, exec_id, generic, error, &fix).await;
+            }
         };
-    checkpoint(db, exec_id, CheckpointStep::Integrated(integrated.clone())).await?;
+        let tip = if tip != candidate.target_sha {
+            tip
+        } else {
+            match worktree::fast_forward_target_to(
+                repo,
+                target_branch,
+                &candidate.target_sha,
+                &candidate.merge_sha,
+            ) {
+                Ok(integrated) => {
+                    return land_integration(db, execution, run, repo, child_path, integrated).await
+                }
+                // A concurrent integration can still land between the check and the merge.
+                Err(error) => match worktree::resolve_commit(repo, target_branch) {
+                    Ok(moved) if moved != candidate.target_sha => moved,
+                    _ => {
+                        let (code, fix) = apply_refusal_fix(repo, target_branch);
+                        return hold_integration(db, exec_id, code, error, &fix).await;
+                    }
+                },
+            }
+        };
 
-    cleanup_integrated_execution(db, &execution, &repo_path, &child_path, &integrated).await?;
+        // The target advanced under the candidate: rebuild on the tip it now has.
+        if rebuilds == MAX_INTEGRATION_REBUILDS {
+            let reason = format!(
+                "target `{target_branch}` advanced during validation {} times in a row (now at {tip})",
+                rebuilds + 1
+            );
+            let fix = format!(
+                "Attends que les intégrations concurrentes vers `{target_branch}` se terminent."
+            );
+            return hold_integration(
+                db,
+                exec_id,
+                BlockedReasonCode::IntegrationTargetDrifted,
+                reason,
+                &fix,
+            )
+            .await;
+        }
+        rebuilds += 1;
+        // Checked while still Applying, where a refusal parks in Blocked.
+        if let Err(error) = worktree::resolve_commit(child, "HEAD") {
+            return hold_integration(
+                db,
+                exec_id,
+                generic,
+                format!("managed worktree is unusable: {error}"),
+                CHILD_WORKTREE_FIX,
+            )
+            .await;
+        }
+        let backup_ref = match worktree::write_backup_ref(repo, &backup_slug(execution), &tip) {
+            Ok(backup) => backup,
+            Err(error) => {
+                return hold_integration(db, exec_id, generic, error, BACKUP_REF_FIX).await
+            }
+        };
+        reanchor_candidate(db, exec_id, &tip, "target_advanced").await?;
+        let merge_sha = match worktree::build_candidate(child, &tip) {
+            Ok(worktree::CandidateOutcome::Built { sha }) => sha,
+            Ok(worktree::CandidateOutcome::Conflict { files }) => {
+                let reason = format!(
+                    "merge conflict after the target advanced in {}",
+                    files.join(", ")
+                );
+                send_back(db, exec_id, reason.clone()).await?;
+                return Ok(IntegrationOutcome::SentBack { reason });
+            }
+            Err(error) => {
+                return hold_integration(db, exec_id, generic, error, CHILD_WORKTREE_FIX).await
+            }
+        };
+        checkpoint(db, exec_id, CheckpointStep::Built(merge_sha.clone())).await?;
+        checkpoint(db, exec_id, CheckpointStep::Validating).await?;
+        candidate = AnchoredCandidate {
+            target_sha: tip,
+            merge_sha,
+            backup_ref,
+        };
+    }
+}
 
-    advance_campaign_after_integration(db, &run).await;
+/// Drop a stale candidate and pin the integration on `target_sha` (→ `Integrating`).
+async fn reanchor_candidate(
+    db: &Database,
+    exec_id: &str,
+    target_sha: &str,
+    cause: &'static str,
+) -> Result<(), ProvisionError> {
+    let id = exec_id.to_string();
+    let anchor = target_sha.to_string();
+    let moved = db
+        .with_conn(move |conn| {
+            crate::db::orchestration::resume_rebuild_candidate(
+                conn,
+                &id,
+                &anchor,
+                cause,
+                &backend_actor(),
+            )
+        })
+        .await
+        .map_err(|error| ProvisionError::Internal(error.to_string()))?;
+    if moved {
+        Ok(())
+    } else {
+        Err(ProvisionError::CheckpointRefused(
+            "the integration was re-anchored by another caller".into(),
+        ))
+    }
+}
 
+/// Record the landed integration, then clean up and let the campaign continue.
+/// Git has already moved, so a failed checkpoint parks the row for the
+/// idempotent close instead of leaving it `Applying`.
+async fn land_integration(
+    db: &Database,
+    execution: &TaskExecution,
+    run: &crate::models::OrchestrationRun,
+    repo: &std::path::Path,
+    child_path: &str,
+    integrated: String,
+) -> Result<IntegrationOutcome, ProvisionError> {
+    if let Err(error) = checkpoint(
+        db,
+        &execution.id,
+        CheckpointStep::Integrated(integrated.clone()),
+    )
+    .await
+    {
+        let reason = format!("integrated Git state could not be checkpointed: {error:?}");
+        if let Err(interrupt_error) = interrupt_recovered_apply(db, &execution.id, &reason).await {
+            tracing::warn!(
+                execution_id = %execution.id,
+                error = ?interrupt_error,
+                "could not park an apply after its integration checkpoint failed"
+            );
+        }
+        return Err(error);
+    }
+    cleanup_integrated_execution(db, execution, repo, child_path, &integrated).await?;
+    advance_campaign_after_integration(db, run).await;
     Ok(IntegrationOutcome::Integrated { sha: integrated })
 }
 
@@ -1984,23 +2231,32 @@ async fn resume_recovered_integration(
         .target_branch
         .as_deref()
         .ok_or_else(|| internal("run has no pinned target branch".into()))?;
+    let generic = BlockedReasonCode::IntegrationRefused;
 
-    match action {
+    // Refusals are checked before the row leaves its hold: an interrupted row
+    // keeps its pending decision, a claimed Applying one parks in Blocked.
+    let backup_ref = match action {
         ExecutionRecoveryAction::RebuildCandidate => {
             let target_sha = worktree::resolve_commit(&repo, target_branch)
                 .map_err(|error| internal(format!("cannot resolve recovery target: {error}")))?;
-            let id = exec_id.to_string();
-            let anchor = target_sha.clone();
-            db.with_conn(move |conn| {
-                crate::db::orchestration::resume_rebuild_candidate(
-                    conn,
-                    &id,
-                    &anchor,
-                    &backend_actor(),
+            if let Err(error) = worktree::resolve_commit(child, "HEAD") {
+                return hold_integration(
+                    db,
+                    exec_id,
+                    generic,
+                    format!("managed worktree is unusable: {error}"),
+                    CHILD_WORKTREE_FIX,
                 )
-            })
-            .await
-            .map_err(|error| internal(error.to_string()))?;
+                .await;
+            }
+            let backup_ref =
+                match worktree::write_backup_ref(&repo, &backup_slug(&execution), &target_sha) {
+                    Ok(backup) => backup,
+                    Err(error) => {
+                        return hold_integration(db, exec_id, generic, error, BACKUP_REF_FIX).await
+                    }
+                };
+            reanchor_candidate(db, exec_id, &target_sha, "rebuild_candidate").await?;
             let merge_sha = match worktree::build_candidate(child, &target_sha) {
                 Ok(worktree::CandidateOutcome::Built { sha }) => sha,
                 Ok(worktree::CandidateOutcome::Conflict { files }) => {
@@ -2008,31 +2264,44 @@ async fn resume_recovered_integration(
                     send_back(db, exec_id, reason.clone()).await?;
                     return Ok(IntegrationOutcome::SentBack { reason });
                 }
-                Err(error) => return Ok(IntegrationOutcome::Refused { reason: error }),
+                Err(error) => {
+                    return hold_integration(db, exec_id, generic, error, CHILD_WORKTREE_FIX).await
+                }
             };
             checkpoint(db, exec_id, CheckpointStep::Built(merge_sha)).await?;
             checkpoint(db, exec_id, CheckpointStep::Validating).await?;
+            backup_ref
         }
         ExecutionRecoveryAction::RunValidations => {
+            let target_sha = execution
+                .candidate_target_sha
+                .as_deref()
+                .ok_or_else(|| internal("candidate target SHA is missing".into()))?;
+            let backup_ref =
+                match worktree::write_backup_ref(&repo, &backup_slug(&execution), target_sha) {
+                    Ok(backup) => backup,
+                    Err(error) => {
+                        return hold_integration(db, exec_id, generic, error, BACKUP_REF_FIX).await
+                    }
+                };
             let id = exec_id.to_string();
-            db.with_conn(move |conn| {
-                crate::db::orchestration::transition_execution(
-                    conn,
-                    &id,
-                    TaskExecutionStatus::Validating,
-                    &backend_actor(),
-                    serde_json::json!({ "recovery": "run_validations" }),
-                )?;
-                Ok(())
-            })
-            .await
-            .map_err(|error| internal(error.to_string()))?;
+            let claimed = db
+                .with_conn(move |conn| {
+                    crate::db::orchestration::transition_execution(
+                        conn,
+                        &id,
+                        TaskExecutionStatus::Validating,
+                        &backend_actor(),
+                        serde_json::json!({ "recovery": "run_validations" }),
+                    )
+                })
+                .await
+                .map_err(|error| internal(error.to_string()))?;
+            require_recovered_apply_claim(claimed)?;
+            backup_ref
         }
-        ExecutionRecoveryAction::ApplyFastForward => {
-            return finish_recovered_apply(db, &execution, &run, &repo, child_path, true).await;
-        }
-        ExecutionRecoveryAction::IdempotentClose => {
-            return finish_recovered_apply(db, &execution, &run, &repo, child_path, true).await;
+        ExecutionRecoveryAction::ApplyFastForward | ExecutionRecoveryAction::IdempotentClose => {
+            return finish_recovered_apply(db, &execution, &run, &repo, child_path).await;
         }
         ExecutionRecoveryAction::BlockDirtyTarget => {
             let id = exec_id.to_string();
@@ -2057,7 +2326,7 @@ async fn resume_recovered_integration(
                 reason: format!("{other:?} is not an integration recovery action"),
             })
         }
-    }
+    };
 
     // Re-read after the rebuild checkpoints: the initial snapshot intentionally
     // contained the stale candidate that caused reconciliation.
@@ -2077,33 +2346,34 @@ async fn resume_recovered_integration(
         send_back(db, exec_id, reason.clone()).await?;
         return Ok(IntegrationOutcome::SentBack { reason });
     }
-    if let Some(reason) =
-        run_pending_validations(db, exec_id, &run.validations, child, &merge_sha).await?
-    {
-        send_back(db, exec_id, reason.clone()).await?;
-        return Ok(IntegrationOutcome::SentBack { reason });
-    }
     let target_sha = recovered_execution
         .candidate_target_sha
-        .as_deref()
+        .clone()
         .ok_or_else(|| internal("candidate target SHA is missing".into()))?;
-    let backup = worktree::write_backup_ref(
+    validate_and_apply(
+        db,
+        &recovered_execution,
+        &run,
         &repo,
-        &format!("{}-{}", recovered_execution.task_id, exec_short(exec_id)),
-        target_sha,
+        child_path,
+        AnchoredCandidate {
+            target_sha,
+            merge_sha,
+            backup_ref,
+        },
     )
-    .map_err(|error| internal(format!("cannot arm recovered apply: {error}")))?;
-    checkpoint(db, exec_id, CheckpointStep::Armed(backup)).await?;
-    finish_recovered_apply(db, &recovered_execution, &run, &repo, child_path, false).await
+    .await
 }
 
+/// Replay a validated, armed apply, or close one that already landed. The row
+/// is `Interrupted` or `Blocked` on entry and claims `Applying` only after the
+/// real target was re-checked.
 async fn finish_recovered_apply(
     db: &Database,
     execution: &TaskExecution,
     run: &crate::models::OrchestrationRun,
     repo: &std::path::Path,
     child_path: &str,
-    claim_apply: bool,
 ) -> Result<IntegrationOutcome, ProvisionError> {
     let internal = |error: String| ProvisionError::Internal(error);
     let target_branch = run
@@ -2156,6 +2426,7 @@ async fn finish_recovered_apply(
         || worktree::is_ancestor(&target_checkout, merge_sha, &real_tip)
             .map_err(|error| internal(format!("cannot compare target with candidate: {error}")))?;
     let integrated = if already_applied {
+        claim_recovered_apply(db, &execution.id, "idempotent_close_recheck_complete").await?;
         merge_sha.to_string()
     } else {
         if real_tip != target_sha {
@@ -2205,22 +2476,7 @@ async fn finish_recovered_apply(
                 reason: "target became dirty; execution parked".into(),
             });
         }
-        if claim_apply {
-            let id = execution.id.clone();
-            let claimed = db
-                .with_conn(move |conn| {
-                    crate::db::orchestration::transition_execution(
-                        conn,
-                        &id,
-                        TaskExecutionStatus::Applying,
-                        &backend_actor(),
-                        serde_json::json!({ "recovery": "guarded_apply_recheck_complete" }),
-                    )
-                })
-                .await
-                .map_err(|error| internal(error.to_string()))?;
-            require_recovered_apply_claim(claimed)?;
-        }
+        claim_recovered_apply(db, &execution.id, "guarded_apply_recheck_complete").await?;
         match worktree::fast_forward_target_to(repo, target_branch, target_sha, merge_sha) {
             Ok(sha) => sha,
             Err(error) => {
@@ -2230,42 +2486,29 @@ async fn finish_recovered_apply(
             }
         }
     };
-    if already_applied && claim_apply {
-        let id = execution.id.clone();
-        let claimed = db
-            .with_conn(move |conn| {
-                crate::db::orchestration::transition_execution(
-                    conn,
-                    &id,
-                    TaskExecutionStatus::Applying,
-                    &backend_actor(),
-                    serde_json::json!({ "recovery": "idempotent_close_recheck_complete" }),
-                )
-            })
-            .await
-            .map_err(|error| internal(error.to_string()))?;
-        require_recovered_apply_claim(claimed)?;
-    }
-    if let Err(error) = checkpoint(
-        db,
-        &execution.id,
-        CheckpointStep::Integrated(integrated.clone()),
-    )
-    .await
-    {
-        let reason = format!("integrated Git state could not be checkpointed: {error:?}");
-        if let Err(interrupt_error) = interrupt_recovered_apply(db, &execution.id, &reason).await {
-            tracing::warn!(
-                execution_id = %execution.id,
-                error = ?interrupt_error,
-                "could not park a recovered apply after its integration checkpoint failed"
-            );
-        }
-        return Err(error);
-    }
-    cleanup_integrated_execution(db, execution, repo, child_path, &integrated).await?;
-    advance_campaign_after_integration(db, run).await;
-    Ok(IntegrationOutcome::Integrated { sha: integrated })
+    land_integration(db, execution, run, repo, child_path, integrated).await
+}
+
+/// Win the durable Blocked/Interrupted -> Applying claim of a recovered apply.
+async fn claim_recovered_apply(
+    db: &Database,
+    exec_id: &str,
+    recovery: &'static str,
+) -> Result<(), ProvisionError> {
+    let id = exec_id.to_string();
+    let claimed = db
+        .with_conn(move |conn| {
+            crate::db::orchestration::transition_execution(
+                conn,
+                &id,
+                TaskExecutionStatus::Applying,
+                &backend_actor(),
+                serde_json::json!({ "recovery": recovery }),
+            )
+        })
+        .await
+        .map_err(|error| ProvisionError::Internal(error.to_string()))?;
+    require_recovered_apply_claim(claimed)
 }
 
 /// A recovered apply may touch the shared parent checkout only after winning
@@ -7248,7 +7491,8 @@ pub async fn get_execution_recovery(
     }
 }
 
-/// Retry the backend-owned apply gate after a dirty parent was cleaned.
+/// Retry an Applying-origin hold once its cause (dirty, moved or missing target
+/// checkout) was dealt with.
 ///
 /// This is deliberately narrower than boot recovery: only an Applying-origin
 /// block may enter, the real target branch and cleanliness are re-checked, and
@@ -7339,7 +7583,7 @@ async fn resume_blocked_apply(
                     &id,
                     TaskExecutionStatus::Applying,
                     &backend_actor(),
-                    serde_json::json!({ "recovery": "dirty_target_cleared" }),
+                    serde_json::json!({ "recovery": "apply_hold_cleared" }),
                 )
             })
             .await
@@ -7622,9 +7866,16 @@ pub async fn resume_execution(
         | ExecutionRecoveryAction::ApplyFastForward
         | ExecutionRecoveryAction::IdempotentClose
         | ExecutionRecoveryAction::BlockDirtyTarget => {
-            resume_recovered_integration(&state.db, &exec_id, action)
-                .await
-                .map(|outcome| format!("{outcome:?}"))
+            // Only BlockDirtyTarget parks by design; any other refusal leaves the
+            // decision pending so the next resume can apply it.
+            match resume_recovered_integration(&state.db, &exec_id, action).await {
+                Ok(IntegrationOutcome::Refused { reason })
+                    if action != ExecutionRecoveryAction::BlockDirtyTarget =>
+                {
+                    Err(ProvisionError::CheckpointRefused(reason))
+                }
+                other => other.map(|outcome| format!("{outcome:?}")),
+            }
         }
         ExecutionRecoveryAction::BlockMissingWorkspace
         | ExecutionRecoveryAction::BlockMissingDiscussion
@@ -14766,6 +15017,775 @@ mod tests {
         assert_eq!(done.blocked_reason, None);
     }
 
+    /// A validation run by `python3` from outside the repository. Tests steer it
+    /// through files in `control` to interleave Git work with a running validation.
+    fn scripted_validation(control: &Path, lines: &[&str]) -> ValidationSpec {
+        let script = control.join("validate.py");
+        std::fs::write(&script, lines.join("\n")).unwrap();
+        ValidationSpec {
+            command: format!("python3 {}", script.display()),
+            quick_exec_id: None,
+            timeout_secs: Some(60),
+        }
+    }
+
+    async fn wait_for_file(path: &Path) {
+        for _ in 0..1500 {
+            if path.exists() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("{} never appeared", path.display());
+    }
+
+    async fn refusal_notices(db: &Database, parent: &str) -> Vec<String> {
+        let parent = parent.to_string();
+        db.with_conn(move |conn| {
+            let mut stmt = conn.prepare(
+                "SELECT content FROM messages WHERE discussion_id = ?1 \
+                 AND id LIKE 'orch-integration-refused:%' ORDER BY rowid",
+            )?;
+            let rows = stmt
+                .query_map([parent], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(rows)
+        })
+        .await
+        .unwrap()
+    }
+
+    async fn event_count(db: &Database, exec_id: &str, action: &str) -> i64 {
+        let (id, action) = (exec_id.to_string(), action.to_string());
+        db.with_conn(move |conn| {
+            Ok(conn.query_row(
+                "SELECT COUNT(*) FROM task_execution_events \
+                 WHERE task_execution_id = ?1 AND action = ?2",
+                [id, action],
+                |row| row.get(0),
+            )?)
+        })
+        .await
+        .unwrap()
+    }
+
+    /// A running campaign pinned on `main` whose two tasks are approved in their
+    /// own worktrees, each worker having committed its `(path, content)` files.
+    async fn campaign_with_two_approvals(
+        db: &Database,
+        repo: &Path,
+        validations: Vec<ValidationSpec>,
+        files: [&[(&str, &str)]; 2],
+    ) -> [(TaskExecution, std::path::PathBuf); 2] {
+        let project_id = "proj-1".to_string();
+        let parent_id = "parent-1".to_string();
+        let project = test_project(&project_id, &repo.to_string_lossy());
+        let parent = plain_discussion(&parent_id, &project_id);
+        let (run_id, references) = db
+            .with_conn(move |conn| {
+                crate::db::projects::insert_project(conn, &project)?;
+                crate::db::discussions::insert_discussion(conn, &parent)?;
+                let mut references = Vec::new();
+                for title in ["Première tâche", "Seconde tâche"] {
+                    let task = crate::db::planning::create_task(
+                        conn,
+                        &CreatePlanningTaskRequest {
+                            title: title.into(),
+                            discussion_id: Some(parent_id.clone()),
+                            idempotency_key: None,
+                            description: "Implémenter le module.".into(),
+                            status: PlanningTaskStatus::Todo,
+                            priority: Default::default(),
+                            parent_id: None,
+                            project_ids: vec![project_id.clone()],
+                            tags: vec![],
+                            definition_of_done: vec![CreatePlanningDodItem {
+                                id: None,
+                                sentence: "Le module compile.".into(),
+                                completed: false,
+                            }],
+                            links: vec![],
+                            actor: test_actor(),
+                        },
+                    )?;
+                    references.push(task.summary.reference);
+                }
+                let mut input = crate::models::OrchestrationRunInput::single_task(parent_id);
+                input.kind = crate::models::OrchestrationRunKind::Campaign;
+                input.project_id = Some(project_id);
+                input.target_branch = Some("main".into());
+                input.max_concurrent_executions = 2;
+                input.validations = validations;
+                input.default_worker = Some(crate::models::CampaignWorkerSelection {
+                    target: native_worker(),
+                    model: None,
+                    profile_id: None,
+                });
+                let run = crate::db::orchestration::create_orchestration_run(conn, &input)?;
+                Ok((run.id, references))
+            })
+            .await
+            .unwrap();
+        let mut approved = Vec::new();
+        for (reference, files) in references.into_iter().zip(files) {
+            let (execution, _) = provision_campaign_task_execution(
+                db,
+                CampaignProvisionInput {
+                    orchestration_run_id: run_id.clone(),
+                    task_reference: reference.clone(),
+                    worker_override: None,
+                    idempotency_key: Some(format!("campaign-{reference}")),
+                },
+            )
+            .await
+            .unwrap();
+            let (child, _) =
+                worktree::task_worktree_layout(repo, &reference, exec_short(&execution.id))
+                    .unwrap();
+            for (path, content) in files {
+                std::fs::write(child.join(path), content).unwrap();
+            }
+            for args in [vec!["add", "."], vec!["commit", "-m", "worker work"]] {
+                assert!(git(&child, &args).status.success());
+            }
+            let execution_id = execution.id.clone();
+            db.with_conn(move |conn| {
+                for to in [
+                    TaskExecutionStatus::AwaitingReview,
+                    TaskExecutionStatus::Approved,
+                ] {
+                    crate::db::orchestration::transition_execution(
+                        conn,
+                        &execution_id,
+                        to,
+                        &backend_actor(),
+                        serde_json::json!({}),
+                    )?;
+                }
+                Ok(())
+            })
+            .await
+            .unwrap();
+            approved.push((execution, child));
+        }
+        approved.try_into().unwrap()
+    }
+
+    /// Holds any validation of a candidate carrying `slow.marker` until the test
+    /// writes `release` into `control`.
+    fn gated_validation(control: &Path) -> ValidationSpec {
+        let control_path = format!("{:?}", control.to_str().unwrap());
+        scripted_validation(
+            control,
+            &[
+                "import os, sys, time",
+                &format!("control = {control_path}"),
+                "if os.path.exists('slow.marker'):",
+                "    open(os.path.join(control, 'started'), 'a').write('x')",
+                "    deadline = time.time() + 50",
+                "    while not os.path.exists(os.path.join(control, 'release')):",
+                "        if time.time() > deadline:",
+                "            sys.exit(3)",
+                "        time.sleep(0.05)",
+            ],
+        )
+    }
+
+    /// Integrate `first` while `second` lands during its gated validation.
+    async fn integrate_around_a_concurrent_landing(
+        db: &Arc<Database>,
+        repo: &Path,
+        control: &Path,
+        first: &TaskExecution,
+        second: &TaskExecution,
+    ) -> (String, IntegrationOutcome) {
+        let first_job = tokio::spawn({
+            let db = db.clone();
+            let id = first.id.clone();
+            async move { run_integration(&db, &id).await }
+        });
+        wait_for_file(&control.join("started")).await;
+        assert_eq!(
+            exec_of(db, &first.id).await.status,
+            TaskExecutionStatus::Validating
+        );
+        let landed = run_integration(db, &second.id).await.unwrap();
+        let IntegrationOutcome::Integrated { sha: second_sha } = landed else {
+            panic!("the second execution must land first, got {landed:?}");
+        };
+        assert_eq!(git_rev(repo, "main"), second_sha);
+        std::fs::write(control.join("release"), "").unwrap();
+        (second_sha, first_job.await.unwrap().unwrap())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_integration_landing_during_another_ones_validation_makes_it_rebuild() {
+        let repo = init_repo();
+        let control = tempfile::tempdir().unwrap();
+        let db = Arc::new(Database::open_in_memory().unwrap());
+        let [(first, _), (second, _)] = campaign_with_two_approvals(
+            &db,
+            repo.path(),
+            vec![gated_validation(control.path())],
+            [&[("slow.marker", "first")], &[("second.txt", "second")]],
+        )
+        .await;
+        let first_anchor = git_rev(repo.path(), "main");
+
+        // The second execution of the campaign lands while the first validates.
+        let (second_sha, outcome) = integrate_around_a_concurrent_landing(
+            &db,
+            repo.path(),
+            control.path(),
+            &first,
+            &second,
+        )
+        .await;
+        let IntegrationOutcome::Integrated { sha } = outcome else {
+            panic!("the first execution must land after its rebuild, got {outcome:?}");
+        };
+        let done = exec_of(&db, &first.id).await;
+        assert_eq!(done.status, TaskExecutionStatus::Done);
+        assert_eq!(done.integrated_sha.as_deref(), Some(sha.as_str()));
+        assert_eq!(
+            done.candidate_target_sha.as_deref(),
+            Some(second_sha.as_str()),
+            "the candidate is rebuilt on the tip the second execution left"
+        );
+        assert_ne!(first_anchor, second_sha);
+        assert_eq!(git_rev(repo.path(), "main"), sha);
+        assert!(git(
+            repo.path(),
+            &["merge-base", "--is-ancestor", &second_sha, &sha]
+        )
+        .status
+        .success());
+        assert!(repo.path().join("slow.marker").exists());
+        assert!(repo.path().join("second.txt").exists());
+        assert_eq!(
+            event_count(&db, &first.id, "integration_reanchored").await,
+            1
+        );
+        let id = first.id.clone();
+        let runs = db
+            .with_conn(move |conn| crate::db::orchestration::list_validation_runs(conn, &id))
+            .await
+            .unwrap();
+        assert_eq!(runs.len(), 2, "the rebuilt candidate is validated again");
+        assert!(runs.iter().all(|run| run.passed()));
+        assert!(runs
+            .iter()
+            .any(|run| run.candidate_merge_sha.as_deref() == Some(sha.as_str())));
+        assert_eq!(
+            exec_of(&db, &second.id).await.status,
+            TaskExecutionStatus::Done
+        );
+        assert!(
+            refusal_notices(&db, &first.parent_discussion_id)
+                .await
+                .is_empty(),
+            "a rebuild is not a refusal"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_conflict_with_what_landed_meanwhile_goes_back_to_the_worker() {
+        let repo = init_repo();
+        let control = tempfile::tempdir().unwrap();
+        let db = Arc::new(Database::open_in_memory().unwrap());
+        let [(first, first_child), (second, _)] = campaign_with_two_approvals(
+            &db,
+            repo.path(),
+            vec![gated_validation(control.path())],
+            [
+                &[("slow.marker", "first"), ("shared.txt", "first")],
+                &[("shared.txt", "second")],
+            ],
+        )
+        .await;
+
+        let (second_sha, outcome) = integrate_around_a_concurrent_landing(
+            &db,
+            repo.path(),
+            control.path(),
+            &first,
+            &second,
+        )
+        .await;
+        let IntegrationOutcome::SentBack { reason } = outcome else {
+            panic!("a rebuild conflict must go back to the worker, got {outcome:?}");
+        };
+        assert!(reason.contains("shared.txt"), "{reason}");
+        let sent_back = exec_of(&db, &first.id).await;
+        assert_eq!(sent_back.status, TaskExecutionStatus::ChangesRequested);
+        assert_eq!(sent_back.attempt_no, first.attempt_no + 1);
+        assert_eq!(git_rev(repo.path(), "main"), second_sha);
+        assert!(
+            worktree::worktree_dirty_files(&first_child)
+                .unwrap()
+                .is_empty(),
+            "the aborted merge leaves the worker checkout clean"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_target_that_keeps_moving_parks_the_integration_then_resumes() {
+        let repo = init_repo();
+        let control = tempfile::tempdir().unwrap();
+        let paths = format!(
+            "control, repo = {:?}, {:?}",
+            control.path().to_str().unwrap(),
+            repo.path().to_str().unwrap()
+        );
+        let validation = scripted_validation(
+            control.path(),
+            &[
+                "import os, subprocess",
+                &paths,
+                "if not os.path.exists(os.path.join(control, 'stop')):",
+                "    subprocess.run(['git', '-C', repo, 'commit', '--allow-empty', '-q', \
+                 '-m', 'concurrent work'], check=True)",
+            ],
+        );
+        let db = Arc::new(Database::open_in_memory().unwrap());
+        let (execution, _, _) = approved_execution_with_commit(
+            &db,
+            repo.path(),
+            "moving-target",
+            "worker.txt",
+            "done",
+            vec![validation],
+        )
+        .await;
+
+        let outcome = run_integration(&db, &execution.id).await.unwrap();
+        assert!(
+            matches!(outcome, IntegrationOutcome::Refused { .. }),
+            "got {outcome:?}"
+        );
+        let held = exec_of(&db, &execution.id).await;
+        assert_eq!(held.status, TaskExecutionStatus::Blocked);
+        assert_eq!(
+            held.blocked_from_status,
+            Some(TaskExecutionStatus::Applying)
+        );
+        assert_eq!(
+            held.blocked_reason_code,
+            Some(BlockedReasonCode::IntegrationTargetDrifted)
+        );
+        let reason = held.blocked_reason.clone().unwrap();
+        assert!(
+            reason.contains("advanced during validation 4 times"),
+            "{reason}"
+        );
+        assert_eq!(
+            event_count(&db, &execution.id, "integration_reanchored").await,
+            i64::from(MAX_INTEGRATION_REBUILDS)
+        );
+        let tip = git_rev(repo.path(), "main");
+        assert!(
+            !repo.path().join("worker.txt").exists(),
+            "nothing is applied"
+        );
+        let notices = refusal_notices(&db, &execution.parent_discussion_id).await;
+        assert_eq!(notices.len(), 1);
+        assert!(
+            notices[0].contains("Intégration suspendue"),
+            "{}",
+            notices[0]
+        );
+        assert!(notices[0].contains(&reason), "{}", notices[0]);
+        assert!(notices[0].contains("task_exec_resume"), "{}", notices[0]);
+        let run_id = execution.orchestration_run_id.clone();
+        let attention = db
+            .with_conn(move |conn| crate::db::orchestration::principal_attention(conn, &run_id))
+            .await
+            .unwrap();
+        assert_eq!(attention.awaiting_human, 1);
+
+        std::fs::write(control.path().join("stop"), "").unwrap();
+        let Json(resumed) =
+            resume_execution(State(recovery_test_state(&db)), Path(execution.id.clone())).await;
+        assert!(resumed.success, "resume failed: {:?}", resumed.error);
+        let done = exec_of(&db, &execution.id).await;
+        assert_eq!(done.status, TaskExecutionStatus::Done);
+        assert_eq!(done.candidate_target_sha.as_deref(), Some(tip.as_str()));
+        assert_eq!(done.integrated_sha, Some(git_rev(repo.path(), "main")));
+        assert_eq!(done.blocked_reason_code, None);
+        assert!(repo.path().join("worker.txt").exists());
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum ApplyRefusal {
+        DirtyTarget,
+        TargetCheckoutRemoved,
+    }
+
+    async fn assert_apply_refusal_parks_and_resumes(case: ApplyRefusal) {
+        let repo = init_repo();
+        let control = tempfile::tempdir().unwrap();
+        let target_dir = tempfile::tempdir().unwrap();
+        let target = match case {
+            ApplyRefusal::DirtyTarget => repo.path().to_path_buf(),
+            ApplyRefusal::TargetCheckoutRemoved => target_dir.path().join("feature"),
+        };
+        let action = match case {
+            ApplyRefusal::DirtyTarget => {
+                "    open(os.path.join(target, 'concurrent.txt'), 'w').write('wip')"
+            }
+            ApplyRefusal::TargetCheckoutRemoved => {
+                "    subprocess.run(['git', '-C', repo, 'worktree', 'remove', '--force', target], \
+                 check=True)"
+            }
+        };
+        let paths = format!(
+            "control, repo, target = {:?}, {:?}, {:?}",
+            control.path().to_str().unwrap(),
+            repo.path().to_str().unwrap(),
+            target.to_str().unwrap()
+        );
+        let validation = scripted_validation(
+            control.path(),
+            &[
+                "import os, subprocess",
+                &paths,
+                "if not os.path.exists(os.path.join(control, 'stop')):",
+                action,
+            ],
+        );
+        let db = Arc::new(Database::open_in_memory().unwrap());
+        let (execution, _, _) = approved_execution_with_commit(
+            &db,
+            repo.path(),
+            "apply-refusal",
+            "worker.txt",
+            "done",
+            vec![validation],
+        )
+        .await;
+        let branch = match case {
+            ApplyRefusal::DirtyTarget => "main",
+            ApplyRefusal::TargetCheckoutRemoved => {
+                assert!(git(repo.path(), &["branch", "feature-target", "main"])
+                    .status
+                    .success());
+                assert!(git(
+                    repo.path(),
+                    &[
+                        "worktree",
+                        "add",
+                        target.to_str().unwrap(),
+                        "feature-target"
+                    ]
+                )
+                .status
+                .success());
+                "feature-target"
+            }
+        };
+        let run_id = execution.orchestration_run_id.clone();
+        db.with_conn(move |conn| {
+            conn.execute(
+                "UPDATE orchestration_runs SET target_branch = ?2 WHERE id = ?1",
+                [run_id.as_str(), branch],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let anchor = git_rev(repo.path(), branch);
+
+        let outcome = run_integration(&db, &execution.id).await.unwrap();
+        assert!(
+            matches!(outcome, IntegrationOutcome::Refused { .. }),
+            "{case:?}: got {outcome:?}"
+        );
+        let held = exec_of(&db, &execution.id).await;
+        assert_eq!(held.status, TaskExecutionStatus::Blocked, "{case:?}");
+        assert_eq!(
+            held.blocked_from_status,
+            Some(TaskExecutionStatus::Applying),
+            "{case:?}"
+        );
+        let (code, fix) = match case {
+            ApplyRefusal::DirtyTarget => (
+                BlockedReasonCode::IntegrationRefused,
+                "Committe ou retire les fichiers non commités",
+            ),
+            ApplyRefusal::TargetCheckoutRemoved => (
+                BlockedReasonCode::IntegrationTargetNotCheckedOut,
+                "git worktree add <chemin> feature-target",
+            ),
+        };
+        assert_eq!(held.blocked_reason_code, Some(code), "{case:?}");
+        let reason = held.blocked_reason.clone().expect("a durable reason");
+        assert_eq!(git_rev(repo.path(), branch), anchor, "{case:?}: untouched");
+        let notices = refusal_notices(&db, &execution.parent_discussion_id).await;
+        assert_eq!(notices.len(), 1, "{case:?}");
+        assert!(notices[0].contains(&reason), "{case:?}: {}", notices[0]);
+        assert!(notices[0].contains(fix), "{case:?}: {}", notices[0]);
+
+        match case {
+            ApplyRefusal::DirtyTarget => {
+                std::fs::remove_file(target.join("concurrent.txt")).unwrap();
+            }
+            ApplyRefusal::TargetCheckoutRemoved => {
+                assert!(git(
+                    repo.path(),
+                    &[
+                        "worktree",
+                        "add",
+                        target.to_str().unwrap(),
+                        "feature-target"
+                    ]
+                )
+                .status
+                .success());
+            }
+        }
+        std::fs::write(control.path().join("stop"), "").unwrap();
+        let Json(resumed) =
+            resume_execution(State(recovery_test_state(&db)), Path(execution.id.clone())).await;
+        assert!(resumed.success, "{case:?}: {:?}", resumed.error);
+        let done = exec_of(&db, &execution.id).await;
+        assert_eq!(done.status, TaskExecutionStatus::Done, "{case:?}");
+        assert_eq!(
+            done.integrated_sha,
+            Some(git_rev(repo.path(), branch)),
+            "{case:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn every_refused_apply_parks_blocked_with_a_code_and_resumes() {
+        for case in [
+            ApplyRefusal::DirtyTarget,
+            ApplyRefusal::TargetCheckoutRemoved,
+        ] {
+            assert_apply_refusal_parks_and_resumes(case).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn a_refusal_between_anchor_and_apply_is_interrupted_with_a_rebuild_decision() {
+        let repo = init_repo();
+        let db = Arc::new(Database::open_in_memory().unwrap());
+        let (execution, _, _) = approved_execution_with_commit(
+            &db,
+            repo.path(),
+            "refused-build",
+            "worker.txt",
+            "done",
+            vec![],
+        )
+        .await;
+        let anchor = git_rev(repo.path(), "main");
+        checkpoint(&db, &execution.id, CheckpointStep::Anchored(anchor))
+            .await
+            .unwrap();
+
+        let outcome = hold_integration(
+            &db,
+            &execution.id,
+            BlockedReasonCode::IntegrationRefused,
+            "git merge failed: simulated".into(),
+            CHILD_WORKTREE_FIX,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(outcome, IntegrationOutcome::Refused { .. }));
+        let parked = exec_of(&db, &execution.id).await;
+        assert_eq!(parked.status, TaskExecutionStatus::Interrupted);
+        assert_eq!(
+            parked.interrupted_from_status,
+            Some(TaskExecutionStatus::Integrating)
+        );
+        let id = execution.id.clone();
+        let recovery = db
+            .with_conn(move |conn| crate::db::orchestration::get_execution_recovery(conn, &id))
+            .await
+            .unwrap()
+            .expect("a recovery decision");
+        assert!(recovery.pending);
+        assert_eq!(
+            recovery.recovery_action,
+            ExecutionRecoveryAction::RebuildCandidate
+        );
+        let notices = refusal_notices(&db, &execution.parent_discussion_id).await;
+        assert_eq!(notices.len(), 1);
+        assert!(
+            notices[0].contains("Intégration interrompue"),
+            "{}",
+            notices[0]
+        );
+        assert!(notices[0].contains("simulated"), "{}", notices[0]);
+
+        let Json(resumed) =
+            resume_execution(State(recovery_test_state(&db)), Path(execution.id.clone())).await;
+        assert!(resumed.success, "resume failed: {:?}", resumed.error);
+        assert_eq!(
+            exec_of(&db, &execution.id).await.status,
+            TaskExecutionStatus::Done
+        );
+    }
+
+    #[tokio::test]
+    async fn a_backup_ref_refusal_holds_the_approval_before_the_anchor() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (execution, _, _) = approved_execution_with_commit(
+            &db,
+            repo.path(),
+            "backup-refused",
+            "worker.txt",
+            "done",
+            vec![],
+        )
+        .await;
+        let refs = repo.path().join(".git/refs/kronn-backup");
+        std::fs::create_dir_all(&refs).unwrap();
+        let lock = refs.join(format!("{}.lock", backup_slug(&execution)));
+        std::fs::write(&lock, "").unwrap();
+
+        let outcome = run_integration(&db, &execution.id).await.unwrap();
+        assert!(
+            matches!(outcome, IntegrationOutcome::Refused { .. }),
+            "got {outcome:?}"
+        );
+        let held = exec_of(&db, &execution.id).await;
+        assert_eq!(held.status, TaskExecutionStatus::Approved);
+        assert_eq!(
+            held.blocked_reason_code,
+            Some(BlockedReasonCode::IntegrationRefused)
+        );
+        assert_eq!(held.candidate_target_sha, None, "nothing was anchored");
+        let notices = refusal_notices(&db, &execution.parent_discussion_id).await;
+        assert_eq!(notices.len(), 1);
+        assert!(notices[0].contains("refs/kronn-backup/"), "{}", notices[0]);
+
+        std::fs::remove_file(&lock).unwrap();
+        let outcome = run_integration(&db, &execution.id).await.unwrap();
+        assert!(
+            matches!(outcome, IntegrationOutcome::Integrated { .. }),
+            "got {outcome:?}"
+        );
+        let done = exec_of(&db, &execution.id).await;
+        assert_eq!(done.status, TaskExecutionStatus::Done);
+        let backup = done.backup_ref.expect("the apply was armed");
+        assert_eq!(
+            worktree::resolve_commit(repo.path(), &backup).unwrap(),
+            done.candidate_target_sha.unwrap()
+        );
+    }
+
+    /// The live shape of a stuck row: `Applying`, its candidate built on a tip the
+    /// target has since left, no process driving it.
+    #[tokio::test]
+    async fn an_orphaned_apply_on_a_moved_target_is_rebuilt_at_boot() {
+        let repo = init_repo();
+        let db = Arc::new(Database::open_in_memory().unwrap());
+        let validation = ValidationSpec {
+            command: "true".into(),
+            quick_exec_id: None,
+            timeout_secs: Some(5),
+        };
+        let (execution, _, child) = approved_execution_with_commit(
+            &db,
+            repo.path(),
+            "orphaned-apply",
+            "worker.txt",
+            "done",
+            vec![validation.clone()],
+        )
+        .await;
+        let anchor = git_rev(repo.path(), "main");
+        checkpoint(&db, &execution.id, CheckpointStep::Anchored(anchor.clone()))
+            .await
+            .unwrap();
+        let worktree::CandidateOutcome::Built { sha: stale } =
+            worktree::build_candidate(&child, &anchor).unwrap()
+        else {
+            panic!("candidate");
+        };
+        checkpoint(&db, &execution.id, CheckpointStep::Built(stale.clone()))
+            .await
+            .unwrap();
+        checkpoint(&db, &execution.id, CheckpointStep::Validating)
+            .await
+            .unwrap();
+        let (id, candidate) = (execution.id.clone(), stale.clone());
+        db.with_conn(move |conn| {
+            crate::db::orchestration::record_validation_run(
+                conn,
+                &id,
+                Some(&candidate),
+                &validation,
+                Some(0),
+                Some(1),
+                Some("ok"),
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let backup =
+            worktree::write_backup_ref(repo.path(), &backup_slug(&execution), &anchor).unwrap();
+        checkpoint(&db, &execution.id, CheckpointStep::Armed(backup))
+            .await
+            .unwrap();
+        // Another execution lands on the target meanwhile.
+        std::fs::write(repo.path().join("other.txt"), "other").unwrap();
+        for args in [vec!["add", "other.txt"], vec!["commit", "-m", "other work"]] {
+            assert!(git(repo.path(), &args).status.success());
+        }
+        let moved = git_rev(repo.path(), "main");
+        let stuck = exec_of(&db, &execution.id).await;
+        assert_eq!(stuck.status, TaskExecutionStatus::Applying);
+        assert_ne!(stuck.candidate_target_sha.as_deref(), Some(moved.as_str()));
+        assert!(!worktree::is_ancestor(repo.path(), &stale, &moved).unwrap());
+
+        // Boot: interrupt, classify against the real refs, then apply the decision.
+        let interrupted = db
+            .with_conn(crate::db::orchestration::reconcile_stale_task_executions)
+            .await
+            .unwrap();
+        assert!(interrupted.contains(&execution.id));
+        classify_interrupted_execution(&db, &execution.id, &[AgentType::ClaudeCode])
+            .await
+            .unwrap();
+        let id = execution.id.clone();
+        let decided = db
+            .with_conn(move |conn| crate::db::orchestration::get_execution_recovery(conn, &id))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            decided.recovery_action,
+            ExecutionRecoveryAction::RebuildCandidate
+        );
+        let Json(resumed) =
+            resume_execution(State(recovery_test_state(&db)), Path(execution.id.clone())).await;
+        assert!(resumed.success, "resume failed: {:?}", resumed.error);
+
+        let done = exec_of(&db, &execution.id).await;
+        assert_eq!(done.status, TaskExecutionStatus::Done);
+        let integrated = done.integrated_sha.clone().expect("integrated_sha");
+        assert_ne!(integrated, stale, "the stale candidate is not replayed");
+        assert_eq!(done.candidate_target_sha.as_deref(), Some(moved.as_str()));
+        assert_eq!(git_rev(repo.path(), "main"), integrated);
+        assert!(worktree::is_ancestor(repo.path(), &moved, &integrated).unwrap());
+        assert!(repo.path().join("other.txt").exists());
+        assert!(repo.path().join("worker.txt").exists());
+        let id = execution.id.clone();
+        let runs = db
+            .with_conn(move |conn| crate::db::orchestration::list_validation_runs(conn, &id))
+            .await
+            .unwrap();
+        assert!(runs.iter().any(|run| {
+            run.candidate_merge_sha.as_deref() == Some(integrated.as_str()) && run.passed()
+        }));
+    }
+
     async fn assert_pinned_target_checkout_integration(main_dirty: bool) {
         let repo = init_repo();
         let target_dir = tempfile::tempdir().unwrap();
@@ -15244,16 +16264,10 @@ mod tests {
 
         let dirty_path = repo.path().join("uncommitted.txt");
         std::fs::write(&dirty_path, "keep me").unwrap();
-        let blocked = finish_recovered_apply(
-            &db,
-            &applying,
-            &run,
-            repo.path(),
-            child.to_str().unwrap(),
-            true,
-        )
-        .await
-        .unwrap();
+        let blocked =
+            finish_recovered_apply(&db, &applying, &run, repo.path(), child.to_str().unwrap())
+                .await
+                .unwrap();
         assert!(matches!(blocked, IntegrationOutcome::Refused { .. }));
         let execution_id = execution.id.clone();
         let parked = db

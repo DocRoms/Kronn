@@ -445,13 +445,18 @@ pub enum BlockedReasonCode {
     /// The target CLI session already holds a live offer for another execution.
     /// Needs a human decision: re-offer to another session or pick a native worker.
     WorkerSessionCommittedElsewhere,
-    /// An approved integration cannot start because its target branch is checked
-    /// out in no worktree, or in several. The row stays `Approved`; a human or the
-    /// principal checks the branch out once, then retries the approval or resume.
+    /// The integration target branch is checked out in no worktree, or in several.
+    /// Before the anchor the row stays `Approved`; while applying it parks in
+    /// `Blocked`. A human checks the branch out once, then resumes.
     IntegrationTargetNotCheckedOut,
-    /// An approved integration was refused by another precondition (dirty target,
-    /// unpinned branch, missing worktree...). The row stays `Approved` until retried.
+    /// An integration was refused by another precondition (dirty target, unpinned
+    /// branch, missing worktree...): `Approved` before the anchor, `Blocked` while
+    /// applying, until resumed.
     IntegrationRefused,
+    /// The target branch kept advancing while the candidate was being validated,
+    /// beyond the rebuild budget of one attempt. Parked in `Blocked`; a resume
+    /// rebuilds on the tip it then finds.
+    IntegrationTargetDrifted,
 }
 
 impl BlockedReasonCode {
@@ -461,6 +466,7 @@ impl BlockedReasonCode {
             Self::WorkerSessionCommittedElsewhere => "worker_session_committed_elsewhere",
             Self::IntegrationTargetNotCheckedOut => "integration_target_not_checked_out",
             Self::IntegrationRefused => "integration_refused",
+            Self::IntegrationTargetDrifted => "integration_target_drifted",
         }
     }
 }
@@ -473,6 +479,7 @@ impl std::str::FromStr for BlockedReasonCode {
             "worker_session_committed_elsewhere" => Ok(Self::WorkerSessionCommittedElsewhere),
             "integration_target_not_checked_out" => Ok(Self::IntegrationTargetNotCheckedOut),
             "integration_refused" => Ok(Self::IntegrationRefused),
+            "integration_target_drifted" => Ok(Self::IntegrationTargetDrifted),
             _ => anyhow::bail!("Unknown blocked reason code: {value}"),
         }
     }

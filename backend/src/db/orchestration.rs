@@ -2016,40 +2016,79 @@ pub fn block_execution(
     })
 }
 
-/// Record why an approved integration could not start, and tell the principal room.
+/// Park a refused integration, record why and tell the principal room.
 ///
-/// The row deliberately stays `Approved`: the approval is durable and a retry
-/// (approve replay or resume) consumes it, and its `Approved -> Integrating` move
-/// clears this hold. A repeat of the same refusal posts nothing new. Returns
-/// whether a new hold was recorded.
-pub fn hold_approved_integration(
+/// Where the row parks depends on how far the saga got: `Approved` stays
+/// approved (a retry re-anchors it), `Applying` moves to `Blocked` (its resume
+/// re-checks the real target), and a row caught between anchor and apply moves
+/// to `Interrupted` for a recovery decision. Returns the parked status, or `None`
+/// when the row is in none of those states. A repeated refusal of an `Approved`
+/// row posts nothing new.
+pub fn hold_refused_integration(
     conn: &Connection,
     exec_id: &str,
     code: BlockedReasonCode,
     reason: &str,
     fix: &str,
     actor: &OrchestrationActor,
-) -> Result<bool> {
+) -> Result<Option<TaskExecutionStatus>> {
+    use TaskExecutionStatus::*;
     in_savepoint(conn, |conn| {
         let Some(execution) = get_task_execution(conn, exec_id)? else {
-            return Ok(false);
+            return Ok(None);
         };
-        if execution.status != TaskExecutionStatus::Approved
-            || (execution.blocked_reason_code == Some(code)
-                && execution.blocked_reason.as_deref() == Some(reason))
-        {
-            return Ok(false);
-        }
         let now = Utc::now();
-        let moved = conn.execute(
-            "UPDATE task_executions \
-             SET blocked_reason = ?2, blocked_reason_code = ?3, updated_at = ?4 \
-             WHERE id = ?1 AND status = 'Approved'",
-            params![exec_id, reason, code.as_str(), now.to_rfc3339()],
-        )?;
-        if moved == 0 {
-            return Ok(false);
-        }
+        let stamp = |status: TaskExecutionStatus| -> Result<usize> {
+            Ok(conn.execute(
+                "UPDATE task_executions \
+                 SET blocked_reason = ?2, blocked_reason_code = ?3, updated_at = ?4 \
+                 WHERE id = ?1 AND status = ?5",
+                params![
+                    exec_id,
+                    reason,
+                    code.as_str(),
+                    now.to_rfc3339(),
+                    status.as_str()
+                ],
+            )?)
+        };
+        let parked = match execution.status {
+            Approved => {
+                if execution.blocked_reason_code == Some(code)
+                    && execution.blocked_reason.as_deref() == Some(reason)
+                {
+                    return Ok(Some(Approved));
+                }
+                if stamp(Approved)? == 0 {
+                    return Ok(None);
+                }
+                Approved
+            }
+            Applying => {
+                let changes = serde_json::json!({
+                    "reason": reason,
+                    "code": code.as_str(),
+                    "phase": "integration",
+                });
+                if !transition_execution(conn, exec_id, Blocked, actor, changes)? {
+                    return Ok(None);
+                }
+                stamp(Blocked)?;
+                Blocked
+            }
+            Integrating | Validating => {
+                let changes = serde_json::json!({
+                    "reason": reason,
+                    "code": code.as_str(),
+                    "recovery": "integration_refused",
+                });
+                if !transition_execution(conn, exec_id, Interrupted, actor, changes)? {
+                    return Ok(None);
+                }
+                Interrupted
+            }
+            _ => return Ok(None),
+        };
         record_execution_event(
             conn,
             exec_id,
@@ -2057,90 +2096,135 @@ pub fn hold_approved_integration(
             None,
             None,
             actor,
-            serde_json::json!({ "reason": reason, "code": code.as_str(), "fix": fix }),
+            serde_json::json!({
+                "reason": reason,
+                "code": code.as_str(),
+                "fix": fix,
+                "parked": parked.as_str(),
+            }),
         )?;
-        let occurrence: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM task_execution_events \
-             WHERE task_execution_id = ?1 AND action = 'integration_refused'",
-            [exec_id],
-            |row| row.get(0),
-        )?;
-        let task: Option<(i64, String)> = conn
-            .query_row(
-                "SELECT task_number, title FROM planning_tasks WHERE id = ?1",
-                [&execution.task_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()?;
-        let Some((task_number, title)) = task else {
-            return Ok(true);
-        };
-        let parent = execution.parent_discussion_id.as_str();
-        let Some(principal) = crate::db::discussions::get_discussion(conn, parent)? else {
-            return Ok(true);
-        };
-        let reference = format!("KT-{task_number}");
-        let message = DiscussionMessage {
-            id: format!("orch-integration-refused:{exec_id}:{occurrence}"),
-            role: MessageRole::User,
-            channel: MessageChannel::Main,
-            content: format!(
-                "**Intégration bloquée — {reference}**\n\n\
-                 L'exécution `{exec_id}` (**{title}**) est approuvée, mais son intégration \
-                 n'a pas pu démarrer : {reason}\n\n\
-                 **Correctif :** {fix} Puis relance l'intégration (`task_exec_resume` ou \
-                 nouvelle approbation) : l'approbation reste acquise."
-            ),
-            agent_type: None,
-            timestamp: now,
-            tokens_used: 0,
-            session_tokens_at_message: None,
-            recovered_partial: false,
-            auth_mode: None,
-            model_tier: None,
-            model: None,
-            cost_usd: None,
-            author_pseudo: Some("Orchestrateur".to_string()),
-            author_avatar_email: None,
-            source_msg_id: None,
-            duration_ms: None,
-            lint_report: None,
-            target_agent: None,
-            reply_to_message_id: None,
-            author_cli_ordinal: None,
-        };
-        let targets = [MessageTarget::discussion_agent(principal.agent)];
-        crate::db::discussions::insert_message_with_targets_and_dispatches_within_tx(
-            conn,
-            parent,
-            &message,
-            &targets,
-            &[],
-            None,
-        )?;
-        crate::db::discussion_important::publish_steering_card(
-            conn,
-            parent,
-            &message.id,
-            crate::db::discussion_important::SteeringCard {
-                category: crate::db::discussion_important::ImportantCategory::HumanActionRequired,
-                dedup_key: &format!("orch.integration.refused.{exec_id}.{occurrence}"),
-                title: &format!("{reference} — intégration bloquée"),
-                highlight: &format!("{reference} est approuvée mais n'est pas intégrée."),
-                impact: "La branche cible n'avance pas tant que la cause n'est pas corrigée.",
-                action_required: crate::db::discussion_important::ImportantAction::owed(
-                    fix, "Humain",
-                ),
-                references: crate::db::discussion_important::ImportantReferences {
-                    task_ref: Some(reference.clone()),
-                    execution_id: Some(exec_id.to_string()),
-                    ..Default::default()
-                },
-            },
-            &message.timestamp.to_rfc3339(),
-        )?;
-        Ok(true)
+        announce_integration_refusal(conn, &execution, parked, reason, fix, now)?;
+        Ok(Some(parked))
     })
+}
+
+/// Post the refusal in the principal room, message and steering card together.
+fn announce_integration_refusal(
+    conn: &Connection,
+    execution: &TaskExecution,
+    parked: TaskExecutionStatus,
+    reason: &str,
+    fix: &str,
+    now: DateTime<Utc>,
+) -> Result<()> {
+    let exec_id = execution.id.as_str();
+    let occurrence: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM task_execution_events \
+         WHERE task_execution_id = ?1 AND action = 'integration_refused'",
+        [exec_id],
+        |row| row.get(0),
+    )?;
+    let task: Option<(i64, String)> = conn
+        .query_row(
+            "SELECT task_number, title FROM planning_tasks WHERE id = ?1",
+            [&execution.task_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let Some((task_number, title)) = task else {
+        return Ok(());
+    };
+    let parent = execution.parent_discussion_id.as_str();
+    let Some(principal) = crate::db::discussions::get_discussion(conn, parent)? else {
+        return Ok(());
+    };
+    let reference = format!("KT-{task_number}");
+    let (headline, body, next, highlight) = match parked {
+        TaskExecutionStatus::Blocked => (
+            "Intégration suspendue",
+            format!(
+                "L'exécution `{exec_id}` (**{title}**) est validée, mais n'a pas pu être \
+                 appliquée sur la branche cible : {reason}\n\n\
+                 Elle est mise en attente (`Blocked`) ; la branche cible n'a pas bougé."
+            ),
+            "Puis relance avec `task_exec_resume` : Kronn revérifie la branche cible et \
+             reconstruit le candidat si elle a avancé.",
+            format!("{reference} est validée mais n'est pas appliquée."),
+        ),
+        TaskExecutionStatus::Interrupted => (
+            "Intégration interrompue",
+            format!(
+                "L'exécution `{exec_id}` (**{title}**) n'a pas pu construire son candidat \
+                 d'intégration : {reason}\n\n\
+                 Elle est `Interrupted` ; la branche cible n'a pas bougé."
+            ),
+            "Puis relance avec `task_exec_resume` : le candidat est reconstruit sur la \
+             pointe réelle de la branche cible.",
+            format!("{reference} est approuvée mais son intégration est interrompue."),
+        ),
+        _ => (
+            "Intégration bloquée",
+            format!(
+                "L'exécution `{exec_id}` (**{title}**) est approuvée, mais son intégration \
+                 n'a pas pu démarrer : {reason}"
+            ),
+            "Puis relance l'intégration (`task_exec_resume` ou nouvelle approbation) : \
+             l'approbation reste acquise.",
+            format!("{reference} est approuvée mais n'est pas intégrée."),
+        ),
+    };
+    let message = DiscussionMessage {
+        id: format!("orch-integration-refused:{exec_id}:{occurrence}"),
+        role: MessageRole::User,
+        channel: MessageChannel::Main,
+        content: format!("**{headline} — {reference}**\n\n{body}\n\n**Correctif :** {fix} {next}"),
+        agent_type: None,
+        timestamp: now,
+        tokens_used: 0,
+        session_tokens_at_message: None,
+        recovered_partial: false,
+        auth_mode: None,
+        model_tier: None,
+        model: None,
+        cost_usd: None,
+        author_pseudo: Some("Orchestrateur".to_string()),
+        author_avatar_email: None,
+        source_msg_id: None,
+        duration_ms: None,
+        lint_report: None,
+        target_agent: None,
+        reply_to_message_id: None,
+        author_cli_ordinal: None,
+    };
+    let targets = [MessageTarget::discussion_agent(principal.agent)];
+    crate::db::discussions::insert_message_with_targets_and_dispatches_within_tx(
+        conn,
+        parent,
+        &message,
+        &targets,
+        &[],
+        None,
+    )?;
+    crate::db::discussion_important::publish_steering_card(
+        conn,
+        parent,
+        &message.id,
+        crate::db::discussion_important::SteeringCard {
+            category: crate::db::discussion_important::ImportantCategory::HumanActionRequired,
+            dedup_key: &format!("orch.integration.refused.{exec_id}.{occurrence}"),
+            title: &format!("{reference} — intégration bloquée"),
+            highlight: &highlight,
+            impact: "La branche cible n'avance pas tant que la cause n'est pas corrigée.",
+            action_required: crate::db::discussion_important::ImportantAction::owed(fix, "Humain"),
+            references: crate::db::discussion_important::ImportantReferences {
+                task_ref: Some(reference.clone()),
+                execution_id: Some(exec_id.to_string()),
+                ..Default::default()
+            },
+        },
+        &message.timestamp.to_rfc3339(),
+    )?;
+    Ok(())
 }
 
 /// Inputs to [`commit_provisioning_checkpoint`] — the single atomic commit that
@@ -4766,13 +4850,15 @@ pub fn clear_execution_recovery(conn: &Connection, exec_id: &str, applied: &str)
     Ok(())
 }
 
-/// Resume an interrupted integration by rebuilding its candidate against an
-/// observed real target tip. The interrupted origin guard is honoured, and all
-/// stale candidate/apply checkpoints are cleared atomically before Git runs.
+/// Rebuild an integration candidate against an observed real target tip, from an
+/// interrupted row or from an `Applying` one whose target advanced. The origin
+/// guard is honoured, and all stale candidate/apply checkpoints are cleared
+/// atomically before Git runs.
 pub fn resume_rebuild_candidate(
     conn: &Connection,
     exec_id: &str,
     target_sha: &str,
+    cause: &str,
     actor: &OrchestrationActor,
 ) -> Result<bool> {
     in_savepoint(conn, |conn| {
@@ -4781,7 +4867,7 @@ pub fn resume_rebuild_candidate(
             exec_id,
             TaskExecutionStatus::Integrating,
             actor,
-            serde_json::json!({ "recovery": "rebuild_candidate", "target_sha": target_sha }),
+            serde_json::json!({ "recovery": cause, "target_sha": target_sha }),
         )? {
             return Ok(false);
         }

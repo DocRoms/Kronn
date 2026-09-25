@@ -3941,7 +3941,11 @@ fn parse_blocked_reason_code_is_strict() {
         parse_blocked_reason_code(30, Some("worker_session_committed_elsewhere".into())).unwrap(),
         Some(WorkerSessionCommittedElsewhere)
     );
-    for code in [IntegrationTargetNotCheckedOut, IntegrationRefused] {
+    for code in [
+        IntegrationTargetNotCheckedOut,
+        IntegrationRefused,
+        IntegrationTargetDrifted,
+    ] {
         assert_eq!(
             parse_blocked_reason_code(30, Some(code.as_str().into())).unwrap(),
             Some(code)

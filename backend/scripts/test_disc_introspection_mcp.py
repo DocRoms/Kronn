@@ -1275,7 +1275,7 @@ class TaskExecPrincipalSurfaceTests(unittest.TestCase):
         self.assertIn("agent_list", str(refused.exception))
         http.assert_not_called()
 
-    def test_status_advertises_resume_only_for_public_applying_checkpoint(self):
+    def test_status_advertises_resume_only_for_resumable_integration_holds(self):
         identity = {"source_agent": "Codex", "source_session_id": "session-1"}
         cases = [
             ({
@@ -1300,6 +1300,40 @@ class TaskExecPrincipalSurfaceTests(unittest.TestCase):
                 "lineage": {"execution": {
                     "status": "AwaitingReview", "blocked_from_status": None,
                     "interrupted_from_status": None,
+                }},
+            }, False),
+            ({
+                "lineage": {"execution": {
+                    "status": "Interrupted", "blocked_from_status": None,
+                    "interrupted_from_status": "Integrating",
+                }},
+                "recovery": {"pending": True, "recovery_action": "rebuild_candidate"},
+            }, True),
+            ({
+                "lineage": {"execution": {
+                    "status": "Interrupted", "blocked_from_status": None,
+                    "interrupted_from_status": "Integrating",
+                }},
+                "recovery": {"pending": False, "recovery_action": "rebuild_candidate"},
+            }, False),
+            ({
+                "lineage": {"execution": {
+                    "status": "Interrupted", "blocked_from_status": None,
+                    "interrupted_from_status": "Working",
+                }},
+                "recovery": {"pending": True, "recovery_action": "resume_worker"},
+            }, False),
+            ({
+                "lineage": {"execution": {
+                    "status": "Approved", "blocked_from_status": None,
+                    "interrupted_from_status": None,
+                    "blocked_reason_code": "integration_refused",
+                }},
+            }, True),
+            ({
+                "lineage": {"execution": {
+                    "status": "Approved", "blocked_from_status": None,
+                    "interrupted_from_status": None, "blocked_reason_code": None,
                 }},
             }, False),
         ]

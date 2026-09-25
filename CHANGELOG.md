@@ -75,6 +75,12 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- A task execution no longer stays in `Applying` forever when another one lands
+  on the same target branch during its validations: Kronn rebuilds the candidate
+  on the new tip, validates it again and applies it (up to three times). Any
+  other refusal to apply, or a target that keeps moving, parks it in `Blocked`
+  with a reason code and a notice in the principal room; `task_exec_resume`
+  then continues from the real target.
 - A workflow with launch variables triggered from MCP (`workflow_trigger`) now
   runs. That launcher never prepared the encrypted variable snapshot the UI
   prepares, so the run died at start and stayed "Running" forever, counting
