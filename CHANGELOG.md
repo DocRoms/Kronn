@@ -70,6 +70,9 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- The desktop application icons are back to the exact bytes of their
+  canonical render. An unrelated change had re-encoded them without changing a
+  pixel, which made `scripts/check-app-icons.mjs` fail.
 - In `kronn start-dev`, a build that writes generated sources under a
   `target/` directory (another checkout's Cargo build, for example) no longer
   restarts the backend and cuts the agents it is running. The file watcher now
