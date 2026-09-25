@@ -388,6 +388,19 @@ retried. The tool cannot advance provisioning- or review-owned checkpoints.
 [src: file: backend/scripts/disc-introspection-mcp.py:921-941]
 [src: file: backend/scripts/disc-introspection-mcp.py:5437-5475]
 
+`task_exec_status({task_execution_id, wait_for, timeout_secs})` blocks until
+the execution is in one of the `wait_for` statuses and adds
+`wait: {matched, timed_out, waited_ms}` to the usual response. A status already
+reached returns at once, a terminal execution returns unmatched, and
+`timeout_secs` defaults to 60 s, capped at 170 s below the bridge's HTTP
+timeout. The parent-room notices of an execution (review request, escalation,
+integration refusal, campaign pause, undelivered worker, terminal state)
+address the joined CLI that last launched, reviewed, resumed or reassigned it
+while that session remains in the room, so its `disc_wait_for_peer` wakes on
+them; without such a session they address the room's configured agent.
+`[src: file: backend/src/api/orchestration.rs]`
+`[src: file: backend/src/db/orchestration.rs]`
+
 When the worker identity is not already known, call `agent_list()` first and
 copy one returned `worker` object unchanged into `task_exec_prepare`. Native
 HTTP providers are `discussion_agent` targets, punctual host processes are

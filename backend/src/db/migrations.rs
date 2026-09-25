@@ -731,6 +731,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "190_workflow_runs_latest_index",
         include_str!("sql/190_workflow_runs_latest_index.sql"),
     ),
+    (
+        "191_task_execution_principal_session",
+        include_str!("sql/191_task_execution_principal_session.sql"),
+    ),
 ];
 
 /// Apply one migration inside the caller-owned transaction.

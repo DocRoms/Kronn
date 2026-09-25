@@ -4367,14 +4367,17 @@ async fn deliver_authorized_worker_manifest(
     }
     // ── 3. Resolve the task + the parent's principal AFTER authz. A stranger
     // still gets no task, manifest or worktree validation oracle. ──
-    let (task, principal_agent) = {
+    let (task, principal_target) = {
         let (tid, parent) = (exec.task_id.clone(), exec.parent_discussion_id.clone());
+        let eid = exec.id.clone();
         db.with_conn(move |conn| {
             let task = crate::db::planning::get_task(conn, &tid)?
                 .context("task vanished before delivery")?;
             let parent = crate::db::discussions::get_discussion(conn, &parent)?
                 .context("parent discussion vanished before delivery")?;
-            Ok((task, parent.agent))
+            let target =
+                crate::db::orchestration::principal_notice_target(conn, &eid, parent.agent)?;
+            Ok((task, target))
         })
         .await
         .map_err(|e| ProvisionError::Internal(e.to_string()))?
@@ -4456,7 +4459,6 @@ async fn deliver_authorized_worker_manifest(
     if let Err(detail) = git_validation {
         return Ok(DeliverOutcome::InvalidManifest(detail));
     }
-    let principal_target = MessageTarget::discussion_agent(principal_agent);
     let child = exec.sub_discussion_id.clone().unwrap_or_default();
     let review_request = build_review_request_message(
         &exec.id,
@@ -5289,13 +5291,19 @@ async fn decide_authorized_review(
         let (findings_owned, escalation_owned, reactivation_owned, native_dispatch_owned) =
             if verdict == ReviewVerdict::RequestChanges {
                 let (parent, tid) = (exec.parent_discussion_id.clone(), exec.task_id.clone());
-                let (parent_agent, task) = db
+                let eid = exec.id.clone();
+                let (principal_target, task) = db
                     .with_conn(move |conn| {
                         let parent = crate::db::discussions::get_discussion(conn, &parent)?
                             .context("parent discussion vanished before review")?;
                         let task = crate::db::planning::get_task(conn, &tid)?
                             .context("task vanished before review")?;
-                        Ok((parent.agent, task))
+                        let target = crate::db::orchestration::principal_notice_target(
+                            conn,
+                            &eid,
+                            parent.agent,
+                        )?;
+                        Ok((target, task))
                     })
                     .await
                     .map_err(|e| ProvisionError::Internal(e.to_string()))?;
@@ -5345,7 +5353,7 @@ async fn decide_authorized_review(
                 let escalation = (
                     exec.parent_discussion_id.clone(),
                     escalation_msg,
-                    MessageTarget::discussion_agent(parent_agent),
+                    principal_target,
                 );
 
                 // (c) re-offer → re-activate the CLI worker for the next attempt (DoD-9). Only for a
@@ -9085,7 +9093,7 @@ pub struct TaskExecLaunchRequest {
     pub worker_scope: Option<TaskWorkerScope>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
 pub struct TaskExecCallerRequest {
     #[serde(default)]
     pub source_agent: String,
@@ -9135,6 +9143,34 @@ fn principal_cli_is_authorized(
         crate::db::discussion_sessions::find_active_session(conn, source_agent, source_session_id)?
             .is_some_and(|session| session.disc_id == parent_discussion_id),
     )
+}
+
+/// Make the calling parent-room CLI the one this execution's notices address
+/// (KT-790). Routing metadata only, so a failure is logged, never surfaced.
+async fn pin_cli_principal(
+    db: &Database,
+    exec_id: &str,
+    source_agent: &str,
+    source_session_id: &str,
+) {
+    let (id, agent, session) = (
+        exec_id.to_string(),
+        source_agent.to_string(),
+        source_session_id.to_string(),
+    );
+    let pinned = db
+        .with_conn(move |conn| {
+            let Some(session) =
+                crate::db::discussion_sessions::find_active_session(conn, &agent, &session)?
+            else {
+                return Ok(false);
+            };
+            crate::db::orchestration::pin_principal_cli_session(conn, &id, session.id)
+        })
+        .await;
+    if let Err(error) = pinned {
+        tracing::warn!(execution = %exec_id, %error, "could not pin the principal CLI session");
+    }
 }
 
 /// Who is asking to prepare or launch a task execution from a room.
@@ -9984,6 +10020,10 @@ pub async fn task_exec_launch(
         ));
     }
     let parent = request.parent_discussion_id.trim().to_string();
+    let cli_principal = match &caller {
+        PrincipalCaller::Cli { agent, session_id } => Some((agent.clone(), session_id.clone())),
+        PrincipalCaller::RoomAgent(_) => None,
+    };
     let authorized = {
         let parent = parent.clone();
         state
@@ -10045,17 +10085,93 @@ pub async fn task_exec_launch(
     )
     .await
     {
-        Ok(execution) => Json(ApiResponse::ok(execution)),
+        Ok(execution) => {
+            if let Some((agent, session_id)) = cli_principal {
+                pin_cli_principal(&state.db, &execution.id, &agent, &session_id).await;
+            }
+            Json(ApiResponse::ok(execution))
+        }
         Err(error) => Json(provision_error_to_response(error)),
     }
+}
+
+/// Bounds of the blocking `task_exec_status` wait (KT-790). The ceiling stays
+/// below the bridge's 180 s HTTP timeout, like `disc_wait_for_peer`'s.
+const EXEC_WAIT_DEFAULT_SECS: u64 = 60;
+const EXEC_WAIT_MAX_SECS: u64 = 170;
+const EXEC_WAIT_POLL_MS: u64 = 500;
+
+/// How a `wait_for` status read ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct ExecutionWaitOutcome {
+    pub matched: bool,
+    pub timed_out: bool,
+    pub waited_ms: u64,
+}
+
+/// Hold until the execution is in one of `wait_for`, becomes terminal or the
+/// bounded timeout expires. A state already reached returns at once.
+async fn wait_for_execution_status(
+    db: &Database,
+    exec_id: &str,
+    wait_for: &[TaskExecutionStatus],
+    timeout_secs: Option<u64>,
+) -> Result<ExecutionWaitOutcome> {
+    let budget = std::time::Duration::from_secs(
+        timeout_secs
+            .unwrap_or(EXEC_WAIT_DEFAULT_SECS)
+            .clamp(1, EXEC_WAIT_MAX_SECS),
+    );
+    let started = std::time::Instant::now();
+    loop {
+        let id = exec_id.to_string();
+        let status = db
+            .with_read_conn(move |conn| {
+                let status: String = conn.query_row(
+                    "SELECT status FROM task_executions WHERE id = ?1",
+                    [&id],
+                    |row| row.get(0),
+                )?;
+                status.parse::<TaskExecutionStatus>()
+            })
+            .await?;
+        let elapsed = started.elapsed();
+        let matched = wait_for.contains(&status);
+        if matched || status.is_terminal() || elapsed >= budget {
+            return Ok(ExecutionWaitOutcome {
+                matched,
+                timed_out: !matched && !status.is_terminal(),
+                waited_ms: elapsed.as_millis() as u64,
+            });
+        }
+        let poll = std::time::Duration::from_millis(EXEC_WAIT_POLL_MS);
+        tokio::time::sleep(poll.min(budget - elapsed)).await;
+    }
+}
+
+/// Body of `POST /api/orchestration/tool/executions/{id}/status`.
+#[derive(Deserialize, Default)]
+pub struct TaskExecStatusRequest {
+    #[serde(flatten)]
+    pub caller: TaskExecCallerRequest,
+    /// Block until the execution reaches one of these states (KT-790).
+    #[serde(default)]
+    pub wait_for: Vec<TaskExecutionStatus>,
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
 }
 
 pub async fn task_exec_status(
     State(state): State<AppState>,
     Path(exec_id): Path<String>,
-    Json(request): Json<TaskExecCallerRequest>,
-) -> Json<ApiResponse<crate::models::TaskExecutionDetail>> {
-    if let Some(caller) = request.spawned_agent {
+    Json(request): Json<TaskExecStatusRequest>,
+) -> Json<ApiResponse<serde_json::Value>> {
+    let TaskExecStatusRequest {
+        caller: request,
+        wait_for,
+        timeout_secs,
+    } = request;
+    let execution_id = if let Some(caller) = request.spawned_agent {
         if !request.source_agent.trim().is_empty() || !request.source_session_id.trim().is_empty() {
             return Json(ApiResponse::err_coded(
                 ApiErrorCode::Validation,
@@ -10073,7 +10189,7 @@ pub async fn task_exec_status(
                 }
             };
         let alias = crate::db::orchestration::agent_type_to_db(&agent_type);
-        let execution = match spawned_native_worker_execution_for_caller(
+        match spawned_native_worker_execution_for_caller(
             &state.db,
             &exec_id,
             dispatch_job_id,
@@ -10087,7 +10203,7 @@ pub async fn task_exec_status(
         )
         .await
         {
-            Ok(Some(execution)) => execution,
+            Ok(Some(execution)) => execution.id,
             Ok(None) => {
                 return Json(ApiResponse::err_coded(
                     ApiErrorCode::NotFound,
@@ -10098,52 +10214,77 @@ pub async fn task_exec_status(
                 let (code, message) = provision_error_parts(&error);
                 return Json(ApiResponse::err_coded(code, message));
             }
+        }
+    } else {
+        let Some((agent, session_id)) =
+            caller_fields(&request.source_agent, &request.source_session_id)
+        else {
+            return Json(ApiResponse::err_coded(
+                ApiErrorCode::Validation,
+                "durable source_agent and source_session_id are required",
+            ));
         };
-        let execution_id = execution.id;
-        return match state
+        let authorized = state
             .db
-            .with_conn(move |conn| execution_detail(conn, &execution_id))
-            .await
-        {
-            Ok(mut detail) => {
-                attach_runtime_liveness(&state, &mut detail);
-                Json(ApiResponse::ok(detail))
+            .with_conn(move |conn| {
+                let execution = resolve_task_execution_reference(conn, &exec_id)?
+                    .context("execution not found or caller is not a party")?;
+                if !execution_party_is_authorized(conn, &execution, &agent, &session_id)? {
+                    bail!("execution not found or caller is not a party");
+                }
+                Ok(execution.id)
+            })
+            .await;
+        match authorized {
+            Ok(id) => id,
+            Err(error) => {
+                return Json(ApiResponse::err_coded(
+                    ApiErrorCode::NotFound,
+                    error.to_string(),
+                ))
             }
-            Err(error) => Json(ApiResponse::err_coded(
+        }
+    };
+    let wait = if wait_for.is_empty() {
+        None
+    } else {
+        match wait_for_execution_status(&state.db, &execution_id, &wait_for, timeout_secs).await {
+            Ok(outcome) => Some(outcome),
+            Err(error) => {
+                return Json(ApiResponse::err_coded(
+                    ApiErrorCode::Internal,
+                    error.to_string(),
+                ))
+            }
+        }
+    };
+    let detail = state
+        .db
+        .with_conn(move |conn| execution_detail(conn, &execution_id))
+        .await;
+    let mut detail = match detail {
+        Ok(detail) => detail,
+        Err(error) => {
+            return Json(ApiResponse::err_coded(
                 ApiErrorCode::NotFound,
                 error.to_string(),
-            )),
-        };
-    }
-    let Some((agent, session_id)) =
-        caller_fields(&request.source_agent, &request.source_session_id)
-    else {
-        return Json(ApiResponse::err_coded(
-            ApiErrorCode::Validation,
-            "durable source_agent and source_session_id are required",
-        ));
-    };
-    let result = state
-        .db
-        .with_conn(move |conn| {
-            let execution = resolve_task_execution_reference(conn, &exec_id)?
-                .context("execution not found or caller is not a party")?;
-            if !execution_party_is_authorized(conn, &execution, &agent, &session_id)? {
-                bail!("execution not found or caller is not a party");
-            }
-            execution_detail(conn, &execution.id)
-        })
-        .await;
-    match result {
-        Ok(mut detail) => {
-            attach_runtime_liveness(&state, &mut detail);
-            Json(ApiResponse::ok(detail))
+            ))
         }
-        Err(error) => Json(ApiResponse::err_coded(
-            ApiErrorCode::NotFound,
-            error.to_string(),
-        )),
+    };
+    attach_runtime_liveness(&state, &mut detail);
+    let mut body = match serde_json::to_value(&detail) {
+        Ok(body) => body,
+        Err(error) => {
+            return Json(ApiResponse::err_coded(
+                ApiErrorCode::Internal,
+                error.to_string(),
+            ))
+        }
+    };
+    if let (Some(wait), Some(object)) = (wait, body.as_object_mut()) {
+        object.insert("wait".into(), serde_json::json!(wait));
     }
+    Json(ApiResponse::ok(body))
 }
 
 pub async fn task_exec_resume(
@@ -10165,6 +10306,7 @@ pub async fn task_exec_resume(
             "durable source_agent and source_session_id are required",
         ));
     };
+    let (agent_pin, session_pin) = (agent.clone(), session_id.clone());
     let authorized = {
         let id = exec_id.clone();
         state
@@ -10187,6 +10329,7 @@ pub async fn task_exec_resume(
             "execution not found or caller is not its principal",
         ));
     }
+    pin_cli_principal(&state.db, &exec_id, &agent_pin, &session_pin).await;
     resume_execution(State(state), Path(exec_id)).await
 }
 
@@ -10249,6 +10392,7 @@ pub async fn task_exec_reassign(
             "durable source_agent and source_session_id are required",
         ));
     };
+    let (agent_pin, session_pin) = (agent.clone(), session_id.clone());
     let authorized = {
         let id = exec_id.clone();
         state
@@ -10271,6 +10415,7 @@ pub async fn task_exec_reassign(
             "execution not found or caller is not its principal",
         ));
     }
+    pin_cli_principal(&state.db, &exec_id, &agent_pin, &session_pin).await;
     reassign_execution(
         State(state),
         Path(exec_id),
@@ -11151,6 +11296,8 @@ pub async fn review(
             ))
         }
     };
+    // Before the decision, so an escalation it raises addresses this reviewer.
+    pin_cli_principal(&state.db, &exec_id, &source_agent, &source_session_id).await;
     match decide_review(
         &state.db,
         &exec_id,
@@ -13496,15 +13643,18 @@ mod tests {
         let Json(stale_status) = task_exec_status(
             State(state.clone()),
             Path(execution_id.clone()),
-            Json(TaskExecCallerRequest {
-                source_agent: String::new(),
-                source_session_id: String::new(),
-                spawned_agent: Some(SpawnedAgentCaller {
-                    discussion_id: child.clone(),
-                    agent_type: "Codex".into(),
-                    dispatch_job_id: replacement_dispatch.clone(),
-                    source_message_id: current_trigger.clone(),
-                }),
+            Json(TaskExecStatusRequest {
+                caller: TaskExecCallerRequest {
+                    source_agent: String::new(),
+                    source_session_id: String::new(),
+                    spawned_agent: Some(SpawnedAgentCaller {
+                        discussion_id: child.clone(),
+                        agent_type: "Codex".into(),
+                        dispatch_job_id: replacement_dispatch.clone(),
+                        source_message_id: current_trigger.clone(),
+                    }),
+                },
+                ..Default::default()
             }),
         )
         .await;
@@ -13515,15 +13665,18 @@ mod tests {
         let Json(status) = task_exec_status(
             State(state.clone()),
             Path(execution_id.clone()),
-            Json(TaskExecCallerRequest {
-                source_agent: String::new(),
-                source_session_id: String::new(),
-                spawned_agent: Some(SpawnedAgentCaller {
-                    discussion_id: child.clone(),
-                    agent_type: "Codex".into(),
-                    dispatch_job_id: current_dispatch.clone(),
-                    source_message_id: current_trigger.clone(),
-                }),
+            Json(TaskExecStatusRequest {
+                caller: TaskExecCallerRequest {
+                    source_agent: String::new(),
+                    source_session_id: String::new(),
+                    spawned_agent: Some(SpawnedAgentCaller {
+                        discussion_id: child.clone(),
+                        agent_type: "Codex".into(),
+                        dispatch_job_id: current_dispatch.clone(),
+                        source_message_id: current_trigger.clone(),
+                    }),
+                },
+                ..Default::default()
             }),
         )
         .await;
@@ -13613,15 +13766,18 @@ mod tests {
             let Json(stale_status) = task_exec_status(
                 State(state.clone()),
                 Path(execution_id.clone()),
-                Json(TaskExecCallerRequest {
-                    source_agent: String::new(),
-                    source_session_id: String::new(),
-                    spawned_agent: Some(SpawnedAgentCaller {
-                        discussion_id: child.clone(),
-                        agent_type: "Codex".into(),
-                        dispatch_job_id: previous_dispatch.clone(),
-                        source_message_id: trigger.clone(),
-                    }),
+                Json(TaskExecStatusRequest {
+                    caller: TaskExecCallerRequest {
+                        source_agent: String::new(),
+                        source_session_id: String::new(),
+                        spawned_agent: Some(SpawnedAgentCaller {
+                            discussion_id: child.clone(),
+                            agent_type: "Codex".into(),
+                            dispatch_job_id: previous_dispatch.clone(),
+                            source_message_id: trigger.clone(),
+                        }),
+                    },
+                    ..Default::default()
                 }),
             )
             .await;
@@ -21432,6 +21588,169 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(task.summary.status, PlanningTaskStatus::InProgress);
+    }
+
+    fn kt790_state(db: &std::sync::Arc<Database>) -> AppState {
+        AppState::new_defaults(
+            std::sync::Arc::new(tokio::sync::RwLock::new(
+                crate::core::config::default_config(),
+            )),
+            db.clone(),
+            crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+        )
+    }
+
+    fn kt790_principal_status(
+        wait_for: Vec<TaskExecutionStatus>,
+        timeout_secs: Option<u64>,
+    ) -> TaskExecStatusRequest {
+        TaskExecStatusRequest {
+            caller: TaskExecCallerRequest {
+                source_agent: "ClaudeCode".into(),
+                source_session_id: "principal-sess".into(),
+                spawned_agent: None,
+            },
+            wait_for,
+            timeout_secs,
+        }
+    }
+
+    /// KT-790 DoD-1 — the delivery's review request addresses the CLI principal
+    /// that launched the execution, so that principal's wait wakes on it instead
+    /// of timing out with the turn withheld by routing.
+    #[tokio::test]
+    async fn a_delivery_wakes_the_principal_cli_wait() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let (_, parent_id, _, exec_id) = attached_cli_worker(&db, repo.path()).await;
+        seed_cli_session(&db, 202, &parent_id, "principal-sess").await;
+        // The launch, review, resume and reassign handlers all pin through this.
+        pin_cli_principal(&db, &exec_id, "ClaudeCode", "principal-sess").await;
+
+        let manifest = clean_manifest_for_execution(&db, &exec_id).await;
+        let outcome = deliver_worker_manifest(&db, &exec_id, "ClaudeCode", "sess-a", &manifest)
+            .await
+            .unwrap();
+        assert!(matches!(outcome, DeliverOutcome::Delivered { .. }));
+
+        let Json(response) = crate::api::disc_invite::wait_for_peer(
+            State(kt790_state(&db)),
+            Path(parent_id),
+            axum::extract::Query(crate::api::disc_invite::WaitForPeerQuery {
+                since_sort_order: Some(0),
+                timeout_secs: Some(2),
+                exclude_agent_type: Some("ClaudeCode".into()),
+                session_id: Some("principal-sess".into()),
+                conversation_id: None,
+                ack_awareness_upto: None,
+            }),
+        )
+        .await;
+        let wake = response.data.expect("wait_for_peer must answer");
+        assert!(!wake.timed_out, "the delivery must wake the principal");
+        let review_request = format!("orch-review-request:{exec_id}:0");
+        let delivered = wake
+            .messages
+            .iter()
+            .find(|message| message.message_id == review_request)
+            .expect("the review request is the wake");
+        assert!(delivered.addressed_to_caller);
+        assert!(!delivered.awareness);
+        assert_eq!(
+            delivered.targets,
+            vec![MessageTarget::cli(AgentType::ClaudeCode, 202)]
+        );
+    }
+
+    /// KT-790 DoD-2 — `wait_for` holds the status read until the first matching
+    /// state, returns at once when it already holds, and stays bounded.
+    #[tokio::test]
+    async fn task_exec_status_wait_for_returns_at_the_first_matching_transition() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let (_, parent_id, _, exec_id) = attached_cli_worker(&db, repo.path()).await;
+        seed_cli_session(&db, 202, &parent_id, "principal-sess").await;
+        let state = kt790_state(&db);
+
+        let delivering = {
+            let (db, exec_id) = (db.clone(), exec_id.clone());
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+                let manifest = clean_manifest_for_execution(&db, &exec_id).await;
+                deliver_worker_manifest(&db, &exec_id, "ClaudeCode", "sess-a", &manifest)
+                    .await
+                    .unwrap()
+            })
+        };
+        let started = std::time::Instant::now();
+        let Json(woken) = task_exec_status(
+            State(state.clone()),
+            Path(exec_id.clone()),
+            Json(kt790_principal_status(
+                vec![
+                    TaskExecutionStatus::AwaitingReview,
+                    TaskExecutionStatus::Done,
+                    TaskExecutionStatus::Blocked,
+                ],
+                Some(30),
+            )),
+        )
+        .await;
+        let elapsed = started.elapsed();
+        assert!(matches!(
+            delivering.await.unwrap(),
+            DeliverOutcome::Delivered { .. }
+        ));
+        let body = woken.data.expect("status with wait_for must answer");
+        assert_eq!(body["lineage"]["execution"]["status"], "AwaitingReview");
+        assert_eq!(body["wait"]["matched"], true);
+        assert_eq!(body["wait"]["timed_out"], false);
+        assert!(
+            body["wait"]["waited_ms"].as_u64().unwrap() >= 500,
+            "it waited for the transition: {body}"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(10),
+            "it returned at the transition, not at the 30 s timeout"
+        );
+
+        let Json(immediate) = task_exec_status(
+            State(state.clone()),
+            Path(exec_id.clone()),
+            Json(kt790_principal_status(
+                vec![TaskExecutionStatus::AwaitingReview],
+                Some(30),
+            )),
+        )
+        .await;
+        let body = immediate.data.unwrap();
+        assert_eq!(body["wait"]["matched"], true);
+        assert!(body["wait"]["waited_ms"].as_u64().unwrap() < 500);
+
+        let Json(bounded) = task_exec_status(
+            State(state.clone()),
+            Path(exec_id.clone()),
+            Json(kt790_principal_status(
+                vec![TaskExecutionStatus::Done],
+                Some(1),
+            )),
+        )
+        .await;
+        let body = bounded.data.unwrap();
+        assert_eq!(body["wait"]["matched"], false);
+        assert_eq!(body["wait"]["timed_out"], true);
+        assert!(body["wait"]["waited_ms"].as_u64().unwrap() >= 1000);
+
+        let Json(plain) = task_exec_status(
+            State(state),
+            Path(exec_id),
+            Json(kt790_principal_status(Vec::new(), None)),
+        )
+        .await;
+        assert!(
+            plain.data.unwrap().get("wait").is_none(),
+            "a plain read keeps its historical shape"
+        );
     }
 
     /// A session that is NOT the execution's worker cannot deliver — NotAddressed (fused

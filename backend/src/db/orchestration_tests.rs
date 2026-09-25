@@ -5150,3 +5150,82 @@ fn a_replayed_campaign_gate_publishes_nothing_and_breaks_no_transition() {
         "a skipped gate publishes no card"
     );
 }
+
+/// KT-790 — parent-room notices address the CLI steering the execution, and only
+/// a live session of that very room can take that role.
+#[test]
+fn principal_notices_address_the_pinned_parent_room_cli() {
+    let conn = setup();
+    seed_task(&conn, "t-principal-pin", 1790);
+    let execution = launch_single_task(
+        &conn,
+        &LaunchSingleTaskInput::new("t-principal-pin", DISC),
+        &backend_actor(),
+    )
+    .unwrap()
+    .execution;
+    let room_agent = crate::db::discussions::get_discussion(&conn, DISC)
+        .unwrap()
+        .unwrap()
+        .agent;
+    assert_eq!(
+        principal_notice_target(&conn, &execution.id, room_agent.clone()).unwrap(),
+        MessageTarget::discussion_agent(room_agent.clone()),
+        "without a pinned principal the room agent keeps the notice"
+    );
+
+    seed_session(&conn, 790, "Codex", "cli-principal");
+    conn.execute(
+        "INSERT INTO discussions (id, title, created_at, updated_at) \
+         VALUES ('disc-elsewhere', 'E', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO discussion_sessions \
+         (id, disc_id, agent_type, session_id, role, status, joined_at) \
+         VALUES (791, 'disc-elsewhere', 'ClaudeCode', 'cli-elsewhere', 'peer', 'active', \
+                 '2026-01-01T00:00:00Z')",
+        [],
+    )
+    .unwrap();
+    assert!(
+        !pin_principal_cli_session(&conn, &execution.id, 791).unwrap(),
+        "a session of another room never becomes the principal"
+    );
+    assert!(pin_principal_cli_session(&conn, &execution.id, 790).unwrap());
+    assert!(
+        !pin_principal_cli_session(&conn, &execution.id, 790).unwrap(),
+        "re-pinning the same session writes nothing"
+    );
+    assert_eq!(
+        principal_notice_target(&conn, &execution.id, room_agent.clone()).unwrap(),
+        MessageTarget::cli(AgentType::Codex, 790)
+    );
+
+    transition_execution(
+        &conn,
+        &execution.id,
+        TaskExecutionStatus::Cancelled,
+        &backend_actor(),
+        serde_json::json!({}),
+    )
+    .unwrap();
+    let notice = format!("orch-principal-terminal:{}:Cancelled", execution.id);
+    assert_eq!(
+        crate::db::discussions::list_message_targets(&conn, &notice).unwrap(),
+        vec![MessageTarget::cli(AgentType::Codex, 790)],
+        "the terminal notice wakes the exact principal session"
+    );
+
+    conn.execute(
+        "UPDATE discussion_sessions SET status = 'left' WHERE id = 790",
+        [],
+    )
+    .unwrap();
+    assert_eq!(
+        principal_notice_target(&conn, &execution.id, room_agent.clone()).unwrap(),
+        MessageTarget::discussion_agent(room_agent),
+        "a principal that left the room no longer captures notices"
+    );
+}

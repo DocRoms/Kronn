@@ -2196,7 +2196,7 @@ fn announce_integration_refusal(
         reply_to_message_id: None,
         author_cli_ordinal: None,
     };
-    let targets = [MessageTarget::discussion_agent(principal.agent)];
+    let targets = [principal_notice_target(conn, exec_id, principal.agent)?];
     crate::db::discussions::insert_message_with_targets_and_dispatches_within_tx(
         conn,
         parent,
@@ -3801,7 +3801,7 @@ fn publish_campaign_gate_card(
         reply_to_message_id: None,
         author_cli_ordinal: None,
     };
-    let targets = [MessageTarget::discussion_agent(principal.agent)];
+    let targets = [principal_notice_target(conn, exec_id, principal.agent)?];
     crate::db::discussions::insert_message_with_targets_and_dispatches_within_tx(
         conn,
         &parent,
@@ -3830,6 +3830,50 @@ fn publish_campaign_gate_card(
         &message.timestamp.to_rfc3339(),
     )?;
     Ok(())
+}
+
+/// Record `session_pk` as the CLI steering `exec_id` (KT-790). Only a session of
+/// the execution's own parent room can take that role.
+pub fn pin_principal_cli_session(
+    conn: &Connection,
+    exec_id: &str,
+    session_pk: i64,
+) -> Result<bool> {
+    let changed = conn.execute(
+        "UPDATE task_executions SET principal_cli_session_id = ?2 \
+         WHERE id = ?1 AND principal_cli_session_id IS NOT ?2 \
+           AND EXISTS (SELECT 1 FROM discussion_sessions s \
+                       WHERE s.id = ?2 AND s.disc_id = task_executions.parent_discussion_id \
+                         AND s.status <> 'left')",
+        params![exec_id, session_pk],
+    )?;
+    Ok(changed > 0)
+}
+
+/// Who a parent-room notice about `exec_id` addresses. A joined CLI is woken only
+/// by turns aimed at its exact session, so the pinned principal wins while it is
+/// still in that room; otherwise the room's configured agent, as before.
+pub fn principal_notice_target(
+    conn: &Connection,
+    exec_id: &str,
+    room_agent: AgentType,
+) -> Result<MessageTarget> {
+    let pinned: Option<(i64, String)> = conn
+        .query_row(
+            "SELECT s.id, s.agent_type FROM task_executions e \
+             JOIN discussion_sessions s ON s.id = e.principal_cli_session_id \
+             WHERE e.id = ?1 AND s.disc_id = e.parent_discussion_id AND s.status <> 'left'",
+            [exec_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    Ok(match pinned {
+        Some((session_pk, agent)) => MessageTarget::cli(
+            crate::db::discussions::parse_agent_type(&agent)?,
+            session_pk,
+        ),
+        None => MessageTarget::discussion_agent(room_agent),
+    })
 }
 
 /// Every terminal child event leaves a bounded, deterministic obligation in the
@@ -3891,7 +3935,7 @@ fn notify_principal_of_terminal(
         reply_to_message_id: None,
         author_cli_ordinal: None,
     };
-    let targets = [MessageTarget::discussion_agent(principal.agent)];
+    let targets = [principal_notice_target(conn, exec_id, principal.agent)?];
     crate::db::discussions::insert_message_with_targets_and_dispatches_within_tx(
         conn,
         &parent,

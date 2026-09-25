@@ -932,15 +932,17 @@ TOOLS = [
     {
         "name": "task_exec_status",
         "description": (
-            "Read a party-visible TaskExecution and its durable evidence/recovery state. "
-            "After reconnect, use its id or task_reference, obey returned `next_action`, "
-            "and never infer execution state from chat."
+            "Read a party-visible TaskExecution by id or task_reference (KT-###); obey its "
+            "`next_action`, never infer state from chat. `wait_for` blocks until one of those "
+            "statuses: tool_manual({tool: \"task_exec_status\"})."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "task_execution_id": {"type": "string"},
-                "task_reference": {"type": "string", "description": "KT-### or task UUID fallback."},
+                "task_reference": {"type": "string"},
+                "wait_for": {"type": "array", "items": {"type": "string"}},
+                "timeout_secs": {"type": "integer"},
             },
             "required": [],
         },
@@ -1271,7 +1273,8 @@ TOOLS = [
             "`latest_sort_order`, never `last_sort_order` returned by an append. Each item has a "
             "`message_id`; reply with its exact `reply_to_message_id`. A wait moved to the background "
             "lasts to its terminal result or your next Kronn call: DO NOT start another wait; "
-            "re-arm. Quiet or interruption is not departure. Routing: "
+            "re-arm. Quiet or interruption is not departure. To await a worker, use "
+            "`task_exec_status` `wait_for`. Routing: "
             "`tool_manual({tool: \"disc_wait_for_peer\"})`."
         ),
         "inputSchema": {
@@ -1279,15 +1282,15 @@ TOOLS = [
             "properties": {
                 "since_sort_order": {
                     "type": "integer",
-                    "description": "Advanced override: highest sort_order actually read. Normally omit it so the bridge uses its durable read cursor. Never pass an append's last_sort_order.",
+                    "description": "Advanced override; see the tool description.",
                 },
                 "timeout_secs": {
                     "type": "integer",
-                    "description": "Inner poll window in seconds (default 60, capped at 60 so interruptions stay responsive). The OVERALL wait is governed by max_total_secs, not this.",
+                    "description": "Inner poll window, seconds (default and cap 60); max_total_secs bounds the whole wait.",
                 },
                 "max_total_secs": {
                     "type": "integer",
-                    "description": "Overall wait budget in seconds (env KRONN_WAIT_TOTAL_SECS). Use 20 between real work steps; omit only when idle (unbounded default). A background wait remains active: await its terminal result before another.",
+                    "description": "Overall budget, seconds (env KRONN_WAIT_TOTAL_SECS): 20 between work steps; omit only when idle (unbounded).",
                 },
             },
             "required": [],
@@ -5877,7 +5880,38 @@ def call_task_exec_launch(args):
     return _task_exec_request("/api/orchestration/tool/launch", body)
 
 
+_TASK_EXECUTION_STATUSES = frozenset({
+    "Pending", "Provisioning", "Blocked", "Working", "AwaitingReview", "Approved",
+    "ChangesRequested", "Integrating", "Validating", "Applying", "Escalated",
+    "Interrupted", "Done", "Failed", "Cancelled",
+})
+
+
+def _task_exec_status_options(args):
+    """The optional blocking wait (KT-790); the backend bounds its duration."""
+    options = {}
+    wait_for = args.get("wait_for")
+    if wait_for is not None:
+        if (
+            not isinstance(wait_for, list)
+            or not wait_for
+            or any(status not in _TASK_EXECUTION_STATUSES for status in wait_for)
+        ):
+            raise RuntimeError(
+                "task_exec_status: wait_for must list TaskExecution statuses, one of "
+                + ", ".join(sorted(_TASK_EXECUTION_STATUSES))
+            )
+        options["wait_for"] = wait_for
+    timeout_secs = args.get("timeout_secs")
+    if timeout_secs is not None:
+        if isinstance(timeout_secs, bool) or not isinstance(timeout_secs, int) or timeout_secs < 1:
+            raise RuntimeError("task_exec_status: timeout_secs must be a positive integer")
+        options["timeout_secs"] = timeout_secs
+    return options
+
+
 def call_task_exec_status(args):
+    options = _task_exec_status_options(args)
     if _spawned_task_worker_mode():
         context = _spawned_task_worker_context(
             required=True, tool_name="task_exec_status"
@@ -5892,6 +5926,7 @@ def call_task_exec_status(args):
                     "dispatch_job_id": context["dispatch_job_id"],
                     "source_message_id": context["source_message_id"],
                 },
+                **options,
             },
         ))
     execution_id = (args.get("task_execution_id") or args.get("task_reference") or "").strip()
@@ -5901,7 +5936,7 @@ def call_task_exec_status(args):
     result = _unwrap(_http(
         "POST",
         f"/api/orchestration/tool/executions/{urllib.parse.quote(execution_id, safe='')}/status",
-        {"source_agent": source_agent, "source_session_id": source_session_id},
+        {"source_agent": source_agent, "source_session_id": source_session_id, **options},
     ))
     execution = ((result.get("lineage") or {}).get("execution") or {})
     status = execution.get("status")
@@ -9595,6 +9630,18 @@ TOOL_MANUALS = {
         "party-scoped; cancel/reassign are parent-principal-only; delivery is exact-worker-only. "
         "If a joined runtime lacks these tools after reconnect, reconnect the Kronn MCP and report "
         "the capability gap instead of fabricating a handoff."
+    ),
+    "task_exec_status": (
+        "`wait_for: [\"AwaitingReview\", \"Done\", \"Blocked\"]` holds the call until the "
+        "execution is in one of these statuses, then returns the status plus "
+        "`wait: {matched, timed_out, waited_ms}`. A status already reached returns at once; a "
+        "terminal execution returns unmatched; `timeout_secs` defaults to 60, capped at 170. "
+        "Use it instead of sleeping or polling while a worker runs. Statuses: Pending, "
+        "Provisioning, Blocked, Working, AwaitingReview, Approved, ChangesRequested, "
+        "Integrating, Validating, Applying, Escalated, Interrupted, Done, Failed, Cancelled. "
+        "Delivery, escalation, integration and terminal notices address the parent-room CLI "
+        "that launched, reviewed, resumed or reassigned the execution, so its "
+        "`disc_wait_for_peer` wakes on them too."
     ),
     "task_exec_resume": (
         "Call resume only when `task_exec_status` returns the exact "

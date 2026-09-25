@@ -13,6 +13,11 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Added
 
+- `task_exec_status` can wait for an execution: `wait_for` lists statuses (for
+  example `["AwaitingReview", "Done", "Blocked"]`) and the call returns as soon
+  as the execution is in one of them, with `wait: {matched, timed_out,
+  waited_ms}`, instead of the principal sleeping and re-reading. `timeout_secs`
+  bounds it (60 s by default, 170 s at most).
 - A room's native agent can prepare and launch a task execution itself, as
   its principal, without a CLI joining the room. Kronn identifies it from the
   turn it is running, so only that room's agent is accepted.
@@ -98,6 +103,13 @@ Release notes for 0.9.3 and earlier are available in the
   completes. A resume requested for an execution already being resumed is
   refused with `a resume of this execution is already running` instead of
   running twice.
+- A worker's delivery now wakes the CLI principal waiting in the parent room.
+  The review request, escalations, integration refusals, campaign pauses, the
+  undelivered-worker notice and the terminal notice were addressed to the
+  room's native agent, so the principal's `disc_wait_for_peer` withheld them
+  and timed out. They now address the joined CLI that launched, reviewed,
+  resumed or reassigned the execution while it remains in that room, and the
+  room's agent otherwise.
 - A prelocalized rework no longer edits the launch line numbers on moved
   content. When a delivery changed the file's line count, `request_changes`
   replayed the same range and a local worker deleted the neighbouring rule.
