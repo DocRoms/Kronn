@@ -70,6 +70,11 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- An open discussion no longer re-downloads its whole transcript when an
+  unrelated workflow or media run reports progress. Every refresh now asks for
+  the detail only if it changed, and a burst of events collapses into one
+  request. On a 2,000-message room with a workflow running: opening it went
+  from 66 MB to 27 MB, and 20 s at rest from up to 27 MB to 1.9 MB.
 - The desktop application icons are back to the exact bytes of their
   canonical render. An unrelated change had re-encoded them without changing a
   pixel, which made `scripts/check-app-icons.mjs` fail.
