@@ -388,6 +388,13 @@ retried. The tool cannot advance provisioning- or review-owned checkpoints.
 [src: file: backend/scripts/disc-introspection-mcp.py:921-941]
 [src: file: backend/scripts/disc-introspection-mcp.py:5437-5475]
 
+`task_exec_status({view: "compact"})` returns id, task, status, attempt,
+review rounds, delivered `head_sha`, last error, the latest candidate's
+validations (command, exit code, duration) and a backend-derived
+`next_action`, trimmed to stay under 1 000 characters as the bridge prints it.
+The default `view: "full"` is unchanged: worker briefs and reviews read its
+lineage, attempts and manifests.
+
 `task_exec_status({task_execution_id, wait_for, timeout_secs})` blocks until
 the execution is in one of the `wait_for` statuses and adds
 `wait: {matched, timed_out, waited_ms}` to the usual response. A status already
@@ -547,7 +554,10 @@ attach. If `task_exec_accept_worker_offer` refuses this way, reconnect the
 `[src: file: backend/scripts/disc-introspection-mcp.py]`
 
 `task_exec_reassign(reason)` persists the reason and includes it verbatim in
-the replacement worker's handoff message. It is therefore a real recovery
+the replacement worker's handoff message. From `AwaitingReview` it first
+rejects the pending delivery (`AwaitingReview -> ChangesRequested`, journaled
+with `delivery: rejected`); the manifest stays in the attempt history and the
+replacement works on the next attempt. It is therefore a real recovery
 instruction, not an audit-only label. The chosen provider, tier, model and
 profile are synchronised to the durable child discussion in the same database
 transaction: that discussion is what the runtime resolves when it starts the

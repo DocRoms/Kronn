@@ -5051,6 +5051,26 @@ pub fn reassign_execution_worker(
                 );
             }
         }
+        // KT-791 — reassigning rejects the pending delivery: its manifest stays in
+        // the attempt history and the replacement works on the next attempt.
+        if execution.status == TaskExecutionStatus::AwaitingReview {
+            if !transition_execution(
+                conn,
+                exec_id,
+                TaskExecutionStatus::ChangesRequested,
+                actor,
+                serde_json::json!({
+                    "phase": "reassignment",
+                    "delivery": "rejected",
+                    "attempt": execution.attempt_no,
+                    "reason": reason,
+                }),
+            )? {
+                bail!("execution {exec_id} raced out of AwaitingReview");
+            }
+            execution = get_task_execution(conn, exec_id)?
+                .ok_or_else(|| anyhow::anyhow!("execution vanished rejecting its delivery"))?;
+        }
         let resumable_worker_state = matches!(
             execution.status,
             TaskExecutionStatus::Working

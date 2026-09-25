@@ -8692,6 +8692,19 @@ pub async fn cancel_execution(
 /// the assignment generation, handoff message and replacement dispatch in one
 /// transaction means a quota fallback cannot lose the execution between the
 /// provider decision and the actual wake-up.
+/// What a replacement worker must know when its reassignment rejected the
+/// delivery that was awaiting review (KT-791).
+fn rejected_delivery_note(before: &TaskExecution) -> Option<String> {
+    (before.status == TaskExecutionStatus::AwaitingReview).then(|| {
+        format!(
+            "\n\n## Livraison rejetée\n\nLa livraison de la tentative {} attendait une revue ; \
+             cette réaffectation l'a rejetée. Elle reste dans l'historique : produis et livre \
+             une nouvelle tentative.",
+            before.attempt_no
+        )
+    })
+}
+
 pub(crate) async fn reassign_native_execution(
     state: &AppState,
     exec_id: &str,
@@ -8714,6 +8727,7 @@ pub(crate) async fn reassign_native_execution(
     let scope_note = reanchor_execution_scope(&state.db, &execution)
         .await?
         .map(|reanchored| reanchored_scope_note(&reanchored));
+    let rejected_note = rejected_delivery_note(&execution);
     let id = exec_id.to_string();
     let persisted_reason = reason.to_string();
     let (view, replaced_dispatch_id) = state
@@ -8774,6 +8788,7 @@ pub(crate) async fn reassign_native_execution(
                 handoff.push_str(persisted_reason.trim());
             }
             handoff.push_str(scope_note.as_deref().unwrap_or_default());
+            handoff.push_str(rejected_note.as_deref().unwrap_or_default());
             let message =
                 orchestrator_message(format!("orch-reassign:{}:{}", id, generation), handoff);
             crate::db::discussions::insert_message(&transaction, &child, &message)?;
@@ -8863,16 +8878,19 @@ pub async fn reassign_execution(
     let reassigned = state
         .db
         .with_conn(move |conn| {
-            crate::db::orchestration::reassign_execution_worker(
+            let before = crate::db::orchestration::get_task_execution(conn, &id)?
+                .context("unknown task execution")?;
+            let execution = crate::db::orchestration::reassign_execution_worker(
                 conn,
                 &id,
                 &selection,
                 &reason,
                 &backend_actor(),
-            )
+            )?;
+            Ok((execution, rejected_delivery_note(&before)))
         })
         .await;
-    let Ok(execution) = reassigned else {
+    let Ok((execution, rejected_note)) = reassigned else {
         return Json(ApiResponse::err_coded(
             ApiErrorCode::Conflict,
             reassigned.err().unwrap().to_string(),
@@ -8975,8 +8993,10 @@ pub async fn reassign_execution(
                             "**Offre de réassignation — génération {}**\n\n\
                              Accepte avec `task_exec_accept_worker_offer({{ offer_id: \"{}\" }})`. \
                              Tu reprendras la même sous-discussion, le même worktree, les manifests, \
-                             constats et SHA déjà persistés ; aucun travail validé ne doit être rejoué.",
-                            recovery.assignment_generation, offer.id
+                             constats et SHA déjà persistés ; aucun travail validé ne doit être rejoué.{}",
+                            recovery.assignment_generation,
+                            offer.id,
+                            rejected_note.as_deref().unwrap_or_default()
                         ),
                     );
                     let target = MessageTarget::cli(provider, session_id);
@@ -10149,11 +10169,226 @@ async fn wait_for_execution_status(
     }
 }
 
+/// Which projection `task_exec_status` returns. `Full` stays the default: worker
+/// briefs and reviews read its lineage, attempts and manifests (KT-791).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskExecStatusView {
+    #[default]
+    Full,
+    Compact,
+}
+
+/// The compact view is measured as the bridge prints it (2-space JSON) and
+/// trimmed until it fits under 1 000 characters.
+const COMPACT_STATUS_MAX_CHARS: usize = 960;
+const COMPACT_ERROR_MAX_CHARS: usize = 160;
+const COMPACT_COMMAND_MAX_CHARS: usize = 60;
+const COMPACT_VALIDATIONS_MAX: usize = 3;
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CompactValidation {
+    pub command: String,
+    pub exit_code: Option<i32>,
+    pub duration_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CompactNextAction {
+    pub tool: Option<&'static str>,
+    pub reason: &'static str,
+}
+
+/// What a polling principal needs to decide its next call, in under 1 000
+/// characters; `view: full` keeps the whole projection.
+#[derive(Debug, Clone, Serialize)]
+pub struct TaskExecutionCompactStatus {
+    pub id: String,
+    pub task: String,
+    pub status: TaskExecutionStatus,
+    pub attempt: u32,
+    pub review_rounds: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub head_sha: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub validations: Vec<CompactValidation>,
+    pub next_action: Option<CompactNextAction>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wait: Option<ExecutionWaitOutcome>,
+}
+
+fn clip_chars(text: &str, max: usize) -> String {
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() <= max {
+        return flat;
+    }
+    let mut clipped: String = flat.chars().take(max.saturating_sub(1)).collect();
+    clipped.push('…');
+    clipped
+}
+
+/// The same resumable holds the bridge announces on the full view, plus the
+/// call each other state expects from the principal.
+fn compact_next_action(detail: &crate::models::TaskExecutionDetail) -> Option<CompactNextAction> {
+    use crate::models::ExecutionRecoveryAction as Action;
+    use TaskExecutionStatus::*;
+    let execution = &detail.lineage.execution;
+    let integration_recovery = detail.recovery.as_ref().is_some_and(|recovery| {
+        recovery.pending
+            && matches!(
+                recovery.recovery_action,
+                Action::RebuildCandidate
+                    | Action::RunValidations
+                    | Action::ApplyFastForward
+                    | Action::IdempotentClose
+            )
+    });
+    let applying_hold = execution.blocked_from_status == Some(Applying);
+    let resumable = (execution.status == Blocked && applying_hold)
+        || (execution.status == Interrupted
+            && execution.interrupted_from_status == Some(Blocked)
+            && applying_hold)
+        || (execution.status == Interrupted && integration_recovery)
+        || (execution.status == Approved && execution.blocked_reason_code.is_some());
+    if resumable {
+        return Some(CompactNextAction {
+            tool: Some("task_exec_resume"),
+            reason: "integration hold: resume once its cause is fixed",
+        });
+    }
+    let (tool, reason) = match execution.status {
+        Done | Failed | Cancelled => return None,
+        AwaitingReview => (Some("task_exec_review"), "review the delivery at head_sha"),
+        Blocked
+            if execution.blocked_reason_code
+                == Some(crate::models::BlockedReasonCode::AwaitingWorkerAcceptance) =>
+        {
+            (
+                Some("task_exec_status"),
+                "the worker has not accepted its offer yet; wait_for Working",
+            )
+        }
+        Blocked | Interrupted => (
+            None,
+            "decide: read last_error and view full, then reassign or cancel",
+        ),
+        Escalated => (None, "a human decision is required; see view full"),
+        Pending | Provisioning | Working | ChangesRequested | Approved | Integrating
+        | Validating | Applying => (
+            Some("task_exec_status"),
+            "in progress: wait_for AwaitingReview, Done or Blocked",
+        ),
+    };
+    Some(CompactNextAction { tool, reason })
+}
+
+fn compact_last_error(detail: &crate::models::TaskExecutionDetail) -> Option<String> {
+    let execution = &detail.lineage.execution;
+    let outcome = execution
+        .outcome_reason
+        .as_deref()
+        .filter(|_| execution.status != TaskExecutionStatus::Done);
+    let recovery = detail
+        .recovery
+        .as_ref()
+        .filter(|recovery| recovery.pending)
+        .map(|recovery| recovery.recovery_reason.as_str());
+    let dispatch = (detail.progress.phase == crate::models::TaskExecutionProgressPhase::Failed)
+        .then_some(detail.progress.reason.as_deref())
+        .flatten();
+    execution
+        .blocked_reason
+        .as_deref()
+        .or(outcome)
+        .or(recovery)
+        .or(dispatch)
+        .filter(|text| !text.trim().is_empty())
+        .map(|text| clip_chars(text, COMPACT_ERROR_MAX_CHARS))
+}
+
+/// Latest candidate's validation runs, most recent last.
+fn compact_validations(detail: &crate::models::TaskExecutionDetail) -> Vec<CompactValidation> {
+    let candidate = detail
+        .lineage
+        .execution
+        .candidate_merge_sha
+        .clone()
+        .or_else(|| {
+            detail
+                .validation_runs
+                .last()
+                .and_then(|run| run.candidate_merge_sha.clone())
+        });
+    let runs: Vec<_> = detail
+        .validation_runs
+        .iter()
+        .filter(|run| run.candidate_merge_sha == candidate)
+        .collect();
+    runs[runs.len().saturating_sub(COMPACT_VALIDATIONS_MAX)..]
+        .iter()
+        .map(|run| CompactValidation {
+            command: clip_chars(&run.command, COMPACT_COMMAND_MAX_CHARS),
+            exit_code: run.exit_code,
+            duration_ms: run.duration_ms,
+        })
+        .collect()
+}
+
+fn compact_status_chars(compact: &TaskExecutionCompactStatus) -> usize {
+    serde_json::to_string_pretty(compact)
+        .map(|text| text.chars().count())
+        .unwrap_or(usize::MAX)
+}
+
+pub(crate) fn compact_execution_status(
+    detail: &crate::models::TaskExecutionDetail,
+    wait: Option<ExecutionWaitOutcome>,
+) -> TaskExecutionCompactStatus {
+    let execution = &detail.lineage.execution;
+    let mut compact = TaskExecutionCompactStatus {
+        id: execution.id.clone(),
+        task: detail.lineage.task_reference.clone(),
+        status: execution.status,
+        attempt: execution.attempt_no,
+        review_rounds: format!(
+            "{}/{}",
+            execution.review_rounds, execution.max_review_rounds
+        ),
+        head_sha: detail
+            .attempts
+            .iter()
+            .rev()
+            .find_map(|attempt| attempt.delivery.as_ref())
+            .map(|delivery| delivery.head_sha.clone()),
+        last_error: compact_last_error(detail),
+        validations: compact_validations(detail),
+        next_action: compact_next_action(detail),
+        wait,
+    };
+    while compact_status_chars(&compact) > COMPACT_STATUS_MAX_CHARS {
+        if !compact.validations.is_empty() {
+            compact.validations.remove(0);
+        } else if let Some(error) = compact.last_error.take() {
+            let shorter = error.chars().count() / 2;
+            if shorter >= 16 {
+                compact.last_error = Some(clip_chars(&error, shorter));
+            }
+        } else {
+            break;
+        }
+    }
+    compact
+}
+
 /// Body of `POST /api/orchestration/tool/executions/{id}/status`.
 #[derive(Deserialize, Default)]
 pub struct TaskExecStatusRequest {
     #[serde(flatten)]
     pub caller: TaskExecCallerRequest,
+    #[serde(default)]
+    pub view: TaskExecStatusView,
     /// Block until the execution reaches one of these states (KT-790).
     #[serde(default)]
     pub wait_for: Vec<TaskExecutionStatus>,
@@ -10168,6 +10403,7 @@ pub async fn task_exec_status(
 ) -> Json<ApiResponse<serde_json::Value>> {
     let TaskExecStatusRequest {
         caller: request,
+        view,
         wait_for,
         timeout_secs,
     } = request;
@@ -10272,19 +10508,24 @@ pub async fn task_exec_status(
         }
     };
     attach_runtime_liveness(&state, &mut detail);
-    let mut body = match serde_json::to_value(&detail) {
-        Ok(body) => body,
-        Err(error) => {
-            return Json(ApiResponse::err_coded(
-                ApiErrorCode::Internal,
-                error.to_string(),
-            ))
+    let body = match view {
+        TaskExecStatusView::Compact => {
+            serde_json::to_value(compact_execution_status(&detail, wait))
         }
+        TaskExecStatusView::Full => serde_json::to_value(&detail).map(|mut body| {
+            if let (Some(wait), Some(object)) = (wait, body.as_object_mut()) {
+                object.insert("wait".into(), serde_json::json!(wait));
+            }
+            body
+        }),
     };
-    if let (Some(wait), Some(object)) = (wait, body.as_object_mut()) {
-        object.insert("wait".into(), serde_json::json!(wait));
+    match body {
+        Ok(body) => Json(ApiResponse::ok(body)),
+        Err(error) => Json(ApiResponse::err_coded(
+            ApiErrorCode::Internal,
+            error.to_string(),
+        )),
     }
-    Json(ApiResponse::ok(body))
 }
 
 pub async fn task_exec_resume(
@@ -21610,6 +21851,7 @@ mod tests {
                 source_session_id: "principal-sess".into(),
                 spawned_agent: None,
             },
+            view: TaskExecStatusView::Full,
             wait_for,
             timeout_secs,
         }
@@ -21751,6 +21993,300 @@ mod tests {
             plain.data.unwrap().get("wait").is_none(),
             "a plain read keeps its historical shape"
         );
+    }
+
+    async fn kt791_delivered_execution(
+        db: &std::sync::Arc<Database>,
+        repo: &Path,
+    ) -> (String, String, String) {
+        let (_, parent_id, child_id, exec_id) = attached_cli_worker(db, repo).await;
+        seed_cli_session(db, 202, &parent_id, "principal-sess").await;
+        let manifest = clean_manifest_for_execution(db, &exec_id).await;
+        let outcome = deliver_worker_manifest(db, &exec_id, "ClaudeCode", "sess-a", &manifest)
+            .await
+            .unwrap();
+        assert!(matches!(outcome, DeliverOutcome::Delivered { .. }));
+        (parent_id, child_id, exec_id)
+    }
+
+    async fn kt791_status(
+        state: &AppState,
+        exec_id: &str,
+        view: TaskExecStatusView,
+    ) -> (serde_json::Value, usize) {
+        let mut request = kt790_principal_status(Vec::new(), None);
+        request.view = view;
+        let Json(response) = task_exec_status(
+            State(state.clone()),
+            Path(exec_id.to_string()),
+            Json(request),
+        )
+        .await;
+        let body = response.data.expect("status must answer");
+        // Measured the way the MCP bridge prints a tool result.
+        let printed = serde_json::to_string_pretty(&body).unwrap().chars().count();
+        (body, printed)
+    }
+
+    /// KT-791 DoD-1 — `view: compact` answers a delivered, validated execution
+    /// with its state, attempt, head, last error, validations and next action in
+    /// under 1 000 characters, and stays under it however long the evidence is.
+    #[tokio::test]
+    async fn compact_status_carries_the_decision_fields_in_under_a_thousand_chars() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let (_, _, exec_id) = kt791_delivered_execution(&db, repo.path()).await;
+        let head_sha = {
+            let id = exec_id.clone();
+            db.with_conn(move |conn| {
+                Ok(crate::db::worker_deliveries::get_delivery(conn, &id, 0)?
+                    .unwrap()
+                    .head_sha)
+            })
+            .await
+            .unwrap()
+        };
+        {
+            let id = exec_id.clone();
+            db.with_conn(move |conn| {
+                for (command, exit_code, duration_ms) in [
+                    ("cargo fmt --check", 0, 2_140),
+                    ("cargo clippy --all-targets -- -D warnings", 0, 96_310),
+                    ("cargo test --no-fail-fast", 101, 412_877),
+                ] {
+                    crate::db::orchestration::record_validation_run(
+                        conn,
+                        &id,
+                        Some("candidate-sha"),
+                        &crate::models::ValidationSpec {
+                            command: command.into(),
+                            quick_exec_id: None,
+                            timeout_secs: Some(900),
+                        },
+                        Some(exit_code),
+                        Some(duration_ms),
+                        Some(&"test output line\n".repeat(400)),
+                    )?;
+                }
+                conn.execute(
+                    "UPDATE task_executions SET candidate_merge_sha = 'candidate-sha' WHERE id = ?1",
+                    [&id],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        }
+        let state = kt790_state(&db);
+
+        let (full, full_chars) = kt791_status(&state, &exec_id, TaskExecStatusView::Full).await;
+        assert!(
+            full.get("lineage").is_some(),
+            "full stays the default shape"
+        );
+        let (compact, compact_chars) =
+            kt791_status(&state, &exec_id, TaskExecStatusView::Compact).await;
+        assert!(
+            compact_chars < 1000,
+            "compact view is {compact_chars} chars: {compact:#}"
+        );
+        assert!(
+            full_chars > 5 * compact_chars,
+            "full {full_chars} vs compact {compact_chars}"
+        );
+        assert_eq!(compact["id"], exec_id);
+        assert_eq!(compact["status"], "AwaitingReview");
+        assert_eq!(compact["attempt"], 0);
+        assert_eq!(compact["head_sha"], head_sha);
+        assert_eq!(compact["next_action"]["tool"], "task_exec_review");
+        let validations = compact["validations"].as_array().unwrap();
+        assert_eq!(validations.len(), 3);
+        assert_eq!(validations[2]["command"], "cargo test --no-fail-fast");
+        assert_eq!(validations[2]["exit_code"], 101);
+        assert_eq!(validations[2]["duration_ms"], 412_877);
+        assert!(compact.get("lineage").is_none());
+
+        // A pathological hold: a huge reason and many long quoted commands.
+        {
+            let id = exec_id.clone();
+            db.with_conn(move |conn| {
+                for index in 0..12 {
+                    crate::db::orchestration::record_validation_run(
+                        conn,
+                        &id,
+                        Some("candidate-sha"),
+                        &crate::models::ValidationSpec {
+                            command: format!("run \"{}\" {index}", "\\\"x\\\"".repeat(60)),
+                            quick_exec_id: None,
+                            timeout_secs: None,
+                        },
+                        Some(1),
+                        Some(10),
+                        None,
+                    )?;
+                }
+                conn.execute(
+                    "UPDATE task_executions SET blocked_reason = ?2 WHERE id = ?1",
+                    rusqlite::params![&id, "« refusé » \"quoted\"\n".repeat(300)],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        }
+        let (worst, worst_chars) =
+            kt791_status(&state, &exec_id, TaskExecStatusView::Compact).await;
+        assert!(
+            worst_chars < 1000,
+            "worst case is {worst_chars} chars: {worst:#}"
+        );
+        assert_eq!(worst["status"], "AwaitingReview");
+        assert!(worst["last_error"].as_str().unwrap().ends_with('…'));
+        assert!(!worst["validations"].as_array().unwrap().is_empty());
+    }
+
+    /// KT-791 DoD-2 — reassigning an execution awaiting review rejects its
+    /// delivery, keeps the task and the attempt history, and starts a new
+    /// attempt on the requested native worker.
+    #[tokio::test]
+    async fn reassign_from_awaiting_review_starts_a_new_attempt_on_the_requested_worker() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let (_, child_id, exec_id) = kt791_delivered_execution(&db, repo.path()).await;
+        let before = exec_of(&db, &exec_id).await;
+        assert_eq!(before.status, TaskExecutionStatus::AwaitingReview);
+
+        let Json(reassigned) = task_exec_reassign(
+            State(kt790_state(&db)),
+            Path(exec_id.clone()),
+            Json(TaskExecReassignRequest {
+                source_agent: "ClaudeCode".into(),
+                source_session_id: "principal-sess".into(),
+                worker: MessageTarget::discussion_agent(AgentType::Ollama),
+                reason: "the delivery misread the DoD; try a native worker".into(),
+            }),
+        )
+        .await;
+        assert!(reassigned.success, "{:?}", reassigned.error);
+
+        let after = exec_of(&db, &exec_id).await;
+        assert_eq!(after.status, TaskExecutionStatus::Working);
+        assert_eq!(after.attempt_no, before.attempt_no + 1, "a new attempt");
+        assert_eq!(after.task_id, before.task_id);
+        assert_eq!(after.sub_discussion_id.as_deref(), Some(child_id.as_str()));
+        assert_eq!(after.worker_agent_type.as_deref(), Some("Ollama"));
+        assert_eq!(after.worker_cli_session_id, None);
+        assert_eq!(after.review_rounds, before.review_rounds);
+
+        let id = exec_id.clone();
+        let (kept_delivery, rejection, handoff, principal) = db
+            .with_conn(move |conn| {
+                let kept = crate::db::worker_deliveries::get_delivery(conn, &id, 0)?.is_some();
+                let rejection: String = conn.query_row(
+                    "SELECT changes_json FROM task_execution_events \
+                     WHERE task_execution_id = ?1 AND from_status = 'AwaitingReview' \
+                       AND to_status = 'ChangesRequested'",
+                    [&id],
+                    |row| row.get(0),
+                )?;
+                let handoff: String = conn.query_row(
+                    "SELECT content FROM messages WHERE id LIKE 'orch-reassign:' || ?1 || ':%'",
+                    [&id],
+                    |row| row.get(0),
+                )?;
+                let principal = crate::db::orchestration::principal_notice_target(
+                    conn,
+                    &id,
+                    AgentType::ClaudeCode,
+                )?;
+                Ok((kept, rejection, handoff, principal))
+            })
+            .await
+            .unwrap();
+        assert!(kept_delivery, "the rejected delivery stays in the history");
+        assert!(
+            rejection.contains("\"delivery\":\"rejected\""),
+            "{rejection}"
+        );
+        assert!(handoff.contains("Livraison rejetée"), "{handoff}");
+        assert_eq!(
+            principal,
+            MessageTarget::cli(AgentType::ClaudeCode, 202),
+            "the reassigning CLI now receives the execution's notices"
+        );
+        assert_eq!(
+            count(&db, "SELECT COUNT(*) FROM agent_dispatch_jobs").await,
+            1,
+            "exactly one dispatch for the replacement worker"
+        );
+    }
+
+    /// KT-791 DoD-2, CLI target — the reassignment offers the next attempt to the
+    /// requested session, which accepts it and works on it.
+    #[tokio::test]
+    async fn reassign_from_awaiting_review_offers_the_new_attempt_to_the_requested_cli() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let (parent_id, _, exec_id) = kt791_delivered_execution(&db, repo.path()).await;
+        seed_cli_session(&db, 102, &parent_id, "sess-b").await;
+        {
+            let parent_id = parent_id.clone();
+            db.with_conn(move |conn| {
+                crate::db::disc_source::bind_to_source(conn, &parent_id, "ClaudeCode", "sess-b")
+            })
+            .await
+            .unwrap();
+        }
+
+        let Json(reassigned) = task_exec_reassign(
+            State(kt790_state(&db)),
+            Path(exec_id.clone()),
+            Json(TaskExecReassignRequest {
+                source_agent: "ClaudeCode".into(),
+                source_session_id: "principal-sess".into(),
+                worker: MessageTarget::cli(AgentType::ClaudeCode, 102),
+                reason: "hand the rework to another CLI".into(),
+            }),
+        )
+        .await;
+        assert!(reassigned.success, "{:?}", reassigned.error);
+
+        let after = exec_of(&db, &exec_id).await;
+        assert_eq!(after.attempt_no, 1);
+        let offer = {
+            let id = exec_id.clone();
+            db.with_conn(move |conn| {
+                crate::db::worker_offers::get_active_offer_for_attempt(conn, &id, 1)
+            })
+            .await
+            .unwrap()
+            .expect("the new attempt is offered to the requested session")
+        };
+        assert_eq!(offer.target_cli_session_id, 102);
+        let offer_text = {
+            let message_id = offer.offer_message_id.clone().unwrap();
+            db.with_conn(move |conn| {
+                conn.query_row(
+                    "SELECT content FROM messages WHERE id = ?1",
+                    [&message_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .map_err(anyhow::Error::from)
+            })
+            .await
+            .unwrap()
+        };
+        assert!(offer_text.contains("Livraison rejetée"), "{offer_text}");
+
+        let accepted =
+            accept_worker_offer_and_attach(&db, &offer.id, "ClaudeCode", "sess-b", "sess-b")
+                .await
+                .unwrap();
+        assert!(matches!(accepted, AcceptAttachOutcome::Attached { .. }));
+        let working = exec_of(&db, &exec_id).await;
+        assert_eq!(working.status, TaskExecutionStatus::Working);
+        assert_eq!(working.worker_cli_session_id, Some(102));
+        assert_eq!(working.attempt_no, 1);
     }
 
     /// A session that is NOT the execution's worker cannot deliver — NotAddressed (fused

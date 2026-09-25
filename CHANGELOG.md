@@ -103,6 +103,16 @@ Release notes for 0.9.3 and earlier are available in the
   completes. A resume requested for an execution already being resumed is
   refused with `a resume of this execution is already running` instead of
   running twice.
+- A principal following a task execution no longer reads 10 to 17 thousand
+  characters per `task_exec_status` call. `view: "compact"` returns the status,
+  attempt, review rounds, delivered `head_sha`, last error, the latest
+  candidate's validations (command, exit code, duration) and `next_action` in
+  under 1 000 characters. The full view stays the default, for reviews and
+  diagnosis.
+- `task_exec_reassign` is accepted from `AwaitingReview`. The pending delivery
+  is rejected but kept in the attempt history, and the requested worker starts
+  the next attempt on the same task, room and worktree, instead of the
+  principal cancelling and relaunching the task.
 - A worker's delivery now wakes the CLI principal waiting in the parent room.
   The review request, escalations, integration refusals, campaign pauses, the
   undelivered-worker notice and the terminal notice were addressed to the

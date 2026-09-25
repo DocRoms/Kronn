@@ -933,14 +933,15 @@ TOOLS = [
         "name": "task_exec_status",
         "description": (
             "Read a party-visible TaskExecution by id or task_reference (KT-###); obey its "
-            "`next_action`, never infer state from chat. `wait_for` blocks until one of those "
-            "statuses: tool_manual({tool: \"task_exec_status\"})."
+            "`next_action`, never infer state from chat. Poll with `view: compact` (<1 KB); "
+            "`wait_for` blocks until one of those statuses: tool_manual({tool: \"task_exec_status\"})."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "task_execution_id": {"type": "string"},
                 "task_reference": {"type": "string"},
+                "view": {"type": "string", "enum": ["compact", "full"]},
                 "wait_for": {"type": "array", "items": {"type": "string"}},
                 "timeout_secs": {"type": "integer"},
             },
@@ -983,8 +984,8 @@ TOOLS = [
     {
         "name": "task_exec_reassign",
         "description": (
-            "Reassign an interrupted/blocked execution without losing its room or evidence. "
-            "See tool_manual({tool: \"task_exec_reassign\"})."
+            "Reassign an interrupted, blocked or awaiting-review execution (a pending delivery is "
+            "rejected), keeping its room and evidence. See tool_manual({tool: \"task_exec_reassign\"})."
         ),
         "inputSchema": {
             "type": "object",
@@ -5888,8 +5889,14 @@ _TASK_EXECUTION_STATUSES = frozenset({
 
 
 def _task_exec_status_options(args):
-    """The optional blocking wait (KT-790); the backend bounds its duration."""
+    """The compact view (KT-791) and the blocking wait (KT-790), which the
+    backend bounds."""
     options = {}
+    view = args.get("view")
+    if view is not None:
+        if view not in ("compact", "full"):
+            raise RuntimeError('task_exec_status: view must be "compact" or "full"')
+        options["view"] = view
     wait_for = args.get("wait_for")
     if wait_for is not None:
         if (
@@ -5938,6 +5945,9 @@ def call_task_exec_status(args):
         f"/api/orchestration/tool/executions/{urllib.parse.quote(execution_id, safe='')}/status",
         {"source_agent": source_agent, "source_session_id": source_session_id, **options},
     ))
+    if options.get("view") == "compact":
+        # The backend already derives `next_action` for this projection.
+        return result
     execution = ((result.get("lineage") or {}).get("execution") or {})
     status = execution.get("status")
     blocked_from = execution.get("blocked_from_status")
@@ -9632,6 +9642,11 @@ TOOL_MANUALS = {
         "the capability gap instead of fabricating a handoff."
     ),
     "task_exec_status": (
+        "`view: \"compact\"` returns only id, task, status, attempt, review_rounds, head_sha, "
+        "last_error, the latest candidate's validations (command, exit_code, duration_ms) and "
+        "`next_action`, in under 1 000 characters: use it to poll. The default `view: \"full\"` "
+        "keeps lineage, DoD, every attempt's manifest and review, validation output and usage; "
+        "read it to review a delivery or diagnose a hold.\n\n"
         "`wait_for: [\"AwaitingReview\", \"Done\", \"Blocked\"]` holds the call until the "
         "execution is in one of these statuses, then returns the status plus "
         "`wait: {matched, timed_out, waited_ms}`. A status already reached returns at once; a "
@@ -9653,7 +9668,9 @@ TOOL_MANUALS = {
     ),
     "task_exec_reassign": (
         "Reassignment is principal-only and preserves the execution room, "
-        "worktree and evidence. Pass the flat typed MessageTarget copied from "
+        "worktree and evidence. From `AwaitingReview` it rejects the pending "
+        "delivery, which stays in the attempt history, and the new worker starts "
+        "the next attempt. Pass the flat typed MessageTarget copied from "
         "`agent_list` (`kind`, `agent_type`, optional exact `cli_session_id` and "
         "tier), never the internal `{target, model, profile_id}` envelope. A "
         "transport change must change `worker.kind`. Native HTTP targets do not "

@@ -1265,6 +1265,32 @@ class TaskExecPrincipalSurfaceTests(unittest.TestCase):
         self.assertIn("wait_for", schema)
         self.assertIn("timeout_secs", schema)
 
+    def test_status_forwards_the_compact_view_without_rewriting_its_next_action(self):
+        """KT-791 — the compact projection carries the backend's own `next_action`;
+        the full-view resume heuristic must not run on it."""
+        compact = {
+            "id": "exec-1", "status": "AwaitingReview", "attempt": 1,
+            "next_action": {"tool": "task_exec_review", "reason": "review"},
+        }
+        http = mock.MagicMock(return_value={"success": True, "data": compact})
+        with mock.patch.object(
+            self.mod, "_task_exec_identity", return_value=("Codex", "session-1"),
+        ), mock.patch.object(self.mod, "_http", http):
+            self.assertEqual(
+                self.mod.call_task_exec_status({"task_execution_id": "exec-1", "view": "compact"}),
+                compact,
+            )
+            with self.assertRaises(RuntimeError):
+                self.mod.call_task_exec_status({"task_execution_id": "exec-1", "view": "tiny"})
+        http.assert_called_once_with(
+            "POST", "/api/orchestration/tool/executions/exec-1/status", {
+                "source_agent": "Codex", "source_session_id": "session-1", "view": "compact",
+            },
+        )
+        reassign = next(tool for tool in self.mod.TOOLS if tool["name"] == "task_exec_reassign")
+        self.assertIn("awaiting-review", reassign["description"])
+        self.assertIn("AwaitingReview", self.mod.TOOL_MANUALS["task_exec_reassign"])
+
     def test_task_exec_reassign_accepts_every_message_target_kind_from_agent_list(self):
         """KT-492 — `worker` is the flat MessageTarget object copied verbatim
         from `agent_list`, for every transport it can report: an HTTP provider
