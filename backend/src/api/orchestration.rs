@@ -159,9 +159,73 @@ pub struct OrchestrationBootReport {
     pub interrupted: usize,
     pub classified: usize,
     pub resumed_or_parked: usize,
+    /// Classified executions whose resume can run Git, validations or a
+    /// provisioning: [`spawn_deferred_boot_resumes`] applies them once HTTP is served.
+    pub deferred_resumes: Vec<String>,
     pub orphan_workspaces_removed: usize,
     pub orphan_workspaces_preserved: usize,
     pub errors: Vec<String>,
+}
+
+#[derive(Debug, Default)]
+struct DeferredResumeReport {
+    resumed_or_parked: usize,
+    /// Already resumed, cancelled or being resumed by another caller.
+    skipped: usize,
+    errors: Vec<String>,
+}
+
+/// One execution's `/resume` slot, released on drop.
+struct ResumeSlot {
+    slots: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    execution_id: String,
+}
+
+impl ResumeSlot {
+    fn claim(
+        slots: &std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+        execution_id: &str,
+    ) -> Option<Self> {
+        let mut held = slots
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        held.insert(execution_id.to_string()).then(|| Self {
+            slots: slots.clone(),
+            execution_id: execution_id.to_string(),
+        })
+    }
+}
+
+impl Drop for ResumeSlot {
+    fn drop(&mut self) {
+        self.slots
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.execution_id);
+    }
+}
+
+/// Whether this boot decision can run Git, validations or a provisioning. The rest stay
+/// before the dispatcher starts, so it never claims a job of a still-Interrupted execution.
+fn boot_resume_is_deferred(execution: &TaskExecution, action: ExecutionRecoveryAction) -> bool {
+    use ExecutionRecoveryAction::*;
+    // An interrupted Applying hold replays its apply whatever the decision says.
+    if execution.interrupted_from_status == Some(TaskExecutionStatus::Blocked)
+        && execution.blocked_from_status == Some(TaskExecutionStatus::Applying)
+    {
+        return true;
+    }
+    match action {
+        ResumeProvisioning | RebuildCandidate | RunValidations | ApplyFastForward
+        | IdempotentClose => true,
+        ResumeWorker
+        | AwaitReview
+        | AwaitHuman
+        | BlockDirtyTarget
+        | BlockMissingWorkspace
+        | BlockMissingDiscussion
+        | BlockAgentUnavailable => false,
+    }
 }
 
 pub(crate) fn available_agent_types(
@@ -190,8 +254,17 @@ pub(crate) async fn available_agent_types_for_state(state: &AppState) -> Vec<Age
 /// Reconcile every orchestration boundary before the dispatch engine starts.
 /// Each in-flight row first becomes `Interrupted`; only then do we inspect its
 /// durable lineage and the real Git refs and persist a bounded recovery action.
-/// No status is declared successful from a checkpoint alone.
+/// No status is declared successful from a checkpoint alone. Decisions that can
+/// run for minutes are returned in `deferred_resumes` instead of being applied.
 pub async fn reconcile_at_boot(state: &AppState) -> OrchestrationBootReport {
+    let available_agents = available_agent_types_for_state(state).await;
+    reconcile_at_boot_with_agents(state, &available_agents).await
+}
+
+async fn reconcile_at_boot_with_agents(
+    state: &AppState,
+    available_agents: &[AgentType],
+) -> OrchestrationBootReport {
     let mut report = OrchestrationBootReport::default();
     let moved = match state
         .db
@@ -218,27 +291,49 @@ pub async fn reconcile_at_boot(state: &AppState) -> OrchestrationBootReport {
             moved
         });
 
-    let mut detected_agents = crate::agents::detect_all_cached(false).await;
-    {
-        let config = state.config.read().await;
-        crate::agents::apply_configured_status(&mut detected_agents, &config);
-    }
-    let available_agents = available_agent_types(detected_agents);
-
     for id in ids {
         // Recovery decisions describe the real execution/Git state at one
         // instant. A failed apply may leave that decision pending while the
         // execution advances to a newer Interrupted checkpoint. Reclassify on
         // every boot before consuming it so a stale ResumeProvisioning can
         // never be replayed against an Applying-origin interruption.
-        if let Err(error) = classify_interrupted_execution(&state.db, &id, &available_agents).await
-        {
+        if let Err(error) = classify_interrupted_execution(&state.db, &id, available_agents).await {
             report
                 .errors
                 .push(format!("execution {id} classification: {error}"));
             continue;
         }
         report.classified += 1;
+        let deferred = {
+            let id = id.clone();
+            state
+                .db
+                .with_conn(move |conn| {
+                    let execution = crate::db::orchestration::get_task_execution(conn, &id)?
+                        .context("execution vanished after classification")?;
+                    let recovery = crate::db::orchestration::get_execution_recovery(conn, &id)?
+                        .context("classification left no recovery decision")?;
+                    Ok(boot_resume_is_deferred(
+                        &execution,
+                        recovery.recovery_action,
+                    ))
+                })
+                .await
+        };
+        match deferred {
+            Ok(false) => {}
+            Ok(true) => {
+                report.deferred_resumes.push(id);
+                continue;
+            }
+            Err(error) => {
+                report
+                    .errors
+                    .push(format!("execution {id} recovery scheduling: {error}"));
+                report.deferred_resumes.push(id);
+                continue;
+            }
+        }
         // Classification is durably journaled first. Applying it through the
         // same guarded surface as an explicit resume then either continues safe
         // work or parks a human-only boundary. A prior boot's pending decision
@@ -354,6 +449,102 @@ pub async fn reconcile_at_boot(state: &AppState) -> OrchestrationBootReport {
                     orphan.id
                 ));
             }
+        }
+    }
+    report
+}
+
+/// Apply the decisions [`reconcile_at_boot`] deferred, in boot order, on a
+/// background task so a replayed validation never holds up the HTTP listener.
+pub fn spawn_deferred_boot_resumes(state: AppState, execution_ids: Vec<String>) {
+    if execution_ids.is_empty() {
+        return;
+    }
+    tokio::spawn(async move {
+        let available_agents = available_agent_types_for_state(&state).await;
+        let report = resume_deferred_at_boot(state, execution_ids, available_agents).await;
+        if report.errors.is_empty() {
+            tracing::info!(
+                resumed_or_parked = report.resumed_or_parked,
+                skipped = report.skipped,
+                "Deferred task-execution resumes completed"
+            );
+        } else {
+            tracing::warn!(
+                resumed_or_parked = report.resumed_or_parked,
+                skipped = report.skipped,
+                errors = ?report.errors,
+                "Deferred task-execution resumes completed"
+            );
+        }
+    });
+}
+
+async fn resume_deferred_at_boot(
+    state: AppState,
+    execution_ids: Vec<String>,
+    available_agents: Vec<AgentType>,
+) -> DeferredResumeReport {
+    let mut report = DeferredResumeReport::default();
+    for id in execution_ids {
+        // A user resume that started first owns the execution.
+        let Some(_slot) = ResumeSlot::claim(&state.execution_resumes, &id) else {
+            report.skipped += 1;
+            tracing::info!(execution_id = %id, "deferred boot resume skipped: another resume is running");
+            continue;
+        };
+        let still_interrupted = {
+            let id = id.clone();
+            state
+                .db
+                .with_conn(move |conn| {
+                    Ok(
+                        crate::db::orchestration::get_task_execution(conn, &id)?.is_some_and(
+                            |execution| execution.status == TaskExecutionStatus::Interrupted,
+                        ),
+                    )
+                })
+                .await
+        };
+        match still_interrupted {
+            Ok(true) => {}
+            Ok(false) => {
+                report.skipped += 1;
+                tracing::info!(execution_id = %id, "deferred boot resume skipped: no longer interrupted");
+                continue;
+            }
+            Err(error) => {
+                let message = format!("execution {id} deferred resume scan: {error}");
+                tracing::warn!("{message}");
+                report.errors.push(message);
+                continue;
+            }
+        }
+        // Minutes may separate the boot decision from this apply, and an earlier
+        // resume may have moved the target: decide again from the refs as they are.
+        if let Err(error) = classify_interrupted_execution(&state.db, &id, &available_agents).await
+        {
+            let message = format!("execution {id} classification: {error}");
+            tracing::warn!("{message}");
+            report.errors.push(message);
+            continue;
+        }
+        let started = std::time::Instant::now();
+        let response = resume_claimed_execution(state.clone(), id.clone()).await.0;
+        let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        if response.success {
+            report.resumed_or_parked += 1;
+            let outcome = response.data.and_then(|view| view.outcome);
+            tracing::info!(execution_id = %id, elapsed_ms, ?outcome, "deferred boot resume completed");
+        } else {
+            let message = format!(
+                "execution {id} recovery apply: {}",
+                response
+                    .error
+                    .unwrap_or_else(|| "unknown recovery error".into())
+            );
+            tracing::warn!(execution_id = %id, elapsed_ms, "{message}");
+            report.errors.push(message);
         }
     }
     report
@@ -7922,6 +8113,20 @@ async fn resume_blocked_apply(
 pub async fn resume_execution(
     State(state): State<AppState>,
     Path(exec_id): Path<String>,
+) -> Json<ApiResponse<ExecutionRecoveryView>> {
+    let Some(_slot) = ResumeSlot::claim(&state.execution_resumes, &exec_id) else {
+        return Json(ApiResponse::err_coded(
+            ApiErrorCode::Conflict,
+            "a resume of this execution is already running",
+        ));
+    };
+    resume_claimed_execution(state, exec_id).await
+}
+
+/// `/resume` for a caller that holds the execution's [`ResumeSlot`].
+async fn resume_claimed_execution(
+    state: AppState,
+    exec_id: String,
 ) -> Json<ApiResponse<ExecutionRecoveryView>> {
     let snapshot = {
         let id = exec_id.clone();
@@ -16544,6 +16749,172 @@ mod tests {
             Some("already resumed: Done")
         );
         assert_eq!(git_rev(repo.path(), "main"), merge_sha);
+    }
+
+    // KT-801 — the multi-thread flavour mirrors the production runtime.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_slow_validation_replayed_after_a_restart_does_not_delay_health() {
+        use tower::ServiceExt;
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        // Long enough to be observed in flight, short enough for the suite.
+        let validation = ValidationSpec {
+            command: "sleep 3".into(),
+            quick_exec_id: None,
+            timeout_secs: Some(60),
+        };
+        let (execution, _, child) = approved_execution_with_commit(
+            &db,
+            repo.path(),
+            "slow-boot-resume",
+            "worker.txt",
+            "done",
+            vec![validation],
+        )
+        .await;
+        let anchor = git_rev(repo.path(), "main");
+        checkpoint(&db, &execution.id, CheckpointStep::Anchored(anchor.clone()))
+            .await
+            .unwrap();
+        let worktree::CandidateOutcome::Built { sha } =
+            worktree::build_candidate(&child, &anchor).unwrap()
+        else {
+            panic!("candidate");
+        };
+        checkpoint(&db, &execution.id, CheckpointStep::Built(sha.clone()))
+            .await
+            .unwrap();
+        checkpoint(&db, &execution.id, CheckpointStep::Validating)
+            .await
+            .unwrap();
+        let state = recovery_test_state(&db);
+
+        // Boot: the validation the restart cut short is classified, not replayed.
+        let report = reconcile_at_boot_with_agents(&state, &[AgentType::ClaudeCode]).await;
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert_eq!(report.interrupted, 1);
+        assert_eq!(report.classified, 1);
+        assert_eq!(report.resumed_or_parked, 0);
+        assert_eq!(report.deferred_resumes, vec![execution.id.clone()]);
+        assert_eq!(
+            exec_of(&db, &execution.id).await.status,
+            TaskExecutionStatus::Interrupted
+        );
+        let id = execution.id.clone();
+        let (decision, runs) = db
+            .with_conn(move |conn| {
+                Ok((
+                    crate::db::orchestration::get_execution_recovery(conn, &id)?,
+                    crate::db::orchestration::list_validation_runs(conn, &id)?,
+                ))
+            })
+            .await
+            .unwrap();
+        let decision = decision.expect("boot decision");
+        assert_eq!(
+            decision.recovery_action,
+            ExecutionRecoveryAction::RunValidations
+        );
+        assert!(decision.pending);
+        assert!(runs.is_empty(), "no validation runs before the listener");
+
+        // Listener bound: the replay runs in the background.
+        let resumes = tokio::spawn(resume_deferred_at_boot(
+            state.clone(),
+            report.deferred_resumes,
+            vec![AgentType::ClaudeCode],
+        ));
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        while exec_of(&db, &execution.id).await.status != TaskExecutionStatus::Validating {
+            assert!(!resumes.is_finished(), "the deferred resume ended early");
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "no validation claim"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let health = tokio::time::timeout(
+            Duration::from_secs(2),
+            crate::build_router_with_auth(state.clone(), false).oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/health")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            ),
+        )
+        .await
+        .expect("health waited for the resume")
+        .unwrap();
+        assert_eq!(health.status(), axum::http::StatusCode::OK);
+        assert!(
+            !resumes.is_finished(),
+            "health answered while the validation still runs"
+        );
+
+        // A user resume meanwhile is refused instead of running the saga twice.
+        let Json(concurrent) =
+            resume_execution(State(state.clone()), Path(execution.id.clone())).await;
+        assert!(!concurrent.success);
+        assert!(
+            concurrent
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("already running")),
+            "{:?}",
+            concurrent.error
+        );
+
+        let deferred = tokio::time::timeout(Duration::from_secs(60), resumes)
+            .await
+            .expect("the deferred resume finishes")
+            .unwrap();
+        assert!(deferred.errors.is_empty(), "{:?}", deferred.errors);
+        assert_eq!(deferred.resumed_or_parked, 1);
+        let done = exec_of(&db, &execution.id).await;
+        assert_eq!(done.status, TaskExecutionStatus::Done);
+        assert_eq!(done.integrated_sha.as_deref(), Some(sha.as_str()));
+        assert_eq!(git_rev(repo.path(), "main"), sha);
+        let Json(replay) = resume_execution(State(state), Path(execution.id.clone())).await;
+        assert_eq!(
+            replay.data.and_then(|view| view.outcome).as_deref(),
+            Some("already resumed: Done"),
+            "the slot is released once the resume ends"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_worker_interrupted_by_a_restart_is_woken_before_serving() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let (task_ref, parent_id, _) = seed(&db, repo.path()).await;
+        let execution = provision_single_task_execution(
+            &db,
+            ProvisionInput {
+                task_reference: task_ref,
+                parent_discussion_id: parent_id,
+                worker: native_worker(),
+                base_rev: Some("main".into()),
+                idempotency_key: Some("boot-worker".into()),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(execution.status, TaskExecutionStatus::Working);
+
+        let report =
+            reconcile_at_boot_with_agents(&recovery_test_state(&db), &[AgentType::ClaudeCode])
+                .await;
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert_eq!(report.interrupted, 1);
+        assert!(
+            report.deferred_resumes.is_empty(),
+            "the dispatcher must find the worker already woken"
+        );
+        assert_eq!(report.resumed_or_parked, 1);
+        assert_eq!(
+            exec_of(&db, &execution.id).await.status,
+            TaskExecutionStatus::Working
+        );
     }
 
     #[tokio::test]

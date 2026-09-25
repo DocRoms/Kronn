@@ -75,6 +75,15 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- A restart in the middle of a task execution's integration no longer keeps the
+  backend from answering while the interrupted validations are replayed, which
+  could outlast the 300 health probes `kronn start-dev` waits for. Boot still
+  reclassifies every interrupted execution, but replaying validations,
+  rebuilding a candidate, applying and provisioning now start once the server
+  listens, in the background and one execution at a time, each logged as it
+  completes. A resume requested for an execution already being resumed is
+  refused with `a resume of this execution is already running` instead of
+  running twice.
 - A prelocalized rework no longer edits the launch line numbers on moved
   content. When a delivery changed the file's line count, `request_changes`
   replayed the same range and a local worker deleted the neighbouring rule.
