@@ -70,6 +70,11 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- The document exporter (`kronn-docs`) no longer outlives a backend that is
+  killed outright (crash, SIGKILL, a hot-reload restart that times out). It
+  now exits as soon as the backend's end of its stdin pipe closes, instead of
+  piling up orphaned processes across restarts. Development setups that use
+  the desktop bundle need `make docs-bundle` once to pick this up.
 - `kronn start-dev` no longer moves `/opt/homebrew/bin` and `~/.cargo/bin`
   ahead of your own PATH; it adds them at the end, and only when missing. With a
   second, older agent CLI installed through Homebrew/npm, Kronn used to run that

@@ -402,6 +402,10 @@ def main() -> None:
         sys.exit(2)
     port = int(port_str)
 
+    from kronn_docs import parent_watch
+
+    parent_watch.start_if_requested()
+
     # uvicorn won't print anything useful for the ready marker, so we
     # hook the `lifespan` startup event to write it ourselves.
     @app.on_event("startup")  # type: ignore[deprecated]
