@@ -170,12 +170,13 @@ export function postLivePageActionSlot(
 export function postLivePageActionStates(
   target: Window,
   channelId: string,
-  launches: Pick<LivePageAction, 'action_ref' | 'binding_key' | 'state'>[],
+  launches: Pick<LivePageAction, 'id' | 'action_ref' | 'binding_key' | 'state'>[],
 ): void {
   const states = launches.map(launch => ({
     action_ref: launch.action_ref,
     binding_key: launch.binding_key ?? '',
     state: launch.state,
+    launch_id: launch.id,
   }));
   target.postMessage({ type: 'kronn:page-action-states', version: 1, channel_id: channelId, states }, '*');
 }
@@ -251,6 +252,7 @@ export function buildSandboxDocument(
     // document scrolls: the host draws the card in a layer that does NOT
     // scroll with us, so a one-shot anchor drifts away from its row.
     let anchored=null;
+    let anchoredAt=null;
     let anchorQueued=false;
     // A row, not the button: the card belongs under the whole line it acts on.
     // A Page may name where its collapse opens: the card then sits under the CTA's own
@@ -264,6 +266,7 @@ export function buildSandboxDocument(
     // The collapse the host asked us to open, in THIS document, so the rows
     // below are pushed down instead of being covered by a floating panel.
     let slotEl=null;
+    let slotSpec=null;
     const dropSlot=()=>{
       if(slotEl&&slotEl.parentNode)slotEl.parentNode.removeChild(slotEl);
       slotEl=null;
@@ -310,7 +313,9 @@ export function buildSandboxDocument(
     const sendAnchor=()=>{
       anchorQueued=false;
       if(!anchored||!linkPort)return;
-      if(!anchored.isConnected){anchored=null;return;}
+      // A Page that redraws its rows replaces the CTA: follow its successor.
+      if(!anchored.isConnected)anchored=anchoredAt&&findCta(anchoredAt.ref,anchoredAt.key);
+      if(!anchored)return;
       // With a slot open the card fills it, so the slot IS the anchor.
       const inSlot=Boolean(slotEl&&slotEl.isConnected);
       const rect=inSlot?getBounds.call(slotEl):anchorRect(anchored);
@@ -341,20 +346,31 @@ export function buildSandboxDocument(
     const markActions=()=>{
       document.querySelectorAll('[data-kronn-action]').forEach(element=>{
         const ref=(getAttribute.call(element,'data-kronn-action')||'').trim();
-        const state=actionStates.get(ref+'\\n'+bindingKey(readBindings(element)));
-        if(state){
+        const entry=actionStates.get(ref+'\\n'+bindingKey(readBindings(element)));
+        if(entry){
+          const state=entry.state;
           if(getAttribute.call(element,'data-kronn-action-state')!==state)element.setAttribute('data-kronn-action-state',state);
+          // Tells one attempt of a row from the next, even when both succeeded.
+          if(entry.launch){
+            if(getAttribute.call(element,'data-kronn-action-launch')!==entry.launch)element.setAttribute('data-kronn-action-launch',entry.launch);
+          }else element.removeAttribute('data-kronn-action-launch');
           if(state==='launching'||state==='running')element.setAttribute('aria-busy','true');
           else element.removeAttribute('aria-busy');
         }else if(element.hasAttribute('data-kronn-action-state')){
           element.removeAttribute('data-kronn-action-state');
+          element.removeAttribute('data-kronn-action-launch');
           element.removeAttribute('aria-busy');
         }
       });
     };
     // Pages render their rows from data, often after this runs: re-mark
     // whenever rows appear or change their binding, never on our own marks.
-    new MutationObserver(()=>{if(actionStates.size)markActions();}).observe(document,{childList:true,subtree:true,attributes:true,attributeFilter:['data-kronn-action','data-kronn-bindings']});
+    new MutationObserver(()=>{
+      if(actionStates.size)markActions();
+      // Redrawn rows take the open collapse with them: reopen it under the new row.
+      if(slotSpec&&!(slotEl&&slotEl.isConnected))openSlot(slotSpec.ref,slotSpec.key,slotSpec.height);
+      else if(anchored&&!anchored.isConnected)queueAnchor();
+    }).observe(document,{childList:true,subtree:true,attributes:true,attributeFilter:['data-kronn-action','data-kronn-bindings']});
     Object.defineProperty(window,'KronnPageData',{configurable:false,get:()=>latest});
     const materializedRoot=()=>{
       const root=document.documentElement.cloneNode(true);
@@ -403,6 +419,7 @@ export function buildSandboxDocument(
         if(!/^[A-Za-z0-9._~-]{1,256}$/.test(actionRef))return;
         const bindings=readBindings(action);
         anchored=action;
+        anchoredAt={ref:actionRef,key:bindingKey(bindings)};
         portPost.call(linkPort,{type:'kronn:page-action',version:1,channel_id:channel,action_ref:actionRef,bindings,anchor:anchorRect(action)});
         return;
       }
@@ -485,10 +502,11 @@ export function buildSandboxDocument(
       }
       if(message.type==='kronn:page-action-slot'){
         const slot=message.slot;
-        if(!slot){dropSlot();queueAnchor();return;}
+        if(!slot){slotSpec=null;dropSlot();queueAnchor();return;}
         if(typeof slot.action_ref!=='string'||typeof slot.binding_key!=='string')return;
         const height=Number(slot.height);
         if(!isFinite(height)||height<0||height>4000)return;
+        slotSpec={ref:slot.action_ref,key:slot.binding_key,height};
         openSlot(slot.action_ref,slot.binding_key,height);
         return;
       }
@@ -496,7 +514,7 @@ export function buildSandboxDocument(
         if(!Array.isArray(message.states))return;
         actionStates=new Map(message.states
           .filter(entry=>entry&&typeof entry.action_ref==='string'&&typeof entry.binding_key==='string'&&typeof entry.state==='string')
-          .map(entry=>[entry.action_ref+'\\n'+entry.binding_key,entry.state]));
+          .map(entry=>[entry.action_ref+'\\n'+entry.binding_key,{state:entry.state,launch:typeof entry.launch_id==='string'?entry.launch_id:null}]));
         markActions();
         return;
       }

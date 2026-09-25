@@ -9490,9 +9490,11 @@ _PAGE_ACTION_CONTRACT = (
     "running is never launched twice. Kronn marks each button with "
     "`data-kronn-action-state` (launching, running, succeeded, failed, "
     "preflight_failed) and a default indicator: style that attribute instead of "
-    "tracking launches in Page scripts. A click opens the native card on the offer "
-    "for a row that never ran, on its latest run otherwise: the steps, the "
-    "discussions it opened with the agent's answer, and a way to launch it again. "
+    "tracking launches in Page scripts. `data-kronn-action-launch` holds the id of "
+    "that latest launch, so a new attempt of a row is told from the previous one. "
+    "A click on a running row reopens its run: the steps, the discussions it "
+    "opened with the agent's answer. Any other click opens a fresh offer, which "
+    "launches a new attempt, with the row's last run one click away. "
     "A Quick Prompt counts as succeeded once its agent has answered."
 )
 

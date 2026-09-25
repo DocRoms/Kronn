@@ -116,6 +116,27 @@ describe('DiscussionActionCard', () => {
     expect(input).toHaveValue('fr');
   });
 
+  it('shows a placeholder as an example, never as the value it would send', () => {
+    render(
+      <DiscussionActionCard
+        action={action({ values: [
+          variable({ name: 'banc', label: 'Banc', placeholder: 'ollama', required: false }),
+          variable({ name: 'delay', label: 'Delay', placeholder: 'ex. 30 min', required: false }),
+          variable({ name: 'source', label: 'Source', placeholder: 'Saisissez la phrase source…', required: false }),
+        ] })}
+        onChanged={vi.fn()}
+        onOpenDiscussion={vi.fn()}
+      />,
+    );
+    expand();
+    const banc = screen.getByRole('textbox', { name: 'Banc' });
+    expect(banc).toHaveAttribute('placeholder', 'disc.action.placeholderExample:ollama');
+    expect(banc).toHaveValue('');
+    // Already an example, or an instruction: left as its author wrote it.
+    expect(screen.getByRole('textbox', { name: 'Delay' })).toHaveAttribute('placeholder', 'ex. 30 min');
+    expect(screen.getByRole('textbox', { name: 'Source' })).toHaveAttribute('placeholder', 'Saisissez la phrase source…');
+  });
+
   it('keeps project environment references masked and read-only', () => {
     render(
       <DiscussionActionCard

@@ -2038,6 +2038,7 @@ const en: TranslationDict = {
   'disc.action.outcome.idle': 'No answer',
   'disc.action.outcome.more': 'and {0} more discussions',
   'disc.action.resolvedAtLaunch': 'Resolved by Kronn at launch',
+  'disc.action.placeholderExample': 'e.g. {0}',
   'disc.action.dynamicBinding': 'Resolved from the Artifact · {0}',
   'disc.action.stalePageSource': 'This action comes from an older Artifact revision. Its result remains available, but its source location has changed.',
   'disc.action.unavailablePageAction': 'This action is no longer available in the current Artifact revision.',

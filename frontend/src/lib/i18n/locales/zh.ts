@@ -2017,6 +2017,7 @@ const zh: TranslationDict = {
   "disc.action.outcome.idle": "无回复",
   "disc.action.outcome.more": "还有 {0} 个讨论",
   "disc.action.resolvedAtLaunch": "由 Kronn 在启动时解析",
+  "disc.action.placeholderExample": "例如：{0}",
   "disc.action.dynamicBinding": "从 Artifact 解析 · {0}",
   "disc.action.stalePageSource": "此操作来自较早的 Artifact 修订。结果仍然可用，但来源位置已更改。",
   "disc.action.unavailablePageAction": "当前 Artifact 修订中已不再提供此操作。",

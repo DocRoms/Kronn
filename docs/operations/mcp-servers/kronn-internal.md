@@ -940,9 +940,10 @@ contracts; they are not claimed as entries in this first version.
   row. `tool_manual({tool: "page_create"})` and
   `tool_manual({tool: "page_update_html"})` carry the contract: one inert
   `application/kronn-action` block per action, one `data-kronn-bindings`
-  selector per row, `data-kronn-action-state` on each button for its row's live
-  state, and a native card that opens on the row's latest run and what it
-  produced. Keep a block's reference stable across revisions.
+  selector per row, `data-kronn-action-state` and `data-kronn-action-launch` on
+  each button for its row's live state and latest attempt, and a native card
+  that reopens a running row's run or offers a new attempt with the last run one
+  click away. Keep a block's reference stable across revisions.
 
 ## Related
 

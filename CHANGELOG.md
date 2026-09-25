@@ -75,6 +75,12 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- A Kronn action card opened from a Live Page no longer closes every 30 s
+  when the Page refreshes, and keeps what was typed in it; it now follows its
+  row when new data makes the Page redraw. Each row's state carries its launch
+  id (`data-kronn-action-launch`), so a Page tells a new attempt from the
+  previous one. A field's placeholder reads as an example (`e.g. ollama`)
+  instead of passing for the value an empty field would send.
 - A restart in the middle of a task execution's integration no longer keeps the
   backend from answering while the interrupted validations are replayed, which
   could outlast the 300 health probes `kronn start-dev` waits for. Boot still

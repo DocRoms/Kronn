@@ -57,12 +57,32 @@ function isEffectivelyRequired(value: DiscussionActionValue): boolean {
   return (value.provenance === 'user_input' || value.provenance === 'agent_suggestion') && value.required;
 }
 
-function promptVariable(value: DiscussionActionValue): PromptVariable {
+// Already phrased as an example by its author: "e.g. …", "ex. : …", "p. ej. …".
+const EXAMPLE_PREFIX = /^\s*(e\.\s?g\.|eg\b|ex\.|ex\s*:|p\.\s?ej\.|par ex|例如)/i;
+// "Type the source sentence…" is an instruction, not a sample value.
+const INSTRUCTION_SUFFIX = /(…|\.\.\.)\s*$/;
+
+/** A greyed placeholder reads as the field's value, while an empty field sends
+ * nothing: say it is only an example. */
+function examplePlaceholder(
+  placeholder: string,
+  t: (key: string, ...args: (string | number)[]) => string,
+): string {
+  const text = placeholder.trim();
+  if (!text) return '';
+  if (EXAMPLE_PREFIX.test(text) || INSTRUCTION_SUFFIX.test(text)) return text;
+  return t('disc.action.placeholderExample', text);
+}
+
+function promptVariable(
+  value: DiscussionActionValue,
+  t: (key: string, ...args: (string | number)[]) => string,
+): PromptVariable {
   const isEnvironmentOverride = value.provenance === 'project_env' || value.provenance === 'kronn_context';
   return {
     name: value.name,
     label: value.label,
-    placeholder: value.placeholder,
+    placeholder: examplePlaceholder(value.placeholder, t),
     description: value.description,
     required: isEnvironmentOverride ? false : value.required,
     source: 'user_input',
@@ -242,7 +262,7 @@ export function KronnActionCard<T extends KronnAction>({
                 </span>
                 {editable ? (
                   <PromptVariableInput
-                    variable={promptVariable(value)}
+                    variable={promptVariable(value, t)}
                     value={values[value.name] ?? ''}
                     onChange={next => setValues(currentValues => ({ ...currentValues, [value.name]: next }))}
                     disabled={busy}
