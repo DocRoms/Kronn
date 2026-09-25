@@ -6658,6 +6658,8 @@ fn summarize_http_turn_usage(
     let mut prompt_tokens = 0u64;
     let mut cached_prompt_tokens = 0u64;
     let mut cache_reported_turns = 0u32;
+    let mut cache_write_prompt_tokens = 0u64;
+    let mut cache_write_reported_turns = 0u32;
     let mut eval_tokens = 0u64;
     let mut duration_ms = 0u64;
     let mut peak_context_tokens = 0u64;
@@ -6687,6 +6689,10 @@ fn summarize_http_turn_usage(
                 cached_prompt_tokens = cached_prompt_tokens.saturating_add(cached);
                 cache_reported_turns = cache_reported_turns.saturating_add(1);
             }
+            if let Some(written) = turn.cache_write_prompt_tokens {
+                cache_write_prompt_tokens = cache_write_prompt_tokens.saturating_add(written);
+                cache_write_reported_turns = cache_write_reported_turns.saturating_add(1);
+            }
             eval_tokens = eval_tokens.saturating_add(turn.eval_tokens);
             duration_ms = duration_ms.saturating_add(turn.duration_ms);
             peak_context_tokens = peak_context_tokens.max(turn.prompt_tokens);
@@ -6698,6 +6704,8 @@ fn summarize_http_turn_usage(
                     prompt_tokens: 0,
                     cached_prompt_tokens: 0,
                     cache_reported_turns: 0,
+                    cache_write_prompt_tokens: 0,
+                    cache_write_reported_turns: 0,
                     eval_tokens: 0,
                     duration_ms: 0,
                 });
@@ -6706,6 +6714,12 @@ fn summarize_http_turn_usage(
             if let Some(cached) = turn.cached_prompt_tokens {
                 phase.cached_prompt_tokens = phase.cached_prompt_tokens.saturating_add(cached);
                 phase.cache_reported_turns = phase.cache_reported_turns.saturating_add(1);
+            }
+            if let Some(written) = turn.cache_write_prompt_tokens {
+                phase.cache_write_prompt_tokens =
+                    phase.cache_write_prompt_tokens.saturating_add(written);
+                phase.cache_write_reported_turns =
+                    phase.cache_write_reported_turns.saturating_add(1);
             }
             phase.eval_tokens = phase.eval_tokens.saturating_add(turn.eval_tokens);
             phase.duration_ms = phase.duration_ms.saturating_add(turn.duration_ms);
@@ -6723,6 +6737,8 @@ fn summarize_http_turn_usage(
         prompt_tokens,
         cached_prompt_tokens,
         cache_reported_turns,
+        cache_write_prompt_tokens,
+        cache_write_reported_turns,
         eval_tokens,
         traffic_tokens: prompt_tokens.saturating_add(eval_tokens),
         peak_context_tokens,
@@ -11824,6 +11840,14 @@ mod tests {
             (0, 0),
             "legacy turns read as not reported"
         );
+        assert_eq!(
+            (
+                usage.cache_write_prompt_tokens,
+                usage.cache_write_reported_turns
+            ),
+            (0, 0),
+            "legacy turns report no cache write"
+        );
     }
 
     #[test]
@@ -11865,6 +11889,65 @@ mod tests {
             (800, 1)
         );
         assert_eq!(usage.recent_turns[1].cached_prompt_tokens, None);
+    }
+
+    #[test]
+    fn http_turn_usage_sums_cache_writes_apart_from_cache_reads() {
+        let events = vec![crate::models::TaskExecutionEvent {
+            id: "e1".into(),
+            task_execution_id: "exec-1".into(),
+            action: "http_turn_telemetry".into(),
+            from_status: None,
+            to_status: None,
+            actor_kind: crate::models::PlanningActorKind::Backend,
+            actor_id: Some("http-agent-runner".into()),
+            actor_session_id: Some("dispatch-1".into()),
+            changes: serde_json::json!({"version": 1, "turns": [
+                {"turn": 1, "provider": "litellm", "phase": "exploration",
+                 "prompt_tokens": 1_300, "cached_prompt_tokens": 0,
+                 "cache_write_prompt_tokens": 1_100, "eval_tokens": 10,
+                 "duration_ms": 1, "provider_ok": true, "requested_tools": [], "executed_tools": []},
+                {"turn": 2, "provider": "litellm", "phase": "exploration",
+                 "prompt_tokens": 1_500, "cached_prompt_tokens": 1_100,
+                 "cache_write_prompt_tokens": 350, "eval_tokens": 10,
+                 "duration_ms": 1, "provider_ok": true, "requested_tools": [], "executed_tools": []},
+                {"turn": 3, "provider": "litellm", "phase": "answer",
+                 "prompt_tokens": 900, "cached_prompt_tokens": 700, "eval_tokens": 10,
+                 "duration_ms": 1, "provider_ok": true, "requested_tools": [], "executed_tools": []}
+            ]}),
+            source_message_id: None,
+            created_at: chrono::Utc::now(),
+        }];
+        let usage = summarize_http_turn_usage(&events).unwrap();
+        assert_eq!(
+            (usage.cached_prompt_tokens, usage.cache_reported_turns),
+            (1_800, 3)
+        );
+        assert_eq!(
+            (
+                usage.cache_write_prompt_tokens,
+                usage.cache_write_reported_turns
+            ),
+            (1_450, 2),
+            "a turn without the field is not counted as writing nothing"
+        );
+        let exploration = &usage.phases[0];
+        assert_eq!(
+            (
+                exploration.cache_write_prompt_tokens,
+                exploration.cache_write_reported_turns
+            ),
+            (1_450, 2)
+        );
+        assert_eq!(
+            (
+                usage.phases[1].cache_write_prompt_tokens,
+                usage.phases[1].cache_write_reported_turns
+            ),
+            (0, 0)
+        );
+        assert_eq!(usage.recent_turns[0].cache_write_prompt_tokens, Some(1_100));
+        assert_eq!(usage.recent_turns[2].cache_write_prompt_tokens, None);
     }
 
     // ── HTTP mapping (KT-328 tranche 2, commit 3) — pure, no AppState needed. ──

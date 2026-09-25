@@ -474,6 +474,7 @@ fn http_turn_telemetry_replaces_same_dispatch_and_preserves_rework() {
         phase: crate::models::TaskExecutionHttpPhase::Read,
         prompt_tokens,
         cached_prompt_tokens: None,
+        cache_write_prompt_tokens: None,
         eval_tokens: 10,
         duration_ms: 1_000,
         provider_ok: true,

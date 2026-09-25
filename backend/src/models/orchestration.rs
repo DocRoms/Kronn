@@ -1309,6 +1309,10 @@ pub struct TaskExecutionHttpTurnUsage {
     /// written before this field existed: unknown, not zero.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cached_prompt_tokens: Option<u64>,
+    /// Prompt tokens the provider reports writing to its prompt cache. `None`
+    /// when not reported, as for `cached_prompt_tokens`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_prompt_tokens: Option<u64>,
     pub eval_tokens: u64,
     pub duration_ms: u64,
     pub provider_ok: bool,
@@ -1327,6 +1331,11 @@ pub struct TaskExecutionHttpPhaseUsage {
     pub cached_prompt_tokens: u64,
     #[serde(default)]
     pub cache_reported_turns: u32,
+    /// Sum over the `cache_write_reported_turns` that reported a cache write only.
+    #[serde(default)]
+    pub cache_write_prompt_tokens: u64,
+    #[serde(default)]
+    pub cache_write_reported_turns: u32,
     pub eval_tokens: u64,
     pub duration_ms: u64,
 }
@@ -1345,6 +1354,11 @@ pub struct TaskExecutionHttpUsage {
     pub cached_prompt_tokens: u64,
     #[serde(default)]
     pub cache_reported_turns: u32,
+    /// Sum over the `cache_write_reported_turns` that reported a cache write only.
+    #[serde(default)]
+    pub cache_write_prompt_tokens: u64,
+    #[serde(default)]
+    pub cache_write_reported_turns: u32,
     pub eval_tokens: u64,
     pub traffic_tokens: u64,
     pub peak_context_tokens: u64,

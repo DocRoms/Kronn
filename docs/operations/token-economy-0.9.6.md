@@ -48,7 +48,14 @@ Kronn had no counter for a CLI it did not spawn. That single reading is why:
 - an HTTP task execution keeps a turn's `cached_prompt_tokens` absent when its
   provider did not report one. Totals sum only over `cache_reported_turns`, so a
   cache rate or an invoice is never derived from them: the unreported turns may
-  have been cached or not.
+  have been cached or not. `cache_write_prompt_tokens` (Anthropic's
+  `cache_creation_input_tokens`, billed above the input rate) follows the same
+  rule and sums over its own `cache_write_reported_turns`.
+
+Anthropic caches only what a request marks, so Claude through LiteLLM reports
+zero cached tokens. `KRONN_LITELLM_PROMPT_CACHE=1` on the backend adds LiteLLM's
+`cache_control_injection_points` (system and last message) to requests whose model
+contains `claude`; off by default until an A/B run shows reads outweigh writes.
 
 ## 3. What shipped
 

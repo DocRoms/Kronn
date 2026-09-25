@@ -34,6 +34,11 @@ Release notes for 0.9.3 and earlier are available in the
   served from its cache, when it reports them (`prompt_tokens_details.cached_tokens`
   or `cache_read_input_tokens`). Turns that do not report it stay unknown and are
   counted separately, so no cache rate is inferred for them.
+- HTTP task execution usage also records the prompt tokens a provider wrote to
+  its cache (`cache_creation_input_tokens`), per turn, per phase and in total.
+  Setting `KRONN_LITELLM_PROMPT_CACHE=1` asks LiteLLM to mark Anthropic cache
+  breakpoints on the system prompt and the last message of Claude requests.
+  The switch is off by default.
 - Open 2–12 selected discussions in a separate mosaic tab, with Artifact-style
   layouts, plan progress, recent messages and saved response checkpoints.
   Each tile scrolls independently and links to its full discussion. The bounded

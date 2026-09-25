@@ -34,6 +34,9 @@ pub(crate) struct ChatChunk {
     /// Share of `prompt_tokens` the provider served from its prompt cache.
     /// `None` when the provider does not report it, which proves nothing.
     pub cached_prompt_tokens: Option<u64>,
+    /// Prompt tokens the provider reports writing to its prompt cache (Anthropic
+    /// bills them above the plain input rate). `None` when not reported.
+    pub cache_write_prompt_tokens: Option<u64>,
     pub eval_tokens: u64,
     /// Tool calls the model wants executed before it can answer. Ollama puts
     /// them on the terminal chunk; OpenAI streams them as indexed fragments
@@ -149,6 +152,7 @@ impl ChatCodec for OpenAiCodec {
             chunk.cached_prompt_tokens = usage["prompt_tokens_details"]["cached_tokens"]
                 .as_u64()
                 .or_else(|| usage["cache_read_input_tokens"].as_u64());
+            chunk.cache_write_prompt_tokens = usage["cache_creation_input_tokens"].as_u64();
             chunk.eval_tokens = usage["completion_tokens"].as_u64().unwrap_or(0);
         }
         if let Some(reason) = choice["finish_reason"].as_str() {
@@ -196,6 +200,25 @@ pub(crate) fn build_openai_chat_body(
         });
     }
     body
+}
+
+/// Copy of an OpenAI-wire body asking LiteLLM to mark Anthropic cache
+/// breakpoints on the system prompt and the last message. Anthropic caches only
+/// marked prefixes; `None` for other models, which cache implicitly or not at all.
+pub(crate) fn with_prompt_cache_hints(body: &Value) -> Option<Value> {
+    let model = body.get("model")?.as_str()?;
+    if !model.to_ascii_lowercase().contains("claude") {
+        return None;
+    }
+    let mut hinted = body.clone();
+    hinted.as_object_mut()?.insert(
+        "cache_control_injection_points".to_string(),
+        serde_json::json!([
+            { "location": "message", "role": "system" },
+            { "location": "message", "index": -1 },
+        ]),
+    );
+    Some(hinted)
 }
 
 #[cfg(test)]
@@ -313,6 +336,55 @@ mod tests {
             reported_zero.cached_prompt_tokens,
             Some(0),
             "a reported zero is a measurement and wins over the fallback"
+        );
+    }
+
+    #[test]
+    fn openai_reads_cache_writes_apart_from_cache_reads() {
+        let anthropic = OpenAiCodec
+            .parse_line(
+                r#"data: {"choices":[],"usage":{"prompt_tokens":900,"completion_tokens":5,"cache_creation_input_tokens":600,"cache_read_input_tokens":0}}"#,
+            )
+            .unwrap();
+        assert_eq!(
+            (
+                anthropic.cached_prompt_tokens,
+                anthropic.cache_write_prompt_tokens
+            ),
+            (Some(0), Some(600))
+        );
+        let gemini = OpenAiCodec
+            .parse_line(
+                r#"data: {"choices":[],"usage":{"prompt_tokens":900,"completion_tokens":5,"prompt_tokens_details":{"cached_tokens":800}}}"#,
+            )
+            .unwrap();
+        assert_eq!(
+            gemini.cache_write_prompt_tokens, None,
+            "absent means not reported"
+        );
+    }
+
+    #[test]
+    fn prompt_cache_hints_mark_system_and_last_message_for_claude_only() {
+        let body = build_openai_chat_body("anthropic/Claude-Sonnet-4-6", "sys", "hi", None, true);
+        let hinted = with_prompt_cache_hints(&body).expect("claude model");
+        assert_eq!(
+            hinted["cache_control_injection_points"],
+            serde_json::json!([
+                { "location": "message", "role": "system" },
+                { "location": "message", "index": -1 },
+            ])
+        );
+        assert_eq!(hinted["messages"], body["messages"]);
+        assert!(
+            body.get("cache_control_injection_points").is_none(),
+            "the stored body is left untouched"
+        );
+        let gemini = build_openai_chat_body("gemini-2.5-flash", "sys", "hi", None, true);
+        assert_eq!(with_prompt_cache_hints(&gemini), None);
+        assert_eq!(
+            with_prompt_cache_hints(&serde_json::json!({ "messages": [] })),
+            None
         );
     }
 

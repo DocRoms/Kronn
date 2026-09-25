@@ -6568,7 +6568,11 @@ export type TaskExecutionHttpPhaseUsage = { phase: TaskExecutionHttpPhase, turns
 /**
  * Sum over the `cache_reported_turns` that reported a cached share only.
  */
-cached_prompt_tokens: number, cache_reported_turns: number, eval_tokens: number, duration_ms: number, };
+cached_prompt_tokens: number, cache_reported_turns: number,
+/**
+ * Sum over the `cache_write_reported_turns` that reported a cache write only.
+ */
+cache_write_prompt_tokens: number, cache_write_reported_turns: number, eval_tokens: number, duration_ms: number, };
 
 export type TaskExecutionHttpToolUsage = { name: string, ok: boolean, };
 
@@ -6583,7 +6587,12 @@ export type TaskExecutionHttpTurnUsage = { turn: number, dispatch_id?: string | 
  * when the provider does not report it, including every journal entry
  * written before this field existed: unknown, not zero.
  */
-cached_prompt_tokens?: number | null, eval_tokens: number, duration_ms: number, provider_ok: boolean, requested_tools: Array<string>, executed_tools: Array<TaskExecutionHttpToolUsage>, };
+cached_prompt_tokens?: number | null,
+/**
+ * Prompt tokens the provider reports writing to its prompt cache. `None`
+ * when not reported, as for `cached_prompt_tokens`.
+ */
+cache_write_prompt_tokens?: number | null, eval_tokens: number, duration_ms: number, provider_ok: boolean, requested_tools: Array<string>, executed_tools: Array<TaskExecutionHttpToolUsage>, };
 
 /**
  * Aggregate across every dispatch/rework of one durable task execution. The
@@ -6595,7 +6604,11 @@ export type TaskExecutionHttpUsage = { turns: number, prompt_tokens: number,
  * Sum over the `cache_reported_turns` that reported a cached share only;
  * never a cache rate for turns that did not report one.
  */
-cached_prompt_tokens: number, cache_reported_turns: number, eval_tokens: number, traffic_tokens: number, peak_context_tokens: number, duration_ms: number, phases: Array<TaskExecutionHttpPhaseUsage>, recent_turns: Array<TaskExecutionHttpTurnUsage>, };
+cached_prompt_tokens: number, cache_reported_turns: number,
+/**
+ * Sum over the `cache_write_reported_turns` that reported a cache write only.
+ */
+cache_write_prompt_tokens: number, cache_write_reported_turns: number, eval_tokens: number, traffic_tokens: number, peak_context_tokens: number, duration_ms: number, phases: Array<TaskExecutionHttpPhaseUsage>, recent_turns: Array<TaskExecutionHttpTurnUsage>, };
 
 /**
  * A resolved TaskExecution + its lineage, answerable in one query (DoD-4):
