@@ -580,23 +580,27 @@ const IDENTITY_TRAILERS: &[&str] = &[
     "helped-by",
 ];
 
+/// Split a message line into `(key, value)` when it is an identity trailer.
+pub(crate) fn identity_trailer(line: &str) -> Option<(&str, &str)> {
+    let (key, value) = line.trim_start().split_once(':')?;
+    let key = key.trim();
+    IDENTITY_TRAILERS
+        .contains(&key.to_ascii_lowercase().as_str())
+        .then(|| (key, value.trim()))
+}
+
 /// Drop identity trailer lines from a worker-written message, returning the
 /// cleaned message and the trailer names removed.
 fn strip_identity_trailers(message: &str) -> (String, Vec<String>) {
     let mut removed = Vec::new();
     let kept: Vec<&str> = message
         .lines()
-        .filter(|line| {
-            let Some((key, _)) = line.trim_start().split_once(':') else {
-                return true;
-            };
-            let key = key.trim();
-            if IDENTITY_TRAILERS.contains(&key.to_ascii_lowercase().as_str()) {
+        .filter(|line| match identity_trailer(line) {
+            Some((key, _)) => {
                 removed.push(key.to_string());
                 false
-            } else {
-                true
             }
+            None => true,
         })
         .collect();
     (kept.join("\n").trim().to_string(), removed)

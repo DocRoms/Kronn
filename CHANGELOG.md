@@ -75,6 +75,14 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- A CLI task worker that runs `git commit` itself can no longer deliver a
+  commit carrying an invented identity. At delivery, every `Signed-off-by`,
+  `Co-Authored-By` or similar trailer in the delivered commits must name the
+  repository's git identity, the one `git commit -s` signs with; otherwise the
+  delivery is refused with the offending lines and how to fix them, before any
+  review or integration. Approval checks it again for deliveries accepted
+  earlier, and the CLI worker brief now asks for `git commit -s` and no
+  hand-written trailer.
 - A task execution no longer stays in `Applying` forever when another one lands
   on the same target branch during its validations: Kronn rebuilds the candidate
   on the new tip, validates it again and applies it (up to three times). Any

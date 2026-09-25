@@ -2301,6 +2301,63 @@ pub fn committed_file_changes(
         .collect()
 }
 
+/// `(sha, full message)` of every commit in `base_rev..head_rev`.
+pub fn commit_messages(
+    worktree_path: &Path,
+    base_rev: &str,
+    head_rev: &str,
+) -> Result<Vec<(String, String)>, String> {
+    reject_option_like_rev(base_rev)?;
+    reject_option_like_rev(head_rev)?;
+    let output = sync_cmd("git")
+        .args([
+            "log",
+            "-z",
+            "--format=%H%n%B",
+            &format!("{base_rev}..{head_rev}"),
+            "--",
+        ])
+        .current_dir(worktree_path)
+        .output()
+        .map_err(|e| format!("git log failed in worktree: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "git log failed in worktree ({}): {}",
+            worktree_path.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .split('\0')
+        .filter(|record| !record.trim().is_empty())
+        .map(|record| {
+            let record = record.trim_start();
+            let (sha, message) = record.split_once('\n').unwrap_or((record, ""));
+            (sha.trim().to_string(), message.to_string())
+        })
+        .collect())
+}
+
+/// The `Name <email>` that `git commit -s` signs with in this worktree.
+pub fn committer_identity(worktree_path: &Path) -> Result<String, String> {
+    let output = sync_cmd("git")
+        .args(["var", "GIT_COMMITTER_IDENT"])
+        .current_dir(worktree_path)
+        .output()
+        .map_err(|e| format!("git var failed in worktree: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "git has no committer identity in this worktree: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let ident = String::from_utf8_lossy(&output.stdout);
+    let end = ident
+        .rfind('>')
+        .ok_or_else(|| format!("unexpected git committer identity `{}`", ident.trim()))?;
+    Ok(ident[..=end].trim().to_string())
+}
+
 /// Snapshot the main repo's state (current branch + dirty files).
 ///
 /// Used as preflight #2 + #3 on `test-mode/enter`. Returns an empty

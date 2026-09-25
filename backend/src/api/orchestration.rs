@@ -4354,7 +4354,59 @@ fn validate_delivery_git_facts(
             facts.head_sha
         ));
     }
-    validate_committed_file_inventory(facts, manifest)
+    validate_committed_file_inventory(facts, manifest)?;
+    validate_delivery_identity_trailers(facts)
+}
+
+/// A CLI worker runs `git commit` itself, so nothing strips an identity
+/// trailer the model wrote; every one must name the repository's git identity.
+fn validate_delivery_identity_trailers(facts: &DeliveryGitFacts) -> Result<(), String> {
+    let commits = worktree::commit_messages(&facts.repo, &facts.base_sha, &facts.head_sha)
+        .map_err(|error| format!("cannot inspect the delivered commit messages: {error}"))?;
+    let trailers = commits
+        .iter()
+        .flat_map(|(sha, message)| {
+            message.lines().filter_map(move |line| {
+                crate::api::agent_workspace_tools::identity_trailer(line)
+                    .map(|(key, value)| (sha.as_str(), key, value))
+            })
+        })
+        .collect::<Vec<_>>();
+    if trailers.is_empty() {
+        return Ok(());
+    }
+    let identity = worktree::committer_identity(&facts.repo).map_err(|error| {
+        format!("cannot verify the identity trailers of the delivered commits: {error}")
+    })?;
+    let foreign = trailers
+        .into_iter()
+        .filter(|(_, _, value)| !same_git_identity(value, &identity))
+        .map(|(sha, key, value)| format!("{} `{key}: {value}`", short_sha(sha)))
+        .collect::<Vec<_>>();
+    if foreign.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "delivered commits carry identity trailers that do not match this repository's git identity `{identity}`: {}. \
+         Remove these lines and let `git commit -s` add the sign-off; never write an identity trailer by hand \
+         (for example `git reset --soft {}` then `git commit -s -m \"<message>\"`), then deliver the new HEAD.",
+        foreign.join(", "),
+        short_sha(&facts.base_sha),
+    ))
+}
+
+fn short_sha(sha: &str) -> String {
+    sha.chars().take(10).collect()
+}
+
+/// Compare `Name <email>` identities: exact name, case-insensitive email.
+fn same_git_identity(trailer: &str, identity: &str) -> bool {
+    fn parts(ident: &str) -> Option<(String, String)> {
+        let (name, rest) = ident.trim().rsplit_once('<')?;
+        let email = rest.strip_suffix('>')?.trim().to_ascii_lowercase();
+        Some((name.split_whitespace().collect::<Vec<_>>().join(" "), email))
+    }
+    matches!((parts(trailer), parts(identity)), (Some(a), Some(b)) if a == b)
 }
 
 fn validate_manifest_claims(
@@ -4486,6 +4538,9 @@ pub enum ApproveBlockReason {
     /// The persisted manifest's file inventory does not describe the committed
     /// base..HEAD diff. This also protects rows accepted by an older backend.
     ManifestDiffMismatch(String),
+    /// A delivered commit carries a `Signed-off-by`/`Co-Authored-By`-style
+    /// trailer naming someone other than the repository's git identity.
+    ForeignIdentityTrailers(String),
 }
 
 /// The verdict of a principal review decision (KT-319 tranche 3a). Refusals are typed — never
@@ -5258,6 +5313,10 @@ async fn approve_guards(
     };
     if let Err(detail) = validate_committed_file_inventory(&facts, &manifest) {
         return Ok(Some(ApproveBlockReason::ManifestDiffMismatch(detail)));
+    }
+    // Also guards deliveries accepted before this check existed.
+    if let Err(detail) = validate_delivery_identity_trailers(&facts) {
+        return Ok(Some(ApproveBlockReason::ForeignIdentityTrailers(detail)));
     }
     Ok(None)
 }
@@ -6120,7 +6179,7 @@ fn worker_brief_markdown(
                      uniquement les fichiers explicites et le message. Kronn possède seul \
                      l'accès Git administratif."
                 } else {
-                    "Crée un commit propre avant la livraison."
+                    "Crée un commit propre avec `git commit -s` avant la livraison."
                 }
             ),
             "Cherche le symbole cité dans l'objectif avec les outils natifs de ton CLI, \
@@ -6172,7 +6231,10 @@ fn worker_brief_markdown(
          modifiés et un message concis. N'utilise pas `git commit` dans le shell : les objets et \
          refs partagés restent volontairement hors de ta sandbox."
     } else if can_run_shell {
-        "Crée un commit propre dans ce worktree avant la livraison."
+        "Crée un commit propre dans ce worktree avant la livraison, avec `git commit -s` : \
+         il signe avec l'identité git du dépôt. N'écris jamais de trailer d'identité \
+         (`Signed-off-by`, `Co-Authored-By`…) à la main : Kronn refuse la livraison si un \
+         trailer ne correspond pas à cette identité."
     } else {
         "Avant la livraison, appelle `git_commit` avec les seuls chemins relatifs réellement \
          modifiés et un message concis."
@@ -10524,6 +10586,7 @@ fn approve_block_message(reason: &ApproveBlockReason) -> String {
         ApproveBlockReason::ManifestDiffMismatch(detail) => {
             format!("delivery manifest does not match the committed diff: {detail}")
         }
+        ApproveBlockReason::ForeignIdentityTrailers(detail) => detail.clone(),
     }
 }
 
@@ -11758,6 +11821,12 @@ mod tests {
         );
         assert!(brief.contains("outils natifs de ton CLI"), "{brief}");
         assert!(!brief.contains("Premier appel : `search_text`"), "{brief}");
+        // KT-788: a CLI worker commits itself, so the brief names the sign-off command.
+        assert!(brief.contains("avec `git commit -s`"), "{brief}");
+        assert!(
+            brief.contains("N'écris jamais de trailer d'identité"),
+            "{brief}"
+        );
     }
 
     #[test]
@@ -20975,6 +21044,185 @@ mod tests {
             exec_of(&db, &exec_id).await.status,
             TaskExecutionStatus::Working
         );
+    }
+
+    /// Commit `file` in the execution worktree with `message`, as a CLI worker
+    /// does itself, and return the manifest for the new HEAD.
+    async fn cli_worker_commit(
+        db: &Database,
+        exec_id: &str,
+        file: &str,
+        message: &str,
+        extra: &[&str],
+    ) -> String {
+        let path = managed_worktree_path(db, exec_id).await;
+        std::fs::write(Path::new(&path).join(file), format!("{message}\n")).unwrap();
+        git(Path::new(&path), &["add", file]);
+        let mut args = vec!["commit", "-m", message];
+        args.extend_from_slice(extra);
+        let committed = git(Path::new(&path), &args);
+        assert!(committed.status.success(), "{committed:?}");
+        manifest_json_with_files_for_dod(
+            &git_rev(Path::new(&path), "HEAD"),
+            serde_json::json!([{ "path": file, "kind": "added" }]),
+            &dod_id_for_execution(db, exec_id).await,
+            true,
+        )
+    }
+
+    async fn delivery_count(db: &Database) -> i64 {
+        count(db, "SELECT COUNT(*) FROM task_execution_deliveries").await
+    }
+
+    #[tokio::test]
+    async fn deliver_refuses_an_invented_sign_off_then_accepts_git_commit_s() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (_task_ref, _parent_id, _child_id, exec_id) =
+            attached_cli_worker(&db, repo.path()).await;
+        let invented = cli_worker_commit(
+            &db,
+            &exec_id,
+            "signed.txt",
+            "feat: add signed\n\nSigned-off-by: Romuald Priol <romuald.priol@euronews.com>",
+            &[],
+        )
+        .await;
+
+        let refused = deliver_worker_manifest(&db, &exec_id, "ClaudeCode", "sess-a", &invented)
+            .await
+            .unwrap();
+        match refused {
+            DeliverOutcome::InvalidManifest(detail) => assert!(
+                detail.contains("Signed-off-by: Romuald Priol <romuald.priol@euronews.com>")
+                    && detail.contains("`T <t@t.com>`")
+                    && detail.contains("git commit -s")
+                    && detail.contains("never write an identity trailer by hand"),
+                "the refusal must name the line, the identity and the fix: {detail}"
+            ),
+            other => panic!("an invented sign-off must be refused, got {other:?}"),
+        }
+        assert_eq!(
+            exec_of(&db, &exec_id).await.status,
+            TaskExecutionStatus::Working
+        );
+        assert_eq!(delivery_count(&db).await, 0);
+
+        let path = managed_worktree_path(&db, &exec_id).await;
+        git(
+            Path::new(&path),
+            &["commit", "--amend", "-s", "-m", "feat: add signed"],
+        );
+        let signed = manifest_json_with_files_for_dod(
+            &git_rev(Path::new(&path), "HEAD"),
+            serde_json::json!([{ "path": "signed.txt", "kind": "added" }]),
+            &dod_id_for_execution(&db, &exec_id).await,
+            true,
+        );
+        let delivered = deliver_worker_manifest(&db, &exec_id, "ClaudeCode", "sess-a", &signed)
+            .await
+            .unwrap();
+        assert!(
+            matches!(delivered, DeliverOutcome::Delivered { .. }),
+            "the sign-off `git commit -s` adds is the repository identity: {delivered:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn deliver_refuses_an_invented_co_author_in_an_earlier_commit() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (_task_ref, _parent_id, _child_id, exec_id) =
+            attached_cli_worker(&db, repo.path()).await;
+        cli_worker_commit(
+            &db,
+            &exec_id,
+            "first.txt",
+            "feat: first\n\nCo-Authored-By: Claude <noreply@anthropic.com>",
+            &["-s"],
+        )
+        .await;
+        let path = managed_worktree_path(&db, &exec_id).await;
+        std::fs::write(Path::new(&path).join("second.txt"), "second\n").unwrap();
+        git(Path::new(&path), &["add", "second.txt"]);
+        git(Path::new(&path), &["commit", "-s", "-m", "feat: second"]);
+        let manifest = manifest_json_with_files_for_dod(
+            &git_rev(Path::new(&path), "HEAD"),
+            serde_json::json!([
+                { "path": "first.txt", "kind": "added" },
+                { "path": "second.txt", "kind": "added" }
+            ]),
+            &dod_id_for_execution(&db, &exec_id).await,
+            true,
+        );
+
+        let refused = deliver_worker_manifest(&db, &exec_id, "ClaudeCode", "sess-a", &manifest)
+            .await
+            .unwrap();
+        match refused {
+            DeliverOutcome::InvalidManifest(detail) => {
+                assert!(
+                    detail.contains("Co-Authored-By: Claude <noreply@anthropic.com>"),
+                    "{detail}"
+                );
+                assert!(
+                    !detail.contains("Signed-off-by"),
+                    "the configured sign-off is not a finding: {detail}"
+                );
+            }
+            other => panic!("an invented co-author must be refused, got {other:?}"),
+        }
+        assert_eq!(delivery_count(&db).await, 0);
+    }
+
+    #[tokio::test]
+    async fn approve_is_refused_when_a_delivered_trailer_no_longer_matches_the_identity() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (_task_ref, parent_id, _child_id, exec_id) =
+            attached_cli_worker(&db, repo.path()).await;
+        let manifest = cli_worker_commit(&db, &exec_id, "a.txt", "feat: a", &["-s"]).await;
+        let delivered = deliver_worker_manifest(&db, &exec_id, "ClaudeCode", "sess-a", &manifest)
+            .await
+            .unwrap();
+        assert!(matches!(delivered, DeliverOutcome::Delivered { .. }));
+        seed_cli_session(&db, 102, &parent_id, "sess-b").await;
+        git(repo.path(), &["config", "user.email", "someone-else@t.com"]);
+
+        let outcome = decide_review(
+            &db,
+            &exec_id,
+            &review_approve(&db, &exec_id).await,
+            "ClaudeCode",
+            "sess-b",
+        )
+        .await
+        .unwrap();
+        match outcome {
+            ReviewOutcome::ApproveBlocked {
+                reason: ApproveBlockReason::ForeignIdentityTrailers(detail),
+            } => assert!(
+                detail.contains("Signed-off-by: T <t@t.com>")
+                    && detail.contains("T <someone-else@t.com>"),
+                "{detail}"
+            ),
+            other => panic!("expected an identity-trailer approve block, got {other:?}"),
+        }
+        assert_eq!(
+            exec_of(&db, &exec_id).await.status,
+            TaskExecutionStatus::AwaitingReview
+        );
+    }
+
+    #[test]
+    fn identity_trailers_compare_name_exactly_and_email_case_insensitively() {
+        assert!(same_git_identity("T  <T@T.com>", "T <t@t.com>"));
+        assert!(!same_git_identity("t <t@t.com>", "T <t@t.com>"));
+        assert!(!same_git_identity("T", "T <t@t.com>"));
+        assert!(!same_git_identity(
+            "Romuald Priol <romuald.priol@euronews.com>",
+            "Romuald Priol <romuald.priol@protonmail.com>"
+        ));
     }
 
     /// Anti-oracle at the HTTP frontier: an unknown execution and a wrong worker collapse
