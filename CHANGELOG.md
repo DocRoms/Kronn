@@ -70,6 +70,9 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- A Page opened in its own tab now keeps up with new data. It is read again
+  every 30 s and when the tab comes back into view, and the new data is sent
+  to the open page without reloading it, so scroll and open rows are kept.
 - Opening a discussion no longer downloads every image it contains. An image
   thumbnail, which is the whole file, loads as it nears the screen: on a
   2,000-message room with 12 images, 9.5 MB instead of 15.6 MB at opening.
