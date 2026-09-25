@@ -75,6 +75,15 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- Two workflows of one project that run in its main checkout and start at the
+  same moment (crons sharing a minute, for example) no longer make one of them
+  fail at once with "Refusing to run in the main checkout". The later run now
+  waits its turn, in arrival order, for up to 60 s
+  (`KRONN_MAIN_TREE_WAIT_SECS`) and stops waiting if it is cancelled; past that
+  delay the refusal names the run still holding the checkout. A workflow that
+  never writes the checkout can declare it (`workspace_config.main_tree_read_only`,
+  or "Does not write to the project checkout" in its advanced settings) and
+  then runs without taking this lock (KT-787).
 - A Live Page action whose workflow run was interrupted by a restart no longer
   stays "running" forever and blocks its row. The interruption now reaches
   the run's shared status, runs left in that state by earlier versions are

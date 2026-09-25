@@ -319,6 +319,61 @@ pub(crate) fn inject_and_consume_gate_feedback(
     }
 }
 
+/// Runs above this one in its sub-workflow chain, nearest first.
+async fn ancestor_run_ids(state: &AppState, run: &WorkflowRun) -> Vec<String> {
+    let Some(parent) = run.parent_run_id.clone() else {
+        return Vec::new();
+    };
+    let lookup = state
+        .db
+        .with_conn(move |conn| {
+            use rusqlite::OptionalExtension;
+            let mut chain = Vec::new();
+            let mut next = Some(parent);
+            while let Some(id) = next.take() {
+                if chain.contains(&id) || chain.len() >= 32 {
+                    break;
+                }
+                next = conn
+                    .query_row(
+                        "SELECT parent_run_id FROM workflow_runs WHERE id = ?1",
+                        [&id],
+                        |row| row.get::<_, Option<String>>(0),
+                    )
+                    .optional()?
+                    .flatten();
+                chain.push(id);
+            }
+            Ok(chain)
+        })
+        .await;
+    lookup.unwrap_or_else(|error| {
+        tracing::warn!(run_id = %run.id, "could not read the run's ancestors: {error}");
+        run.parent_run_id.clone().into_iter().collect()
+    })
+}
+
+fn main_tree_refusal_message(refusal: &crate::workflows::workspace::MainTreeRefusal) -> String {
+    use crate::workflows::workspace::MainTreeRefusal;
+    match refusal {
+        MainTreeRefusal::Busy { holder, waited } => format!(
+            "Refusing to run in the main checkout: run {holder} still held it after {}s of waiting \
+             (two non-isolated runs would contaminate each other's files and .kronn/ state). \
+             Enable worktree isolation, declare the workflow as not writing the main tree, \
+             or raise {}.",
+            waited.as_secs(),
+            crate::workflows::workspace::MAIN_TREE_WAIT_ENV
+        ),
+        MainTreeRefusal::HeldByAncestor { holder } => format!(
+            "Refusing to run in the main checkout: parent run {holder} is executing there and \
+             waits for this run. Enable worktree isolation on this workflow."
+        ),
+        MainTreeRefusal::Cancelled => {
+            "Workflow run cancelled while waiting for the main checkout".into()
+        }
+    }
+}
+
 /// Execute a complete workflow run.
 #[allow(clippy::too_many_arguments)]
 pub async fn execute_run(
@@ -638,16 +693,64 @@ async fn execute_run_with_notify_policy(
     // TD-20260709 (A) — a run about to execute in the MAIN checkout takes a
     // per-project exclusivity guard (isolated worktree runs skip it). Held
     // for this execution's lifetime; the checkpoint-reset preflight covers
-    // the deferred gate-pause window.
-    let _main_tree_guard = if workspace.is_none() && !project_path.is_empty() {
-        match crate::workflows::workspace::MainTreeGuard::acquire(&project_path, &run.id) {
+    // the deferred gate-pause window. Crons of the same minute fire in one
+    // tick, so a busy tree is waited for (bounded, FIFO) before refusing.
+    let writes_main_tree = !workflow
+        .workspace_config
+        .as_ref()
+        .is_some_and(|config| config.main_tree_read_only);
+    let _main_tree_guard = if workspace.is_none() && !project_path.is_empty() && writes_main_tree {
+        let ancestors = ancestor_run_ids(&state, run).await;
+        let wait = crate::workflows::workspace::main_tree_wait();
+        match crate::workflows::workspace::MainTreeGuard::acquire(
+            &project_path,
+            &run.id,
+            &ancestors,
+            wait,
+            &cancel_token,
+        )
+        .await
+        {
             Ok(g) => Some(g),
-            Err(holder) => {
-                let msg = format!(
-                    "Refusing to run in the main checkout: run {holder} is already executing there \
-                     (two non-isolated runs would contaminate each other's files and .kronn/ state). \
-                     Wait for it, or enable worktree isolation on one of the workflows."
+            Err(crate::workflows::workspace::MainTreeRefusal::Cancelled) => {
+                tracing::info!(
+                    "Workflow run {} cancelled while waiting for the main checkout",
+                    run.id
                 );
+                run.status = RunStatus::Cancelled;
+                run.step_results.push(StepResult {
+                    step_name: "__cancelled_by_user__".to_string(),
+                    status: RunStatus::Cancelled,
+                    output: "Workflow run cancelled by user while waiting for the main checkout"
+                        .to_string(),
+                    tokens_used: Some(0),
+                    duration_ms: 0,
+                    started_at: None,
+                    condition_result: None,
+                    envelope_detected: None,
+                    step_kind: None,
+                    step_agent: None,
+                    step_model: None,
+                    step_api_plugin_slug: None,
+                    step_api_endpoint_path: None,
+                    is_rollback: false,
+                    child_run_id: None,
+                    agent_provenance: None,
+                    native_tool_calls: Box::default(),
+                });
+                run.finished_at = Some(Utc::now());
+                let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
+                let db_g = db.clone();
+                db_g.with_conn(move |conn| crate::db::workflows::update_run_progress(conn, snap))
+                    .await?;
+                emit(RunEvent::RunDone {
+                    status: RunStatus::Cancelled,
+                });
+                broadcast_run_state(&run.status, run.step_results.len() as i32 - 1, None);
+                return Ok(());
+            }
+            Err(refusal) => {
+                let msg = main_tree_refusal_message(&refusal);
                 run.status = RunStatus::Failed;
                 run.step_results.push(StepResult {
                     step_name: "__workspace__".to_string(),
@@ -674,6 +777,7 @@ async fn execute_run_with_notify_policy(
                 db_g.with_conn(move |conn| crate::db::workflows::update_run_progress(conn, snap))
                     .await?;
                 emit(RunEvent::RunError { error: msg });
+                broadcast_run_state(&run.status, run.step_results.len() as i32 - 1, None);
                 return Ok(());
             }
         }
@@ -3460,6 +3564,7 @@ mod tests {
             Some(&WorkspaceConfig {
                 hooks: crate::models::WorkspaceHooks::default(),
                 require_isolation: true,
+                main_tree_read_only: false,
             }),
         )
         .expect("hooks");
@@ -3472,6 +3577,7 @@ mod tests {
             Some(&WorkspaceConfig {
                 hooks: hooks(Some("./scripts/one-off.sh"), None),
                 require_isolation: true,
+                main_tree_read_only: false,
             }),
         )
         .expect("hooks");
@@ -3496,6 +3602,7 @@ mod tests {
             Some(&WorkspaceConfig {
                 hooks: crate::models::WorkspaceHooks::default(),
                 require_isolation: true,
+                main_tree_read_only: false,
             })
         )
         .is_none());
@@ -3505,6 +3612,7 @@ mod tests {
             Some(&WorkspaceConfig {
                 hooks: hooks(Some("./prepare.sh"), None),
                 require_isolation: false,
+                main_tree_read_only: false,
             }),
         )
         .expect("hooks");
@@ -3519,6 +3627,7 @@ mod tests {
         assert!(!workflow_requests_workspace(Some(&WorkspaceConfig {
             hooks: crate::models::WorkspaceHooks::default(),
             require_isolation: false,
+            main_tree_read_only: false,
         })));
         assert!(resolved_workspace_hooks(Some(&project), None).is_some());
     }
@@ -3551,10 +3660,12 @@ mod tests {
         assert!(!workflow_requests_workspace(Some(&WorkspaceConfig {
             hooks: WorkspaceHooks::default(),
             require_isolation: false,
+            main_tree_read_only: false,
         })));
         assert!(workflow_requests_workspace(Some(&WorkspaceConfig {
             hooks: WorkspaceHooks::default(),
             require_isolation: true,
+            main_tree_read_only: false,
         })));
         assert!(workflow_requests_workspace(Some(&WorkspaceConfig {
             hooks: WorkspaceHooks {
@@ -3562,6 +3673,7 @@ mod tests {
                 ..WorkspaceHooks::default()
             },
             require_isolation: false,
+            main_tree_read_only: false,
         })));
     }
 
@@ -4790,6 +4902,268 @@ mod tests {
             .unwrap();
         assert_eq!(child_runs, 1, "one durable child batch run is created");
         assert_eq!(discussions, 1, "one fire-and-forget discussion is queued");
+    }
+
+    /// A project on a real directory with one non-isolated workflow whose
+    /// only step sleeps, so two concurrent runs would visibly overlap.
+    async fn main_tree_fixture(
+        state: &crate::AppState,
+        suffix: &str,
+        read_only: bool,
+    ) -> (tempfile::TempDir, Workflow) {
+        let repo = tempfile::TempDir::new().unwrap();
+        let now = chrono::Utc::now();
+        let project: Project = serde_json::from_value(serde_json::json!({
+            "id": format!("proj-main-tree-{suffix}"), "name": "Main tree fixture",
+            "path": repo.path().to_string_lossy(),
+            "repo_url": null, "token_override": null,
+            "ai_config": {"detected": false, "configs": []},
+            "created_at": now.to_rfc3339(), "updated_at": now.to_rfc3339(),
+        }))
+        .unwrap();
+        let mut workflow = make_workflow_with_artifacts(Default::default());
+        workflow.id = format!("wf-main-tree-{suffix}");
+        workflow.project_id = Some(project.id.clone());
+        workflow.workspace_config = read_only.then(|| WorkspaceConfig {
+            hooks: WorkspaceHooks::default(),
+            require_isolation: false,
+            main_tree_read_only: true,
+        });
+        workflow.exec_allowlist = vec!["sleep".into()];
+        let mut pause = fake_step("pause");
+        pause.step_type = StepType::Exec;
+        pause.exec_command = Some("sleep".into());
+        pause.exec_args = vec!["0.4".into()];
+        workflow.steps = vec![pause];
+        state
+            .db
+            .with_conn(move |conn| crate::db::projects::insert_project(conn, &project))
+            .await
+            .unwrap();
+        (repo, workflow)
+    }
+
+    fn step_window(run: &WorkflowRun) -> (chrono::DateTime<Utc>, chrono::DateTime<Utc>) {
+        let step = &run.step_results[0];
+        let start = step.started_at.expect("step start recorded");
+        (
+            start,
+            start + chrono::Duration::milliseconds(step.duration_ms as i64),
+        )
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn two_non_isolated_runs_of_one_project_started_together_both_succeed_in_turn() {
+        let (state, tokens, agents) = test_state_and_configs();
+        let (_repo, workflow) = main_tree_fixture(&state, "turns", false).await;
+        let mut first = pending_run("run-main-tree-first", &workflow.id);
+        let mut second = pending_run("run-main-tree-second", &workflow.id);
+        insert_wf_and_run(&state, &workflow, &first).await;
+        let second_db = second.clone();
+        state
+            .db
+            .with_conn(move |conn| crate::db::workflows::insert_run(conn, &second_db))
+            .await
+            .unwrap();
+
+        let (a, b) = tokio::join!(
+            execute_run(
+                state.clone(),
+                &workflow,
+                &mut first,
+                &tokens,
+                &agents,
+                None,
+                None,
+                None
+            ),
+            execute_run(
+                state.clone(),
+                &workflow,
+                &mut second,
+                &tokens,
+                &agents,
+                None,
+                None,
+                None
+            ),
+        );
+        a.unwrap();
+        b.unwrap();
+
+        for run in [&first, &second] {
+            assert_eq!(run.status, RunStatus::Success, "{:?}", run.step_results);
+            assert_eq!(run.step_results.len(), 1, "no __workspace__ refusal");
+        }
+        let (first_start, first_end) = step_window(&first);
+        let (second_start, second_end) = step_window(&second);
+        assert!(
+            first_end <= second_start || second_end <= first_start,
+            "the runs took the checkout one after the other: {first_start}..{first_end} vs {second_start}..{second_end}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_run_that_outwaits_the_main_tree_fails_naming_the_holder() {
+        let (state, tokens, agents) = test_state_and_configs();
+        let (repo, workflow) = main_tree_fixture(&state, "timeout", false).await;
+        let holder = crate::workflows::workspace::MainTreeGuard::try_acquire(
+            &repo.path().to_string_lossy(),
+            "run-holding-the-tree",
+        )
+        .unwrap();
+        let mut run = pending_run("run-main-tree-late", &workflow.id);
+        insert_wf_and_run(&state, &workflow, &run).await;
+
+        let started = std::time::Instant::now();
+        crate::workflows::workspace::MAIN_TREE_WAIT_FOR_TESTS
+            .scope(
+                std::time::Duration::from_millis(200),
+                execute_run(
+                    state.clone(),
+                    &workflow,
+                    &mut run,
+                    &tokens,
+                    &agents,
+                    None,
+                    None,
+                    None,
+                ),
+            )
+            .await
+            .unwrap();
+        drop(holder);
+
+        assert!(
+            started.elapsed() >= std::time::Duration::from_millis(200),
+            "it waited first"
+        );
+        assert_eq!(run.status, RunStatus::Failed);
+        let refusal = &run.step_results[0];
+        assert_eq!(refusal.step_name, "__workspace__");
+        assert!(
+            refusal.output.contains("run-holding-the-tree"),
+            "the reason names the holder: {}",
+            refusal.output
+        );
+        let persisted = state
+            .db
+            .with_conn(|conn| crate::db::workflows::get_run(conn, "run-main-tree-late"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(persisted.status, RunStatus::Failed);
+        assert!(persisted.step_results[0]
+            .output
+            .contains("run-holding-the-tree"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_workflow_declared_read_only_on_the_main_tree_skips_the_lock() {
+        let (state, tokens, agents) = test_state_and_configs();
+        let (repo, workflow) = main_tree_fixture(&state, "read-only", true).await;
+        let tree = repo.path().to_string_lossy().to_string();
+        let _holder =
+            crate::workflows::workspace::MainTreeGuard::try_acquire(&tree, "run-writer").unwrap();
+        let mut run = pending_run("run-main-tree-reader", &workflow.id);
+        insert_wf_and_run(&state, &workflow, &run).await;
+
+        crate::workflows::workspace::MAIN_TREE_WAIT_FOR_TESTS
+            .scope(
+                std::time::Duration::ZERO,
+                execute_run(
+                    state.clone(),
+                    &workflow,
+                    &mut run,
+                    &tokens,
+                    &agents,
+                    None,
+                    None,
+                    None,
+                ),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(run.status, RunStatus::Success, "{:?}", run.step_results);
+        assert_eq!(
+            crate::workflows::workspace::MainTreeGuard::try_acquire(&tree, "probe").err(),
+            Some("run-writer".to_string()),
+            "the writer kept the lock; the reader never took it"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_run_that_waits_for_the_main_tree_stops_the_wait() {
+        let (state, tokens, agents) = test_state_and_configs();
+        let (repo, workflow) = main_tree_fixture(&state, "cancel", false).await;
+        let _holder = crate::workflows::workspace::MainTreeGuard::try_acquire(
+            &repo.path().to_string_lossy(),
+            "run-holding-the-tree",
+        )
+        .unwrap();
+        let mut run = pending_run("run-main-tree-cancelled", &workflow.id);
+        insert_wf_and_run(&state, &workflow, &run).await;
+
+        let canceller = {
+            let state = state.clone();
+            async move {
+                // Wait for the runner to register its token, then cancel.
+                for _ in 0..200 {
+                    let registered = state
+                        .cancel_registry
+                        .lock()
+                        .unwrap()
+                        .contains_key("run-main-tree-cancelled");
+                    if registered {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                crate::workflows::cancellation::cancel_run_tree(
+                    &state,
+                    "run-main-tree-cancelled",
+                    crate::workflows::cancellation::CancellationScope::RunTree,
+                    "cancelled_by_operator",
+                )
+                .await
+                .unwrap();
+            }
+        };
+        let started = std::time::Instant::now();
+        let (result, ()) = tokio::join!(
+            crate::workflows::workspace::MAIN_TREE_WAIT_FOR_TESTS.scope(
+                std::time::Duration::from_secs(30),
+                execute_run(
+                    state.clone(),
+                    &workflow,
+                    &mut run,
+                    &tokens,
+                    &agents,
+                    None,
+                    None,
+                    None,
+                ),
+            ),
+            canceller,
+        );
+        result.unwrap();
+
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "no full wait"
+        );
+        assert_eq!(run.status, RunStatus::Cancelled);
+        let persisted = state
+            .db
+            .with_conn(|conn| crate::db::workflows::get_run(conn, "run-main-tree-cancelled"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(persisted.status, RunStatus::Cancelled);
     }
 
     #[tokio::test]

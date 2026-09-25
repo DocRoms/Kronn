@@ -463,6 +463,31 @@ describe('WorkflowWizard — step list handlers', () => {
     expect(isolation).toBeChecked();
   });
 
+  it('keeps a workflow declared as not writing the checkout when it is saved', async () => {
+    renderWizard({ editWorkflow: mkWorkflow({
+      steps: [mkStep(), mkStep({ name: 'review' })],
+      workspace_config: { hooks: {}, require_isolation: false, main_tree_read_only: true },
+    }) });
+    fireEvent.click(screen.getByText('wiz.next')); // Infos → Trigger
+    fireEvent.click(screen.getByText('wiz.next')); // Trigger → Steps
+    fireEvent.click(screen.getByText('wiz.next')); // Steps → Config
+    fireEvent.click(screen.getByText('wiz.advanced'));
+
+    const readOnly = screen.getByLabelText('wiz.mainTreeReadOnly') as HTMLInputElement;
+    expect(readOnly).toBeChecked();
+    fireEvent.click(screen.getByLabelText('wiz.requireIsolationAction'));
+    expect(readOnly).toBeDisabled();
+    fireEvent.click(screen.getByLabelText('wiz.requireIsolationAction'));
+
+    fireEvent.click(screen.getByText('wiz.next')); // Config → Summary
+    fireEvent.click(screen.getByText('wiz.save'));
+    await waitFor(() => expect(updateMock).toHaveBeenCalled());
+    expect(updateMock.mock.calls[0][1].workspace_config).toMatchObject({
+      require_isolation: false,
+      main_tree_read_only: true,
+    });
+  });
+
   it('editing a step name propagates to the step', () => {
     toStepsPage([mkStep(), mkStep({ name: 'beta' })]);
     const stepName = screen.getByDisplayValue('main') as HTMLInputElement;

@@ -429,6 +429,8 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
   // (no silent main-tree fallback). Carried from the preset; persisted in
   // workspace_config.require_isolation.
   const [requireIsolation, setRequireIsolation] = useState<boolean>(editWorkflow?.workspace_config?.require_isolation ?? false);
+  // Declared "never writes the checkout": its main-tree runs skip the project lock.
+  const [mainTreeReadOnly, setMainTreeReadOnly] = useState<boolean>(editWorkflow?.workspace_config?.main_tree_read_only ?? false);
   const hasAgentExecMix =
     steps.some(step => !step.step_type || step.step_type.type === 'Agent') &&
     steps.some(step => step.step_type?.type === 'Exec');
@@ -550,6 +552,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
     if (preset.childWorkflows) setPendingChildWorkflows(preset.childWorkflows);
     if (preset.execAllowlist) setExecAllowlist(preset.execAllowlist);
     setRequireIsolation(!!preset.requireIsolation);
+    setMainTreeReadOnly(false);
     if (preset.variables) setWfVariables(preset.variables);
     if (initialProjectId && projects.some(p => p.id === initialProjectId)) {
       setProjectId(initialProjectId);
@@ -765,6 +768,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
         // preset-apply effect above.
         setPendingChildWorkflows(p.childWorkflows ?? []);
         setRequireIsolation(!!p.requireIsolation);
+        setMainTreeReadOnly(false);
         if (p.variables) setWfVariables(p.variables);
         setWizardMode('advanced');
         setWizardStep(2);
@@ -1164,7 +1168,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
     const hasHooks = wsHookAfterCreate || wsHookBeforeRun || wsHookAfterRun || wsHookBeforeRemove;
     // Emit a config when there are hooks OR isolation is required — otherwise a
     // code-pushing preset's require_isolation would be dropped (null config).
-    if (!hasHooks && !requireIsolation) return null;
+    if (!hasHooks && !requireIsolation && !mainTreeReadOnly) return null;
     return {
       hooks: {
         after_create: wsHookAfterCreate || null,
@@ -1173,6 +1177,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
         before_remove: wsHookBeforeRemove || null,
       },
       require_isolation: requireIsolation,
+      main_tree_read_only: mainTreeReadOnly,
     };
   };
 
@@ -4863,6 +4868,18 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                 </label>
                 <p className="text-xs text-faint" style={{ margin: '6px 0 0' }}>
                   {t(projectId ? 'wiz.workflowIsolationHint' : 'wiz.workflowIsolationNoProject')}
+                </p>
+                <label className="wf-checkbox-label" style={{ marginTop: 10 }}>
+                  <input
+                    type="checkbox"
+                    checked={mainTreeReadOnly}
+                    disabled={!projectId || requireIsolation}
+                    onChange={e => setMainTreeReadOnly(e.target.checked)}
+                  />
+                  <span>{t('wiz.mainTreeReadOnly')}</span>
+                </label>
+                <p className="text-xs text-faint" style={{ margin: '6px 0 0' }}>
+                  {t('wiz.mainTreeReadOnlyHint')}
                 </p>
               </div>
 

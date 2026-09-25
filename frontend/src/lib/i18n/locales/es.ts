@@ -4286,6 +4286,8 @@ KRONN:APPLY; eso sobreescribiría el valor real con un placeholder
   'wiz.workflowIsolation': 'Aislamiento del workflow',
   'wiz.workflowIsolationHint': 'Crea un worktree git dedicado para el run e impide volver al checkout principal si falla su creación.',
   'wiz.workflowIsolationNoProject': 'Vincula primero un proyecto Git para aislar los runs.',
+  'wiz.mainTreeReadOnly': 'No escribe en el checkout del proyecto',
+  'wiz.mainTreeReadOnlyHint': 'Sus runs en el checkout principal no toman el bloqueo de exclusividad del proyecto y pueden ejecutarse junto a otro run. Solo para workflows que leen el checkout o trabajan con rutas absolutas.',
   'wiz.workspaceModeIsolated': 'Worktree dedicado',
   'wiz.workspaceModeMain': 'Checkout principal',
   'wiz.worktreeIconTooltip': 'Worktree git: copia aislada del repo, creada por la duración del run, en .kronn/worktrees/.',
