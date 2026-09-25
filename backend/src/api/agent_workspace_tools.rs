@@ -29,6 +29,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Seek, Write};
 use std::path::{Component, Path, PathBuf};
 
+use super::agent_workspace_structure;
+
 use futures::StreamExt;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -1223,6 +1225,11 @@ pub fn write_file_payload_with_receipt(
 ) -> Result<Value, String> {
     let path = resolve_in_workspace(root, requested).map_err(|refusal| refusal.message())?;
     validate_proposed_source(&path, requested, content)?;
+    if agent_workspace_structure::is_guarded(&path) {
+        if let Ok(original) = std::fs::read_to_string(&path) {
+            agent_workspace_structure::validate_delimiters(&path, requested, &original, content)?;
+        }
+    }
     write_file_payload_inner(root, requested, content, expected_sha256)
 }
 
@@ -1447,6 +1454,7 @@ pub fn edit_file_payload(
     replaced.push_str(&text[cursor..]);
     let total_lines = replaced.lines().count();
     validate_proposed_source(&path, requested, &replaced)?;
+    agent_workspace_structure::validate_delimiters(&path, requested, &text, &replaced)?;
     file.seek(std::io::SeekFrom::Start(0))
         .map_err(|error| format!("could not seek `{requested}` for editing: {error}"))?;
     file.write_all(replaced.as_bytes())
@@ -1547,6 +1555,13 @@ pub fn edit_lines_payload(
     if selected_had_newline && !replacement.is_empty() && !replacement.ends_with(line_ending) {
         replacement.push_str(line_ending);
     }
+    agent_workspace_structure::validate_range_indentation(
+        &path,
+        requested,
+        start_line,
+        &lines[start_line - 1..end_line],
+        new_string,
+    )?;
     if text[region_start..region_end] == replacement {
         return Err("the selected lines already equal `new_string` — nothing would change.".into());
     }
@@ -1557,6 +1572,7 @@ pub fn edit_lines_payload(
     replaced.push_str(&replacement);
     replaced.push_str(&text[region_end..]);
     validate_proposed_source(&path, requested, &replaced)?;
+    agent_workspace_structure::validate_delimiters(&path, requested, &text, &replaced)?;
     file.seek(std::io::SeekFrom::Start(0))
         .map_err(|error| format!("could not seek `{requested}` for editing: {error}"))?;
     file.write_all(replaced.as_bytes())
@@ -1663,6 +1679,7 @@ pub fn insert_after_line_payload(
     replaced.push_str(&inserted);
     replaced.push_str(&text[insertion_at..]);
     validate_proposed_source(&path, requested, &replaced)?;
+    agent_workspace_structure::validate_delimiters(&path, requested, &text, &replaced)?;
     file.seek(std::io::SeekFrom::Start(0))
         .map_err(|error| format!("could not seek `{requested}` for editing: {error}"))?;
     file.write_all(replaced.as_bytes())
@@ -2274,6 +2291,68 @@ mod tests {
         );
         assert!(result.is_ok());
     }
+    #[test]
+    fn a_shifted_boundary_or_an_orphan_brace_never_reaches_disk_outside_rust() {
+        let root = tempfile::tempdir().unwrap();
+        let twig = "<ul>\n  {% if a %}\n    <li>{{ a }}</li>\n  {% endif %}\n</ul>\n";
+        write_file_payload(root.path(), "list.twig", twig).unwrap();
+        let receipt = revision(root.path(), "list.twig");
+        let shifted = edit_lines_payload(
+            root.path(),
+            "list.twig",
+            3,
+            3,
+            "     <li>{{ b }}</li>",
+            &receipt,
+        )
+        .unwrap_err();
+        assert!(
+            shifted.starts_with(agent_workspace_structure::STRUCTURE_REFUSAL_PREFIX),
+            "{shifted}"
+        );
+        assert!(
+            shifted.contains("line 3 (4 space(s)), not 5 space(s)"),
+            "{shifted}"
+        );
+        let unclosed =
+            edit_lines_payload(root.path(), "list.twig", 4, 4, "", &receipt).unwrap_err();
+        assert!(
+            unclosed.contains("`{% if %}` is never closed"),
+            "{unclosed}"
+        );
+        assert_eq!(revision(root.path(), "list.twig"), receipt);
+
+        let scss = ".a {\n  color: red;\n}\n";
+        write_file_payload(root.path(), "a.scss", scss).unwrap();
+        let receipt = revision(root.path(), "a.scss");
+        let orphan =
+            edit_file_payload(root.path(), "a.scss", "}\n", "}\n}\n", false, &receipt).unwrap_err();
+        assert!(orphan.contains("orphan closing `}`"), "{orphan}");
+        let inserted =
+            insert_after_line_payload(root.path(), "a.scss", 3, "}", &receipt).unwrap_err();
+        assert!(inserted.contains("orphan closing `}`"), "{inserted}");
+        let rewritten =
+            write_file_payload_with_receipt(root.path(), "a.scss", ".a {\n", Some(&receipt))
+                .unwrap_err();
+        assert!(rewritten.contains("is never closed"), "{rewritten}");
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("a.scss")).unwrap(),
+            scss
+        );
+
+        // A correct bounded edit still goes through.
+        let receipt = revision(root.path(), "list.twig");
+        edit_lines_payload(
+            root.path(),
+            "list.twig",
+            3,
+            3,
+            "    <li>{{ b }}</li>",
+            &receipt,
+        )
+        .expect("an edit that keeps the range's indentation is written");
+    }
+
     #[test]
     fn invalid_rust_line_edits_and_whole_file_writes_never_reach_disk() {
         let root = tempfile::tempdir().unwrap();

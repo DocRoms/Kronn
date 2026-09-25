@@ -372,7 +372,18 @@ mod tests {
             }),
             ok: false,
         };
-        assert!(rust_syntax_refusal(&refusal));
+        assert_eq!(structural_refusal(&refusal), Some("Rust syntax"));
+        let structure = crate::agents::tools::ToolOutcome {
+            call: refusal.call.clone(),
+            content: serde_json::json!({
+                "error": format!(
+                    "{} `a.scss`: line 4: orphan closing `}}`",
+                    crate::api::agent_workspace_structure::STRUCTURE_REFUSAL_PREFIX
+                )
+            }),
+            ok: false,
+        };
+        assert_eq!(structural_refusal(&structure), Some("Structure"));
     }
 
     #[test]

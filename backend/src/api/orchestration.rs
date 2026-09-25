@@ -6537,8 +6537,6 @@ fn worker_brief_markdown(
                 "# {task_reference} — {task_title}\n\n\
                  ## Objectif\n{objective}\n\n\
                  ## Definition of Done\n{dod}\n\n\
-                 {human_arbitration}\
-                 {parent_milestones}\
                  ## Cible mécanique prélocalisée\n{target}\n\n\
                  ## Protocole borné\n\
                  1. Appelle l'unique `read_file` contraint.\n\
@@ -12476,11 +12474,14 @@ mod tests {
             true,
             Some(&scope),
         );
-        for (name, brief) in [
-            ("native CLI", native_cli),
-            ("generic HTTP", generic_http),
-            ("prelocalized HTTP", prelocalized_http),
-        ] {
+        // A bounded edit never arbitrates nor reports milestones: both
+        // sections only cost a local worker context.
+        assert!(
+            !prelocalized_http.contains("## Arbitrages humains")
+                && !prelocalized_http.contains("## Jalons parent"),
+            "{prelocalized_http}"
+        );
+        for (name, brief) in [("native CLI", native_cli), ("generic HTTP", generic_http)] {
             assert!(
                 brief.contains("demande au principal de relayer"),
                 "{name}: {brief}"

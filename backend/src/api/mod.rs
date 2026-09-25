@@ -1,6 +1,7 @@
 pub mod agent_api;
 pub mod agent_jobs;
 pub mod agent_tools;
+pub mod agent_workspace_structure;
 pub mod agent_workspace_tools;
 pub mod agents;
 pub mod ai_docs;

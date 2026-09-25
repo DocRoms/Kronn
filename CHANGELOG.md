@@ -75,6 +75,14 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- A shell-less worker's edit to a PHP, Twig, SCSS/CSS, TS/JS or JSON file is
+  refused before it reaches disk when it leaves an orphan delimiter or an
+  unclosed Twig block, or when an `edit_lines` replacement shifts the
+  indentation of the first or last line it replaces; the diagnostic sends the
+  worker into its one strict correction, as a Rust parser error already did.
+  Local models got bounded edits with indented edges wrong on every measured
+  case. The prelocalized worker brief no longer carries the human-arbitration
+  and parent-milestone sections.
 - A Kronn action card opened from a Live Page no longer closes every 30 s
   when the Page refreshes, and keeps what was typed in it; it now follows its
   row when new data makes the Page redraw. Each row's state carries its launch

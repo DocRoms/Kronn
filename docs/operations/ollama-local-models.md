@@ -146,6 +146,18 @@ reassignment. After a successful edit, Kronn exposes only `git_commit` (one
 response plus one correction), then only `task_exec_deliver`: status/diff and
 all read/edit tools stay withdrawn.
 
+Before any write, the edit is refused and nothing reaches disk when it breaks
+the file's structure. Rust is parsed. PHP, Twig, SCSS/CSS/LESS, TS/JS and JSON
+get a language-aware delimiter check (strings and comments ignored; Twig tags
+and `if`/`for`/`block`… with their `end…`), applied only to a file whose
+delimiters were balanced before the edit. An `edit_lines` replacement must
+also keep the indentation of the first and last non-blank lines it replaces;
+inner lines may move. The diagnostic starts with `Structure validation refused`
+and, like a Rust parser error, puts the worker into its one strict correction
+of the same frozen range. The prelocalized brief carries no human-arbitration
+or parent-milestone section: a bounded edit has neither.
+`[src: file: backend/src/api/agent_workspace_structure.rs]`
+
 For a pure insertion, do not make the worker reproduce a paragraph inside a
 replacement range. Use one verified anchor line:
 
