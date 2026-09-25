@@ -345,6 +345,13 @@ dev_missing_tools() {
     echo "${missing# }"
 }
 
+# Pure: succeed when the watched build left the served binary byte-identical
+# ($1 = fingerprint of the running binary, $2 = fingerprint after the build).
+# An unknown fingerprint never counts as unchanged, so a real rebuild still swaps.
+dev_backend_binary_unchanged() {
+    [[ -n "${1-}" && "${1-}" == "${2-}" ]]
+}
+
 # Pure: echo PATH ($1) with DIR ($2) appended only when it is not already an
 # entry. Never reorders: the backend resolves agent CLIs through PATH, so moving
 # a directory ahead of the user's own choice can launch a stale duplicate binary.

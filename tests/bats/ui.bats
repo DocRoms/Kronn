@@ -309,6 +309,30 @@ setup() {
     assert_output "cargo node pnpm watchexec"
 }
 
+# ─── dev_backend_binary_unchanged (hot-reload swap guard) ────────────────────
+
+@test "dev_backend_binary_unchanged: identical fingerprints keep the backend" {
+    run dev_backend_binary_unchanged "123 456" "123 456"
+    assert_success
+}
+
+@test "dev_backend_binary_unchanged: a new binary is a change" {
+    run dev_backend_binary_unchanged "123 456" "789 456"
+    assert_failure
+}
+
+@test "dev_backend_binary_unchanged: an unknown fingerprint is never unchanged" {
+    run dev_backend_binary_unchanged "" ""
+    assert_failure
+    run dev_backend_binary_unchanged "123 456" ""
+    assert_failure
+}
+
+@test "dev-backend-supervisor: watchexec ignores build output directories" {
+    run grep -c -- "--ignore '\*\*/target/\*\*'" "${BATS_TEST_DIRNAME}/../../scripts/dev-backend-supervisor.sh"
+    assert_output "1"
+}
+
 # ─── path_append_missing (kronn start-dev PATH) ───────────────────────────────
 
 @test "path_append_missing: keeps the user's order when the dir is already listed" {
@@ -552,9 +576,11 @@ printf 'start\n' >>"$KRONN_TEST_BACKEND_STARTS"
 trap 'exit 0' TERM INT
 while true; do sleep 1; done
 EOF
+    # The signal follows a build that really replaced the binary.
     cat >"$fake_bin/watchexec" <<'EOF'
 #!/usr/bin/env bash
 sleep 0.2
+printf '# rebuilt\n' >>"$KRONN_DEV_BACKEND_BINARY"
 kill -USR1 "$KRONN_DEV_BACKEND_SUPERVISOR_PID"
 trap 'exit 0' TERM INT
 while true; do sleep 1; done

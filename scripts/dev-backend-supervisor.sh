@@ -29,6 +29,7 @@ watcher_pid=""
 reload_requested=0
 bootstrap_started=0
 bootstrap_fingerprint=""
+serving_fingerprint=""
 
 record_failure() {
     local status="${1:-1}"
@@ -60,7 +61,12 @@ cleanup() {
     done
 }
 
+binary_fingerprint() {
+    cksum <"$BACKEND_BINARY" 2>/dev/null || true
+}
+
 start_backend() {
+    serving_fingerprint="$(binary_fingerprint)"
     (cd "$BACKEND_DIR" && exec "$BACKEND_BINARY") &
     backend_pid=$!
 }
@@ -131,6 +137,7 @@ if dev_backend_watch_enabled "${KRONN_DEV_BACKEND_WATCH:-1}"; then
             --postpone \
             --on-busy-update=restart \
             --exts rs,toml,lock \
+            --ignore '**/target/**' \
             --stop-timeout 10s \
             -- ../scripts/dev-backend-watch-command.sh
     ) &
@@ -140,6 +147,14 @@ else
 fi
 
 while true; do
+    if (( reload_requested == 1 )) \
+        && dev_backend_binary_unchanged "$serving_fingerprint" "$(binary_fingerprint)"; then
+        # Any watched file can trigger a build that changes nothing, such as a
+        # generated source under a target directory; restarting would only
+        # cut the agents the running backend serves.
+        reload_requested=0
+        echo "  Backend build left the binary unchanged — keeping the running backend."
+    fi
     if (( reload_requested == 1 )); then
         reload_requested=0
         echo "  Backend build ready — restarting without compile downtime..."

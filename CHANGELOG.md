@@ -70,6 +70,11 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- In `kronn start-dev`, a build that writes generated sources under a
+  `target/` directory (another checkout's Cargo build, for example) no longer
+  restarts the backend and cuts the agents it is running. The file watcher now
+  ignores `target/`, and a watched build restarts the backend only when it
+  actually changed the binary.
 - The document exporter (`kronn-docs`) no longer outlives a backend that is
   killed outright (crash, SIGKILL, a hot-reload restart that times out). It
   now exits as soon as the backend's end of its stdin pipe closes, instead of
