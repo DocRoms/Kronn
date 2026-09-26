@@ -121,6 +121,14 @@ Release notes for 0.9.3 and earlier are available in the
   while each foreach stays sequential. In such a fresh worktree the foreach no
   longer skips every item on `No such file or directory`: it creates the
   untracked `.kronn/` folder before writing `current_task.json`.
+- Kronn no longer deletes a repository's own skills and agent files. At every
+  startup the native sync removed any `.claude/skills`, `.agents/skills` or
+  `.gemini/skills` folder (and any agent file) it had not just written, and
+  appended a whole-folder ignore rule such as `.agents/` that cancelled the
+  repository's `!.agents/skills/`. It now records what it writes in
+  `.kronn/native-files.json` and only removes an unmodified, untracked file
+  of its own; it ignores only what it wrote, and drops a whole-folder rule an
+  earlier sync appended over a re-included folder.
 - A kronn-action block removed from a Page's HTML is no longer listed among
   its actions after the next publication; its launches stay in the history.
 - A shell-less worker's edit to a PHP, Twig, SCSS/CSS, TS/JS or JSON file is

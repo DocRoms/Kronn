@@ -305,6 +305,8 @@ All three axes are available in:
 - Profiles → agent files in `.claude/agents/`, `.gemini/agents/`, `.codex/agents/` — agents discover them as sub-agents
 - Vibe/Kiro: fallback to prompt injection (Vibe uses custom runner, Kiro headless unconfirmed)
 - Sync: additive per discussion (no cleanup), full cleanup at startup + project config change
+- Ownership: every file Kronn writes is recorded with its digest in the project's `.kronn/native-files.json`. Cleanup only removes a recorded file that still holds those bytes, is not a symlink and is not tracked by git; a repository's own skills and agent files are never touched, and a tracked file named like a Kronn skill is never overwritten.
+- Ignore rules: a skill folder Kronn writes carries its own `.gitignore` (`*`), and an agent file is ignored by its exact path. The sync never adds a whole-folder rule (`.agents/`, `.claude/`), and removes one an earlier sync appended when the repository re-includes something under that folder (e.g. `!.agents/skills/`). `.gemini/` and `.kiro/` stay ignored for their MCP settings.
 - Module: `core/native_files.rs`
 
 ### Workflow engine
