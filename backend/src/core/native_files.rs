@@ -54,7 +54,7 @@ fn save_ledger(root: &Path, ledger: &Ledger) {
 /// Whether git tracks `rel` in the repository at `root`. Outside a repository,
 /// or without git, nothing is tracked.
 fn is_tracked(root: &Path, rel: &str) -> bool {
-    std::process::Command::new("git")
+    crate::core::cmd::sync_cmd("git")
         .arg("-C")
         .arg(root)
         .args(["ls-files", "--error-unmatch", "--", rel])

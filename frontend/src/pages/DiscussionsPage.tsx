@@ -3525,7 +3525,7 @@ export function DiscussionsPage({
     const idempotencyKey = editingRevisionKeyRef.current ?? newClientMessageId();
     editingRevisionKeyRef.current = idempotencyKey;
     const controller = new AbortController();
-    abortControllers.current[discId] = controller;
+    registerAbortController(abortControllers, discId, controller);
     let participants: ParticipantView[] = [];
     try {
       participants = await discussionsApi.participants(discId) as ParticipantView[];
