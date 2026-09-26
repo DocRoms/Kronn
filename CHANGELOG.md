@@ -161,6 +161,10 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- The desktop app compiles again. Its fifteen PNG icons had been restored to
+  the renderer's RGB bytes, and Tauri stopped at `icon … is not RGBA`. They are
+  RGBA again, with the same pixels, and `scripts/check-app-icons.mjs` now checks
+  that desktop icons are 8-bit RGBA and match a fresh render pixel for pixel.
 - The boot purge of finished workflow runs no longer removes a worktree that a
   finished sub-workflow shares with its parent while that parent is still
   running, paused at a gate or resumable after an interruption.
