@@ -3,6 +3,7 @@
 //! Ticks every 30s, checks triggers, enforces concurrency limits,
 //! and spawns runs.
 
+pub mod api_call_binary;
 pub mod api_call_executor;
 pub mod api_call_ratelimit;
 pub mod api_call_security;
@@ -544,6 +545,7 @@ mod tests {
             api_timeout_ms: None,
             api_max_retries: None,
             api_output_var: None,
+            api_response: None,
             gate_message: None,
             gate_request_changes_target: None,
             gate_notify_url: None,

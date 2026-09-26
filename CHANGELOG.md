@@ -44,6 +44,16 @@ Release notes for 0.9.3 and earlier are available in the
   behind a fallback and now refuses a malformed one; the wizard no longer warns
   about a guarded reference to a later step. `{{run.id}}` gives the current
   run's id. See [the template grammar](docs/architecture/overview.md).
+- `ApiCall` and `BatchApiCall` steps can fetch an image or another file through
+  the API broker with `api_response: {"type": "Binary"}`: the credentials stay
+  on the server and the step returns `{content_type, size, base64, data_uri}`
+  instead of failing on JSON parsing. Only the declared media types are
+  accepted (`image/*` by default, `*/*` refused), and a body over `max_bytes`
+  (256 KiB by default, 2 MiB at most) fails the step rather than being
+  truncated. Published as a `data:` URI, a Jira attachment thumbnail shows in a
+  Page without opening its image policy to another domain. Steps without the
+  option parse JSON as before.
+  See [binary responses](docs/operations/deagent-apicall.md#binary-responses-images-and-other-files).
 - A room's native agent can prepare and launch a task execution itself, as
   its principal, without a CLI joining the room. Kronn identifies it from the
   turn it is running, so only that room's agent is accepted.

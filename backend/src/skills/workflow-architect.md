@@ -72,6 +72,8 @@ JSONPath extraction examples (RFC 9535, syntax familiar from `jq`):
 - `$.total` — single scalar
 - `$.issues[?(@.priority=='high')].id` — filtered subset
 
+**Images and other files** (e.g. Jira `/rest/api/2/attachment/thumbnail/{id}`): set `"api_response": {"type": "Binary"}` (also on `BatchApiCall`). The data becomes `{content_type, size, base64, data_uri}`; add `"api_extract": {"path": "$.data_uri"}` to keep only the URI a Page `<img>` can show (Pages accept `data:` images only). `accept` defaults to `["image/*"]` (`*/*` refused) and `max_bytes` to 262144 (max 2097152); an undeclared type or a larger body fails the step instead of being truncated. Never fetch such files with `Exec` + credentials: the broker keeps them server-side.
+
 - **Reference a saved `QuickApi`** via `quick_api_id` — the runtime loads the QuickApi from DB and pulls every `api_*` field from it. Per-field overrides on the step still win when set, so you can keep the shared body template but override e.g. `api_extract` for one workflow. Same pattern as `BatchApiCall` — when 3+ workflows would share the same call, define it once as a `QuickApi` and reference it. (0.7+, was 0.6.0 for batch only, extended to single-shot in 0.7+.)
 
 ### 3. `Exec` — direct shell command in the workspace (0 tokens)

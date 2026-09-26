@@ -29,6 +29,9 @@ use serde_json::Value;
 use crate::db::api_call_logs::{self, ApiCallSource, ApiCallStatus, NewApiCallLog};
 use crate::models::*;
 
+use super::api_call_binary::{
+    binary_summary, read_binary_body, resolve_binary_policy, BinaryPolicy,
+};
 use super::api_call_security::{
     assert_host_matches_base, assert_public_ip, redact_url_query, ResolvedAuth,
 };
@@ -155,6 +158,11 @@ pub async fn execute_api_call_step_core(
             start,
             "ApiCall step missing `api_endpoint_path`".into(),
         );
+    };
+
+    let binary = match resolve_binary_policy(step) {
+        Ok(policy) => policy,
+        Err(msg) => return fail(step, start, msg),
     };
 
     // Resolve auth first — even if a subsequent step fails, surfacing an
@@ -305,6 +313,7 @@ pub async fn execute_api_call_step_core(
         &pagination,
         plugin_slug,
         config_id,
+        binary.as_ref(),
     )
     .await
     {
@@ -345,7 +354,12 @@ pub async fn execute_api_call_step_core(
             method,
             redact_url_query(&full_url)
         ),
-        None => summarize(&extract_out.value, &full_url, method.as_str()),
+        // An extracted `data_uri` is a scalar: the generic summary would copy
+        // the whole payload into the one-line summary.
+        None => match binary.as_ref().and_then(|_| binary_summary(&response)) {
+            Some(detail) => format!("{method} {} → {detail}", redact_url_query(&full_url)),
+            None => summarize(&extract_out.value, &full_url, method.as_str()),
+        },
     };
 
     // 0.8.5 — emit the canonical Kronn step-output envelope (markers +
@@ -1332,6 +1346,7 @@ async fn walk_pages(
     pagination: &PaginationSpec,
     plugin_slug: &str,
     config_id: &str,
+    binary: Option<&BinaryPolicy>,
 ) -> Result<(Value, bool, Option<u16>), String> {
     // Returns `(merged_response, truncated, empty_response_status)`. The HTTP
     // code is kept separate from API data when the first response has no body.
@@ -1456,6 +1471,7 @@ async fn walk_pages(
             body,
             timeout,
             max_retries,
+            binary,
         )
         .await?;
 
@@ -1684,6 +1700,7 @@ fn rebuild_query(
 /// excerpt so the user can fix their params.
 /// Returns the parsed body plus the raw `Link` response header (C2 — the
 /// only continuation signal GitHub-style list APIs give is in the headers).
+#[allow(clippy::too_many_arguments)]
 async fn send_with_retry(
     method: Method,
     url: &Url,
@@ -1692,6 +1709,7 @@ async fn send_with_retry(
     body: Option<&Value>,
     timeout: Duration,
     max_retries: u8,
+    binary: Option<&BinaryPolicy>,
 ) -> Result<(Value, Option<String>, Option<u16>), String> {
     // 0.8.2 — Explicit User-Agent. GitHub REQUIRES one (returns 403
     // "Request forbidden by administrative rules" without it — see
@@ -1755,6 +1773,12 @@ async fn send_with_retry(
                 .get(reqwest::header::LINK)
                 .and_then(|v| v.to_str().ok())
                 .map(String::from);
+            if let Some(policy) = binary {
+                return Ok(match read_binary_body(response, policy).await? {
+                    Some(value) => (value, link, None),
+                    None => (Value::Null, link, Some(status.as_u16())),
+                });
+            }
             let bytes = response
                 .bytes()
                 .await
@@ -2067,6 +2091,7 @@ mod tests {
             api_timeout_ms: Some(5_000),
             api_max_retries: Some(2),
             api_output_var: None,
+            api_response: None,
             gate_message: None,
             gate_request_changes_target: None,
             gate_notify_url: None,

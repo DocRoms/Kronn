@@ -439,6 +439,19 @@ export type ApiKeyDisplay = { id: string, name: string, provider: string, masked
 export type ApiKeysResponse = { keys: Array<ApiKeyDisplay>, disabled_overrides: Array<string>, };
 
 /**
+ * Response decoding for `ApiCall` / `BatchApiCall`.
+ */
+export type ApiResponseMode = { "type": "Json" } | { "type": "Binary",
+/**
+ * Exact types (`image/png`) or a family (`image/*`). Empty = `image/*`.
+ */
+accept?: Array<string>,
+/**
+ * Largest accepted body in bytes. Default 256 KiB, at most 2 MiB.
+ */
+max_bytes?: number | null, };
+
+/**
  * REST API capability for a plugin.
  *
  * Stored on `McpServer` to let a plugin expose an HTTP API alongside (or
@@ -7832,6 +7845,11 @@ api_max_retries?: number | null,
  * Defaults to the step's `name` field when unset.
  */
 api_output_var?: string | null,
+/**
+ * How a 2xx body is decoded. Absent = JSON, exactly as before; `Binary`
+ * returns an allowed media type as base64 instead of parsing it.
+ */
+api_response?: ApiResponseMode | null,
 /**
  * Markdown message shown to the operator on the run-detail page.
  * Templates supported. Empty string falls back to a default

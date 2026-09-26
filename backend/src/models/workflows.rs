@@ -496,6 +496,11 @@ pub struct WorkflowStep {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_output_var: Option<String>,
 
+    /// How a 2xx body is decoded. Absent = JSON, exactly as before; `Binary`
+    /// returns an allowed media type as base64 instead of parsing it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_response: Option<ApiResponseMode>,
+
     // ─── Gate fields (0.7.0 Phase 4 — human-in-the-loop) ─────────────
     // Only meaningful when `step_type == Gate`. The runner stops the
     // run with `RunStatus::WaitingApproval`; a human decides via the
@@ -725,6 +730,26 @@ pub struct ExtractSpec {
 /// serde default for `ExtractSpec::fail_on_empty` (2026-06-10).
 fn default_true() -> bool {
     true
+}
+
+/// Response decoding for `ApiCall` / `BatchApiCall`.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
+#[ts(export)]
+#[serde(tag = "type")]
+pub enum ApiResponseMode {
+    /// Parse the body as JSON (the behaviour when `api_response` is absent).
+    Json,
+    /// Return the body as `{content_type, size, base64, data_uri}`. Only the
+    /// declared media types are accepted, so the broker cannot proxy arbitrary
+    /// files, and a body over the cap is refused rather than truncated.
+    Binary {
+        /// Exact types (`image/png`) or a family (`image/*`). Empty = `image/*`.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        accept: Vec<String>,
+        /// Largest accepted body in bytes. Default 256 KiB, at most 2 MiB.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_bytes: Option<u64>,
+    },
 }
 
 /// Pagination strategy for an `ApiCall` step. `Auto` covers the three most

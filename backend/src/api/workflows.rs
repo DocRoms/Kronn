@@ -821,6 +821,8 @@ fn validate_api_call_minimum(s: &WorkflowStep, is_batch: bool) -> Result<(), Str
             s.name
         ));
     }
+    crate::workflows::api_call_binary::resolve_binary_policy(s)
+        .map_err(|error| format!("Step {} « {} » : {error}", kind, s.name))?;
     Ok(())
 }
 
@@ -4332,6 +4334,7 @@ pub async fn suggestions(
                     api_timeout_ms: None,
                     api_max_retries: None,
                     api_output_var: None,
+                    api_response: None,
                     gate_message: None,
                     gate_request_changes_target: None,
                     gate_notify_url: None,
@@ -5212,6 +5215,7 @@ mod tests {
             api_timeout_ms: None,
             api_max_retries: None,
             api_output_var: None,
+            api_response: None,
             gate_message: None,
             gate_request_changes_target: None,
             gate_notify_url: None,
@@ -6483,6 +6487,38 @@ mod tests {
         s.api_plugin_slug = Some("jira".into());
         s.api_endpoint_path = Some("/rest/api/3/issue/{{issue_key}}".into());
         validate_required_fields_per_type(&[s]).expect("complete inline ApiCall should validate");
+    }
+
+    #[test]
+    fn required_fields_binary_response_is_bounded_when_the_workflow_is_saved() {
+        let mut s = mk_step("thumbs", StepType::BatchApiCall);
+        s.api_plugin_slug = Some("mcp-atlassian".into());
+        s.api_endpoint_path = Some("/rest/api/2/attachment/thumbnail/{{batch.item.id}}".into());
+        s.batch_items_from = Some("{{steps.attachments.data}}".into());
+        s.api_response = Some(ApiResponseMode::Binary {
+            accept: vec![],
+            max_bytes: None,
+        });
+        validate_required_fields_per_type(std::slice::from_ref(&s))
+            .expect("default binary contract should validate");
+
+        for (accept, max_bytes, expected) in [
+            (vec!["*/*".to_string()], None, "accept"),
+            (vec![], Some(0), "max_bytes"),
+            (
+                vec![],
+                Some(crate::workflows::api_call_binary::BINARY_MAX_BYTES_CEILING + 1),
+                "max_bytes",
+            ),
+        ] {
+            s.api_response = Some(ApiResponseMode::Binary { accept, max_bytes });
+            let err = validate_required_fields_per_type(std::slice::from_ref(&s))
+                .expect_err("out-of-contract binary response must be refused");
+            assert!(
+                err.contains("thumbs") && err.contains(expected),
+                "got: {err}"
+            );
+        }
     }
 
     #[test]

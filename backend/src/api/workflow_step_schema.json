@@ -134,7 +134,8 @@
         "api_method (default GET)",
         "api_query",
         "api_body",
-        "api_extract"
+        "api_extract",
+        "api_response ({\"type\":\"Binary\",\"accept\":[\"image/*\"],\"max_bytes\":262144} for a file: data {content_type,size,base64,data_uri}; extract $.data_uri for a Page <img>. Cap max 2097152; an undeclared type or a larger body fails the step)"
       ],
       "note": "plugin_slug + config_id MUST exist in mcp_list. endpoint_path is INDICATIVE — any valid path on the API works; set api_method explicitly for a non-GET on an unlisted path.",
       "example": {
@@ -237,7 +238,9 @@
         "api_endpoint_path"
       ],
       "optional": [
-        "api_method"
+        "api_method",
+        "api_extract",
+        "api_response (as ApiCall: one file per item)"
       ],
       "note": "fan one ApiCall over a list without starting a model.",
       "PER_ITEM_VARS": "Each item's fields are templatable in api_endpoint_path AND api_body/api_query as `{{batch.item.<field>}}` (canonical), `{{item.<field>}}` (alias), and bare `{{<field>}}`. So a per-item path works: `/comments/{{batch.item.commentId}}/reactions`. Also `{{batch.index}}` (0-based) and `{{batch.item}}` (whole item as JSON). NOTE: this is a DIFFERENT name from the SubWorkflow-foreach item (`current_task.*`) — batch fan-out uses `batch.item.*`/`item.*`.",

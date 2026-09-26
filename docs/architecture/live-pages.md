@@ -234,6 +234,12 @@ The frontend renders a Page in an iframe with `sandbox="allow-scripts"` and no
 credentials. It cannot fetch APIs: the authenticated parent loads datasets from
 Kronn, then posts a versioned, validated snapshot into the frame.
 
+Images load only from `data:` and `blob:` URIs. An image behind authentication,
+such as a Jira attachment thumbnail, is fetched by an `ApiCall` with
+`api_response: Binary` and published as a data URI; see
+[binary responses](../operations/deagent-apicall.md#binary-responses-images-and-other-files).
+[src: file: frontend/src/lib/live-page-sandbox.ts:5]
+
 PDF and DOCX export starts from the materialized iframe DOM, not from the stored
 HTML template. A request/response `postMessage` bridge keeps the opaque-origin
 boundary intact while capturing the current dataset-driven document. The same
