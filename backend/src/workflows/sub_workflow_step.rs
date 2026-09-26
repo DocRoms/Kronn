@@ -598,6 +598,10 @@ async fn execute_foreach(
     };
 
     let task_file = std::path::Path::new(&ws).join(".kronn/current_task.json");
+    // `.kronn/` is usually untracked, so a fresh isolated worktree lacks it.
+    if let Some(parent) = task_file.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
     let mut results: Vec<serde_json::Value> = Vec::with_capacity(items.len());
     let mut succeeded = 0usize;
     let mut failed = 0usize;

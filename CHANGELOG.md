@@ -116,6 +116,11 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- A workflow with `require_isolation` and a SubWorkflow foreach accepts a
+  `concurrency_limit` above 1: each run owns its worktree, so two runs overlap
+  while each foreach stays sequential. In such a fresh worktree the foreach no
+  longer skips every item on `No such file or directory`: it creates the
+  untracked `.kronn/` folder before writing `current_task.json`.
 - A kronn-action block removed from a Page's HTML is no longer listed among
   its actions after the next publication; its launches stay in the history.
 - A shell-less worker's edit to a PHP, Twig, SCSS/CSS, TS/JS or JSON file is

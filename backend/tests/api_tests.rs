@@ -3937,6 +3937,156 @@ async fn a_run_seeded_with_a_ticket_is_found_by_it_in_one_call() {
     assert!(refused.contains("one line"), "{refused}");
 }
 
+/// KT-807: an isolated workflow with a SubWorkflow foreach accepts a
+/// concurrency above one, and two overlapping runs each work in their own
+/// worktree, their foreach still sequential and complete.
+#[cfg(unix)]
+#[tokio::test]
+async fn isolated_foreach_runs_overlap_in_their_own_worktrees() {
+    let state = test_state();
+    state.config.write().await.encryption_secret = Some(kronn::core::crypto::generate_secret());
+    let repo = tempfile::tempdir().unwrap();
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .args(["-c", "user.email=t@t", "-c", "user.name=t"])
+            .args(args)
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    git(&["init", "-q", "-b", "main"]);
+    std::fs::write(
+        repo.path().join("tasks.json"),
+        r#"[{"id":"T1"},{"id":"T2"}]"#,
+    )
+    .unwrap();
+    git(&["add", "tasks.json"]);
+    git(&["commit", "-q", "-m", "tasks"]);
+    let project_path = repo.path().to_string_lossy().into_owned();
+    let now = chrono::Utc::now();
+    let child: kronn::models::Workflow = serde_json::from_value(serde_json::json!({
+        "id": "foreach-child", "name": "child", "project_id": null,
+        "trigger": {"type": "Manual"},
+        "steps": [{"name": "note", "step_type": {"type": "JsonData"}, "json_data_payload": {"ok": true}}],
+        "actions": [], "safety": {"sandbox": false, "max_files": null, "max_lines": null, "require_approval": false},
+        "workspace_config": null, "concurrency_limit": null, "guards": null, "artifacts": {},
+        "on_failure": [], "exec_allowlist": [], "variables": [], "enabled": true, "pinned": false,
+        "created_at": now, "updated_at": now,
+    }))
+    .unwrap();
+    state
+        .db
+        .with_conn(move |conn| {
+            conn.execute(
+                "INSERT INTO projects (id,name,path,created_at,updated_at) VALUES ('foreach-project','Foreach',?1,?2,?2)",
+                rusqlite::params![project_path, now.to_rfc3339()],
+            )?;
+            kronn::db::workflows::insert_workflow(conn, &child)
+        })
+        .await
+        .unwrap();
+
+    let (status, body) = post_json(
+        build_router_with_auth(state.clone(), false),
+        "/api/workflows",
+        serde_json::json!({
+            "name": "Isolated fan-out",
+            "project_id": "foreach-project",
+            "trigger": {"type": "Manual"},
+            "steps": [{
+                "name": "fanout", "step_type": {"type": "SubWorkflow"},
+                "sub_workflow_id": "foreach-child",
+                "sub_workflow_foreach_file": "tasks.json",
+            }],
+            "workspace_config": {"hooks": {}, "require_isolation": true},
+            "concurrency_limit": 2,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["success"], true,
+        "an isolated foreach accepts a limit above one: {body}"
+    );
+    let workflow_id = body["data"]["id"].as_str().unwrap().to_owned();
+
+    let trigger = || {
+        let app = build_router_with_auth(state.clone(), false);
+        let uri = format!("/api/workflows/{workflow_id}/trigger");
+        async move {
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(uri)
+                        .header("content-type", "application/json")
+                        .body(Body::from("{}"))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let bytes = tokio::time::timeout(
+                std::time::Duration::from_secs(60),
+                response.into_body().collect(),
+            )
+            .await
+            .expect("workflow SSE must terminate")
+            .unwrap()
+            .to_bytes();
+            let events = String::from_utf8(bytes.to_vec()).unwrap();
+            events
+                .lines()
+                .filter_map(|line| line.strip_prefix("data: "))
+                .filter_map(|data| serde_json::from_str::<Value>(data).ok())
+                .find_map(|event| event["run_id"].as_str().map(str::to_owned))
+                .unwrap_or_else(|| panic!("missing run_start: {events}"))
+        }
+    };
+    let (first, second) = tokio::join!(trigger(), trigger());
+    assert_ne!(first, second);
+
+    let mut workspaces = Vec::new();
+    for run_id in [&first, &second] {
+        let run_id = run_id.clone();
+        let (run, children) = state
+            .db
+            .with_conn(move |conn| {
+                let run = kronn::db::workflows::get_run(conn, &run_id)?.expect("run");
+                let children: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM workflow_runs WHERE parent_run_id = ?1 AND status = 'Success'",
+                    [&run_id],
+                    |row| row.get(0),
+                )?;
+                Ok((run, children))
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            run.status,
+            kronn::models::RunStatus::Success,
+            "{:?}",
+            run.step_results
+        );
+        assert_eq!(children, 2, "each run's foreach processes both items once");
+        let workspace = run
+            .workspace_path
+            .clone()
+            .expect("an isolated run records its worktree");
+        assert_ne!(
+            workspace,
+            repo.path().to_string_lossy(),
+            "never the main checkout"
+        );
+        workspaces.push(workspace);
+    }
+    assert_ne!(workspaces[0], workspaces[1], "each run owns its worktree");
+}
+
 /// KT-786: the MCP launcher must prepare the same encrypted snapshot as the
 /// UI route, so a workflow with required variables reaches its first step.
 #[tokio::test]

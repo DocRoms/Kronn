@@ -743,16 +743,21 @@ pub(crate) fn count_misconfigured_steps(steps: &[WorkflowStep]) -> u32 {
 }
 
 /// `Workflow.concurrency_limit` limits overlapping *whole runs*. It has never
-/// been a foreach worker count. Refuse the ambiguous combination instead of
-/// accepting a value that looks like per-item parallelism but is ignored by
-/// the shared-worktree SubWorkflow executor.
+/// been a foreach worker count. Without isolation, overlapping runs would share
+/// the main checkout the foreach works in, so a limit above one is refused. An
+/// isolated workflow gives each run its own worktree: runs may overlap while
+/// each foreach stays sequential in its own.
 fn validate_sub_workflow_foreach_concurrency(
     steps: &[WorkflowStep],
     concurrency_limit: Option<u32>,
+    workspace_config: Option<&WorkspaceConfig>,
 ) -> Result<(), String> {
     let Some(limit) = concurrency_limit.filter(|limit| *limit > 1) else {
         return Ok(());
     };
+    if workspace_config.is_some_and(|config| config.require_isolation) {
+        return Ok(());
+    }
     let Some(step) = steps.iter().find(|step| {
         step.step_type == StepType::SubWorkflow
             && step
@@ -764,7 +769,7 @@ fn validate_sub_workflow_foreach_concurrency(
     };
 
     Err(format!(
-        "Step SubWorkflow « {} » : `concurrency_limit: {limit}` controls overlapping complete workflow runs and cannot parallelize foreach items. SubWorkflow foreach is sequential in the shared worktree; remove the value (or set it to 1) and use BatchQuickPrompt for safe parallel fan-out.",
+        "Step SubWorkflow « {} » : `concurrency_limit: {limit}` controls overlapping complete workflow runs and cannot parallelize foreach items. SubWorkflow foreach is sequential in the shared worktree; set `workspace_config.require_isolation: true` so each run gets its own worktree, remove the value (or set it to 1), or use BatchQuickPrompt for parallel fan-out.",
         step.name
     ))
 }
@@ -1243,7 +1248,11 @@ pub async fn create(
     if let Err(e) = validate_required_fields_per_type(&req.on_failure) {
         return Json(ApiResponse::err(e));
     }
-    if let Err(e) = validate_sub_workflow_foreach_concurrency(&req.steps, req.concurrency_limit) {
+    if let Err(e) = validate_sub_workflow_foreach_concurrency(
+        &req.steps,
+        req.concurrency_limit,
+        req.workspace_config.as_ref(),
+    ) {
         return Json(ApiResponse::err(e));
     }
     // 2026-06-11 Phase 1 — SubWorkflow graph: cycle/depth/dangling/no-gate.
@@ -1542,9 +1551,11 @@ pub async fn update(
         updated_at: Utc::now(),
     };
 
-    if let Err(e) =
-        validate_sub_workflow_foreach_concurrency(&updated.steps, updated.concurrency_limit)
-    {
+    if let Err(e) = validate_sub_workflow_foreach_concurrency(
+        &updated.steps,
+        updated.concurrency_limit,
+        updated.workspace_config.as_ref(),
+    ) {
         return Json(ApiResponse::err(e));
     }
     if let Err(e) = validate_saved_quick_exec_refs(
@@ -1949,7 +1960,11 @@ pub(crate) fn validate_workflow_for_import(wf: &Workflow) -> Result<(), String> 
     validate_exec_steps(&wf.on_failure, &wf.exec_allowlist)?;
     validate_required_fields_per_type(&wf.steps)?;
     validate_required_fields_per_type(&wf.on_failure)?;
-    validate_sub_workflow_foreach_concurrency(&wf.steps, wf.concurrency_limit)?;
+    validate_sub_workflow_foreach_concurrency(
+        &wf.steps,
+        wf.concurrency_limit,
+        wf.workspace_config.as_ref(),
+    )?;
     Ok(())
 }
 
@@ -4696,14 +4711,30 @@ mod tests {
             ..Default::default()
         };
 
-        assert!(
-            validate_sub_workflow_foreach_concurrency(std::slice::from_ref(&foreach), Some(1))
-                .is_ok()
-        );
-        let error = validate_sub_workflow_foreach_concurrency(&[foreach], Some(8))
-            .expect_err("foreach plus a limit above one must not be silently accepted");
+        assert!(validate_sub_workflow_foreach_concurrency(
+            std::slice::from_ref(&foreach),
+            Some(1),
+            None
+        )
+        .is_ok());
+        let error = validate_sub_workflow_foreach_concurrency(
+            std::slice::from_ref(&foreach),
+            Some(8),
+            None,
+        )
+        .expect_err("foreach plus a limit above one must not be silently accepted");
         assert!(error.contains("cannot parallelize foreach items"));
+        assert!(error.contains("require_isolation"));
         assert!(error.contains("BatchQuickPrompt"));
+        // Each isolated run owns its worktree, so whole runs may overlap.
+        let isolated = WorkspaceConfig {
+            hooks: Default::default(),
+            require_isolation: true,
+            main_tree_read_only: false,
+        };
+        assert!(
+            validate_sub_workflow_foreach_concurrency(&[foreach], Some(3), Some(&isolated)).is_ok()
+        );
     }
 
     #[test]
