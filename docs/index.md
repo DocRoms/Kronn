@@ -7,7 +7,29 @@ This folder is the project's living knowledge base, shared by humans and AI agen
 - **[AGENTS.md](AGENTS.md)** — Tiered context loader read by Claude Code, Codex, Gemini, Vibe, Copilot, Kiro and any agent that follows the `AGENTS.md` convention. Start here if you're an LLM.
 - **This file (`index.md`)** — Plain landing page for humans browsing the folder. Extend it with whatever helps onboarding.
 
-## Current release: 0.14.0
+## Current release: 0.14.1
+
+- Workflows chain and scale: a `TriggerWorkflow` step launches another workflow
+  with mapped variables, `concurrency_key` counts the limit per rendered key, and
+  `workspace_config.base_ref` starts an isolated run from a fetched commit. See
+  the [architecture overview](architecture/overview.md).
+- A workflow Agent step with `room_id` is its room's principal without an invite
+  token, at every launch and resume. See
+  [kronn-internal](operations/mcp-servers/kronn-internal.md).
+- `ApiCall` can return an image or another file (`api_response: Binary`) that an
+  Artifact displays without opening its sandbox to the network. See
+  [Live Pages](architecture/live-pages.md) and
+  [de-agentified ApiCall](operations/deagent-apicall.md).
+- Anthropic prompt caching through LiteLLM is on by default;
+  `KRONN_LITELLM_PROMPT_CACHE=0` turns it off. See
+  [token economy](operations/token-economy-0.9.6.md).
+- The native-files sync removes only what it wrote (`.kronn/native-files.json`),
+  and boot reclaims the clean worktree of an interrupted run after
+  `server.interrupted_worktree_ttl_days`. See the
+  [0.14.1 release notes](../CHANGELOG.md), including the dark-theme
+  accessibility pass and its validation limits.
+
+## Earlier releases
 
 - HTTP agents can discover, launch and edit Quick Prompts, and author disabled
   workflow drafts. See [HTTP-agent capabilities](architecture/http-agent-capabilities.md)
@@ -23,8 +45,6 @@ This folder is the project's living knowledge base, shared by humans and AI agen
 - Live Pages follow Kronn's theme and no longer reset local state when polled
   data is unchanged. See the [0.14.0 release notes](../CHANGELOG.md) for these
   changes, setup improvements and validation limits.
-
-## Earlier releases
 
 - Automation variables can reference encrypted project values without copying
   secrets into templates. Launch previews are masked and audited, while each
