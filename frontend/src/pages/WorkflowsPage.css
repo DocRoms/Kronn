@@ -8013,7 +8013,7 @@
   display: grid;
   gap: 7px;
   padding: 8px;
-  background: color-mix(in srgb, var(--kr-surface-raised, #fff) 72%, transparent);
+  background: color-mix(in srgb, var(--kr-bg-raised) 72%, transparent);
   border: 1px solid var(--kr-border-subtle, rgba(128, 128, 128, 0.2));
   border-radius: 7px;
 }

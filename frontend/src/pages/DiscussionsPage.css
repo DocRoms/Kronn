@@ -53,13 +53,13 @@
 .disc-sidebar-header .disc-icon-btn.disc-sidebar-new-btn {
   background: var(--kr-accent);
   border-color: transparent;
-  color: var(--kr-text-on-accent, #fff);
+  color: var(--kr-text-on-accent);
 }
 
 .disc-sidebar-header .disc-icon-btn.disc-sidebar-new-btn:hover,
 .disc-sidebar-header .disc-icon-btn.disc-sidebar-new-btn:focus-visible {
-  background: var(--kr-accent-hover, var(--kr-accent));
-  color: var(--kr-text-on-accent, #fff);
+  background: var(--kr-accent);
+  color: var(--kr-text-on-accent);
 }
 
 .disc-sidebar-header-menu-wrap {
@@ -458,7 +458,7 @@
   padding: 1px 6px;
   border-radius: 999px;
   background: var(--kr-accent);
-  color: var(--kr-text-on-accent, #fff);
+  color: var(--kr-text-on-accent);
   font-size: 10px;
   font-weight: 700;
   text-align: center;
@@ -3207,7 +3207,7 @@ button.disc-contact-open {
    strip's 2px of padding either side, plus its border. Declared once here
    because the topmost controls must reserve its footprint, not the thread. */
 .disc-messages-git-row[data-rail-floating='true'] {
-  --kr-disc-rail-w: 63px;
+  --disc-rail-w: 63px;
 }
 
 /* When search is closed, the arbitration banner can be the topmost row. Keep
@@ -3215,7 +3215,7 @@ button.disc-contact-open {
    along the full conversation. With search open, the banner is below the rail. */
 .disc-messages-git-row[data-rail-floating='true'][data-search-open='false'] .disc-question-banner,
 .disc-messages-git-row[data-rail-floating='true'] .disc-message-search {
-  padding-right: calc(var(--kr-disc-rail-w) + var(--kr-sp-3));
+  padding-right: calc(var(--disc-rail-w) + var(--kr-sp-3));
 }
 
 .disc-plan-btn {

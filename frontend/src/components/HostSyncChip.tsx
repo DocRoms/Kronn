@@ -18,7 +18,7 @@ export function HostSyncChip({ mode }: { mode: HostSyncMode }) {
         className="badge"
         title={t('mcp.hostScope.kronnOnlyHint')}
         style={{
-          background: 'var(--kr-surface-muted, rgba(100, 116, 139, 0.1))',
+          background: 'var(--kr-bg-active)',
           color: 'var(--kr-text-secondary, #64748b)',
           fontSize: '0.75em',
         }}

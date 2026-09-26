@@ -6559,7 +6559,7 @@
   padding: 4px 10px;
   font-size: var(--kr-fs-xs);
   background: var(--kr-accent);
-  color: var(--kr-text-on-accent, #fff);
+  color: var(--kr-text-on-accent);
   border: none;
   border-radius: var(--kr-r-sm);
   cursor: pointer;

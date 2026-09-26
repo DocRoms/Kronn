@@ -53,8 +53,8 @@
   min-height: 22px;
   border: 1px solid var(--kr-border, rgba(128, 128, 128, 0.3));
   border-radius: 4px;
-  background: var(--kr-surface-2, rgba(0, 0, 0, 0.06));
-  color: var(--kr-text, inherit);
+  background: var(--kr-bg-subtle);
+  color: inherit;
   cursor: pointer;
   font-size: 10px;
 }

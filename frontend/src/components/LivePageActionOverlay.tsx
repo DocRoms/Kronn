@@ -73,8 +73,8 @@ export function LivePageActionOverlay({ active, action, offer, onChanged, onClos
         top: inSlot ? active.anchor.top : active.anchor.top + active.anchor.height + 4,
         // CSS constrains both offsets at the viewport edge; direct width/left values
         // would conflict with its right-side constraint.
-        ['--kr-action-anchor-left' as string]: `${Math.max(8, active.anchor.left)}px`,
-        ['--kr-action-anchor-width' as string]: `${active.anchor.width}px`,
+        ['--action-anchor-left' as string]: `${Math.max(8, active.anchor.left)}px`,
+        ['--action-anchor-width' as string]: `${active.anchor.width}px`,
       }}
     >
       <button

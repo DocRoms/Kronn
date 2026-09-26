@@ -131,6 +131,14 @@ Release notes for 0.9.3 and earlier are available in the
   earlier sync appended over a re-included folder.
 - A kronn-action block removed from a Page's HTML is no longer listed among
   its actions after the next publication; its launches stay in the history.
+- The "▶ Launch" button of a native action card, the project git switcher's
+  button and the current-branch marker no longer print white text on the
+  accent: they use `--kr-text-on-accent`, which reads at 15.97:1 on the default
+  lime, 13.58:1 on the gotham yellow and 15.38:1 on the matrix green, where
+  white was 1.18, 1.43 and 1.37. The discussion weight panel and the prompt
+  variable editor no longer open white in dark themes. The token guard now
+  refuses any `var(--kr-*)` that `tokens.css` does not define, even behind a
+  fallback, and white text pinned on an accent fill.
 - A shell-less worker's edit to a PHP, Twig, SCSS/CSS, TS/JS or JSON file is
   refused before it reaches disk when it leaves an orphan delimiter or an
   unclosed Twig block, or when an `edit_lines` replacement shifts the

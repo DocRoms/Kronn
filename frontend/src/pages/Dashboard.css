@@ -3446,7 +3446,7 @@ html[data-density="large"] .dash-main {
   border: 1px solid var(--kr-accent);
   border-radius: var(--kr-r-md);
   background: var(--kr-accent);
-  color: white;
+  color: var(--kr-text-on-accent);
   font-weight: 700;
   cursor: pointer;
 }
@@ -3560,7 +3560,7 @@ html[data-density="large"] .dash-main {
 .project-git-branch-list article[data-current='true'] .project-git-branch-node {
   border-color: var(--kr-accent);
   background: var(--kr-accent);
-  color: white;
+  color: var(--kr-text-on-accent);
 }
 
 .project-git-branch-list article > div:nth-child(2) {

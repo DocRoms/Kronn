@@ -3,7 +3,7 @@
 
    Two things make that work, and both come from the Page, not from here. The
    iframe bridge anchors on the CTA's `tr`/`li` rather than on the button, so
-   `--kr-action-anchor-width` IS the row's width. And because the Page scrolls
+   `--action-anchor-width` IS the row's width. And because the Page scrolls
    INSIDE its iframe while this card lives in the host layer that does not, the
    bridge re-sends that rectangle on every scroll frame; without it the card
    would stay behind while its row moved away.
@@ -13,19 +13,19 @@
    than the viewport, and falls back to the full-width layout on narrow
    screens — the lower bound wins when the upper one drops below it. */
 .live-page-action-overlay {
-  --kr-action-card-width: clamp(
+  --action-card-width: clamp(
     280px,
-    var(--kr-action-anchor-width, min(720px, calc(100% - 16px))),
+    var(--action-anchor-width, min(720px, calc(100% - 16px))),
     calc(100% - 16px)
   );
 
   position: absolute;
   z-index: 4;
-  width: var(--kr-action-card-width);
+  width: var(--action-card-width);
   left: clamp(
     8px,
-    var(--kr-action-anchor-left, 8px),
-    max(8px, calc(100% - var(--kr-action-card-width) - 8px))
+    var(--action-anchor-left, 8px),
+    max(8px, calc(100% - var(--action-card-width) - 8px))
   );
   max-height: calc(100% - 16px);
   overflow: auto;
