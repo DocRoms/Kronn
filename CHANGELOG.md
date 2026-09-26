@@ -13,6 +13,15 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Added
 
+- A Claude Code or Codex workflow Agent step can name its room: `room_id` (a
+  template, for example `{{steps.jeton.data.room_id}}`) makes the step's agent
+  a member and the principal of that discussion without a `kr-join` token. The runner hands the
+  agent's bridge a capability through the environment on every launch and every
+  resume, the bridge joins with it before the first Kronn tool, and the backend
+  accepts it only while that very step of that run is running, for that room.
+  The membership ends with the step, a replayed step takes over the executions
+  its interrupted session steered (their deliveries wake it), and
+  `task_exec_prepare` works again after `/resume` of an interrupted run.
 - A workflow run can carry a plain business label from its launch:
   `POST /api/workflows/{id}/trigger` accepts `state` beside `variables`, and
   `GET /api/workflows/{id}/runs?state_key=…&state_value=…` returns the runs

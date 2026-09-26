@@ -1628,11 +1628,27 @@ async fn execute_run_with_notify_policy(
                     } else {
                         Ok(None)
                     };
-                    let preparation_error = hydration.err().or_else(|| {
-                        docs_before.as_ref().err().map(|error| format!(
-                            "Document audit preflight failed; no agent launched, files preserved: {error}"
-                        ))
-                    });
+                    // KT-793 — a room that does not resolve refuses the launch.
+                    let step_room = if hydration.is_ok() {
+                        super::step_room::activate(
+                            &state.workflow_step_rooms,
+                            &state.db,
+                            &run.id,
+                            &hydrated,
+                            &ctx,
+                        )
+                        .await
+                    } else {
+                        Ok(None)
+                    };
+                    let preparation_error = hydration
+                        .err()
+                        .or_else(|| {
+                            docs_before.as_ref().err().map(|error| format!(
+                                "Document audit preflight failed; no agent launched, files preserved: {error}"
+                            ))
+                        })
+                        .or_else(|| step_room.as_ref().err().cloned());
                     if let Some(e) = preparation_error {
                         StepOutcome {
                             result: StepResult {
@@ -1672,6 +1688,7 @@ async fn execute_run_with_notify_policy(
                             &mut run.state,
                         );
                         let step = &hydrated;
+                        let step_room = step_room.ok().flatten();
                         let full_access = agents_config.full_access_for(&step.agent);
                         let native_tools = Some(KronnToolExecutor::workflow_arc(
                             state.clone(),
@@ -1736,8 +1753,12 @@ async fn execute_run_with_notify_policy(
                             Some(&ollama_context_overrides),
                             native_tools,
                             Some(&state.db),
+                            step_room.as_ref().map(|room| room.context()),
                         )
                         .await;
+                        if let Some(room) = step_room {
+                            room.finish().await;
+                        }
                         // execute_step took ownership of progress_tx and dropped
                         // it on return → the forwarder's recv() now yields None
                         // and the loop exits naturally. AWAIT it (don't abort —
@@ -2732,32 +2753,55 @@ async fn execute_run_with_notify_policy(
                     .await
                 }
                 StepType::Agent => {
-                    let full_access = agents_config.full_access_for(&rb_step.agent);
-                    let native_tools = Some(KronnToolExecutor::workflow_arc(
-                        state.clone(),
-                        workflow.project_id.clone(),
-                        run.id.clone(),
-                        rb_step.name.clone(),
-                    ));
-                    execute_step(
+                    let room_started = std::time::Instant::now();
+                    match super::step_room::activate(
+                        &state.workflow_step_rooms,
+                        &state.db,
+                        &run.id,
                         rb_step,
-                        &project_path,
-                        &work_dir,
-                        tokens_config,
-                        full_access,
                         &ctx,
-                        &agent_extra_context,
-                        None,
-                        None,
-                        Some(&agents_config.model_tiers),
-                        Some(&crate::models::setup::HttpEndpoints::from_agents(
-                            agents_config,
-                        )),
-                        Some(&ollama_context_overrides),
-                        native_tools,
-                        Some(&state.db),
                     )
                     .await
+                    {
+                        Err(error) => super::step_room::refused_outcome(
+                            rb_step,
+                            error,
+                            room_started.elapsed().as_millis() as u64,
+                        ),
+                        Ok(step_room) => {
+                            let full_access = agents_config.full_access_for(&rb_step.agent);
+                            let native_tools = Some(KronnToolExecutor::workflow_arc(
+                                state.clone(),
+                                workflow.project_id.clone(),
+                                run.id.clone(),
+                                rb_step.name.clone(),
+                            ));
+                            let outcome = execute_step(
+                                rb_step,
+                                &project_path,
+                                &work_dir,
+                                tokens_config,
+                                full_access,
+                                &ctx,
+                                &agent_extra_context,
+                                None,
+                                None,
+                                Some(&agents_config.model_tiers),
+                                Some(&crate::models::setup::HttpEndpoints::from_agents(
+                                    agents_config,
+                                )),
+                                Some(&ollama_context_overrides),
+                                native_tools,
+                                Some(&state.db),
+                                step_room.as_ref().map(|room| room.context()),
+                            )
+                            .await;
+                            if let Some(room) = step_room {
+                                room.finish().await;
+                            }
+                            outcome
+                        }
+                    }
                 }
                 StepType::Gate => {
                     // Gate in rollback would deadlock the run on a Failed
@@ -3932,6 +3976,7 @@ mod tests {
             sub_workflow_id: None,
             sub_workflow_foreach_file: None,
             multi_agent_review: None,
+            room_id: None,
         }
     }
     fn fake_result(name: &str) -> crate::models::StepResult {
@@ -4274,6 +4319,7 @@ mod tests {
             sub_workflow_id: None,
             sub_workflow_foreach_file: None,
             multi_agent_review: None,
+            room_id: None,
         }
     }
 

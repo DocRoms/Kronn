@@ -4498,6 +4498,8 @@ const zh: TranslationDict = {
   "wiz.multiReview.defaultPrompt": "这是初始代理发出的计划。作为评审者，需挑战其相关性、完整性和正确性。必须达成全局共识后才能继续。",
   "wiz.model": "模型",
   "wiz.modelPlaceholder": "例如：o3",
+  "wiz.roomId": "房间（讨论 ID）",
+  "wiz.roomIdHint": "可选，仅限 Claude Code 或 Codex。讨论 ID 或模板。此步骤的代理在每次启动和每次恢复时都以主代理身份加入该房间，无需邀请令牌。",
   "wiz.stallTimeout": "停滞超时（秒）",
   "wiz.delayAfter": "延迟后（秒）",
   "wiz.retry": "重试",

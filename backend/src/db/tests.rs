@@ -1914,6 +1914,7 @@ pub(crate) fn sample_workflow(id: &str) -> Workflow {
             sub_workflow_id: None,
             sub_workflow_foreach_file: None,
             multi_agent_review: None,
+            room_id: None,
         }],
         actions: vec![],
         safety: WorkflowSafety {
@@ -5073,6 +5074,7 @@ fn workflow_multi_step_roundtrip() {
                 sub_workflow_id: None,
                 sub_workflow_foreach_file: None,
                 multi_agent_review: None,
+                room_id: None,
             },
             WorkflowStep {
                 id: None,
@@ -5139,6 +5141,7 @@ fn workflow_multi_step_roundtrip() {
                 sub_workflow_id: None,
                 sub_workflow_foreach_file: None,
                 multi_agent_review: None,
+                room_id: None,
             },
             WorkflowStep {
                 id: None,
@@ -5202,6 +5205,7 @@ fn workflow_multi_step_roundtrip() {
                 sub_workflow_id: None,
                 sub_workflow_foreach_file: None,
                 multi_agent_review: None,
+                room_id: None,
             },
         ],
         actions: vec![],
@@ -5319,6 +5323,7 @@ fn workflow_update_steps_count() {
         sub_workflow_id: None,
         sub_workflow_foreach_file: None,
         multi_agent_review: None,
+        room_id: None,
     });
     crate::db::workflows::update_workflow(&conn, &wf).unwrap();
 

@@ -673,6 +673,12 @@ pub struct WorkflowStep {
     /// back-and-forth rather than a file relay. `None` = plain Agent step.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub multi_agent_review: Option<MultiAgentReviewConfig>,
+
+    /// KT-793 — Agent steps only: a template rendering to a discussion id. The
+    /// step's agent joins that room as its principal without an invite token,
+    /// on every launch and every resume of the step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub room_id: Option<String>,
 }
 
 /// Config for the "Multi-agent review" option on an Agent step (see

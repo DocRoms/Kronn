@@ -51,6 +51,7 @@ pub mod shared_runs;
 pub mod worker_deliveries;
 pub mod worker_offers;
 pub mod worker_reviews;
+pub mod workflow_step_rooms;
 pub mod workflows;
 
 #[cfg(test)]
@@ -228,6 +229,11 @@ impl Database {
                 Vec::new()
             }
         };
+        match workflow_step_rooms::revoke_all_after_restart(&conn) {
+            Ok(0) => {}
+            Ok(n) => tracing::info!("Revoked {n} room membership(s) of workflow steps that died with the previous process"),
+            Err(e) => tracing::warn!("Failed to revoke stale workflow step room memberships: {e}"),
+        }
         match shared_runs::repair_stale_workflow_projections(&conn) {
             Ok(0) => {}
             Ok(n) => tracing::info!(

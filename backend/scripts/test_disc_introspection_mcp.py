@@ -1495,6 +1495,142 @@ class TaskExecPrincipalSurfaceTests(unittest.TestCase):
         http.assert_not_called()
 
 
+class WorkflowStepRoomTests(unittest.TestCase):
+    """KT-793 — a workflow Agent step with a room joins it through the runner's
+    environment capability before its first tool, then acts as that session."""
+
+    CONTEXT = {
+        "discussion_id": "room-793", "run_id": "run-793",
+        "step_key": "orchestrate", "capability": "kr-step-secret",
+    }
+
+    def setUp(self):
+        self.mod = _load_module()
+        self.env = mock.patch.dict(os.environ, {
+            "KRONN_WORKFLOW_STEP_CONTEXT": json.dumps(self.CONTEXT),
+            "KRONN_DISCUSSION_ID": "room-793",
+        })
+        self.env.start()
+        self.addCleanup(self.env.stop)
+        for name, value in (
+            ("_agent_type_for_session", "ClaudeCode"),
+            ("_session_id_for_caller", "adhoc-step-1"),
+            ("_room_peek_for_tool_result", None),
+        ):
+            patcher = mock.patch.object(self.mod, name, return_value=value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def _call(self, name, arguments, rid=1):
+        response = self.mod._handle({
+            "jsonrpc": "2.0", "id": rid, "method": "tools/call",
+            "params": {"name": name, "arguments": arguments},
+        })
+        return response["result"]
+
+    @staticmethod
+    def _backend(method, path, body=None):
+        if path == "/api/discussions/workflow-step-join":
+            return {"success": True, "data": {
+                "disc_id": body["workflow_step"]["discussion_id"], "session_pk": 7,
+                "self_alias": "@claude-cli-2", "repinned_executions": 0,
+            }}
+        if path == "/api/orchestration/tool/prepare":
+            return {"success": True, "data": {"launchable": True}}
+        return {"success": True, "data": {"left": True}}
+
+    def test_prepare_needs_no_disc_join_the_bridge_joins_with_the_step_capability(self):
+        http = mock.MagicMock(side_effect=self._backend)
+        worker = {"kind": "agent", "agent_type": "Codex"}
+        with mock.patch.object(self.mod, "_http", http):
+            first = self._call("task_exec_prepare", {
+                "task_reference": "KT-793", "worker": worker, "worker_scope_intent": "generic",
+            })
+            self._call("task_exec_prepare", {
+                "task_reference": "KT-793", "worker": worker, "worker_scope_intent": "generic",
+            }, rid=2)
+        self.assertNotIn("isError", first)
+        paths = [recorded.args[1] for recorded in http.call_args_list]
+        self.assertEqual(paths, [
+            "/api/discussions/workflow-step-join",
+            "/api/orchestration/tool/prepare",
+            "/api/orchestration/tool/prepare",
+        ], "one join, before the first tool only")
+        join_body = http.call_args_list[0].args[2]
+        self.assertEqual(join_body, {
+            "workflow_step": self.CONTEXT,
+            "agent_type": "ClaudeCode",
+            "session_id": "adhoc-step-1",
+        })
+        prepare_body = http.call_args_list[1].args[2]
+        self.assertEqual(prepare_body["parent_discussion_id"], "room-793")
+        self.assertEqual(prepare_body["source_agent"], "ClaudeCode")
+        self.assertEqual(prepare_body["source_session_id"], "adhoc-step-1")
+        self.assertNotIn("workflow_step", prepare_body)
+        self.assertNotIn("room_agent", prepare_body)
+        result = json.loads(first["content"][0]["text"])
+        self.assertEqual(result["kronn_room_joined"], {
+            "disc_id": "room-793", "self_alias": "@claude-cli-2",
+        })
+        self.assertNotIn("kr-step-secret", first["content"][0]["text"])
+
+    def test_an_incomplete_capability_fails_closed_before_any_request(self):
+        http = mock.MagicMock(side_effect=self._backend)
+        with mock.patch.dict(os.environ, {
+            "KRONN_WORKFLOW_STEP_CONTEXT": json.dumps({"discussion_id": "room-793"}),
+        }), mock.patch.object(self.mod, "_http", http):
+            result = self._call("disc_meta", {})
+        self.assertTrue(result["isError"])
+        self.assertIn("workflow step context is incomplete", result["content"][0]["text"])
+        http.assert_not_called()
+
+    def test_a_join_to_another_room_is_refused(self):
+        def elsewhere(method, path, body=None):
+            return {"success": True, "data": {"disc_id": "room-other", "session_pk": 7}}
+        with mock.patch.object(self.mod, "_http", mock.MagicMock(side_effect=elsewhere)):
+            result = self._call("disc_meta", {})
+        self.assertTrue(result["isError"])
+        self.assertIn("another room", result["content"][0]["text"])
+        self.assertIsNone(self.mod._WORKFLOW_STEP_MEMBERSHIP["state"])
+
+    def test_after_disc_leave_the_step_stays_out_of_the_room(self):
+        http = mock.MagicMock(side_effect=self._backend)
+        with mock.patch.object(self.mod, "_http", http):
+            self._call("disc_leave", {})
+            self._call("disc_leave", {}, rid=2)
+        paths = [recorded.args[1] for recorded in http.call_args_list]
+        self.assertEqual(paths.count("/api/discussions/workflow-step-join"), 1)
+        self.assertEqual(self.mod._WORKFLOW_STEP_MEMBERSHIP["state"], "left")
+
+    def test_a_spawned_worker_never_uses_a_step_capability(self):
+        worker_context = {
+            "execution_id": "exec-a", "discussion_id": "disc-child",
+            "agent_type": "Codex", "dispatch_job_id": "job", "source_message_id": "msg",
+        }
+        http = mock.MagicMock(return_value={"success": True, "data": {"execution": {}}})
+        with mock.patch.dict(os.environ, {
+            self.mod._TASK_WORKER_CONTEXT_ENV: json.dumps(worker_context),
+        }), mock.patch.object(self.mod, "_http", http):
+            self._call("task_exec_status", {})
+        paths = [recorded.args[1] for recorded in http.call_args_list]
+        self.assertNotIn("/api/discussions/workflow-step-join", paths)
+
+    def test_no_tool_input_schema_can_carry_the_capability(self):
+        def property_names(schema):
+            if isinstance(schema, dict):
+                for key, value in schema.items():
+                    if key == "properties" and isinstance(value, dict):
+                        yield from value
+                    yield from property_names(value)
+            elif isinstance(schema, list):
+                for item in schema:
+                    yield from property_names(item)
+        for tool in self.mod.TOOLS:
+            names = set(property_names(tool["inputSchema"]))
+            self.assertNotIn("workflow_step", names, tool["name"])
+            self.assertNotIn("capability", names, tool["name"])
+
+
 class TaskExecAcceptWorkerOfferTests(unittest.TestCase):
     """KT-328 tranche 2 — the CLI-worker accept tool: server-derived identity and
     a local rebind that follows the session into the child sub-discussion."""

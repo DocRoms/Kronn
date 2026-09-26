@@ -457,6 +457,26 @@ async fn validate_sub_workflow_graph_db(
 /// intentionally no-ops here — they have dedicated validators
 /// (`validate_exec_steps`, `validate_json_data_steps`).
 fn validate_step_required_fields(s: &WorkflowStep) -> Result<(), String> {
+    if let Some(room) = s.room_id.as_deref() {
+        if !matches!(s.step_type, StepType::Agent) {
+            return Err(format!(
+                "Step « {} » : `room_id` ne s'applique qu'à une étape Agent.",
+                s.name
+            ));
+        }
+        if room.trim().is_empty() {
+            return Err(format!(
+                "Step Agent « {} » : `room_id` ne peut pas être vide (retire-le ou donne un id de discussion, gabarit accepté).",
+                s.name
+            ));
+        }
+        if !matches!(s.agent, AgentType::ClaudeCode | AgentType::Codex) {
+            return Err(format!(
+                "Step Agent « {} » : `room_id` demande Claude Code ou Codex, seuls agents dont le bridge Kronn porte la capacité de room.",
+                s.name
+            ));
+        }
+    }
     match s.step_type {
         StepType::Agent => {
             let has_inline = !s.prompt_template.trim().is_empty();
@@ -3044,6 +3064,8 @@ pub async fn test_step(
             Some(&ollama_context_overrides),
             native_tools,
             Some(&state.db),
+            // A test step has no run, so it never holds a room capability.
+            None,
         )
         .await;
 
@@ -4370,6 +4392,7 @@ pub async fn suggestions(
                     sub_workflow_id: None,
                     sub_workflow_foreach_file: None,
                     multi_agent_review: None,
+                    room_id: None,
                 })
                 .collect(),
         });
@@ -5267,6 +5290,7 @@ mod tests {
             sub_workflow_id: None,
             sub_workflow_foreach_file: None,
             multi_agent_review: None,
+            room_id: None,
         }
     }
 
@@ -6451,6 +6475,30 @@ mod tests {
         s.prompt_template = "   \n\t  ".into();
         let err = validate_required_fields_per_type(&[s]).expect_err("whitespace is empty");
         assert!(err.contains("plan"));
+    }
+
+    #[test]
+    fn room_id_is_an_agent_step_field_and_never_blank() {
+        let mut agent = mk_step("orchestrate", StepType::Agent);
+        agent.prompt_template = "Orchestrate the ticket".into();
+        agent.room_id = Some("{{steps.jeton.data.room_id}}".into());
+        validate_required_fields_per_type(&[agent.clone()]).expect("a templated room is valid");
+        agent.room_id = Some("  ".into());
+        let blank = validate_required_fields_per_type(&[agent]).expect_err("blank room");
+        assert!(
+            blank.contains("room_id") && blank.contains("orchestrate"),
+            "{blank}"
+        );
+        let mut local = mk_step("orchestrate", StepType::Agent);
+        local.prompt_template = "Orchestrate the ticket".into();
+        local.agent = AgentType::Ollama;
+        local.room_id = Some("disc-1".into());
+        let bridgeless = validate_step_required_fields(&local).expect_err("CLI agents only");
+        assert!(bridgeless.contains("Claude Code ou Codex"), "{bridgeless}");
+        let mut exec = mk_step("sortie", StepType::Exec);
+        exec.room_id = Some("disc-1".into());
+        let misplaced = validate_step_required_fields(&exec).expect_err("Agent only");
+        assert!(misplaced.contains("room_id"), "{misplaced}");
     }
 
     #[test]

@@ -759,6 +759,7 @@ fn workflow_step_api_call_roundtrip() {
         sub_workflow_id: None,
         sub_workflow_foreach_file: None,
         multi_agent_review: None,
+        room_id: None,
     };
     let json = serde_json::to_string(&step).unwrap();
     let parsed: WorkflowStep = serde_json::from_str(&json).unwrap();

@@ -568,6 +568,33 @@ describe('WorkflowWizard — step list handlers', () => {
     });
   });
 
+  it('saves the room an Agent step joins as principal, and clears it when emptied', async () => {
+    toStepsPage([mkStep({ room_id: 'disc-old' }), mkStep({ name: 'beta' })]);
+    // A saved room marks the step's advanced section as customised.
+    fireEvent.click(screen.getByText('wiz.advanced *'));
+    const room = screen.getByLabelText('wiz.roomId');
+    expect(room).toHaveValue('disc-old');
+    expect(screen.getByText('wiz.roomIdHint')).toBeInTheDocument();
+    fireEvent.change(room, { target: { value: '{{steps.jeton.data.room_id}}' } });
+    fireEvent.click(screen.getByText('wiz.next'));
+    fireEvent.click(screen.getByText('wiz.next'));
+    fireEvent.click(screen.getByText('wiz.save'));
+    await waitFor(() => expect(updateMock).toHaveBeenCalled());
+    expect(updateMock.mock.calls[0][1].steps[0].room_id).toBe('{{steps.jeton.data.room_id}}');
+    expect(updateMock.mock.calls[0][1].steps[1].room_id).toBeUndefined();
+  });
+
+  it('stores an emptied room as null so the step saves without one', async () => {
+    toStepsPage([mkStep({ room_id: 'disc-old' }), mkStep({ name: 'beta' })]);
+    fireEvent.click(screen.getByText('wiz.advanced *'));
+    fireEvent.change(screen.getByLabelText('wiz.roomId'), { target: { value: '   ' } });
+    fireEvent.click(screen.getByText('wiz.next'));
+    fireEvent.click(screen.getByText('wiz.next'));
+    fireEvent.click(screen.getByText('wiz.save'));
+    await waitFor(() => expect(updateMock).toHaveBeenCalled());
+    expect(updateMock.mock.calls[0][1].steps[0].room_id).toBeNull();
+  });
+
   it('adding a rollback (on_failure) step renders a Notify rollback row', () => {
     toStepsPage([mkStep(), mkStep({ name: 'beta' })]);
     const addRb = screen.getByText('wiz.addRollbackStep').closest('button') as HTMLButtonElement;

@@ -173,6 +173,8 @@ pub async fn execute_step(
     ollama_context_overrides: Option<&std::collections::HashMap<String, u64>>,
     native_tools: Option<Arc<dyn crate::agents::tools::ToolExecutor>>,
     catalog_db: Option<&crate::db::Database>,
+    // KT-793 — the step's room capability; only its own agent attempts carry it.
+    room: Option<&runner::WorkflowStepBridgeContext>,
 ) -> StepOutcome {
     let start = Instant::now();
 
@@ -406,6 +408,7 @@ pub async fn execute_step(
             &mut provenance,
             WorkflowAgentAttemptRole::Initial,
             attempt + 1,
+            room,
         )
         .await
         {
@@ -503,6 +506,7 @@ pub async fn execute_step(
                             &mut provenance,
                             WorkflowAgentAttemptRole::Repair,
                             attempt + 1,
+                            room,
                         )
                         .await;
                         if let Err(ref e) = repair_res {
@@ -605,6 +609,7 @@ pub async fn execute_step(
                                 &mut provenance,
                                 WorkflowAgentAttemptRole::Escalation,
                                 attempt + 1,
+                                room,
                             )
                             .await;
                             if let Err(ref e) = esc_res {
@@ -1093,6 +1098,7 @@ async fn run_agent_with_timeout(
     provenance: &mut WorkflowAgentProvenance,
     role: WorkflowAgentAttemptRole,
     retry: u32,
+    room: Option<&runner::WorkflowStepBridgeContext>,
 ) -> Result<AgentOutput> {
     let started_at = chrono::Utc::now();
     let started = Instant::now();
@@ -1152,6 +1158,9 @@ async fn run_agent_with_timeout(
             // runner refuses the spawn outright.
             external_http,
             tools: native_tools,
+            // The bridge's discussion is the room the capability names.
+            discussion_id: room.map(|room| room.discussion_id.as_str()),
+            workflow_step_context: room,
             ..runner::AgentStartConfig::new(&step.agent, project_path, prompt, tokens_config)
         })
         .await
@@ -1621,6 +1630,7 @@ async fn run_multi_agent_debate(
             provenance,
             WorkflowAgentAttemptRole::Review,
             retry,
+            None,
         )
         .await?;
         tokens = add_tokens(tokens, rev.tokens_used);
@@ -1684,6 +1694,7 @@ async fn run_multi_agent_debate(
             provenance,
             WorkflowAgentAttemptRole::Author,
             retry,
+            None,
         )
         .await?;
         tokens = add_tokens(tokens, auth.tokens_used);
@@ -2241,6 +2252,7 @@ mod tests {
             sub_workflow_id: None,
             sub_workflow_foreach_file: None,
             multi_agent_review: None,
+            room_id: None,
         }
     }
 
@@ -3021,6 +3033,7 @@ mod http_native_tool_step_tests {
             None,
             None,
             Some(&db),
+            None,
         )
         .await;
 
@@ -3077,6 +3090,7 @@ mod http_native_tool_step_tests {
             None,
             None,
             Some(&db),
+            None,
         )
         .await;
 
@@ -3130,6 +3144,7 @@ mod http_native_tool_step_tests {
             None,
             None,
             Some(&db),
+            None,
         )
         .await;
 
@@ -3181,6 +3196,7 @@ mod http_native_tool_step_tests {
             None,
             None,
             Some(&db),
+            None,
         )
         .await;
 
@@ -3260,6 +3276,7 @@ mod http_native_tool_step_tests {
             }),
             None,
             Some(tools),
+            None,
             None,
         )
         .await;
@@ -3350,6 +3367,7 @@ mod http_native_tool_step_tests {
             None,
             Some(&overrides),
             Some(tools),
+            None,
             None,
         )
         .await;

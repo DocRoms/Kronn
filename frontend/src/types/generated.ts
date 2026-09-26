@@ -8005,7 +8005,13 @@ sub_workflow_foreach_file?: string | null,
  * reads the artifact once, then only the conversation delta) and a real
  * back-and-forth rather than a file relay. `None` = plain Agent step.
  */
-multi_agent_review?: MultiAgentReviewConfig | null, };
+multi_agent_review?: MultiAgentReviewConfig | null,
+/**
+ * KT-793 — Agent steps only: a template rendering to a discussion id. The
+ * step's agent joins that room as its principal without an invite token,
+ * on every launch and every resume of the step.
+ */
+room_id?: string | null, };
 
 export type WorkflowSuggestion = { id: string, title: string, description: string, reason: string, required_mcps: Array<string>, audience: string, complexity: string, trigger: WorkflowTrigger, steps: Array<WorkflowStep>, };
 

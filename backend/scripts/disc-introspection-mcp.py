@@ -5575,6 +5575,56 @@ def _room_agent_context(tool_name):
     return {field: value[field].strip() for field in fields}
 
 
+_WORKFLOW_STEP_CONTEXT_ENV = "KRONN_WORKFLOW_STEP_CONTEXT"
+_WORKFLOW_STEP_MEMBERSHIP = {"state": None}
+
+
+def _workflow_step_context():
+    """A workflow Agent step's room capability, injected by the runner (KT-793).
+
+    Never in an input schema. Absent means no step room; malformed fails closed.
+    """
+    raw = os.environ.get(_WORKFLOW_STEP_CONTEXT_ENV)
+    if not raw:
+        return None
+    try:
+        value = json.loads(raw)
+    except (TypeError, ValueError) as error:
+        raise RuntimeError("workflow step context is invalid") from error
+    fields = ("discussion_id", "run_id", "step_key", "capability")
+    if not isinstance(value, dict) or any(
+        not isinstance(value.get(field), str) or not value[field].strip() for field in fields
+    ):
+        raise RuntimeError("workflow step context is incomplete")
+    return {field: value[field].strip() for field in fields}
+
+
+def _ensure_workflow_step_membership():
+    """Join the step's room once, before its first Kronn tool runs, so the agent
+    is a member and principal there without an invite token. After an explicit
+    `disc_leave` it stays out."""
+    if _WORKFLOW_STEP_MEMBERSHIP["state"] is not None or _spawned_task_worker_mode():
+        return None
+    context = _workflow_step_context()
+    if context is None:
+        return None
+    agent_type = _agent_type_for_session()
+    session_id = _session_id_for_caller()
+    if not agent_type or agent_type == "Unknown" or not session_id:
+        raise RuntimeError("workflow step room: this bridge has no resolved agent identity")
+    result = _unwrap(_http("POST", "/api/discussions/workflow-step-join", {
+        "workflow_step": context,
+        "agent_type": agent_type,
+        "session_id": session_id,
+    }))
+    disc_id = result.get("disc_id") if isinstance(result, dict) else None
+    if disc_id != context["discussion_id"]:
+        raise RuntimeError("workflow step room: the backend joined another room")
+    _set_current_disc_id(disc_id)
+    _WORKFLOW_STEP_MEMBERSHIP["state"] = "joined"
+    return {"disc_id": disc_id, "self_alias": result.get("self_alias")}
+
+
 def _task_exec_principal(tool_name):
     """Principal identity fields for prepare/launch: the room's native agent
     when Kronn launched this bridge for it, otherwise the joined CLI session."""
@@ -6778,6 +6828,7 @@ def call_disc_leave(_args):
     # 0.9.0 — a deliberate leave drops the resume capability: the next
     # session must join explicitly, not silently reclaim this row.
     _clear_binding()
+    _WORKFLOW_STEP_MEMBERSHIP["state"] = "left"
     return result
 
 
@@ -11162,6 +11213,7 @@ def _handle(req):
             if name == "disc_wait_for_peer":
                 preempted = None
             try:
+                joined_room = _ensure_workflow_step_membership()
                 data = fn(args)
             finally:
                 _CURRENT_RPC_SEQUENCE = previous_rpc_sequence
@@ -11183,6 +11235,8 @@ def _handle(req):
                 room = _room_peek_for_tool_result(name)
                 if room:
                     data["kronn_room"] = room
+            if joined_room and isinstance(data, dict):
+                data["kronn_room_joined"] = joined_room
             return _with_wait_preempted({
                 "jsonrpc": "2.0",
                 "id": rid,

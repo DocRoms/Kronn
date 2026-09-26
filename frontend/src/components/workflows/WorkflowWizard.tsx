@@ -1967,7 +1967,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
             const isAdvOpen = expandedStepAdvanced === i;
             const hasAdvanced = (step.on_result && step.on_result.length > 0) ||
               step.agent_settings ||
-              step.stall_timeout_secs || step.retry || step.delay_after_secs;
+              step.stall_timeout_secs || step.retry || step.delay_after_secs || step.room_id;
             const multiAgentReview = step.multi_agent_review;
             const activeStepType = step.step_type?.type ?? 'Agent';
             const activeTypeOption = STEP_TYPE_GROUPS
@@ -4303,6 +4303,26 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                             </div>
                           </div>
                         )}
+                      </div>
+                    )}
+
+                    {/* KT-793 — the room this step's agent joins as principal. */}
+                    {(!step.step_type || step.step_type.type === 'Agent') && (
+                      <div className="mb-5">
+                        <label className="wf-label">{t('wiz.roomId')}</label>
+                        <input
+                          type="text"
+                          className="wf-input"
+                          value={step.room_id ?? ''}
+                          onChange={e => updateStep(i, {
+                            room_id: e.target.value.trim() ? e.target.value : null,
+                          })}
+                          placeholder="{{steps.jeton.data.room_id}}"
+                          aria-label={t('wiz.roomId')}
+                        />
+                        <p className="text-2xs text-muted" style={{ margin: 'var(--kr-sp-1) 0 0' }}>
+                          {t('wiz.roomIdHint')}
+                        </p>
                       </div>
                     )}
 

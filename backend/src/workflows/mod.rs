@@ -23,6 +23,7 @@ pub mod quick_api_hydrate;
 pub mod quick_prompt_hydrate;
 pub mod runner;
 pub mod step_output_format;
+pub mod step_room;
 pub mod steps;
 pub mod sub_workflow_step;
 pub mod template;
@@ -566,6 +567,7 @@ mod tests {
             sub_workflow_id: None,
             sub_workflow_foreach_file: None,
             multi_agent_review: None,
+            room_id: None,
         }
     }
 

@@ -224,6 +224,8 @@ Reserve `Agent` for steps that **require reasoning, generation, or judgement**: 
 ```
 Envelope-safe: on a Structured/TypedSchema step the author re-emits the full envelope; a guard reverts to the pre-debate output if it can't. The feasibility-autopilot uses this ON its `triage` step (reviewer = Codex) — it REPLACED the old separate `plan_review → Goto(triage)` file-relay loop.
 
+- **`room_id` — the step's agent orchestrates from a room (KT-793; Claude Code or Codex steps).** A template rendering to a discussion id (e.g. `"{{steps.jeton.data.room_id}}"`). The step's agent becomes a member and the principal of that room without any `kr-join` token: it can call `task_exec_prepare`/`task_exec_launch`, follow and review its executions, and their deliveries wake it. It holds that role only while the step runs, and gets it back when an interrupted run is resumed. Never put an invite token in the prompt for this; an unknown room fails the step before the agent starts.
+
 ### 8. `JsonData` — deterministic data source (0 tokens, 0 network)
 
 Emits a literal JSON payload as the step's structured envelope. Zero token, zero network. Use this for:

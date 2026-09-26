@@ -2236,6 +2236,27 @@ pub struct RoomAgentBridgeContext {
     pub source_message_id: String,
 }
 
+/// Capability of a workflow Agent step whose `room_id` names a room (KT-793).
+/// Like the room agent's identity it only travels in the process environment;
+/// the backend accepts it while that very step runs, and only for that room.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub struct WorkflowStepBridgeContext {
+    pub discussion_id: String,
+    pub run_id: String,
+    pub step_key: String,
+    pub capability: String,
+}
+
+impl std::fmt::Debug for WorkflowStepBridgeContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WorkflowStepBridgeContext")
+            .field("discussion_id", &self.discussion_id)
+            .field("run_id", &self.run_id)
+            .field("step_key", &self.step_key)
+            .finish_non_exhaustive()
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct TaskWorkerBridgeContext {
     pub execution_id: String,
@@ -2255,6 +2276,7 @@ pub(crate) const KRONN_INTERNAL_CODEX_ENV_VARS: &[&str] = &[
     "KRONN_AUTH_TOKEN",
     "KRONN_TASK_WORKER_CONTEXT",
     "KRONN_ROOM_AGENT_CONTEXT",
+    "KRONN_WORKFLOW_STEP_CONTEXT",
     "KRONN_SESSION_ID",
     "KRONN_CALLER_SESSION_ID",
     "KRONN_AGENT_TYPE",
@@ -2580,6 +2602,8 @@ pub struct AgentStartConfig<'a> {
     /// The room's native agent identity for this turn, so it can act as the
     /// principal of `task_exec`. Ignored when a worker context is present.
     pub room_agent_context: Option<&'a RoomAgentBridgeContext>,
+    /// A workflow step's room capability. Ignored when a worker context is present.
+    pub workflow_step_context: Option<&'a WorkflowStepBridgeContext>,
     /// Ollama-only: a JSON Schema (a `TypedSchema` step's schema, already
     /// wrapped in the canonical envelope shape by the caller) forwarded as
     /// the `/api/chat` `format` param — grammar-constrained decoding +
@@ -2674,6 +2698,7 @@ impl<'a> AgentStartConfig<'a> {
             cli_resume_id: None,
             task_worker_context: None,
             room_agent_context: None,
+            workflow_step_context: None,
             ollama_format: None,
             model_override: None,
             reasoning_effort_override: None,
@@ -3656,6 +3681,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
             let launch = AdapterLaunchOptions {
                 worker_context: config.task_worker_context.cloned(),
                 room_agent_context: config.room_agent_context.cloned(),
+                workflow_step_context: config.workflow_step_context.cloned(),
                 worker_args,
                 api_key: get_api_key(env_key, config.tokens),
             };
@@ -3772,6 +3798,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
         config.discussion_id,
         config.task_worker_context,
         config.room_agent_context,
+        config.workflow_step_context,
     ) {
         Ok(c) => c,
         Err(e) => {
@@ -3788,6 +3815,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                     config.discussion_id,
                     config.task_worker_context,
                     config.room_agent_context,
+                    config.workflow_step_context,
                 )?
             } else {
                 return Err(e);
@@ -3925,6 +3953,7 @@ pub(crate) enum SpawnIo<'a> {
 pub(crate) struct AdapterLaunchOptions {
     pub(crate) worker_context: Option<TaskWorkerBridgeContext>,
     pub(crate) room_agent_context: Option<RoomAgentBridgeContext>,
+    pub(crate) workflow_step_context: Option<WorkflowStepBridgeContext>,
     pub(crate) worker_args: Option<Vec<String>>,
     pub(crate) api_key: Option<String>,
 }
@@ -10894,6 +10923,7 @@ pub(crate) fn try_spawn(
     discussion_id: Option<&str>,
     task_worker_context: Option<&TaskWorkerBridgeContext>,
     room_agent_context: Option<&RoomAgentBridgeContext>,
+    workflow_step_context: Option<&WorkflowStepBridgeContext>,
 ) -> Result<tokio::process::Child, String> {
     let stdin_payload = match io {
         SpawnIo::Direct(payload) => payload,
@@ -11059,6 +11089,16 @@ pub(crate) fn try_spawn(
         }
         None => {
             cmd.env_remove("KRONN_ROOM_AGENT_CONTEXT");
+        }
+    }
+    match workflow_step_context.filter(|_| task_worker_context.is_none()) {
+        Some(context) => {
+            let encoded = serde_json::to_string(context)
+                .map_err(|error| format!("Unable to encode workflow step context: {error}"))?;
+            cmd.env("KRONN_WORKFLOW_STEP_CONTEXT", encoded);
+        }
+        None => {
+            cmd.env_remove("KRONN_WORKFLOW_STEP_CONTEXT");
         }
     }
 
