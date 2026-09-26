@@ -5887,6 +5887,11 @@ run_retention_days: number,
  */
 execution_variable_retention_days: number,
 /**
+ * Days after which boot reclaims the clean worktree of an `Interrupted`
+ * run nobody resumed; its commits stay on a preserved branch. `0` = never.
+ */
+interrupted_worktree_ttl_days: number,
+/**
  * KT-373 — refuse to provision a worktree below this much free disk, in
  * GiB. On 2026-08-21 the dev volume hit 100% with seven worktrees each
  * holding its own Rust `target/`; provisioning kept going until nothing
@@ -8046,7 +8051,13 @@ require_isolation: boolean,
  * reads it, or works through absolute paths / page data), so its
  * non-isolated runs skip the per-project exclusivity lock.
  */
-main_tree_read_only?: boolean, };
+main_tree_read_only?: boolean,
+/**
+ * Commit a fresh run's worktree starts from (`origin/main`, a tag, a SHA)
+ * instead of the checkout's HEAD. A `<remote>/<branch>` value is fetched
+ * first and a failed fetch refuses the run. Setting it requests a worktree.
+ */
+base_ref?: string | null, };
 
 export type WorkspaceHistoryLease = { id: string, disc_id: string, session_pk: number, session_agent_type: string, session_id: string | null, canonical_path: string, branch: string, backup_ref: string, head_sha: string, acquired_at: string, expires_at: string, };
 

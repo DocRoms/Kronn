@@ -16,6 +16,7 @@ pub mod collect_api_data_step;
 pub mod exec_step;
 pub mod gate_checkpoint;
 pub mod gate_step;
+pub mod interrupted_worktrees;
 pub mod json_data_step;
 pub mod notify_step;
 pub mod publish_page_step;

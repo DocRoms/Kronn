@@ -117,6 +117,10 @@ pub struct ServerConfig {
     /// but disables value retention. Product default: 30 days.
     #[serde(default = "default_execution_variable_retention_days")]
     pub execution_variable_retention_days: u32,
+    /// Days after which boot reclaims the clean worktree of an `Interrupted`
+    /// run nobody resumed; its commits stay on a preserved branch. `0` = never.
+    #[serde(default = "default_interrupted_worktree_ttl_days")]
+    pub interrupted_worktree_ttl_days: u32,
     /// KT-373 — refuse to provision a worktree below this much free disk, in
     /// GiB. On 2026-08-21 the dev volume hit 100% with seven worktrees each
     /// holding its own Rust `target/`; provisioning kept going until nothing
@@ -295,6 +299,10 @@ fn default_disk_critical_gib() -> u64 {
 
 fn default_execution_variable_retention_days() -> u32 {
     30
+}
+pub(crate) const DEFAULT_INTERRUPTED_WORKTREE_TTL_DAYS: u32 = 7;
+fn default_interrupted_worktree_ttl_days() -> u32 {
+    DEFAULT_INTERRUPTED_WORKTREE_TTL_DAYS
 }
 fn default_disk_warning_gib() -> u64 {
     DEFAULT_DISK_WARNING_GIB

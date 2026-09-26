@@ -344,6 +344,49 @@ Unified automation system: `Trigger → Steps`. Kronn and OpenAI Symphony overla
 - Isolated git worktree per run (`git worktree add`), branch: `kronn/<workflow>/<run-id>`.
 - Lifecycle hooks (shell commands): `after_create`, `before_run`, `after_run`, `before_remove`.
 - Cleanup on completion/failure.
+- **Three checkout modes, chosen by `workspace_config` (KT-798 audit).**
+  Isolated: `require_isolation: true` (or hooks, or `base_ref`) creates the
+  worktree above. Main checkout under the per-project lock: the default.
+  Neither worktree nor lock: `main_tree_read_only: true` without
+  `require_isolation`, hooks or `base_ref`, for workflows that never write the
+  checkout (KT-787); no separate mode exists for it.
+  [src: file: backend/src/workflows/runner.rs:181-199]
+- **Starting point (`workspace_config.base_ref`, KT-798).** Without it a
+  worktree starts from the main checkout's HEAD, which may lag its remote.
+  With it (`origin/main`, a tag, a SHA), a value naming a configured remote's
+  branch is fetched first (`git fetch --no-tags <remote>
+  +refs/heads/<b>:refs/remotes/<remote>/<b>`, non-interactive, bounded at 60 s),
+  then resolved to a commit the new branch starts from, without tracking.
+  Fetches into one repository run one at a time inside the process: parallel
+  foreach items fetching the same ref would otherwise race on its lock and all
+  but one fail. A fetch still refused by a held ref lock (the user's own
+  `git fetch`) is retried once after 200 ms. A failed or timed-out fetch, or a
+  ref naming no commit, refuses the run with a `__workspace__` step saying what
+  to check (network, credentials, the ref) or to remove `base_ref`. It never
+  falls back to the main checkout nor to a stale
+  remote-tracking ref, even without `require_isolation`, because the author
+  asked for that tip. The API refuses a value shaped like an option or a
+  revision expression (`-x`, `~`, `^`, `..`, `@{`, whitespace).
+  [src: file: backend/src/workflows/workspace.rs:337-497]
+- **Interrupted worktrees have a lifetime (KT-798).** A run left
+  `Interrupted` by a restart keeps its worktree so it can be resumed. At boot,
+  once it has been interrupted longer than `server.interrupted_worktree_ttl_days`
+  (config file, default 7, `0` = never), its worktree is reclaimed unless that
+  could lose work: a checkout with uncommitted or untracked (non-ignored) files
+  is kept, a detached HEAD is kept, a path shared with a run that is live,
+  paused or interrupted more recently is kept, and a branch holding commits no
+  known base has is kept and recorded in the run's `produced_branches` before
+  the checkout goes. Git-ignored files (build output) go with the checkout.
+  Removal uses `git worktree remove` without `--force`; the run's own
+  `kronn/…` branch is deleted only when fully integrated, by compare-and-swap
+  on the commit that was checked. No workspace hook runs. The run keeps its
+  `workspace_path`, so a later resume is refused ("worktree no longer exists")
+  instead of running in the main checkout, and names the preserved branch.
+  The boot purge of terminal runs likewise skips a worktree still shared with a
+  live, paused or Interrupted run (a finished sub-workflow child shares its
+  parent's).
+  [src: file: backend/src/workflows/interrupted_worktrees.rs:1-169]
+  [src: file: backend/src/db/workflows.rs:1135-1320]
 - **The hooks belong to the project (KT-687).** `Project.workspace.hooks` is
   inherited by every workflow of the project that asks for isolation, and a
   workflow overrides it field by field — what it declares wins, what it leaves
@@ -627,7 +670,7 @@ WorkflowEngine (polling loop, ticks every 30s)
   → manual trigger via API → spawn run immediately
 
 WorkflowRunner (per run)
-  → create workspace (git worktree add -b kronn/<workflow>/<run-id>)
+  → create workspace (git worktree add -b kronn/<workflow>/<run-id> [<base_ref> after fetch])
   → run workspace hooks: after_create
   → run workspace hooks: before_run
   → for each step:

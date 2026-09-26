@@ -431,6 +431,8 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
   const [requireIsolation, setRequireIsolation] = useState<boolean>(editWorkflow?.workspace_config?.require_isolation ?? false);
   // Declared "never writes the checkout": its main-tree runs skip the project lock.
   const [mainTreeReadOnly, setMainTreeReadOnly] = useState<boolean>(editWorkflow?.workspace_config?.main_tree_read_only ?? false);
+  // Where an isolated run's worktree starts (e.g. origin/main); empty = checkout HEAD.
+  const [baseRef, setBaseRef] = useState<string>(editWorkflow?.workspace_config?.base_ref ?? '');
   const hasAgentExecMix =
     steps.some(step => !step.step_type || step.step_type.type === 'Agent') &&
     steps.some(step => step.step_type?.type === 'Exec');
@@ -1169,6 +1171,8 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
     // Emit a config when there are hooks OR isolation is required — otherwise a
     // code-pushing preset's require_isolation would be dropped (null config).
     if (!hasHooks && !requireIsolation && !mainTreeReadOnly) return null;
+    // A starting point only means something for an isolated run.
+    const trimmedBaseRef = requireIsolation ? baseRef.trim() : '';
     return {
       hooks: {
         after_create: wsHookAfterCreate || null,
@@ -1178,6 +1182,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
       },
       require_isolation: requireIsolation,
       main_tree_read_only: mainTreeReadOnly,
+      ...(trimmedBaseRef ? { base_ref: trimmedBaseRef } : {}),
     };
   };
 
@@ -4891,6 +4896,22 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                 <p className="text-xs text-faint" style={{ margin: '6px 0 0' }}>
                   {t(projectId ? 'wiz.workflowIsolationHint' : 'wiz.workflowIsolationNoProject')}
                 </p>
+                {requireIsolation && (
+                  <div style={{ marginTop: 10 }}>
+                    <label className="wf-label text-xs" htmlFor="wf-base-ref">{t('wiz.baseRef')}</label>
+                    <input
+                      id="wf-base-ref"
+                      className="wf-input"
+                      value={baseRef}
+                      onChange={e => setBaseRef(e.target.value)}
+                      placeholder="origin/main"
+                      aria-label={t('wiz.baseRef')}
+                    />
+                    <p className="text-xs text-faint" style={{ margin: '6px 0 0' }}>
+                      {t('wiz.baseRefHint')}
+                    </p>
+                  </div>
+                )}
                 <label className="wf-checkbox-label" style={{ marginTop: 10 }}>
                   <input
                     type="checkbox"

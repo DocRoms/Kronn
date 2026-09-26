@@ -4203,6 +4203,8 @@ const zh: TranslationDict = {
   "wiz.workflowIsolationNoProject": "请先关联 Git 项目，才能隔离工作流运行。",
   "wiz.mainTreeReadOnly": "不写入项目检出目录",
   "wiz.mainTreeReadOnlyHint": "其在主检出目录中的运行不获取项目独占锁，可与其他运行同时进行。仅适用于只读取检出目录或通过绝对路径工作的工作流。",
+  "wiz.baseRef": "起始于",
+  "wiz.baseRefHint": "运行的工作树从该分支、标签或提交开始，而不是检出目录当前的 HEAD，例如 origin/main。远程分支会先被拉取（fetch）；拉取失败时拒绝运行，而不是从过时的副本开始。留空 = 当前 HEAD。",
   "wiz.workspaceModeIsolated": "专用工作树",
   "wiz.workspaceModeMain": "主检出目录",
   "wiz.worktreeIconTooltip": "Git工作树：为运行生命周期创建的仓库隔离副本，位于.kronn/worktrees/下。",

@@ -274,6 +274,8 @@ mod tests {
             failure_notify_url: None,
             run_retention_days: 0,
             execution_variable_retention_days: 30,
+            interrupted_worktree_ttl_days:
+                crate::models::setup::DEFAULT_INTERRUPTED_WORKTREE_TTL_DAYS,
             disk_critical_gib: crate::models::setup::DEFAULT_DISK_CRITICAL_GIB,
             disk_warning_gib: crate::models::setup::DEFAULT_DISK_WARNING_GIB,
             max_concurrent_agents: 5,

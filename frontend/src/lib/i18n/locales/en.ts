@@ -4298,6 +4298,8 @@ suggestion; that would overwrite the real value with a placeholder
   'wiz.workflowIsolationNoProject': 'Link a Git project first to isolate workflow runs.',
   'wiz.mainTreeReadOnly': 'Does not write to the project checkout',
   'wiz.mainTreeReadOnlyHint': 'Its main-checkout runs skip the project exclusivity lock and may run alongside another run. Only for workflows that read the checkout or work through absolute paths.',
+  'wiz.baseRef': 'Start from',
+  'wiz.baseRefHint': 'Branch, tag or commit the run\'s worktree starts from instead of the checkout\'s current HEAD, e.g. origin/main. A remote branch is fetched first; if the fetch fails, the run is refused instead of starting from a stale copy. Empty = current HEAD.',
   'wiz.workspaceModeIsolated': 'Dedicated worktree',
   'wiz.workspaceModeMain': 'Main checkout',
   'wiz.worktreeIconTooltip': 'Git worktree: an isolated copy of the repo, created for the run\'s lifetime, under .kronn/worktrees/.',

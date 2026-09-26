@@ -2437,6 +2437,139 @@ fn terminal_workspace_cleanup_candidates_exclude_interrupted_and_owned_paths() {
 }
 
 #[test]
+fn a_finished_child_never_purges_the_worktree_its_resumable_parent_shares() {
+    let conn = test_db();
+    let mut workflow = sample_workflow("w-shared");
+    workflow.project_id = Some("p-shared".into());
+    conn.execute(
+        "INSERT INTO projects (id, name, path, created_at, updated_at)
+         VALUES ('p-shared', 'Shared', '/repo', 'now', 'now')",
+        [],
+    )
+    .unwrap();
+    crate::db::workflows::insert_workflow(&conn, &workflow).unwrap();
+    let shared = "/repo/.kronn/worktrees/parent";
+    for (parent_status, parent_id) in [
+        (RunStatus::Interrupted, "parent-interrupted"),
+        (RunStatus::WaitingApproval, "parent-paused"),
+    ] {
+        let mut parent = sample_run(parent_id, "w-shared");
+        parent.status = parent_status;
+        parent.workspace_path = Some(format!("{shared}-{parent_id}"));
+        crate::db::workflows::insert_run(&conn, &parent).unwrap();
+        let mut child = sample_run(&format!("{parent_id}-child"), "w-shared");
+        child.status = RunStatus::Success;
+        child.parent_run_id = Some(parent_id.into());
+        child.run_type = "subworkflow".into();
+        child.workspace_path = parent.workspace_path.clone();
+        crate::db::workflows::insert_run(&conn, &child).unwrap();
+    }
+    let mut finished = sample_run("parent-done", "w-shared");
+    finished.status = RunStatus::Failed;
+    finished.workspace_path = Some(format!("{shared}-done"));
+    crate::db::workflows::insert_run(&conn, &finished).unwrap();
+    let mut finished_child = sample_run("parent-done-child", "w-shared");
+    finished_child.status = RunStatus::Success;
+    finished_child.parent_run_id = Some("parent-done".into());
+    finished_child.workspace_path = finished.workspace_path.clone();
+    crate::db::workflows::insert_run(&conn, &finished_child).unwrap();
+
+    let mut candidates: Vec<String> =
+        crate::db::workflows::terminal_workspace_cleanup_candidates(&conn)
+            .unwrap()
+            .into_iter()
+            .map(|candidate| candidate.run_id)
+            .collect();
+    candidates.sort();
+    assert_eq!(
+        candidates,
+        ["parent-done", "parent-done-child"],
+        "only a worktree every sharer has finished with is purged"
+    );
+}
+
+#[test]
+fn stale_interrupted_candidates_follow_the_cutoff_and_name_the_owner() {
+    let conn = test_db();
+    let mut workflow = sample_workflow("w-stale");
+    workflow.project_id = Some("p-stale".into());
+    conn.execute(
+        "INSERT INTO projects (id, name, path, created_at, updated_at)
+         VALUES ('p-stale', 'Stale', '/repo', 'now', 'now')",
+        [],
+    )
+    .unwrap();
+    crate::db::workflows::insert_workflow(&conn, &workflow).unwrap();
+    let now = Utc::now();
+    let interrupted = |id: &str, days: i64, path: &str| {
+        let mut run = sample_run(id, "w-stale");
+        run.status = RunStatus::Interrupted;
+        run.finished_at = Some(now - chrono::Duration::days(days));
+        run.workspace_path = Some(path.into());
+        run
+    };
+    let old = interrupted("old-owner", 10, "/repo/.kronn/worktrees/old");
+    crate::db::workflows::insert_run(&conn, &old).unwrap();
+    let mut old_child = interrupted("old-child", 10, "/repo/.kronn/worktrees/old");
+    old_child.parent_run_id = Some("old-owner".into());
+    crate::db::workflows::insert_run(&conn, &old_child).unwrap();
+    crate::db::workflows::insert_run(
+        &conn,
+        &interrupted("recent", 2, "/repo/.kronn/worktrees/recent"),
+    )
+    .unwrap();
+    let mut unknown_age = interrupted("unknown-age", 10, "/repo/.kronn/worktrees/unknown");
+    unknown_age.finished_at = None;
+    crate::db::workflows::insert_run(&conn, &unknown_age).unwrap();
+
+    let candidates = crate::db::workflows::stale_interrupted_workspace_candidates(
+        &conn,
+        now - chrono::Duration::days(7),
+    )
+    .unwrap();
+    assert_eq!(
+        candidates,
+        vec![crate::db::workflows::InterruptedWorkspaceCandidate {
+            run_id: "old-owner".into(),
+            workflow_name: "Test Workflow".into(),
+            project_path: "/repo".into(),
+            workspace_path: "/repo/.kronn/worktrees/old".into(),
+        }],
+        "one candidate per path, attributed to the top-level run"
+    );
+
+    let branch = crate::models::ProducedBranch {
+        branch_name: "kronn/Test-Workflow/old-owne".into(),
+        head_sha: "abc123".into(),
+        ahead: 2,
+        pushed_upstream: false,
+    };
+    for _ in 0..2 {
+        assert!(crate::db::workflows::record_reclaimed_interrupted_branch(
+            &conn,
+            "old-owner",
+            "/repo/.kronn/worktrees/old",
+            &branch,
+        )
+        .unwrap());
+    }
+    let stored = crate::db::workflows::get_run(&conn, "old-owner")
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.produced_branches.len(), 1, "recorded once");
+    assert!(
+        !crate::db::workflows::record_reclaimed_interrupted_branch(
+            &conn,
+            "recent",
+            "/repo/.kronn/worktrees/elsewhere",
+            &branch,
+        )
+        .unwrap(),
+        "a run that no longer owns that path is left alone"
+    );
+}
+
+#[test]
 fn set_run_state_key_merges_one_key_under_status_guard() {
     use crate::models::RunStatus::*;
     let conn = test_db();

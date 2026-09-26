@@ -1201,6 +1201,11 @@ pub struct WorkspaceConfig {
     /// non-isolated runs skip the per-project exclusivity lock.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub main_tree_read_only: bool,
+    /// Commit a fresh run's worktree starts from (`origin/main`, a tag, a SHA)
+    /// instead of the checkout's HEAD. A `<remote>/<branch>` value is fetched
+    /// first and a failed fetch refuses the run. Setting it requests a worktree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_ref: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -1879,6 +1884,14 @@ mod step_deserialization_tests {
             serde_json::to_value(&legacy).unwrap(),
             serde_json::json!({"hooks": {}, "require_isolation": false}),
             "an unset flag is not serialized"
+        );
+        assert_eq!(legacy.base_ref, None, "no starting point by default");
+        let based: WorkspaceConfig =
+            serde_json::from_str(r#"{"hooks":{},"base_ref":"origin/main"}"#).unwrap();
+        assert_eq!(based.base_ref.as_deref(), Some("origin/main"));
+        assert_eq!(
+            serde_json::to_value(&based).unwrap()["base_ref"],
+            "origin/main"
         );
     }
 

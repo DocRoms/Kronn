@@ -4311,6 +4311,8 @@ suggestion KRONN:APPLY ; cela écraserait la vraie valeur par un placeholder
   'wiz.workflowIsolationNoProject': 'Lie d’abord un projet Git pour pouvoir isoler les runs.',
   'wiz.mainTreeReadOnly': 'N’écrit pas dans le dépôt du projet',
   'wiz.mainTreeReadOnlyHint': 'Ses runs dans le dépôt principal ne prennent pas le verrou d’exclusivité du projet et peuvent tourner en même temps qu’un autre run. Réservé aux workflows qui lisent le dépôt ou travaillent par chemins absolus.',
+  'wiz.baseRef': 'Partir de',
+  'wiz.baseRefHint': 'Branche, tag ou commit d’où part le worktree du run au lieu du HEAD actuel du dépôt, par ex. origin/main. Une branche distante est d’abord récupérée (fetch) ; si le fetch échoue, le run est refusé plutôt que de partir d’une copie périmée. Vide = HEAD actuel.',
   'wiz.workspaceModeIsolated': 'Worktree dédié',
   'wiz.workspaceModeMain': 'Dépôt principal',
   'wiz.worktreeIconTooltip': 'Worktree git : copie isolée du dépôt créée pour la durée du run, sous .kronn/worktrees/.',

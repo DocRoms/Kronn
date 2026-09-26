@@ -22,6 +22,16 @@ Release notes for 0.9.3 and earlier are available in the
   The membership ends with the step, a replayed step takes over the executions
   its interrupted session steered (their deliveries wake it), and
   `task_exec_prepare` works again after `/resume` of an interrupted run.
+- An isolated workflow run can start from a chosen commit instead of the
+  project checkout's HEAD: `workspace_config.base_ref` (`origin/main`, a tag, a
+  SHA; "Start from" in the workflow editor). A remote branch is fetched first,
+  within 60 s and one fetch at a time per repository, so parallel foreach items
+  do not refuse each other on the ref lock. A failed fetch or an unknown ref
+  refuses the run with a message naming what to check, rather than starting
+  from a stale copy or the main checkout. The worktree of a run left
+  `Interrupted` and not resumed within `server.interrupted_worktree_ttl_days`
+  (default 7, `0` = never) is reclaimed at boot, except a dirty or detached
+  one; commits no base holds stay on a branch listed on the run.
 - A workflow run can carry a plain business label from its launch:
   `POST /api/workflows/{id}/trigger` accepts `state` beside `variables`, and
   `GET /api/workflows/{id}/runs?state_key=…&state_value=…` returns the runs
@@ -126,6 +136,9 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- The boot purge of finished workflow runs no longer removes a worktree that a
+  finished sub-workflow shares with its parent while that parent is still
+  running, paused at a gate or resumable after an interruption.
 - An arbitration card lets the reader take a checked option back, and offers
   a Comment action: the text reaches the agent that asked, marked as not a
   decision, and the question stays pending. Before, a checked radio button

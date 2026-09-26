@@ -762,6 +762,16 @@ pub(crate) fn count_misconfigured_steps(steps: &[WorkflowStep]) -> u32 {
         .count() as u32
 }
 
+/// A blank `base_ref` means "unset"; anything else must look like a ref.
+fn validate_workspace_config(config: Option<&WorkspaceConfig>) -> Result<(), String> {
+    match config.and_then(|config| config.base_ref.as_deref()) {
+        Some(base_ref) if !base_ref.trim().is_empty() => {
+            crate::workflows::workspace::validate_base_ref(base_ref).map(|_| ())
+        }
+        _ => Ok(()),
+    }
+}
+
 /// `Workflow.concurrency_limit` limits overlapping *whole runs*. It has never
 /// been a foreach worker count. Without isolation, overlapping runs would share
 /// the main checkout the foreach works in, so a limit above one is refused. An
@@ -1275,6 +1285,9 @@ pub async fn create(
     ) {
         return Json(ApiResponse::err(e));
     }
+    if let Err(e) = validate_workspace_config(req.workspace_config.as_ref()) {
+        return Json(ApiResponse::err(e));
+    }
     // 2026-06-11 Phase 1 — SubWorkflow graph: cycle/depth/dangling/no-gate.
     // A create can't be in a cycle with itself (its id doesn't exist yet),
     // so a placeholder start id is safe.
@@ -1576,6 +1589,9 @@ pub async fn update(
         updated.concurrency_limit,
         updated.workspace_config.as_ref(),
     ) {
+        return Json(ApiResponse::err(e));
+    }
+    if let Err(e) = validate_workspace_config(updated.workspace_config.as_ref()) {
         return Json(ApiResponse::err(e));
     }
     if let Err(e) = validate_saved_quick_exec_refs(
@@ -1985,6 +2001,7 @@ pub(crate) fn validate_workflow_for_import(wf: &Workflow) -> Result<(), String> 
         wf.concurrency_limit,
         wf.workspace_config.as_ref(),
     )?;
+    validate_workspace_config(wf.workspace_config.as_ref())?;
     Ok(())
 }
 
@@ -4754,10 +4771,28 @@ mod tests {
             hooks: Default::default(),
             require_isolation: true,
             main_tree_read_only: false,
+            base_ref: None,
         };
         assert!(
             validate_sub_workflow_foreach_concurrency(&[foreach], Some(3), Some(&isolated)).is_ok()
         );
+    }
+
+    #[test]
+    fn a_base_ref_must_look_like_a_ref_and_a_blank_one_means_unset() {
+        let with = |base_ref: Option<&str>| WorkspaceConfig {
+            hooks: Default::default(),
+            require_isolation: true,
+            main_tree_read_only: false,
+            base_ref: base_ref.map(str::to_string),
+        };
+        assert!(validate_workspace_config(None).is_ok());
+        assert!(validate_workspace_config(Some(&with(None))).is_ok());
+        assert!(validate_workspace_config(Some(&with(Some("  ")))).is_ok());
+        assert!(validate_workspace_config(Some(&with(Some("origin/main")))).is_ok());
+        let error = validate_workspace_config(Some(&with(Some("--upload-pack=evil"))))
+            .expect_err("an option is not a ref");
+        assert!(error.contains("workspace_config.base_ref"), "{error}");
     }
 
     #[test]

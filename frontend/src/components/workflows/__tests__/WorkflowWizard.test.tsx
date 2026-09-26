@@ -488,6 +488,51 @@ describe('WorkflowWizard — step list handlers', () => {
     });
   });
 
+  it('saves the starting point of an isolated run, trimmed, and drops it without isolation', async () => {
+    renderWizard({ editWorkflow: mkWorkflow({
+      steps: [mkStep(), mkStep({ name: 'review' })],
+      workspace_config: { hooks: {}, require_isolation: true, base_ref: 'origin/develop' },
+    }) });
+    fireEvent.click(screen.getByText('wiz.next')); // Infos → Trigger
+    fireEvent.click(screen.getByText('wiz.next')); // Trigger → Steps
+    fireEvent.click(screen.getByText('wiz.next')); // Steps → Config
+    fireEvent.click(screen.getByText('wiz.advanced'));
+
+    const baseRef = screen.getByLabelText('wiz.baseRef') as HTMLInputElement;
+    expect(baseRef.value).toBe('origin/develop');
+    fireEvent.change(baseRef, { target: { value: '  origin/main ' } });
+
+    fireEvent.click(screen.getByText('wiz.next')); // Config → Summary
+    fireEvent.click(screen.getByText('wiz.save'));
+    await waitFor(() => expect(updateMock).toHaveBeenCalledTimes(1));
+    expect(updateMock.mock.calls[0][1].workspace_config).toMatchObject({
+      require_isolation: true,
+      base_ref: 'origin/main',
+    });
+  });
+
+  it('hides the starting point while the run is not isolated and never sends it', async () => {
+    renderWizard({ editWorkflow: mkWorkflow({
+      steps: [mkStep(), mkStep({ name: 'review' })],
+      workspace_config: { hooks: {}, require_isolation: true, base_ref: 'origin/main' },
+    }) });
+    fireEvent.click(screen.getByText('wiz.next')); // Infos → Trigger
+    fireEvent.click(screen.getByText('wiz.next')); // Trigger → Steps
+    fireEvent.click(screen.getByText('wiz.next')); // Steps → Config
+    fireEvent.click(screen.getByText('wiz.advanced'));
+
+    fireEvent.click(screen.getByLabelText('wiz.requireIsolationAction'));
+    expect(screen.queryByLabelText('wiz.baseRef')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByLabelText('wiz.mainTreeReadOnly'));
+
+    fireEvent.click(screen.getByText('wiz.next')); // Config → Summary
+    fireEvent.click(screen.getByText('wiz.save'));
+    await waitFor(() => expect(updateMock).toHaveBeenCalledTimes(1));
+    const saved = updateMock.mock.calls[0][1].workspace_config;
+    expect(saved).toMatchObject({ require_isolation: false, main_tree_read_only: true });
+    expect(saved).not.toHaveProperty('base_ref');
+  });
+
   it('editing a step name propagates to the step', () => {
     toStepsPage([mkStep(), mkStep({ name: 'beta' })]);
     const stepName = screen.getByDisplayValue('main') as HTMLInputElement;

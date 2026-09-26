@@ -1151,6 +1151,15 @@ pub fn terminal_workspace_cleanup_candidates(
                   JOIN agent_dispatch_jobs dispatch ON dispatch.group_id = child.id
                  WHERE child.parent_run_id = run.id
                    AND dispatch.status IN ('Pending', 'Running')
+            )
+            -- A finished sub-workflow shares its parent's worktree: a parent
+            -- still live, paused or resumable keeps it.
+            AND NOT EXISTS (
+                SELECT 1
+                  FROM workflow_runs sharer
+                 WHERE sharer.workspace_path = run.workspace_path
+                   AND sharer.id <> run.id
+                   AND sharer.status NOT IN ('Success', 'Partial', 'Failed', 'Cancelled', 'StoppedByGuard')
             )",
     )?;
     let candidates = stmt
@@ -1164,6 +1173,150 @@ pub fn terminal_workspace_cleanup_candidates(
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(candidates)
+}
+
+/// The checkout of an `Interrupted` run nobody resumed before `cutoff`,
+/// attributed to the run that owns it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InterruptedWorkspaceCandidate {
+    pub run_id: String,
+    pub workflow_name: String,
+    pub project_path: String,
+    pub workspace_path: String,
+}
+
+const TERMINAL_RUN_STATUSES: [&str; 5] = [
+    "Success",
+    "Partial",
+    "Failed",
+    "Cancelled",
+    "StoppedByGuard",
+];
+
+/// A path is returned only when every run pointing at it is terminal or was
+/// interrupted before `cutoff`: a live, paused or recently interrupted sharer
+/// (a sub-workflow inherits its parent's worktree) keeps it resumable.
+pub fn stale_interrupted_workspace_candidates(
+    conn: &Connection,
+    cutoff: DateTime<Utc>,
+) -> Result<Vec<InterruptedWorkspaceCandidate>> {
+    struct Row {
+        run_id: String,
+        status: String,
+        finished_at: Option<String>,
+        workflow_name: String,
+        project_path: Option<String>,
+        top_level: bool,
+        read_by_children: bool,
+    }
+    let mut stmt = conn.prepare(
+        "SELECT run.id, run.status, run.finished_at, run.workspace_path, workflow.name,
+                project.path, run.parent_run_id IS NULL,
+                EXISTS (
+                    SELECT 1
+                      FROM workflow_runs child
+                      JOIN agent_dispatch_jobs dispatch ON dispatch.group_id = child.id
+                     WHERE child.parent_run_id = run.id
+                       AND dispatch.status IN ('Pending', 'Running')
+                )
+           FROM workflow_runs run
+           JOIN workflows workflow ON workflow.id = run.workflow_id
+           LEFT JOIN projects project ON project.id = workflow.project_id
+          WHERE run.workspace_path IS NOT NULL
+          ORDER BY run.started_at, run.id",
+    )?;
+    let mut by_path: std::collections::BTreeMap<String, Vec<Row>> = Default::default();
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(3)?,
+            Row {
+                run_id: row.get(0)?,
+                status: row.get(1)?,
+                finished_at: row.get(2)?,
+                workflow_name: row.get(4)?,
+                project_path: row.get(5)?,
+                top_level: row.get(6)?,
+                read_by_children: row.get(7)?,
+            },
+        ))
+    })?;
+    for row in rows {
+        let (path, row) = row?;
+        by_path.entry(path).or_default().push(row);
+    }
+
+    // An unreadable timestamp parses as "now": never old enough to reclaim.
+    let stale = |row: &Row| {
+        row.status == "Interrupted"
+            && row
+                .finished_at
+                .as_ref()
+                .is_some_and(|at| parse_dt(at.clone()) < cutoff)
+    };
+    let mut candidates = Vec::new();
+    for (workspace_path, rows) in by_path {
+        let kept = rows.iter().any(|row| {
+            row.read_by_children
+                || !(TERMINAL_RUN_STATUSES.contains(&row.status.as_str()) || stale(row))
+        });
+        if kept {
+            continue;
+        }
+        let Some(owner) = rows
+            .iter()
+            .filter(|row| stale(row))
+            .find(|row| row.top_level)
+            .or_else(|| rows.iter().find(|row| stale(row)))
+        else {
+            continue;
+        };
+        let Some(project_path) = owner.project_path.clone() else {
+            continue;
+        };
+        candidates.push(InterruptedWorkspaceCandidate {
+            run_id: owner.run_id.clone(),
+            workflow_name: owner.workflow_name.clone(),
+            project_path,
+            workspace_path,
+        });
+    }
+    Ok(candidates)
+}
+
+/// Append a branch preserved while reclaiming an `Interrupted` run's checkout.
+/// `false` when the run is no longer that Interrupted owner (resumed meanwhile).
+pub fn record_reclaimed_interrupted_branch(
+    conn: &Connection,
+    run_id: &str,
+    workspace_path: &str,
+    branch: &ProducedBranch,
+) -> Result<bool> {
+    let current: Option<Option<String>> = conn
+        .query_row(
+            "SELECT produced_branches FROM workflow_runs
+              WHERE id = ?1 AND status = 'Interrupted' AND workspace_path = ?2",
+            params![run_id, workspace_path],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(current) = current else {
+        return Ok(false);
+    };
+    let mut branches: Vec<ProducedBranch> = match current {
+        Some(raw) => serde_json::from_str(&raw)?,
+        None => Vec::new(),
+    };
+    if !branches
+        .iter()
+        .any(|known| known.branch_name == branch.branch_name && known.head_sha == branch.head_sha)
+    {
+        branches.push(branch.clone());
+    }
+    Ok(conn.execute(
+        "UPDATE workflow_runs SET produced_branches = ?3
+          WHERE id = ?1 AND status = 'Interrupted' AND workspace_path = ?2",
+        params![run_id, workspace_path, serde_json::to_string(&branches)?],
+    )? == 1)
 }
 
 pub fn mark_workspace_cleaned(
