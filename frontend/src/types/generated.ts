@@ -1317,6 +1317,12 @@ timeout_secs?: number | null,
  */
 output_format: CollectQuickExecOutputFormat, };
 
+/**
+ * A remark on a question that is not a decision: it reaches the asker and
+ * leaves the card waiting.
+ */
+export type CommentDiscussionQuestionRequest = { idempotency_key: string, text: string, };
+
 export type CompareImprovementAvailability = "available" | "different_prompts" | "missing_prompt" | "no_shared_quick_prompt";
 
 export type ComparePromptCompatibility = "identical" | "different" | "missing";

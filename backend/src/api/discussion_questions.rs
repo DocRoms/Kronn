@@ -5,8 +5,8 @@ use axum::{
 };
 
 use crate::db::discussion_questions::{
-    self, AnswerDiscussionQuestionRequest, AnswerError, DeclineDiscussionQuestionRequest,
-    DiscussionQuestion, DiscussionQuestionList,
+    self, AnswerDiscussionQuestionRequest, AnswerError, CommentDiscussionQuestionRequest,
+    DeclineDiscussionQuestionRequest, DiscussionQuestion, DiscussionQuestionList,
 };
 use crate::models::{ApiErrorCode, ApiResponse};
 use crate::AppState;
@@ -128,6 +128,67 @@ pub async fn decline(
         .db
         .with_conn(move |conn| {
             Ok(discussion_questions::decline(
+                conn,
+                &discussion_id,
+                &question_id,
+                &request,
+                &pseudo,
+                email.as_deref(),
+            ))
+        })
+        .await;
+    match result {
+        Ok(Ok(question)) => {
+            state.agent_dispatch_notify.notify_one();
+            (StatusCode::OK, Json(ApiResponse::ok(question)))
+        }
+        Ok(Err(AnswerError::NotFound)) => (
+            StatusCode::NOT_FOUND,
+            Json(ApiResponse::err_coded(
+                ApiErrorCode::NotFound,
+                "Discussion question not found",
+            )),
+        ),
+        Ok(Err(AnswerError::Conflict)) => (
+            StatusCode::CONFLICT,
+            Json(ApiResponse::err_coded(
+                ApiErrorCode::Conflict,
+                "This question has already been decided",
+            )),
+        ),
+        Ok(Err(AnswerError::Invalid(message))) => (
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::err_coded(ApiErrorCode::Validation, message)),
+        ),
+        Ok(Err(AnswerError::Failed(error))) | Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiResponse::err(error.to_string())),
+        ),
+    }
+}
+
+/// Comment on an arbitration without deciding it. The asker receives the text
+/// like an answer; the question stays pending.
+pub async fn comment(
+    State(state): State<AppState>,
+    Path((discussion_id, question_id)): Path<(String, String)>,
+    Json(request): Json<CommentDiscussionQuestionRequest>,
+) -> (StatusCode, Json<ApiResponse<DiscussionQuestion>>) {
+    let (pseudo, email) = {
+        let config = state.config.read().await;
+        (
+            config
+                .server
+                .pseudo
+                .clone()
+                .unwrap_or_else(|| "Human".into()),
+            config.server.avatar_email.clone(),
+        )
+    };
+    let result = state
+        .db
+        .with_conn(move |conn| {
+            Ok(discussion_questions::comment(
                 conn,
                 &discussion_id,
                 &question_id,

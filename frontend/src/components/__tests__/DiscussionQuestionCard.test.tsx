@@ -1,13 +1,14 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { questionsMock, answerMock } = vi.hoisted(() => ({
+const { questionsMock, answerMock, commentMock } = vi.hoisted(() => ({
   questionsMock: vi.fn(),
   answerMock: vi.fn(),
+  commentMock: vi.fn(),
 }));
 
 vi.mock('../../lib/api', () => ({
-  discussions: { questions: questionsMock, answerQuestion: answerMock },
+  discussions: { questions: questionsMock, answerQuestion: answerMock, commentQuestion: commentMock },
 }));
 
 vi.mock('../../lib/I18nContext', () => ({
@@ -205,6 +206,42 @@ describe('DiscussionQuestionCard', () => {
     fireEvent.click(screen.getByTestId('disc-question-option-b'));
     expect(screen.getByTestId('disc-question-option-a')).toBeChecked();
     expect(screen.getByTestId('disc-question-option-b')).toBeChecked();
+  });
+
+  it('lets the reader take a single choice back before sending', async () => {
+    renderCard();
+    await screen.findByTestId('disc-question-q-1');
+    const option = screen.getByTestId('disc-question-option-a');
+    fireEvent.click(option);
+    expect(option).toBeChecked();
+    // A checked radio fires no change of its own: the second click must still undo it.
+    fireEvent.click(option);
+    expect(option).not.toBeChecked();
+    expect(screen.getByTestId('disc-question-send')).toBeDisabled();
+  });
+
+  it('sends a comment without deciding and keeps the question waiting', async () => {
+    commentMock.mockResolvedValue(question());
+    renderCard();
+    await screen.findByTestId('disc-question-q-1');
+    expect(screen.getByTestId('disc-question-comment')).toBeDisabled();
+
+    fireEvent.change(screen.getByTestId('disc-question-text'), {
+      target: { value: 'Quel est le problème de ce ticket ?' },
+    });
+    fireEvent.click(screen.getByTestId('disc-question-comment'));
+
+    await waitFor(() => expect(commentMock).toHaveBeenCalledWith('d-1', 'q-1', {
+      text: 'Quel est le problème de ce ticket ?',
+      idempotency_key: expect.any(String),
+    }));
+    expect(answerMock).not.toHaveBeenCalled();
+    expect(await screen.findByTestId('disc-question-commented')).toBeInTheDocument();
+    expect(screen.getByTestId('disc-question-q-1')).toHaveAttribute('data-state', 'pending');
+    expect(screen.getByTestId('disc-question-text')).toHaveValue('');
+    // The choice stays open after a comment.
+    fireEvent.click(screen.getByTestId('disc-question-option-b'));
+    expect(screen.getByTestId('disc-question-send')).toBeEnabled();
   });
 
   /// A lost response must not record a second decision, and a corrected answer

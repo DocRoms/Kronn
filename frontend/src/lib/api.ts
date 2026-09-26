@@ -230,6 +230,7 @@ import type {
   ImportantCategory,
   ImportantMessageList,
   AnswerDiscussionQuestionRequest,
+  CommentDiscussionQuestionRequest,
   DeclineDiscussionQuestionRequest,
   ProviderQuotaState,
 } from '../types/generated';
@@ -1887,6 +1888,18 @@ export const discussions = {
   ) => api<DiscussionQuestion>(
     'POST',
     `/discussions/${encodeURIComponent(id)}/questions/${encodeURIComponent(questionId)}/decline`,
+    request,
+  ),
+
+  /** Say something about a question without deciding it: the asker receives it
+   *  like an answer and the question stays pending. Same idempotency contract. */
+  commentQuestion: (
+    id: string,
+    questionId: string,
+    request: CommentDiscussionQuestionRequest,
+  ) => api<DiscussionQuestion>(
+    'POST',
+    `/discussions/${encodeURIComponent(id)}/questions/${encodeURIComponent(questionId)}/comment`,
     request,
   ),
 

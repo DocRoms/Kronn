@@ -101,6 +101,7 @@ function QuestionBody({
   const [text, setText] = useState('');
   const [sending, setSending] = useState(false);
   const [error, setError] = useState('');
+  const [commented, setCommented] = useState(false);
   // A retry of the SAME answer must not record a second decision; a retry of a
   // DIFFERENT one must not be swallowed as a duplicate. So the key survives a
   // failed send and is renewed the moment the answer itself changes.
@@ -128,6 +129,31 @@ function QuestionBody({
         ? current.filter(id => id !== optionId)
         : [...current, optionId];
     });
+  };
+
+  // A comment is not a decision: the asker reads it and the card keeps waiting.
+  const comment = async () => {
+    const body = text.trim();
+    if (!body || inFlight.current) return;
+    inFlight.current = true;
+    setSending(true);
+    setError('');
+    setCommented(false);
+    try {
+      await discussionsApi.commentQuestion(discussionId, question.id, {
+        text: body,
+        idempotency_key: idempotencyKey.current,
+      });
+      setText('');
+      renewKey();
+      setCommented(true);
+    } catch (cause) {
+      setError(userError(cause));
+      refreshDiscussionQuestions(discussionId);
+    } finally {
+      inFlight.current = false;
+      setSending(false);
+    }
   };
 
   const decline = async () => {
@@ -218,6 +244,11 @@ function QuestionBody({
                         name={`question-${question.id}`}
                         checked={selected.includes(option.id)}
                         onChange={() => toggle(option.id)}
+                        // A checked radio fires no change when clicked again:
+                        // this is what lets the reader take a choice back.
+                        onClick={() => {
+                          if (!question.multiple && selected.includes(option.id)) toggle(option.id);
+                        }}
                         disabled={sending}
                         data-testid={`disc-question-option-${option.id}`}
                       />
@@ -246,7 +277,7 @@ function QuestionBody({
           <textarea
             className="disc-question-text-input"
             value={text}
-            onChange={event => { renewKey(); setText(event.target.value); }}
+            onChange={event => { renewKey(); setCommented(false); setText(event.target.value); }}
             disabled={sending}
             placeholder={t('disc.question.freeTextPlaceholder')}
             aria-label={t('disc.question.freeTextPlaceholder')}
@@ -255,6 +286,11 @@ function QuestionBody({
           />
 
           {error && <p className="disc-question-error" data-testid="disc-question-error">{error}</p>}
+          {commented && (
+            <p className="disc-question-context" data-testid="disc-question-commented">
+              {t('disc.question.commentSent')}
+            </p>
+          )}
 
           <div className="disc-question-actions">
             <button
@@ -266,6 +302,16 @@ function QuestionBody({
             >
               {sending ? <Loader2 size={12} className="spin" /> : null}
               {t('disc.question.send')}
+            </button>
+            <button
+              type="button"
+              className="disc-question-decline"
+              onClick={() => void comment()}
+              disabled={!text.trim() || sending}
+              title={t('disc.question.commentHint')}
+              data-testid="disc-question-comment"
+            >
+              {t('disc.question.comment')}
             </button>
             {/* Refusing needs no selection: not deciding IS the decision, and
                 until now the only way to clear a question was to answer it. */}

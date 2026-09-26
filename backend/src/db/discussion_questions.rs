@@ -52,6 +52,15 @@ pub struct DeclineDiscussionQuestionRequest {
     pub reason: Option<String>,
 }
 
+/// A remark on a question that is not a decision: it reaches the asker and
+/// leaves the card waiting.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct CommentDiscussionQuestionRequest {
+    pub idempotency_key: String,
+    pub text: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct DiscussionQuestionAnswer {
@@ -448,6 +457,80 @@ fn publish_human_resolution(
         connection_id.as_deref(),
     )?;
     Ok(())
+}
+
+/// Say something about a question without deciding it: a question back, a
+/// missing fact, a caveat. The asker receives it like an answer, through the
+/// same targeting and dispatch, and the question stays pending.
+pub fn comment(
+    conn: &Connection,
+    discussion_id: &str,
+    question_id: &str,
+    request: &CommentDiscussionQuestionRequest,
+    author_pseudo: &str,
+    author_avatar_email: Option<&str>,
+) -> Result<DiscussionQuestion, AnswerError> {
+    if !nonempty_bounded(&request.idempotency_key, 128) {
+        return Err(AnswerError::Invalid(
+            "A bounded idempotency key is required".into(),
+        ));
+    }
+    let text = request.text.trim();
+    if text.is_empty() || text.chars().count() > 8000 {
+        return Err(AnswerError::Invalid(
+            "A comment needs between 1 and 8000 characters".into(),
+        ));
+    }
+    let question = list(conn, discussion_id)?
+        .questions
+        .into_iter()
+        .find(|q| q.id == question_id)
+        .ok_or(AnswerError::NotFound)?;
+    if question.state != DiscussionQuestionState::Pending {
+        return Err(AnswerError::Conflict);
+    }
+    let message_id = format!("question-comment:{question_id}:{}", request.idempotency_key);
+    let already: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM messages WHERE id=?1)",
+            [&message_id],
+            |r| r.get(0),
+        )
+        .map_err(anyhow::Error::from)?;
+    if already {
+        return Ok(question);
+    }
+    conn.execute_batch("SAVEPOINT comment_discussion_question")
+        .map_err(anyhow::Error::from)?;
+    let content = format!(
+        "Commentaire sur l'arbitrage — {}\n\n{text}\n\nCe n'est pas une décision : la question reste en attente.",
+        question.question
+    );
+    let published = publish_human_resolution(
+        conn,
+        discussion_id,
+        &question,
+        &message_id,
+        content,
+        &message_id,
+        Utc::now(),
+        author_pseudo,
+        author_avatar_email,
+        true,
+    );
+    match published {
+        Ok(()) => {
+            conn.execute_batch("RELEASE comment_discussion_question")
+                .map_err(anyhow::Error::from)?;
+            Ok(question)
+        }
+        Err(error) => {
+            let _ = conn.execute_batch(
+                "ROLLBACK TO comment_discussion_question; RELEASE comment_discussion_question",
+            );
+            Err(error)
+        }
+    }
 }
 
 /// Refuse an arbitration instead of answering it.

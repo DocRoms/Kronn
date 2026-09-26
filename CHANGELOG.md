@@ -117,6 +117,10 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- An arbitration card lets the reader take a checked option back, and offers
+  a Comment action: the text reaches the agent that asked, marked as not a
+  decision, and the question stays pending. Before, a checked radio button
+  could not be unchecked and a written reply always settled the question.
 - A workflow with `require_isolation` and a SubWorkflow foreach accepts a
   `concurrency_limit` above 1: each run owns its worktree, so two runs overlap
   while each foreach stays sequential. In such a fresh worktree the foreach no

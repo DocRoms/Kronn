@@ -74,6 +74,10 @@ API contract: `GET /api/discussions/{id}/questions` returns
 declined. Answering and declining share one resolution path
 (`publish_human_resolution`), so a declined card produces the same receipt,
 routing and idempotency guarantees as an answered one — they cannot drift apart.
+`POST /api/discussions/{id}/questions/{question_id}/comment` accepts
+`{text, idempotency_key}`: the asker receives the text through the same path,
+as a message that says it is not a decision, and the question stays pending.
+In the card, a checked option can be clicked again to take it back.
 Discussion list items expose `pending_question_count`, including pagination.
 `[src: file: backend/src/db/discussion_questions.rs:1]`
 `[src: file: backend/src/api/discussion_questions.rs:1]`
