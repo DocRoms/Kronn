@@ -984,7 +984,7 @@ export type BudgetVerdict = "ok" | "warn" | "rotate" | "unknown";
  * `[TRIAGE]` addendum apply inside the child run — see
  * `docs/design/decomposed-autopilot-presets.md` INV-3).
  */
-export type BundleChildWorkflow = { bundle_id: string, name: string, project_id: string | null, trigger: WorkflowTrigger, steps: Array<WorkflowStep>, actions: Array<WorkflowAction>, safety: WorkflowSafety | null, workspace_config: WorkspaceConfig | null, concurrency_limit: number | null, guards: WorkflowGuards | null, artifacts: Record<string, ArtifactSpec>, on_failure: Array<WorkflowStep>, exec_allowlist: Array<string>, variables: Array<PromptVariable>,
+export type BundleChildWorkflow = { bundle_id: string, name: string, project_id: string | null, trigger: WorkflowTrigger, steps: Array<WorkflowStep>, actions: Array<WorkflowAction>, safety: WorkflowSafety | null, workspace_config: WorkspaceConfig | null, concurrency_limit: number | null, concurrency_key: string | null, guards: WorkflowGuards | null, artifacts: Record<string, ArtifactSpec>, on_failure: Array<WorkflowStep>, exec_allowlist: Array<string>, variables: Array<PromptVariable>,
 /**
  * 0.8.5 — optional initial state. Default `true` for back-compat
  * (every UI-driven create stays enabled by default). The MCP
@@ -1553,7 +1553,7 @@ export type CreateQuickPromptRequest = { name: string, icon?: string | null, pro
 
 export type CreateSkillRequest = { name: string, description: string, icon: string, category: SkillCategory, content: string, license?: string | null, allowed_tools?: string | null, };
 
-export type CreateWorkflowRequest = { name: string, project_id?: string | null, trigger: WorkflowTrigger, steps: Array<WorkflowStep>, actions?: Array<WorkflowAction>, safety?: WorkflowSafety | null, workspace_config?: WorkspaceConfig | null, concurrency_limit?: number | null, guards?: WorkflowGuards | null, artifacts?: Record<string, ArtifactSpec>, on_failure?: Array<WorkflowStep>, exec_allowlist?: Array<string>, variables?: Array<PromptVariable>,
+export type CreateWorkflowRequest = { name: string, project_id?: string | null, trigger: WorkflowTrigger, steps: Array<WorkflowStep>, actions?: Array<WorkflowAction>, safety?: WorkflowSafety | null, workspace_config?: WorkspaceConfig | null, concurrency_limit?: number | null, concurrency_key?: string | null, guards?: WorkflowGuards | null, artifacts?: Record<string, ArtifactSpec>, on_failure?: Array<WorkflowStep>, exec_allowlist?: Array<string>, variables?: Array<PromptVariable>,
 /**
  * 0.8.5 — optional initial state. Default `true` for back-compat
  * (every UI-driven create stays enabled by default). The MCP
@@ -7125,7 +7125,11 @@ export type UpdatePlanningTaskRequest = { title?: string | null, description?: s
  */
 export type UpdateQuickFavoriteRequest = { pinned: boolean, };
 
-export type UpdateWorkflowRequest = { name?: string | null, project_id?: string | null | null, trigger?: WorkflowTrigger | null, steps?: Array<WorkflowStep> | null, actions?: Array<WorkflowAction> | null, safety?: WorkflowSafety | null, workspace_config?: WorkspaceConfig | null, concurrency_limit?: number | null, guards?: WorkflowGuards | null,
+export type UpdateWorkflowRequest = { name?: string | null, project_id?: string | null | null, trigger?: WorkflowTrigger | null, steps?: Array<WorkflowStep> | null, actions?: Array<WorkflowAction> | null, safety?: WorkflowSafety | null, workspace_config?: WorkspaceConfig | null, concurrency_limit?: number | null,
+/**
+ * `null` clears the key; omitted keeps it.
+ */
+concurrency_key?: string | null | null, guards?: WorkflowGuards | null,
 /**
  * Replace the artifact map entirely when present. To clear all
  * declarations, send `Some({})`. Omit the field to leave existing
@@ -7412,6 +7416,11 @@ export type WorkerOfferStatus = "pending" | "accepting" | "accepted" | "declined
 
 export type Workflow = { id: string, name: string, project_id: string | null, trigger: WorkflowTrigger, steps: Array<WorkflowStep>, actions: Array<WorkflowAction>, safety: WorkflowSafety, workspace_config: WorkspaceConfig | null, concurrency_limit: number | null,
 /**
+ * Template rendered at launch from non-secret launch variables
+ * (`{{ticketKey}}`): `concurrency_limit` then counts runs per rendered key.
+ */
+concurrency_key?: string | null,
+/**
  * Execution limits (timeout, LLM calls cap, loop detection). 0.7.0 —
  * Phase 1 of the Auto-Dev workflow expansion. `None` = use the soft
  * backend defaults (120 min wall-clock, 100 LLM calls, 10 revisits
@@ -7657,6 +7666,10 @@ state?: Record<string, string>,
  * blocked, no auth, network down, …).
  */
 produced_branches?: Array<ProducedBranch>,
+/**
+ * The workflow's `concurrency_key` as rendered for this run at launch.
+ */
+concurrency_key?: string | null,
 /**
  * Provenance enrichment (DERIVED, not persisted). When this run is a
  * sub-workflow child (`parent_run_id` set), these resolve the parent run's

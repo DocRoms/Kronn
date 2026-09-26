@@ -174,6 +174,7 @@ fn workflow() -> Workflow {
         },
         workspace_config: None,
         concurrency_limit: None,
+        concurrency_key: None,
         guards: None,
         artifacts: Default::default(),
         on_failure: vec![],
@@ -208,6 +209,7 @@ fn pending_run() -> WorkflowRun {
         parent_workflow_id: None,
         parent_workflow_name: None,
         parent_run_started_at: None,
+        concurrency_key: None,
     }
 }
 

@@ -787,7 +787,7 @@ Apply these rules to every workflow you design:
 6. **Last step = either FreeText Agent or Notify** — final output is either a human-readable report (FreeText) or a webhook delivery (Notify). Never end on Structured.
 7. **Limit to 4-5 steps** — most workflows work well with 2-4 steps. More steps = more latency. Only add steps when there's a clear separation of concern.
 8. **Agent choice (when `Agent` IS used)** — default to `ClaudeCode` (most capable). Use `GeminiCli` or `Codex` for simpler analysis if the user wants to save tokens. `tier: "economy"` for collection/summary, `"default"` for analysis, `"reasoning"` only for genuinely hard problems (architecture, debugging, debate).
-9. **`concurrency_limit: 1`** for workflows that modify external state (Jira comments, git commits, Slack posts) — prevents accidental double-fire on overlapping cron schedules.
+9. **`concurrency_limit: 1`** for workflows that modify external state (Jira comments, git commits, Slack posts) — prevents accidental double-fire on overlapping cron schedules. When runs of different business objects may overlap but two runs of the same one must not (one run per ticket), add **`concurrency_key: "{{ticketKey}}"`**: the limit is then counted per key rendered at launch, runs with different keys run side by side, and a launch whose key is already at the limit is refused with a clear error (no queue). The key needs `concurrency_limit`, may read only `user_input` launch variables (a `project_env`/`kronn_context` variable is refused at save: the rendered key is stored in clear on every run as `run.concurrency_key`), and with a SubWorkflow foreach it requires `workspace_config.require_isolation: true`, like a limit above 1.
 10. **Use `Gate` for high-stakes pipelines** — anything touching prod (deploys, refunds, customer comms, irreversible writes). The pause is zero tokens and gives operators a kill switch. Pair with `gate_notify_url` so the gate doesn't sit unread for hours.
 11. **Use `Exec` over "Agent + bash tool" for deterministic shell** — `cargo test`, `npm run build`, `make smoke` — these don't need an LLM to read the output. Add the binaries to `exec_allowlist`. Branch on the result via `on_result.contains "ERROR"` (test failure) or `on_result.contains "exit_2"` (e.g. compile error vs test failure) — the Exec step emits `[SIGNAL: ...]` markers automatically. The downstream Agent step can also read `{{steps.X.data.exit_code}}` and `{{steps.X.data.stdout}}` if it needs the actual output.
 12. **Auto-correcting loops via `Goto + max_iterations` + `state`** — the Auto-Dev pattern has TWO loops, both bounded by `max_iterations`:
@@ -895,6 +895,7 @@ workflow_create_draft({
   exec_allowlist?: string[],
   artifacts?: Record<string, ArtifactSpec>,
   concurrency_limit?: number,
+  concurrency_key?: string, // e.g. "{{ticketKey}}" — limit counted per rendered key
   safety?: WorkflowSafety,
 })
 → { id, name, enabled: false, ... }       // the full Workflow JSON

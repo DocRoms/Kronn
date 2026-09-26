@@ -533,6 +533,47 @@ describe('WorkflowWizard — step list handlers', () => {
     expect(saved).not.toHaveProperty('base_ref');
   });
 
+  it('saves a concurrency key with the limit, and clears it when emptied (KT-796)', async () => {
+    renderWizard({ editWorkflow: mkWorkflow({
+      steps: [mkStep(), mkStep({ name: 'review' })],
+      concurrency_limit: 1,
+      concurrency_key: '{{ticketKey}}',
+    }) });
+    fireEvent.click(screen.getByText('wiz.next')); // Infos → Trigger
+    fireEvent.click(screen.getByText('wiz.next')); // Trigger → Steps
+    fireEvent.click(screen.getByText('wiz.next')); // Steps → Config
+    fireEvent.click(screen.getByText('wiz.advanced'));
+
+    const key = screen.getByLabelText('wiz.concurrencyKey') as HTMLInputElement;
+    expect(key.value).toBe('{{ticketKey}}');
+    fireEvent.change(key, { target: { value: '  pr-{{ticketKey}} ' } });
+    fireEvent.click(screen.getByText('wiz.next')); // Config → Summary
+    expect(screen.getByText('pr-{{ticketKey}}')).toBeInTheDocument();
+    fireEvent.click(screen.getByText('wiz.save'));
+    await waitFor(() => expect(updateMock).toHaveBeenCalledTimes(1));
+    expect(updateMock.mock.calls[0][1]).toMatchObject({
+      concurrency_limit: 1,
+      concurrency_key: 'pr-{{ticketKey}}',
+    });
+  });
+
+  it('sends a null concurrency key when the field is emptied, so the update clears it', async () => {
+    renderWizard({ editWorkflow: mkWorkflow({
+      steps: [mkStep(), mkStep({ name: 'review' })],
+      concurrency_limit: 1,
+      concurrency_key: '{{ticketKey}}',
+    }) });
+    fireEvent.click(screen.getByText('wiz.next'));
+    fireEvent.click(screen.getByText('wiz.next'));
+    fireEvent.click(screen.getByText('wiz.next'));
+    fireEvent.click(screen.getByText('wiz.advanced'));
+    fireEvent.change(screen.getByLabelText('wiz.concurrencyKey'), { target: { value: '   ' } });
+    fireEvent.click(screen.getByText('wiz.next'));
+    fireEvent.click(screen.getByText('wiz.save'));
+    await waitFor(() => expect(updateMock).toHaveBeenCalledTimes(1));
+    expect(updateMock.mock.calls[0][1].concurrency_key).toBeNull();
+  });
+
   it('editing a step name propagates to the step', () => {
     toStepsPage([mkStep(), mkStep({ name: 'beta' })]);
     const stepName = screen.getByDisplayValue('main') as HTMLInputElement;

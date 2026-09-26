@@ -8169,8 +8169,8 @@ def call_workflow_update(args):
         raise RuntimeError("workflow_update: missing required 'workflow_id'")
     patchable = (
         "name", "project_id", "trigger", "steps", "actions", "safety",
-        "workspace_config", "concurrency_limit", "guards", "artifacts",
-        "on_failure", "exec_allowlist", "variables", "enabled",
+        "workspace_config", "concurrency_limit", "concurrency_key", "guards",
+        "artifacts", "on_failure", "exec_allowlist", "variables", "enabled",
     )
     body = {k: args[k] for k in patchable if k in args}
     if not body:
@@ -9817,6 +9817,11 @@ TOOL_MANUALS = {
         "converged. The payload mirrors CreateWorkflowRequest: required name, tagged trigger "
         "and 1-20 steps; optional project, variables, guards, failure chain, allowlist, "
         "artifacts, concurrency, safety, actions and workspace config.\n\n"
+        "`concurrency_key` (e.g. `\"{{ticketKey}}\"`, also accepted by `workflow_update`, "
+        "null clears it) makes `concurrency_limit` count runs per key rendered at launch: "
+        "runs with different keys overlap, a launch whose key is already at the limit is "
+        "refused. It needs `concurrency_limit` and may read only `user_input` variables, "
+        "never a `project_env`/`kronn_context` one, because the key is stored in clear.\n\n"
         "Each PromptVariable is `{name,label?,placeholder?,description?,required?,pattern?,"
         "source?,source_ref?,allow_manual_override?,control?}`. Omitted source means "
         "`user_input`. Use `project_env` with a declarative `<env.NAME>` reference only "

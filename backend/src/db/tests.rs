@@ -1925,6 +1925,7 @@ pub(crate) fn sample_workflow(id: &str) -> Workflow {
         },
         workspace_config: None,
         concurrency_limit: None,
+        concurrency_key: None,
         guards: None,
         artifacts: ::std::collections::HashMap::new(),
         on_failure: vec![],
@@ -2033,6 +2034,7 @@ pub(crate) fn sample_run(id: &str, workflow_id: &str) -> WorkflowRun {
         parent_run_id: None,
         state: ::std::collections::HashMap::new(),
         produced_branches: vec![],
+        concurrency_key: None,
         parent_workflow_id: None,
         parent_workflow_name: None,
         parent_run_started_at: None,
@@ -3402,6 +3404,7 @@ fn sample_batch_run(id: &str, qp_id: &str, total: u32) -> WorkflowRun {
         parent_run_id: None,
         state: ::std::collections::HashMap::new(),
         produced_branches: vec![],
+        concurrency_key: None,
         parent_workflow_id: None,
         parent_workflow_name: None,
         parent_run_started_at: None,
@@ -3705,20 +3708,33 @@ fn workflow_latest_run_aggregation_does_not_read_run_payload_pages() {
 fn workflow_latest_run_index_upgrade_preserves_existing_runs_and_ties() {
     let conn = Connection::open_in_memory().unwrap();
     migrations::run_through(&conn, "189_artifact_message_origin").unwrap();
-    for id in ["latest-wf", "without-runs", "qp:latest-batch"] {
-        crate::db::workflows::insert_workflow(&conn, &sample_workflow(id)).unwrap();
-    }
     let start = Utc.with_ymd_and_hms(2026, 9, 24, 8, 0, 0).unwrap();
+    // Rows written with the 189 schema: today's insert helpers name later columns.
+    for id in ["latest-wf", "without-runs", "qp:latest-batch"] {
+        conn.execute(
+            "INSERT INTO workflows (id, name, trigger_json, steps_json, created_at, updated_at)
+             VALUES (?1, ?1, '\"Manual\"', '[]', ?2, ?2)",
+            rusqlite::params![id, start.to_rfc3339()],
+        )
+        .unwrap();
+    }
     for (id, workflow_id, minute) in [
         ("earlier", "latest-wf", 0),
         ("latest-a", "latest-wf", 1),
         ("latest-b", "latest-wf", 1),
         ("batch", "qp:latest-batch", 0),
     ] {
-        let mut run = sample_run(id, workflow_id);
-        run.started_at = start + chrono::Duration::minutes(minute);
-        run.tokens_used = 123;
-        crate::db::workflows::insert_run(&conn, &run).unwrap();
+        conn.execute(
+            "INSERT INTO workflow_runs (id, workflow_id, status, step_results_json, tokens_used, started_at, run_type)
+             VALUES (?1, ?2, 'Success', ?3, 123, ?4, 'linear')",
+            rusqlite::params![
+                id,
+                workflow_id,
+                format!(r#"[{{"step_name":"{id}","status":"Success","output":"kept","tokens_used":1,"duration_ms":1}}]"#),
+                (start + chrono::Duration::minutes(minute)).to_rfc3339(),
+            ],
+        )
+        .unwrap();
     }
     let saved = |conn: &Connection| -> Vec<(String, String)> {
         conn.prepare("SELECT id, step_results_json FROM workflow_runs ORDER BY id")
@@ -5350,6 +5366,7 @@ fn workflow_multi_step_roundtrip() {
         },
         workspace_config: None,
         concurrency_limit: None,
+        concurrency_key: None,
         guards: None,
         artifacts: ::std::collections::HashMap::new(),
         on_failure: vec![],

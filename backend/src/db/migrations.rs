@@ -740,6 +740,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         include_str!("sql/192_task_execution_served_model.sql"),
     ),
     (
+        "193_workflow_concurrency_key",
+        include_str!("sql/193_workflow_concurrency_key.sql"),
+    ),
+    (
         "194_workflow_step_room_sessions",
         include_str!("sql/194_workflow_step_room_sessions.sql"),
     ),

@@ -58,6 +58,7 @@ fn draft_patch(
         "safety",
         "workspace_config",
         "concurrency_limit",
+        "concurrency_key",
         "guards",
         "artifacts",
         "on_failure",

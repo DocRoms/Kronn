@@ -32,6 +32,14 @@ Release notes for 0.9.3 and earlier are available in the
   `Interrupted` and not resumed within `server.interrupted_worktree_ttl_days`
   (default 7, `0` = never) is reclaimed at boot, except a dirty or detached
   one; commits no base holds stay on a branch listed on the run.
+- A workflow's `concurrency_limit` can be counted per business object:
+  `concurrency_key` (for example `"{{ticketKey}}"`) is rendered at each launch
+  from the run's launch variables and stored on the run. Runs with different
+  keys run side by side; a launch whose key is already at the limit is refused
+  with `Concurrency limit reached for key …`, as the per-workflow limit already
+  was. The key may read only `user_input` variables: one resolved from the
+  project environment or the Kronn context is refused at save, since the key
+  is stored in clear. Migration 193 adds the column to workflows and runs.
 - A workflow run can carry a plain business label from its launch:
   `POST /api/workflows/{id}/trigger` accepts `state` beside `variables`, and
   `GET /api/workflows/{id}/runs?state_key=…&state_value=…` returns the runs

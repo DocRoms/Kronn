@@ -13,6 +13,7 @@ pub mod batch_step;
 pub mod big_ticket_template;
 pub mod cancellation;
 pub mod collect_api_data_step;
+pub mod concurrency;
 pub mod exec_step;
 pub mod gate_checkpoint;
 pub mod gate_step;
@@ -166,8 +167,12 @@ impl WorkflowEngine {
                 continue;
             }
 
-            // Check concurrency limit
-            if let Some(limit) = wf.concurrency_limit {
+            // Advisory per-workflow check; a keyed limit is only known once the
+            // run's variables are resolved, so spawn_run enforces it.
+            if let Some(limit) = wf
+                .concurrency_limit
+                .filter(|_| wf.concurrency_key.is_none())
+            {
                 let wf_id = wf.id.clone();
                 let db2 = self.db().clone();
                 let active = db2
@@ -326,6 +331,13 @@ impl WorkflowEngine {
                 serde_json::to_string(&failures).unwrap_or_default()
             )
         })?;
+        let concurrency_key = match wf.concurrency_key.as_deref() {
+            Some(template) => {
+                concurrency::render_key(template, &wf.variables, &prepared.resolved.values)
+                    .map_err(anyhow::Error::msg)?
+            }
+            None => None,
+        };
         if let Some(object) = trigger_ctx.as_object_mut() {
             object.insert("execution_snapshot_id".into(), prepared.snapshot_id.into());
             object.insert(
@@ -353,6 +365,7 @@ impl WorkflowEngine {
             parent_run_id: None,
             state: ::std::collections::HashMap::new(),
             produced_branches: vec![],
+            concurrency_key,
             parent_workflow_id: None,
             parent_workflow_name: None,
             parent_run_started_at: None,
@@ -364,25 +377,16 @@ impl WorkflowEngine {
         // manual HTTP trigger (which is atomic, api/workflows.rs) could land
         // in that gap and put a limit=1 workflow at 2 concurrent runs.
         let r = run.clone();
-        let limit = wf.concurrency_limit;
-        let wf_id_check = wf.id.clone();
+        let admission = wf.clone();
         let db = self.db().clone();
         let inserted = db
-            .with_conn(move |conn| {
-                if let Some(max) = limit {
-                    let active = crate::db::workflows::count_active_runs(conn, &wf_id_check)?;
-                    if active >= max {
-                        return Ok(false);
-                    }
-                }
-                crate::db::workflows::insert_run(conn, &r)?;
-                Ok(true)
-            })
+            .with_conn(move |conn| concurrency::insert_run_within_limit(conn, &admission, &r))
             .await?;
-        if !inserted {
+        if let Err(reason) = inserted {
             tracing::info!(
-                "Workflow '{}' trigger skipped at insert — concurrency limit filled by a concurrent trigger",
-                wf.name
+                "Workflow '{}' trigger skipped at insert — {}",
+                wf.name,
+                reason
             );
             return Ok(());
         }
@@ -700,6 +704,7 @@ mod tests {
             parent_run_id: None,
             state: ::std::collections::HashMap::new(),
             produced_branches: vec![],
+            concurrency_key: None,
             parent_workflow_id: None,
             parent_workflow_name: None,
             parent_run_started_at: None,
@@ -746,6 +751,7 @@ mod tests {
             parent_run_id: None,
             state: ::std::collections::HashMap::new(),
             produced_branches: vec![],
+            concurrency_key: None,
             parent_workflow_id: None,
             parent_workflow_name: None,
             parent_run_started_at: None,

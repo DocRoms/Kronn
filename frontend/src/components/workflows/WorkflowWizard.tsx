@@ -361,6 +361,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
 
   // Concurrency
   const [concurrencyLimit, setConcurrencyLimit] = useState<string>(editWorkflow?.concurrency_limit?.toString() ?? '');
+  const [concurrencyKey, setConcurrencyKey] = useState<string>(editWorkflow?.concurrency_key ?? '');
 
   // 0.7.0 — Execution limits (timeout / max LLM calls / loop detection)
   const [guards, setGuards] = useState<WorkflowGuards | null>(editWorkflow?.guards ?? null);
@@ -1196,6 +1197,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
       const wsConfig = buildWorkspaceConfig();
       const safetyVal = (safety.sandbox || safety.require_approval || safety.max_files || safety.max_lines) ? safety : undefined;
       const concurrency = concurrencyLimit ? parseInt(concurrencyLimit) : undefined;
+      const trimmedConcurrencyKey = concurrencyKey.trim();
 
       if (isEdit && editWorkflow) {
         await workflowsApi.update(editWorkflow.id, {
@@ -1207,6 +1209,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
           safety: safetyVal ?? editWorkflow.safety,
           workspace_config: wsConfig ?? undefined,
           concurrency_limit: concurrency ?? null,
+          concurrency_key: trimmedConcurrencyKey || null,
           guards,
           on_failure: onFailureSteps,
           exec_allowlist: execAllowlist,
@@ -1222,6 +1225,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
           safety: safetyVal,
           workspace_config: wsConfig ?? undefined,
           concurrency_limit: concurrency,
+          concurrency_key: trimmedConcurrencyKey || undefined,
           guards: guards ?? undefined,
           on_failure: onFailureSteps,
           exec_allowlist: execAllowlist,
@@ -4874,6 +4878,18 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                   placeholder="illimite"
                   aria-label={t('wiz.concurrency')}
                 />
+                <label className="wf-label" style={{ marginTop: 8 }}>{t('wiz.concurrencyKey')}</label>
+                <input
+                  type="text"
+                  className="wf-input"
+                  value={concurrencyKey}
+                  onChange={e => setConcurrencyKey(e.target.value)}
+                  placeholder="{{ticketKey}}"
+                  aria-label={t('wiz.concurrencyKey')}
+                />
+                <p className="text-xs text-faint" style={{ margin: '6px 0 0' }}>
+                  {t('wiz.concurrencyKeyHint')}
+                </p>
               </div>
 
               {/* Workflow-level workspace isolation. Child batch discussions
@@ -4970,6 +4986,9 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
           </div>
           {concurrencyLimit && (
             <div className="wf-summary-row"><span className="wf-summary-label">Concurrence</span> max {concurrencyLimit} runs</div>
+          )}
+          {concurrencyKey.trim() && (
+            <div className="wf-summary-row"><span className="wf-summary-label">{t('wiz.concurrencyKey')}</span> <code>{concurrencyKey.trim()}</code></div>
           )}
           {projectId && (
             <div className="wf-summary-row">

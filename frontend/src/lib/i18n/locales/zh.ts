@@ -4561,6 +4561,8 @@ const zh: TranslationDict = {
   "wiz.maxFiles": "最大修改文件数",
   "wiz.maxLines": "最大修改行数",
   "wiz.concurrency": "并发限制（同时运行）",
+  "wiz.concurrencyKey": "并发键",
+  "wiz.concurrencyKeyHint": "可选。启动时渲染的模板（例如 {{ticketKey}}）：限制将按键统计运行，若某个键已达到限制，则拒绝该次启动。只接受启动时输入的变量，绝不接受环境变量或上下文变量。",
   "wiz.hooks": "工作区钩子（可选）",
   "wiz.hooksHint": "在 git 工作树的每个阶段执行的 Shell 命令",
   "wiz.hookAfterCreate": "创建后",

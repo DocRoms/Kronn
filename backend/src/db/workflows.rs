@@ -146,7 +146,7 @@ pub fn list_workflows(conn: &Connection) -> Result<Vec<Workflow>> {
         "SELECT id, name, project_id, trigger_json, steps_json, actions_json,
                 safety_json, workspace_config_json, concurrency_limit, enabled,
                 created_at, updated_at, guards, artifacts, on_failure, exec_allowlist, variables,
-                pinned
+                pinned, concurrency_key
          FROM workflows WHERE id NOT LIKE 'qp:%' ORDER BY updated_at DESC",
     )?;
 
@@ -163,7 +163,7 @@ pub fn get_workflow(conn: &Connection, id: &str) -> Result<Option<Workflow>> {
         "SELECT id, name, project_id, trigger_json, steps_json, actions_json,
                 safety_json, workspace_config_json, concurrency_limit, enabled,
                 created_at, updated_at, guards, artifacts, on_failure, exec_allowlist, variables,
-                pinned
+                pinned, concurrency_key
          FROM workflows WHERE id = ?1",
     )?;
 
@@ -574,6 +574,7 @@ pub(crate) fn create_batch_run_with_launch_settings(
         parent_run_id: input.parent_run_id.clone(),
         state: ::std::collections::HashMap::new(),
         produced_branches: vec![],
+        concurrency_key: None,
         parent_workflow_id: None,
         parent_workflow_name: None,
         parent_run_started_at: None,
@@ -947,8 +948,8 @@ pub fn insert_workflow(conn: &Connection, wf: &Workflow) -> Result<()> {
     let on_failure = steps_with_durable_ids(&wf.on_failure, None, &mut used_step_ids);
     conn.execute(
         "INSERT INTO workflows (id, name, project_id, trigger_json, steps_json, actions_json,
-         safety_json, workspace_config_json, concurrency_limit, enabled, created_at, updated_at, guards, artifacts, on_failure, exec_allowlist, variables, pinned)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+         safety_json, workspace_config_json, concurrency_limit, enabled, created_at, updated_at, guards, artifacts, on_failure, exec_allowlist, variables, pinned, concurrency_key)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
         params![
             wf.id,
             wf.name,
@@ -972,6 +973,7 @@ pub fn insert_workflow(conn: &Connection, wf: &Workflow) -> Result<()> {
             // actually need a launch dialog.
             if wf.variables.is_empty() { None } else { Some(serde_json::to_string(&wf.variables)?) },
             wf.pinned as i32,
+            wf.concurrency_key,
         ],
     )?;
     Ok(())
@@ -999,7 +1001,8 @@ pub fn update_workflow(conn: &Connection, wf: &Workflow) -> Result<bool> {
         "UPDATE workflows SET name = ?2, project_id = ?3, trigger_json = ?4, steps_json = ?5,
          actions_json = ?6, safety_json = ?7, workspace_config_json = ?8,
          concurrency_limit = ?9, enabled = ?10, updated_at = ?11, guards = ?12, artifacts = ?13,
-         on_failure = ?14, exec_allowlist = ?15, variables = ?16, pinned = ?17
+         on_failure = ?14, exec_allowlist = ?15, variables = ?16, pinned = ?17,
+         concurrency_key = ?18
          WHERE id = ?1",
         params![
             wf.id,
@@ -1038,6 +1041,7 @@ pub fn update_workflow(conn: &Connection, wf: &Workflow) -> Result<bool> {
                 Some(serde_json::to_string(&wf.variables)?)
             },
             wf.pinned as i32,
+            wf.concurrency_key,
         ],
     )?;
     Ok(n > 0)
@@ -1644,8 +1648,8 @@ pub fn insert_run(conn: &Connection, run: &WorkflowRun) -> Result<()> {
         "INSERT INTO workflow_runs (id, workflow_id, status, trigger_context,
          step_results_json, tokens_used, workspace_path, started_at, finished_at,
          run_type, batch_total, batch_completed, batch_failed, batch_name, parent_run_id, state,
-         produced_branches, batch_no_response)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+         produced_branches, batch_no_response, concurrency_key)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
         params![
             run.id,
             run.workflow_id,
@@ -1678,6 +1682,7 @@ pub fn insert_run(conn: &Connection, run: &WorkflowRun) -> Result<()> {
                 Some(serde_json::to_string(&run.produced_branches)?)
             },
             run.batch_no_response as i64,
+            run.concurrency_key,
         ],
     )?;
     crate::db::shared_runs::sync_workflow(conn, run)?;
@@ -2157,6 +2162,22 @@ pub fn count_active_runs(conn: &Connection, workflow_id: &str) -> Result<u32> {
     Ok(count)
 }
 
+/// Active runs of a workflow that rendered the same concurrency key. `None`
+/// counts the runs whose key rendered empty, which share one bucket.
+pub fn count_active_runs_for_key(
+    conn: &Connection,
+    workflow_id: &str,
+    key: Option<&str>,
+) -> Result<u32> {
+    let count: u32 = conn.query_row(
+        "SELECT COUNT(*) FROM workflow_runs
+          WHERE workflow_id = ?1 AND status IN ('Pending', 'Running') AND concurrency_key IS ?2",
+        params![workflow_id, key],
+        |row| row.get(0),
+    )?;
+    Ok(count)
+}
+
 // ─── Tracker reconciliation ─────────────────────────────────────────────────
 
 pub fn is_issue_processed(conn: &Connection, workflow_id: &str, issue_id: &str) -> Result<bool> {
@@ -2229,6 +2250,7 @@ fn row_to_workflow(row: &rusqlite::Row) -> Workflow {
         }),
         workspace_config: ws_config_str.and_then(|s| serde_json::from_str(&s).ok()),
         concurrency_limit: concurrency,
+        concurrency_key: row.get(18).unwrap_or(None),
         // Defensive: a corrupt JSON blob in `guards` should NOT silently
         // disable the safety net — fall back to the column being absent
         // (= backend defaults applied) so the runner still kills runaway
@@ -2295,6 +2317,7 @@ fn row_to_run(row: &rusqlite::Row) -> WorkflowRun {
     // Same tolerance as `state` for legacy / corrupt rows.
     let produced_branches_str: Option<String> = row.get(16).unwrap_or(None);
     let batch_no_response: i64 = row.get(17).unwrap_or(0);
+    let concurrency_key: Option<String> = row.get(18).unwrap_or(None);
 
     WorkflowRun {
         id: row.get(0).unwrap_or_default(),
@@ -2326,6 +2349,7 @@ fn row_to_run(row: &rusqlite::Row) -> WorkflowRun {
             .as_deref()
             .and_then(|s| serde_json::from_str::<Vec<crate::models::ProducedBranch>>(s).ok())
             .unwrap_or_default(),
+        concurrency_key,
         // Derived, filled by enrich_parent_provenance (never from a column).
         parent_workflow_id: None,
         parent_workflow_name: None,
@@ -2338,7 +2362,7 @@ fn row_to_run(row: &rusqlite::Row) -> WorkflowRun {
 const WORKFLOW_RUN_COLS: &str = "id, workflow_id, status, trigger_context, step_results_json, \
     tokens_used, workspace_path, started_at, finished_at, \
     run_type, batch_total, batch_completed, batch_failed, batch_name, parent_run_id, state, \
-    produced_branches, batch_no_response";
+    produced_branches, batch_no_response, concurrency_key";
 
 /// Blanks every step's `output` inside SQLite, leaving names, statuses and
 /// timings intact. `output` is the entire weight of the column — measured at

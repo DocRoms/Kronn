@@ -23,6 +23,10 @@ pub struct Workflow {
     pub safety: WorkflowSafety,
     pub workspace_config: Option<WorkspaceConfig>,
     pub concurrency_limit: Option<u32>,
+    /// Template rendered at launch from non-secret launch variables
+    /// (`{{ticketKey}}`): `concurrency_limit` then counts runs per rendered key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub concurrency_key: Option<String>,
     /// Execution limits (timeout, LLM calls cap, loop detection). 0.7.0 —
     /// Phase 1 of the Auto-Dev workflow expansion. `None` = use the soft
     /// backend defaults (120 min wall-clock, 100 LLM calls, 10 revisits
@@ -1306,6 +1310,9 @@ pub struct WorkflowRun {
     /// blocked, no auth, network down, …).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub produced_branches: Vec<ProducedBranch>,
+    /// The workflow's `concurrency_key` as rendered for this run at launch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub concurrency_key: Option<String>,
     /// Provenance enrichment (DERIVED, not persisted). When this run is a
     /// sub-workflow child (`parent_run_id` set), these resolve the parent run's
     /// workflow id + name + tick time so the UI can render
@@ -1599,6 +1606,8 @@ pub struct CreateWorkflowRequest {
     #[serde(default)]
     pub concurrency_limit: Option<u32>,
     #[serde(default)]
+    pub concurrency_key: Option<String>,
+    #[serde(default)]
     pub guards: Option<WorkflowGuards>,
     #[serde(default)]
     #[ts(type = "Record<string, ArtifactSpec>")]
@@ -1633,6 +1642,9 @@ pub struct UpdateWorkflowRequest {
     pub safety: Option<WorkflowSafety>,
     pub workspace_config: Option<WorkspaceConfig>,
     pub concurrency_limit: Option<u32>,
+    /// `null` clears the key; omitted keeps it.
+    #[serde(default, deserialize_with = "super::deserialize_optional_field")]
+    pub concurrency_key: Option<Option<String>>,
     pub guards: Option<WorkflowGuards>,
     /// Replace the artifact map entirely when present. To clear all
     /// declarations, send `Some({})`. Omit the field to leave existing

@@ -1849,6 +1849,13 @@ export function WorkflowDetail({ workflow, runs, availableAgentTypes, agentChoic
         </div>
       )}
 
+      {workflow.concurrency_key && (
+        <div className="wf-info-row">
+          <span className="wf-info-label">{t('wiz.concurrencyKey')}</span>
+          <code>{workflow.concurrency_key}</code>
+        </div>
+      )}
+
       {/* Steps — compact pipeline plus one focused preview by default. */}
       {(() => {
         const agentCount = workflow.steps.filter(s => compactStepMeta(s).usesTokens).length;

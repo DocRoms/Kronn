@@ -665,7 +665,8 @@ User → nginx (gateway:3456)
 
 ```
 WorkflowEngine (polling loop, ticks every 30s)
-  → check cron triggers → spawn run (respect concurrency_limit)
+  → check cron triggers → spawn run (respect concurrency_limit, counted per
+    rendered concurrency_key when the workflow declares one)
   → check tracker triggers → poll API → reconcile (skip already-processed) → spawn run per new issue
   → manual trigger via API → spawn run immediately
 

@@ -521,6 +521,26 @@ fn parse_time_shift(raw: &str) -> Result<Duration> {
     Ok(Duration::seconds(seconds))
 }
 
+/// The paths a template reads, `??` fallbacks stripped. Fails like strict
+/// rendering on an unclosed placeholder or a malformed fallback.
+pub fn placeholder_paths(template: &str) -> Result<Vec<String>> {
+    let mut paths = Vec::new();
+    let mut rest = template;
+    while let Some(start) = rest.find("{{") {
+        let after = &rest[start + 2..];
+        let end = after.find("}}").ok_or_else(|| {
+            anyhow::anyhow!(
+                "Unclosed workflow template placeholder `{{{{{}`",
+                after.trim()
+            )
+        })?;
+        let (path, _) = split_fallback(after[..end].trim())?;
+        paths.push(path.to_string());
+        rest = &after[end + 2..];
+    }
+    Ok(paths)
+}
+
 /// Split `path ?? "text"` (or `'text'`) into the path and its fallback. The
 /// literal is taken verbatim, without escapes; it applies when the path is
 /// absent or JSON null, never to hide a syntax error.

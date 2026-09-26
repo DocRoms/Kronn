@@ -1585,6 +1585,7 @@ async fn live_page_workflows_returns_configured_publishers() {
                 safety: kronn::models::WorkflowSafety { sandbox: false, max_files: None, max_lines: None, require_approval: false },
                 workspace_config: None,
                 concurrency_limit: None,
+                concurrency_key: None,
                 guards: None,
                 artifacts: std::collections::HashMap::new(),
                 on_failure: vec![],
@@ -1781,6 +1782,7 @@ async fn workflow_portability_fixture() -> (AppState, Value) {
                 },
                 workspace_config: None,
                 concurrency_limit: None,
+                concurrency_key: None,
                 guards: None,
                 artifacts: Default::default(),
                 on_failure: vec![],
@@ -3541,6 +3543,7 @@ async fn optional_variable_http_run(
         },
         workspace_config: None,
         concurrency_limit: None,
+        concurrency_key: None,
         guards: None,
         artifacts: HashMap::new(),
         on_failure: vec![],
@@ -3763,6 +3766,7 @@ async fn workflow_goto_path_renders_fallback_exec_markers_and_run_id() {
         },
         workspace_config: None,
         concurrency_limit: None,
+        concurrency_key: None,
         guards: None,
         artifacts: HashMap::new(),
         on_failure: vec![],
@@ -3864,6 +3868,7 @@ async fn a_run_seeded_with_a_ticket_is_found_by_it_in_one_call() {
         },
         workspace_config: None,
         concurrency_limit: None,
+        concurrency_key: None,
         guards: None,
         artifacts: HashMap::new(),
         on_failure: vec![],
@@ -3935,6 +3940,151 @@ async fn a_run_seeded_with_a_ticket_is_found_by_it_in_one_call() {
     assert!(refused.contains("must be 1-64 letters"), "{refused}");
     let refused = trigger(serde_json::json!({"state": {"note": "two\nlines"}})).await;
     assert!(refused.contains("one line"), "{refused}");
+}
+
+/// KT-796: `concurrency_limit` counted per rendered `concurrency_key`. A run of
+/// another ticket starts while one ticket's run is active; the same ticket is
+/// refused, and a secret variable can never become the key.
+#[tokio::test]
+async fn a_keyed_limit_runs_other_tickets_and_refuses_the_same_one() {
+    let state = test_state();
+    state.config.write().await.encryption_secret = Some(kronn::core::crypto::generate_secret());
+    let app = || build_router_with_auth(state.clone(), false);
+    let ticket = serde_json::json!({"name": "ticketKey", "label": "Ticket", "placeholder": ""});
+    let workflow = |key: &str, variables: Value| {
+        serde_json::json!({
+            "name": "Keyed",
+            "trigger": {"type": "Manual"},
+            "steps": [{"name": "review", "step_type": {"type": "Gate"}, "gate_message": "Review {{ticketKey}}"}],
+            "variables": variables,
+            "concurrency_limit": 1,
+            "concurrency_key": key,
+        })
+    };
+
+    let context = serde_json::json!({
+        "name": "origin", "label": "Origin", "placeholder": "",
+        "source": "kronn_context", "source_ref": "<context.discussion_id>",
+    });
+    let (_, refused) = post_json(
+        app(),
+        "/api/workflows",
+        workflow("{{origin}}", serde_json::json!([ticket.clone(), context])),
+    )
+    .await;
+    assert_eq!(refused["success"], false, "{refused}");
+    assert!(
+        refused["error"].as_str().unwrap().contains("may be secret"),
+        "{refused}"
+    );
+
+    let (_, created) = post_json(
+        app(),
+        "/api/workflows",
+        workflow("{{ticketKey}}", serde_json::json!([ticket])),
+    )
+    .await;
+    assert_eq!(created["success"], true, "{created}");
+    assert_eq!(created["data"]["concurrency_key"], "{{ticketKey}}");
+    let workflow_id = created["data"]["id"].as_str().unwrap().to_string();
+
+    // An in-flight run of EW-1, as a still-running launch would leave it.
+    let now = chrono::Utc::now();
+    let active = kronn::models::WorkflowRun {
+        id: "active-ew-1".into(),
+        workflow_id: workflow_id.clone(),
+        status: kronn::models::RunStatus::Running,
+        trigger_context: None,
+        step_results: vec![],
+        tokens_used: 0,
+        workspace_path: None,
+        started_at: now,
+        finished_at: None,
+        run_type: "linear".into(),
+        batch_total: 0,
+        batch_completed: 0,
+        batch_failed: 0,
+        batch_no_response: 0,
+        batch_name: None,
+        parent_run_id: None,
+        state: HashMap::new(),
+        produced_branches: vec![],
+        concurrency_key: Some("EW-1".into()),
+        parent_workflow_id: None,
+        parent_workflow_name: None,
+        parent_run_started_at: None,
+    };
+    state
+        .db
+        .with_conn(move |conn| kronn::db::workflows::insert_run(conn, &active))
+        .await
+        .unwrap();
+
+    let trigger = |ticket: &str| {
+        let app = app();
+        let uri = format!("/api/workflows/{workflow_id}/trigger");
+        let body = serde_json::json!({"variables": {"ticketKey": ticket}});
+        async move {
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(uri)
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let bytes = tokio::time::timeout(
+                std::time::Duration::from_secs(15),
+                response.into_body().collect(),
+            )
+            .await
+            .expect("workflow SSE must terminate")
+            .unwrap()
+            .to_bytes();
+            String::from_utf8(bytes.to_vec()).unwrap()
+        }
+    };
+
+    let same = trigger("EW-1").await;
+    assert!(
+        same.contains("Concurrency limit reached for key `EW-1` (1/1)"),
+        "{same}"
+    );
+    let other = trigger("EW-2").await;
+    let run_id = other
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .filter_map(|data| serde_json::from_str::<Value>(data).ok())
+        .find_map(|event| event["run_id"].as_str().map(str::to_owned))
+        .unwrap_or_else(|| panic!("another ticket must start: {other}"));
+    let (_, run) = get_json(
+        app(),
+        &format!(
+            "/api/workflows/{}/runs/{run_id}",
+            created["data"]["id"].as_str().unwrap()
+        ),
+    )
+    .await;
+    assert_eq!(run["data"]["concurrency_key"], "EW-2", "{run}");
+
+    // A later edit cannot turn the key into a secret either.
+    let (_, updated) = put_json_root(
+        app(),
+        &format!("/api/workflows/{}", created["data"]["id"].as_str().unwrap()),
+        serde_json::json!({"variables": [{
+            "name": "ticketKey", "label": "Ticket", "placeholder": "",
+            "source": "kronn_context", "source_ref": "<context.discussion_id>",
+        }]}),
+    )
+    .await;
+    assert_eq!(updated["success"], false, "{updated}");
+    assert!(
+        updated["error"].as_str().unwrap().contains("may be secret"),
+        "{updated}"
+    );
 }
 
 /// KT-807: an isolated workflow with a SubWorkflow foreach accepts a
@@ -4117,6 +4267,7 @@ async fn mcp_workflow_trigger_runs_a_workflow_with_required_variables_like_the_u
         },
         workspace_config: None,
         concurrency_limit: None,
+        concurrency_key: None,
         guards: None,
         artifacts: HashMap::new(),
         on_failure: vec![],
@@ -18722,6 +18873,7 @@ mod cold_api_handlers_tests {
             },
             workspace_config: None,
             concurrency_limit: None,
+            concurrency_key: None,
             guards: None,
             artifacts: std::collections::HashMap::new(),
             on_failure: vec![],
@@ -18780,6 +18932,7 @@ mod cold_api_handlers_tests {
             },
             workspace_config: None,
             concurrency_limit: None,
+            concurrency_key: None,
             guards: None,
             artifacts: std::collections::HashMap::new(),
             on_failure: vec![],
@@ -19240,6 +19393,7 @@ mod cold_api_handlers_tests {
             },
             workspace_config: None,
             concurrency_limit: None,
+            concurrency_key: None,
             guards: None,
             artifacts: std::collections::HashMap::new(),
             on_failure: vec![],
@@ -19276,6 +19430,7 @@ mod cold_api_handlers_tests {
             parent_run_id: None,
             state: std::collections::HashMap::new(),
             produced_branches: vec![],
+            concurrency_key: None,
             parent_workflow_id: None,
             parent_workflow_name: None,
             parent_run_started_at: None,

@@ -780,11 +780,15 @@ fn validate_workspace_config(config: Option<&WorkspaceConfig>) -> Result<(), Str
 fn validate_sub_workflow_foreach_concurrency(
     steps: &[WorkflowStep],
     concurrency_limit: Option<u32>,
+    concurrency_key: Option<&str>,
     workspace_config: Option<&WorkspaceConfig>,
 ) -> Result<(), String> {
-    let Some(limit) = concurrency_limit.filter(|limit| *limit > 1) else {
+    let limit = concurrency_limit.filter(|limit| *limit > 1);
+    // A key lets runs with different keys overlap exactly like a higher limit.
+    let keyed = concurrency_limit.is_some() && concurrency_key.is_some();
+    if limit.is_none() && !keyed {
         return Ok(());
-    };
+    }
     if workspace_config.is_some_and(|config| config.require_isolation) {
         return Ok(());
     }
@@ -798,6 +802,12 @@ fn validate_sub_workflow_foreach_concurrency(
         return Ok(());
     };
 
+    let Some(limit) = limit else {
+        return Err(format!(
+            "Step SubWorkflow « {} » : `concurrency_key` lets runs with different keys overlap, while SubWorkflow foreach is sequential in the shared worktree; set `workspace_config.require_isolation: true` so each run gets its own worktree, or remove the key.",
+            step.name
+        ));
+    };
     Err(format!(
         "Step SubWorkflow « {} » : `concurrency_limit: {limit}` controls overlapping complete workflow runs and cannot parallelize foreach items. SubWorkflow foreach is sequential in the shared worktree; set `workspace_config.require_isolation: true` so each run gets its own worktree, remove the value (or set it to 1), or use BatchQuickPrompt for parallel fan-out.",
         step.name
@@ -1278,9 +1288,18 @@ pub async fn create(
     if let Err(e) = validate_required_fields_per_type(&req.on_failure) {
         return Json(ApiResponse::err(e));
     }
+    let concurrency_key = crate::workflows::concurrency::normalize_key(req.concurrency_key);
+    if let Err(e) = crate::workflows::concurrency::validate_key(
+        concurrency_key.as_deref(),
+        req.concurrency_limit,
+        &req.variables,
+    ) {
+        return Json(ApiResponse::err(e));
+    }
     if let Err(e) = validate_sub_workflow_foreach_concurrency(
         &req.steps,
         req.concurrency_limit,
+        concurrency_key.as_deref(),
         req.workspace_config.as_ref(),
     ) {
         return Json(ApiResponse::err(e));
@@ -1317,6 +1336,7 @@ pub async fn create(
         }),
         workspace_config: req.workspace_config,
         concurrency_limit: req.concurrency_limit,
+        concurrency_key,
         guards: req.guards,
         artifacts: req.artifacts,
         on_failure,
@@ -1573,6 +1593,10 @@ pub async fn update(
         safety: req.safety.unwrap_or(existing.safety),
         workspace_config: req.workspace_config.or(existing.workspace_config),
         concurrency_limit: req.concurrency_limit.or(existing.concurrency_limit),
+        concurrency_key: match req.concurrency_key {
+            Some(key) => crate::workflows::concurrency::normalize_key(key),
+            None => existing.concurrency_key,
+        },
         guards: req.guards.or(existing.guards),
         artifacts: req.artifacts.unwrap_or(existing.artifacts),
         on_failure,
@@ -1584,9 +1608,17 @@ pub async fn update(
         updated_at: Utc::now(),
     };
 
+    if let Err(e) = crate::workflows::concurrency::validate_key(
+        updated.concurrency_key.as_deref(),
+        updated.concurrency_limit,
+        &updated.variables,
+    ) {
+        return Json(ApiResponse::err(e));
+    }
     if let Err(e) = validate_sub_workflow_foreach_concurrency(
         &updated.steps,
         updated.concurrency_limit,
+        updated.concurrency_key.as_deref(),
         updated.workspace_config.as_ref(),
     ) {
         return Json(ApiResponse::err(e));
@@ -1996,9 +2028,15 @@ pub(crate) fn validate_workflow_for_import(wf: &Workflow) -> Result<(), String> 
     validate_exec_steps(&wf.on_failure, &wf.exec_allowlist)?;
     validate_required_fields_per_type(&wf.steps)?;
     validate_required_fields_per_type(&wf.on_failure)?;
+    crate::workflows::concurrency::validate_key(
+        wf.concurrency_key.as_deref(),
+        wf.concurrency_limit,
+        &wf.variables,
+    )?;
     validate_sub_workflow_foreach_concurrency(
         &wf.steps,
         wf.concurrency_limit,
+        wf.concurrency_key.as_deref(),
         wf.workspace_config.as_ref(),
     )?;
     validate_workspace_config(wf.workspace_config.as_ref())?;
@@ -2481,6 +2519,14 @@ pub(crate) async fn create_manual_run(
                 serde_json::to_string(&failures).unwrap_or_default()
             )
         })?;
+    let concurrency_key = match wf.concurrency_key.as_deref() {
+        Some(template) => crate::workflows::concurrency::render_key(
+            template,
+            &wf.variables,
+            &prepared.resolved.values,
+        )?,
+        None => None,
+    };
     let trigger_obj =
         build_secure_execution_trigger_obj(prepared.snapshot_id, prepared.resolved.resolved_at);
     let now = Utc::now();
@@ -2503,24 +2549,17 @@ pub(crate) async fn create_manual_run(
         parent_run_id: None,
         state: initial_state,
         produced_branches: vec![],
+        concurrency_key,
         parent_workflow_id: None,
         parent_workflow_name: None,
         parent_run_started_at: None,
     };
     let persisted = run.clone();
-    let limit = wf.concurrency_limit;
-    let workflow_id = wf.id.clone();
+    let admission = wf.clone();
     state
         .db
         .with_conn(move |conn| {
-            if let Some(max) = limit {
-                let active = crate::db::workflows::count_active_runs(conn, &workflow_id)?;
-                if active >= max {
-                    return Ok(Err(format!("Concurrency limit reached ({active}/{max})")));
-                }
-            }
-            crate::db::workflows::insert_run(conn, &persisted)?;
-            Ok(Ok(()))
+            crate::workflows::concurrency::insert_run_within_limit(conn, &admission, &persisted)
         })
         .await
         .map_err(|error| format!("DB error: {error}"))??;
@@ -4754,6 +4793,7 @@ mod tests {
         assert!(validate_sub_workflow_foreach_concurrency(
             std::slice::from_ref(&foreach),
             Some(1),
+            None,
             None
         )
         .is_ok());
@@ -4761,11 +4801,21 @@ mod tests {
             std::slice::from_ref(&foreach),
             Some(8),
             None,
+            None,
         )
         .expect_err("foreach plus a limit above one must not be silently accepted");
         assert!(error.contains("cannot parallelize foreach items"));
         assert!(error.contains("require_isolation"));
         assert!(error.contains("BatchQuickPrompt"));
+        // A key lets runs with different keys overlap in the same checkout.
+        let keyed = validate_sub_workflow_foreach_concurrency(
+            std::slice::from_ref(&foreach),
+            Some(1),
+            Some("{{ticketKey}}"),
+            None,
+        )
+        .expect_err("a keyed limit overlaps runs like a higher limit");
+        assert!(keyed.contains("`concurrency_key`"), "{keyed}");
         // Each isolated run owns its worktree, so whole runs may overlap.
         let isolated = WorkspaceConfig {
             hooks: Default::default(),
@@ -4773,9 +4823,20 @@ mod tests {
             main_tree_read_only: false,
             base_ref: None,
         };
-        assert!(
-            validate_sub_workflow_foreach_concurrency(&[foreach], Some(3), Some(&isolated)).is_ok()
-        );
+        assert!(validate_sub_workflow_foreach_concurrency(
+            std::slice::from_ref(&foreach),
+            Some(1),
+            Some("{{ticketKey}}"),
+            Some(&isolated)
+        )
+        .is_ok());
+        assert!(validate_sub_workflow_foreach_concurrency(
+            &[foreach],
+            Some(3),
+            None,
+            Some(&isolated)
+        )
+        .is_ok());
     }
 
     #[test]
@@ -5714,6 +5775,7 @@ mod tests {
             },
             workspace_config: None,
             concurrency_limit: None,
+            concurrency_key: None,
             guards: None,
             artifacts: ::std::collections::HashMap::new(),
             on_failure: vec![],
@@ -6833,5 +6895,87 @@ mod tests {
         // gate_auto_approve_after_secs defaults to None — no validation
         // applies. Manual-forever is the default, preserved here.
         validate_required_fields_per_type(&[s]).expect("None must validate");
+    }
+
+    fn keyed_workflow(id: &str) -> Workflow {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "name": id, "project_id": null,
+            "trigger": {"type": "Manual"},
+            "steps": [{"name": "review", "step_type": {"type": "Gate"}}],
+            "actions": [],
+            "safety": {"sandbox": false, "max_files": null, "max_lines": null, "require_approval": false},
+            "workspace_config": null,
+            "concurrency_limit": 1,
+            "concurrency_key": "{{ticketKey}}",
+            "variables": [{"name": "ticketKey", "label": "Ticket", "placeholder": ""}],
+            "enabled": true,
+            "created_at": chrono::Utc::now(), "updated_at": chrono::Utc::now(),
+        }))
+        .expect("keyed workflow")
+    }
+
+    /// KT-796: runs created here stay Pending (nothing spawns them), so each
+    /// one holds its key's slot for the whole test.
+    #[tokio::test]
+    async fn a_keyed_limit_admits_other_keys_and_refuses_the_same_key() {
+        let db = Arc::new(crate::db::Database::open_in_memory().expect("in-memory DB"));
+        let cfg = Arc::new(RwLock::new(crate::core::config::default_config()));
+        let state = AppState::new_defaults(cfg, db, crate::DEFAULT_MAX_CONCURRENT_AGENTS);
+        let workflow = keyed_workflow("keyed");
+        state
+            .db
+            .with_conn(move |conn| crate::db::workflows::insert_workflow(conn, &workflow))
+            .await
+            .unwrap();
+        let launch = |key: &str| {
+            let state = state.clone();
+            let variables =
+                std::collections::HashMap::from([("ticketKey".to_string(), key.to_string())]);
+            async move {
+                create_manual_run(
+                    &state,
+                    "keyed",
+                    variables,
+                    std::collections::HashMap::new(),
+                    crate::core::launch_context::LaunchContext::default(),
+                )
+                .await
+                .map(|(_, run)| run)
+            }
+        };
+
+        let first = launch("EW-1").await.expect("first run of EW-1");
+        assert_eq!(first.concurrency_key.as_deref(), Some("EW-1"));
+        let other = launch("EW-2").await.expect("another key runs alongside");
+        let active = state
+            .db
+            .with_conn(|conn| crate::db::workflows::count_active_runs(conn, "keyed"))
+            .await
+            .unwrap();
+        assert_eq!(active, 2, "both keys are active at the same time");
+
+        let refused = launch("EW-1")
+            .await
+            .expect_err("the same key is at its limit");
+        assert!(
+            refused.contains("Concurrency limit reached for key `EW-1` (1/1)"),
+            "{refused}"
+        );
+
+        let first_id = first.id.clone();
+        let stored = state
+            .db
+            .with_conn(move |conn| {
+                conn.execute(
+                    "UPDATE workflow_runs SET status = 'Success' WHERE id = ?1",
+                    [&first_id],
+                )?;
+                crate::db::workflows::get_run(conn, &other.id)
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.concurrency_key.as_deref(), Some("EW-2"));
+        launch("EW-1").await.expect("a finished run frees its key");
     }
 }
