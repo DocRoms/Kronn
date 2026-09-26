@@ -963,7 +963,6 @@
 .set-ollama-model-row-pickable:focus-visible {
   background: rgba(var(--kr-text-rgb), 0.04);
   border-color: rgba(var(--kr-text-rgb), 0.08);
-  outline: none;
 }
 .set-ollama-model-row-pickable[data-selected="true"] {
   background: rgba(var(--kr-success-rgb), 0.08);
@@ -1182,14 +1181,16 @@
   cursor: help;
 }
 
+/* Blended toward the text colour: the badge also sits on the active voice
+   button's tint, where the bare status colour falls under 4.5:1. */
 .set-gender-badge[data-gender="F"] {
   background: rgba(var(--kr-pink-rgb), 0.15);
-  color: var(--kr-pink);
+  color: color-mix(in srgb, var(--kr-pink) 60%, var(--kr-text-primary));
 }
 
 .set-gender-badge[data-gender="M"] {
   background: rgba(var(--kr-info-rgb), 0.15);
-  color: var(--kr-info);
+  color: color-mix(in srgb, var(--kr-info) 60%, var(--kr-text-primary));
 }
 
 /* ── Form label ────────────────────────────────────────── */
@@ -1410,7 +1411,6 @@
 .set-update-badge-cta:focus-visible {
   border-color: rgba(var(--kr-warning-rgb), 0.4);
   background: rgba(var(--kr-warning-rgb), 0.18);
-  outline: none;
 }
 
 /* RTK section freshness pill — same shape as the agent update CTA,
@@ -1433,7 +1433,6 @@
 .set-compression-update-pill:focus-visible {
   border-color: rgba(var(--kr-warning-rgb), 0.4);
   background: rgba(var(--kr-warning-rgb), 0.2);
-  outline: none;
 }
 
 /* Modal "Copy command" button — used by both the per-agent update
@@ -1455,7 +1454,6 @@
 .set-compression-copy-btn:hover,
 .set-compression-copy-btn:focus-visible {
   background: rgba(var(--kr-text-rgb), 0.08);
-  outline: none;
 }
 
 /* ── Account / usage link per agent (added 2026-05-10) ──── */
@@ -2711,7 +2709,6 @@
 
 .set-model-catalog-model[data-availability='unavailable'] {
   border-style: dashed;
-  opacity: 0.78;
 }
 
 .set-model-catalog-capability {
@@ -2841,7 +2838,7 @@
   border: 1px solid color-mix(in srgb, var(--ext-api-color) 24%, transparent);
   border-radius: 999px;
   background: color-mix(in srgb, var(--ext-api-color) 7%, transparent);
-  color: color-mix(in srgb, var(--ext-api-color) 75%, var(--kr-text-secondary));
+  color: color-mix(in srgb, var(--ext-api-color) 60%, var(--kr-text-primary));
   font-size: var(--kr-fs-2xs);
   font-weight: 650;
   letter-spacing: 0.04em;
@@ -3476,7 +3473,8 @@
 }
 
 .set-agent-title {
-  color: var(--agent-color);
+  /* A brand colour alone is under 4.5:1 on dark surfaces (OpenCode, Copilot). */
+  color: color-mix(in srgb, var(--agent-color) 60%, var(--kr-text-primary));
   font-size: var(--kr-fs-base);
   font-weight: 700;
 }
@@ -3484,7 +3482,7 @@
 .set-agent-row .set-origin-badge {
   border-color: color-mix(in srgb, var(--agent-color) 22%, transparent);
   background: color-mix(in srgb, var(--agent-color) 8%, transparent);
-  color: color-mix(in srgb, var(--agent-color) 78%, var(--kr-text-primary));
+  color: color-mix(in srgb, var(--agent-color) 60%, var(--kr-text-primary));
 }
 
 .set-agent-row .set-agent-release-error {
@@ -3658,6 +3656,12 @@
   align-items: center;
   gap: var(--kr-sp-4);
   width: fit-content;
+  /* Also a <button> (Debug section): drop the UA's light-grey face. */
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
   cursor: pointer;
   font-size: var(--kr-fs-xs);
 }
@@ -6266,9 +6270,9 @@
   white-space: nowrap;
 }
 
-.set-ollama-tier-cpu   { background: rgba(34, 197, 94, 0.16);  color: #16a34a; }
-.set-ollama-tier-mid   { background: rgba(234, 179, 8, 0.16);  color: #b45309; }
-.set-ollama-tier-power { background: rgba(168, 85, 247, 0.16); color: #9333ea; }
+.set-ollama-tier-cpu   { background: rgba(var(--kr-success-rgb), 0.16); color: var(--kr-success); }
+.set-ollama-tier-mid   { background: rgba(var(--kr-warning-rgb), 0.16); color: var(--kr-warning); }
+.set-ollama-tier-power { background: rgba(var(--kr-purple-soft-rgb), 0.16); color: var(--kr-purple-soft); }
 
 /* ── Responsive settings shell ─────────────────────────── */
 @media (max-width: 980px) {
@@ -6891,9 +6895,10 @@
 }
 
 /* An unavailable model stays listed and stays readable: hiding it would leave
-   a tier pointing at something the page never mentions. */
+   a tier pointing at something the page never mentions. Muted, not faded:
+   opacity would drop its text under 4.5:1. */
 .set-model-catalog-table tr[data-availability='unavailable'] td {
-  opacity: 0.62;
+  color: var(--kr-text-muted);
 }
 
 .set-model-catalog-unavailable {

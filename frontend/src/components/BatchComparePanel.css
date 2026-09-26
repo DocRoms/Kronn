@@ -287,7 +287,7 @@
 .disc-compare-stars {
   display: inline-flex;
   align-items: center;
-  color: #e8a317;
+  color: var(--kr-warning-soft);
 }
 .disc-compare-stars button {
   display: grid;

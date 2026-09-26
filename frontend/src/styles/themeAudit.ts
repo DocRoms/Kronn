@@ -8,6 +8,42 @@ export type ThemeTokens = Map<string, string>;
 export type Source = { file: string; text: string };
 export type Finding = { file: string; line: number; detail: string };
 
+/** Themes whose surfaces are dark. */
+export const DARK_THEMES: ReadonlySet<string> = new Set(['dark', 'gotham', 'matrix']);
+
+/** Opaque surface ramp the text roles sit on. */
+export const SURFACE_TOKENS = [
+  '--kr-bg-base', '--kr-bg-raised', '--kr-bg-surface', '--kr-bg-elevated', '--kr-bg-input',
+] as const;
+
+export const TEXT_TOKENS = [
+  '--kr-text-primary', '--kr-text-secondary', '--kr-text-tertiary', '--kr-text-muted',
+  '--kr-text-faint', '--kr-text-dim', '--kr-text-ghost',
+] as const;
+
+const LOW_EMPHASIS = new Set(['--kr-text-faint', '--kr-text-dim', '--kr-text-ghost']);
+
+/** Status colours that dark themes print as small text (badges, chips, states). */
+export const STATUS_TOKENS = [
+  '--kr-accent', '--kr-accent-text', '--kr-success', '--kr-error', '--kr-error-soft',
+  '--kr-warning', '--kr-warning-soft', '--kr-warning-amber', '--kr-info', '--kr-cyan',
+  '--kr-purple', '--kr-purple-soft', '--kr-pink', '--kr-cancelled', '--kr-agent-nvidia-text',
+] as const;
+
+/** The global `:focus-visible` ring colour: non-text, so 3:1 (WCAG 1.4.11). */
+export const FOCUS_RING_TOKEN = '--kr-accent-ink';
+
+/** A chip resting on `--kr-bg-hover` over an elevated panel: the lightest
+ *  resting background of a dark theme. */
+export const HOVER_ON_ELEVATED = '--kr-bg-hover@--kr-bg-elevated';
+
+/** WCAG AA floor of a text role. Dark themes use every role for small text, so
+ *  every role needs 4.5:1 there; elsewhere faint/dim/ghost may stay at 3:1
+ *  (large text and non-text only). */
+export function textFloor(theme: string, token: string): number {
+  return !DARK_THEMES.has(theme) && LOW_EMPHASIS.has(token) ? 3 : 4.5;
+}
+
 export function stripComments(css: string): string {
   // Keep line breaks so reported line numbers stay true.
   return css.replace(/\/\*[\s\S]*?\*\//g, m => m.replace(/[^\n]/g, ' '));
@@ -117,6 +153,43 @@ export function themeColor(tokens: ThemeTokens, name: string): Rgba | null {
   return value ? parseColor(resolveValue(value, tokens)) : null;
 }
 
+export type ContrastRow = {
+  theme: string; text: string; background: string; ratio: number; floor: number;
+};
+
+function backgroundsOf(theme: string, tokens: ThemeTokens, withHover: boolean): Array<[string, Rgba]> {
+  const out: Array<[string, Rgba]> = [];
+  for (const name of SURFACE_TOKENS) {
+    const bg = themeColor(tokens, name);
+    if (bg && bg.a >= 1) out.push([name, bg]);
+  }
+  const hover = themeColor(tokens, '--kr-bg-hover');
+  const elevated = themeColor(tokens, '--kr-bg-elevated');
+  if (withHover && DARK_THEMES.has(theme) && hover && elevated) {
+    out.push([HOVER_ON_ELEVATED, composite(hover, elevated)]);
+  }
+  return out;
+}
+
+/** Text roles on the opaque ramp (plus the hover chip in dark themes) of every
+ *  theme, and status colours on the ramp of every dark theme. */
+export function measureTextContrast(themes: Map<string, ThemeTokens>): ContrastRow[] {
+  const rows: ContrastRow[] = [];
+  for (const [theme, tokens] of themes) {
+    const pairs: Array<[string, number, boolean]> = TEXT_TOKENS.map(t => [t, textFloor(theme, t), true]);
+    if (DARK_THEMES.has(theme)) pairs.push(...STATUS_TOKENS.map(t => [t, 4.5, false] as [string, number, boolean]));
+    pairs.push([FOCUS_RING_TOKEN, 3, false]);
+    for (const [text, floor, withHover] of pairs) {
+      const fg = themeColor(tokens, text);
+      if (!fg) continue;
+      for (const [background, bg] of backgroundsOf(theme, tokens, withHover)) {
+        rows.push({ theme, text, background, ratio: contrastRatio(fg, bg), floor });
+      }
+    }
+  }
+  return rows;
+}
+
 function lineOf(text: string, index: number): number {
   return text.slice(0, index).split('\n').length;
 }
@@ -140,21 +213,56 @@ export function undefinedTokenUsages(sources: Source[], baseTokens: ReadonlySet<
   return findings;
 }
 
-const LITERAL_WHITE = /^(white|#fff|#ffffff|rgb\(\s*255\s*,\s*255\s*,\s*255\s*\))(\s*!important)?$/i;
+const LITERAL_WHITE_OR_BLACK =
+  /^(white|black|#fff|#ffffff|#000|#000000|rgb\(\s*(255\s*,\s*255\s*,\s*255|0\s*,\s*0\s*,\s*0)\s*\))(\s*!important)?$/i;
 
-/** A rule filled with an accent token whose text is pinned to literal white:
- *  right on a dark accent, unreadable on the lime or yellow ones. */
+/** A rule painted from a `--kr-*` token whose text is pinned to literal white
+ *  or black: right in the theme it was written for, unreadable in another. */
 export function forcedTextOnTokenBackground(file: string, css: string): Finding[] {
   const findings: Finding[] = [];
   for (const rule of cssRules(css)) {
     const decls = declarations(rule.body);
-    const background = decls.find(([p, v]) => /^background(-color)?$/.test(p) && /var\(\s*--kr-accent/.test(v));
-    const color = decls.find(([p, v]) => p === 'color' && LITERAL_WHITE.test(v));
+    const background = decls.find(([p, v]) => /^background(-color)?$/.test(p) && /var\(\s*--kr-/.test(v));
+    const color = decls.find(([p, v]) => p === 'color' && LITERAL_WHITE_OR_BLACK.test(v));
     if (background && color) {
       findings.push({
         file, line: rule.line,
         detail: `${rule.selector} { background: ${background[1]}; color: ${color[1]} }`,
       });
+    }
+  }
+  return findings;
+}
+
+/** A `:focus-visible` rule that drops the outline without drawing a ring of
+ *  its own (box-shadow): keyboard focus becomes a faint background change. */
+export function focusRingRemovals(file: string, css: string): Finding[] {
+  const findings: Finding[] = [];
+  for (const rule of cssRules(css)) {
+    if (!rule.selector.includes(':focus-visible')) continue;
+    const decls = new Map(declarations(rule.body));
+    const outline = decls.get('outline');
+    if (outline && /^(none|0)(\s*!important)?$/.test(outline) && !decls.has('box-shadow')) {
+      findings.push({ file, line: rule.line, detail: `${rule.selector} { outline: ${outline} }` });
+    }
+  }
+  return findings;
+}
+
+/** Custom properties of any prefix read with `var()` but declared nowhere,
+ *  neither in a stylesheet nor as an inline style property. */
+export function undeclaredCustomProperties(sources: Source[]): Finding[] {
+  const declared = new Set<string>();
+  for (const source of sources) {
+    const code = codeOf(source);
+    for (const m of code.matchAll(/(--[a-z0-9-]+)['"]?\s*(?:as string\]\s*)?:/gi)) declared.add(m[1]);
+    for (const m of code.matchAll(/setProperty\(\s*['"`](--[a-z0-9-]+)/gi)) declared.add(m[1]);
+  }
+  const findings: Finding[] = [];
+  for (const source of sources) {
+    const code = codeOf(source);
+    for (const m of code.matchAll(/var\(\s*(--[a-z0-9-]+)/gi)) {
+      if (!declared.has(m[1])) findings.push({ file: source.file, line: lineOf(code, m.index ?? 0), detail: m[1] });
     }
   }
   return findings;
@@ -180,4 +288,28 @@ export function appSources(srcDir: string): Source[] {
 
 export function loadThemes(srcDir: string): Map<string, ThemeTokens> {
   return parseThemes(readFileSync(join(srcDir, 'styles', 'tokens.css'), 'utf8'));
+}
+
+export type RepoAudit = {
+  themes: Map<string, ThemeTokens>;
+  contrast: ContrastRow[];
+  undefinedTokens: Finding[];
+  undeclaredProperties: Finding[];
+  forcedText: Finding[];
+  focusRemovals: Finding[];
+};
+
+/** Every static check against `frontend/src`, as the CLI and the tests run it. */
+export function auditRepo(srcDir: string): RepoAudit {
+  const themes = loadThemes(srcDir);
+  const sources = appSources(srcDir);
+  const css = sources.filter(s => s.file.endsWith('.css'));
+  return {
+    themes,
+    contrast: measureTextContrast(themes),
+    undefinedTokens: undefinedTokenUsages(sources, new Set(themes.get('dark')?.keys() ?? [])),
+    undeclaredProperties: undeclaredCustomProperties(sources),
+    forcedText: css.flatMap(s => forcedTextOnTokenBackground(s.file, s.text)),
+    focusRemovals: css.flatMap(s => focusRingRemovals(s.file, s.text)),
+  };
 }

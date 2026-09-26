@@ -131,6 +131,19 @@ Release notes for 0.9.3 and earlier are available in the
   earlier sync appended over a re-included folder.
 - A kronn-action block removed from a Page's HTML is no longer listed among
   its actions after the next publication; its launches stay in the history.
+- The dark themes pass WCAG AA: axe, plus a re-measure of the text it leaves
+  undecided behind gradients, now finds no contrast failure on Projects,
+  Discussions, Planning, Plugins, Workflows, Pages, Settings or an open action
+  card in `dark`, `gotham` or `matrix`, where it found 23, 404 and 395. Gotham
+  and matrix low-emphasis text (`--kr-text-muted` down to `--kr-text-ghost`) and
+  a few status colours were lightened, keeping their hue, to at least 4.5:1;
+  sakura and euronews ghost text reaches 3:1. Settings' debug switches no
+  longer show a light-grey browser button, unavailable models are muted
+  instead of faded, and agent names blend their brand colour with the text
+  colour. Thirteen `:focus-visible` rules no longer hide the focus ring.
+  `pnpm lint:theme` (also in CI) measures every theme and refuses undefined
+  custom properties, white or black text pinned on a token fill and removed
+  focus rings; `e2e/specs/a11y-dark-themes.spec.ts` scans the rendered screens.
 - The "▶ Launch" button of a native action card, the project git switcher's
   button and the current-branch marker no longer print white text on the
   accent: they use `--kr-text-on-accent`, which reads at 15.97:1 on the default

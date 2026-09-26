@@ -15,6 +15,7 @@
     "lint": "eslint src/",
     "lint:fast": "oxlint src --max-warnings 0",
     "lint:i18n": "node scripts/lint-i18n.mjs",
+    "lint:theme": "node scripts/theme-audit.mjs",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
