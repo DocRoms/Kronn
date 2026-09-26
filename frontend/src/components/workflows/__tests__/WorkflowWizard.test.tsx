@@ -20,7 +20,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, cleanup, act } from '@testing-library/react';
 import type { ComponentProps } from 'react';
 import { buildApiMock } from '../../../test/apiMock';
-import type { Project, Workflow, WorkflowStep } from '../../../types/generated';
+import type { Project, Workflow, WorkflowStep, WorkflowSummary } from '../../../types/generated';
 
 const { createMock, updateMock, qpListMock, skillListMock, profileListMock, directiveListMock } = vi.hoisted(() => ({
   createMock: vi.fn(),
@@ -63,7 +63,7 @@ vi.mock('../../../lib/I18nContext', () => ({
 import { WorkflowWizard } from '../WorkflowWizard';
 import { jsonPathToTarget } from '../../../lib/workflowUiUtils';
 import { buildBlankStep } from '../../../lib/workflowUiUtils';
-import { pages as pagesApi, projects as projectsApi } from '../../../lib/api';
+import { pages as pagesApi, projects as projectsApi, workflows as workflowsApi } from '../../../lib/api';
 
 // ── Fixtures ────────────────────────────────────────────────────────
 
@@ -905,7 +905,7 @@ describe('WorkflowWizard — step-type swaps', () => {
     fireEvent.click(option);
   };
 
-  it('keeps the twelve types collapsed and groups them by purpose when opened', () => {
+  it('keeps the thirteen types collapsed and groups them by purpose when opened', () => {
     toSteps();
     expect(document.querySelector('.wf-step-type-catalog')).toBeNull();
 
@@ -915,7 +915,28 @@ describe('WorkflowWizard — step-type swaps', () => {
     expect(screen.getByText('wiz.stepTypeGroupAi')).toBeInTheDocument();
     expect(screen.getByText('wiz.stepTypeGroupData')).toBeInTheDocument();
     expect(screen.getByText('wiz.stepTypeGroupControl')).toBeInTheDocument();
-    expect(firstCard.querySelectorAll('.wf-step-type-option')).toHaveLength(12);
+    expect(firstCard.querySelectorAll('.wf-step-type-option')).toHaveLength(13);
+  });
+
+  it('lets a TriggerWorkflow step target any workflow, this one included, and keeps a SubWorkflow target when swapped (KT-796)', async () => {
+    vi.mocked(workflowsApi.list).mockResolvedValueOnce([
+      { id: 'wf-1', name: 'ExistingWorkflow', step_count: 2 },
+      { id: 'wf-2', name: 'Phase 3', step_count: 1 },
+    ] as unknown as WorkflowSummary[]);
+    toSteps([
+      mkStep({ step_type: { type: 'SubWorkflow' }, prompt_template: '', sub_workflow_id: 'wf-2' }),
+      mkStep({ name: 'beta' }),
+    ]);
+    const values = () => Array.from(
+      (screen.getByLabelText('wiz.subWorkflowPicker') as HTMLSelectElement).options,
+    ).map(option => option.value);
+    await waitFor(() => expect(values()).toContain('wf-2'));
+    expect(values()).not.toContain('wf-1');
+
+    chooseStepType('wiz.stepTypeTriggerWorkflow');
+    expect(screen.getByText('wiz.triggerWorkflowTitle')).toBeInTheDocument();
+    expect((screen.getByLabelText('wiz.subWorkflowPicker') as HTMLSelectElement).value).toBe('wf-2');
+    expect(values()).toContain('wf-1');
   });
 
   it('keeps optional agent context compact and reveals each selector on demand', async () => {

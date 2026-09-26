@@ -592,6 +592,7 @@ pub async fn run_qa(
         sub_workflow_foreach_file: None,
         multi_agent_review: None,
         room_id: None,
+        sub_workflow_variables: std::collections::HashMap::new(),
     };
 
     // Standalone runs are manual tests. A native-tool call made inside an
@@ -1026,6 +1027,7 @@ pub async fn batch_run_qa(
         sub_workflow_foreach_file: None,
         multi_agent_review: None,
         room_id: None,
+        sub_workflow_variables: std::collections::HashMap::new(),
     };
 
     let mut ctx = crate::workflows::template::TemplateContext::new();

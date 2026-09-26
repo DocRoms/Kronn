@@ -12,7 +12,8 @@
     "CollectApiData",
     "TransformData",
     "PublishPageData",
-    "SubWorkflow"
+    "SubWorkflow",
+    "TriggerWorkflow"
   ],
   "fields_by_type": {
     "Agent": {
@@ -285,7 +286,8 @@
         "sub_workflow_id"
       ],
       "optional": [
-        "sub_workflow_foreach_file (workspace-relative JSON array → child runs once per item)"
+        "sub_workflow_foreach_file (workspace-relative JSON array → child runs once per item)",
+        "sub_workflow_variables ({childVariable: template} rendered in this run; the child's snapshot is prepared like a manual launch; in foreach it may read {{current_task.*}})"
       ],
       "FOREACH_RUNTIME_CONTRACT": "RUN-BREAKING. `sub_workflow_foreach_file` is YOUR source list (any name, e.g. .kronn/prs.json). Before each child run the engine exposes the CURRENT item to the child TWO ways: (1) TEMPLATE VARS — each top-level field as `{{current_task.<field>}}` (e.g. an ApiCall path `/repos/o/r/pulls/{{current_task.number}}/reviews`, a worktree `.kronn/pr-{{current_task.number}}`); scalars stringify, null→\"\", nested arrays/objects render as compact JSON, and the whole item is `{{current_task}}`. The accessor name is FIXED `current_task.*` (it mirrors the file, NOT the source-file name; it is NOT `{{item.*}}` or `{{foreach.*}}`). (2) FILE — the same item is written to the FIXED path `.kronn/current_task.json` in the shared worktree, for an Agent/Exec step that needs the full object. Bookkeeping vars `{{__subwf_item_id__}}` (=item `id`) and `{{__subwf_item__}}` (index) are also set.",
       "FOREACH_CONCURRENCY": "SubWorkflow foreach is intentionally SEQUENTIAL in the parent worktree. Workflow-level `concurrency_limit` controls overlapping FULL workflow runs; it does not parallelize foreach items. A limit above 1, or a `concurrency_key` (runs with different keys overlap), is accepted only with `workspace_config.require_isolation: true`, where each run owns its worktree and its own sequential foreach; otherwise it is rejected at save. Use BatchQuickPrompt for parallel agent fan-out.",
@@ -296,6 +298,33 @@
         },
         "sub_workflow_id": "<child workflow id>",
         "sub_workflow_foreach_file": ".kronn/tasks.json"
+      }
+    },
+    "TriggerWorkflow": {
+      "required": [
+        "sub_workflow_id"
+      ],
+      "optional": [
+        "sub_workflow_variables ({childVariable: template} rendered in this run)"
+      ],
+      "note": "Launches the target workflow as an INDEPENDENT run and continues at once (fire and forget), unlike SubWorkflow which waits and shares the worktree. The child is created like a manual launch: it must be enabled, its required variables must be mapped, its own concurrency_limit/concurrency_key applies, and it gets its own worktree, budget and lifecycle (cancelling the parent does not cancel it). Loops between workflows are allowed (review → rework → review); a chain of more than 20 runs launching one another is refused. Mapped names must be child launch variables; a template may not read a parent variable resolved from project_env/kronn_context (declare the secret on the child). Output data: child_run_id, child_workflow_id, child_workflow_name, variables (names only), concurrency_key; signal TRIGGERED. A refusal (disabled child, missing variable, key at its limit, …) fails the step with status/signal TRIGGER_REFUSED, branchable via on_result. The child's run carries triggered_by_run_id; the parent's step result carries child_run_id.",
+      "example": {
+        "name": "Rework",
+        "step_type": {
+          "type": "TriggerWorkflow"
+        },
+        "sub_workflow_id": "<workflow id>",
+        "sub_workflow_variables": {
+          "ticketKey": "{{ticketKey}}"
+        },
+        "on_result": [
+          {
+            "contains": "TRIGGER_REFUSED",
+            "action": {
+              "type": "Stop"
+            }
+          }
+        ]
       }
     }
   },

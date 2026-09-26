@@ -139,6 +139,8 @@ Project-specific terms. For deep dives, follow the linked `docs/architecture/` f
 
 **WorkflowAction** — (Legacy/deprecated) Post-step operation type kept in the data model for backward compatibility but no longer exposed in the UI wizard. Actions like creating PRs or commenting on issues should be done via MCP tools within steps.
 
+**TriggerWorkflow** — Step type that launches another workflow as an independent run (same path as a manual launch, own worktree, limit and lifecycle) and continues without waiting. The launched run's `triggered_by_run_id` names the run that launched it.
+
 **WorkflowRun** — A single execution of a workflow. Tracks status, step results, tokens used, workspace path. Statuses: `Pending`, `Running`, `Success`, `Failed`, `Cancelled`, `WaitingApproval`. Runs can be deleted individually or in bulk.
 
 **StepResult** — Output of a single step execution: status, output text, tokens used, duration. Output available to subsequent steps via `{{steps.<name>.output}}`.

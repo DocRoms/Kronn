@@ -747,6 +747,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "194_workflow_step_room_sessions",
         include_str!("sql/194_workflow_step_room_sessions.sql"),
     ),
+    (
+        "195_workflow_run_triggered_by",
+        include_str!("sql/195_workflow_run_triggered_by.sql"),
+    ),
 ];
 
 /// Apply one migration inside the caller-owned transaction.

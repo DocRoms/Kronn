@@ -1915,6 +1915,7 @@ pub(crate) fn sample_workflow(id: &str) -> Workflow {
             sub_workflow_foreach_file: None,
             multi_agent_review: None,
             room_id: None,
+            sub_workflow_variables: std::collections::HashMap::new(),
         }],
         actions: vec![],
         safety: WorkflowSafety {
@@ -2035,6 +2036,7 @@ pub(crate) fn sample_run(id: &str, workflow_id: &str) -> WorkflowRun {
         state: ::std::collections::HashMap::new(),
         produced_branches: vec![],
         concurrency_key: None,
+        triggered_by_run_id: None,
         parent_workflow_id: None,
         parent_workflow_name: None,
         parent_run_started_at: None,
@@ -3405,6 +3407,7 @@ fn sample_batch_run(id: &str, qp_id: &str, total: u32) -> WorkflowRun {
         state: ::std::collections::HashMap::new(),
         produced_branches: vec![],
         concurrency_key: None,
+        triggered_by_run_id: None,
         parent_workflow_id: None,
         parent_workflow_name: None,
         parent_run_started_at: None,
@@ -5224,6 +5227,7 @@ fn workflow_multi_step_roundtrip() {
                 sub_workflow_foreach_file: None,
                 multi_agent_review: None,
                 room_id: None,
+                sub_workflow_variables: std::collections::HashMap::new(),
             },
             WorkflowStep {
                 id: None,
@@ -5291,6 +5295,7 @@ fn workflow_multi_step_roundtrip() {
                 sub_workflow_foreach_file: None,
                 multi_agent_review: None,
                 room_id: None,
+                sub_workflow_variables: std::collections::HashMap::new(),
             },
             WorkflowStep {
                 id: None,
@@ -5355,6 +5360,7 @@ fn workflow_multi_step_roundtrip() {
                 sub_workflow_foreach_file: None,
                 multi_agent_review: None,
                 room_id: None,
+                sub_workflow_variables: std::collections::HashMap::new(),
             },
         ],
         actions: vec![],
@@ -5474,6 +5480,7 @@ fn workflow_update_steps_count() {
         sub_workflow_foreach_file: None,
         multi_agent_review: None,
         room_id: None,
+        sub_workflow_variables: std::collections::HashMap::new(),
     });
     crate::db::workflows::update_workflow(&conn, &wf).unwrap();
 

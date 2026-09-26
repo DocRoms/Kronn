@@ -33,6 +33,7 @@ pub mod tracker;
 pub mod transform_data_step;
 pub mod triage;
 pub mod trigger;
+pub mod trigger_workflow_step;
 pub mod workspace;
 
 use chrono::Utc;
@@ -366,6 +367,7 @@ impl WorkflowEngine {
             state: ::std::collections::HashMap::new(),
             produced_branches: vec![],
             concurrency_key,
+            triggered_by_run_id: None,
             parent_workflow_id: None,
             parent_workflow_name: None,
             parent_run_started_at: None,
@@ -467,6 +469,7 @@ mod tests {
                 StepType::TransformData => "TransformData",
                 StepType::PublishPageData => "PublishPageData",
                 StepType::SubWorkflow => "SubWorkflow",
+                StepType::TriggerWorkflow => "TriggerWorkflow",
             }
         }
         let rust: std::collections::BTreeSet<&str> = [
@@ -482,6 +485,7 @@ mod tests {
             StepType::TransformData,
             StepType::PublishPageData,
             StepType::SubWorkflow,
+            StepType::TriggerWorkflow,
         ]
         .iter()
         .map(variant_name)
@@ -573,6 +577,7 @@ mod tests {
             sub_workflow_foreach_file: None,
             multi_agent_review: None,
             room_id: None,
+            sub_workflow_variables: std::collections::HashMap::new(),
         }
     }
 
@@ -705,6 +710,7 @@ mod tests {
             state: ::std::collections::HashMap::new(),
             produced_branches: vec![],
             concurrency_key: None,
+            triggered_by_run_id: None,
             parent_workflow_id: None,
             parent_workflow_name: None,
             parent_run_started_at: None,
@@ -752,6 +758,7 @@ mod tests {
             state: ::std::collections::HashMap::new(),
             produced_branches: vec![],
             concurrency_key: None,
+            triggered_by_run_id: None,
             parent_workflow_id: None,
             parent_workflow_name: None,
             parent_run_started_at: None,

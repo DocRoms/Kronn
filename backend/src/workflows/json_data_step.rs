@@ -218,6 +218,7 @@ mod tests {
             sub_workflow_foreach_file: None,
             multi_agent_review: None,
             room_id: None,
+            sub_workflow_variables: std::collections::HashMap::new(),
         }
     }
 

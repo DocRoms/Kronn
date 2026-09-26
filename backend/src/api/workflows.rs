@@ -427,6 +427,98 @@ pub(crate) fn validate_sub_workflow_graph(
     visit(start_steps, graph, &mut path)
 }
 
+/// Launch variables mapped to a child (SubWorkflow, TriggerWorkflow) never read
+/// a secret of this workflow.
+fn validate_child_variable_mappings(
+    steps: &[WorkflowStep],
+    variables: &[crate::models::PromptVariable],
+) -> Result<(), String> {
+    steps
+        .iter()
+        .filter(|step| {
+            matches!(
+                step.step_type,
+                StepType::SubWorkflow | StepType::TriggerWorkflow
+            )
+        })
+        .find_map(|step| crate::workflows::sub_workflow_step::secret_mapping_error(step, variables))
+        .map_or(Ok(()), Err)
+}
+
+/// A TriggerWorkflow target must exist, and every mapped variable must be
+/// declared by the child. `start_id` names the workflow being saved, whose
+/// new declarations are `own`: a workflow may trigger itself.
+pub(crate) fn validate_child_targets(
+    start_id: &str,
+    own: &Workflow,
+    steps: &[WorkflowStep],
+    workflows: &std::collections::HashMap<String, Workflow>,
+) -> Result<(), String> {
+    for step in steps {
+        if !matches!(
+            step.step_type,
+            StepType::SubWorkflow | StepType::TriggerWorkflow
+        ) {
+            continue;
+        }
+        let Some(target) = step
+            .sub_workflow_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|target| !target.is_empty())
+        else {
+            continue;
+        };
+        let child = if target == start_id {
+            Some(own)
+        } else {
+            workflows.get(target)
+        };
+        let Some(child) = child else {
+            if step.step_type == StepType::TriggerWorkflow {
+                return Err(format!(
+                    "Step TriggerWorkflow « {} » : le workflow « {target} » est introuvable (supprimé ? id erroné ?).",
+                    step.name
+                ));
+            }
+            // The SubWorkflow graph validator reports a dangling child.
+            continue;
+        };
+        if let Some(error) =
+            crate::workflows::sub_workflow_step::undeclared_mapping_error(step, child)
+        {
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
+async fn validate_child_targets_db(
+    state: &AppState,
+    start_id: &str,
+    own: &Workflow,
+) -> Result<(), String> {
+    let launches_children = own.steps.iter().chain(own.on_failure.iter()).any(|step| {
+        matches!(
+            step.step_type,
+            StepType::SubWorkflow | StepType::TriggerWorkflow
+        )
+    });
+    if !launches_children {
+        return Ok(());
+    }
+    let workflows = state
+        .db
+        .with_conn(crate::db::workflows::list_workflows)
+        .await
+        .map_err(|e| format!("DB error loading workflows for child validation: {e}"))?
+        .into_iter()
+        .map(|workflow| (workflow.id.clone(), workflow))
+        .collect();
+    validate_child_targets(start_id, own, &own.steps, &workflows)?;
+    validate_child_targets(start_id, own, &own.on_failure, &workflows)
+}
+
 /// Async wrapper: short-circuits when no SubWorkflow step is present (no DB
 /// hit for the common case), else loads every workflow's steps and runs the
 /// pure validator above.
@@ -572,6 +664,19 @@ fn validate_step_required_fields(s: &WorkflowStep) -> Result<(), String> {
                         "Step SubWorkflow « {} » : `sub_workflow_id` est requis (choisis le workflow enfant à lancer).",
                         s.name
                     ));
+            }
+        }
+        StepType::TriggerWorkflow => {
+            if s.sub_workflow_id
+                .as_deref()
+                .map(str::trim)
+                .unwrap_or("")
+                .is_empty()
+            {
+                return Err(format!(
+                    "Step TriggerWorkflow « {} » : `sub_workflow_id` est requis (choisis le workflow à lancer).",
+                    s.name
+                ));
             }
         }
         StepType::PublishPageData => {
@@ -1307,6 +1412,11 @@ pub async fn create(
     if let Err(e) = validate_workspace_config(req.workspace_config.as_ref()) {
         return Json(ApiResponse::err(e));
     }
+    if let Err(e) = validate_child_variable_mappings(&req.steps, &req.variables)
+        .and_then(|()| validate_child_variable_mappings(&req.on_failure, &req.variables))
+    {
+        return Json(ApiResponse::err(e));
+    }
     // 2026-06-11 Phase 1 — SubWorkflow graph: cycle/depth/dangling/no-gate.
     // A create can't be in a cycle with itself (its id doesn't exist yet),
     // so a placeholder start id is safe.
@@ -1350,6 +1460,9 @@ pub async fn create(
         created_at: now,
         updated_at: now,
     };
+    if let Err(e) = validate_child_targets_db(&state, &wf.id, &wf).await {
+        return Json(ApiResponse::err(e));
+    }
 
     let w = wf.clone();
     match state
@@ -1485,6 +1598,10 @@ pub async fn update(
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
     };
 
+    // Child targets are re-read only when what they depend on changes, so a
+    // rename or a pin never fails on a target deleted since.
+    let child_launches_changed =
+        req.steps.is_some() || req.on_failure.is_some() || req.variables.is_some();
     if let Some(ref steps) = req.steps {
         if steps.len() > 20 {
             return Json(ApiResponse::err(format!(
@@ -1615,6 +1732,16 @@ pub async fn update(
     ) {
         return Json(ApiResponse::err(e));
     }
+    if let Err(e) = validate_child_variable_mappings(&updated.steps, &updated.variables)
+        .and_then(|()| validate_child_variable_mappings(&updated.on_failure, &updated.variables))
+    {
+        return Json(ApiResponse::err(e));
+    }
+    if child_launches_changed {
+        if let Err(e) = validate_child_targets_db(&state, &updated.id, &updated).await {
+            return Json(ApiResponse::err(e));
+        }
+    }
     if let Err(e) = validate_sub_workflow_foreach_concurrency(
         &updated.steps,
         updated.concurrency_limit,
@@ -1723,12 +1850,17 @@ const WORKFLOW_EXPORT_KIND: &str = "kronn.workflow";
 /// transitive sub-workflow. The frontend triggers a file download from this
 /// response (filename suggested via `Content-Disposition`).
 /// #10 — the non-empty `sub_workflow_id`s referenced by a step list's
-/// SubWorkflow steps. Used to bundle (export) and remap (import) the child
-/// workflow graph. Pure + unit-tested.
+/// SubWorkflow and TriggerWorkflow steps. Used to bundle (export) and remap
+/// (import) the child workflow graph. Pure + unit-tested.
 pub(crate) fn sub_workflow_child_ids(steps: &[WorkflowStep]) -> Vec<String> {
     steps
         .iter()
-        .filter(|s| matches!(s.step_type, StepType::SubWorkflow))
+        .filter(|s| {
+            matches!(
+                s.step_type,
+                StepType::SubWorkflow | StepType::TriggerWorkflow
+            )
+        })
         .filter_map(|s| s.sub_workflow_id.clone())
         .filter(|id| !id.trim().is_empty())
         .collect()
@@ -2033,6 +2165,8 @@ pub(crate) fn validate_workflow_for_import(wf: &Workflow) -> Result<(), String> 
         wf.concurrency_limit,
         &wf.variables,
     )?;
+    validate_child_variable_mappings(&wf.steps, &wf.variables)?;
+    validate_child_variable_mappings(&wf.on_failure, &wf.variables)?;
     validate_sub_workflow_foreach_concurrency(
         &wf.steps,
         wf.concurrency_limit,
@@ -2550,6 +2684,7 @@ pub(crate) async fn create_manual_run(
         state: initial_state,
         produced_branches: vec![],
         concurrency_key,
+        triggered_by_run_id: launch.triggered_by_run_id.clone(),
         parent_workflow_id: None,
         parent_workflow_name: None,
         parent_run_started_at: None,
@@ -4449,6 +4584,7 @@ pub async fn suggestions(
                     sub_workflow_foreach_file: None,
                     multi_agent_review: None,
                     room_id: None,
+                    sub_workflow_variables: std::collections::HashMap::new(),
                 })
                 .collect(),
         });
@@ -5387,6 +5523,7 @@ mod tests {
             sub_workflow_foreach_file: None,
             multi_agent_review: None,
             room_id: None,
+            sub_workflow_variables: std::collections::HashMap::new(),
         }
     }
 
@@ -6977,5 +7114,52 @@ mod tests {
             .unwrap();
         assert_eq!(stored.concurrency_key.as_deref(), Some("EW-2"));
         launch("EW-1").await.expect("a finished run frees its key");
+    }
+
+    /// KT-796: a TriggerWorkflow target may be any existing workflow, this one
+    /// included (loops between workflows are the point), but must exist.
+    #[test]
+    fn trigger_targets_must_exist_and_receive_only_declared_variables() {
+        let step = |target: &str, mapping: serde_json::Value| -> WorkflowStep {
+            serde_json::from_value(serde_json::json!({
+                "name": "launch", "step_type": {"type": "TriggerWorkflow"},
+                "sub_workflow_id": target, "sub_workflow_variables": mapping,
+            }))
+            .unwrap()
+        };
+        let own = keyed_workflow("phase-2");
+        let other = keyed_workflow("phase-3");
+        let workflows = std::collections::HashMap::from([("phase-3".to_string(), other)]);
+        let mapping = serde_json::json!({"ticketKey": "{{ticketKey}}"});
+
+        validate_child_targets(
+            "phase-2",
+            &own,
+            &[step("phase-3", mapping.clone())],
+            &workflows,
+        )
+        .expect("an existing target with a declared variable");
+        validate_child_targets(
+            "phase-2",
+            &own,
+            &[step("phase-2", mapping.clone())],
+            &workflows,
+        )
+        .expect("a workflow may trigger itself");
+        let missing = validate_child_targets("phase-2", &own, &[step("gone", mapping)], &workflows)
+            .unwrap_err();
+        assert!(missing.contains("introuvable"), "{missing}");
+        let undeclared = validate_child_targets(
+            "phase-2",
+            &own,
+            &[step("phase-3", serde_json::json!({"ticket": "x"}))],
+            &workflows,
+        )
+        .unwrap_err();
+        assert!(
+            undeclared.contains("declares no launch variable `ticket`"),
+            "{undeclared}"
+        );
+        assert!(validate_required_fields_per_type(&[step(" ", serde_json::json!({}))]).is_err());
     }
 }

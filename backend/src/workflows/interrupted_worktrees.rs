@@ -300,6 +300,7 @@ mod tests {
             parent_workflow_name: None,
             parent_run_started_at: None,
             concurrency_key: None,
+            triggered_by_run_id: None,
         }
     }
 

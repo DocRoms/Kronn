@@ -711,7 +711,8 @@ pub fn validate_step_references(steps: &[crate::models::WorkflowStep]) -> Result
             | StepType::PublishPageData
             // SubWorkflow's output is the child run's final envelope
             // (standardised) → `{{steps.<subwf>.data}}` is valid.
-            | StepType::SubWorkflow => true,
+            | StepType::SubWorkflow
+            | StepType::TriggerWorkflow => true,
         }
     }
 
@@ -2358,6 +2359,7 @@ mod tests {
             sub_workflow_foreach_file: None,
             multi_agent_review: None,
             room_id: None,
+            sub_workflow_variables: std::collections::HashMap::new(),
         }
     }
 

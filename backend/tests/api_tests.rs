@@ -4010,6 +4010,7 @@ async fn a_keyed_limit_runs_other_tickets_and_refuses_the_same_one() {
         state: HashMap::new(),
         produced_branches: vec![],
         concurrency_key: Some("EW-1".into()),
+        triggered_by_run_id: None,
         parent_workflow_id: None,
         parent_workflow_name: None,
         parent_run_started_at: None,
@@ -4084,6 +4085,187 @@ async fn a_keyed_limit_runs_other_tickets_and_refuses_the_same_one() {
     assert!(
         updated["error"].as_str().unwrap().contains("may be secret"),
         "{updated}"
+    );
+}
+
+/// KT-796: a TriggerWorkflow step launches a workflow whose variable is
+/// required, without waiting for it. The child reaches its first step with the
+/// mapped value, and each run references the other.
+#[tokio::test]
+async fn a_trigger_step_launches_a_workflow_with_required_variables_and_links_both_runs() {
+    let state = test_state();
+    state.config.write().await.encryption_secret = Some(kronn::core::crypto::generate_secret());
+    let app = || build_router_with_auth(state.clone(), false);
+
+    let (_, child) = post_json(
+        app(),
+        "/api/workflows",
+        serde_json::json!({
+            "name": "Phase 3",
+            "trigger": {"type": "Manual"},
+            "steps": [{"name": "review", "step_type": {"type": "Gate"}, "gate_message": "Review {{ticketKey}}"}],
+            "variables": [{"name": "ticketKey", "label": "Ticket", "placeholder": "", "required": true}],
+            "concurrency_limit": 1,
+            "concurrency_key": "{{ticketKey}}",
+        }),
+    )
+    .await;
+    assert_eq!(child["success"], true, "{child}");
+    let child_id = child["data"]["id"].as_str().unwrap().to_string();
+
+    let parent_body = |mapping: Value, variables: Value| {
+        serde_json::json!({
+            "name": "Phase 2",
+            "trigger": {"type": "Manual"},
+            "steps": [
+                {"name": "launch", "step_type": {"type": "TriggerWorkflow"},
+                 "sub_workflow_id": child_id, "sub_workflow_variables": mapping},
+                {"name": "after", "step_type": {"type": "JsonData"}, "json_data_payload": {"continued": true}},
+            ],
+            "variables": variables,
+        })
+    };
+    let ticket = serde_json::json!([{"name": "ticket", "label": "Ticket", "placeholder": ""}]);
+
+    // Save-time contract: a declared child variable, never a parent secret.
+    let (_, undeclared) = post_json(
+        app(),
+        "/api/workflows",
+        parent_body(
+            serde_json::json!({"ticket_key": "{{ticket}}"}),
+            ticket.clone(),
+        ),
+    )
+    .await;
+    assert!(
+        undeclared["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("declares no launch variable"),
+        "{undeclared}"
+    );
+    let (_, secret) = post_json(
+        app(),
+        "/api/workflows",
+        parent_body(
+            serde_json::json!({"ticketKey": "{{origin}}"}),
+            serde_json::json!([{
+                "name": "origin", "label": "Origin", "placeholder": "",
+                "source": "kronn_context", "source_ref": "<context.discussion_id>",
+            }]),
+        ),
+    )
+    .await;
+    assert!(
+        secret["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Secrets are not forwarded"),
+        "{secret}"
+    );
+
+    let (_, parent) = post_json(
+        app(),
+        "/api/workflows",
+        parent_body(serde_json::json!({"ticketKey": "{{ticket}}"}), ticket),
+    )
+    .await;
+    assert_eq!(parent["success"], true, "{parent}");
+    let parent_id = parent["data"]["id"].as_str().unwrap().to_string();
+
+    let response = app()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/workflows/{parent_id}/trigger"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({"variables": {"ticket": "EW-7796"}}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let events = String::from_utf8(
+        tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            response.into_body().collect(),
+        )
+        .await
+        .expect("the parent must finish without waiting for the child")
+        .unwrap()
+        .to_bytes()
+        .to_vec(),
+    )
+    .unwrap();
+    let parent_run_id = events
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .filter_map(|data| serde_json::from_str::<Value>(data).ok())
+        .find_map(|event| event["run_id"].as_str().map(str::to_owned))
+        .unwrap_or_else(|| panic!("missing run_start: {events}"));
+
+    let (_, parent_run) = get_json(
+        app(),
+        &format!("/api/workflows/{parent_id}/runs/{parent_run_id}"),
+    )
+    .await;
+    let parent_run = &parent_run["data"];
+    assert_eq!(parent_run["status"], "Success", "{parent_run}");
+    let launch = &parent_run["step_results"][0];
+    assert_eq!(launch["status"], "Success", "{launch}");
+    let output = launch["output"].as_str().unwrap();
+    assert!(output.contains("[SIGNAL: TRIGGERED]"), "{launch}");
+    let envelope: Value = serde_json::from_str(
+        output
+            .split("---STEP_OUTPUT---")
+            .nth(1)
+            .and_then(|rest| rest.split("---END_STEP_OUTPUT---").next())
+            .unwrap()
+            .trim(),
+    )
+    .unwrap();
+    // Names only: a mapped value may be anything the parent rendered.
+    assert_eq!(
+        envelope["data"]["variables"],
+        serde_json::json!(["ticketKey"])
+    );
+    assert_eq!(envelope["data"]["child_workflow_id"], child_id);
+    assert_eq!(parent_run["step_results"][1]["step_name"], "after");
+    let child_run_id = launch["child_run_id"]
+        .as_str()
+        .expect("the parent references its child")
+        .to_string();
+
+    let mut child_run = Value::Null;
+    for _ in 0..150 {
+        let (_, body) = get_json(
+            app(),
+            &format!("/api/workflows/{child_id}/runs/{child_run_id}"),
+        )
+        .await;
+        child_run = body["data"].clone();
+        if child_run["status"] == "WaitingApproval" {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!(child_run["status"], "WaitingApproval", "{child_run}");
+    assert_eq!(
+        child_run["triggered_by_run_id"], parent_run_id,
+        "{child_run}"
+    );
+    assert_eq!(child_run["parent_workflow_name"], "Phase 2", "{child_run}");
+    assert!(
+        child_run["parent_run_id"].is_null(),
+        "independent lifecycles: {child_run}"
+    );
+    assert_eq!(child_run["concurrency_key"], "EW-7796");
+    let first = &child_run["step_results"][0];
+    assert_eq!(first["step_name"], "review");
+    assert!(
+        first["output"].as_str().unwrap().contains("Review EW-7796"),
+        "{first}"
     );
 }
 
@@ -19431,6 +19613,7 @@ mod cold_api_handlers_tests {
             state: std::collections::HashMap::new(),
             produced_branches: vec![],
             concurrency_key: None,
+            triggered_by_run_id: None,
             parent_workflow_id: None,
             parent_workflow_name: None,
             parent_run_started_at: None,

@@ -1889,6 +1889,7 @@ mod tests {
             state: std::collections::HashMap::new(),
             produced_branches: vec![],
             concurrency_key: None,
+            triggered_by_run_id: None,
             parent_workflow_id: None,
             parent_workflow_name: None,
             parent_run_started_at: None,
@@ -2013,6 +2014,7 @@ mod tests {
             sub_workflow_foreach_file: None,
             multi_agent_review: None,
             room_id: None,
+            sub_workflow_variables: std::collections::HashMap::new(),
         }
     }
 

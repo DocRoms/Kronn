@@ -32,6 +32,23 @@ Release notes for 0.9.3 and earlier are available in the
   `Interrupted` and not resumed within `server.interrupted_worktree_ttl_days`
   (default 7, `0` = never) is reclaimed at boot, except a dirty or detached
   one; commits no base holds stay on a branch listed on the run.
+- A workflow step can launch another workflow without waiting for it:
+  `TriggerWorkflow` creates the child run through the same path as a manual
+  launch (its variables mapped from templates, its snapshot prepared, its own
+  concurrency limit and key applied), then continues at once. The child run
+  records `triggered_by_run_id` and shows the launching workflow as its origin;
+  the step keeps `child_run_id`. Loops between workflows are allowed (a chain of
+  more than 20 runs launching one another is refused), and a refused launch
+  ends the step with `TRIGGER_REFUSED`, which `on_result` can branch on. A
+  phase no longer needs an Exec calling `POST …/trigger` and hanging up after
+  `run_start`. Migration 194 adds the column to runs.
+- `SubWorkflow` passes values to its child: `sub_workflow_variables` maps the
+  child's launch variables to templates rendered in the parent run (in a
+  foreach, `{{current_task.*}}` too), and the child's variable snapshot is
+  prepared like a manual launch's. A child that declares variables used to fail
+  for want of a snapshot. Mapped names must be declared by the child, and a
+  parent variable resolved from the project environment or the Kronn context
+  is never forwarded.
 - A workflow's `concurrency_limit` can be counted per business object:
   `concurrency_key` (for example `"{{ticketKey}}"`) is rendered at each launch
   from the run's launch variables and stored on the run. Runs with different

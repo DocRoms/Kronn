@@ -6484,7 +6484,7 @@ cache_write_prompt_tokens?: number | null,
  */
 last_activity?: AgentActivity | null, };
 
-export type StepType = { "type": "Agent" } | { "type": "ApiCall" } | { "type": "BatchQuickPrompt" } | { "type": "Notify" } | { "type": "Gate" } | { "type": "Exec" } | { "type": "BatchApiCall" } | { "type": "JsonData" } | { "type": "CollectApiData" } | { "type": "TransformData" } | { "type": "PublishPageData" } | { "type": "SubWorkflow" };
+export type StepType = { "type": "Agent" } | { "type": "ApiCall" } | { "type": "BatchQuickPrompt" } | { "type": "Notify" } | { "type": "Gate" } | { "type": "Exec" } | { "type": "BatchApiCall" } | { "type": "JsonData" } | { "type": "CollectApiData" } | { "type": "TransformData" } | { "type": "PublishPageData" } | { "type": "SubWorkflow" } | { "type": "TriggerWorkflow" };
 
 /**
  * A stored run, as a later reader gets it back.
@@ -7671,6 +7671,11 @@ produced_branches?: Array<ProducedBranch>,
  */
 concurrency_key?: string | null,
 /**
+ * The run whose `TriggerWorkflow` step launched this one. Unlike
+ * `parent_run_id`, the two runs have independent lifecycles.
+ */
+triggered_by_run_id?: string | null,
+/**
  * Provenance enrichment (DERIVED, not persisted). When this run is a
  * sub-workflow child (`parent_run_id` set), these resolve the parent run's
  * workflow id + name + tick time so the UI can render
@@ -8013,6 +8018,12 @@ sub_workflow_id?: string | null,
  * tokens + more deterministic). `None` = single child run (Phase 1/2).
  */
 sub_workflow_foreach_file?: string | null,
+/**
+ * For `SubWorkflow` and `TriggerWorkflow`: child launch variable name →
+ * template rendered in this run. The child's snapshot is prepared from
+ * these values like a manual launch's.
+ */
+sub_workflow_variables?: Record<string, string>,
 /**
  * 2026-06-13 — "Multi-agent review" advanced option on an Agent step.
  * When set, the step runs its own agent normally, THEN opens a shared

@@ -31,13 +31,178 @@ use serde_json::json;
 use uuid::Uuid;
 
 use crate::models::setup::{AgentsConfig, TokensConfig};
-use crate::models::{RunStatus, StepResult, WorkflowRun, WorkflowStep};
+use crate::models::{
+    PromptVariable, PromptVariableSource, RunStatus, StepResult, Workflow, WorkflowRun,
+    WorkflowStep,
+};
 
 use super::steps::StepOutcome;
+use super::template::TemplateContext;
 
 /// Max nesting depth — mirrors `api::workflows::MAX_SUBWORKFLOW_DEPTH` (the
 /// save-time static cap). Kept as a local const to avoid an api→workflows dep.
 const MAX_SUBWORKFLOW_DEPTH: usize = 5;
+
+/// What a parent run hands a child launch: the context its variable templates
+/// render in, the parent's declarations and its project.
+#[derive(Clone, Copy)]
+pub struct ChildLaunch<'a> {
+    pub ctx: &'a TemplateContext,
+    pub parent_variables: &'a [PromptVariable],
+    pub parent_project_id: Option<&'a str>,
+}
+
+/// A mapping may not read a parent variable resolved from the project
+/// environment or the Kronn context: secrets are never forwarded, the child
+/// declares its own. Pure, shared by save-time validation and the executors.
+pub(crate) fn secret_mapping_error(
+    step: &WorkflowStep,
+    parent_variables: &[PromptVariable],
+) -> Option<String> {
+    let mut mappings: Vec<_> = step.sub_workflow_variables.iter().collect();
+    mappings.sort();
+    for (name, template) in mappings {
+        if name.trim().is_empty() {
+            return Some(format!(
+                "Step « {} » : a `sub_workflow_variables` entry has an empty variable name.",
+                step.name
+            ));
+        }
+        let paths = match super::template::placeholder_paths(template) {
+            Ok(paths) => paths,
+            Err(error) => {
+                let step_name = &step.name;
+                return Some(format!(
+                    "Step « {step_name} » : `sub_workflow_variables.{name}` is not a valid template: {error}"
+                ));
+            }
+        };
+        for path in paths {
+            let secret = parent_variables.iter().any(|variable| {
+                variable.name == path
+                    && variable.source.clone().unwrap_or_default()
+                        != PromptVariableSource::UserInput
+            });
+            if secret {
+                return Some(format!(
+                    "Step « {} » : `sub_workflow_variables.{name}` reads `{path}`, a variable resolved from the project environment or the Kronn context. Secrets are not forwarded; declare the variable on the child workflow with its own source.",
+                    step.name
+                ));
+            }
+        }
+    }
+    None
+}
+
+/// Every mapped name must be a launch variable of the child.
+pub(crate) fn undeclared_mapping_error(step: &WorkflowStep, child: &Workflow) -> Option<String> {
+    let mut names: Vec<_> = step.sub_workflow_variables.keys().collect();
+    names.sort();
+    names
+        .into_iter()
+        .find(|name| {
+            !child
+                .variables
+                .iter()
+                .any(|variable| &variable.name == *name)
+        })
+        .map(|name| {
+            format!(
+                "Step « {} » : workflow « {} » declares no launch variable `{name}`.",
+                step.name, child.name
+            )
+        })
+}
+
+/// Renders a step's `sub_workflow_variables` strictly in the parent run.
+pub(crate) fn render_child_variables(
+    step: &WorkflowStep,
+    ctx: &TemplateContext,
+) -> Result<std::collections::HashMap<String, String>, String> {
+    step.sub_workflow_variables
+        .iter()
+        .map(|(name, template)| {
+            ctx.render_strict(template)
+                .map(|value| (name.clone(), value))
+                .map_err(|error| {
+                    format!(
+                        "Step « {} » : `sub_workflow_variables.{name}` could not be rendered: {error}",
+                        step.name
+                    )
+                })
+        })
+        .collect()
+}
+
+/// Prepares the child's encrypted variable snapshot exactly like a manual
+/// launch. `None` when the child declares no variable (nothing to prepare).
+async fn prepare_child_snapshot(
+    state: &crate::AppState,
+    child: &Workflow,
+    child_run_id: &str,
+    supplied: std::collections::HashMap<String, String>,
+    parent_project_id: Option<&str>,
+) -> Result<Option<(String, chrono::DateTime<Utc>)>, String> {
+    if child.variables.is_empty() {
+        return Ok(None);
+    }
+    let (secret, retention_days) = {
+        let config = state.config.read().await;
+        (
+            config.encryption_secret.clone().ok_or_else(|| {
+                "Variable preflight unavailable: encryption key missing".to_string()
+            })?,
+            config.server.execution_variable_retention_days,
+        )
+    };
+    let declarations = child.variables.clone();
+    let project_id = child
+        .project_id
+        .clone()
+        .or_else(|| parent_project_id.map(str::to_string));
+    let run_id = child_run_id.to_string();
+    let prepared = state
+        .db
+        .with_conn(move |conn| {
+            crate::core::execution_variables::prepare(
+                conn,
+                crate::core::execution_variables::PrepareRequest {
+                    declarations: &declarations,
+                    supplied: &supplied,
+                    context: &std::collections::HashMap::new(),
+                    project_id: project_id.as_deref(),
+                    discussion_id: None,
+                    environment_ref: "project_mcp_configs",
+                    run_kind: "workflow",
+                    run_id: &run_id,
+                    encryption_secret: &secret,
+                    retention_days,
+                },
+            )
+        })
+        .await
+        .map_err(|error| format!("Variable preflight failed: {error}"))?
+        .map_err(|failures| {
+            format!(
+                "preflight_failed:{}",
+                serde_json::to_string(&failures).unwrap_or_default()
+            )
+        })?;
+    Ok(Some((prepared.snapshot_id, prepared.resolved.resolved_at)))
+}
+
+fn insert_snapshot_marker(
+    trigger: &mut serde_json::Map<String, serde_json::Value>,
+    snapshot: Option<(String, chrono::DateTime<Utc>)>,
+) {
+    if let Some((snapshot_id, resolved_at)) = snapshot {
+        trigger.insert("execution_snapshot_id".into(), snapshot_id.into());
+        trigger.insert(
+            "variables_resolved_at".into(),
+            resolved_at.to_rfc3339().into(),
+        );
+    }
+}
 
 /// Run a sub-workflow as a child run. `current_depth` is the depth of the
 /// PARENT run (0 for a top-level run); the child is created at
@@ -59,8 +224,12 @@ pub async fn execute_sub_workflow_step(
     // later parent step (`create_pr`) sees the child's work. `None` → the child
     // gets its own worktree (legacy Phase 1 behaviour, e.g. parent in main tree).
     parent_workspace: Option<String>,
+    launch: ChildLaunch<'_>,
 ) -> StepOutcome {
     let start = Instant::now();
+    if let Some(error) = secret_mapping_error(step, launch.parent_variables) {
+        return fail(step, start, error);
+    }
 
     let target = match step
         .sub_workflow_id
@@ -111,6 +280,7 @@ pub async fn execute_sub_workflow_step(
             &target,
             ff,
             start,
+            launch,
         )
         .await;
     }
@@ -139,17 +309,38 @@ pub async fn execute_sub_workflow_step(
         }
     };
 
+    if let Some(error) = undeclared_mapping_error(step, &child_wf) {
+        return fail(step, start, error);
+    }
+    let supplied = match render_child_variables(step, launch.ctx) {
+        Ok(values) => values,
+        Err(error) => return fail(step, start, error),
+    };
+
     // Build + persist the child run. The depth marker rides in
     // `trigger_context` so the child's OWN SubWorkflow steps read the right
     // depth (the dispatch reads `__subwf_depth__`).
     let now = Utc::now();
     let child_run_id = Uuid::new_v4().to_string();
-    let trigger = json!({ "__subwf_depth__": child_depth });
+    let mut trigger = serde_json::Map::new();
+    trigger.insert("__subwf_depth__".into(), json!(child_depth));
+    match prepare_child_snapshot(
+        state,
+        &child_wf,
+        &child_run_id,
+        supplied,
+        launch.parent_project_id,
+    )
+    .await
+    {
+        Ok(snapshot) => insert_snapshot_marker(&mut trigger, snapshot),
+        Err(error) => return fail(step, start, error),
+    }
     let mut child_run = WorkflowRun {
         id: child_run_id.clone(),
         workflow_id: child_wf.id.clone(),
         status: RunStatus::Pending,
-        trigger_context: Some(trigger),
+        trigger_context: Some(serde_json::Value::Object(trigger)),
         step_results: vec![],
         tokens_used: 0,
         // Phase 1b-i: child gets its OWN workspace (execute_run handles it,
@@ -167,6 +358,7 @@ pub async fn execute_sub_workflow_step(
         state: Default::default(),
         produced_branches: vec![],
         concurrency_key: None,
+        triggered_by_run_id: None,
         parent_workflow_id: None,
         parent_workflow_name: None,
         parent_run_started_at: None,
@@ -468,6 +660,7 @@ async fn execute_foreach(
     target: &str,
     foreach_file: &str,
     start: Instant,
+    launch: ChildLaunch<'_>,
 ) -> StepOutcome {
     // The fan-out is defined around the SHARED worktree (the items file +
     // current_task.json + the children's commits all live there).
@@ -514,6 +707,10 @@ async fn execute_foreach(
             )
         }
     };
+
+    if let Some(error) = undeclared_mapping_error(step, &child_wf) {
+        return fail(step, start, error);
+    }
 
     // A2 resume reconciliation — three sources, trusted in this order:
     //   1. git ledger (`[item_id]` commit subjects, checked per-item below)
@@ -771,11 +968,42 @@ async fn execute_foreach(
             tctx.insert(k, serde_json::Value::String(v));
         }
 
-        let trigger_context = serde_json::Value::Object(tctx);
-        let mut resumed = false;
         let interrupted_child = interrupted_children_by_id
             .remove(&item_id)
             .or_else(|| legacy_interrupted_children_by_index.remove(&idx));
+        let child_id = interrupted_child
+            .as_ref()
+            .map_or_else(|| Uuid::new_v4().to_string(), |child| child.id.clone());
+        // Mappings may read the current item as `{{current_task.*}}`.
+        let mut item_ctx = launch.ctx.clone();
+        for (k, v) in current_task_template_vars(item) {
+            item_ctx.set(k, v);
+        }
+        let snapshot = match render_child_variables(step, &item_ctx) {
+            Ok(supplied) => {
+                prepare_child_snapshot(
+                    state,
+                    &child_wf,
+                    &child_id,
+                    supplied,
+                    launch.parent_project_id,
+                )
+                .await
+            }
+            Err(error) => Err(error),
+        };
+        match snapshot {
+            Ok(snapshot) => insert_snapshot_marker(&mut tctx, snapshot),
+            Err(error) => {
+                tracing::warn!(target: "kronn::sub_workflow", item=%idx, item_id=%item_id, "foreach: child variables not prepared ({error}) — skipping this item");
+                failed += 1;
+                results.push(json!({ "item": idx, "id": item_id, "child_run_id": null, "status": "SkippedVariableError", "error": error }));
+                continue;
+            }
+        }
+
+        let trigger_context = serde_json::Value::Object(tctx);
+        let mut resumed = false;
         let mut child_run = if let Some(mut child) = interrupted_child {
             child.trigger_context = Some(trigger_context.clone());
             if let Err(e) = super::runner::claim_interrupted_run_row(state, &mut child).await {
@@ -790,7 +1018,7 @@ async fn execute_foreach(
         } else {
             let now = Utc::now();
             let child = WorkflowRun {
-                id: Uuid::new_v4().to_string(),
+                id: child_id.clone(),
                 workflow_id: child_wf.id.clone(),
                 status: RunStatus::Pending,
                 trigger_context: Some(trigger_context),
@@ -809,6 +1037,7 @@ async fn execute_foreach(
                 state: Default::default(),
                 produced_branches: vec![],
                 concurrency_key: None,
+                triggered_by_run_id: None,
                 parent_workflow_id: None,
                 parent_workflow_name: None,
                 parent_run_started_at: None,
@@ -1121,6 +1350,7 @@ mod tests {
             state: Default::default(),
             produced_branches: vec![],
             concurrency_key: None,
+            triggered_by_run_id: None,
             parent_workflow_id: None,
             parent_workflow_name: None,
             parent_run_started_at: None,
@@ -1178,6 +1408,7 @@ mod tests {
         ws: &tempfile::TempDir,
         step: &crate::models::WorkflowStep,
     ) -> serde_json::Value {
+        let ctx = crate::workflows::template::TemplateContext::new();
         let outcome = super::execute_sub_workflow_step(
             state,
             "parent-run",
@@ -1187,6 +1418,11 @@ mod tests {
             agents,
             crate::workflows::runner::SharedBudget::root(50),
             Some(ws.path().to_string_lossy().to_string()),
+            super::ChildLaunch {
+                ctx: &ctx,
+                parent_variables: &[],
+                parent_project_id: None,
+            },
         )
         .await;
         assert_eq!(
@@ -1505,5 +1741,162 @@ mod tests {
         }
         // missing files[] → fall back to agent (error string)
         assert!(super::validate_mechanical_files(&json!({"id":"a"})).is_err());
+    }
+
+    fn ticket_variable(
+        source: Option<crate::models::PromptVariableSource>,
+    ) -> crate::models::PromptVariable {
+        serde_json::from_value(serde_json::json!({
+            "name": "ticket", "label": "Ticket", "placeholder": "",
+            "source": source,
+            "source_ref": source.as_ref().map(|_| "<env.TICKET>"),
+        }))
+        .expect("variable")
+    }
+
+    /// KT-796: a SubWorkflow hands its child the mapped launch variables,
+    /// prepared into the child's snapshot exactly like a manual launch.
+    #[tokio::test]
+    async fn a_sub_workflow_passes_mapped_variables_to_a_child_that_requires_them() {
+        let (state, tokens, agents, _ws, _) = foreach_fixture().await;
+        let child: crate::models::Workflow = serde_json::from_value(serde_json::json!({
+            "id": "needs-ticket", "name": "needs ticket", "project_id": null,
+            "trigger": {"type": "Manual"},
+            "steps": [{
+                "name": "echo", "step_type": {"type": "TransformData"},
+                "transform_data": {"input_from": "{{ticketKey}}", "fields": [{"target": "ticket", "source": "$"}]},
+            }],
+            "actions": [],
+            "safety": {"sandbox": false, "max_files": null, "max_lines": null, "require_approval": false},
+            "workspace_config": null, "concurrency_limit": null,
+            "variables": [{"name": "ticketKey", "label": "Ticket", "placeholder": ""}],
+            "enabled": true,
+            "created_at": chrono::Utc::now(), "updated_at": chrono::Utc::now(),
+        }))
+        .unwrap();
+        state
+            .db
+            .with_conn(move |conn| crate::db::workflows::insert_workflow(conn, &child))
+            .await
+            .unwrap();
+        let mut ctx = crate::workflows::template::TemplateContext::new();
+        ctx.set("ticket", "EW-42");
+        let parent_variables = vec![ticket_variable(None)];
+        let run = |step: crate::models::WorkflowStep,
+                   variables: Vec<crate::models::PromptVariable>| {
+            let (state, tokens, agents, ctx) =
+                (state.clone(), tokens.clone(), agents.clone(), ctx.clone());
+            async move {
+                super::execute_sub_workflow_step(
+                    &state,
+                    "parent-run",
+                    0,
+                    &step,
+                    &tokens,
+                    &agents,
+                    crate::workflows::runner::SharedBudget::root(50),
+                    None,
+                    super::ChildLaunch {
+                        ctx: &ctx,
+                        parent_variables: &variables,
+                        parent_project_id: None,
+                    },
+                )
+                .await
+            }
+        };
+
+        let mapped = step_json(serde_json::json!({
+            "name": "child", "step_type": {"type": "SubWorkflow"},
+            "sub_workflow_id": "needs-ticket",
+            "sub_workflow_variables": {"ticketKey": "{{ticket}}"},
+        }));
+        let outcome = run(mapped.clone(), parent_variables.clone()).await;
+        assert_eq!(
+            outcome.result.status,
+            crate::models::RunStatus::Success,
+            "{}",
+            outcome.result.output
+        );
+        let child_id = outcome.result.child_run_id.clone().expect("child run id");
+        let key = crate::core::crypto::parse_secret(
+            state
+                .config
+                .read()
+                .await
+                .encryption_secret
+                .as_deref()
+                .unwrap(),
+        )
+        .unwrap();
+        let lookup = child_id.clone();
+        let (child_run, values) = state
+            .db
+            .with_conn(move |conn| {
+                Ok((
+                    crate::db::workflows::get_run(conn, &lookup)?.expect("child row"),
+                    crate::db::execution_variable_snapshots::load_values(
+                        conn,
+                        "workflow",
+                        &lookup,
+                        &key,
+                        chrono::Utc::now(),
+                    )?,
+                ))
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            values,
+            Some(std::collections::HashMap::from([(
+                "ticketKey".to_string(),
+                "EW-42".to_string()
+            )]))
+        );
+        assert!(
+            child_run.step_results[0].output.contains("EW-42"),
+            "the child renders the variable: {}",
+            child_run.step_results[0].output
+        );
+
+        // Without a mapping the required variable is missing: refused before the child runs.
+        let mut unmapped = mapped.clone();
+        unmapped.sub_workflow_variables.clear();
+        let missing = run(unmapped, parent_variables.clone()).await;
+        assert_eq!(missing.result.status, crate::models::RunStatus::Failed);
+        assert!(
+            missing.result.output.contains("missing_user_input"),
+            "{}",
+            missing.result.output
+        );
+
+        // A name the child does not declare is an error, not a silent drop.
+        let mut unknown = mapped.clone();
+        unknown
+            .sub_workflow_variables
+            .insert("ticket_key".into(), "{{ticket}}".into());
+        let undeclared = run(unknown, parent_variables).await;
+        assert!(
+            undeclared
+                .result
+                .output
+                .contains("declares no launch variable `ticket_key`"),
+            "{}",
+            undeclared.result.output
+        );
+
+        // A parent secret is never forwarded.
+        let secret = run(
+            mapped,
+            vec![ticket_variable(Some(
+                crate::models::PromptVariableSource::ProjectEnv,
+            ))],
+        )
+        .await;
+        assert!(
+            secret.result.output.contains("Secrets are not forwarded"),
+            "{}",
+            secret.result.output
+        );
     }
 }

@@ -1563,7 +1563,7 @@ impl ToolExecutor for KronnToolExecutor {
                         launch: Some(crate::core::launch_context::LaunchContext {
                             discussion_id: self.disc_id.clone(),
                             project_id,
-                            context: Default::default(),
+                            ..Default::default()
                         }),
                     };
                     let Json(res) =

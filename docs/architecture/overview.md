@@ -335,6 +335,14 @@ Unified automation system: `Trigger → Steps`. Kronn and OpenAI Symphony overla
   Collection and transformation use zero model tokens; optional source
   failures remain visible in a `PARTIAL` envelope. See
   `docs/architecture/live-pages.md`.
+- **Workflow composition**: `SubWorkflow` runs another workflow as a nested
+  child and waits for it (shared worktree, no cycle); `TriggerWorkflow`
+  launches one as an independent run through the manual-launch path and
+  continues at once, so phases may loop between workflows (a chain of more than
+  20 runs launching one another is refused). Both map the child's launch
+  variables with `sub_workflow_variables`; a triggered run records
+  `triggered_by_run_id` and its parent's step keeps `child_run_id`.
+  `[src: file: backend/src/workflows/trigger_workflow_step.rs:20]`
 - **Conditional branching**: `on_result` rules per step — e.g. `{ contains: "NO_RESULTS", action: stop }`. Actions: `Stop`, `Skip`, `Goto(step_name)`.
 - **Per-step agent config**: optional `AgentSettings { model, reasoning_effort, max_tokens }` override.
 - **Stall detection**: configurable timeout — kill step if no agent output for N seconds.

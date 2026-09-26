@@ -575,6 +575,7 @@ pub(crate) fn create_batch_run_with_launch_settings(
         state: ::std::collections::HashMap::new(),
         produced_branches: vec![],
         concurrency_key: None,
+        triggered_by_run_id: None,
         parent_workflow_id: None,
         parent_workflow_name: None,
         parent_run_started_at: None,
@@ -1433,6 +1434,15 @@ pub fn list_runs_page_complete_group(
     Ok(runs)
 }
 
+/// The run a run comes from: the SubWorkflow/batch parent, else the run whose
+/// TriggerWorkflow step launched it.
+fn provenance_run_id(run: &WorkflowRun) -> Option<&str> {
+    run.parent_run_id
+        .as_deref()
+        .or(run.triggered_by_run_id.as_deref())
+        .filter(|id| !id.is_empty())
+}
+
 /// Fill the DERIVED `parent_workflow_id/name` + `parent_run_started_at` fields
 /// on any run that has a `parent_run_id`, via a SINGLE batch query (no N+1).
 /// Resolves each distinct parent run id → its workflow id/name + start time.
@@ -1442,8 +1452,8 @@ pub(crate) fn enrich_parent_provenance(conn: &Connection, runs: &mut [WorkflowRu
     // Distinct, non-empty parent ids present in this batch.
     let mut ids: Vec<String> = runs
         .iter()
-        .filter_map(|r| r.parent_run_id.clone())
-        .filter(|s| !s.is_empty())
+        .filter_map(provenance_run_id)
+        .map(str::to_string)
         .collect();
     ids.sort();
     ids.dedup();
@@ -1475,7 +1485,7 @@ pub(crate) fn enrich_parent_provenance(conn: &Connection, runs: &mut [WorkflowRu
     }
 
     for run in runs.iter_mut() {
-        if let Some(pid) = run.parent_run_id.as_deref() {
+        if let Some(pid) = provenance_run_id(run) {
             if let Some((wid, wname, started)) = map.get(pid) {
                 run.parent_workflow_id = Some(wid.clone());
                 run.parent_workflow_name = Some(wname.clone());
@@ -1648,8 +1658,8 @@ pub fn insert_run(conn: &Connection, run: &WorkflowRun) -> Result<()> {
         "INSERT INTO workflow_runs (id, workflow_id, status, trigger_context,
          step_results_json, tokens_used, workspace_path, started_at, finished_at,
          run_type, batch_total, batch_completed, batch_failed, batch_name, parent_run_id, state,
-         produced_branches, batch_no_response, concurrency_key)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+         produced_branches, batch_no_response, concurrency_key, triggered_by_run_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
         params![
             run.id,
             run.workflow_id,
@@ -1683,6 +1693,7 @@ pub fn insert_run(conn: &Connection, run: &WorkflowRun) -> Result<()> {
             },
             run.batch_no_response as i64,
             run.concurrency_key,
+            run.triggered_by_run_id,
         ],
     )?;
     crate::db::shared_runs::sync_workflow(conn, run)?;
@@ -2318,6 +2329,7 @@ fn row_to_run(row: &rusqlite::Row) -> WorkflowRun {
     let produced_branches_str: Option<String> = row.get(16).unwrap_or(None);
     let batch_no_response: i64 = row.get(17).unwrap_or(0);
     let concurrency_key: Option<String> = row.get(18).unwrap_or(None);
+    let triggered_by_run_id: Option<String> = row.get(19).unwrap_or(None);
 
     WorkflowRun {
         id: row.get(0).unwrap_or_default(),
@@ -2350,6 +2362,7 @@ fn row_to_run(row: &rusqlite::Row) -> WorkflowRun {
             .and_then(|s| serde_json::from_str::<Vec<crate::models::ProducedBranch>>(s).ok())
             .unwrap_or_default(),
         concurrency_key,
+        triggered_by_run_id,
         // Derived, filled by enrich_parent_provenance (never from a column).
         parent_workflow_id: None,
         parent_workflow_name: None,
@@ -2362,7 +2375,7 @@ fn row_to_run(row: &rusqlite::Row) -> WorkflowRun {
 const WORKFLOW_RUN_COLS: &str = "id, workflow_id, status, trigger_context, step_results_json, \
     tokens_used, workspace_path, started_at, finished_at, \
     run_type, batch_total, batch_completed, batch_failed, batch_name, parent_run_id, state, \
-    produced_branches, batch_no_response, concurrency_key";
+    produced_branches, batch_no_response, concurrency_key, triggered_by_run_id";
 
 /// Blanks every step's `output` inside SQLite, leaving names, statuses and
 /// timings intact. `output` is the entire weight of the column — measured at

@@ -667,6 +667,13 @@ pub struct WorkflowStep {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sub_workflow_foreach_file: Option<String>,
 
+    /// For `SubWorkflow` and `TriggerWorkflow`: child launch variable name →
+    /// template rendered in this run. The child's snapshot is prepared from
+    /// these values like a manual launch's.
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    #[ts(type = "Record<string, string>")]
+    pub sub_workflow_variables: std::collections::HashMap<String, String>,
+
     /// 2026-06-13 — "Multi-agent review" advanced option on an Agent step.
     /// When set, the step runs its own agent normally, THEN opens a shared
     /// Kronn discussion and invites a SECOND agent (a different model family,
@@ -940,6 +947,11 @@ pub enum StepType {
     /// step's status (→ the parent's `on_result` can branch on it), and its
     /// run id is recorded on the `StepResult.child_run_id` for drill-down.
     SubWorkflow,
+    /// Launch another workflow (`sub_workflow_id`) as an independent run and
+    /// continue at once. The child is created like a manual launch (variables
+    /// from `sub_workflow_variables`, its own concurrency limit) and records
+    /// this run as `triggered_by_run_id`; cycles between workflows are allowed.
+    TriggerWorkflow,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
@@ -1313,6 +1325,10 @@ pub struct WorkflowRun {
     /// The workflow's `concurrency_key` as rendered for this run at launch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub concurrency_key: Option<String>,
+    /// The run whose `TriggerWorkflow` step launched this one. Unlike
+    /// `parent_run_id`, the two runs have independent lifecycles.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub triggered_by_run_id: Option<String>,
     /// Provenance enrichment (DERIVED, not persisted). When this run is a
     /// sub-workflow child (`parent_run_id` set), these resolve the parent run's
     /// workflow id + name + tick time so the UI can render

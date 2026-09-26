@@ -217,6 +217,7 @@ fn uncertain_side_effect_type(step_type: &StepType) -> Option<&'static str> {
         StepType::Exec => Some("Exec"),
         StepType::PublishPageData => Some("PublishPageData"),
         StepType::CollectApiData => Some("CollectApiData"),
+        StepType::TriggerWorkflow => Some("TriggerWorkflow"),
         StepType::Agent
         | StepType::BatchQuickPrompt
         | StepType::Gate
@@ -1985,6 +1986,17 @@ async fn execute_run_with_notify_policy(
                         agents_config,
                         sub_budget.clone(),
                         sub_parent_workspace.clone(),
+                        super::sub_workflow_step::ChildLaunch {
+                            ctx: &ctx,
+                            parent_variables: &workflow.variables,
+                            parent_project_id: workflow.project_id.as_deref(),
+                        },
+                    )
+                    .await
+                }
+                StepType::TriggerWorkflow => {
+                    super::trigger_workflow_step::execute_trigger_workflow_step(
+                        &state, workflow, &run.id, step, &ctx,
                     )
                     .await
                 }
@@ -2175,7 +2187,9 @@ async fn execute_run_with_notify_policy(
             | StepType::JsonData
             | StepType::CollectApiData
             | StepType::TransformData
-            | StepType::PublishPageData => {}
+            | StepType::PublishPageData
+            // A triggered run has its own budget.
+            | StepType::TriggerWorkflow => {}
             // SubWorkflow itself spawns no LLM directly; its child run's
             // Agent steps consume LLM calls. Phase 1b aggregates the child's
             // count into the SHARED budget so the parent quota isn't bypassed
@@ -2893,6 +2907,13 @@ async fn execute_run_with_notify_policy(
                     // for a hand-edited JSON: fail loudly, never recurse from
                     // a rollback step.
                     super::sub_workflow_step::forbidden_in_rollback(rb_step)
+                }
+                // An independent run, e.g. a cleanup workflow: nothing recurses.
+                StepType::TriggerWorkflow => {
+                    super::trigger_workflow_step::execute_trigger_workflow_step(
+                        &state, workflow, &run.id, rb_step, &ctx,
+                    )
+                    .await
                 }
             };
 
@@ -3659,6 +3680,7 @@ pub(crate) fn apply_step_snapshot(
         StepType::TransformData => "TransformData",
         StepType::PublishPageData => "PublishPageData",
         StepType::SubWorkflow => "SubWorkflow",
+        StepType::TriggerWorkflow => "TriggerWorkflow",
     };
     result.step_kind = Some(kind.into());
     if matches!(step.step_type, StepType::Agent) {
@@ -4023,6 +4045,7 @@ mod tests {
             sub_workflow_foreach_file: None,
             multi_agent_review: None,
             room_id: None,
+            sub_workflow_variables: std::collections::HashMap::new(),
         }
     }
     fn fake_result(name: &str) -> crate::models::StepResult {
@@ -4366,6 +4389,7 @@ mod tests {
             sub_workflow_foreach_file: None,
             multi_agent_review: None,
             room_id: None,
+            sub_workflow_variables: std::collections::HashMap::new(),
         }
     }
 
@@ -4977,6 +5001,7 @@ mod tests {
             state: ::std::collections::HashMap::new(),
             produced_branches: vec![],
             concurrency_key: None,
+            triggered_by_run_id: None,
             parent_workflow_id: None,
             parent_workflow_name: None,
             parent_run_started_at: None,
@@ -6405,6 +6430,8 @@ mod tests {
             StepType::BatchApiCall,
             StepType::Notify,
             StepType::Exec,
+            // Replaying it after a crash would launch a second run.
+            StepType::TriggerWorkflow,
         ] {
             assert!(
                 uncertain_side_effect_type(&step_type).is_some(),

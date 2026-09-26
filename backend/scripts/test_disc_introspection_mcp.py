@@ -6357,7 +6357,8 @@ class WorkflowQpCrudToolTests(unittest.TestCase):
         entry = next(t for t in self.mod.TOOLS if t["name"] == "workflow_create_draft")
         desc = entry["description"]
         for st in ["Agent", "ApiCall", "BatchApiCall", "BatchQuickPrompt",
-                   "Exec", "Gate", "Notify", "JsonData", "SubWorkflow"]:
+                   "Exec", "Gate", "Notify", "JsonData", "SubWorkflow",
+                   "TriggerWorkflow"]:
             self.assertIn(st, desc, f"step_type '{st}' must be documented in workflow_create_draft")
 
     # ── initialize `instructions` must ORIENT the agent (what Kronn is + a
@@ -6405,13 +6406,13 @@ class StepSchemaAndBindingListTests(unittest.TestCase):
         return {"success": True, "data": data}
 
     # ── workflow_step_schema ─────────────────────────────────────────
-    def test_step_schema_lists_the_closed_twelve_set(self):
+    def test_step_schema_lists_the_closed_thirteen_set(self):
         out = self.mod.call_workflow_step_schema({})
         self.assertEqual(
             set(out["step_types_closed_set"]),
             {"Agent", "ApiCall", "BatchApiCall", "BatchQuickPrompt", "Exec",
              "Gate", "Notify", "JsonData", "CollectApiData", "TransformData",
-             "PublishPageData", "SubWorkflow"},
+             "PublishPageData", "SubWorkflow", "TriggerWorkflow"},
         )
         # every type has a field spec
         for st in out["step_types_closed_set"]:

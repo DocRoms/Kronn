@@ -37,6 +37,7 @@ import {
 import { scanUndeclaredVars } from '../../lib/scanUndeclaredVars';
 import { userError } from '../../lib/userError';
 import { PromptVariableControlEditor } from './PromptVariableControlEditor';
+import { ChildWorkflowVariablesEditor } from './ChildWorkflowVariablesEditor';
 import '../../pages/WorkflowsPage.css';
 
 const checkAgentRestricted = isAgentRestricted;
@@ -95,6 +96,7 @@ const STEP_TYPE_GROUPS: ReadonlyArray<{
       { type: 'Agent', dataType: 'agent', labelKey: 'wiz.stepTypeAgent', hintKey: 'wiz.stepTypeAgentHint' },
       { type: 'BatchQuickPrompt', dataType: 'batch-qp', labelKey: 'wiz.stepTypeBatchQP', hintKey: 'wiz.stepTypeBatchQPHint' },
       { type: 'SubWorkflow', dataType: 'sub-workflow', labelKey: 'wiz.stepTypeSubWorkflow', hintKey: 'wiz.stepTypeSubWorkflowHint' },
+      { type: 'TriggerWorkflow', dataType: 'trigger-workflow', labelKey: 'wiz.stepTypeTriggerWorkflow', hintKey: 'wiz.stepTypeTriggerWorkflowHint' },
     ],
   },
   {
@@ -142,6 +144,7 @@ function StepTypeGlyph({ type, size = 16 }: { type: string; size?: number }) {
   if (type === 'CollectApiData') return <Database size={size} />;
   if (type === 'TransformData') return <Shuffle size={size} />;
   if (type === 'PublishPageData') return <FileText size={size} />;
+  if (type === 'TriggerWorkflow') return <Play size={size} />;
   return <GitBranch size={size} />;
 }
 
@@ -187,7 +190,9 @@ function isWorkflowStepIncomplete(step: WorkflowStep): boolean {
   if (step.step_type?.type === 'PublishPageData') {
     return !step.page_publish?.page_id?.trim() || !step.page_publish.writes.length;
   }
-  if (step.step_type?.type === 'SubWorkflow') return !step.sub_workflow_id?.trim();
+  if (step.step_type?.type === 'SubWorkflow' || step.step_type?.type === 'TriggerWorkflow') {
+    return !step.sub_workflow_id?.trim();
+  }
   if (!step.prompt_template && !step.quick_prompt_id) return true;
   return (step.on_result ?? []).some(rule => !rule.contains);
 }
@@ -1068,6 +1073,12 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
         mode: s.mode,
         step_type: { type: newType } as WorkflowStep['step_type'],
       };
+      // SubWorkflow ↔ TriggerWorkflow keep their target and variable mapping.
+      const childLaunch = ['SubWorkflow', 'TriggerWorkflow'];
+      if (childLaunch.includes(currentType) && childLaunch.includes(newType)) {
+        universal.sub_workflow_id = s.sub_workflow_id;
+        universal.sub_workflow_variables = s.sub_workflow_variables;
+      }
       // Keep `agent` field present (the type allows AgentType only) — the
       // backend ignores it for non-Agent steps but the model field is
       // non-nullable. Mirror the default the form uses on new steps.
@@ -3617,11 +3628,15 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                       )}
                     </div>
                   );
-                })() : step.step_type?.type === 'SubWorkflow' ? (() => {
+                })() : step.step_type?.type === 'SubWorkflow' || step.step_type?.type === 'TriggerWorkflow' ? (() => {
                   // Phase 1c — pick the workflow to run as a nested child run.
                   // Self is excluded (the most obvious cycle); deeper cycles +
                   // "no Gate inside" + depth are enforced server-side at save.
-                  const selectableWfs = availableWorkflows.filter(w => w.id !== editWorkflow?.id);
+                  // A TriggerWorkflow run is independent: it may loop back to itself.
+                  const isTrigger = step.step_type?.type === 'TriggerWorkflow';
+                  const selectableWfs = isTrigger
+                    ? availableWorkflows
+                    : availableWorkflows.filter(w => w.id !== editWorkflow?.id);
                   const selected = availableWorkflows.find(w => w.id === step.sub_workflow_id) ?? null;
                   // Decomposed-preset case: the child doesn't exist yet — the
                   // step carries an `@bundle:<id>` sentinel resolved at save by
@@ -3634,10 +3649,10 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                   return (
                     <div className="wf-sub-workflow-form">
                       <div className="wf-batch-intro">
-                        <GitBranch size={14} />
+                        {isTrigger ? <Play size={14} /> : <GitBranch size={14} />}
                         <div>
-                          <strong>{t('wiz.subWorkflowTitle')}</strong>
-                          <p className="text-xs text-muted">{t('wiz.subWorkflowHint')}</p>
+                          <strong>{t(isTrigger ? 'wiz.triggerWorkflowTitle' : 'wiz.subWorkflowTitle')}</strong>
+                          <p className="text-xs text-muted">{t(isTrigger ? 'wiz.triggerWorkflowHint' : 'wiz.subWorkflowHint')}</p>
                         </div>
                       </div>
                       <label className="text-xs text-muted mb-1">
@@ -3673,7 +3688,12 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                           {t('wiz.subWorkflowSelected', selected.name, String(selected.step_count))}
                         </p>
                       )}
-                      <p className="text-2xs text-ghost mt-2">{t('wiz.subWorkflowConstraints')}</p>
+                      <ChildWorkflowVariablesEditor
+                        targetId={step.sub_workflow_id}
+                        value={step.sub_workflow_variables ?? {}}
+                        onChange={next => updateStep(i, { sub_workflow_variables: next })}
+                      />
+                      <p className="text-2xs text-ghost mt-2">{t(isTrigger ? 'wiz.triggerWorkflowConstraints' : 'wiz.subWorkflowConstraints')}</p>
                     </div>
                   );
                 })() : (() => {
@@ -5010,6 +5030,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
               : typeKind === 'JsonData' ? 'JSON'
               : typeKind === 'PublishPageData' ? 'PAGE'
               : typeKind === 'SubWorkflow' ? 'SOUS-WF'
+              : typeKind === 'TriggerWorkflow' ? 'TRIGGER'
               : 'AGENT';
             const typeData = typeKind === 'ApiCall' ? 'api'
               : typeKind === 'BatchQuickPrompt' ? 'batch-qp'
@@ -5022,6 +5043,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
               : typeKind === 'JsonData' ? 'json-data'
               : typeKind === 'PublishPageData' ? 'page-data'
               : typeKind === 'SubWorkflow' ? 'subworkflow'
+              : typeKind === 'TriggerWorkflow' ? 'trigger-workflow'
               : 'agent';
             const isBatch = typeKind === 'BatchQuickPrompt';
             const isApi = typeKind === 'ApiCall';
@@ -5249,7 +5271,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
             if (!s.page_publish?.page_id?.trim() || !s.page_publish.writes.length) {
               errors.push(t('wiz.errorPublishPageConfig').replace('{0}', label));
             }
-          } else if (s.step_type?.type === 'SubWorkflow') {
+          } else if (s.step_type?.type === 'SubWorkflow' || s.step_type?.type === 'TriggerWorkflow') {
             // SubWorkflow steps run a child workflow — no prompt. They need a
             // `sub_workflow_id` (a saved-workflow id, or an `@bundle:<id>`
             // sentinel resolved at save when shipped as a decomposed preset).
