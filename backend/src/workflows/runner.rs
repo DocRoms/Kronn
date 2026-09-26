@@ -996,6 +996,8 @@ async fn execute_run_with_notify_policy(
             ctx.set(name, value);
         }
     }
+    // After trigger fields and variables, so neither can stand in for the run.
+    ctx.set("run.id", run.id.clone());
     // 0.7.0 Phase 3 — pre-seed every declared artifact to "" so a step
     // referencing `{{artifacts.review}}` on round 1 (before any step
     // wrote it) renders cleanly rather than leaving the literal
@@ -2088,7 +2090,8 @@ async fn execute_run_with_notify_policy(
         // output are kept in `ctx` (template visibility) but NOT
         // persisted — declaring is the contract that says "this matters
         // enough to write a file for".
-        let extracted = super::template::extract_artifacts(&outcome.result.output);
+        let (extracted, extracted_state) =
+            super::template::extract_step_markers(&outcome.result.output);
         if !extracted.is_empty() {
             persist_declared_artifacts(workflow, &extracted, std::path::Path::new(&work_dir));
         }
@@ -2098,7 +2101,7 @@ async fn execute_run_with_notify_policy(
         // next step; here we mirror those entries onto `run.state`
         // so they're persisted to the DB on the upcoming progress
         // snapshot and survive Gate pauses / daemon restarts.
-        for (k, v) in super::template::extract_state(&outcome.result.output) {
+        for (k, v) in extracted_state {
             run.state.insert(k, v);
         }
 
@@ -2832,7 +2835,7 @@ async fn execute_run_with_notify_policy(
             };
 
             ctx.set_step_output(&rb_step.name, &rb_outcome.result.output);
-            for (k, v) in super::template::extract_state(&rb_outcome.result.output) {
+            for (k, v) in super::template::extract_step_markers(&rb_outcome.result.output).1 {
                 run.state.insert(k, v);
             }
             run.tokens_used += rb_outcome.result.tokens_used.unwrap_or(0);

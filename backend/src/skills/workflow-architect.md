@@ -698,6 +698,8 @@ The optional `control` is `{ "type": "text" }`, `{ "type": "textarea" }`, or
 - `{{failed_step.name}}` / `{{failed_step.output}}` — **only valid inside `on_failure` steps**. The runner injects them when firing the rollback chain
 - `{{<launch_var>}}` — any name declared in `Workflow.variables` resolves at launch time from its declared source (`user_input`, current project `<env.NAME>`, or allowlisted `<context.key>`)
 - `{{issue.title}}` / `{{issue.body}}` / `{{issue.number}}` / `{{issue.url}}` / `{{issue.labels}}` — populated only when trigger is Tracker
+- `{{run.id}}` — id of the current workflow run (a SubWorkflow child run has its own)
+- `{{<path> ?? "text"}}` — the one explicit fallback (`'text'` also works, no escapes). Renders the literal when the path is absent or JSON null; a present empty string stays empty. Use it when a step may not have run on every path, e.g. `{{steps.porte_check.data.stdout ?? ""}}` after a `Goto` that skips `porte_check`, or `{{artifacts.review ?? ""}}` on round 1. Without `??`, an absent reference fails the step before it runs. A guarded reference may name a later step, never an unknown one, and never hides an unsupported filter
 - `{{time.now}}` — one timestamp captured at run start and reused by every step/source, including after a Gate/restart resume. `{{now}}` is a shorthand unless a declared/static variable named `now` exists. Compose vendor-neutral filters: `shift:+1d|-24h|-7d` (fixed durations; units `s,m,h,d,w`), `tz:Europe/Paris` (IANA; UTC default), `floor:minute|hour|day`, and `fmt:rfc3339|local_iso_ms|date|unix|unix_ms`. Example: `{{time.now|shift:-24h|tz:Europe/Paris|floor:hour|fmt:local_iso_ms}}`. Shorthand `{{now-24h|floor:hour}}` also works. Never invent plugin formats such as `fmt:adobe`; Adobe's no-zone local ISO shape is the generic `local_iso_ms` preset.
 
 ### StepOutputFormat (Agent steps only)
@@ -1099,7 +1101,7 @@ Do not paraphrase, do not move the disclaimer above the signal line, do not omit
 - The `actions` array supports post-workflow actions like `CreatePr` or `CreateIssue`, but these are advanced and rarely needed.
 - **`Gate` cannot live inside `on_failure`** — the run is already `Failed`, no resume path serves the pause, the wizard rejects it server-side.
 - **`Exec` requires `Workflow.exec_allowlist`** to be populated (otherwise the validator refuses to save). Allowlist matches on the bare binary name only — no `/usr/bin/cargo`, no `bash -c`, no shell metas.
-- **`---STATE:k=v---` blocks are 1-line only** — multi-line values won't parse. The block must be on its own line and close with `---` on the same line.
+- **`---STATE:k=v---` blocks are 1-line only** — multi-line values won't parse. The block must be on its own line and close with `---` on the same line. Exception: an `Exec` step's markers are read from its raw stdout, where a value may span lines up to the first `---`.
 - **`---ARTIFACT:name---...---END_ARTIFACT---`** is multi-line, content captured between the markers (single trailing newline trimmed).
 - **`Goto.max_iterations` is a per-edge cap**, not workflow-wide. Two different Gotos targeting different steps each have their own counter. The workflow-level `loop_detection_max_revisits` guard remains the global safety net.
 - **Launch variables must be declared in `Workflow.variables` to be valid** — referencing `{{some_var}}` in a step prompt without declaring it renders empty at runtime. The wizard surfaces a live warning ("undeclared var") with a 1-click "add to launch variables" button.

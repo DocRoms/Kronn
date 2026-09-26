@@ -297,7 +297,7 @@
   },
   "discovery_rule": "Do not infer the available step types from one workflow: step_types_closed_set is the complete taxonomy. To adapt an existing workflow, call workflow_list and then workflow_get with an id actually returned by that list; no named example is guaranteed to exist.",
   "template_vars": {
-    "syntax": "`{{namespace.path}}` in any string field (prompt_template, api_endpoint_path, api_query/api_body values, exec_args/exec_stdin, gate_message, notify_config, …). Dotted nested access works incl. array index: `{{steps.plan.data.subtasks.0.title}}`. An UNKNOWN ref is left VERBATIM in previews and rejected before execution, so a typo never reaches an agent, command or external API.",
+    "syntax": "`{{namespace.path}}` in any string field (prompt_template, api_endpoint_path, api_query/api_body values, exec_args/exec_stdin, gate_message, notify_config, …). Dotted nested access works incl. array index: `{{steps.plan.data.subtasks.0.title}}`. An UNKNOWN ref is left VERBATIM in previews and rejected before execution, so a typo never reaches an agent, command or external API. The one explicit fallback is `{{path ?? \"text\"}}` (or `'text'`, no escapes): it renders the literal when the path is absent or JSON null, e.g. `{{steps.check.data.stdout ?? \"\"}}` after a Goto skipped `check`; such a ref may name a later step but never an unknown one.",
     "namespaces": {
       "steps.<name>.output": "raw text the step produced (FreeText).",
       "steps.<name>.data": "structured payload (Structured/TypedSchema agent, ApiCall/Exec/JsonData envelope). Nested fields: `steps.<name>.data.<field>` (incl. array index). Strings unwrapped for clean interpolation. In an api_body, a field whose value is EXACTLY one such placeholder is injected as the REAL typed JSON (array/object preserved) — write it quoted, e.g. `\"comments\": \"{{steps.review.data.inlineComments}}\"`.",
@@ -306,8 +306,9 @@
       "previous_step.{output,data,data_json,summary,status}": "shorthand for the immediately preceding step.",
       "batch.item.<field> / item.<field> / <field>": "the current item inside a BatchApiCall / BatchQuickPrompt fan-out (templatable in api_endpoint_path + body/query). `{{batch.index}}` = 0-based index, `{{batch.item}}` = whole item JSON.",
       "current_task / current_task.<field>": "the current item inside a SubWorkflow foreach child (DIFFERENT name from batch fan-out's `batch.item.*`; see SubWorkflow.FOREACH_RUNTIME_CONTRACT).",
-      "state.<key>": "run state written by a step via a `---STATE:<k>=<v>---` line; persists across Gate pauses + Goto loops.",
+      "state.<key>": "run state written by a step via a `---STATE:<k>=<v>---` line; persists across Gate pauses + Goto loops. An Exec's markers are read from its raw stdout, where a value may span lines up to its closing `---`.",
       "artifacts.<name>": "content a step emitted via a `---ARTIFACT:<name>---` block.",
+      "run.id": "id of the current workflow run (a SubWorkflow child run has its own).",
       "issue.{title,body,number,url,labels}": "tracker-trigger fields (Cron/Tracker workflows).",
       "time.now / now": "one timestamp captured at run start and reused by all steps and parallel CollectApiData sources, including after resume. `now` is shorthand unless a static/launch variable named `now` exists.",
       "<launch_var>": "any `variables[].name` is referenced bare as `{{name}}`. Its source is user_input (default), project_env with source_ref `<env.NAME>`, or kronn_context with `<context.key>`. References resolve at run start; never store the resolved value."

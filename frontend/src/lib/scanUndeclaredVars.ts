@@ -19,8 +19,12 @@
 //                                    them broadly because trigger contexts
 //                                    inject arbitrary string fields)
 //   - <bare_name>                   (when listed in workflow.variables)
+//   - run.id                        (the current run, runtime injected)
 //
-// Anything else → undeclared.
+// Anything else → undeclared. A reference with a quoted fallback
+// (`{{steps.X.data ?? ""}}`) accepts absence: it may name a step a Goto
+// skips or that runs later, and an undeclared name is optional. A step
+// name that exists nowhere is still flagged, as the backend does at save.
 //
 // Note on `{{steps.X.Y}}` with X = unknown step : we surface that here
 // too as undeclared (the backend's hard validator catches the same case
@@ -30,6 +34,10 @@
 import type { WorkflowStep, PromptVariable, ArtifactSpec } from '../types/generated';
 
 const VAR_RE = /\{\{\s*([^}]+?)\s*\}\}/g;
+// Same grammar as the backend's `split_fallback`: `path ?? "text"` or `'text'`.
+const FALLBACK_RE = /^(.*?)\s*\?\?\s*(?:"[\s\S]*"|'[\s\S]*')$/;
+
+const ALWAYS_VALID_NAMES = new Set(['run.id']);
 
 const ALWAYS_VALID_PREFIXES = [
   'previous_step.',
@@ -71,7 +79,11 @@ export function scanUndeclaredVars(
 ): UndeclaredVar[] {
   const out: UndeclaredVar[] = [];
   const seen = new Set<string>();
+  const flag = (name: string, reason: UndeclaredVar['reason']) => {
+    if (!out.some(v => v.name === name)) out.push({ name, reason });
+  };
   const stepNames = new Set(opts.allSteps.slice(0, opts.currentStepIdx).map(s => s.name));
+  const allStepNames = new Set(opts.allSteps.map(s => s.name));
   const declaredVarNames = new Set(opts.workflowVariables.map(v => v.name));
   const declaredArtifactKeys = new Set(Object.keys(opts.artifacts));
 
@@ -79,11 +91,16 @@ export function scanUndeclaredVars(
   // Reset regex state.
   VAR_RE.lastIndex = 0;
   while ((match = VAR_RE.exec(prompt)) !== null) {
-    const raw = match[1].trim();
+    let raw = match[1].trim();
+    const fallback = FALLBACK_RE.exec(raw);
+    if (fallback) raw = fallback[1].trim();
+    const guarded = fallback !== null;
     // Skip pipes / filters / weird forms — we only check simple `name` or `a.b.c`.
-    if (raw === '' || raw.includes('|') || raw.includes(' ')) continue;
-    if (seen.has(raw)) continue;
-    seen.add(raw);
+    if (raw === '' || raw.includes('|') || raw.includes(' ') || raw.includes('?')) continue;
+    const seenKey = guarded ? `${raw} ??` : raw;
+    if (seen.has(seenKey)) continue;
+    seen.add(seenKey);
+    if (ALWAYS_VALID_NAMES.has(raw)) continue;
 
     // 1) Always-valid runtime prefixes.
     if (ALWAYS_VALID_PREFIXES.some(p => raw.startsWith(p))) {
@@ -106,17 +123,17 @@ export function scanUndeclaredVars(
     // 2) failed_step.* only valid in rollback.
     if (raw.startsWith('failed_step.')) {
       if (!opts.inRollback) {
-        out.push({ name: raw, reason: 'failed_step_outside_rollback' });
+        flag(raw, 'failed_step_outside_rollback');
       }
       continue;
     }
 
-    // 3) steps.<name>.<field> — must reference an earlier step.
+    // 3) steps.<name>.<field> — an earlier step, or any step behind a fallback.
     if (raw.startsWith('steps.')) {
       const rest = raw.slice('steps.'.length);
       const stepName = rest.split('.')[0];
-      if (!stepNames.has(stepName)) {
-        out.push({ name: raw, reason: 'unknown_step' });
+      if (!(guarded ? allStepNames : stepNames).has(stepName)) {
+        flag(raw, 'unknown_step');
       }
       continue;
     }
@@ -129,6 +146,9 @@ export function scanUndeclaredVars(
       continue;
     }
 
+    // A fallback makes any other name optional: absence is the declared case.
+    if (guarded) continue;
+
     // 5) Bare name (no dot).
     if (!raw.includes('.')) {
       if (declaredVarNames.has(raw)) continue;
@@ -138,12 +158,12 @@ export function scanUndeclaredVars(
       // injects them then). For Manual triggers, only declared
       // workflow variables are valid.
       if (opts.triggerType !== 'Manual' && (raw === 'type' || raw === 'triggered_at')) continue;
-      out.push({ name: raw, reason: 'unknown_bare' });
+      flag(raw, 'unknown_bare');
       continue;
     }
 
     // 6) Anything else with a dot but no matching prefix → unknown.
-    out.push({ name: raw, reason: 'unknown_bare' });
+    flag(raw, 'unknown_bare');
   }
   return out;
 }

@@ -31,6 +31,14 @@ Release notes for 0.9.3 and earlier are available in the
   stored on the in-flight step result as `last_activity` and returned by
   `workflow_run_status` as `current_activity`, so every reader sees what the
   step is doing, not only the client that started the run.
+- Workflow templates accept one explicit fallback, `{{path ?? "text"}}` (or
+  `'text'`, taken verbatim). It renders the literal when the path is absent or
+  JSON null, so a step reading a step that a `Goto` skipped runs instead of
+  failing the run; a present empty value stays empty, and an absent reference
+  without `??` still fails as before. Saving still refuses an unknown step name
+  behind a fallback and now refuses a malformed one; the wizard no longer warns
+  about a guarded reference to a later step. `{{run.id}}` gives the current
+  run's id. See [the template grammar](docs/architecture/overview.md).
 - A room's native agent can prepare and launch a task execution itself, as
   its principal, without a CLI joining the room. Kronn identifies it from the
   turn it is running, so only that room's agent is accepted.
@@ -103,6 +111,12 @@ Release notes for 0.9.3 and earlier are available in the
   Local models got bounded edits with indented edges wrong on every measured
   case. The prelocalized worker brief no longer carries the human-arbitration
   and parent-milestone sections.
+- An `Exec` step's `---STATE:k=v---` and `---ARTIFACT:name---` markers are read
+  from the command's raw stdout instead of the JSON-escaped copy in its
+  envelope. A multi-line value or artifact now reaches later steps and the run
+  state with real line breaks rather than literal `\n`, and quotes and
+  backslashes are no longer escaped. Only stdout is read; there a `STATE` value
+  may span lines up to its closing `---`.
 - A Kronn action card opened from a Live Page no longer closes every 30 s
   when the Page refreshes, and keeps what was typed in it; it now follows its
   row when new data makes the Page redraw. Each row's state carries its launch

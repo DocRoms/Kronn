@@ -94,7 +94,7 @@ describe('placeholdersInStep', () => {
         'fetch={{steps.fetch.data}} batch={{batch.item.title}} prev={{previous_qp.output}} ' +
         'iter={{iter.x}} state={{state.k}} failed={{failed_step.error}} env={{env.HOME}} ' +
         'trig={{trigger.issue.key}} ps={{previous_step.summary}} art={{artifacts.report}} ' +
-        'user={{issue}}',
+        'run={{run.id}} user={{issue}}',
     });
     // Only `issue` (bare, user-provided) should survive.
     expect(placeholdersInStep(step)).toEqual(['issue']);

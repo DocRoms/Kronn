@@ -3701,6 +3701,142 @@ async fn workflow_http_optional_input_does_not_hide_unknown_template_variables()
     );
 }
 
+/// A reference guarded by `??` survives a Goto that skips its step, and an
+/// Exec's multi-line markers and `{{run.id}}` reach the next step as printed.
+#[cfg(unix)]
+#[tokio::test]
+async fn workflow_goto_path_renders_fallback_exec_markers_and_run_id() {
+    use kronn::models::{ConditionAction, RunStatus, StepConditionRule, StepType, WorkflowStep};
+    let state = test_state();
+    let directory = tempfile::tempdir().unwrap();
+    let project_path = directory.path().to_string_lossy().into_owned();
+    let now = chrono::Utc::now();
+    let workflow = kronn::models::Workflow {
+        id: "goto-fallback-workflow".into(),
+        name: "Goto fallback".into(),
+        project_id: Some("goto-fallback-project".into()),
+        trigger: kronn::models::WorkflowTrigger::Manual,
+        steps: vec![
+            WorkflowStep {
+                name: "sortie".into(),
+                step_type: StepType::Exec,
+                exec_command: Some("cat".into()),
+                // Prints stdin, then fails on the missing file: exit 1.
+                exec_args: vec!["-".into(), "missing-file".into()],
+                exec_stdin: Some(
+                    "log\n---STATE:plan=first line\nsecond line---\n\
+                     ---ARTIFACT:notes---\nline A\nline B\n---END_ARTIFACT---\n"
+                        .into(),
+                ),
+                on_result: vec![StepConditionRule {
+                    contains: "exit_1".into(),
+                    action: ConditionAction::Goto {
+                        step_name: "enchaine".into(),
+                        max_iterations: None,
+                    },
+                }],
+                ..Default::default()
+            },
+            WorkflowStep {
+                name: "porte_check".into(),
+                step_type: StepType::Exec,
+                exec_command: Some("cat".into()),
+                exec_stdin: Some("must not run".into()),
+                ..Default::default()
+            },
+            WorkflowStep {
+                name: "enchaine".into(),
+                step_type: StepType::Gate,
+                gate_message: Some(
+                    r#"check=[{{steps.porte_check.data.stdout ?? ""}}] run={{run.id}} plan=[{{state.plan}}] notes=[{{artifacts.notes}}]"#
+                        .into(),
+                ),
+                ..Default::default()
+            },
+        ],
+        actions: vec![],
+        safety: kronn::models::WorkflowSafety {
+            sandbox: false,
+            max_files: None,
+            max_lines: None,
+            require_approval: false,
+        },
+        workspace_config: None,
+        concurrency_limit: None,
+        guards: None,
+        artifacts: HashMap::new(),
+        on_failure: vec![],
+        exec_allowlist: vec!["cat".into()],
+        variables: vec![],
+        enabled: true,
+        pinned: false,
+        created_at: now,
+        updated_at: now,
+    };
+    state.db.with_conn(move |conn| {
+        conn.execute("INSERT INTO projects (id,name,path,created_at,updated_at) VALUES ('goto-fallback-project','Goto fallback',?1,?2,?2)", rusqlite::params![project_path, now.to_rfc3339()])?;
+        kronn::db::workflows::insert_workflow(conn, &workflow)
+    }).await.unwrap();
+    let response = build_router_with_auth(state.clone(), false)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/workflows/goto-fallback-workflow/trigger")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::json!({"variables": {}}).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        response.into_body().collect(),
+    )
+    .await
+    .expect("workflow SSE must terminate")
+    .unwrap()
+    .to_bytes();
+    let events = String::from_utf8(bytes.to_vec()).unwrap();
+    let run_id = events
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .filter_map(|data| serde_json::from_str::<Value>(data).ok())
+        .find_map(|event| event["run_id"].as_str().map(str::to_owned))
+        .unwrap_or_else(|| panic!("missing run_start: {events}"));
+    let run = state
+        .db
+        .with_conn(move |conn| kronn::db::workflows::get_run(conn, &run_id))
+        .await
+        .unwrap()
+        .expect("persisted run");
+
+    assert_eq!(
+        run.status,
+        RunStatus::WaitingApproval,
+        "{:?}",
+        run.step_results
+    );
+    let executed: Vec<&str> = run
+        .step_results
+        .iter()
+        .map(|result| result.step_name.as_str())
+        .collect();
+    assert_eq!(executed, ["sortie", "enchaine"], "porte_check is skipped");
+    assert_eq!(run.step_results[0].status, RunStatus::Failed);
+    assert_eq!(
+        run.step_results[1].output,
+        format!(
+            "check=[] run={} plan=[first line\nsecond line] notes=[line A\nline B]",
+            run.id
+        )
+    );
+    assert_eq!(
+        run.state.get("plan").map(String::as_str),
+        Some("first line\nsecond line")
+    );
+}
+
 /// KT-786: the MCP launcher must prepare the same encrypted snapshot as the
 /// UI route, so a workflow with required variables reaches its first step.
 #[tokio::test]

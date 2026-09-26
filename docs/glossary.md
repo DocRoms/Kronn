@@ -163,7 +163,7 @@ Project-specific terms. For deep dives, follow the linked `docs/architecture/` f
 
 **Symphony** — OpenAI's `WORKFLOW.md`-based automation system: single-agent, single-prompt and tracker-driven. Kronn does not currently import this format and is not a superset of Symphony's orchestration. The systems intentionally share the four workspace-hook names; Kronn otherwise uses its own versioned JSON model and adds multi-step/multi-agent execution, conditional branching, native APIs, approval gates and cost guards.
 
-**Kronn workflow templates** — Purpose-built `{{variable}}` substitution used in workflow prompts and deterministic step fields. Examples: `{{issue.title}}`, `{{issue.body}}`, `{{issue.number}}`, `{{previous_step.output}}`, `{{steps.<name>.output}}`. It is not Liquid and supports no filters. Runtime rendering is strict; preview rendering preserves unresolved placeholders for human diagnosis.
+**Kronn workflow templates** — Purpose-built `{{variable}}` substitution used in workflow prompts and deterministic step fields. Examples: `{{issue.title}}`, `{{issue.body}}`, `{{issue.number}}`, `{{previous_step.output}}`, `{{steps.<name>.output}}`, `{{run.id}}`. It is not Liquid and supports no filters beyond `time.now`. Runtime rendering is strict; preview rendering preserves unresolved placeholders for human diagnosis. `{{path ?? "text"}}` is the one explicit fallback for a path that may be absent.
 
 ## Agents
 

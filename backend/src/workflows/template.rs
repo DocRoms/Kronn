@@ -5,7 +5,8 @@
 //! vendor-neutral `time.now` grammar; arbitrary Liquid filters remain
 //! unsupported. Preview rendering keeps unresolved placeholders visible to the
 //! author; execution rendering is strict so a typo can never be sent to an
-//! agent or an external command/API.
+//! agent or an external command/API. `{{path ?? "text"}}` is the one explicit
+//! way to accept an absent (or JSON null) path, e.g. a step skipped by a Goto.
 
 use anyhow::Result;
 use chrono::{DateTime, Datelike, Duration, SecondsFormat, TimeZone, Timelike, Utc};
@@ -158,33 +159,21 @@ impl TemplateContext {
                 .insert("previous_step.data_json".into(), envelope.data_json);
         }
 
-        // 0.7.0 Phase 3 — also extract any `---ARTIFACT:<name>---` blocks
-        // and expose them as `{{artifacts.<name>}}`. Persistence to disk
-        // is handled by the runner (which knows the workspace path);
-        // this just makes the content available to subsequent steps via
-        // the same render path. Re-emitting the same artifact on a
-        // later step overwrites the previous render — Auto-Dev's
-        // implement→review→implement loop relies on this.
-        for (name, content) in extract_artifacts(output) {
+        // `---ARTIFACT:<name>---` blocks and `---STATE:<k>=<v>---` entries
+        // become `{{artifacts.<name>}}` / `{{state.<k>}}` for later steps;
+        // the runner persists them. A later emission overwrites the earlier
+        // one — Auto-Dev's implement→review→implement loop relies on this.
+        let (artifacts, state) = extract_step_markers(output);
+        for (name, content) in artifacts {
             self.values.insert(format!("artifacts.{}", name), content);
         }
-
-        // 0.7.0 Phase 6 — same pattern for `---STATE:<k>=<v>---` lines.
-        // Persistence to the run row is handled by the runner; this
-        // just exposes the freshly-written state to subsequent steps in
-        // the same iteration via `{{state.<k>}}`. Re-writing a key
-        // overwrites — the run.state map ends up with the last value.
-        for (k, v) in extract_state(output) {
+        for (k, v) in state {
             self.values.insert(format!("state.{}", k), v);
         }
     }
 
-    /// Seed the context with previously-persisted artifacts at run start.
-    /// Used by the runner to make `{{artifacts.<name>}}` resolve before
-    /// the first step that produces them — Auto-Dev's first
-    /// `implement` iteration reads `{{artifacts.review | if_exists}}`
-    /// which is empty on round 1 (no review yet) and populated on
-    /// rounds 2+ once the previous iteration wrote it.
+    /// Seed `{{artifacts.<name>}}` values before any step produced them.
+    /// A step that can run before its producer reads `{{artifacts.review ?? ""}}`.
     pub fn seed_artifacts(&mut self, artifacts: &::std::collections::HashMap<String, String>) {
         for (name, content) in artifacts {
             self.values
@@ -209,22 +198,29 @@ impl TemplateContext {
     /// is injected as real JSON rather than an escaped string. A flat string
     /// value is returned as `Value::String` (so scalars stay scalars).
     pub fn resolve_value(&self, key: &str) -> Option<serde_json::Value> {
+        let (path, fallback) = split_fallback(key).ok()?;
         // Typed resolution FIRST so a `.data` / `.data_json` (whole or nested)
         // yields the PARSED value, not the flat unwrapped string. Non-data keys
         // (launch vars, `current_task.<field>`, …) fall through to the flat
         // string value, preserving scalar-as-string behaviour.
-        if let Some(v) = resolve_typed_path(&self.values, key) {
-            return Some(v);
-        }
-        self.values
-            .get(key)
-            .map(|v| serde_json::Value::String(v.clone()))
+        let value = resolve_typed_path(&self.values, path)
             .or_else(|| {
-                self.resolve_time_expression(key)
+                self.values
+                    .get(path)
+                    .map(|v| serde_json::Value::String(v.clone()))
+            })
+            .or_else(|| {
+                self.resolve_time_expression(path)
                     .ok()
                     .flatten()
                     .map(serde_json::Value::String)
-            })
+            });
+        match (value, fallback) {
+            (None | Some(serde_json::Value::Null), Some(literal)) => {
+                Some(serde_json::Value::String(literal.to_string()))
+            }
+            (value, _) => value,
+        }
     }
 
     /// Render a template for an editor/preview surface.
@@ -277,24 +273,33 @@ impl TemplateContext {
                 }
 
                 let key = var_name.trim();
-                if let Some(value) = self.values.get(key) {
-                    result.push_str(value);
-                } else if let Some(value) = resolve_nested_path(&self.values, key) {
-                    result.push_str(&value);
-                } else if let Some(value) = match self.resolve_time_expression(key) {
-                    Ok(value) => value,
+                let (path, fallback) = match split_fallback(key) {
+                    Ok(parts) => parts,
                     Err(error) if strict => return Err(error),
-                    Err(_) => None,
-                } {
-                    result.push_str(&value);
-                } else if strict && key.contains('|') {
-                    let filter = key
+                    Err(_) => {
+                        result.push_str("{{");
+                        result.push_str(key);
+                        result.push_str("}}");
+                        continue;
+                    }
+                };
+                let value = if fallback.is_some() && self.is_json_null(path) {
+                    None
+                } else {
+                    self.lookup(path, strict)?
+                };
+                // A filter is a syntax error, not an absence: `??` never hides it.
+                if value.is_none() && strict && path.contains('|') {
+                    let filter = path
                         .split_once('|')
                         .map(|(_, filter)| filter.trim())
                         .unwrap_or_default();
                     anyhow::bail!(
                         "Unsupported workflow template filter `{filter}` in `{{{{{key}}}}}`; Kronn templates support variables and dotted paths, not Liquid filters"
                     );
+                }
+                if let Some(value) = value.as_deref().or(fallback) {
+                    result.push_str(value);
                 } else if strict {
                     anyhow::bail!("Unknown workflow template variable `{key}`");
                 } else {
@@ -309,6 +314,27 @@ impl TemplateContext {
         }
 
         Ok(result)
+    }
+
+    fn lookup(&self, key: &str, strict: bool) -> Result<Option<String>> {
+        if let Some(value) = self.values.get(key) {
+            return Ok(Some(value.clone()));
+        }
+        if let Some(value) = resolve_nested_path(&self.values, key) {
+            return Ok(Some(value));
+        }
+        match self.resolve_time_expression(key) {
+            Ok(value) => Ok(value),
+            Err(error) if strict => Err(error),
+            Err(_) => Ok(None),
+        }
+    }
+
+    fn is_json_null(&self, path: &str) -> bool {
+        matches!(
+            resolve_typed_path(&self.values, path),
+            Some(serde_json::Value::Null)
+        )
     }
 
     fn resolve_time_expression(&self, expression: &str) -> Result<Option<String>> {
@@ -495,6 +521,26 @@ fn parse_time_shift(raw: &str) -> Result<Duration> {
     Ok(Duration::seconds(seconds))
 }
 
+/// Split `path ?? "text"` (or `'text'`) into the path and its fallback. The
+/// literal is taken verbatim, without escapes; it applies when the path is
+/// absent or JSON null, never to hide a syntax error.
+fn split_fallback(key: &str) -> Result<(&str, Option<&str>)> {
+    let Some((path, literal)) = key.split_once("??") else {
+        return Ok((key, None));
+    };
+    let path = path.trim();
+    let literal = literal.trim();
+    let text = ['"', '\'']
+        .into_iter()
+        .find_map(|quote| literal.strip_prefix(quote)?.strip_suffix(quote));
+    match text {
+        Some(text) if !path.is_empty() => Ok((path, Some(text))),
+        _ => anyhow::bail!(
+            "Invalid fallback in `{{{{{key}}}}}`; write `{{{{path ?? \"text\"}}}}` with a quoted literal"
+        ),
+    }
+}
+
 /// Resolve a dotted path like `steps.X.data.subtasks.0.title` against a flat
 /// values map. The map only stores the top-level pseudo-keys
 /// (`steps.X.data`, `steps.X.data_json`, `previous_step.data`, etc.); to look
@@ -607,11 +653,15 @@ pub fn validate_step_references(steps: &[crate::models::WorkflowStep]) -> Result
     // structured envelope at all. Sub-path validity is best-effort
     // (resolved at run time, leaves placeholder if missing) since we don't
     // know the actual JSON shape ahead of execution.
+    // Group 6 is an optional `?? "text"` fallback: such a reference may name a
+    // step that a Goto skips or that runs later, but the step must exist.
     static RE: std::sync::LazyLock<regex_lite::Regex> = std::sync::LazyLock::new(|| {
         regex_lite::Regex::new(
-            r"\{\{\s*(?:steps\.([A-Za-z0-9_\-]+)\.(data|summary|status|data_json|output)((?:\.[A-Za-z0-9_\-]+)*)|previous_step\.(data|summary|status|data_json|output)((?:\.[A-Za-z0-9_\-]+)*))\s*\}\}"
+            r#"\{\{\s*(?:steps\.([A-Za-z0-9_\-]+)\.(data|summary|status|data_json|output)((?:\.[A-Za-z0-9_\-]+)*)|previous_step\.(data|summary|status|data_json|output)((?:\.[A-Za-z0-9_\-]+)*))\s*(\?\?\s*(?:"[^}]*"|'[^}]*')\s*)?\}\}"#
         ).unwrap()
     });
+    static PLACEHOLDER: std::sync::LazyLock<regex_lite::Regex> =
+        std::sync::LazyLock::new(|| regex_lite::Regex::new(r"\{\{(.*?)\}\}").unwrap());
 
     /// Le step émet-il une envelope Structured exploitable par
     /// `{{steps.X.data|summary|status|data_json}}` ? Pour l'Agent, ça
@@ -647,7 +697,13 @@ pub fn validate_step_references(steps: &[crate::models::WorkflowStep]) -> Result
 
     let mut errors = Vec::new();
     for (idx, step) in steps.iter().enumerate() {
+        for placeholder in PLACEHOLDER.captures_iter(&step.prompt_template) {
+            if let Err(error) = split_fallback(placeholder[1].trim()) {
+                errors.push(format!("Étape '{}' : {error}", step.name));
+            }
+        }
         for caps in RE.captures_iter(&step.prompt_template) {
+            let guarded = caps.get(6).is_some();
             if let (Some(name), Some(field)) = (caps.get(1), caps.get(2)) {
                 let target_name = name.as_str();
                 let target_field = field.as_str();
@@ -662,8 +718,13 @@ pub fn validate_step_references(steps: &[crate::models::WorkflowStep]) -> Result
                     ));
                     continue;
                 }
-                // Look only in strictly-upstream steps (can't read self or future)
-                let upstream = steps.iter().take(idx).find(|s| s.name == target_name);
+                // Strictly upstream (can't read self or future) unless the
+                // reference carries a fallback for the not-yet-run case.
+                let upstream = if guarded {
+                    steps.iter().find(|s| s.name == target_name)
+                } else {
+                    steps.iter().take(idx).find(|s| s.name == target_name)
+                };
                 match upstream {
                     // `.output` is the RAW text — any upstream format is fine;
                     // only existence/ordering matter (a typo'd name used to
@@ -701,6 +762,9 @@ pub fn validate_step_references(steps: &[crate::models::WorkflowStep]) -> Result
                     continue;
                 }
                 if idx == 0 {
+                    if guarded {
+                        continue;
+                    }
                     errors.push(format!(
                         "Étape '{}' utilise {{{{previous_step.{}}}}} mais c'est la première étape du workflow — il n'y a pas de précédente.",
                         step.name, target_field
@@ -741,7 +805,7 @@ pub fn healable_producer_names(steps: &[crate::models::WorkflowStep]) -> Vec<Str
     use crate::models::StepOutputFormat;
     static RE: std::sync::LazyLock<regex_lite::Regex> = std::sync::LazyLock::new(|| {
         regex_lite::Regex::new(
-            r"\{\{\s*(?:steps\.([A-Za-z0-9_\-]+)\.(?:data|summary|status|data_json)|previous_step\.(?:data|summary|status|data_json))\s*\}\}"
+            r#"\{\{\s*(?:steps\.([A-Za-z0-9_\-]+)\.(?:data|summary|status|data_json)|previous_step\.(?:data|summary|status|data_json))\s*(?:\?\?\s*(?:"[^}]*"|'[^}]*')\s*)?\}\}"#
         ).unwrap()
     });
 
@@ -919,6 +983,16 @@ pub fn extract_artifacts(text: &str) -> ::std::collections::HashMap<String, Stri
 ///   `---STATE:last_verdict=approved---`
 ///   `---STATE:notes=---`              (empty value, key "notes" set to "")
 pub fn extract_state(text: &str) -> ::std::collections::HashMap<String, String> {
+    extract_state_entries(text, false)
+}
+
+/// `multiline` lets a value run over several lines up to the first `---`.
+/// Only an Exec's raw stdout is read that way: its author controls every byte,
+/// unlike agent prose where a stray `---` would end a runaway value.
+fn extract_state_entries(
+    text: &str,
+    multiline: bool,
+) -> ::std::collections::HashMap<String, String> {
     use ::std::collections::HashMap;
     let mut out = HashMap::new();
     let prefix = "---STATE:";
@@ -927,9 +1001,12 @@ pub fn extract_state(text: &str) -> ::std::collections::HashMap<String, String> 
     while let Some(start_rel) = text[cursor..].find(prefix) {
         let header_start = cursor + start_rel;
         let after_prefix = &text[header_start + prefix.len()..];
-        // Each entry is a single line — anything past `\n` ends the search.
-        // Find the closing `---` BEFORE any newline.
-        let line_end = after_prefix.find('\n').unwrap_or(after_prefix.len());
+        // Outside `multiline`, the closing `---` must come before any newline.
+        let line_end = if multiline {
+            after_prefix.len()
+        } else {
+            after_prefix.find('\n').unwrap_or(after_prefix.len())
+        };
         let line_slice = &after_prefix[..line_end];
         let close_rel = match line_slice.find(suffix) {
             Some(i) => i,
@@ -947,9 +1024,57 @@ pub fn extract_state(text: &str) -> ::std::collections::HashMap<String, String> 
                 out.insert(key, value);
             }
         }
-        cursor = header_start + prefix.len() + close_rel + suffix.len();
+        // A multi-line value left unclosed ends where the next marker begins,
+        // so resume on that `---` instead of skipping past it.
+        cursor = header_start + prefix.len() + close_rel;
+        if !multiline {
+            cursor += suffix.len();
+        }
     }
     out
+}
+
+/// Artifacts and state emitted by a step output. An Exec keeps its stdout
+/// JSON-escaped inside the envelope, so its markers are read from the decoded
+/// stdout rather than from that escaped copy.
+pub fn extract_step_markers(
+    output: &str,
+) -> (
+    ::std::collections::HashMap<String, String>,
+    ::std::collections::HashMap<String, String>,
+) {
+    let Some((before, stdout, after)) = split_exec_stdout(output) else {
+        return (extract_artifacts(output), extract_state(output));
+    };
+    let mut artifacts = extract_artifacts(before);
+    let mut state = extract_state(before);
+    artifacts.extend(extract_artifacts(&stdout));
+    state.extend(extract_state_entries(&stdout, true));
+    artifacts.extend(extract_artifacts(after));
+    state.extend(extract_state(after));
+    (artifacts, state)
+}
+
+/// `(text before the envelope, decoded stdout, text after it)` for an Exec
+/// output, recognised by the exact keys of its `data`.
+fn split_exec_stdout(output: &str) -> Option<(&str, String, &str)> {
+    const OPEN: &str = "---STEP_OUTPUT---";
+    const CLOSE: &str = "---END_STEP_OUTPUT---";
+    if !output.contains("\"exit_code\"") {
+        return None;
+    }
+    let start = output.find(OPEN)?;
+    let end = output.rfind(CLOSE).filter(|end| *end > start)?;
+    let envelope = extract_step_envelope(output)?;
+    let serde_json::Value::Object(data) = serde_json::from_str(&envelope.data_json).ok()? else {
+        return None;
+    };
+    let exec_keys = ["exit_code", "stdout", "stderr", "duration_ms"];
+    if data.len() != exec_keys.len() || !exec_keys.iter().all(|key| data.contains_key(*key)) {
+        return None;
+    }
+    let stdout = data.get("stdout")?.as_str()?.to_string();
+    Some((&output[..start], stdout, &output[end + CLOSE.len()..]))
 }
 
 // ─── TypedSchema (0.7.0 Phase 2) ─────────────────────────────────────────────
@@ -3044,6 +3169,241 @@ mod tests {
         ctx.set_step_output("r2", "---STATE:last_verdict=approved---");
         let rendered = ctx.render("{{state.last_verdict}}").unwrap();
         assert_eq!(rendered, "approved");
+    }
+
+    // ─── Explicit fallback `??` and Exec markers ─────────────────────────────
+
+    /// Exec output exactly as `exec_step` formats it.
+    fn exec_output(stdout: &str) -> String {
+        let envelope = serde_json::json!({
+            "data": {"exit_code": 3, "stdout": stdout, "stderr": "", "duration_ms": 4},
+            "status": "ERROR",
+            "summary": "exit 3 — 4 ms",
+        });
+        format!(
+            "exit 3 — 4 ms\n\n---STEP_OUTPUT---\n{envelope}\n---END_STEP_OUTPUT---\n[SIGNAL: ERROR]\n[SIGNAL: exit_3]"
+        )
+    }
+
+    #[test]
+    fn strict_fallback_renders_its_literal_for_a_step_that_never_ran() {
+        let ctx = TemplateContext::new();
+        assert_eq!(
+            ctx.render_strict(r#"[{{steps.absent.data.stdout ?? ""}}]"#)
+                .unwrap(),
+            "[]"
+        );
+        assert_eq!(
+            ctx.render_strict("{{ steps.absent.data.stdout ?? 'none' }}")
+                .unwrap(),
+            "none"
+        );
+        assert_eq!(
+            ctx.render_strict(r#"{{steps.absent.summary ?? "said "no""}}"#)
+                .unwrap(),
+            r#"said "no""#,
+            "the literal is verbatim between its outer quotes"
+        );
+        assert_eq!(
+            ctx.render(r#"{{steps.absent.data.stdout ?? ""}}"#).unwrap(),
+            "",
+            "preview applies the fallback the run would apply"
+        );
+    }
+
+    #[test]
+    fn strict_fallback_keeps_a_present_value() {
+        let mut ctx = TemplateContext::new();
+        ctx.set_step_output("porte_check", &exec_output("gate ok\n"));
+        ctx.set("ticket", "");
+        assert_eq!(
+            ctx.render_strict(r#"{{steps.porte_check.data.stdout ?? "x"}}"#)
+                .unwrap(),
+            "gate ok\n"
+        );
+        assert_eq!(
+            ctx.render_strict(r#"{{steps.porte_check.data.exit_code??"x"}}"#)
+                .unwrap(),
+            "3"
+        );
+        // Only absence or JSON null falls back: a present empty value stays.
+        assert_eq!(ctx.render_strict(r#"{{ticket ?? "x"}}"#).unwrap(), "");
+    }
+
+    #[test]
+    fn strict_fallback_replaces_json_null() {
+        let mut ctx = TemplateContext::new();
+        ctx.set_step_output(
+            "api",
+            "---STEP_OUTPUT---\n{\"data\": {\"owner\": null}, \"status\": \"OK\", \"summary\": \"s\"}\n---END_STEP_OUTPUT---",
+        );
+        assert_eq!(
+            ctx.render_strict(r#"{{steps.api.data.owner ?? "nobody"}}"#)
+                .unwrap(),
+            "nobody"
+        );
+        assert_eq!(ctx.render_strict("{{steps.api.data.owner}}").unwrap(), "");
+    }
+
+    #[test]
+    fn strict_reference_without_fallback_still_fails_when_absent() {
+        let ctx = TemplateContext::new();
+        let error = ctx
+            .render_strict("{{steps.absent.data.stdout}}")
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            error,
+            "Unknown workflow template variable `steps.absent.data.stdout`"
+        );
+    }
+
+    #[test]
+    fn malformed_fallback_is_rejected_and_never_hides_a_syntax_error() {
+        let ctx = TemplateContext::new();
+        for template in [
+            "{{x ?? y}}",
+            "{{x ?? \"open}}",
+            "{{?? \"\"}}",
+            "{{x ??}}",
+            "{{x ?? \"a\"'}}",
+        ] {
+            let error = ctx.render_strict(template).unwrap_err().to_string();
+            assert!(error.contains("Invalid fallback"), "{template}: {error}");
+            assert_eq!(ctx.render(template).unwrap(), template, "preview");
+        }
+        let error = ctx
+            .render_strict(r#"{{steps.a.data | upper ?? ""}}"#)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("Unsupported workflow template filter `upper`"),
+            "{error}"
+        );
+        let error = ctx
+            .render_strict(r#"{{time.now|fmt:bogus ?? ""}}"#)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("Unknown time format `bogus`"), "{error}");
+    }
+
+    #[test]
+    fn typed_resolution_honours_the_fallback() {
+        let mut ctx = TemplateContext::new();
+        ctx.set_step_output(
+            "review",
+            "---STEP_OUTPUT---\n{\"data\": {\"comments\": [1, 2], \"owner\": null}, \"status\": \"OK\", \"summary\": \"s\"}\n---END_STEP_OUTPUT---",
+        );
+        assert_eq!(
+            ctx.resolve_value(r#"steps.review.data.comments ?? """#),
+            Some(serde_json::json!([1, 2])),
+            "a present value keeps its JSON type"
+        );
+        assert_eq!(
+            ctx.resolve_value(r#"steps.review.data.owner ?? "nobody""#),
+            Some(serde_json::json!("nobody"))
+        );
+        assert_eq!(
+            ctx.resolve_value("steps.absent.data ?? '[]'"),
+            Some(serde_json::json!("[]"))
+        );
+        assert_eq!(ctx.resolve_value("steps.absent.data ?? bare"), None);
+    }
+
+    #[test]
+    fn validation_accepts_a_guarded_reference_to_a_step_a_goto_may_skip() {
+        use crate::models::StepOutputFormat::*;
+        let guarded = vec![
+            step("sortie", "go", Structured),
+            step(
+                "enchaine",
+                r#"{{steps.porte_check.data.stdout ?? ""}} {{steps.enchaine.output ?? ''}} {{steps.porte_check.summary ?? "said "no""}}"#,
+                FreeText,
+            ),
+            step("porte_check", "check", Structured),
+        ];
+        assert_eq!(validate_step_references(&guarded), Ok(()));
+        assert_eq!(healable_producer_names(&guarded), Vec::<String>::new());
+
+        let unguarded = vec![
+            step("enchaine", "{{steps.porte_check.data.stdout}}", FreeText),
+            step("porte_check", "check", Structured),
+        ];
+        let errors = validate_step_references(&unguarded).unwrap_err();
+        assert!(errors[0].contains("n'est pas exécutée avant"), "{errors:?}");
+
+        let first = vec![step("a", r#"{{previous_step.output ?? ""}}"#, FreeText)];
+        assert_eq!(validate_step_references(&first), Ok(()));
+    }
+
+    #[test]
+    fn validation_never_lets_a_fallback_excuse_a_typo_or_a_freetext_producer() {
+        use crate::models::StepOutputFormat::*;
+        let typo = vec![
+            step("porte_check", "check", Structured),
+            step("enchaine", r#"{{steps.porte_chek.data ?? ""}}"#, FreeText),
+        ];
+        let errors = validate_step_references(&typo).unwrap_err();
+        assert!(
+            errors[0].contains("aucune étape ne porte le nom"),
+            "{errors:?}"
+        );
+
+        let freetext = vec![
+            step("porte_check", "check", FreeText),
+            step("enchaine", r#"{{steps.porte_check.data ?? ""}}"#, FreeText),
+        ];
+        let errors = validate_step_references(&freetext).unwrap_err();
+        assert!(errors[0].contains("FreeText"), "{errors:?}");
+        assert_eq!(healable_producer_names(&freetext), vec!["porte_check"]);
+
+        let malformed = vec![step("a", "{{ticket ?? none}}", FreeText)];
+        let errors = validate_step_references(&malformed).unwrap_err();
+        assert!(errors[0].contains("Invalid fallback"), "{errors:?}");
+    }
+
+    #[test]
+    fn exec_markers_are_read_from_the_raw_stdout() {
+        let stdout = "log\n---STATE:plan=first line\nsecond line---\n\
+            ---STATE:quote=say \"hi\" \\o/---\n\
+            ---ARTIFACT:notes---\nline A\nline B\n---END_ARTIFACT---\n";
+        let output = exec_output(stdout);
+        let (artifacts, state) = extract_step_markers(&output);
+        assert_eq!(state["plan"], "first line\nsecond line");
+        assert_eq!(state["quote"], "say \"hi\" \\o/");
+        assert_eq!(artifacts["notes"], "line A\nline B");
+
+        let mut ctx = TemplateContext::new();
+        ctx.set_step_output("sortie", &output);
+        assert_eq!(
+            ctx.render_strict("{{state.plan}}|{{artifacts.notes}}")
+                .unwrap(),
+            "first line\nsecond line|line A\nline B"
+        );
+    }
+
+    #[test]
+    fn exec_unclosed_state_value_ends_at_the_next_marker() {
+        let (_, state) = extract_step_markers(&exec_output("---STATE:a=1\n---STATE:b=2---\n"));
+        assert_eq!(state["a"], "1");
+        assert_eq!(state["b"], "2");
+    }
+
+    #[test]
+    fn markers_outside_an_exec_envelope_keep_the_single_line_rule() {
+        let output = format!(
+            "---STATE:open=3\nprose\n---STATE:before=1---\n{}",
+            exec_output("---STATE:inside=2---\n")
+        );
+        let (_, state) = extract_step_markers(&output);
+        assert_eq!(state.get("open"), None);
+        assert_eq!(state["before"], "1");
+        assert_eq!(state["inside"], "2");
+
+        let agent = "---STATE:counter=3\nprose\n---END_THING---\n---STATE:ok=1---";
+        let (_, state) = extract_step_markers(agent);
+        assert_eq!(state.len(), 1);
+        assert_eq!(state["ok"], "1");
     }
 
     // ════════════════════════════════════════════════════════════════════

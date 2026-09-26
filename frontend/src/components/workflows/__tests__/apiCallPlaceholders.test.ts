@@ -63,6 +63,7 @@ describe('isRuntimeToken — namespace exclusion', () => {
     expect(isRuntimeToken('batch.index')).toBe(true);
     expect(isRuntimeToken('issue.title')).toBe(true);
     expect(isRuntimeToken('artifacts.review')).toBe(true);
+    expect(isRuntimeToken('run.id')).toBe(true);
   });
 
   it('classifies bare user variables as NOT runtime', () => {
