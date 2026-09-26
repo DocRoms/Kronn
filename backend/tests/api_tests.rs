@@ -3837,6 +3837,106 @@ async fn workflow_goto_path_renders_fallback_exec_markers_and_run_id() {
     );
 }
 
+/// KT-808: a launcher labels a run with its business object, and the run list
+/// finds the last run about it in one call, without reading any step output.
+#[tokio::test]
+async fn a_run_seeded_with_a_ticket_is_found_by_it_in_one_call() {
+    let state = test_state();
+    state.config.write().await.encryption_secret = Some(kronn::core::crypto::generate_secret());
+    let now = chrono::Utc::now();
+    let workflow = kronn::models::Workflow {
+        id: "labelled-workflow".into(),
+        name: "Labelled".into(),
+        project_id: None,
+        trigger: kronn::models::WorkflowTrigger::Manual,
+        steps: vec![kronn::models::WorkflowStep {
+            name: "Review".into(),
+            step_type: kronn::models::StepType::Gate,
+            gate_message: Some("Review".into()),
+            ..Default::default()
+        }],
+        actions: vec![],
+        safety: kronn::models::WorkflowSafety {
+            sandbox: false,
+            max_files: None,
+            max_lines: None,
+            require_approval: false,
+        },
+        workspace_config: None,
+        concurrency_limit: None,
+        guards: None,
+        artifacts: HashMap::new(),
+        on_failure: vec![],
+        exec_allowlist: vec![],
+        variables: vec![],
+        enabled: true,
+        pinned: false,
+        created_at: now,
+        updated_at: now,
+    };
+    state
+        .db
+        .with_conn(move |conn| kronn::db::workflows::insert_workflow(conn, &workflow))
+        .await
+        .unwrap();
+    let trigger = |body: Value| {
+        let app = build_router_with_auth(state.clone(), false);
+        async move {
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/workflows/labelled-workflow/trigger")
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let bytes = tokio::time::timeout(
+                std::time::Duration::from_secs(15),
+                response.into_body().collect(),
+            )
+            .await
+            .expect("workflow SSE must terminate")
+            .unwrap()
+            .to_bytes();
+            String::from_utf8(bytes.to_vec()).unwrap()
+        }
+    };
+    let run_id = |events: &str| {
+        events
+            .lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .filter_map(|data| serde_json::from_str::<Value>(data).ok())
+            .find_map(|event| event["run_id"].as_str().map(str::to_owned))
+            .unwrap_or_else(|| panic!("missing run_start: {events}"))
+    };
+
+    let first = run_id(&trigger(serde_json::json!({"state": {"ticketKey": "EW-7791"}})).await);
+    let _other = run_id(&trigger(serde_json::json!({"state": {"ticketKey": "EW-1"}})).await);
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    let latest = run_id(&trigger(serde_json::json!({"state": {"ticketKey": "EW-7791"}})).await);
+    assert_ne!(first, latest);
+
+    let (status, body) = get_json(
+        build_router_with_auth(state.clone(), false),
+        "/api/workflows/labelled-workflow/runs?state_key=ticketKey&state_value=EW-7791&limit=1",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let runs = body["data"].as_array().unwrap();
+    assert_eq!(runs.len(), 1, "{body}");
+    assert_eq!(runs[0]["id"], latest);
+    assert_eq!(runs[0]["state"]["ticketKey"], "EW-7791");
+
+    // The seeded state is shown everywhere and never encrypted: plain labels only.
+    let refused = trigger(serde_json::json!({"state": {"bad key": "x"}})).await;
+    assert!(refused.contains("must be 1-64 letters"), "{refused}");
+    let refused = trigger(serde_json::json!({"state": {"note": "two\nlines"}})).await;
+    assert!(refused.contains("one line"), "{refused}");
+}
+
 /// KT-786: the MCP launcher must prepare the same encrypted snapshot as the
 /// UI route, so a workflow with required variables reaches its first step.
 #[tokio::test]

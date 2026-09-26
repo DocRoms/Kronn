@@ -1206,6 +1206,34 @@ pub fn list_runs_paginated(
     Ok(runs)
 }
 
+/// The runs whose `state` holds `key` (with `value`, when given), newest
+/// first: finds "the last run about this ticket" without reading any output.
+pub fn list_runs_by_state(
+    conn: &Connection,
+    workflow_id: &str,
+    key: &str,
+    value: Option<&str>,
+    limit: u32,
+    offset: u32,
+) -> Result<Vec<WorkflowRun>> {
+    let sql = format!(
+        "SELECT {} FROM workflow_runs WHERE workflow_id = ?1
+           AND EXISTS (SELECT 1 FROM json_each(workflow_runs.state)
+                       WHERE json_each.key = ?2 AND (?3 IS NULL OR json_each.value = ?3))
+         ORDER BY started_at DESC LIMIT ?4 OFFSET ?5",
+        workflow_run_cols_without_outputs()
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let mut runs: Vec<WorkflowRun> = stmt
+        .query_map(params![workflow_id, key, value, limit, offset], |row| {
+            Ok(row_to_run(row))
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+    enrich_parent_provenance(conn, &mut runs)?;
+    Ok(runs)
+}
+
 /// Return at least `minimum` runs, extending the page through the end of the
 /// boundary run's parent group. A workflow invocation that spawned 17 child
 /// runs must not look like a 10-child invocation merely because the UI's

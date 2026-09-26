@@ -6980,7 +6980,13 @@ export type TransformDataValueType = "string" | "number" | "boolean";
  * "trigger with no variables" flow working — back-compat for tracker
  * triggers that don't need variables.
  */
-export type TriggerWorkflowRequest = { variables?: Record<string, string>, };
+export type TriggerWorkflowRequest = { variables?: Record<string, string>,
+/**
+ * Non-secret entries seeded into the run's `state` at creation, e.g. the
+ * ticket a run is about, so the run list can be filtered on them even if
+ * the run fails before any step writes its state.
+ */
+state?: Record<string, string>, };
 
 export type UnlinkPlanningDiscussionRequest = { discussion_id: string, actor?: PlanningActor, };
 

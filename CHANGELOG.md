@@ -13,6 +13,11 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Added
 
+- A workflow run can carry a plain business label from its launch:
+  `POST /api/workflows/{id}/trigger` accepts `state` beside `variables`, and
+  `GET /api/workflows/{id}/runs?state_key=…&state_value=…` returns the runs
+  holding that entry, newest first. The last run about a ticket now takes one
+  call instead of reading the detail of every recent run.
 - A Page action's `user_input` field can start from the clicked row's data:
   with a `<page.dataset…>` `source_ref`, Kronn resolves it server-side when the
   card opens and the reader edits it before launching, instead of retyping a

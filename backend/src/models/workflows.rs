@@ -1728,6 +1728,12 @@ pub struct TriggerWorkflowRequest {
     #[serde(default)]
     #[ts(type = "Record<string, string>")]
     pub variables: ::std::collections::HashMap<String, String>,
+    /// Non-secret entries seeded into the run's `state` at creation, e.g. the
+    /// ticket a run is about, so the run list can be filtered on them even if
+    /// the run fails before any step writes its state.
+    #[serde(default)]
+    #[ts(type = "Record<string, string>")]
+    pub state: ::std::collections::HashMap<String, String>,
 }
 
 /// Self-contained envelope produced by `GET /api/workflows/:id/export`.

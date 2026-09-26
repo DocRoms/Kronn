@@ -137,6 +137,7 @@ pub async fn workflow_trigger(
         &state,
         &req.workflow_id,
         req.variables,
+        Default::default(),
         crate::core::launch_context::LaunchContext::default(),
     )
     .await

@@ -2876,6 +2876,36 @@ fn listings_tolerate_a_run_with_no_steps() {
 }
 
 #[test]
+fn runs_are_found_by_a_state_entry_newest_first() {
+    let conn = test_db();
+    crate::db::workflows::insert_workflow(&conn, &sample_workflow("w1")).unwrap();
+    let now = Utc::now();
+    for (id, ticket, minutes_ago) in [
+        ("old", "EW-1", 30),
+        ("other", "EW-2", 20),
+        ("new", "EW-1", 10),
+    ] {
+        let mut run = sample_run(id, "w1");
+        run.started_at = now - chrono::Duration::minutes(minutes_ago);
+        run.state.insert("ticketKey".into(), ticket.into());
+        crate::db::workflows::insert_run(&conn, &run).unwrap();
+    }
+    crate::db::workflows::insert_run(&conn, &sample_run("unlabelled", "w1")).unwrap();
+    let ids = |value: Option<&str>, limit: u32| {
+        crate::db::workflows::list_runs_by_state(&conn, "w1", "ticketKey", value, limit, 0)
+            .unwrap()
+            .into_iter()
+            .map(|run| run.id)
+            .collect::<Vec<_>>()
+    };
+
+    assert_eq!(ids(Some("EW-1"), 1), ["new"]);
+    assert_eq!(ids(Some("EW-1"), 10), ["new", "old"]);
+    assert_eq!(ids(None, 10), ["new", "other", "old"]);
+    assert!(ids(Some("EW-404"), 10).is_empty());
+}
+
+#[test]
 fn list_runs_provenance_none_for_toplevel_run() {
     let conn = test_db();
     crate::db::workflows::insert_workflow(&conn, &sample_workflow("w1")).unwrap();

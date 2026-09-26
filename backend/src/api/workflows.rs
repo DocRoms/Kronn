@@ -2347,10 +2347,12 @@ pub(crate) async fn start_manual_run(
     state: &AppState,
     workflow_id: &str,
     provided_vars: std::collections::HashMap<String, String>,
+    initial_state: std::collections::HashMap<String, String>,
     event_sender: Option<tokio::sync::mpsc::Sender<crate::workflows::runner::RunEvent>>,
     launch: crate::core::launch_context::LaunchContext,
 ) -> Result<WorkflowRun, String> {
-    let (wf, run) = create_manual_run(state, workflow_id, provided_vars, launch).await?;
+    let (wf, run) =
+        create_manual_run(state, workflow_id, provided_vars, initial_state, launch).await?;
     spawn_manual_run(state, wf, run.clone(), event_sender, false);
     Ok(run)
 }
@@ -2363,8 +2365,10 @@ pub(crate) async fn create_manual_run(
     state: &AppState,
     workflow_id: &str,
     provided_vars: std::collections::HashMap<String, String>,
+    initial_state: std::collections::HashMap<String, String>,
     launch: crate::core::launch_context::LaunchContext,
 ) -> Result<(Workflow, WorkflowRun), String> {
+    validate_initial_run_state(&initial_state)?;
     let lookup_id = workflow_id.to_string();
     let mut wf = state
         .db
@@ -2443,7 +2447,7 @@ pub(crate) async fn create_manual_run(
         batch_no_response: 0,
         batch_name: None,
         parent_run_id: None,
-        state: ::std::collections::HashMap::new(),
+        state: initial_state,
         produced_branches: vec![],
         parent_workflow_id: None,
         parent_workflow_name: None,
@@ -2467,6 +2471,40 @@ pub(crate) async fn create_manual_run(
         .await
         .map_err(|error| format!("DB error: {error}"))??;
     Ok((wf, run))
+}
+
+const MAX_INITIAL_STATE_ENTRIES: usize = 16;
+const MAX_INITIAL_STATE_VALUE_CHARS: usize = 256;
+
+/// The state a launcher seeds is shown in every run list and never encrypted:
+/// keep it to a few short, plain labels.
+fn validate_initial_run_state(
+    initial_state: &std::collections::HashMap<String, String>,
+) -> Result<(), String> {
+    if initial_state.len() > MAX_INITIAL_STATE_ENTRIES {
+        return Err(format!(
+            "`state` takes at most {MAX_INITIAL_STATE_ENTRIES} entries"
+        ));
+    }
+    for (key, value) in initial_state {
+        let valid_key = (1..=64).contains(&key.len())
+            && key
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'));
+        if !valid_key {
+            return Err(format!(
+                "`state` key `{key}` must be 1-64 letters, digits, `_`, `-` or `.`"
+            ));
+        }
+        if value.chars().count() > MAX_INITIAL_STATE_VALUE_CHARS
+            || value.chars().any(char::is_control)
+        {
+            return Err(format!(
+                "`state.{key}` must be one line of at most {MAX_INITIAL_STATE_VALUE_CHARS} characters"
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Runs a run created by [`create_manual_run`] in the background. An
@@ -2509,12 +2547,15 @@ pub async fn trigger(
     Path(id): Path<String>,
     body: Option<Json<TriggerWorkflowRequest>>,
 ) -> Sse<SseStream> {
-    let provided_vars = body.map(|Json(b)| b.variables).unwrap_or_default();
+    let (provided_vars, initial_state) = body
+        .map(|Json(b)| (b.variables, b.state))
+        .unwrap_or_default();
     let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::workflows::runner::RunEvent>(32);
     let run = match start_manual_run(
         &state,
         &id,
         provided_vars,
+        initial_state,
         Some(tx),
         crate::core::launch_context::LaunchContext::default(),
     )
@@ -3051,6 +3092,10 @@ pub struct ListRunsQuery {
     offset: Option<u32>,
     #[serde(default)]
     complete_group: bool,
+    /// Only the runs whose `state` holds this key, newest first…
+    state_key: Option<String>,
+    /// …with exactly this value, when given.
+    state_value: Option<String>,
 }
 
 pub async fn list_runs(
@@ -3063,6 +3108,20 @@ pub async fn list_runs(
     match state
         .db
         .with_read_conn(move |conn| {
+            if let Some(key) = params.state_key.as_deref() {
+                let limit = params
+                    .limit
+                    .unwrap_or(crate::db::workflows::MAX_RUNS_UNPAGINATED)
+                    .clamp(1, crate::db::workflows::MAX_RUNS_UNPAGINATED);
+                return crate::db::workflows::list_runs_by_state(
+                    conn,
+                    &id,
+                    key,
+                    params.state_value.as_deref(),
+                    limit,
+                    params.offset.unwrap_or(0),
+                );
+            }
             if params.limit.is_some() || params.offset.is_some() {
                 let limit = params
                     .limit
