@@ -4387,9 +4387,9 @@ mod tests {
 
         let previous = std::env::var("KRONN_LITELLM_PROMPT_CACHE").ok();
         for (switch, model) in [
-            (Some("1"), "anthropic/claude-sonnet-4-6"),
-            (Some("1"), "gemini-2.5-flash"),
-            (None, "claude-sonnet-4-6"),
+            (None, "anthropic/claude-sonnet-4-6"),
+            (None, "gemini-2.5-flash"),
+            (Some("0"), "claude-sonnet-4-6"),
         ] {
             match switch {
                 Some(value) => std::env::set_var("KRONN_LITELLM_PROMPT_CACHE", value),
@@ -4440,7 +4440,7 @@ mod tests {
         );
         assert!(
             bodies[2].get("cache_control_injection_points").is_none(),
-            "off unless the switch is set"
+            "`KRONN_LITELLM_PROMPT_CACHE=0` turns it off"
         );
     }
 

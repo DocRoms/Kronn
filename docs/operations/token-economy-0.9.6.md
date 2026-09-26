@@ -57,9 +57,12 @@ Kronn had no counter for a CLI it did not spawn. That single reading is why:
   `cached_prompt_tokens` and `cache_write_prompt_tokens`, absent when unreported.
 
 Anthropic caches only what a request marks, so Claude through LiteLLM reports
-zero cached tokens. `KRONN_LITELLM_PROMPT_CACHE=1` on the backend adds LiteLLM's
+zero cached tokens unless the request marks them. Kronn adds LiteLLM's
 `cache_control_injection_points` (system and last message) to requests whose model
-contains `claude`; off by default until an A/B run shows reads outweigh writes.
+contains `claude`, by default: on the same Sonnet task replayed 8 times with the
+marks against 3 without, the input cost fell to 22–26 % of the uncached price
+(reads ×0.1, writes ×1.25), with 7 of 8 deliveries passing against 3 of 3.
+`KRONN_LITELLM_PROMPT_CACHE=0` on the backend turns it off.
 
 ## 3. What shipped
 

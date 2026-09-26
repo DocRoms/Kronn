@@ -6606,9 +6606,10 @@ async fn send_http_agent_request(
     retry_allowed: bool,
     stderr: &Arc<Mutex<Vec<String>>>,
 ) -> Result<(reqwest::Response, usize), HttpProviderFailure> {
-    // Anthropic caches only the prefixes a request marks; opt-in until measured.
+    // Anthropic caches only the prefixes a request marks. Measured at about a
+    // quarter of the uncached input cost; `KRONN_LITELLM_PROMPT_CACHE=0` opts out.
     let hinted = (backend == "LiteLLM"
-        && std::env::var("KRONN_LITELLM_PROMPT_CACHE").as_deref() == Ok("1"))
+        && std::env::var("KRONN_LITELLM_PROMPT_CACHE").as_deref() != Ok("0"))
     .then(|| crate::agents::chat_codec::with_prompt_cache_hints(body))
     .flatten();
     let body = hinted.as_ref().unwrap_or(body);
