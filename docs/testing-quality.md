@@ -228,6 +228,8 @@ history; collector timeout behavior needs separate backend coverage.
 role and status colour needs 4.5:1 on the surface ramp, text roles also on a
 hover chip over elevated; elsewhere faint/dim/ghost need 3:1. A fallback does
 not excuse an undefined `--kr-*`; component-scoped properties drop the prefix.
+White or black text pinned on a `--kr-*` fill is refused in stylesheets and in
+inline `style={{ }}` objects alike.
 `a11y-dark-themes.spec.ts` renders the main screens and a native action card in
 `dark`, `gotham` and `matrix`, re-measures the text axe leaves undecided behind
 gradients or pseudo-elements, and walks keyboard focus. It answers every non-GET

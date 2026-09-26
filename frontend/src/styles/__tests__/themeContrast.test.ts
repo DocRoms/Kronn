@@ -7,7 +7,7 @@ import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  auditRepo, focusRingRemovals, forcedTextOnTokenBackground, measureTextContrast,
+  auditRepo, focusRingRemovals, forcedTextInInlineStyles, forcedTextOnTokenBackground, measureTextContrast,
   parseThemes, STATUS_TOKENS, TEXT_TOKENS, undeclaredCustomProperties,
 } from '../themeAudit';
 
@@ -95,6 +95,17 @@ describe('theme guards', () => {
       '.video { background: rgba(0, 0, 0, 0.6); color: #fff; }',
     ].join('\n');
     expect(forcedTextOnTokenBackground('x.css', css).map(f => f.line)).toEqual([1, 2]);
+  });
+
+  it('flags the same pairing in an inline style object', () => {
+    const tsx = [
+      "<div style={{ background: 'var(--kr-accent, #3b82f6)', color: '#fff' }} />",
+      '<div style={{ backgroundColor: "var(--kr-bg-code)", padding: 4, color: "black" }} />',
+      "<div style={{ background: 'var(--kr-accent)', color: 'var(--kr-text-on-accent)' }} />",
+      "<div style={{ background: 'rgba(0, 0, 0, 0.6)', color: '#fff' }} />",
+      "<div style={{ borderColor: 'var(--kr-accent)', color: `${tone}` }} />",
+    ].join('\n');
+    expect(forcedTextInInlineStyles('x.tsx', tsx).map(f => f.line)).toEqual([1, 2]);
   });
 
   it('finds no :focus-visible rule that removes the ring', () => {

@@ -147,8 +147,10 @@ Release notes for 0.9.3 and earlier are available in the
   instead of faded, and agent names blend their brand colour with the text
   colour. Thirteen `:focus-visible` rules no longer hide the focus ring.
   `pnpm lint:theme` (also in CI) measures every theme and refuses undefined
-  custom properties, white or black text pinned on a token fill and removed
-  focus rings; `e2e/specs/a11y-dark-themes.spec.ts` scans the rendered screens.
+  custom properties, white or black text pinned on a token fill (in a
+  stylesheet or an inline `style={{ }}` object) and removed focus rings;
+  `e2e/specs/a11y-dark-themes.spec.ts` scans the rendered screens. The Plugins
+  page's scope tip no longer prints white text on the accent.
 - The "▶ Launch" button of a native action card, the project git switcher's
   button and the current-branch marker no longer print white text on the
   accent: they use `--kr-text-on-accent`, which reads at 15.97:1 on the default
